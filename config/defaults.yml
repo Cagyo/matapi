@@ -1,0 +1,24 @@
+sensor_defaults:
+  digital:
+    debounce_ms: 10000
+    severity: info
+    pull: up
+    active_low: true
+  uart:
+    debounce_ms: 0
+    severity: warning
+    baud_rate: 9600
+    read_interval_ms: 5000
+    flush_interval_ms: 60000
+  mqtt:
+    debounce_ms: 5000
+    severity: info
+  camera:
+    debounce_ms: 0
+    severity: info
+    snapshot_cache_ttl_ms: 2000
+
+notifications:
+  quiet_hours_default: null
+  critical_ignores_quiet_hours: true
+  max_queue_before_force_aggregate: 100

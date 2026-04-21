@@ -1,0 +1,29 @@
+# System packages installed at install time keyed by feature.
+# Read by scripts/install.sh.
+core:
+  apt:
+    - git
+    - sqlite3
+    - libsqlite3-dev
+    - pigpio
+    - python3-pigpio
+
+motion:
+  apt:
+    - motion
+    - ffmpeg
+  scripts:
+    - "curl https://rclone.org/install.sh | sudo bash"
+
+uart:
+  raspi-config:
+    - "do_serial 2"
+
+zigbee:
+  apt:
+    - mosquitto
+    - mosquitto-clients
+
+cellular:
+  apt:
+    - usb-modeswitch

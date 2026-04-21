@@ -1,0 +1,31 @@
+# Build & deps
+node_modules/
+dist/
+coverage/
+
+# Local data (DB + WAL/SHM, motion captures, logs)
+data/
+*.db
+*.db-wal
+*.db-shm
+*.log
+logs/
+
+# Generated migration metadata (schema.ts is source of truth)
+migrations/meta/
+
+# Secrets & env
+.env
+.env.*
+!.env.example
+
+# Lockfiles (large, rarely useful for reasoning)
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# VCS / editor
+.git/
+.vscode/
+.idea/
+.DS_Store

@@ -1,0 +1,36 @@
+# env
+.env
+.env.*
+!.env.example
+
+# deps
+node_modules/
+
+# yarn 4 (zero-installs disabled — keep cache/state out of git)
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+.pnp.*
+
+# build
+dist/
+*.tsbuildinfo
+
+# data
+data/
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# logs
+logs/
+*.log
+
+# editor
+.vscode/
+.idea/
+.DS_Store
