@@ -61,31 +61,26 @@ Videos cut into 30-second segments (`MOTION_VIDEO_SEGMENT_SEC`).
 ### POST /motion/snapshot
 - Update `motion_events` row with `snapshotPath`
 
-## Snapshot Service
+## Snapshot Port (application/infrastructure)
+
+Snapshot fetching is a port — `SnapshotPort` in `camera/domain/ports/` — with one production adapter (`FfmpegSnapshotAdapter` in `camera/infrastructure/`). The handler for `/camera snapshot` depends on `SnapshotPort`, not on ffmpeg or any buffer cache.
 
 ```typescript
-class SnapshotService {
-  private cache = new Map<string, { data: Buffer; timestamp: number }>();
+// src/camera/application/get-snapshot.use-case.ts
+@Injectable()
+export class GetSnapshotUseCase {
+  constructor(
+    @Inject(SNAPSHOT) private readonly snapshot: SnapshotPort,
+    @Inject(CLOCK)    private readonly clock: ClockPort,
+  ) {}
 
-  async getSnapshot(cameraId: string): Promise<Buffer> {
-    const cached = this.cache.get(cameraId);
-    if (cached && Date.now() - cached.timestamp < 2000) {
-      return cached.data;
-    }
-
-    const frame = await this.grabFrame(cameraId);
-    this.cache.set(cameraId, { data: frame, timestamp: Date.now() });
-    return frame;
-  }
-
-  private async grabFrame(cameraId: string): Promise<Buffer> {
-    // ffmpeg -i <source> -frames:v 1 -f image2pipe pipe:1
+  execute(cameraId: string): Promise<Buffer> {
+    return this.snapshot.grab(cameraId);    // caching lives inside the adapter
   }
 }
 ```
 
-- 2-second cache TTL prevents concurrent ffmpeg spawns
-- Multiple `/camera snapshot` requests return cached frame
+The adapter implements the 2-second cache (`MOTION_SNAPSHOT_CACHE_TTL_MS`) and the actual `ffmpeg -i <source> -frames:v 1 -f image2pipe pipe:1` invocation. The TTL prevents concurrent ffmpeg spawns. Add `SnapshotPort` to [../ports-and-adapters.md → Camera context](../ports-and-adapters.md#camera-context) when implementing.
 
 ## Multiple Cameras
 

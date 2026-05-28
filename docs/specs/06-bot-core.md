@@ -3,6 +3,11 @@
 ## Dependencies
 - 01-database.md (users table)
 - 00-overview.md (grammY, .env)
+- 11-bot-cmd-users.md (`/claim_admin`, role commands)
+- ../ports-and-adapters.md (`RolePort`, `UserRepositoryPort`, `NotifierPort`)
+- ../error-handling.md (handler error mapping), `src/locales/en.ts` (all user-facing strings)
+
+> **User-facing copy rule.** Every string the bot replies with comes from [`src/locales/en.ts`](../../src/locales/en.ts) (see ../naming-and-conventions.md and ../error-handling.md → Interface boundary mapping). Inline strings in the examples below are illustrative — in code they MUST be locale keys.
 
 ## Library Setup
 
@@ -51,17 +56,19 @@ grammY runner handles basic reconnection. Additional safeguard:
 
 ## Role Guard
 
-```typescript
-// src/telegram/guards/role.guard.ts
-function adminOnly(ctx, next) {
-  const user = db.select().from(users)
-    .where(eq(users.telegramId, ctx.from.id))
-    .get();
+Guards live in `telegram/interfaces/` and depend on a `RolePort` (or `UserRepositoryPort.findById`) — **never** on Drizzle directly (../architecture.md → Anti-patterns).
 
-  if (!user || user.role !== 'admin') {
-    return ctx.reply("❌ Admin access required");
-  }
-  return next();
+```typescript
+// src/telegram/interfaces/role.middleware.ts
+export function adminOnly(roles: RolePort, en: Locale) {
+  return async (ctx, next) => {
+    const role = await roles.roleOf(ctx.from!.id);
+    if (role !== 'admin') {
+      await ctx.reply(en.common.adminRequired);   // locale key, not a literal
+      return;
+    }
+    return next();
+  };
 }
 ```
 
@@ -69,11 +76,13 @@ Applied as middleware on admin-only commands.
 
 ## Admin Claim Flow (First Boot)
 
-1. Worker starts, checks `users` table — empty
-2. Worker enters "awaiting admin" mode — indefinitely waits for `/claim_admin`
-3. First user to send `/claim_admin` becomes admin
-4. Command permanently disabled after first successful claim
-5. Additional admins added via `/promote`
+See [11-bot-cmd-users.md → /claim_admin](11-bot-cmd-users.md#claim_admin) for the full UX and use-case shape. Summary:
+
+1. Worker starts; `UserRepositoryPort.countAdmins()` returns 0.
+2. Worker enters "awaiting admin" mode — indefinitely waits for `/claim_admin`.
+3. First user to send `/claim_admin` becomes admin (via `ClaimAdminUseCase`).
+4. Command rejected after first successful claim.
+5. Additional admins added via `/promote`.
 
 No time window, no claim code. Simple infinite wait.
 
@@ -92,7 +101,7 @@ await ctx.reply("Result");
 
 ## Error Handling
 
-- Every command wrapped in try/catch at handler level
-- Error response: "❌ Failed to [action]: [reason]"
-- Full stack trace logged to PM2 logs
-- Never propagate unhandled exceptions to process
+- Every handler wraps the use-case call in `try/catch` and maps domain errors to locale keys per ../error-handling.md → *Interface boundary mapping*.
+- Generic fallback reply uses `en.common.error(...)` — never `error.message`.
+- Full stack trace logged via Nest `Logger` (never `console.log` / `console.error`).
+- Never propagate unhandled exceptions to the process — PM2 restart is reserved for genuine crashes, not bot input.

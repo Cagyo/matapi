@@ -43,7 +43,7 @@ Use this file to decide **which** `docs/*.md` to load. Each doc declares its own
 | [08](08-bot-cmd-health.md) | `/health` | Disk, memory, sensor liveness report |
 | [09](09-bot-cmd-logs.md) | `/logs` | Tail sensor logs + system logs |
 | [10](10-bot-cmd-config.md) | `/config add\|modify\|remove` | Sensor CRUD via bot |
-| [11](11-bot-cmd-users.md) | `/invite` `/promote` `/demote` `/start` | Role management, claim-admin |
+| [11](11-bot-cmd-users.md) | `/invite` `/promote` `/demote` `/start` `/claim_admin` | Role management, first-boot admin claim |
 | [12](12-bot-cmd-mute.md) | `/mute` `/unmute` `/quiet_hours` | Notification suppression |
 | [13](13-bot-cmd-update.md) | `/update` `/rollback` `/restart` | App-level OTA control |
 | [14](14-bot-cmd-camera.md) | `/camera` | Snapshot, record, on/off |

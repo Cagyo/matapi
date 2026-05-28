@@ -1,8 +1,9 @@
 # 03 — Digital Sensor Driver (GPIO)
 
 ## Dependencies
-- 02-sensor-core.md (ISensorDriver interface)
+- 02-sensor-core.md (`SensorDriverPort` interface)
 - 01-database.md (sensors table)
+- ../error-handling.md (typed domain errors)
 
 ## Overview
 
@@ -48,11 +49,11 @@ digital:
 
 ## Validations
 
-- GPIO pin must be in valid range (0-27 for Pi)
-- **Pin uniqueness enforced**: no two sensors can use the same GPIO pin. Validate on add/import.
-- Pin conflict returns clear error: "GPIO pin 17 is already used by sensor 'front_door'"
+- GPIO pin must be in valid range (0-27 for Pi). Encapsulated in a `GpioPin` value object whose constructor throws `InvalidGpioPinError` on out-of-range values.
+- **Pin uniqueness enforced**: no two sensors can use the same GPIO pin. Validated in the `AddSensorUseCase` / `ImportConfigUseCase` (application layer) against `SensorRepositoryPort` — pin conflict raises `PinAlreadyInUseError(pin, ownerName)`.
+- The bot handler maps `PinAlreadyInUseError` to a locale key (e.g. `en.config.pinTaken`) that renders: `"GPIO pin 17 is already used by sensor 'front_door'"`. No string concatenation in handlers (see ../error-handling.md → Interface boundary mapping).
 
 ## Error Handling
 
-- pigpiod unreachable: sensor marked offline, admin notified
-- Pin read failure: log error, mark sensor offline
+- pigpiod unreachable: adapter raises `DriverUnavailableError`; registry marks sensor offline, admin notified via `NotifierPort`.
+- Pin read failure: log at adapter (warn), translate to `SensorReadError`, registry marks sensor offline.

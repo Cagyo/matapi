@@ -2,7 +2,9 @@
 
 ## Dependencies
 - 01-database.md (events table)
-- 06-bot-core.md (grammY bot instance for sending)
+- ../ports-and-adapters.md (`EventRepositoryPort`, `NotifierPort`, `ClockPort`)
+
+This spec is a pure application-layer concern. It depends on **ports**, never on the grammY bot directly — the bot is one of many possible adapters behind `NotifierPort`.
 
 ## Delivery Guarantee
 
@@ -14,24 +16,34 @@ All sensor events written to `events` table with `sent_at = NULL`. EventProcesso
 
 ## Queue Drain on Reconnect
 
+Lives in `src/events/application/drain-event-queue.use-case.ts`. Depends only on ports — **no Drizzle imports, no grammY imports**.
+
 ```typescript
-async drainQueue() {
-  while (true) {
-    const batch = db.select().from(events)
-      .where(isNull(events.sentAt))
-      .orderBy(events.createdAt)
-      .limit(50);
+@Injectable()
+export class DrainEventQueueUseCase {
+  constructor(
+    @Inject(EVENT_REPOSITORY) private readonly repo: EventRepositoryPort,
+    @Inject(NOTIFIER)         private readonly notifier: NotifierPort,
+    @Inject(CLOCK)            private readonly clock: ClockPort,
+  ) {}
 
-    if (batch.length === 0) break;
+  async execute(): Promise<void> {
+    while (true) {
+      const batch = await this.repo.pending(50);
+      if (batch.length === 0) break;
 
-    const summary = this.aggregateBatch(batch);
-    await this.sendToTelegram(summary);
-    this.markAsSent(batch);
+      const summary = aggregate(batch);                // pure domain fn
+      await this.notifier.notify(summary);
+      await this.repo.markSent(batch.map(b => b.id), this.clock.now());
 
-    await sleep(2000); // respect Telegram rate limits
+      // Inter-batch pacing for Telegram rate limits is the notifier adapter's
+      // concern (auto-retry plugin), not this use case. Do not sleep() here.
+    }
   }
 }
 ```
+
+Note: `aggregate(...)` is a pure function in `events/domain/` — testable without Nest. The 2-second pacing in the legacy sketch belongs in the `TelegramNotifierAdapter` (or comes for free via `@grammyjs/auto-retry`), not the use case.
 
 ## Aggregated Summaries
 

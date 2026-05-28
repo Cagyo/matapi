@@ -149,9 +149,7 @@ Admin only
 ```
 
 ### Behavior
-```bash
-sudo systemctl start motion
-```
+Handler calls `EnableMotionUseCase`, which delegates to `MotionControlPort.start()`. The systemctl invocation lives in the adapter (`MotionDaemonAdapter` in `camera/infrastructure/`) — handlers never shell out directly (see ../ports-and-adapters.md → Camera context).
 
 ### Output
 ```
@@ -159,11 +157,11 @@ sudo systemctl start motion
 ```
 
 ### Error Cases
-| Condition | Response |
-|-----------|----------|
-| Already running | "ℹ️ Motion daemon is already running" |
-| Start fails | "❌ Failed to start motion daemon: [error]" |
-| Motion not installed | "❌ Motion is not installed. Re-run install with motion feature." |
+| Condition | Domain error | Reply (from `en.ts`) |
+|-----------|--------------|----------------------|
+| Already running | `MotionAlreadyRunningError` | "ℹ️ Motion daemon is already running" |
+| Start fails | `MotionStartFailedError` | "❌ Failed to start motion daemon: [error]" |
+| Motion not installed | `MotionNotInstalledError` | "❌ Motion is not installed. Re-run install with motion feature." |
 
 ---
 
@@ -178,9 +176,7 @@ Admin only
 ```
 
 ### Behavior
-```bash
-sudo systemctl stop motion
-```
+Handler calls `DisableMotionUseCase` → `MotionControlPort.stop()`. Same boundary rule as `/camera enable`.
 
 ### Output
 ```

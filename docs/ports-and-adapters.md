@@ -60,6 +60,7 @@ Status legend: ✅ canonical · 🚧 in transition · 📝 planned
 | `MotionControlPort` | `MotionDaemonAdapter` (systemctl) | 🚧 | [motion.service.ts](../src/camera/motion.service.ts) |
 | `CloudUploadPort` | `RcloneGdriveUploader`, `NoopUploader` (dev) | 🚧 | [upload.service.ts](../src/camera/upload.service.ts) |
 | `MediaRepositoryPort` | `DrizzleMotionEventRepository` | 📝 | [schema.ts](../src/database/schema.ts) |
+| `SnapshotPort` (`SNAPSHOT`) | `FfmpegSnapshotAdapter` (caches via TTL), `StubSnapshotAdapter` (dev) | 📝 — referenced by [specs/20-camera.md](specs/20-camera.md). Cache TTL lives inside the adapter. | — |
 
 ### Network context
 

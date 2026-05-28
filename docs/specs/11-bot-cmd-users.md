@@ -1,8 +1,38 @@
-# 11 — /invite, /promote, /demote, /start Commands
+# 11 — /invite, /promote, /demote, /start, /claim_admin Commands
 
 ## Dependencies
 - 06-bot-core.md (bot instance, role guard)
 - 01-database.md (users table, invite_codes table)
+- ../ports-and-adapters.md (`UserRepositoryPort`, `RolePort`, `NotifierPort`)
+
+> All user-facing strings live in [`src/locales/en.ts`](../../src/locales/en.ts). The literals below are illustrative.
+
+---
+
+## /claim_admin
+
+### Access
+Anyone — but only valid until the first admin is created.
+
+### Syntax
+```
+/claim_admin
+```
+
+### Behavior
+First-boot admin bootstrap. Handler delegates to `ClaimAdminUseCase`:
+
+1. `UserRepositoryPort.countAdmins()` — if `> 0`, throw `AdminAlreadyClaimedError`.
+2. Insert sender into `users` with `role = 'admin'` and `createdBy = NULL`.
+3. Reply: "✅ You are now the admin of this Home Worker."
+
+No time window, no claim code. After success, every subsequent `/claim_admin` is rejected by the same use case.
+
+### Error Cases
+| Condition | Domain error | Reply (from `en.ts`) |
+|-----------|--------------|----------------------|
+| Admin already exists | `AdminAlreadyClaimedError` | "❌ This Home Worker already has an admin." |
+| DB write fails | (unmapped — generic) | "❌ Failed to claim admin role." |
 
 ---
 

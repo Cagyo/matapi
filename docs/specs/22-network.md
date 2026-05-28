@@ -1,42 +1,46 @@
 # 22 — Network Module
 
 ## Dependencies
-- 06-bot-core.md (grammY bot instance)
-- 00-overview.md (.env HEARTBEAT_URL, HEARTBEAT_INTERVAL_MS)
+- 00-overview.md (.env `HEARTBEAT_URL`, `HEARTBEAT_INTERVAL_MS`)
+- ../ports-and-adapters.md (`HeartbeatClientPort`, `NetworkProbePort`, `ClockPort`)
 
 ## Overview
 
-NetworkService monitors connectivity and bot health. Provides external heartbeat for dead-system detection. Future: 4G failover.
+The network context monitors connectivity and bot polling health and emits an external heartbeat for dead-system detection. Future: 4G failover. The application layer never imports `fetch` directly — all I/O is behind ports; all timestamps come from `ClockPort`; all logging uses Nest's `Logger`.
 
-## NetworkService
+## Health & Polling Watcher (application/)
 
 ```typescript
-class NetworkService {
-  private lastUpdateReceived: number = Date.now();
+// src/network/application/check-bot-polling.service.ts
+@Injectable()
+export class CheckBotPollingService {
+  private readonly logger = new Logger(CheckBotPollingService.name);
+  private lastUpdateReceived: number;
 
-  // Called every 30 seconds
+  constructor(
+    @Inject(CLOCK) private readonly clock: ClockPort,
+    @Inject(HEARTBEAT_CLIENT) private readonly heartbeat: HeartbeatClientPort,
+  ) {
+    this.lastUpdateReceived = clock.now().getTime();
+  }
+
+  // Called every 30s by a scheduled job
   async healthCheck(): Promise<boolean> {
-    try {
-      await fetch('https://api.telegram.org/bot<token>/getMe', {
-        signal: AbortSignal.timeout(10000)
-      });
-      return true;
-    } catch {
-      return false;
-    }
+    return this.heartbeat.pingTelegram();
   }
 
-  // Called by bot on every received update
-  onUpdateReceived() {
-    this.lastUpdateReceived = Date.now();
+  // Wired from the bot gateway in telegram/infrastructure
+  onUpdateReceived(): void {
+    this.lastUpdateReceived = this.clock.now().getTime();
   }
 
-  // Check if bot is actually receiving updates
   isBotPollingHealthy(): boolean {
-    return Date.now() - this.lastUpdateReceived < 120_000; // 2 minutes
+    return this.clock.now().getTime() - this.lastUpdateReceived < 120_000;
   }
 }
 ```
+
+`HeartbeatClientPort` is implemented by `FetchHeartbeatClient` in `network/infrastructure/` — that's where `fetch(...)` and `AbortSignal.timeout(...)` live.
 
 ## Bot Polling Recovery
 
@@ -49,23 +53,28 @@ This catches the scenario where WiFi drops and reconnects but the TCP socket is 
 
 ## External Heartbeat
 
-Worker pings an external monitoring service periodically:
+Worker pings an external monitoring service every `HEARTBEAT_INTERVAL_MS` (default 5 minutes). The scheduler lives in `network/application/heartbeat-scheduler.service.ts`; the actual HTTP call is `HeartbeatClientPort.pingExternal()` implemented by `FetchHeartbeatClient`.
 
 ```typescript
-// Called every HEARTBEAT_INTERVAL_MS (default 5 minutes)
-async sendHeartbeat() {
-  if (!process.env.HEARTBEAT_URL) return;
+// application — scheduler
+@Injectable()
+export class HeartbeatSchedulerService {
+  private readonly logger = new Logger(HeartbeatSchedulerService.name);
 
-  try {
-    await fetch(process.env.HEARTBEAT_URL, {
-      signal: AbortSignal.timeout(10000)
-    });
-  } catch (err) {
-    // Log but don't crash — heartbeat failure is informational
-    console.warn('Heartbeat failed:', err.message);
+  constructor(@Inject(HEARTBEAT_CLIENT) private readonly client: HeartbeatClientPort) {}
+
+  async tick(): Promise<void> {
+    try {
+      await this.client.pingExternal();
+    } catch (err) {
+      // Heartbeat failure is informational — log via Nest Logger, never console.
+      this.logger.warn(`Heartbeat failed: ${(err as Error).message}`);
+    }
   }
 }
 ```
+
+The adapter is responsible for the no-op when `HEARTBEAT_URL` is unset and for the 10 s `AbortSignal.timeout`.
 
 - Service: UptimeRobot free tier (or any URL-ping monitor)
 - If pings stop, external service sends email/SMS

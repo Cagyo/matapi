@@ -44,29 +44,17 @@ HEARTBEAT_URL=
 
 ## Testing Strategy
 
-### Minimum Required Tests
+**Test runner: Vitest** (the only runner in this repo). Test placement, the three-tier model (unit / use-case / integration), determinism rules, and what NOT to test are defined once in [../testing.md](../testing.md). This spec does not duplicate that — examples below illustrate the dev-loop scenarios specific to this project; for the canonical rules, follow `testing.md`.
 
-| Area | Type | Description |
-|------|------|-------------|
-| Sensor driver contract | Unit | Each driver implements `init`, `destroy`, `getState`, `onEvent` |
-| Event queue drain | Integration | Insert 1000 events → drain → verify all sent with rate limiting |
-| Config hot-reload | Integration | Modify SQLite → verify sensors update without restart |
-| Bot commands | Integration | grammY test framework — verify responses and role guards |
-| Aggregation | Unit | Offline events → aggregated summary preserving chronological order |
-| DB migrations | Integration | Apply all migrations to empty DB → verify schema |
-| YAML validation | Unit | Valid and invalid YAML → correct accept/reject |
-| Pin uniqueness | Unit | Duplicate GPIO pins → verify rejection |
+### Representative scenarios per tier
 
-### Test Runner
+| Tier | Example SUTs from this repo |
+|------|------------------------------|
+| Unit (domain) | `GpioPin` value object, severity parsing, quiet-hours overnight span, aggregation of offline events into a chronological summary |
+| Use case (application) | `DrainEventQueueUseCase` with `InMemoryEventRepository` + stub notifier + fixed clock; `ReloadSensorsUseCase` with mock driver factory; pin-uniqueness rejection in `AddSensorUseCase` |
+| Integration (infrastructure) | `DrizzleEventRepository` against `:memory:` SQLite; `DigitalGpioAdapter` against a mocked `PigpioGateway`; grammY handlers via the official test transport |
 
-Jest or Vitest. No preference — pick one and be consistent.
-
-### What NOT to Test
-
-- NestJS module wiring (framework's job)
-- grammY internals
-- pigpio bindings (can't run on dev machine anyway)
-- SQLite itself
+Do **not** test: NestJS DI itself, grammY internals, Drizzle's query builder, pigpio bindings (unavailable off-Pi), SQLite itself.
 
 ## Git Workflow
 
