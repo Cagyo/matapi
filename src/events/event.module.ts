@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
+import { SensorRegistryService } from '../sensors/application/sensor-registry.service';
 import { SensorModule } from '../sensors/sensor.module';
-import { SensorRegistry } from '../sensors/sensor.registry';
 import { DrainEventQueueUseCase } from './application/drain-event-queue.use-case';
 import { EventNotifierService } from './application/event-notifier.service';
 import { EventProcessorService } from './application/event-processor.service';
@@ -31,7 +31,7 @@ function positiveIntegerFromEnv(value: string | undefined, fallback: number): nu
     { provide: CLOCK, useClass: SystemClockAdapter },
     { provide: EVENT_REPOSITORY, useClass: DrizzleEventRepository },
     { provide: NOTIFIER, useExisting: EventNotifierService },
-    { provide: SENSOR_EVENT_SOURCE, useExisting: SensorRegistry },
+    { provide: SENSOR_EVENT_SOURCE, useExisting: SensorRegistryService },
     {
       provide: EVENT_QUEUE_OPTIONS,
       useFactory: (): EventQueueOptions => ({
