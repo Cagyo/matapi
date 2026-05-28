@@ -9,6 +9,15 @@ export interface SensorLogEntry {
   timestamp: Date;
 }
 
+export interface SensorLogQuery {
+  /** Maximum rows to return, newest first. */
+  limit: number;
+  /** Inclusive lower bound on `timestamp`. Combined with `limit`. */
+  since?: Date;
+}
+
 export interface SensorLogRepositoryPort {
   appendBatch(entries: SensorLogEntry[]): Promise<void>;
+  /** Fetch recent log entries for one sensor, newest first. */
+  findRecent(sensorId: string, query: SensorLogQuery): Promise<SensorLogEntry[]>;
 }
