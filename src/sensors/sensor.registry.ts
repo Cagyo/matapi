@@ -8,6 +8,7 @@ import { DigitalDriver } from './drivers/digital.driver';
 import { UartDriver } from './drivers/uart.driver';
 import { MqttDriver } from './drivers/mqtt.driver';
 import { CameraDriver } from './drivers/camera.driver';
+import { PigpioGateway } from './drivers/pigpio.gateway';
 
 type DriverFactory = () => ISensorDriver;
 
@@ -18,10 +19,13 @@ export class SensorRegistry implements OnModuleInit, OnModuleDestroy {
   private readonly listeners: Array<(event: SensorEvent) => void> = [];
   private readonly factories: Record<string, DriverFactory>;
 
-  constructor(@Inject(DB) private readonly db: AppDatabase) {
+  constructor(
+    @Inject(DB) private readonly db: AppDatabase,
+    private readonly pigpio: PigpioGateway,
+  ) {
     const isDev = process.env.NODE_ENV === 'development';
     this.factories = {
-      digital: () => (isDev ? new MockGpioDriver() : new DigitalDriver()),
+      digital: () => (isDev ? new MockGpioDriver() : new DigitalDriver(this.pigpio)),
       uart: () => new UartDriver(),
       mqtt: () => new MqttDriver(),
       camera: () => new CameraDriver(),
@@ -59,8 +63,31 @@ export class SensorRegistry implements OnModuleInit, OnModuleDestroy {
       }
     }
 
+    // Pin-uniqueness pre-check: digital sensors only.
+    const pinOwners = new Map<number, string>();
+    for (const row of rows) {
+      if (row.type !== 'digital') continue;
+      const pin = DigitalDriver.getPin(row.config as Record<string, unknown> | null);
+      if (pin === null) continue;
+      const prior = pinOwners.get(pin);
+      if (prior) {
+        this.logger.error(
+          `GPIO pin ${pin} is already used by sensor '${prior}' — skipping '${row.name}'`,
+        );
+        continue;
+      }
+      pinOwners.set(pin, row.name);
+    }
+
     for (const row of rows) {
       if (this.active.has(row.id)) continue;
+
+      if (row.type === 'digital') {
+        const pin = DigitalDriver.getPin(row.config as Record<string, unknown> | null);
+        if (pin !== null && pinOwners.get(pin) !== row.name) {
+          continue; // skipped due to pin conflict logged above
+        }
+      }
 
       const factory = this.factories[row.type];
       if (!factory) {
@@ -97,12 +124,31 @@ export class SensorRegistry implements OnModuleInit, OnModuleDestroy {
   }
 
   private fanOut(event: SensorEvent): void {
+    this.persistState(event);
     for (const cb of this.listeners) {
       try {
         cb(event);
       } catch (err) {
         this.logger.error(`Listener error: ${(err as Error).message}`);
       }
+    }
+  }
+
+  /** Update sensors.lastValue / lastValueAt on every reading. Used by /status. */
+  private persistState(event: SensorEvent): void {
+    if (event.type === 'error') return;
+    try {
+      this.db
+        .update(sensors)
+        .set({
+          lastValue: String(event.newValue),
+          lastValueAt: event.timestamp,
+          updatedAt: new Date(),
+        })
+        .where(eq(sensors.id, event.sensorId))
+        .run();
+    } catch (err) {
+      this.logger.warn(`persistState failed for ${event.sensorId}: ${(err as Error).message}`);
     }
   }
 }
