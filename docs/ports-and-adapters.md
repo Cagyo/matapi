@@ -35,8 +35,9 @@ Status legend: ✅ canonical · 🚧 in transition · 📝 planned
 |---|---|---|---|
 | `SensorDriverPort` (`SENSOR_DRIVER_FACTORY`) | `DigitalGpioAdapter`, `UartCo2Adapter`, `MqttSensorAdapter`, `CameraSensorAdapter`, `MockGpioAdapter` (dev), `MockUartCo2Adapter` (dev) | ✅ canonical — env-driven factory in [sensor-driver.factory.ts](../src/sensors/infrastructure/sensor-driver.factory.ts) selects mocks for `NODE_ENV=development` | [sensor-driver.port.ts](../src/sensors/domain/ports/sensor-driver.port.ts) |
 | `SensorRepositoryPort` (`SENSOR_REPOSITORY`) | `DrizzleSensorRepository`, `InMemorySensorRepository` (tests) | ✅ canonical | [sensor-repository.port.ts](../src/sensors/domain/ports/sensor-repository.port.ts) |
-| `SensorLogRepositoryPort` (`SENSOR_LOG_REPOSITORY`) | `DrizzleSensorLogRepository`, `InMemorySensorLogRepository` (tests) | ✅ canonical — drives buffered UART log flushing | [sensor-log-repository.port.ts](../src/sensors/domain/ports/sensor-log-repository.port.ts) |
-| `SensorQueryPort` (read model for other contexts) | `DrizzleSensorQuery` | 📝 — needed so `telegram/` stops importing `sensors` schema. | — |
+| `SensorLogRepositoryPort` (`SENSOR_LOG_REPOSITORY`) | `DrizzleSensorLogRepository`, `InMemorySensorLogRepository` (tests) | ✅ canonical — drives buffered UART log flushing **and** `/logs` recent-entry queries (`findRecent(sensorId, { limit, since })`). | [sensor-log-repository.port.ts](../src/sensors/domain/ports/sensor-log-repository.port.ts) |
+| `SensorQueryPort` (`SENSOR_QUERY`) read model for other contexts | `DrizzleSensorQuery`, `InMemorySensorQuery` (tests) | ✅ canonical — `listEnabled`, `findById`, and `findByName` (returns active **or** archived sensor; `/logs` uses archive fallback). | [sensor-query.port.ts](../src/sensors/domain/ports/sensor-query.port.ts) |
+| `SensorHealthPort` (`SENSOR_HEALTH`) | `SensorRegistryService` (live `healthCheck()` per active driver; failures coerced to `false`) | ✅ canonical — powers `/status` and `/health` online counts. | [sensor-health.port.ts](../src/sensors/application/ports/sensor-health.port.ts) |
 | `PigpioGateway` | (internal — single implementation, intentional infrastructure-only utility) | ✅ keep as gateway, do not promote to port | [pigpio.gateway.ts](../src/sensors/infrastructure/pigpio.gateway.ts) |
 
 ### Events context
@@ -62,6 +63,12 @@ Status legend: ✅ canonical · 🚧 in transition · 📝 planned
 | `CloudUploadPort` | `RcloneGdriveUploader`, `NoopUploader` (dev) | 🚧 | [upload.service.ts](../src/camera/upload.service.ts) |
 | `MediaRepositoryPort` | `DrizzleMotionEventRepository` | 📝 | [schema.ts](../src/database/schema.ts) |
 | `SnapshotPort` (`SNAPSHOT`) | `FfmpegSnapshotAdapter` (caches via TTL), `StubSnapshotAdapter` (dev) | 📝 — referenced by [specs/20-camera.md](specs/20-camera.md). Cache TTL lives inside the adapter. | — |
+
+### System context
+
+| Port | Adapters | Status | Source |
+|---|---|---|---|
+| `SystemHealthPort` (`SYSTEM_HEALTH`) | `OsSystemHealthAdapter` (`df -kP`, `/sys/class/thermal`, `process.memoryUsage`, `os.totalmem`, `process.uptime`, `fs.stat` on `DATABASE_PATH`) | ✅ canonical — drives `/health`. Disk / CPU temp / db size degrade to `null` on dev hosts without throwing. | [system-health.port.ts](../src/system/domain/ports/system-health.port.ts) |
 
 ### Network context
 
