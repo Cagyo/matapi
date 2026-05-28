@@ -3,7 +3,7 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { DatabaseModule } from './database/database.module';
 import { SensorModule } from './sensors/sensor.module';
 import { EventModule } from './events/event.module';
-import { BotModule } from './telegram/bot.module';
+import { TelegramModule } from './telegram/telegram.module';
 import { CameraModule } from './camera/camera.module';
 import { NetworkModule } from './network/network.module';
 
@@ -13,7 +13,7 @@ import { NetworkModule } from './network/network.module';
     DatabaseModule,
     SensorModule,
     EventModule,
-    BotModule,
+    TelegramModule,
     CameraModule,
     NetworkModule,
   ],

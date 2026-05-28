@@ -1,11 +1,8 @@
 import { Bot, InputFile } from 'grammy';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { users } from '../../../src/database/schema';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { TelegramNotifierAdapter } from '../../../src/telegram/infrastructure/telegram-notifier.adapter';
-import {
-  createTestDatabase,
-  TestDatabaseContext,
-} from '../../helpers/database';
+import { InMemoryUserRepository } from '../../../src/telegram/infrastructure/in-memory-user.repository';
+import { User } from '../../../src/telegram/domain/user.entity';
 
 type FakeBot = Bot & {
   api: {
@@ -23,17 +20,27 @@ function makeBot(): FakeBot {
   } as unknown as FakeBot;
 }
 
+function makeUser(overrides: Partial<User> = {}): User {
+  return {
+    telegramId: 1001,
+    name: 'Ada',
+    role: 'admin',
+    createdAt: new Date('2030-01-01T00:00:00.000Z'),
+    ...overrides,
+  };
+}
+
 describe('TelegramNotifierAdapter', () => {
-  let context: TestDatabaseContext;
+  let users: InMemoryUserRepository;
   let adapter: TelegramNotifierAdapter;
 
-  beforeEach(() => {
-    context = createTestDatabase();
-    adapter = new TelegramNotifierAdapter(context.appDb);
-  });
+  function withUsers(seed: User[]): void {
+    users = new InMemoryUserRepository(seed);
+    adapter = new TelegramNotifierAdapter(users);
+  }
 
-  afterEach(() => {
-    context.close();
+  beforeEach(() => {
+    withUsers([]);
   });
 
   it('reports readiness from the bot binding', () => {
@@ -54,13 +61,10 @@ describe('TelegramNotifierAdapter', () => {
 
   it('sends text notifications to every registered user', async () => {
     const bot = makeBot();
-    context.db
-      .insert(users)
-      .values([
-        { telegramId: 1001, name: 'Ada', role: 'admin' },
-        { telegramId: 1002, name: 'Linus', role: 'user' },
-      ])
-      .run();
+    withUsers([
+      makeUser({ telegramId: 1001, name: 'Ada', role: 'admin' }),
+      makeUser({ telegramId: 1002, name: 'Linus', role: 'user' }),
+    ]);
     adapter.setBot(bot);
 
     await adapter.notify({ text: 'front_door opened', asFile: false });
@@ -73,7 +77,7 @@ describe('TelegramNotifierAdapter', () => {
 
   it('sends file notifications as Telegram documents', async () => {
     const bot = makeBot();
-    context.db.insert(users).values({ telegramId: 1001, name: 'Ada', role: 'admin' }).run();
+    withUsers([makeUser()]);
     adapter.setBot(bot);
 
     await adapter.notify({ text: 'large offline summary', asFile: true });
@@ -86,13 +90,10 @@ describe('TelegramNotifierAdapter', () => {
 
   it('continues sending when one recipient fails', async () => {
     const bot = makeBot();
-    context.db
-      .insert(users)
-      .values([
-        { telegramId: 1001, name: 'Ada', role: 'admin' },
-        { telegramId: 1002, name: 'Linus', role: 'user' },
-      ])
-      .run();
+    withUsers([
+      makeUser({ telegramId: 1001 }),
+      makeUser({ telegramId: 1002, name: 'Linus', role: 'user' }),
+    ]);
     bot.api.sendMessage.mockRejectedValueOnce(new Error('blocked'));
     adapter.setBot(bot);
 
@@ -105,7 +106,7 @@ describe('TelegramNotifierAdapter', () => {
 
   it('rejects when every recipient delivery fails', async () => {
     const bot = makeBot();
-    context.db.insert(users).values({ telegramId: 1001, name: 'Ada', role: 'admin' }).run();
+    withUsers([makeUser()]);
     bot.api.sendMessage.mockRejectedValue(new Error('telegram down'));
     adapter.setBot(bot);
 

@@ -1,18 +1,22 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Bot, InputFile } from 'grammy';
-import { AppDatabase, DB } from '../../database/database.module';
-import { users } from '../../database/schema';
 import {
   NotificationMessage,
   NotifierPort,
 } from '../../events/domain/ports/notifier.port';
+import {
+  USER_REPOSITORY,
+  UserRepositoryPort,
+} from '../domain/ports/user-repository.port';
 
 @Injectable()
 export class TelegramNotifierAdapter implements NotifierPort {
   private readonly logger = new Logger(TelegramNotifierAdapter.name);
   private bot?: Bot;
 
-  constructor(@Inject(DB) private readonly db: AppDatabase) {}
+  constructor(
+    @Inject(USER_REPOSITORY) private readonly users: UserRepositoryPort,
+  ) {}
 
   setBot(bot: Bot): void {
     this.bot = bot;
@@ -31,13 +35,13 @@ export class TelegramNotifierAdapter implements NotifierPort {
       throw new Error('Telegram bot is not ready');
     }
 
-    const recipients = this.db.select({ id: users.telegramId }).from(users).all();
+    const recipients = await this.users.listRecipients();
     const failures: Error[] = [];
     let delivered = 0;
 
     for (const recipient of recipients) {
       try {
-        await this.sendToRecipient(recipient.id, message);
+        await this.sendToRecipient(recipient.telegramId, message);
         delivered += 1;
       } catch (error) {
         const failure = error instanceof Error ? error : new Error(String(error));
