@@ -5,8 +5,8 @@ export const en = {
     interrupted: 'Previous operation was interrupted. Please start again.',
   },
   claim: {
-    success: '✅ You are now the admin.',
-    alreadyClaimed: '❌ Admin already claimed.',
+    success: '✅ You are now the admin of this Home Worker.',
+    alreadyClaimed: '❌ This Home Worker already has an admin.',
   },
   status: {
     header: '📡 Sensor status',
@@ -14,12 +14,21 @@ export const en = {
     line: (name: string, value: string, when: string) => `• ${name}: ${value} (${when})`,
   },
   ping: {
-    pong: '🏓 pong',
+    pong: (ms: number) => `🏓 Pong! (${ms}ms)`,
   },
   help: {
-    body: [
-      '/status — sensor overview',
-      '/ping — health check',
+    user: [
+      '📖 Available Commands',
+      '',
+      '/status — sensor status',
+      '/ping — check bot response',
+      '/help — this message',
+    ].join('\n'),
+    admin: [
+      '📖 Available Commands',
+      '',
+      '/status — sensor status',
+      '/ping — check bot response',
       '/help — this message',
       '/claim_admin — claim admin (first run only)',
     ].join('\n'),
