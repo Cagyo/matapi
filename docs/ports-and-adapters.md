@@ -33,10 +33,11 @@ Status legend: ✅ canonical · 🚧 in transition · 📝 planned
 
 | Port | Adapters | Status | Source |
 |---|---|---|---|
-| `SensorDriverPort` (`SENSOR_DRIVER_FACTORY`) | `DigitalGpioAdapter`, `UartCo2Adapter`, `MqttSensorAdapter`, `CameraSensorAdapter`, `MockGpioAdapter` (dev) | 🚧 — interface is [`ISensorDriver`](../src/sensors/sensor.interface.ts), drivers live in [src/sensors/drivers/](../src/sensors/drivers); rename per [naming-and-conventions.md](naming-and-conventions.md) when next touched | [sensor.interface.ts](../src/sensors/sensor.interface.ts) |
-| `SensorRepositoryPort` | `DrizzleSensorRepository` | 📝 — currently the `sensors` Drizzle table is queried directly from [sensor.registry.ts](../src/sensors/sensor.registry.ts) and [status.command.ts](../src/telegram/commands/status.command.ts). Extract on next meaningful change. | — |
+| `SensorDriverPort` (`SENSOR_DRIVER_FACTORY`) | `DigitalGpioAdapter`, `UartCo2Adapter`, `MqttSensorAdapter`, `CameraSensorAdapter`, `MockGpioAdapter` (dev), `MockUartCo2Adapter` (dev) | ✅ canonical — env-driven factory in [sensor-driver.factory.ts](../src/sensors/infrastructure/sensor-driver.factory.ts) selects mocks for `NODE_ENV=development` | [sensor-driver.port.ts](../src/sensors/domain/ports/sensor-driver.port.ts) |
+| `SensorRepositoryPort` (`SENSOR_REPOSITORY`) | `DrizzleSensorRepository`, `InMemorySensorRepository` (tests) | ✅ canonical | [sensor-repository.port.ts](../src/sensors/domain/ports/sensor-repository.port.ts) |
+| `SensorLogRepositoryPort` (`SENSOR_LOG_REPOSITORY`) | `DrizzleSensorLogRepository`, `InMemorySensorLogRepository` (tests) | ✅ canonical — drives buffered UART log flushing | [sensor-log-repository.port.ts](../src/sensors/domain/ports/sensor-log-repository.port.ts) |
 | `SensorQueryPort` (read model for other contexts) | `DrizzleSensorQuery` | 📝 — needed so `telegram/` stops importing `sensors` schema. | — |
-| `PigpioGateway` | (internal — single implementation, intentional infrastructure-only utility) | 🚧 keep as gateway, do not promote to port | [pigpio.gateway.ts](../src/sensors/drivers/pigpio.gateway.ts) |
+| `PigpioGateway` | (internal — single implementation, intentional infrastructure-only utility) | ✅ keep as gateway, do not promote to port | [pigpio.gateway.ts](../src/sensors/infrastructure/pigpio.gateway.ts) |
 
 ### Events context
 
@@ -44,7 +45,7 @@ Status legend: ✅ canonical · 🚧 in transition · 📝 planned
 |---|---|---|---|
 | `EventRepositoryPort` (`EVENT_REPOSITORY`) | `DrizzleEventRepository`, `InMemoryEventRepository` (tests/dev) | ✅ canonical | [event-repository.port.ts](../src/events/domain/ports/event-repository.port.ts) |
 | `NotifierPort` (`NOTIFIER`) | `EventNotifierService` (delegating application adapter), `TelegramNotifierAdapter` | 🚧 — Telegram implements the sender, while bot gateway extraction is still pending. | [notifier.port.ts](../src/events/domain/ports/notifier.port.ts) |
-| `SensorEventSourcePort` (`SENSOR_EVENT_SOURCE`) | `SensorRegistry` (temporary, until sensors migrate) | 🚧 — events no longer import `SensorRegistry` directly; the implementation still lives in the transitional sensors context. | [sensor-event-source.port.ts](../src/events/domain/ports/sensor-event-source.port.ts) |
+| `SensorEventSourcePort` (`SENSOR_EVENT_SOURCE`) | `SensorRegistryService` (sensors application layer) | ✅ canonical — events imports the application service via the sensors module. | [sensor-event-source.port.ts](../src/events/domain/ports/sensor-event-source.port.ts) |
 
 ### Telegram context
 

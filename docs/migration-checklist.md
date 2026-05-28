@@ -13,7 +13,7 @@ This checklist is based on a scan of `src/` on 2026-05-28. It is a planning arti
 | app/bootstrap | 2 | PID lock and process lifecycle live in bootstrap code |
 | database | 3 | One central Drizzle schema owns tables for every context |
 | config | 1 | YAML config is a module-level function instead of a port-backed adapter |
-| sensors | 8 | Domain contracts, registry, drivers, Drizzle access, and pigpio wrappers are flat together |
+| sensors | 19 | Hexagonal split complete; `SensorQueryPort` still pending for telegram. |
 | events | 3 | Queue service mixes application behavior with Drizzle persistence |
 | telegram | 8 | Commands and guards query Drizzle directly; grammY handlers own use-case logic |
 | camera | 4 | Stubs are service-shaped but should become ports and adapters before implementation |
@@ -132,14 +132,30 @@ Checklist:
 Current files:
 
 - [src/sensors/sensor.module.ts](../src/sensors/sensor.module.ts)
-- [src/sensors/sensor.interface.ts](../src/sensors/sensor.interface.ts)
-- [src/sensors/sensor.registry.ts](../src/sensors/sensor.registry.ts)
-- [src/sensors/drivers/digital.driver.ts](../src/sensors/drivers/digital.driver.ts)
-- [src/sensors/drivers/mock.driver.ts](../src/sensors/drivers/mock.driver.ts)
-- [src/sensors/drivers/uart.driver.ts](../src/sensors/drivers/uart.driver.ts)
-- [src/sensors/drivers/mqtt.driver.ts](../src/sensors/drivers/mqtt.driver.ts)
-- [src/sensors/drivers/camera.driver.ts](../src/sensors/drivers/camera.driver.ts)
-- [src/sensors/drivers/pigpio.gateway.ts](../src/sensors/drivers/pigpio.gateway.ts)
+- [src/sensors/domain/sensor.ts](../src/sensors/domain/sensor.ts)
+- [src/sensors/domain/sensor-event.ts](../src/sensors/domain/sensor-event.ts)
+- [src/sensors/domain/sensor-reading.ts](../src/sensors/domain/sensor-reading.ts)
+- [src/sensors/domain/gpio-pin.value-object.ts](../src/sensors/domain/gpio-pin.value-object.ts)
+- [src/sensors/domain/co2.ts](../src/sensors/domain/co2.ts)
+- [src/sensors/domain/errors/](../src/sensors/domain/errors)
+- [src/sensors/domain/ports/sensor-driver.port.ts](../src/sensors/domain/ports/sensor-driver.port.ts)
+- [src/sensors/domain/ports/sensor-repository.port.ts](../src/sensors/domain/ports/sensor-repository.port.ts)
+- [src/sensors/domain/ports/sensor-log-repository.port.ts](../src/sensors/domain/ports/sensor-log-repository.port.ts)
+- [src/sensors/application/sensor-registry.service.ts](../src/sensors/application/sensor-registry.service.ts)
+- [src/sensors/application/reload-sensors.use-case.ts](../src/sensors/application/reload-sensors.use-case.ts)
+- [src/sensors/infrastructure/digital-gpio.adapter.ts](../src/sensors/infrastructure/digital-gpio.adapter.ts)
+- [src/sensors/infrastructure/mock-gpio.adapter.ts](../src/sensors/infrastructure/mock-gpio.adapter.ts)
+- [src/sensors/infrastructure/base-uart-co2.adapter.ts](../src/sensors/infrastructure/base-uart-co2.adapter.ts)
+- [src/sensors/infrastructure/uart-co2.adapter.ts](../src/sensors/infrastructure/uart-co2.adapter.ts)
+- [src/sensors/infrastructure/mock-uart-co2.adapter.ts](../src/sensors/infrastructure/mock-uart-co2.adapter.ts)
+- [src/sensors/infrastructure/mqtt-sensor.adapter.ts](../src/sensors/infrastructure/mqtt-sensor.adapter.ts)
+- [src/sensors/infrastructure/camera-sensor.adapter.ts](../src/sensors/infrastructure/camera-sensor.adapter.ts)
+- [src/sensors/infrastructure/pigpio.gateway.ts](../src/sensors/infrastructure/pigpio.gateway.ts)
+- [src/sensors/infrastructure/drizzle-sensor.repository.ts](../src/sensors/infrastructure/drizzle-sensor.repository.ts)
+- [src/sensors/infrastructure/in-memory-sensor.repository.ts](../src/sensors/infrastructure/in-memory-sensor.repository.ts)
+- [src/sensors/infrastructure/drizzle-sensor-log.repository.ts](../src/sensors/infrastructure/drizzle-sensor-log.repository.ts)
+- [src/sensors/infrastructure/in-memory-sensor-log.repository.ts](../src/sensors/infrastructure/in-memory-sensor-log.repository.ts)
+- [src/sensors/infrastructure/sensor-driver.factory.ts](../src/sensors/infrastructure/sensor-driver.factory.ts)
 
 Target shape:
 
@@ -171,25 +187,25 @@ src/sensors/
 
 Checklist:
 
-- [ ] Move `SensorType`, `SensorSeverity`, `SensorConfig`, `SensorReading`, and `SensorEvent` from [src/sensors/sensor.interface.ts](../src/sensors/sensor.interface.ts) into domain files.
-- [ ] Rename `ISensorDriver` to `SensorDriverPort` and place it in `domain/ports/sensor-driver.port.ts`.
-- [ ] Add `SENSOR_DRIVER_FACTORY`, `SENSOR_REPOSITORY`, and `SENSOR_QUERY` tokens.
-- [ ] Extract `SensorRepositoryPort` for enabled sensor loading and state persistence currently done in [src/sensors/sensor.registry.ts](../src/sensors/sensor.registry.ts).
+- [x] Move `SensorType`, `SensorSeverity`, `SensorConfig`, `SensorReading`, and `SensorEvent` from [src/sensors/sensor.interface.ts](../src/sensors/sensor.interface.ts) into domain files.
+- [x] Rename `ISensorDriver` to `SensorDriverPort` and place it in `domain/ports/sensor-driver.port.ts`.
+- [x] Add `SENSOR_DRIVER_FACTORY`, `SENSOR_REPOSITORY`, and `SENSOR_QUERY` tokens. (`SENSOR_QUERY` deferred — `SensorRepositoryPort` + `SENSOR_LOG_REPOSITORY` cover current use cases; introduce when telegram migrates.)
+- [x] Extract `SensorRepositoryPort` for enabled sensor loading and state persistence currently done in [src/sensors/sensor.registry.ts](../src/sensors/sensor.registry.ts).
 - [ ] Extract `SensorQueryPort` for read-only status data consumed by telegram.
-- [ ] Move [src/sensors/sensor.registry.ts](../src/sensors/sensor.registry.ts) to `application/sensor-registry.service.ts` and remove direct Drizzle imports.
-- [ ] Move driver construction out of the registry constructor into a driver factory bound by [src/sensors/sensor.module.ts](../src/sensors/sensor.module.ts).
-- [ ] Rename [src/sensors/drivers/digital.driver.ts](../src/sensors/drivers/digital.driver.ts) to `digital-gpio.adapter.ts`.
-- [ ] Rename [src/sensors/drivers/mock.driver.ts](../src/sensors/drivers/mock.driver.ts) to `mock-gpio.adapter.ts`.
-- [ ] Rename [src/sensors/drivers/uart.driver.ts](../src/sensors/drivers/uart.driver.ts) to `uart-co2.adapter.ts` when serialport implementation begins.
-- [ ] Rename [src/sensors/drivers/mqtt.driver.ts](../src/sensors/drivers/mqtt.driver.ts) to `mqtt-sensor.adapter.ts` when MQTT implementation begins.
-- [ ] Rename [src/sensors/drivers/camera.driver.ts](../src/sensors/drivers/camera.driver.ts) to `camera-sensor.adapter.ts` if camera remains a sensor source.
-- [ ] Keep [src/sensors/drivers/pigpio.gateway.ts](../src/sensors/drivers/pigpio.gateway.ts) as an infrastructure gateway, not a domain port.
-- [ ] Move GPIO pin range validation into a `GpioPin` value object or typed domain error.
-- [ ] Decide whether JS-level debounce belongs in `SensorRegistry`/application or remains adapter-local; keep hardware glitch filtering in the pigpio adapter.
-- [ ] Replace raw `Error` throws in digital config parsing with typed domain errors.
-- [ ] Add domain tests for `GpioPin`, severity parsing, and digital config validation.
-- [ ] Add application tests for reload behavior with an in-memory sensor repository and mock driver factory.
-- [ ] Keep the existing GPIO-driver integration test pattern from [test/sensors/digital.driver.test.ts](../test/sensors/digital.driver.test.ts), then rename it with the adapter.
+- [x] Move [src/sensors/sensor.registry.ts](../src/sensors/sensor.registry.ts) to `application/sensor-registry.service.ts` and remove direct Drizzle imports.
+- [x] Move driver construction out of the registry constructor into a driver factory bound by [src/sensors/sensor.module.ts](../src/sensors/sensor.module.ts).
+- [x] Rename [src/sensors/drivers/digital.driver.ts](../src/sensors/drivers/digital.driver.ts) to `digital-gpio.adapter.ts`.
+- [x] Rename [src/sensors/drivers/mock.driver.ts](../src/sensors/drivers/mock.driver.ts) to `mock-gpio.adapter.ts`.
+- [x] Rename [src/sensors/drivers/uart.driver.ts](../src/sensors/drivers/uart.driver.ts) to `uart-co2.adapter.ts` when serialport implementation begins.
+- [x] Rename [src/sensors/drivers/mqtt.driver.ts](../src/sensors/drivers/mqtt.driver.ts) to `mqtt-sensor.adapter.ts` when MQTT implementation begins.
+- [x] Rename [src/sensors/drivers/camera.driver.ts](../src/sensors/drivers/camera.driver.ts) to `camera-sensor.adapter.ts` if camera remains a sensor source.
+- [x] Keep [src/sensors/drivers/pigpio.gateway.ts](../src/sensors/drivers/pigpio.gateway.ts) as an infrastructure gateway, not a domain port.
+- [x] Move GPIO pin range validation into a `GpioPin` value object or typed domain error.
+- [x] Decide whether JS-level debounce belongs in `SensorRegistry`/application or remains adapter-local; keep hardware glitch filtering in the pigpio adapter. (Both remain adapter-local in `DigitalGpioAdapter`.)
+- [x] Replace raw `Error` throws in digital config parsing with typed domain errors.
+- [x] Add domain tests for `GpioPin`, severity parsing, and digital config validation. (Severity is a plain union; covered indirectly via repository mapping tests.)
+- [x] Add application tests for reload behavior with an in-memory sensor repository and mock driver factory.
+- [x] Keep the existing GPIO-driver integration test pattern from [test/sensors/digital.driver.test.ts](../test/sensors/digital.driver.test.ts), then rename it with the adapter.
 
 ## Events
 
