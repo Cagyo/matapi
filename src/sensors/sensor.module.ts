@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ReloadSensorsUseCase } from './application/reload-sensors.use-case';
 import { SensorRegistryService } from './application/sensor-registry.service';
+import { SENSOR_HEALTH } from './application/ports/sensor-health.port';
 import {
   SENSOR_DRIVER_FACTORY,
   SensorDriverFactory,
@@ -25,6 +26,7 @@ import { SensorDriverFactoryProvider } from './infrastructure/sensor-driver.fact
     { provide: SENSOR_REPOSITORY, useClass: DrizzleSensorRepository },
     { provide: SENSOR_LOG_REPOSITORY, useClass: DrizzleSensorLogRepository },
     { provide: SENSOR_QUERY, useClass: DrizzleSensorQuery },
+    { provide: SENSOR_HEALTH, useExisting: SensorRegistryService },
     {
       provide: SENSOR_DRIVER_FACTORY,
       useFactory: (
@@ -42,6 +44,7 @@ import { SensorDriverFactoryProvider } from './infrastructure/sensor-driver.fact
     SENSOR_REPOSITORY,
     SENSOR_LOG_REPOSITORY,
     SENSOR_QUERY,
+    SENSOR_HEALTH,
     SENSOR_DRIVER_FACTORY,
   ],
 })

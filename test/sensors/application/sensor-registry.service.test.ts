@@ -132,4 +132,27 @@ describe('SensorRegistryService', () => {
     expect(bad).toHaveBeenCalled();
     expect(good).toHaveBeenCalled();
   });
+
+  it('probe() returns online status per active sensor and tolerates failures', async () => {
+    const repo = new InMemorySensorRepository([
+      digitalSensor({ id: 'ok', name: 'ok', config: { pin: 17 } }),
+      digitalSensor({ id: 'bad', name: 'bad', config: { pin: 18 } }),
+    ]);
+    const goodDriver = new MockGpioAdapter();
+    const badDriver = new MockGpioAdapter();
+    vi.spyOn(badDriver, 'healthCheck').mockRejectedValue(new Error('boom'));
+    const drivers = new Map<string, MockGpioAdapter>([
+      ['digital-1', goodDriver],
+      ['digital-2', badDriver],
+    ]);
+    let i = 0;
+    const registry = makeRegistry(repo, () => [...drivers.values()][i++]!);
+    await registry.reload();
+
+    const result = await registry.probe();
+
+    expect(result.get('ok')).toBe(true);
+    expect(result.get('bad')).toBe(false);
+    expect(result.size).toBe(2);
+  });
 });

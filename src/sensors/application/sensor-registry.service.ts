@@ -11,6 +11,7 @@ import {
   SensorDriverFactory,
   SensorDriverPort,
 } from '../domain/ports/sensor-driver.port';
+import { SensorHealthPort } from './ports/sensor-health.port';
 import {
   SENSOR_REPOSITORY,
   SensorRepositoryPort,
@@ -29,7 +30,7 @@ import { SensorEvent } from '../domain/sensor-event';
  */
 @Injectable()
 export class SensorRegistryService
-  implements SensorEventSourcePort, OnModuleInit, OnModuleDestroy
+  implements SensorEventSourcePort, SensorHealthPort, OnModuleInit, OnModuleDestroy
 {
   private readonly logger = new Logger(SensorRegistryService.name);
   private readonly active = new Map<string, SensorDriverPort>();
@@ -120,6 +121,22 @@ export class SensorRegistryService
 
   list(): Array<{ id: string; driver: SensorDriverPort }> {
     return [...this.active.entries()].map(([id, driver]) => ({ id, driver }));
+  }
+
+  /** `SensorHealthPort.probe` — exposes live driver health to consumers. */
+  async probe(): Promise<Map<string, boolean>> {
+    const result = new Map<string, boolean>();
+    for (const [id, driver] of this.active.entries()) {
+      try {
+        result.set(id, await driver.healthCheck());
+      } catch (err) {
+        this.logger.warn(
+          `healthCheck failed for ${id}: ${(err as Error).message}`,
+        );
+        result.set(id, false);
+      }
+    }
+    return result;
   }
 
   private fanOut(event: SensorEvent): void {
