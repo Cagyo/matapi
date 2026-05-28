@@ -3,7 +3,9 @@
 NestJS worker + grammY Telegram bot for home automation/security on Raspberry Pi.
 Single-package repo. Target runtime: Raspberry Pi 3+ / Raspbian / Node 20 / PM2.
 
-> **Token rule:** Before reading any `docs/*.md`, open [docs/INDEX.md](docs/INDEX.md) and load only the docs that match the task. Do not load the whole `docs/` folder.
+**Architecture:** Hexagonal (ports & adapters), feature-sliced under `src/<context>/{domain,application,infrastructure}/`. Non-negotiable for new modules — see [docs/architecture.md](docs/architecture.md).
+
+> **Token rule:** Before reading any `docs/*.md` or `docs/specs/*.md`, open [docs/INDEX.md](docs/INDEX.md) and load only the docs that match the task. Do not bulk-load either folder.
 
 ## Stack
 
@@ -46,32 +48,48 @@ yarn db:migrate         # apply migrations
 - Bot + commands: [src/telegram/](src/telegram)
 - Camera / Drive: [src/camera/](src/camera)
 - Config defaults: [config/defaults.yml](config/defaults.yml)
-- Env keys: see [docs/00-overview.md](docs/00-overview.md) → *Environment Variables*
+- Env keys: see [docs/specs/00-overview.md](docs/specs/00-overview.md) → *Environment Variables*
 
 For deeper context, route through [docs/INDEX.md](docs/INDEX.md).
 
-## Common Tasks → Docs
+## Architecture Docs — `docs/*.md`
+
+| Topic | Doc |
+|---|---|
+| Hexagonal layers, dependency rule, folder layout | [architecture.md](docs/architecture.md) |
+| Port catalogue + adapter list (living index) | [ports-and-adapters.md](docs/ports-and-adapters.md) |
+| Nest DI tokens, composition root, env-driven adapter selection | [dependency-injection.md](docs/dependency-injection.md) |
+| Domain errors, adapter↔interface boundary mapping | [error-handling.md](docs/error-handling.md) |
+| Vitest tiers (unit / use-case / integration) | [testing.md](docs/testing.md) |
+| File names, class suffixes, folder names | [naming-and-conventions.md](docs/naming-and-conventions.md) |
+| Conventional Commits | [commits.md](docs/commits.md) |
+
+## Common Tasks → Specs (`docs/specs/`)
+
+Pair each spec doc with the relevant architecture doc above.
 
 | Task | Load |
 |---|---|
-| Add a digital (GPIO) sensor | 02, 03 |
-| Add UART/CO2 sensor logic | 02, 04 |
-| Add a Telegram command | 06 + matching `bot-cmd-*` doc |
-| Touch event queue / notifications | 05, 19 |
-| Camera / motion / Drive sync | 20, 21, 15 |
-| OTA / system update | 24, 13, 18 |
-| Install / boot / systemd | 25, 22, 23 |
-| DB schema change | 01 (then `yarn db:generate`) |
+| Add a digital (GPIO) sensor | specs 02, 03 |
+| Add UART/CO2 sensor logic | specs 02, 04 |
+| Add a Telegram command | specs 06 + matching `bot-cmd-*` doc |
+| Touch event queue / notifications | specs 05, 19 |
+| Camera / motion / Drive sync | specs 20, 21, 15 |
+| OTA / system update | specs 24, 13, 18 |
+| Install / boot / systemd | specs 25, 22, 23 |
+| DB schema change | specs 01 (then `yarn db:generate`) |
 
 ## Conventions
 
+- **Hexagonal layering is mandatory for new modules** — see [docs/architecture.md](docs/architecture.md). Existing modules are in transition; rehome to `domain/`/`application/`/`infrastructure/` on the next meaningful change.
 - TypeScript strict; no `any` in module boundaries.
-- Drizzle: schema lives in [src/database/schema.ts](src/database/schema.ts); never hand-edit files in `migrations/` — regenerate via `yarn db:generate`.
-- Sensor drivers implement [`SensorDriver`](src/sensors/sensor.interface.ts) and register through [src/sensors/sensor.registry.ts](src/sensors/sensor.registry.ts).
-- Telegram commands live in `src/telegram/commands/` and follow the pattern in [src/telegram/commands/status.command.ts](src/telegram/commands/status.command.ts).
+- Drizzle: schema lives in [src/database/schema.ts](src/database/schema.ts); never hand-edit files in `migrations/` — regenerate via `yarn db:generate`. Long-term home is per-context `infrastructure/db/` ([docs/architecture.md](docs/architecture.md#target-layout-mapped-to-current-code)).
+- Sensor drivers implement [`SensorDriver`](src/sensors/sensor.interface.ts) and register through [src/sensors/sensor.registry.ts](src/sensors/sensor.registry.ts) — the port will be renamed `SensorDriverPort` per [docs/naming-and-conventions.md](docs/naming-and-conventions.md) when next touched.
+- Telegram commands live in `src/telegram/commands/` and follow the pattern in [src/telegram/commands/status.command.ts](src/telegram/commands/status.command.ts); new handlers depend on application-layer ports, not Drizzle directly.
 - All times stored as Unix epoch (integer); format using `date-fns-tz` with `TIMEZONE` env.
 - Use `pino` via Nest logger; never `console.log` in production paths.
 - I18n strings: [src/locales/en.ts](src/locales/en.ts) — no hardcoded user-facing text.
+- Errors: typed domain error classes, mapped at the interface boundary — see [docs/error-handling.md](docs/error-handling.md).
 
 ## Hard Rules
 
