@@ -10,8 +10,11 @@ export class PingHandler implements TelegramHandler {
 
   register(composer: Composer<Context>): void {
     composer.command('ping', this.guard.registered, async (ctx) => {
-      const started = Date.now();
-      await ctx.reply(en.ping.pong(Date.now() - started));
+      // `message.date` is Unix seconds at the Telegram server. Falling
+      // back to handler entry keeps the round-trip non-zero in tests.
+      const sentMs = ctx.message?.date ? ctx.message.date * 1000 : Date.now();
+      const ms = Math.max(0, Date.now() - sentMs);
+      await ctx.reply(en.ping.pong(ms));
     });
   }
 }

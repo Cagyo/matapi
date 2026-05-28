@@ -12,7 +12,9 @@ import { Bot, GrammyError, HttpError } from 'grammy';
 import { EventNotifierService } from '../../events/application/event-notifier.service';
 import { EventProcessorService } from '../../events/application/event-processor.service';
 import { ClaimAdminHandler } from '../interfaces/claim-admin.handler';
+import { HealthHandler } from '../interfaces/health.handler';
 import { HelpHandler } from '../interfaces/help.handler';
+import { LogsHandler } from '../interfaces/logs.handler';
 import { PingHandler } from '../interfaces/ping.handler';
 import { StatusHandler } from '../interfaces/status.handler';
 import { TelegramHandler } from '../interfaces/telegram-handler';
@@ -37,6 +39,7 @@ export class GrammyBotGateway implements OnApplicationBootstrap, OnModuleDestroy
   private readonly logger = new Logger(GrammyBotGateway.name);
   private bot?: Bot;
   private runner?: RunnerHandle;
+  private lastUpdateAt: Date | null = null;
 
   constructor(
     @Inject(BOT_MODE) private readonly mode: BotMode,
@@ -48,8 +51,15 @@ export class GrammyBotGateway implements OnApplicationBootstrap, OnModuleDestroy
     private readonly status: StatusHandler,
     private readonly ping: PingHandler,
     private readonly help: HelpHandler,
+    private readonly logs: LogsHandler,
+    private readonly health: HealthHandler,
     @Optional() private readonly token: string | undefined = process.env.TELEGRAM_BOT_TOKEN,
   ) {}
+
+  /** Last update received from Telegram, or `null` if none yet (spec 08). */
+  getLastUpdateAt(): Date | null {
+    return this.lastUpdateAt;
+  }
 
   async onApplicationBootstrap(): Promise<void> {
     if (this.mode === 'mock' || !this.token) {
@@ -76,6 +86,13 @@ export class GrammyBotGateway implements OnApplicationBootstrap, OnModuleDestroy
     // group chats or channels are silently dropped before any handler runs.
     bot.use(async (ctx, next) => {
       if (ctx.chat?.type === 'private') return next();
+    });
+
+    // Track last-update timestamp for `/health` (spec 08). Captured before
+    // the handler chain so even ignored updates count as "bot is alive".
+    bot.use(async (_ctx, next) => {
+      this.lastUpdateAt = new Date();
+      return next();
     });
 
     for (const handler of this.handlers()) {
@@ -115,6 +132,6 @@ export class GrammyBotGateway implements OnApplicationBootstrap, OnModuleDestroy
   }
 
   private handlers(): TelegramHandler[] {
-    return [this.claim, this.status, this.ping, this.help];
+    return [this.claim, this.status, this.ping, this.help, this.logs, this.health];
   }
 }

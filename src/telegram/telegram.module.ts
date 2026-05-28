@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { EventModule } from '../events/event.module';
 import { SensorModule } from '../sensors/sensor.module';
+import { SystemModule } from '../system/system.module';
 import { ClaimAdminUseCase } from './application/claim-admin.use-case';
 import { USER_REPOSITORY } from './domain/ports/user-repository.port';
 import { ConsoleNotifierAdapter } from './infrastructure/console-notifier.adapter';
@@ -9,7 +10,9 @@ import { GrammyBotGateway, BOT_MODE, BotMode } from './infrastructure/grammy-bot
 import { InMemoryUserRepository } from './infrastructure/in-memory-user.repository';
 import { TelegramNotifierAdapter } from './infrastructure/telegram-notifier.adapter';
 import { ClaimAdminHandler } from './interfaces/claim-admin.handler';
+import { HealthHandler } from './interfaces/health.handler';
 import { HelpHandler } from './interfaces/help.handler';
+import { LogsHandler } from './interfaces/logs.handler';
 import { PingHandler } from './interfaces/ping.handler';
 import { RoleMiddleware } from './interfaces/role.middleware';
 import { StatusHandler } from './interfaces/status.handler';
@@ -35,7 +38,7 @@ const mode = resolveBotMode();
  * event pipeline so drains succeed locally without a Telegram token.
  */
 @Module({
-  imports: [EventModule, SensorModule],
+  imports: [EventModule, SensorModule, SystemModule],
   providers: [
     { provide: BOT_MODE, useValue: mode },
     {
@@ -48,6 +51,8 @@ const mode = resolveBotMode();
     StatusHandler,
     PingHandler,
     HelpHandler,
+    LogsHandler,
+    HealthHandler,
     TelegramNotifierAdapter,
     ConsoleNotifierAdapter,
     GrammyBotGateway,
