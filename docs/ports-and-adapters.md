@@ -42,8 +42,9 @@ Status legend: ✅ canonical · 🚧 in transition · 📝 planned
 
 | Port | Adapters | Status | Source |
 |---|---|---|---|
-| `EventRepositoryPort` | `DrizzleEventRepository` | 🚧 — Drizzle calls live inline in [event.queue.ts](../src/events/event.queue.ts); extract on next change. | [event.queue.ts](../src/events/event.queue.ts) |
-| `NotifierPort` | `TelegramNotifier`, `LogNotifier` (dev fallback) | 📝 | — |
+| `EventRepositoryPort` (`EVENT_REPOSITORY`) | `DrizzleEventRepository`, `InMemoryEventRepository` (tests/dev) | ✅ canonical | [event-repository.port.ts](../src/events/domain/ports/event-repository.port.ts) |
+| `NotifierPort` (`NOTIFIER`) | `EventNotifierService` (delegating application adapter), `TelegramNotifierAdapter` | 🚧 — Telegram implements the sender, while bot gateway extraction is still pending. | [notifier.port.ts](../src/events/domain/ports/notifier.port.ts) |
+| `SensorEventSourcePort` (`SENSOR_EVENT_SOURCE`) | `SensorRegistry` (temporary, until sensors migrate) | 🚧 — events no longer import `SensorRegistry` directly; the implementation still lives in the transitional sensors context. | [sensor-event-source.port.ts](../src/events/domain/ports/sensor-event-source.port.ts) |
 
 ### Telegram context
 
@@ -70,7 +71,7 @@ Status legend: ✅ canonical · 🚧 in transition · 📝 planned
 
 | Port | Adapters | Status | Source |
 |---|---|---|---|
-| `ClockPort` | `SystemClock`, `FixedClock` (tests) | 📝 — replace direct `new Date()` / `Date.now()` use in domain & application. Currently used directly. | — |
+| `ClockPort` (`CLOCK`) | `SystemClockAdapter`, fixed objects in tests | 🚧 — introduced for events; still planned for the rest of the repo. | [clock.port.ts](../src/events/domain/ports/clock.port.ts) |
 | `ConfigPort` | `YamlConfigLoader` | 🚧 | [config.loader.ts](../src/config/config.loader.ts) |
 | `LoggerPort` | (use Nest `Logger` for now) | ✅ — Nest's `Logger` is the contract; do not invent a wrapper. |
 

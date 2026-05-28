@@ -6,6 +6,7 @@ import { ClaimAdminCommand } from './commands/claim-admin.command';
 import { StatusCommand } from './commands/status.command';
 import { PingCommand } from './commands/ping.command';
 import { HelpCommand } from './commands/help.command';
+import { TelegramNotifierAdapter } from './infrastructure/telegram-notifier.adapter';
 
 @Module({
   imports: [EventModule],
@@ -16,6 +17,7 @@ import { HelpCommand } from './commands/help.command';
     StatusCommand,
     PingCommand,
     HelpCommand,
+    TelegramNotifierAdapter,
   ],
   exports: [BotService],
 })

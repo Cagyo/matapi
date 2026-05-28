@@ -1,10 +1,10 @@
-import { Inject, Injectable, Logger, OnApplicationBootstrap, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, OnApplicationBootstrap, OnModuleDestroy } from '@nestjs/common';
 import { Bot, GrammyError, HttpError } from 'grammy';
 import { run, RunnerHandle } from '@grammyjs/runner';
 import { autoRetry } from '@grammyjs/auto-retry';
-import { DB, AppDatabase } from '../database/database.module';
-import { users } from '../database/schema';
-import { EventProcessor } from '../events/event.processor';
+import { EventNotifierService } from '../events/application/event-notifier.service';
+import { EventProcessorService } from '../events/application/event-processor.service';
+import { TelegramNotifierAdapter } from './infrastructure/telegram-notifier.adapter';
 import { ClaimAdminCommand } from './commands/claim-admin.command';
 import { StatusCommand } from './commands/status.command';
 import { PingCommand } from './commands/ping.command';
@@ -17,8 +17,9 @@ export class BotService implements OnApplicationBootstrap, OnModuleDestroy {
   private runner?: RunnerHandle;
 
   constructor(
-    @Inject(DB) private readonly db: AppDatabase,
-    private readonly eventProcessor: EventProcessor,
+    private readonly eventNotifier: EventNotifierService,
+    private readonly eventProcessor: EventProcessorService,
+    private readonly telegramNotifier: TelegramNotifierAdapter,
     private readonly claim: ClaimAdminCommand,
     private readonly status: StatusCommand,
     private readonly ping: PingCommand,
@@ -51,12 +52,8 @@ export class BotService implements OnApplicationBootstrap, OnModuleDestroy {
       }
     });
 
-    this.eventProcessor.setSender(async (text: string) => {
-      const recipients = this.db.select({ id: users.telegramId }).from(users).all();
-      for (const r of recipients) {
-        await bot.api.sendMessage(r.id, text);
-      }
-    });
+    this.telegramNotifier.setBot(bot);
+    this.eventNotifier.register(this.telegramNotifier);
 
     this.bot = bot;
     this.runner = run(bot);
@@ -70,5 +67,7 @@ export class BotService implements OnApplicationBootstrap, OnModuleDestroy {
     if (this.runner?.isRunning()) {
       await this.runner.stop();
     }
+    this.telegramNotifier.clearBot();
+    this.eventNotifier.clear();
   }
 }

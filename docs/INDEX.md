@@ -15,6 +15,7 @@ Two doc trees live here. Load the right one for the task:
 |---|---|
 | Adding a new bounded context / Nest module | [architecture](architecture.md), [naming-and-conventions](naming-and-conventions.md), [dependency-injection](dependency-injection.md) |
 | Adding a port or replacing an adapter | [architecture](architecture.md), [ports-and-adapters](ports-and-adapters.md) |
+| Planning or executing module migration | [migration-checklist](migration-checklist.md), [architecture](architecture.md), [ports-and-adapters](ports-and-adapters.md), [testing](testing.md) |
 | Writing tests for new code | [testing](testing.md) |
 | Designing an error type / failure path | [error-handling](error-handling.md) |
 | Wiring Nest DI / picking an injection token | [dependency-injection](dependency-injection.md) |

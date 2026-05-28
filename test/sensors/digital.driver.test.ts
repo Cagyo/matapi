@@ -115,6 +115,21 @@ describe('DigitalDriver', () => {
     ).rejects.toThrow(/missing required numeric "pin"/);
   });
 
+  it('rejects unsupported pull modes', async () => {
+    await expect(
+      driver.init({ ...baseConfig, config: { pin: 17, pull: 'sideways' } }),
+    ).rejects.toThrow(/invalid "pull"/);
+  });
+
+  it('connects the gateway before using a pin when disconnected', async () => {
+    (gateway.isConnected as ReturnType<typeof vi.fn>).mockReturnValue(false);
+
+    await driver.init(baseConfig);
+
+    expect(gateway.connect).toHaveBeenCalledTimes(1);
+    expect(gateway.gpio).toHaveBeenCalledWith(17);
+  });
+
   it('destroy unregisters notify', async () => {
     await driver.init(baseConfig);
     await driver.destroy();

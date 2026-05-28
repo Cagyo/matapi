@@ -43,7 +43,7 @@ export class ClaimAdminCommand {
         })
         .run();
 
-      this.logger.log(`Admin claimed by ${from.id}`);
+      this.logger.log('Admin claimed');
       await ctx.reply(en.claim.success);
     });
   }

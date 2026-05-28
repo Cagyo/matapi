@@ -1,6 +1,15 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import {
+  Inject,
+  Injectable,
+  Logger,
+  OnModuleDestroy,
+  OnModuleInit,
+  Optional,
+} from '@nestjs/common';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const pigpioClientLib = require('pigpio-client');
+const defaultPigpioClientLib = require('pigpio-client') as PigpioClientLib;
+
+export const PIGPIO_CLIENT = Symbol('PIGPIO_CLIENT');
 
 export type PudMode = 'up' | 'down' | 'none';
 
@@ -21,6 +30,10 @@ interface PigpioRoot {
   once(event: 'connected' | 'disconnected' | 'error', cb: (info?: unknown) => void): void;
 }
 
+interface PigpioClientLib {
+  pigpio(options: { host: string; port: number }): PigpioRoot;
+}
+
 /**
  * Singleton wrapper around a pigpio-client connection. All GPIO drivers share
  * one socket to pigpiod. Connection is established lazily and re-used.
@@ -31,6 +44,12 @@ export class PigpioGateway implements OnModuleInit, OnModuleDestroy {
   private client: PigpioRoot | null = null;
   private connected = false;
   private connectPromise: Promise<void> | null = null;
+
+  constructor(
+    @Optional()
+    @Inject(PIGPIO_CLIENT)
+    private readonly pigpioClient: PigpioClientLib = defaultPigpioClientLib,
+  ) {}
 
   async onModuleInit(): Promise<void> {
     // Best-effort: don't crash app if pigpiod is down on Pi-less dev hosts.
@@ -68,7 +87,7 @@ export class PigpioGateway implements OnModuleInit, OnModuleDestroy {
 
     this.connectPromise = new Promise<void>((resolve, reject) => {
       try {
-        const c: PigpioRoot = pigpioClientLib.pigpio({ host, port }) as PigpioRoot;
+        const c = this.pigpioClient.pigpio({ host, port });
         this.client = c;
 
         const onError = (err?: unknown) => {
