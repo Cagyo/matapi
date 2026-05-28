@@ -28,7 +28,6 @@ class RecordingNotifier implements NotifierPort {
 const baseOptions: EventQueueOptions = {
   batchSize: 50,
   maxQueueBeforeForceAggregate: 100,
-  drainDelayMs: 0,
 };
 
 function makeUseCase(options: Partial<EventQueueOptions> = {}) {
@@ -58,7 +57,7 @@ describe('DrainEventQueueUseCase', () => {
 
     expect(notifier.messages).toEqual([
       {
-        text: '2029-12-31T23:59:00.000Z — front_door state_change',
+        text: '2029-12-31T23:59:00.000Z — front_door true',
         asFile: false,
       },
     ]);
@@ -86,8 +85,8 @@ describe('DrainEventQueueUseCase', () => {
     expect(notifier.messages).toEqual([
       {
         text:
-          '📋 Events (2):\n\n' +
-          '2029-12-31T23:59:00.000Z — front_door state_change\n' +
+          '📋 Offline events (2029-12-31T23:59:00.000Z — 2030-01-01T00:00:00.000Z):\n\n' +
+          '2029-12-31T23:59:00.000Z — front_door true\n' +
           '2030-01-01T00:00:00.000Z — system system',
         asFile: false,
       },

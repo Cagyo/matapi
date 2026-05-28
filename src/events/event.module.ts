@@ -40,10 +40,9 @@ function positiveIntegerFromEnv(value: string | undefined, fallback: number): nu
           process.env.MAX_QUEUE_BEFORE_FORCE_AGGREGATE,
           100,
         ),
-        drainDelayMs: 2000,
       }),
     },
   ],
-  exports: [EventNotifierService, EventProcessorService, EventQueueService],
+  exports: [EventNotifierService, EventProcessorService, EventQueueService, CLOCK],
 })
 export class EventModule {}

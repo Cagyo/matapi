@@ -11,9 +11,11 @@ import {
   EventQueueOptions,
 } from './ports/event-queue-options.port';
 
-const delay = (milliseconds: number) =>
-  new Promise((resolve) => setTimeout(resolve, milliseconds));
-
+/**
+ * Drains the unsent event queue at-least-once. Inter-batch pacing and
+ * Telegram rate-limit handling are the notifier adapter's concern
+ * (`@grammyjs/auto-retry`), not this use case — see spec 05.
+ */
 @Injectable()
 export class DrainEventQueueUseCase {
   private readonly logger = new Logger(DrainEventQueueUseCase.name);
@@ -53,10 +55,6 @@ export class DrainEventQueueUseCase {
         } catch (error) {
           this.logger.warn(`Send failed, will retry: ${(error as Error).message}`);
           break;
-        }
-
-        if (this.options.drainDelayMs > 0) {
-          await delay(this.options.drainDelayMs);
         }
       }
     } finally {
