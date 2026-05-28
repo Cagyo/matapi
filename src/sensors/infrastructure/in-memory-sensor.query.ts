@@ -1,9 +1,16 @@
-import { SensorQueryPort } from '../domain/ports/sensor-query.port';
+import {
+  ArchivedSensor,
+  SensorLookup,
+  SensorQueryPort,
+} from '../domain/ports/sensor-query.port';
 import { Sensor } from '../domain/sensor';
 
 /** In-memory `SensorQueryPort` for dev mode and use-case tests. */
 export class InMemorySensorQuery implements SensorQueryPort {
-  constructor(private sensors: Sensor[] = []) {}
+  constructor(
+    private sensors: Sensor[] = [],
+    private archived: ArchivedSensor[] = [],
+  ) {}
 
   async listEnabled(): Promise<Sensor[]> {
     return this.sensors.filter((s) => s.enabled);
@@ -14,7 +21,19 @@ export class InMemorySensorQuery implements SensorQueryPort {
     return found ?? null;
   }
 
+  async findByName(name: string): Promise<SensorLookup | null> {
+    const active = this.sensors.find((s) => s.name === name);
+    if (active) return { kind: 'active', sensor: active };
+    const archived = this.archived.find((s) => s.name === name);
+    if (archived) return { kind: 'archived', sensor: archived };
+    return null;
+  }
+
   setSensors(next: Sensor[]): void {
     this.sensors = next;
+  }
+
+  setArchived(next: ArchivedSensor[]): void {
+    this.archived = next;
   }
 }

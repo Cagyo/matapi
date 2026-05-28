@@ -1,11 +1,15 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { eq } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../database/database.module';
-import { sensors } from '../../database/schema';
-import { SensorQueryPort } from '../domain/ports/sensor-query.port';
+import { sensors, sensorsArchive } from '../../database/schema';
+import {
+  SensorLookup,
+  SensorQueryPort,
+} from '../domain/ports/sensor-query.port';
 import { Sensor, SensorSeverity, SensorType } from '../domain/sensor';
 
 type SensorRow = typeof sensors.$inferSelect;
+type ArchivedRow = typeof sensorsArchive.$inferSelect;
 
 @Injectable()
 export class DrizzleSensorQuery implements SensorQueryPort {
@@ -26,6 +30,24 @@ export class DrizzleSensorQuery implements SensorQueryPort {
     return this.toSensor(row);
   }
 
+  async findByName(name: string): Promise<SensorLookup | null> {
+    const active = this.db
+      .select()
+      .from(sensors)
+      .where(eq(sensors.name, name))
+      .get();
+    if (active) return { kind: 'active', sensor: this.toSensor(active) };
+
+    const archived = this.db
+      .select()
+      .from(sensorsArchive)
+      .where(eq(sensorsArchive.name, name))
+      .get();
+    if (archived) return { kind: 'archived', sensor: this.toArchived(archived) };
+
+    return null;
+  }
+
   private toSensor(row: SensorRow): Sensor {
     return {
       id: row.id,
@@ -37,6 +59,14 @@ export class DrizzleSensorQuery implements SensorQueryPort {
       severity: (row.severity as SensorSeverity) ?? 'info',
       lastValue: row.lastValue ?? null,
       lastValueAt: row.lastValueAt ?? null,
+    };
+  }
+
+  private toArchived(row: ArchivedRow) {
+    return {
+      id: row.id,
+      name: row.name,
+      archivedAt: row.archivedAt ?? null,
     };
   }
 }
