@@ -60,4 +60,30 @@ describe('DrizzleUserRepository', () => {
     expect(upserted.name).toBe('Ada Lovelace');
     expect(await repo.countAdmins()).toBe(1);
   });
+
+  it('creates a regular user via createUser and finds by case-insensitive name', async () => {
+    await repo.createUser({
+      telegramId: 2002,
+      name: 'Alex',
+      role: 'user',
+      createdAt: new Date('2030-01-01T00:00:00.000Z'),
+    });
+
+    expect(await repo.findByName('alex')).toMatchObject({ telegramId: 2002 });
+    expect(await repo.findByName('@ALEX')).toMatchObject({ telegramId: 2002 });
+    expect(await repo.findByName('ghost')).toBeNull();
+  });
+
+  it('updates role via updateRole', async () => {
+    await repo.createUser({
+      telegramId: 2002,
+      name: 'Alex',
+      role: 'user',
+      createdAt: new Date('2030-01-01T00:00:00.000Z'),
+    });
+
+    const updated = await repo.updateRole(2002, 'admin');
+    expect(updated.role).toBe('admin');
+    expect(await repo.countAdmins()).toBe(1);
+  });
 });
