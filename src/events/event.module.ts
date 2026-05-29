@@ -65,6 +65,7 @@ function positiveIntegerFromEnv(value: string | undefined, fallback: number): nu
     EventNotifierService,
     EventProcessorService,
     EventQueueService,
+    NotificationService,
     RecipientDirectoryService,
     CLOCK,
   ],

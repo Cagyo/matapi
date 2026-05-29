@@ -5,6 +5,7 @@ import {
 } from '../../sensors/domain/ports/sensor-query.port';
 import { SensorSeverity } from '../../sensors/domain/sensor';
 import { isInQuietHours } from '../domain/quiet-hours';
+import { formatMotionCaption } from '../domain/motion-notification';
 import { formatSensorNotification } from '../domain/sensor-notification';
 import { CLOCK, ClockPort } from '../domain/ports/clock.port';
 import {
@@ -111,6 +112,59 @@ export class NotificationService {
     if (delivered === 0 && failures > 0) return;
 
     await this.markSent(event);
+  }
+
+  /**
+   * Motion-event notification (spec 19, 20). Photo + caption to every
+   * recipient minus those globally muted or in quiet hours (motion is
+   * `info` severity). Best-effort and ephemeral — unlike sensor events it is
+   * not queued for the offline drain. When no per-user recipients exist
+   * (mock/dev) it broadcasts so dev output still surfaces the event.
+   */
+  async notifyMotion(
+    cameraName: string,
+    at: Date,
+    photo: Buffer | null,
+  ): Promise<void> {
+    if (!this.notifier.isReady()) return;
+
+    const caption = formatMotionCaption(cameraName, at, this.options.timezone);
+    const recipients = await this.recipients.listRecipients();
+
+    if (recipients.length === 0) {
+      try {
+        await this.notifier.notify({ text: caption, asFile: false });
+      } catch (error) {
+        this.logger.warn(`Motion broadcast failed: ${(error as Error).message}`);
+      }
+      return;
+    }
+
+    const now = this.clock.now();
+    for (const recipient of recipients) {
+      if (recipient.muted) continue;
+      if (isInQuietHours(recipient, now, this.options.timezone)) continue;
+
+      try {
+        if (photo) {
+          await this.notifier.notifyUserPhoto(recipient.telegramId, {
+            buffer: photo,
+            caption,
+          });
+        } else {
+          await this.notifier.notifyUser(recipient.telegramId, {
+            text: caption,
+            asFile: false,
+          });
+        }
+      } catch (error) {
+        this.logger.warn(
+          `Motion notification to ${recipient.telegramId} failed: ${
+            (error as Error).message
+          }`,
+        );
+      }
+    }
   }
 
   private async isSuppressed(

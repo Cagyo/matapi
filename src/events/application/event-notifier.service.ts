@@ -1,5 +1,9 @@
 import { Injectable } from '@nestjs/common';
-import { NotificationMessage, NotifierPort } from '../domain/ports/notifier.port';
+import {
+  NotificationMessage,
+  NotificationPhoto,
+  NotifierPort,
+} from '../domain/ports/notifier.port';
 
 @Injectable()
 export class EventNotifierService implements NotifierPort {
@@ -31,5 +35,13 @@ export class EventNotifierService implements NotifierPort {
     }
 
     await this.notifier.notifyUser(telegramId, message);
+  }
+
+  async notifyUserPhoto(telegramId: number, photo: NotificationPhoto): Promise<void> {
+    if (!this.notifier?.isReady()) {
+      throw new Error('Notifier is not ready');
+    }
+
+    await this.notifier.notifyUserPhoto(telegramId, photo);
   }
 }
