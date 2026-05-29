@@ -6,6 +6,7 @@ import { GdriveStatusUseCase } from './application/gdrive-status.use-case';
 import { GetMotionPhotoUseCase } from './application/get-motion-photo.use-case';
 import { GetMotionVideoUseCase } from './application/get-motion-video.use-case';
 import { GetSnapshotUseCase } from './application/get-snapshot.use-case';
+import { ListCamerasUseCase } from './application/list-cameras.use-case';
 import { ListMotionEventsUseCase } from './application/list-motion-events.use-case';
 import { DRIVE_STATUS } from './domain/ports/drive-status.port';
 import { GDRIVE_SYNC_HEALTH } from './domain/ports/gdrive-sync-health.port';
@@ -81,6 +82,7 @@ const mode = resolveCameraMode();
     DisableMotionUseCase,
     CameraStatusUseCase,
     GdriveStatusUseCase,
+    ListCamerasUseCase,
     UploadService,
     CleanupService,
   ],
@@ -93,6 +95,7 @@ const mode = resolveCameraMode();
     DisableMotionUseCase,
     CameraStatusUseCase,
     GdriveStatusUseCase,
+    ListCamerasUseCase,
     GDRIVE_SYNC_HEALTH,
   ],
 })
