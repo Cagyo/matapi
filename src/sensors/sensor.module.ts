@@ -7,6 +7,7 @@ import { ModifySensorUseCase } from './application/modify-sensor.use-case';
 import { ReloadSensorsUseCase } from './application/reload-sensors.use-case';
 import { RemoveSensorUseCase } from './application/remove-sensor.use-case';
 import { SensorRegistryService } from './application/sensor-registry.service';
+import { SimulateSensorUseCase } from './application/simulate-sensor.use-case';
 import { SENSOR_HEALTH } from './application/ports/sensor-health.port';
 import {
   SENSOR_DRIVER_FACTORY,
@@ -23,8 +24,15 @@ import { DrizzleSensorQuery } from './infrastructure/drizzle-sensor.query';
 import { DrizzleSensorRepository } from './infrastructure/drizzle-sensor.repository';
 import { PigpioGateway } from './infrastructure/pigpio.gateway';
 import { SensorDriverFactoryProvider } from './infrastructure/sensor-driver.factory';
+import { DevSimulatorController } from './interfaces/dev-simulator.controller';
+
+// The dev simulator panel (spec 26) is mounted on the worker's loopback HTTP
+// server only in development — never reachable in production.
+const devControllers =
+  process.env.NODE_ENV === 'development' ? [DevSimulatorController] : [];
 
 @Module({
+  controllers: devControllers,
   providers: [
     SensorRegistryService,
     ReloadSensorsUseCase,
@@ -32,6 +40,7 @@ import { SensorDriverFactoryProvider } from './infrastructure/sensor-driver.fact
     ModifySensorUseCase,
     RemoveSensorUseCase,
     ImportSensorsUseCase,
+    SimulateSensorUseCase,
     PigpioGateway,
     { provide: CLOCK, useClass: SystemClockAdapter },
     { provide: SENSOR_REPOSITORY, useClass: DrizzleSensorRepository },
@@ -55,6 +64,7 @@ import { SensorDriverFactoryProvider } from './infrastructure/sensor-driver.fact
     ModifySensorUseCase,
     RemoveSensorUseCase,
     ImportSensorsUseCase,
+    SimulateSensorUseCase,
     PigpioGateway,
     SENSOR_REPOSITORY,
     SENSOR_LOG_REPOSITORY,
