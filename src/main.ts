@@ -54,8 +54,14 @@ async function bootstrap(): Promise<void> {
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
 
-  await app.init();
-  Logger.log(`Home Worker started (pid ${process.pid})`, 'Bootstrap');
+  const hookPort = Number(process.env.MOTION_HOOK_PORT) || 3001;
+  // Bind to loopback only — the Motion daemon runs on the same host and the
+  // hook routes must never be reachable off-box (spec 20).
+  await app.listen(hookPort, '127.0.0.1');
+  Logger.log(
+    `Home Worker started (pid ${process.pid}), motion hooks on 127.0.0.1:${hookPort}`,
+    'Bootstrap',
+  );
 }
 
 bootstrap().catch((err: unknown) => {
