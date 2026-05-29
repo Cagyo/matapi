@@ -21,6 +21,9 @@ describe('ClaimAdminUseCase', () => {
       telegramId: 1001,
       name: 'Ada',
       role: 'admin',
+      muted: false,
+      quietStart: null,
+      quietEnd: null,
       createdAt: new Date('2030-01-01T00:00:00.000Z'),
     });
     expect(await users.countAdmins()).toBe(1);

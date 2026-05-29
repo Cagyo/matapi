@@ -11,6 +11,7 @@ import { run, RunnerHandle } from '@grammyjs/runner';
 import { Bot, GrammyError, HttpError } from 'grammy';
 import { EventNotifierService } from '../../events/application/event-notifier.service';
 import { EventProcessorService } from '../../events/application/event-processor.service';
+import { RestartConfirmationService } from '../application/restart-confirmation.service';
 import { ClaimAdminHandler } from '../interfaces/claim-admin.handler';
 import { ConfigHandler } from '../interfaces/config.handler';
 import { DemoteHandler } from '../interfaces/demote.handler';
@@ -18,11 +19,17 @@ import { HealthHandler } from '../interfaces/health.handler';
 import { HelpHandler } from '../interfaces/help.handler';
 import { InviteHandler } from '../interfaces/invite.handler';
 import { LogsHandler } from '../interfaces/logs.handler';
+import { MuteHandler } from '../interfaces/mute.handler';
 import { PingHandler } from '../interfaces/ping.handler';
 import { PromoteHandler } from '../interfaces/promote.handler';
+import { QuietHoursHandler } from '../interfaces/quiet-hours.handler';
+import { RestartHandler } from '../interfaces/restart.handler';
+import { RollbackHandler } from '../interfaces/rollback.handler';
 import { StartHandler } from '../interfaces/start.handler';
 import { StatusHandler } from '../interfaces/status.handler';
 import { TelegramHandler } from '../interfaces/telegram-handler';
+import { UnmuteHandler } from '../interfaces/unmute.handler';
+import { UpdateHandler } from '../interfaces/update.handler';
 import { ConsoleNotifierAdapter } from './console-notifier.adapter';
 import { TelegramDirectMessenger } from './telegram-direct-messenger.adapter';
 import { TelegramNotifierAdapter } from './telegram-notifier.adapter';
@@ -54,6 +61,7 @@ export class GrammyBotGateway implements OnApplicationBootstrap, OnModuleDestroy
     private readonly telegramNotifier: TelegramNotifierAdapter,
     private readonly consoleNotifier: ConsoleNotifierAdapter,
     private readonly directMessenger: TelegramDirectMessenger,
+    private readonly restartConfirmation: RestartConfirmationService,
     private readonly claim: ClaimAdminHandler,
     private readonly status: StatusHandler,
     private readonly ping: PingHandler,
@@ -65,6 +73,12 @@ export class GrammyBotGateway implements OnApplicationBootstrap, OnModuleDestroy
     private readonly start: StartHandler,
     private readonly promote: PromoteHandler,
     private readonly demote: DemoteHandler,
+    private readonly mute: MuteHandler,
+    private readonly unmute: UnmuteHandler,
+    private readonly quietHours: QuietHoursHandler,
+    private readonly update: UpdateHandler,
+    private readonly rollback: RollbackHandler,
+    private readonly restart: RestartHandler,
     @Optional() private readonly token: string | undefined = process.env.TELEGRAM_BOT_TOKEN,
   ) {}
 
@@ -130,6 +144,16 @@ export class GrammyBotGateway implements OnApplicationBootstrap, OnModuleDestroy
     this.runner = run(bot);
     this.logger.log('Telegram bot started');
 
+    // Report the outcome of the previous restart (user /restart, OTA
+    // update, rollback) to admins, then clear the flag.
+    void this.restartConfirmation
+      .run()
+      .catch((err) =>
+        this.logger.warn(
+          `restart confirmation failed: ${(err as Error).message}`,
+        ),
+      );
+
     // Drain anything pending from a previous run.
     void this.eventProcessor.drain();
   }
@@ -148,6 +172,12 @@ export class GrammyBotGateway implements OnApplicationBootstrap, OnModuleDestroy
   private handlers(): TelegramHandler[] {
     return [
       this.claim,
+      this.mute,
+      this.unmute,
+      this.quietHours,
+      this.update,
+      this.rollback,
+      this.restart,
       this.start,
       this.status,
       this.ping,

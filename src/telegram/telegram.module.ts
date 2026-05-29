@@ -9,17 +9,27 @@ import {
   InviteUseCase,
   defaultInviteCodeGenerator,
 } from './application/invite.use-case';
+import { MuteSensorUseCase } from './application/mute-sensor.use-case';
 import { PromoteUserUseCase } from './application/promote-user.use-case';
 import { RegisterUserUseCase } from './application/register-user.use-case';
+import { RestartConfirmationService } from './application/restart-confirmation.service';
+import { RestartSystemUseCase } from './application/restart-system.use-case';
+import { RollbackSystemUseCase } from './application/rollback-system.use-case';
+import { SetQuietHoursUseCase } from './application/set-quiet-hours.use-case';
+import { UnmuteSensorUseCase } from './application/unmute-sensor.use-case';
+import { UpdateSystemUseCase } from './application/update-system.use-case';
 import { DIRECT_MESSENGER } from './domain/ports/direct-messenger.port';
 import { INVITE_CODE_REPOSITORY } from './domain/ports/invite-code-repository.port';
 import { USER_REPOSITORY } from './domain/ports/user-repository.port';
+import { USER_SENSOR_MUTE_REPOSITORY } from './domain/ports/user-sensor-mute-repository.port';
 import { ConsoleNotifierAdapter } from './infrastructure/console-notifier.adapter';
 import { DrizzleInviteCodeRepository } from './infrastructure/drizzle-invite-code.repository';
 import { DrizzleUserRepository } from './infrastructure/drizzle-user.repository';
+import { DrizzleUserSensorMuteRepository } from './infrastructure/drizzle-user-sensor-mute.repository';
 import { GrammyBotGateway, BOT_MODE, BotMode } from './infrastructure/grammy-bot.gateway';
 import { InMemoryInviteCodeRepository } from './infrastructure/in-memory-invite-code.repository';
 import { InMemoryUserRepository } from './infrastructure/in-memory-user.repository';
+import { InMemoryUserSensorMuteRepository } from './infrastructure/in-memory-user-sensor-mute.repository';
 import { TelegramDirectMessenger } from './infrastructure/telegram-direct-messenger.adapter';
 import { TelegramNotifierAdapter } from './infrastructure/telegram-notifier.adapter';
 import { ClaimAdminHandler } from './interfaces/claim-admin.handler';
@@ -29,11 +39,17 @@ import { HealthHandler } from './interfaces/health.handler';
 import { HelpHandler } from './interfaces/help.handler';
 import { InviteHandler } from './interfaces/invite.handler';
 import { LogsHandler } from './interfaces/logs.handler';
+import { MuteHandler } from './interfaces/mute.handler';
 import { PingHandler } from './interfaces/ping.handler';
 import { PromoteHandler } from './interfaces/promote.handler';
+import { QuietHoursHandler } from './interfaces/quiet-hours.handler';
+import { RestartHandler } from './interfaces/restart.handler';
 import { RoleMiddleware } from './interfaces/role.middleware';
+import { RollbackHandler } from './interfaces/rollback.handler';
 import { StartHandler } from './interfaces/start.handler';
 import { StatusHandler } from './interfaces/status.handler';
+import { UnmuteHandler } from './interfaces/unmute.handler';
+import { UpdateHandler } from './interfaces/update.handler';
 
 function resolveBotMode(): BotMode {
   if (process.env.BOT_MODE === 'mock') return 'mock';
@@ -71,6 +87,13 @@ const mode = resolveBotMode();
           ? InMemoryInviteCodeRepository
           : DrizzleInviteCodeRepository,
     },
+    {
+      provide: USER_SENSOR_MUTE_REPOSITORY,
+      useClass:
+        mode === 'mock'
+          ? InMemoryUserSensorMuteRepository
+          : DrizzleUserSensorMuteRepository,
+    },
     { provide: INVITE_CODE_GENERATOR, useValue: defaultInviteCodeGenerator },
     TelegramDirectMessenger,
     { provide: DIRECT_MESSENGER, useExisting: TelegramDirectMessenger },
@@ -79,6 +102,13 @@ const mode = resolveBotMode();
     RegisterUserUseCase,
     PromoteUserUseCase,
     DemoteUserUseCase,
+    MuteSensorUseCase,
+    UnmuteSensorUseCase,
+    SetQuietHoursUseCase,
+    UpdateSystemUseCase,
+    RollbackSystemUseCase,
+    RestartSystemUseCase,
+    RestartConfirmationService,
     RoleMiddleware,
     ClaimAdminHandler,
     StatusHandler,
@@ -91,6 +121,12 @@ const mode = resolveBotMode();
     StartHandler,
     PromoteHandler,
     DemoteHandler,
+    MuteHandler,
+    UnmuteHandler,
+    QuietHoursHandler,
+    UpdateHandler,
+    RollbackHandler,
+    RestartHandler,
     TelegramNotifierAdapter,
     ConsoleNotifierAdapter,
     GrammyBotGateway,
