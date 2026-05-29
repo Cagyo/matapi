@@ -65,12 +65,16 @@ Status legend: ✅ canonical · 🚧 in transition · 📝 planned
 | Port | Adapters | Status | Source |
 |---|---|---|---|
 | `MotionControlPort` (`MOTION_CONTROL`) | `MotionDaemonAdapter` (systemctl, incl. `restart()`), `StubMotionControlAdapter` (dev) | ✅ | [motion-daemon.adapter.ts](../src/camera/infrastructure/motion-daemon.adapter.ts) |
-| `CloudUploadPort` | `RcloneGdriveUploader`, `NoopUploader` (dev) | 🚧 | [upload.service.ts](../src/camera/upload.service.ts) |
+| `DriveStatusPort` (`DRIVE_STATUS`) | `RcloneDriveStatusAdapter` (rclone `about`), `StubDriveStatusAdapter` (dev) | ✅ read side for `/gdrive` (spec 21) | [drive-status.port.ts](../src/camera/domain/ports/drive-status.port.ts) |
+| `DriveSyncPort` (`DRIVE_SYNC`) | `RcloneDriveSyncAdapter` (`ionice -c3 rclone copy/delete/copyto`, additive), `StubDriveSyncAdapter` (dev) | ✅ upload + Drive prune + backup upload (spec 21) | [drive-sync.port.ts](../src/camera/domain/ports/drive-sync.port.ts) |
+| `LocalStoragePort` (`LOCAL_STORAGE`) | `FsLocalStorageAdapter` (`df -P` + fs delete/prune), `StubLocalStorageAdapter` (dev) | ✅ disk usage + local cleanup (spec 21) | [local-storage.port.ts](../src/camera/domain/ports/local-storage.port.ts) |
+| `RetentionPrunePort` (`RETENTION_PRUNE`) | `DrizzleRetentionPruneAdapter` (emergency events/sensor-log prune), `StubRetentionPruneAdapter` (dev) | ✅ emergency disk recovery (spec 21) | [retention-prune.port.ts](../src/camera/domain/ports/retention-prune.port.ts) |
+| `DbBackupPort` (`DB_BACKUP`) | `SqliteDbBackupAdapter` (SQLite online backup), `StubDbBackupAdapter` (dev) | ✅ daily DB backup (spec 21) | [db-backup.port.ts](../src/camera/domain/ports/db-backup.port.ts) |
 | `MediaRepositoryPort` (`MEDIA_REPOSITORY`) | `DrizzleMediaRepository`, `InMemoryMediaRepository` (dev) | ✅ read model | [drizzle-media.repository.ts](../src/camera/infrastructure/drizzle-media.repository.ts) |
 | `MediaWriterPort` (`MEDIA_WRITER`) | `DrizzleMediaRepository`, `InMemoryMediaRepository` (dev) — same instance, aliased | ✅ write side for motion hooks (spec 20) | [media-writer.port.ts](../src/camera/domain/ports/media-writer.port.ts) |
 | `SnapshotPort` (`SNAPSHOT`) | `FfmpegSnapshotAdapter` (caches via TTL), `StubSnapshotAdapter` (dev) | ✅ | [snapshot.port.ts](../src/camera/domain/ports/snapshot.port.ts) |
 | `MotionAlertPort` (`MOTION_ALERT`) | `EventsMotionAlertAdapter` (delegates to events `NotificationService`), `StubMotionAlertAdapter` (dev) | ✅ motion notification (spec 19, 20) | [motion-alert.port.ts](../src/camera/domain/ports/motion-alert.port.ts) |
-| `AdminAlertPort` (`ADMIN_ALERT`) | `AdminAlertService` (register/clear seam) ← `TelegramAdminAlertAdapter` registered at bot bootstrap | ✅ daemon up/down alerts (spec 20) | [admin-alert.port.ts](../src/camera/domain/ports/admin-alert.port.ts) |
+| `AdminAlertPort` (`ADMIN_ALERT`) | `AdminAlertService` (register/clear seam) ← `TelegramAdminAlertAdapter` registered at bot bootstrap | ✅ daemon up/down + Drive-sync / emergency-disk alerts (specs 20, 21) | [admin-alert.port.ts](../src/camera/domain/ports/admin-alert.port.ts) |
 
 ### System context
 

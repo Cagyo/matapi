@@ -330,8 +330,7 @@ Current files:
 
 - [src/camera/camera.module.ts](../src/camera/camera.module.ts)
 - [src/camera/motion.service.ts](../src/camera/motion.service.ts)
-- [src/camera/upload.service.ts](../src/camera/upload.service.ts)
-- [src/camera/cleanup.service.ts](../src/camera/cleanup.service.ts)
+- Drive sync (spec 21) is implemented under `application/` (`upload-motion`, `cleanup-local-storage`, `cleanup-drive`, `backup-upload`, `drive-sync.scheduler`) and `infrastructure/` (rclone/fs/drizzle/sqlite adapters + stubs); the old root `upload.service.ts` / `cleanup.service.ts` stubs were removed.
 
 Target shape:
 
@@ -363,7 +362,7 @@ Checklist:
 
 - [ ] Do the folder split before replacing the current stubs with real `systemctl`, Motion, rclone, or filesystem calls.
 - [ ] Define `MotionControlPort` before implementing [src/camera/motion.service.ts](../src/camera/motion.service.ts).
-- [ ] Define `CloudUploadPort` before implementing [src/camera/upload.service.ts](../src/camera/upload.service.ts).
+- [x] Drive sync ports defined and implemented (spec 21): `DriveSyncPort`, `LocalStoragePort`, `RetentionPrunePort`, `DbBackupPort` (in addition to the existing `DriveStatusPort`).
 - [ ] Define `MediaRepositoryPort` for `motionEvents` rows before writing cleanup or upload state changes.
 - [ ] Define `MediaStorePort` for local file deletion and size calculations.
 - [ ] Keep process execution, filesystem paths, and rclone command details in infrastructure adapters.
