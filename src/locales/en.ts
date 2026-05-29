@@ -1,5 +1,6 @@
 import { format } from 'date-fns';
 import { SensorSeverity, SensorType } from '../sensors/domain/sensor';
+import { ImportSummary } from '../sensors/application/import-sensors.use-case';
 
 const DATE_FNS_FMT = 'dd.MM.yyyy HH:mm';
 const DATE_FNS_FMT_SECONDS = 'dd.MM.yyyy HH:mm:ss';
@@ -257,6 +258,8 @@ export const en = {
       '',
       '/health — system health',
       '/config add|modify|remove — manage sensors',
+      '/export_config — download current config as YAML',
+      '/import_config — import sensors from a YAML file',
       '/invite — issue a one-time invite code',
       '/promote <user> — promote a user to admin',
       '/demote <user> — demote an admin to user',
@@ -452,6 +455,52 @@ export const en = {
     notInstalled: '❌ rclone is not installed.',
     notConfigured: '❌ Google Drive is not configured. Run rclone config.',
     statusFailed: (reason: string) => `❌ Failed to check Drive status: ${reason}`,
+  },
+
+  exportConfig: {
+    caption: '📄 Current configuration. Edit and send back via /import_config.',
+    failed: '❌ Failed to export config.',
+  },
+
+  importConfig: {
+    prompt: 'Send me a YAML config file.',
+    invalidFormat: '❌ Invalid file format. Send a .yml file.',
+    tooLarge: '❌ File is too large. Send a config file under 1 MB.',
+    parseError: (details: string) => `❌ YAML parse error: ${details}`,
+    validationFailed: (errors: string[]): string =>
+      [
+        '❌ Config validation failed:',
+        '',
+        ...errors.map((e) => `• ${e}`),
+        '',
+        'Fix and re-upload.',
+      ].join('\n'),
+    noChanges: 'ℹ️ Config matches the current setup. No changes to apply.',
+    summary: (s: ImportSummary): string => {
+      const lines = ['📋 Import summary:', ''];
+      lines.push(
+        s.added.length > 0 ? `➕ Add: ${s.added.join(', ')}` : '➕ Add: none',
+      );
+      lines.push(
+        s.updated.length > 0
+          ? `🔄 Update: ${s.updated.map((u) => `${u.name} (${u.detail})`).join(', ')}`
+          : '🔄 Update: none',
+      );
+      lines.push(
+        s.archived.length > 0
+          ? `🗄️ Archive: ${s.archived.join(', ')}`
+          : '🗄️ Archive: none',
+      );
+      lines.push('', 'Apply changes?');
+      return lines.join('\n');
+    },
+    applyButton: 'Apply',
+    cancelButton: 'Cancel',
+    applied: (s: ImportSummary): string =>
+      `✅ Config imported. ${s.added.length} added, ${s.updated.length} updated, ${s.archived.length} archived.`,
+    cancelled: 'Import cancelled. No changes made.',
+    failed: (reason: string) =>
+      `❌ Import failed: ${reason}. No changes were made.`,
   },
 };
 

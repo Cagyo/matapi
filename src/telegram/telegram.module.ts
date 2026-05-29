@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { CameraModule } from '../camera/camera.module';
 import { EventModule } from '../events/event.module';
+import { FeatureModule } from '../features/feature.module';
 import { SensorModule } from '../sensors/sensor.module';
 import { SystemModule } from '../system/system.module';
 import { ClaimAdminUseCase } from './application/claim-admin.use-case';
@@ -19,7 +20,9 @@ import { RollbackSystemUseCase } from './application/rollback-system.use-case';
 import { SetQuietHoursUseCase } from './application/set-quiet-hours.use-case';
 import { UnmuteSensorUseCase } from './application/unmute-sensor.use-case';
 import { UpdateSystemUseCase } from './application/update-system.use-case';
+import { ExportConfigUseCase } from './application/export-config.use-case';
 import { DIRECT_MESSENGER } from './domain/ports/direct-messenger.port';
+import { CONFIG_CODEC } from './domain/ports/config-codec.port';
 import { INVITE_CODE_REPOSITORY } from './domain/ports/invite-code-repository.port';
 import { USER_REPOSITORY } from './domain/ports/user-repository.port';
 import { USER_SENSOR_MUTE_REPOSITORY } from './domain/ports/user-sensor-mute-repository.port';
@@ -33,13 +36,16 @@ import { InMemoryUserRepository } from './infrastructure/in-memory-user.reposito
 import { InMemoryUserSensorMuteRepository } from './infrastructure/in-memory-user-sensor-mute.repository';
 import { TelegramDirectMessenger } from './infrastructure/telegram-direct-messenger.adapter';
 import { TelegramNotifierAdapter } from './infrastructure/telegram-notifier.adapter';
+import { YamlConfigCodec } from './infrastructure/yaml-config-codec.adapter';
 import { ClaimAdminHandler } from './interfaces/claim-admin.handler';
 import { CameraHandler } from './interfaces/camera.handler';
 import { ConfigHandler } from './interfaces/config.handler';
 import { DemoteHandler } from './interfaces/demote.handler';
+import { ExportConfigHandler } from './interfaces/export-config.handler';
 import { GdriveHandler } from './interfaces/gdrive.handler';
 import { HealthHandler } from './interfaces/health.handler';
 import { HelpHandler } from './interfaces/help.handler';
+import { ImportConfigHandler } from './interfaces/import-config.handler';
 import { InviteHandler } from './interfaces/invite.handler';
 import { LogsHandler } from './interfaces/logs.handler';
 import { MuteHandler } from './interfaces/mute.handler';
@@ -76,7 +82,7 @@ const mode = resolveBotMode();
  * `TelegramDirectMessenger` falls back to logging in the same regime.
  */
 @Module({
-  imports: [EventModule, SensorModule, SystemModule, CameraModule],
+  imports: [EventModule, SensorModule, SystemModule, CameraModule, FeatureModule],
   providers: [
     { provide: BOT_MODE, useValue: mode },
     {
@@ -112,6 +118,8 @@ const mode = resolveBotMode();
     RollbackSystemUseCase,
     RestartSystemUseCase,
     RestartConfirmationService,
+    ExportConfigUseCase,
+    { provide: CONFIG_CODEC, useClass: YamlConfigCodec },
     RoleMiddleware,
     ClaimAdminHandler,
     StatusHandler,
@@ -132,6 +140,8 @@ const mode = resolveBotMode();
     RestartHandler,
     CameraHandler,
     GdriveHandler,
+    ExportConfigHandler,
+    ImportConfigHandler,
     TelegramNotifierAdapter,
     ConsoleNotifierAdapter,
     GrammyBotGateway,

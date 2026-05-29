@@ -16,9 +16,11 @@ import { ClaimAdminHandler } from '../interfaces/claim-admin.handler';
 import { CameraHandler } from '../interfaces/camera.handler';
 import { ConfigHandler } from '../interfaces/config.handler';
 import { DemoteHandler } from '../interfaces/demote.handler';
+import { ExportConfigHandler } from '../interfaces/export-config.handler';
 import { GdriveHandler } from '../interfaces/gdrive.handler';
 import { HealthHandler } from '../interfaces/health.handler';
 import { HelpHandler } from '../interfaces/help.handler';
+import { ImportConfigHandler } from '../interfaces/import-config.handler';
 import { InviteHandler } from '../interfaces/invite.handler';
 import { LogsHandler } from '../interfaces/logs.handler';
 import { MuteHandler } from '../interfaces/mute.handler';
@@ -83,6 +85,8 @@ export class GrammyBotGateway implements OnApplicationBootstrap, OnModuleDestroy
     private readonly restart: RestartHandler,
     private readonly camera: CameraHandler,
     private readonly gdrive: GdriveHandler,
+    private readonly exportConfig: ExportConfigHandler,
+    private readonly importConfig: ImportConfigHandler,
     @Optional() private readonly token: string | undefined = process.env.TELEGRAM_BOT_TOKEN,
   ) {}
 
@@ -194,6 +198,8 @@ export class GrammyBotGateway implements OnApplicationBootstrap, OnModuleDestroy
       this.demote,
       this.camera,
       this.gdrive,
+      this.exportConfig,
+      this.importConfig,
     ];
   }
 }
