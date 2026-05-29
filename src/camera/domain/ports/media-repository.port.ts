@@ -25,4 +25,16 @@ export interface MediaRepositoryPort {
   countEventsOnDay(day: Date): Promise<number>;
   lastEvent(): Promise<MotionEvent | null>;
   uploadStats(): Promise<UploadStats>;
+  /**
+   * Closed events whose video is recorded but not yet on Drive, oldest first
+   * (`uploadedToGdrive = false`, `videoPath != null`, `localDeleted = false`,
+   * `endedAt != null`). Drives the upload loop (spec 21).
+   */
+  findPendingUploads(): Promise<MotionEvent[]>;
+  /**
+   * Events safe to delete locally — already on Drive and not yet deleted
+   * (`uploadedToGdrive = true`, `localDeleted = false`), oldest first. Drives
+   * the local cleanup loop (spec 21).
+   */
+  findUploadedNotDeleted(): Promise<MotionEvent[]>;
 }

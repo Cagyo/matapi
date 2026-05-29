@@ -27,4 +27,16 @@ export interface MediaWriterPort {
    * disambiguate. Returns the updated event, or `null` when none is open.
    */
   setSnapshotForLatestOpenEvent(snapshotPath: string): Promise<MotionEvent | null>;
+  /**
+   * Mark an event as uploaded to Drive, recording its remote path (spec 21).
+   * Sets `uploadedToGdrive = true` and `gdriveFileId = remotePath`.
+   */
+  markUploaded(id: number, remotePath: string): Promise<void>;
+  /** Mark an event's local files as deleted (`localDeleted = true`, spec 21). */
+  markLocalDeleted(id: number): Promise<void>;
+  /**
+   * Clear the Drive reference for events older than `cutoff` whose remote copy
+   * was pruned (`gdriveFileId = null`). Returns the number of rows updated.
+   */
+  clearGdriveForEventsOlderThan(cutoff: Date): Promise<number>;
 }
