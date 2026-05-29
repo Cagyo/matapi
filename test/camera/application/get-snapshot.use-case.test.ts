@@ -16,6 +16,7 @@ function motion(active: boolean): MotionControlPort {
   return {
     start: async () => undefined,
     stop: async () => undefined,
+    restart: async () => undefined,
     isActive: async () => active,
   };
 }

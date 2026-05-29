@@ -8,6 +8,7 @@ import { InMemoryMediaRepository } from '../../../src/camera/infrastructure/in-m
 const motion = (active: boolean): MotionControlPort => ({
   start: async () => undefined,
   stop: async () => undefined,
+  restart: async () => undefined,
   isActive: async () => active,
 });
 
