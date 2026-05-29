@@ -496,6 +496,10 @@ export const en = {
       daemonDown:
         '🚨 Motion daemon is down and could not be restarted automatically. Camera recording is offline.',
       daemonRecovered: '✅ Motion daemon recovered. Camera recording is back online.',
+      gdriveSyncFailing: (error: string) =>
+        `⚠️ Google Drive sync failing: ${error}`,
+      emergencyDiskCleanup:
+        '🚨 Emergency disk cleanup ran: old events/logs were pruned and the motion daemon was stopped to free space.',
     },
   },
 

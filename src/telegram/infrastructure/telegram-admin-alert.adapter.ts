@@ -27,8 +27,8 @@ export class TelegramAdminAlertAdapter implements AdminAlertPort {
     @Inject(DIRECT_MESSENGER) private readonly dm: DirectMessengerPort,
   ) {}
 
-  async alert(kind: CameraAdminAlert): Promise<void> {
-    const text = this.textFor(kind);
+  async alert(kind: CameraAdminAlert, detail?: string): Promise<void> {
+    const text = this.textFor(kind, detail);
     const recipients = await this.users.listRecipients();
     const admins = recipients.filter((user) => user.role === 'admin');
     await Promise.all(
@@ -42,12 +42,16 @@ export class TelegramAdminAlertAdapter implements AdminAlertPort {
     );
   }
 
-  private textFor(kind: CameraAdminAlert): string {
+  private textFor(kind: CameraAdminAlert, detail?: string): string {
     switch (kind) {
       case 'motion-daemon-down':
         return en.camera.adminAlert.daemonDown;
       case 'motion-daemon-recovered':
         return en.camera.adminAlert.daemonRecovered;
+      case 'gdrive-sync-failing':
+        return en.camera.adminAlert.gdriveSyncFailing(detail ?? 'unknown error');
+      case 'emergency-disk-cleanup':
+        return en.camera.adminAlert.emergencyDiskCleanup;
     }
   }
 }
