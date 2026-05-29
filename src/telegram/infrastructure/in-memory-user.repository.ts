@@ -42,6 +42,9 @@ export class InMemoryUserRepository implements UserRepositoryPort {
       telegramId: user.telegramId,
       name: user.name,
       role: user.role,
+      muted: false,
+      quietStart: null,
+      quietEnd: null,
       createdAt: user.createdAt,
     };
     this.store.set(persisted.telegramId, persisted);
@@ -53,6 +56,9 @@ export class InMemoryUserRepository implements UserRepositoryPort {
       telegramId: user.telegramId,
       name: user.name,
       role: user.role,
+      muted: false,
+      quietStart: null,
+      quietEnd: null,
       createdAt: user.createdAt,
     };
     this.store.set(persisted.telegramId, persisted);
@@ -63,6 +69,26 @@ export class InMemoryUserRepository implements UserRepositoryPort {
     const existing = this.store.get(telegramId);
     if (!existing) throw new UserNotFoundError(String(telegramId));
     const updated: User = { ...existing, role };
+    this.store.set(telegramId, updated);
+    return updated;
+  }
+
+  async setMuted(telegramId: number, muted: boolean): Promise<User> {
+    const existing = this.store.get(telegramId);
+    if (!existing) throw new UserNotFoundError(String(telegramId));
+    const updated: User = { ...existing, muted };
+    this.store.set(telegramId, updated);
+    return updated;
+  }
+
+  async setQuietHours(
+    telegramId: number,
+    start: string | null,
+    end: string | null,
+  ): Promise<User> {
+    const existing = this.store.get(telegramId);
+    if (!existing) throw new UserNotFoundError(String(telegramId));
+    const updated: User = { ...existing, quietStart: start, quietEnd: end };
     this.store.set(telegramId, updated);
     return updated;
   }

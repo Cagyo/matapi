@@ -85,6 +85,32 @@ export class DrizzleUserRepository implements UserRepositoryPort {
     return this.toUser(row);
   }
 
+  async setMuted(telegramId: number, muted: boolean): Promise<User> {
+    const [row] = this.db
+      .update(users)
+      .set({ muted })
+      .where(eq(users.telegramId, telegramId))
+      .returning()
+      .all();
+    if (!row) throw new UserNotFoundError(String(telegramId));
+    return this.toUser(row);
+  }
+
+  async setQuietHours(
+    telegramId: number,
+    start: string | null,
+    end: string | null,
+  ): Promise<User> {
+    const [row] = this.db
+      .update(users)
+      .set({ quietStart: start, quietEnd: end })
+      .where(eq(users.telegramId, telegramId))
+      .returning()
+      .all();
+    if (!row) throw new UserNotFoundError(String(telegramId));
+    return this.toUser(row);
+  }
+
   async listRecipients(): Promise<User[]> {
     return this.db
       .select()
@@ -98,6 +124,9 @@ export class DrizzleUserRepository implements UserRepositoryPort {
       telegramId: row.telegramId,
       name: row.name,
       role: (row.role as Role) ?? 'user',
+      muted: row.muted ?? false,
+      quietStart: row.quietStart ?? null,
+      quietEnd: row.quietEnd ?? null,
       createdAt: row.createdAt ?? null,
     };
   }
