@@ -83,7 +83,7 @@ The adapter is responsible for the no-op when `HEARTBEAT_URL` is unset and for t
 
 ## Hardware Watchdog (optional)
 
-Pi's built-in `bcm2835_wdt`:
+Pi's built-in `bcm2835_wdt`, gated by `HARDWARE_WATCHDOG_ENABLED` (default `false`). When disabled, a `StubWatchdogAdapter` is bound and the pet loop never starts, so dev hosts and machines without the device are unaffected.
 
 ```bash
 # Enable in install script
@@ -91,12 +91,7 @@ sudo modprobe bcm2835_wdt
 echo "bcm2835_wdt" | sudo tee /etc/modules-load.d/watchdog.conf
 ```
 
-Worker pets the watchdog every 15 seconds:
-
-```typescript
-// Write to /dev/watchdog every 15s
-// If process dies, watchdog reboots Pi after timeout
-```
+`WatchdogService` (application) opens the device at bootstrap, pets every `WATCHDOG_PET_INTERVAL_MS` (default 15s), and disarms with the magic-close `V` on clean shutdown so a graceful exit never triggers a reboot. The file I/O lives in `FileWatchdogAdapter` (`WatchdogPort`); the device path is `WATCHDOG_DEVICE` (default `/dev/watchdog`). If the process dies without petting, the kernel reboots the Pi after its timeout.
 
 ## Future: 4G Failover (Phase 2)
 

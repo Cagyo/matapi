@@ -375,34 +375,41 @@ Checklist:
 Current files:
 
 - [src/network/network.module.ts](../src/network/network.module.ts)
-- [src/network/network.service.ts](../src/network/network.service.ts)
+- `src/network/domain/ports/` — `heartbeat-client.port.ts`, `bot-runner.port.ts`, `watchdog.port.ts`
+- `src/network/application/` — `heartbeat-scheduler.service.ts`, `check-bot-polling.service.ts`, `watchdog.service.ts`, `bot-runner.registry.ts`
+- `src/network/infrastructure/` — `fetch-heartbeat.adapter.ts`, `file-watchdog.adapter.ts`, `stub-watchdog.adapter.ts`
 
 Target shape:
 
 ```text
 src/network/
   domain/
-    network-status.ts
-    heartbeat-target.value-object.ts
     ports/heartbeat-client.port.ts
-    ports/network-probe.port.ts
+    ports/bot-runner.port.ts
+    ports/watchdog.port.ts
+    ports/network-probe.port.ts        # planned (4G failover, spec 22 Phase 2)
   application/
     heartbeat-scheduler.service.ts
-    check-network-health.use-case.ts
+    check-bot-polling.service.ts
+    watchdog.service.ts
+    bot-runner.registry.ts
   infrastructure/
-    fetch-heartbeat-client.adapter.ts
-    os-network-probe.adapter.ts
+    fetch-heartbeat.adapter.ts
+    file-watchdog.adapter.ts
+    stub-watchdog.adapter.ts
+    os-network-probe.adapter.ts         # planned
   network.module.ts
 ```
 
 Checklist:
 
-- [ ] Split scheduling from network I/O in [src/network/network.service.ts](../src/network/network.service.ts).
-- [ ] Put `fetch(...)` behind `HeartbeatClientPort`.
-- [ ] Put Wi-Fi or OS-level checks behind `NetworkProbePort` when specs 22/23 are implemented.
-- [ ] Replace direct `process.env.HEARTBEAT_*` reads with `ConfigPort` when heartbeat behavior changes.
-- [ ] Add timer cleanup tests for the scheduler.
-- [ ] Add adapter tests for failed heartbeat responses and network exceptions.
+- [x] Split scheduling from network I/O — legacy `network.service.ts` rehomed to hex (spec 22).
+- [x] Put `fetch(...)` behind `HeartbeatClientPort` (`FetchHeartbeatAdapter`).
+- [x] Bot-polling watchdog + grammY runner recovery via `BotRunnerPort` register seam.
+- [x] Pi hardware watchdog behind `WatchdogPort`, config-gated by `HARDWARE_WATCHDOG_ENABLED`.
+- [x] Add adapter tests for failed heartbeat responses and network exceptions; timer cleanup tests for the watchdog.
+- [ ] Put Wi-Fi or OS-level checks behind `NetworkProbePort` when 4G failover (spec 22 Phase 2) is implemented.
+- [ ] Replace direct `process.env.HEARTBEAT_*` / `WATCHDOG_*` reads with `ConfigPort` when behaviour changes.
 
 ## Locales
 

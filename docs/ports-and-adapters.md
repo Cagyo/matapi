@@ -86,7 +86,10 @@ Status legend: ✅ canonical · 🚧 in transition · 📝 planned
 
 | Port | Adapters | Status | Source |
 |---|---|---|---|
-| `NetworkProbePort` | `OsNetworkProbe` (ping/iwgetid) | 🚧 | [network.service.ts](../src/network/network.service.ts) |
+| `HeartbeatClientPort` (`HEARTBEAT_CLIENT`) | `FetchHeartbeatAdapter` (global `fetch`, 10s `AbortSignal.timeout`, no-op when `HEARTBEAT_URL` unset) | ✅ canonical — external dead-system heartbeat (spec 22). | [heartbeat-client.port.ts](../src/network/domain/ports/heartbeat-client.port.ts) |
+| `BotRunnerPort` (`BOT_RUNNER`) | `BotRunnerRegistry` (application register/clear seam) ← `GrammyBotGateway` registered at bot bootstrap | ✅ canonical — bot-polling watchdog reads last-update + force-restarts the grammY runner (spec 22). Runtime seam avoids a network→telegram cycle, mirroring `AdminAlertPort`. | [bot-runner.port.ts](../src/network/domain/ports/bot-runner.port.ts) |
+| `WatchdogPort` (`WATCHDOG`) | `FileWatchdogAdapter` (`/dev/watchdog`, magic-close disarm), `StubWatchdogAdapter` (dev / disabled) | ✅ canonical — Pi hardware watchdog, selected by `HARDWARE_WATCHDOG_ENABLED` (spec 22). | [watchdog.port.ts](../src/network/domain/ports/watchdog.port.ts) |
+| `NetworkProbePort` | `OsNetworkProbe` (ping/iwgetid) | 📝 planned — connectivity probe / 4G failover (spec 22, Phase 2). | — |
 
 ### Cross-cutting
 
