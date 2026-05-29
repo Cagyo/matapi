@@ -13,6 +13,8 @@ import { AdminAlertService } from '../../camera/application/admin-alert.service'
 import { EventNotifierService } from '../../events/application/event-notifier.service';
 import { EventProcessorService } from '../../events/application/event-processor.service';
 import { RecipientDirectoryService } from '../../events/application/recipient-directory.service';
+import { BotRunnerRegistry } from '../../network/application/bot-runner.registry';
+import { BotRunnerPort } from '../../network/domain/ports/bot-runner.port';
 import { RestartConfirmationService } from '../application/restart-confirmation.service';
 import { ClaimAdminHandler } from '../interfaces/claim-admin.handler';
 import { CameraHandler } from '../interfaces/camera.handler';
@@ -58,7 +60,9 @@ export type BotMode = 'real' | 'mock';
  *   bound instead so the event pipeline drains locally without a token.
  */
 @Injectable()
-export class GrammyBotGateway implements OnApplicationBootstrap, OnModuleDestroy {
+export class GrammyBotGateway
+  implements OnApplicationBootstrap, OnModuleDestroy, BotRunnerPort
+{
   private readonly logger = new Logger(GrammyBotGateway.name);
   private bot?: Bot;
   private runner?: RunnerHandle;
@@ -66,6 +70,7 @@ export class GrammyBotGateway implements OnApplicationBootstrap, OnModuleDestroy
 
   constructor(
     @Inject(BOT_MODE) private readonly mode: BotMode,
+    private readonly botRunnerRegistry: BotRunnerRegistry,
     private readonly eventNotifier: EventNotifierService,
     private readonly eventProcessor: EventProcessorService,
     private readonly recipientDirectory: RecipientDirectoryService,
@@ -93,7 +98,7 @@ export class GrammyBotGateway implements OnApplicationBootstrap, OnModuleDestroy
     private readonly update: UpdateHandler,
     private readonly systemUpdate: SystemUpdateHandler,
     private readonly rollback: RollbackHandler,
-    private readonly restart: RestartHandler,
+    private readonly restartHandler: RestartHandler,
     private readonly camera: CameraHandler,
     private readonly gdrive: GdriveHandler,
     private readonly exportConfig: ExportConfigHandler,
@@ -102,9 +107,25 @@ export class GrammyBotGateway implements OnApplicationBootstrap, OnModuleDestroy
     @Optional() private readonly token: string | undefined = process.env.TELEGRAM_BOT_TOKEN,
   ) {}
 
-  /** Last update received from Telegram, or `null` if none yet (spec 08). */
+  /** Last update received from Telegram, or `null` if none yet (spec 08, 22). */
   getLastUpdateAt(): Date | null {
     return this.lastUpdateAt;
+  }
+
+  /** Whether the grammY runner is currently polling (spec 22). */
+  isRunning(): boolean {
+    return this.runner?.isRunning() ?? false;
+  }
+
+  /**
+   * Force-restart the grammY runner (spec 22 → Bot Polling Recovery). Recovers
+   * a half-open polling socket that grammY still believes is alive.
+   */
+  async restart(): Promise<void> {
+    if (!this.bot) return;
+    if (this.runner?.isRunning()) await this.runner.stop();
+    this.runner = run(this.bot);
+    this.logger.warn('grammY runner force-restarted');
   }
 
   async onApplicationBootstrap(): Promise<void> {
@@ -166,6 +187,7 @@ export class GrammyBotGateway implements OnApplicationBootstrap, OnModuleDestroy
 
     this.bot = bot;
     this.runner = run(bot);
+    this.botRunnerRegistry.register(this);
     this.logger.log('Telegram bot started');
 
     // Report the outcome of the previous restart (user /restart, OTA
@@ -183,6 +205,7 @@ export class GrammyBotGateway implements OnApplicationBootstrap, OnModuleDestroy
   }
 
   async onModuleDestroy(): Promise<void> {
+    this.botRunnerRegistry.clear();
     if (this.runner?.isRunning()) {
       await this.runner.stop();
     }
@@ -204,7 +227,7 @@ export class GrammyBotGateway implements OnApplicationBootstrap, OnModuleDestroy
       this.update,
       this.systemUpdate,
       this.rollback,
-      this.restart,
+      this.restartHandler,
       this.start,
       this.status,
       this.ping,

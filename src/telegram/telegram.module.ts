@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { CameraModule } from '../camera/camera.module';
 import { EventModule } from '../events/event.module';
 import { FeatureModule } from '../features/feature.module';
+import { NetworkModule } from '../network/network.module';
 import { SensorModule } from '../sensors/sensor.module';
 import { SystemModule } from '../system/system.module';
 import { ClaimAdminUseCase } from './application/claim-admin.use-case';
@@ -87,7 +88,14 @@ const mode = resolveBotMode();
  * `TelegramDirectMessenger` falls back to logging in the same regime.
  */
 @Module({
-  imports: [EventModule, SensorModule, SystemModule, CameraModule, FeatureModule],
+  imports: [
+    EventModule,
+    SensorModule,
+    SystemModule,
+    CameraModule,
+    FeatureModule,
+    NetworkModule,
+  ],
   providers: [
     { provide: BOT_MODE, useValue: mode },
     {
