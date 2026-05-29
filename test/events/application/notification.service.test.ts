@@ -4,6 +4,7 @@ import { NotificationService } from '../../../src/events/application/notificatio
 import { ClockPort } from '../../../src/events/domain/ports/clock.port';
 import {
   NotificationMessage,
+  NotificationPhoto,
   NotifierPort,
 } from '../../../src/events/domain/ports/notifier.port';
 import {
@@ -51,6 +52,7 @@ class FakeNotifier implements NotifierPort {
   fail = false;
   readonly userSends: { telegramId: number; message: NotificationMessage }[] = [];
   readonly broadcasts: NotificationMessage[] = [];
+  readonly photoSends: { telegramId: number; photo: NotificationPhoto }[] = [];
 
   isReady(): boolean {
     return this.ready;
@@ -62,6 +64,10 @@ class FakeNotifier implements NotifierPort {
   async notifyUser(telegramId: number, message: NotificationMessage): Promise<void> {
     if (this.fail) throw new Error('telegram offline');
     this.userSends.push({ telegramId, message });
+  }
+  async notifyUserPhoto(telegramId: number, photo: NotificationPhoto): Promise<void> {
+    if (this.fail) throw new Error('telegram offline');
+    this.photoSends.push({ telegramId, photo });
   }
 }
 
@@ -227,5 +233,74 @@ describe('NotificationService', () => {
     await service.process(event);
 
     expect(repo.sentAtFor(event.id)).toBeNull();
+  });
+});
+
+describe('NotificationService.notifyMotion', () => {
+  const MOTION_AT = new Date('2026-07-01T11:51:00Z'); // 14:51 Kyiv
+  const EXPECTED_CAPTION = '📹 Motion detected | front_door | 01.07.2026 14:51';
+
+  it('sends a photo + caption to every eligible recipient', async () => {
+    const { notifier, service } = await setup({
+      recipients: [recipient({ telegramId: 1 }), recipient({ telegramId: 2 })],
+    });
+
+    await service.notifyMotion('front_door', MOTION_AT, Buffer.from('jpeg'));
+
+    expect(notifier.photoSends.map((s) => s.telegramId)).toEqual([1, 2]);
+    expect(notifier.photoSends[0].photo.caption).toBe(EXPECTED_CAPTION);
+    expect(notifier.photoSends[0].photo.buffer.toString()).toBe('jpeg');
+  });
+
+  it('falls back to a text caption when no snapshot is available', async () => {
+    const { notifier, service } = await setup({
+      recipients: [recipient({ telegramId: 1 })],
+    });
+
+    await service.notifyMotion('front_door', MOTION_AT, null);
+
+    expect(notifier.photoSends).toHaveLength(0);
+    expect(notifier.userSends.map((s) => s.message.text)).toEqual([EXPECTED_CAPTION]);
+  });
+
+  it('skips globally muted recipients', async () => {
+    const { notifier, service } = await setup({
+      recipients: [recipient({ telegramId: 1, muted: true }), recipient({ telegramId: 2 })],
+    });
+
+    await service.notifyMotion('front_door', MOTION_AT, Buffer.from('jpeg'));
+
+    expect(notifier.photoSends.map((s) => s.telegramId)).toEqual([2]);
+  });
+
+  it('suppresses motion alerts during quiet hours (info severity)', async () => {
+    const { notifier, service } = await setup({
+      // FIXED_NOW is 15:00 Kyiv, inside 14:00–16:00.
+      recipients: [recipient({ telegramId: 1, quietStart: '14:00', quietEnd: '16:00' })],
+    });
+
+    await service.notifyMotion('front_door', MOTION_AT, Buffer.from('jpeg'));
+
+    expect(notifier.photoSends).toHaveLength(0);
+    expect(notifier.userSends).toHaveLength(0);
+  });
+
+  it('does nothing when the notifier is offline', async () => {
+    const { notifier, service } = await setup({
+      recipients: [recipient({ telegramId: 1 })],
+    });
+    notifier.ready = false;
+
+    await service.notifyMotion('front_door', MOTION_AT, Buffer.from('jpeg'));
+
+    expect(notifier.photoSends).toHaveLength(0);
+  });
+
+  it('broadcasts the caption when there are no per-user recipients', async () => {
+    const { notifier, service } = await setup({ recipients: [] });
+
+    await service.notifyMotion('front_door', MOTION_AT, Buffer.from('jpeg'));
+
+    expect(notifier.broadcasts.map((b) => b.text)).toEqual([EXPECTED_CAPTION]);
   });
 });

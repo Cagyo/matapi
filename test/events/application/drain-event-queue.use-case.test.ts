@@ -4,6 +4,7 @@ import { EventQueueOptions } from '../../../src/events/application/ports/event-q
 import { ClockPort } from '../../../src/events/domain/ports/clock.port';
 import {
   NotificationMessage,
+  NotificationPhoto,
   NotifierPort,
 } from '../../../src/events/domain/ports/notifier.port';
 import { InMemoryEventRepository } from '../../../src/events/infrastructure/in-memory-event.repository';
@@ -26,6 +27,15 @@ class RecordingNotifier implements NotifierPort {
 
   async notifyUser(_telegramId: number, message: NotificationMessage): Promise<void> {
     this.messages.push(message);
+    if (this.fail) {
+      throw new Error('telegram offline');
+    }
+  }
+
+  async notifyUserPhoto(
+    _telegramId: number,
+    _photo: NotificationPhoto,
+  ): Promise<void> {
     if (this.fail) {
       throw new Error('telegram offline');
     }
