@@ -5,6 +5,7 @@ import { Logger } from '@nestjs/common';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { AppModule } from './app.module';
+import { GracefulShutdownService } from './system/application/graceful-shutdown.service';
 
 const PID_LOCK = resolve(process.env.PID_LOCK_PATH || './data/worker.pid');
 
@@ -46,6 +47,18 @@ async function bootstrap(): Promise<void> {
 
   const shutdown = async (signal: string): Promise<void> => {
     Logger.log(`Received ${signal}, shutting down`, 'Bootstrap');
+    // Ordered graceful teardown while the bot is still polling (spec 23):
+    // stop accepting events, drain in-flight work, send the offline notice.
+    try {
+      await app.get(GracefulShutdownService).run(signal);
+    } catch (err) {
+      Logger.warn(
+        `Graceful shutdown step failed: ${(err as Error).message}`,
+        'Bootstrap',
+      );
+    }
+    // Nest then destroys modules: stops the bot runner, flushes sensor
+    // buffers and closes SQLite last (DatabaseModule is global / init-first).
     await app.close();
     releaseLock();
     process.exit(0);
