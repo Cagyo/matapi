@@ -492,6 +492,11 @@ export const en = {
     startFailed: (reason: string) => `❌ Failed to start motion daemon: ${reason}`,
     stopFailed: (reason: string) => `❌ Failed to stop motion daemon: ${reason}`,
     notInstalled: '❌ Motion is not installed. Re-run install with the camera feature.',
+    adminAlert: {
+      daemonDown:
+        '🚨 Motion daemon is down and could not be restarted automatically. Camera recording is offline.',
+      daemonRecovered: '✅ Motion daemon recovered. Camera recording is back online.',
+    },
   },
 
   gdrive: {
