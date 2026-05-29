@@ -26,4 +26,9 @@ export class StubMotionControlAdapter implements MotionControlPort {
     this.running = false;
     this.logger.warn('StubMotionControlAdapter: motion "stopped"');
   }
+
+  async restart(): Promise<void> {
+    this.running = true;
+    this.logger.warn('StubMotionControlAdapter: motion "restarted"');
+  }
 }

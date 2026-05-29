@@ -63,6 +63,17 @@ export class MotionDaemonAdapter implements MotionControlPort {
     }
   }
 
+  async restart(): Promise<void> {
+    try {
+      await exec('sudo', ['systemctl', 'restart', this.unit], { timeout: 15000 });
+    } catch (err) {
+      const reason = this.reasonOf(err);
+      this.logger.warn(`motion restart failed: ${reason}`);
+      if (this.looksUninstalled(reason)) throw new MotionNotInstalledError();
+      throw new MotionStartFailedError(reason);
+    }
+  }
+
   private reasonOf(err: unknown): string {
     const e = err as ExecError;
     const text = (e.stderr ?? '').trim() || e.message;

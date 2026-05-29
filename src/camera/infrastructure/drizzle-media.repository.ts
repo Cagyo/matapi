@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, desc, eq, gte, lt } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, isNull, lt } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../database/database.module';
 import { cameras, motionEvents } from '../../database/schema';
 import { Camera } from '../domain/camera.entity';
@@ -8,14 +8,73 @@ import {
   MediaRepositoryPort,
   UploadStats,
 } from '../domain/ports/media-repository.port';
+import { MediaWriterPort } from '../domain/ports/media-writer.port';
 
 type CameraRow = typeof cameras.$inferSelect;
 type MotionEventRow = typeof motionEvents.$inferSelect;
 
-/** Production `MediaRepositoryPort` over the SQLite `cameras`/`motion_events` tables. */
+/**
+ * Production adapter over the SQLite `cameras`/`motion_events` tables. Serves
+ * both the read-only `MediaRepositoryPort` (bot commands) and the write-side
+ * `MediaWriterPort` (Motion daemon hooks, spec 20).
+ */
 @Injectable()
-export class DrizzleMediaRepository implements MediaRepositoryPort {
+export class DrizzleMediaRepository implements MediaRepositoryPort, MediaWriterPort {
   constructor(@Inject(DB) private readonly db: AppDatabase) {}
+
+  async createEvent(cameraId: string | null, startedAt: Date): Promise<MotionEvent> {
+    const row = this.db
+      .insert(motionEvents)
+      .values({ cameraId, startedAt, uploadedToGdrive: false, localDeleted: false })
+      .returning()
+      .get();
+    return this.toEvent(row);
+  }
+
+  async closeLatestOpenEvent(
+    cameraId: string | null,
+    endedAt: Date,
+    videoPath: string,
+  ): Promise<MotionEvent | null> {
+    const open = this.latestOpen(cameraId);
+    if (!open) return null;
+    const row = this.db
+      .update(motionEvents)
+      .set({ endedAt, videoPath })
+      .where(eq(motionEvents.id, open.id))
+      .returning()
+      .get();
+    return row ? this.toEvent(row) : null;
+  }
+
+  async setSnapshotForLatestOpenEvent(
+    snapshotPath: string,
+  ): Promise<MotionEvent | null> {
+    const open = this.latestOpen(null);
+    if (!open) return null;
+    const row = this.db
+      .update(motionEvents)
+      .set({ snapshotPath })
+      .where(eq(motionEvents.id, open.id))
+      .returning()
+      .get();
+    return row ? this.toEvent(row) : null;
+  }
+
+  /** Most recent event with no `endedAt`, optionally scoped to a camera. */
+  private latestOpen(cameraId: string | null): MotionEventRow | undefined {
+    const where =
+      cameraId === null
+        ? isNull(motionEvents.endedAt)
+        : and(isNull(motionEvents.endedAt), eq(motionEvents.cameraId, cameraId));
+    return this.db
+      .select()
+      .from(motionEvents)
+      .where(where)
+      .orderBy(desc(motionEvents.startedAt))
+      .limit(1)
+      .get();
+  }
 
   async listCameras(): Promise<Camera[]> {
     return this.db
