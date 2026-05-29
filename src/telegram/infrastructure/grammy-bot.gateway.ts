@@ -13,8 +13,10 @@ import { EventNotifierService } from '../../events/application/event-notifier.se
 import { EventProcessorService } from '../../events/application/event-processor.service';
 import { RestartConfirmationService } from '../application/restart-confirmation.service';
 import { ClaimAdminHandler } from '../interfaces/claim-admin.handler';
+import { CameraHandler } from '../interfaces/camera.handler';
 import { ConfigHandler } from '../interfaces/config.handler';
 import { DemoteHandler } from '../interfaces/demote.handler';
+import { GdriveHandler } from '../interfaces/gdrive.handler';
 import { HealthHandler } from '../interfaces/health.handler';
 import { HelpHandler } from '../interfaces/help.handler';
 import { InviteHandler } from '../interfaces/invite.handler';
@@ -79,6 +81,8 @@ export class GrammyBotGateway implements OnApplicationBootstrap, OnModuleDestroy
     private readonly update: UpdateHandler,
     private readonly rollback: RollbackHandler,
     private readonly restart: RestartHandler,
+    private readonly camera: CameraHandler,
+    private readonly gdrive: GdriveHandler,
     @Optional() private readonly token: string | undefined = process.env.TELEGRAM_BOT_TOKEN,
   ) {}
 
@@ -188,6 +192,8 @@ export class GrammyBotGateway implements OnApplicationBootstrap, OnModuleDestroy
       this.invite,
       this.promote,
       this.demote,
+      this.camera,
+      this.gdrive,
     ];
   }
 }

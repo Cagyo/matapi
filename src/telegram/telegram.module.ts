@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { CameraModule } from '../camera/camera.module';
 import { EventModule } from '../events/event.module';
 import { SensorModule } from '../sensors/sensor.module';
 import { SystemModule } from '../system/system.module';
@@ -33,8 +34,10 @@ import { InMemoryUserSensorMuteRepository } from './infrastructure/in-memory-use
 import { TelegramDirectMessenger } from './infrastructure/telegram-direct-messenger.adapter';
 import { TelegramNotifierAdapter } from './infrastructure/telegram-notifier.adapter';
 import { ClaimAdminHandler } from './interfaces/claim-admin.handler';
+import { CameraHandler } from './interfaces/camera.handler';
 import { ConfigHandler } from './interfaces/config.handler';
 import { DemoteHandler } from './interfaces/demote.handler';
+import { GdriveHandler } from './interfaces/gdrive.handler';
 import { HealthHandler } from './interfaces/health.handler';
 import { HelpHandler } from './interfaces/help.handler';
 import { InviteHandler } from './interfaces/invite.handler';
@@ -73,7 +76,7 @@ const mode = resolveBotMode();
  * `TelegramDirectMessenger` falls back to logging in the same regime.
  */
 @Module({
-  imports: [EventModule, SensorModule, SystemModule],
+  imports: [EventModule, SensorModule, SystemModule, CameraModule],
   providers: [
     { provide: BOT_MODE, useValue: mode },
     {
@@ -127,6 +130,8 @@ const mode = resolveBotMode();
     UpdateHandler,
     RollbackHandler,
     RestartHandler,
+    CameraHandler,
+    GdriveHandler,
     TelegramNotifierAdapter,
     ConsoleNotifierAdapter,
     GrammyBotGateway,
