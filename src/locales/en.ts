@@ -2,6 +2,7 @@ import { format } from 'date-fns';
 import { SensorSeverity, SensorType } from '../sensors/domain/sensor';
 import { ImportSummary } from '../sensors/application/import-sensors.use-case';
 import { FeatureStatus } from '../features/domain/feature-status';
+import { DepUpdate } from '../system/domain/ports/system-deps.port';
 
 const DATE_FNS_FMT = 'dd.MM.yyyy HH:mm';
 const DATE_FNS_FMT_SECONDS = 'dd.MM.yyyy HH:mm:ss';
@@ -291,6 +292,7 @@ export const en = {
       '/feature enable|disable|list — toggle optional features',
       '/update — pull and install latest version',
       '/rollback — revert to previous version',
+      '/system_update — update OS dependencies (apt, rclone, node)',
       '/restart — restart the worker',
       '/camera enable|disable — start/stop motion daemon',
       '/gdrive status — Google Drive sync status',
@@ -411,6 +413,38 @@ export const en = {
     restarting: '🔄 Restarting...',
     restartComplete: '✅ Restart complete. Uptime reset.',
     restartFailed: (reason: string) => `❌ Restart failed: ${reason}`,
+  },
+
+  systemUpdate: {
+    checking: '🔄 Checking system dependencies...',
+    allUpToDate: '✅ All system dependencies are up to date.',
+    header: '🔄 System update available:',
+    depLine: (d: DepUpdate): string => {
+      switch (d.kind) {
+        case 'upgrade':
+          return `• ${d.name}: ${d.current} → ${d.available}`;
+        case 'node-minor':
+          return `• ${d.name}: ${d.current} → ${d.available} (minor)`;
+        case 'node-major':
+          return `• ${d.name}: ${d.current} → ${d.available} (major — manual)`;
+        case 'not-installed':
+          return `• ${d.name}: not installed`;
+        case 'unknown':
+          return `• ${d.name}: version unknown`;
+        case 'none':
+        default:
+          return `• ${d.name}: no update`;
+      }
+    },
+    nodeMajorWarning: (current: string, desired: string) =>
+      `⚠️ Node.js major version change detected (${current} → ${desired}). This requires manual intervention.`,
+    applyButton: 'Apply',
+    cancelButton: 'Cancel',
+    applying:
+      '🔄 Applying system update... I will run a health check and report back when ready.',
+    cancelled: 'System update cancelled.',
+    checkFailed: (reason: string) =>
+      `❌ Failed to check for updates: ${reason}`,
   },
 
   camera: {

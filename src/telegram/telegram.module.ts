@@ -18,6 +18,7 @@ import { RestartConfirmationService } from './application/restart-confirmation.s
 import { RestartSystemUseCase } from './application/restart-system.use-case';
 import { RollbackSystemUseCase } from './application/rollback-system.use-case';
 import { SetQuietHoursUseCase } from './application/set-quiet-hours.use-case';
+import { SystemUpdateUseCase } from './application/system-update.use-case';
 import { UnmuteSensorUseCase } from './application/unmute-sensor.use-case';
 import { UpdateSystemUseCase } from './application/update-system.use-case';
 import { ExportConfigUseCase } from './application/export-config.use-case';
@@ -58,6 +59,7 @@ import { RoleMiddleware } from './interfaces/role.middleware';
 import { RollbackHandler } from './interfaces/rollback.handler';
 import { StartHandler } from './interfaces/start.handler';
 import { StatusHandler } from './interfaces/status.handler';
+import { SystemUpdateHandler } from './interfaces/system-update.handler';
 import { UnmuteHandler } from './interfaces/unmute.handler';
 import { UpdateHandler } from './interfaces/update.handler';
 
@@ -116,6 +118,7 @@ const mode = resolveBotMode();
     UnmuteSensorUseCase,
     SetQuietHoursUseCase,
     UpdateSystemUseCase,
+    SystemUpdateUseCase,
     RollbackSystemUseCase,
     RestartSystemUseCase,
     RestartConfirmationService,
@@ -137,6 +140,7 @@ const mode = resolveBotMode();
     UnmuteHandler,
     QuietHoursHandler,
     UpdateHandler,
+    SystemUpdateHandler,
     RollbackHandler,
     RestartHandler,
     CameraHandler,

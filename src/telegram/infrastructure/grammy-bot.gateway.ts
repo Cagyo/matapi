@@ -32,6 +32,7 @@ import { RestartHandler } from '../interfaces/restart.handler';
 import { RollbackHandler } from '../interfaces/rollback.handler';
 import { StartHandler } from '../interfaces/start.handler';
 import { StatusHandler } from '../interfaces/status.handler';
+import { SystemUpdateHandler } from '../interfaces/system-update.handler';
 import { TelegramHandler } from '../interfaces/telegram-handler';
 import { UnmuteHandler } from '../interfaces/unmute.handler';
 import { UpdateHandler } from '../interfaces/update.handler';
@@ -82,6 +83,7 @@ export class GrammyBotGateway implements OnApplicationBootstrap, OnModuleDestroy
     private readonly unmute: UnmuteHandler,
     private readonly quietHours: QuietHoursHandler,
     private readonly update: UpdateHandler,
+    private readonly systemUpdate: SystemUpdateHandler,
     private readonly rollback: RollbackHandler,
     private readonly restart: RestartHandler,
     private readonly camera: CameraHandler,
@@ -186,6 +188,7 @@ export class GrammyBotGateway implements OnApplicationBootstrap, OnModuleDestroy
       this.unmute,
       this.quietHours,
       this.update,
+      this.systemUpdate,
       this.rollback,
       this.restart,
       this.start,
