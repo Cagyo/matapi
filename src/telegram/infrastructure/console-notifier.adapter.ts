@@ -22,4 +22,8 @@ export class ConsoleNotifierAdapter implements NotifierPort {
     const channel = message.asFile ? 'document' : 'message';
     this.logger.log(`[mock-${channel}]\n${message.text}`);
   }
+
+  async notifyUser(telegramId: number, message: NotificationMessage): Promise<void> {
+    this.logger.log(`[mock-message → ${telegramId}]\n${message.text}`);
+  }
 }

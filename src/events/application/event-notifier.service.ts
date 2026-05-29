@@ -24,4 +24,12 @@ export class EventNotifierService implements NotifierPort {
 
     await this.notifier.notify(message);
   }
+
+  async notifyUser(telegramId: number, message: NotificationMessage): Promise<void> {
+    if (!this.notifier?.isReady()) {
+      throw new Error('Notifier is not ready');
+    }
+
+    await this.notifier.notifyUser(telegramId, message);
+  }
 }

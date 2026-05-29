@@ -55,6 +55,13 @@ export class TelegramNotifierAdapter implements NotifierPort {
     }
   }
 
+  async notifyUser(
+    telegramId: number,
+    message: NotificationMessage,
+  ): Promise<void> {
+    await this.sendToRecipient(telegramId, message);
+  }
+
   private async sendToRecipient(
     recipientId: number,
     message: NotificationMessage,
