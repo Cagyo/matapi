@@ -4,6 +4,7 @@ import { AppDatabase, DB } from '../../database/database.module';
 import { sensors, sensorsArchive } from '../../database/schema';
 import {
   NewSensor,
+  SensorImportBatch,
   SensorPatch,
   SensorRepositoryPort,
 } from '../domain/ports/sensor-repository.port';
@@ -103,6 +104,55 @@ export class DrizzleSensorRepository implements SensorRepositoryPort {
         })
         .run();
       tx.delete(sensors).where(eq(sensors.id, id)).run();
+    });
+  }
+
+  async applyImport(batch: SensorImportBatch): Promise<void> {
+    this.db.transaction((tx) => {
+      for (const { id, archivedAt } of batch.archives) {
+        const row = tx.select().from(sensors).where(eq(sensors.id, id)).get();
+        if (!row) continue;
+        tx.insert(sensorsArchive)
+          .values({
+            id: row.id,
+            name: row.name,
+            type: row.type,
+            config: row.config,
+            debounceMs: row.debounceMs,
+            severity: row.severity,
+            lastValue: row.lastValue,
+            lastValueAt: row.lastValueAt,
+            createdAt: row.createdAt,
+            archivedAt,
+          })
+          .run();
+        tx.delete(sensors).where(eq(sensors.id, id)).run();
+      }
+      for (const { id, patch } of batch.updates) {
+        const set: Partial<typeof sensors.$inferInsert> = {
+          updatedAt: patch.updatedAt,
+        };
+        if (patch.name !== undefined) set.name = patch.name;
+        if (patch.config !== undefined) set.config = patch.config;
+        if (patch.debounceMs !== undefined) set.debounceMs = patch.debounceMs;
+        if (patch.severity !== undefined) set.severity = patch.severity;
+        tx.update(sensors).set(set).where(eq(sensors.id, id)).run();
+      }
+      for (const sensor of batch.inserts) {
+        tx.insert(sensors)
+          .values({
+            id: sensor.id,
+            name: sensor.name,
+            type: sensor.type,
+            config: sensor.config,
+            enabled: true,
+            debounceMs: sensor.debounceMs,
+            severity: sensor.severity,
+            createdAt: sensor.createdAt,
+            updatedAt: sensor.createdAt,
+          })
+          .run();
+      }
     });
   }
 

@@ -94,4 +94,52 @@ describe('DrizzleSensorRepository — write surface (spec 10)', () => {
       archivedAt,
     });
   });
+
+  it('applyImport archives, updates and inserts in one transaction (spec 16)', async () => {
+    await repo.create({
+      id: 'keep',
+      name: 'front_door',
+      type: 'digital',
+      config: { pin: 17 },
+      debounceMs: 10_000,
+      severity: 'info',
+      createdAt: new Date('2030-01-01T00:00:00.000Z'),
+    });
+    await repo.create({
+      id: 'drop',
+      name: 'old_sensor',
+      type: 'digital',
+      config: { pin: 5 },
+      debounceMs: 0,
+      severity: 'info',
+      createdAt: new Date('2030-01-01T00:00:00.000Z'),
+    });
+
+    const now = new Date('2030-05-01T00:00:00.000Z');
+    await repo.applyImport({
+      inserts: [
+        {
+          id: 'new',
+          name: 'window_1',
+          type: 'digital',
+          config: { pin: 6 },
+          debounceMs: 10_000,
+          severity: 'info',
+          createdAt: now,
+        },
+      ],
+      updates: [
+        { id: 'keep', patch: { config: { pin: 22 }, updatedAt: now } },
+      ],
+      archives: [{ id: 'drop', archivedAt: now }],
+    });
+
+    const active = ctx.db.select().from(sensors).all();
+    expect(active.map((r) => r.name).sort()).toEqual(['front_door', 'window_1']);
+    expect(active.find((r) => r.id === 'keep')?.config).toEqual({ pin: 22 });
+
+    const archived = ctx.db.select().from(sensorsArchive).all();
+    expect(archived).toHaveLength(1);
+    expect(archived[0]).toMatchObject({ id: 'drop', name: 'old_sensor', archivedAt: now });
+  });
 });

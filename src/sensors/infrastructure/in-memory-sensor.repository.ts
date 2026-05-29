@@ -1,5 +1,6 @@
 import {
   NewSensor,
+  SensorImportBatch,
   SensorPatch,
   SensorRepositoryPort,
 } from '../domain/ports/sensor-repository.port';
@@ -104,6 +105,53 @@ export class InMemorySensorRepository implements SensorRepositoryPort {
     const row = this.sensors[idx];
     this.archived.push({ id: row.id, name: row.name, archivedAt });
     this.sensors = [...this.sensors.slice(0, idx), ...this.sensors.slice(idx + 1)];
+  }
+
+  async applyImport(batch: SensorImportBatch): Promise<void> {
+    for (const { id, archivedAt } of batch.archives) {
+      const idx = this.sensors.findIndex((s) => s.id === id);
+      if (idx === -1) continue;
+      const row = this.sensors[idx];
+      this.archived.push({ id: row.id, name: row.name, archivedAt });
+      this.sensors = [
+        ...this.sensors.slice(0, idx),
+        ...this.sensors.slice(idx + 1),
+      ];
+    }
+    for (const { id, patch } of batch.updates) {
+      const idx = this.sensors.findIndex((s) => s.id === id);
+      if (idx === -1) throw new Error(`applyImport: sensor ${id} not found`);
+      const prev = this.sensors[idx];
+      const next: Sensor = {
+        ...prev,
+        name: patch.name ?? prev.name,
+        config: patch.config ?? prev.config,
+        debounceMs: patch.debounceMs ?? prev.debounceMs,
+        severity: patch.severity ?? prev.severity,
+      };
+      this.sensors = [
+        ...this.sensors.slice(0, idx),
+        next,
+        ...this.sensors.slice(idx + 1),
+      ];
+    }
+    for (const sensor of batch.inserts) {
+      this.sensors = [
+        ...this.sensors,
+        {
+          id: sensor.id,
+          name: sensor.name,
+          type: sensor.type,
+          config: sensor.config,
+          enabled: true,
+          debounceMs: sensor.debounceMs,
+          severity: sensor.severity,
+          lastValue: null,
+          lastValueAt: null,
+        },
+      ];
+      this.states.set(sensor.id, { lastValue: null, lastValueAt: null });
+    }
   }
 
   /** Replace the seed set; useful for hot-reload-style tests. */
