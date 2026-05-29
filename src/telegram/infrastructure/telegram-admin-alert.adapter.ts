@@ -50,6 +50,8 @@ export class TelegramAdminAlertAdapter implements AdminAlertPort {
         return en.camera.adminAlert.daemonRecovered;
       case 'gdrive-sync-failing':
         return en.camera.adminAlert.gdriveSyncFailing(detail ?? 'unknown error');
+      case 'disk-warning':
+        return en.camera.adminAlert.diskWarning;
       case 'emergency-disk-cleanup':
         return en.camera.adminAlert.emergencyDiskCleanup;
     }

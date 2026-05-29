@@ -5,6 +5,7 @@ export type CameraAdminAlert =
   | 'motion-daemon-down'
   | 'motion-daemon-recovered'
   | 'gdrive-sync-failing'
+  | 'disk-warning'
   | 'emergency-disk-cleanup';
 
 /**

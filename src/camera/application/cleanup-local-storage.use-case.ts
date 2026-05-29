@@ -19,15 +19,17 @@ import {
 } from '../domain/ports/retention-prune.port';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_WARN_PERCENT = 70;
 const DEFAULT_CRITICAL_PERCENT = 80;
 const DEFAULT_EMERGENCY_PERCENT = 95;
 
 /**
- * Local storage cleanup loop (spec 21). At `DISK_CRITICAL_PERCENT` it deletes
- * the local copies of events already on Drive (oldest first) and prunes empty
- * day-directories. At `DISK_EMERGENCY_PERCENT` it additionally prunes
- * day-old sent events and sensor logs, stops the Motion daemon, and alerts
- * admins.
+ * Local storage cleanup loop (spec 21, 23). At `DISK_WARN_PERCENT` it logs a
+ * warning and alerts admins once per pass. At `DISK_CRITICAL_PERCENT` it
+ * deletes the local copies of events already on Drive (oldest first) and
+ * prunes empty day-directories. At `DISK_EMERGENCY_PERCENT` it additionally
+ * prunes day-old sent events and sensor logs, stops the Motion daemon, and
+ * alerts admins.
  *
  * **Invariant:** only events with `uploadedToGdrive = true` are ever deleted,
  * so footage that never reached Drive is preserved even when the disk fills.
@@ -48,7 +50,14 @@ export class CleanupLocalStorageUseCase {
   async execute(): Promise<void> {
     const usage = await this.storage.usagePercent();
     const critical = this.percentEnv('DISK_CRITICAL_PERCENT', DEFAULT_CRITICAL_PERCENT);
-    if (usage < critical) return;
+    if (usage < critical) {
+      const warn = this.percentEnv('DISK_WARN_PERCENT', DEFAULT_WARN_PERCENT);
+      if (usage >= warn) {
+        this.logger.warn(`Disk at ${usage}% (warn ${warn}%) — approaching critical`);
+        await this.adminAlert.alert('disk-warning');
+      }
+      return;
+    }
 
     this.logger.warn(`Disk at ${usage}% (critical ${critical}%) — cleaning uploaded media`);
     const candidates = await this.media.findUploadedNotDeleted();
