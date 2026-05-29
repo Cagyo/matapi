@@ -1,6 +1,7 @@
 import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { EventQueueService } from './event-queue.service';
 import { DrainEventQueueUseCase } from './drain-event-queue.use-case';
+import { NotificationService } from './notification.service';
 import {
   SENSOR_EVENT_SOURCE,
   SensorEventSourcePort,
@@ -14,6 +15,7 @@ export class EventProcessorService implements OnModuleInit {
   constructor(
     private readonly eventQueue: EventQueueService,
     private readonly drainEventQueue: DrainEventQueueUseCase,
+    private readonly notifications: NotificationService,
     @Inject(SENSOR_EVENT_SOURCE)
     private readonly sensorEvents: SensorEventSourcePort,
   ) {}
@@ -33,6 +35,6 @@ export class EventProcessorService implements OnModuleInit {
   private async handle(event: SensorEvent): Promise<void> {
     const queued = await this.eventQueue.enqueueSensorEvent(event);
     this.logger.debug(`Queued event #${queued.id} for ${event.sensorId}`);
-    await this.drain();
+    await this.notifications.process(queued);
   }
 }

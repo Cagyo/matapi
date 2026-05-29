@@ -11,6 +11,7 @@ import { run, RunnerHandle } from '@grammyjs/runner';
 import { Bot, GrammyError, HttpError } from 'grammy';
 import { EventNotifierService } from '../../events/application/event-notifier.service';
 import { EventProcessorService } from '../../events/application/event-processor.service';
+import { RecipientDirectoryService } from '../../events/application/recipient-directory.service';
 import { RestartConfirmationService } from '../application/restart-confirmation.service';
 import { ClaimAdminHandler } from '../interfaces/claim-admin.handler';
 import { CameraHandler } from '../interfaces/camera.handler';
@@ -39,6 +40,7 @@ import { UpdateHandler } from '../interfaces/update.handler';
 import { ConsoleNotifierAdapter } from './console-notifier.adapter';
 import { TelegramDirectMessenger } from './telegram-direct-messenger.adapter';
 import { TelegramNotifierAdapter } from './telegram-notifier.adapter';
+import { TelegramRecipientDirectoryAdapter } from './telegram-recipient-directory.adapter';
 
 /** Token for the env-resolved bot mode. */
 export const BOT_MODE = Symbol('BOT_MODE');
@@ -64,7 +66,9 @@ export class GrammyBotGateway implements OnApplicationBootstrap, OnModuleDestroy
     @Inject(BOT_MODE) private readonly mode: BotMode,
     private readonly eventNotifier: EventNotifierService,
     private readonly eventProcessor: EventProcessorService,
+    private readonly recipientDirectory: RecipientDirectoryService,
     private readonly telegramNotifier: TelegramNotifierAdapter,
+    private readonly telegramRecipients: TelegramRecipientDirectoryAdapter,
     private readonly consoleNotifier: ConsoleNotifierAdapter,
     private readonly directMessenger: TelegramDirectMessenger,
     private readonly restartConfirmation: RestartConfirmationService,
@@ -107,6 +111,7 @@ export class GrammyBotGateway implements OnApplicationBootstrap, OnModuleDestroy
           : 'TELEGRAM_BOT_TOKEN not set — Telegram bot disabled, using console notifier',
       );
       this.eventNotifier.register(this.consoleNotifier);
+      this.recipientDirectory.register(this.telegramRecipients);
       void this.eventProcessor.drain();
       return;
     }
@@ -151,6 +156,7 @@ export class GrammyBotGateway implements OnApplicationBootstrap, OnModuleDestroy
     this.telegramNotifier.setBot(bot);
     this.directMessenger.setBot(bot);
     this.eventNotifier.register(this.telegramNotifier);
+    this.recipientDirectory.register(this.telegramRecipients);
 
     this.bot = bot;
     this.runner = run(bot);
@@ -177,6 +183,7 @@ export class GrammyBotGateway implements OnApplicationBootstrap, OnModuleDestroy
     this.telegramNotifier.clearBot();
     this.directMessenger.clearBot();
     this.eventNotifier.clear();
+    this.recipientDirectory.clear();
     this.bot = undefined;
     this.runner = undefined;
   }

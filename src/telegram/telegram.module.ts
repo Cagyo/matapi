@@ -37,6 +37,7 @@ import { InMemoryUserRepository } from './infrastructure/in-memory-user.reposito
 import { InMemoryUserSensorMuteRepository } from './infrastructure/in-memory-user-sensor-mute.repository';
 import { TelegramDirectMessenger } from './infrastructure/telegram-direct-messenger.adapter';
 import { TelegramNotifierAdapter } from './infrastructure/telegram-notifier.adapter';
+import { TelegramRecipientDirectoryAdapter } from './infrastructure/telegram-recipient-directory.adapter';
 import { YamlConfigCodec } from './infrastructure/yaml-config-codec.adapter';
 import { ClaimAdminHandler } from './interfaces/claim-admin.handler';
 import { CameraHandler } from './interfaces/camera.handler';
@@ -150,6 +151,7 @@ const mode = resolveBotMode();
     FeatureHandler,
     TelegramNotifierAdapter,
     ConsoleNotifierAdapter,
+    TelegramRecipientDirectoryAdapter,
     GrammyBotGateway,
   ],
   exports: [GrammyBotGateway, USER_REPOSITORY],
