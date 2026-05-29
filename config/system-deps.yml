@@ -1,5 +1,11 @@
 # System packages installed at install time keyed by feature.
 # Read by scripts/install.sh.
+
+# Desired Node.js major version. Minor/patch upgrades within this major are
+# applied automatically by /system_update; a major change requires manual
+# intervention (spec 18 / spec 24).
+node: "20"
+
 core:
   apt:
     - git
