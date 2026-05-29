@@ -16,6 +16,7 @@ import { RecipientDirectoryService } from '../../events/application/recipient-di
 import { BotRunnerRegistry } from '../../network/application/bot-runner.registry';
 import { BotRunnerPort } from '../../network/domain/ports/bot-runner.port';
 import { RestartConfirmationService } from '../application/restart-confirmation.service';
+import { SystemOnlineNotifier } from '../application/system-online-notifier.service';
 import { ClaimAdminHandler } from '../interfaces/claim-admin.handler';
 import { CameraHandler } from '../interfaces/camera.handler';
 import { ConfigHandler } from '../interfaces/config.handler';
@@ -81,6 +82,7 @@ export class GrammyBotGateway
     private readonly adminAlertService: AdminAlertService,
     private readonly telegramAdminAlert: TelegramAdminAlertAdapter,
     private readonly restartConfirmation: RestartConfirmationService,
+    private readonly systemOnline: SystemOnlineNotifier,
     private readonly claim: ClaimAdminHandler,
     private readonly status: StatusHandler,
     private readonly ping: PingHandler,
@@ -198,6 +200,14 @@ export class GrammyBotGateway
         this.logger.warn(
           `restart confirmation failed: ${(err as Error).message}`,
         ),
+      );
+
+    // Broadcast that the worker is back online, surfacing any DB recovery or
+    // clock-drift warning from boot recovery (spec 23).
+    void this.systemOnline
+      .run()
+      .catch((err) =>
+        this.logger.warn(`system online notice failed: ${(err as Error).message}`),
       );
 
     // Drain anything pending from a previous run.

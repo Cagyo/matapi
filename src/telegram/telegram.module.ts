@@ -16,6 +16,7 @@ import { MuteSensorUseCase } from './application/mute-sensor.use-case';
 import { PromoteUserUseCase } from './application/promote-user.use-case';
 import { RegisterUserUseCase } from './application/register-user.use-case';
 import { RestartConfirmationService } from './application/restart-confirmation.service';
+import { SystemOnlineNotifier } from './application/system-online-notifier.service';
 import { RestartSystemUseCase } from './application/restart-system.use-case';
 import { RollbackSystemUseCase } from './application/rollback-system.use-case';
 import { SetQuietHoursUseCase } from './application/set-quiet-hours.use-case';
@@ -132,6 +133,7 @@ const mode = resolveBotMode();
     RollbackSystemUseCase,
     RestartSystemUseCase,
     RestartConfirmationService,
+    SystemOnlineNotifier,
     ExportConfigUseCase,
     { provide: CONFIG_CODEC, useClass: YamlConfigCodec },
     RoleMiddleware,

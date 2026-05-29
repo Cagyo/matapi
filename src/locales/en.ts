@@ -1,4 +1,5 @@
 import { format } from 'date-fns';
+import { DbRecovery } from '../database/integrity';
 import { SensorSeverity, SensorType } from '../sensors/domain/sensor';
 import { ImportSummary } from '../sensors/application/import-sensors.use-case';
 import { FeatureStatus } from '../features/domain/feature-status';
@@ -76,6 +77,14 @@ export interface GdriveStatusView {
   failedUploads: number;
   lastError: string | null;
   cleanupMinAgeDays: number;
+}
+
+export interface SystemOnlineView {
+  sensorsOnline: number;
+  sensorsTotal: number;
+  dbRecovery: DbRecovery;
+  clockSynchronized: boolean;
+  now: Date;
 }
 
 function gb(bytes: number | null): string {
@@ -498,6 +507,8 @@ export const en = {
       daemonRecovered: '✅ Motion daemon recovered. Camera recording is back online.',
       gdriveSyncFailing: (error: string) =>
         `⚠️ Google Drive sync failing: ${error}`,
+      diskWarning:
+        '⚠️ Disk usage is high and approaching the critical threshold. Uploaded media will be cleaned up automatically if it keeps climbing.',
       emergencyDiskCleanup:
         '🚨 Emergency disk cleanup ran: old events/logs were pruned and the motion daemon was stopped to free space.',
     },
@@ -570,6 +581,23 @@ export const en = {
     cancelled: 'Import cancelled. No changes made.',
     failed: (reason: string) =>
       `❌ Import failed: ${reason}. No changes were made.`,
+  },
+
+  system: {
+    online: (v: SystemOnlineView): string => {
+      const lines = ['🟢 System online', `🔌 Sensors: ${v.sensorsOnline}/${v.sensorsTotal} online`];
+      if (v.dbRecovery === 'restored_from_backup') {
+        lines.push('⚠️ Database was restored from local backup after corruption.');
+      } else if (v.dbRecovery === 'recreated_empty') {
+        lines.push('⚠️ Database was recreated empty after corruption — re-import config.');
+      }
+      if (!v.clockSynchronized) {
+        lines.push('⚠️ System clock is not synchronized — early timestamps may drift.');
+      }
+      lines.push(fmtDate(v.now));
+      return lines.join('\n');
+    },
+    goingOffline: '🔴 System going offline.',
   },
 };
 
