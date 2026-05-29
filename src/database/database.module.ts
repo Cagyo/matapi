@@ -2,8 +2,10 @@ import { Global, Module, Logger } from '@nestjs/common';
 import Database from 'better-sqlite3';
 import { drizzle, BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
-import { mkdirSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { resolve } from 'node:path';
+import { DatabaseLifecycle } from './database-lifecycle';
+import { DatabaseRecoveryState } from './database-recovery.state';
+import { openSqliteWithIntegrity } from './integrity';
 import * as schema from './schema';
 
 export type AppDatabase = BetterSQLite3Database<typeof schema>;
@@ -14,17 +16,16 @@ export const SQLITE = Symbol('SQLITE');
 @Global()
 @Module({
   providers: [
+    DatabaseRecoveryState,
     {
       provide: SQLITE,
-      useFactory: () => {
+      inject: [DatabaseRecoveryState],
+      useFactory: (recoveryState: DatabaseRecoveryState) => {
         const dbPath = resolve(process.env.DATABASE_PATH || './data/dev.db');
-        mkdirSync(dirname(dbPath), { recursive: true });
+        const logger = new Logger('DatabaseModule');
 
-        const sqlite = new Database(dbPath);
-        sqlite.pragma('journal_mode = WAL');
-        sqlite.pragma('synchronous = NORMAL');
-        sqlite.pragma('busy_timeout = 5000');
-        sqlite.pragma('foreign_keys = ON');
+        const { sqlite, recovery } = openSqliteWithIntegrity(dbPath, logger);
+        recoveryState.recovery = recovery;
         return sqlite;
       },
     },
@@ -44,7 +45,8 @@ export const SQLITE = Symbol('SQLITE');
         return db;
       },
     },
+    DatabaseLifecycle,
   ],
-  exports: [DB, SQLITE],
+  exports: [DB, SQLITE, DatabaseRecoveryState],
 })
 export class DatabaseModule {}
