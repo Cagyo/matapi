@@ -11,6 +11,8 @@ import { SensorEvent } from '../domain/sensor-event';
 @Injectable()
 export class EventProcessorService implements OnModuleInit {
   private readonly logger = new Logger(EventProcessorService.name);
+  private shuttingDown = false;
+  private inFlight = 0;
 
   constructor(
     private readonly eventQueue: EventQueueService,
@@ -22,14 +24,39 @@ export class EventProcessorService implements OnModuleInit {
 
   onModuleInit(): void {
     this.sensorEvents.onEvent((event) => {
-      void this.handle(event).catch((error) => {
-        this.logger.error(`Event processing failed: ${(error as Error).message}`);
-      });
+      if (this.shuttingDown) return;
+      this.inFlight += 1;
+      void this.handle(event)
+        .catch((error) => {
+          this.logger.error(`Event processing failed: ${(error as Error).message}`);
+        })
+        .finally(() => {
+          this.inFlight -= 1;
+        });
     });
   }
 
   drain(): Promise<void> {
     return this.drainEventQueue.execute();
+  }
+
+  /** Stop accepting new sensor events (spec 23 — Graceful Shutdown step 1-2). */
+  beginShutdown(): void {
+    this.shuttingDown = true;
+  }
+
+  /**
+   * Resolve once no events are mid-flight, or after `timeoutMs` (spec 23 —
+   * Graceful Shutdown step 3). Bounded so shutdown never hangs.
+   */
+  async waitForIdle(timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (this.inFlight > 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    if (this.inFlight > 0) {
+      this.logger.warn(`Shutdown timeout — ${this.inFlight} event(s) still in flight`);
+    }
   }
 
   private async handle(event: SensorEvent): Promise<void> {

@@ -87,4 +87,78 @@ describe('EventProcessorService', () => {
 
     expect(notifications.process).not.toHaveBeenCalled();
   });
+
+  it('ignores new events once shutdown has begun', async () => {
+    const source = new TestSensorEventSource();
+    const eventQueue = { enqueueSensorEvent: vi.fn().mockResolvedValue({ id: 1 }) };
+    const notifications = { process: vi.fn().mockResolvedValue(undefined) };
+    const service = new EventProcessorService(
+      eventQueue as never,
+      { execute: vi.fn() } as never,
+      notifications as never,
+      source,
+    );
+
+    service.onModuleInit();
+    service.beginShutdown();
+    source.emit(makeEvent());
+    await flushAsync();
+
+    expect(eventQueue.enqueueSensorEvent).not.toHaveBeenCalled();
+  });
+
+  it('waitForIdle resolves only after in-flight events settle', async () => {
+    const source = new TestSensorEventSource();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const eventQueue = {
+      enqueueSensorEvent: vi.fn(async () => {
+        await gate;
+        return { id: 1 };
+      }),
+    };
+    const notifications = { process: vi.fn().mockResolvedValue(undefined) };
+    const service = new EventProcessorService(
+      eventQueue as never,
+      { execute: vi.fn() } as never,
+      notifications as never,
+      source,
+    );
+
+    service.onModuleInit();
+    source.emit(makeEvent());
+    await flushAsync();
+
+    let idle = false;
+    const wait = service.waitForIdle(1000).then(() => {
+      idle = true;
+    });
+    await flushAsync();
+    expect(idle).toBe(false);
+
+    release();
+    await wait;
+    expect(idle).toBe(true);
+  });
+
+  it('waitForIdle gives up after the timeout when work never settles', async () => {
+    const source = new TestSensorEventSource();
+    const eventQueue = {
+      enqueueSensorEvent: vi.fn(() => new Promise<{ id: number }>(() => {})),
+    };
+    const service = new EventProcessorService(
+      eventQueue as never,
+      { execute: vi.fn() } as never,
+      { process: vi.fn() } as never,
+      source,
+    );
+
+    service.onModuleInit();
+    source.emit(makeEvent());
+    await flushAsync();
+
+    await expect(service.waitForIdle(60)).resolves.toBeUndefined();
+  });
 });
