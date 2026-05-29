@@ -28,6 +28,7 @@ import { INVITE_CODE_REPOSITORY } from './domain/ports/invite-code-repository.po
 import { USER_REPOSITORY } from './domain/ports/user-repository.port';
 import { USER_SENSOR_MUTE_REPOSITORY } from './domain/ports/user-sensor-mute-repository.port';
 import { ConsoleNotifierAdapter } from './infrastructure/console-notifier.adapter';
+import { TelegramAdminAlertAdapter } from './infrastructure/telegram-admin-alert.adapter';
 import { DrizzleInviteCodeRepository } from './infrastructure/drizzle-invite-code.repository';
 import { DrizzleUserRepository } from './infrastructure/drizzle-user.repository';
 import { DrizzleUserSensorMuteRepository } from './infrastructure/drizzle-user-sensor-mute.repository';
@@ -151,6 +152,7 @@ const mode = resolveBotMode();
     FeatureHandler,
     TelegramNotifierAdapter,
     ConsoleNotifierAdapter,
+    TelegramAdminAlertAdapter,
     TelegramRecipientDirectoryAdapter,
     GrammyBotGateway,
   ],

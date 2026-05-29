@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import {
   NotificationMessage,
+  NotificationPhoto,
   NotifierPort,
 } from '../../events/domain/ports/notifier.port';
 
@@ -25,5 +26,11 @@ export class ConsoleNotifierAdapter implements NotifierPort {
 
   async notifyUser(telegramId: number, message: NotificationMessage): Promise<void> {
     this.logger.log(`[mock-message → ${telegramId}]\n${message.text}`);
+  }
+
+  async notifyUserPhoto(telegramId: number, photo: NotificationPhoto): Promise<void> {
+    this.logger.log(
+      `[mock-photo → ${telegramId}] (${photo.buffer.length} bytes)\n${photo.caption}`,
+    );
   }
 }

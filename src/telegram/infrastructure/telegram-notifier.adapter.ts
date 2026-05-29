@@ -2,6 +2,7 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Bot, InputFile } from 'grammy';
 import {
   NotificationMessage,
+  NotificationPhoto,
   NotifierPort,
 } from '../../events/domain/ports/notifier.port';
 import {
@@ -60,6 +61,18 @@ export class TelegramNotifierAdapter implements NotifierPort {
     message: NotificationMessage,
   ): Promise<void> {
     await this.sendToRecipient(telegramId, message);
+  }
+
+  async notifyUserPhoto(
+    telegramId: number,
+    photo: NotificationPhoto,
+  ): Promise<void> {
+    if (!this.bot) {
+      throw new Error('Telegram bot is not ready');
+    }
+    await this.bot.api.sendPhoto(telegramId, new InputFile(photo.buffer), {
+      caption: photo.caption,
+    });
   }
 
   private async sendToRecipient(
