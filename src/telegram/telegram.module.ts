@@ -42,6 +42,7 @@ import { CameraHandler } from './interfaces/camera.handler';
 import { ConfigHandler } from './interfaces/config.handler';
 import { DemoteHandler } from './interfaces/demote.handler';
 import { ExportConfigHandler } from './interfaces/export-config.handler';
+import { FeatureHandler } from './interfaces/feature.handler';
 import { GdriveHandler } from './interfaces/gdrive.handler';
 import { HealthHandler } from './interfaces/health.handler';
 import { HelpHandler } from './interfaces/help.handler';
@@ -142,6 +143,7 @@ const mode = resolveBotMode();
     GdriveHandler,
     ExportConfigHandler,
     ImportConfigHandler,
+    FeatureHandler,
     TelegramNotifierAdapter,
     ConsoleNotifierAdapter,
     GrammyBotGateway,

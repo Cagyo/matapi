@@ -1,6 +1,7 @@
 import { format } from 'date-fns';
 import { SensorSeverity, SensorType } from '../sensors/domain/sensor';
 import { ImportSummary } from '../sensors/application/import-sensors.use-case';
+import { FeatureStatus } from '../features/domain/feature-status';
 
 const DATE_FNS_FMT = 'dd.MM.yyyy HH:mm';
 const DATE_FNS_FMT_SECONDS = 'dd.MM.yyyy HH:mm:ss';
@@ -156,6 +157,30 @@ export const en = {
     registerFailed: '❌ Failed to register',
     missingTarget: (cmd: string) => `❌ Usage: /${cmd} <username_or_name>`,
   },
+  feature: {
+    usage: '❌ Usage: /feature enable|disable|list [feature_name]',
+    listHeader: '🔧 Features',
+    listLine(f: FeatureStatus): string {
+      const icon = !f.installed ? '⬜' : f.enabled ? '✅' : '❌';
+      const state = f.enabled ? 'enabled' : 'disabled';
+      const install = f.installed ? 'installed' : 'not installed';
+      return `${icon} ${f.name} — ${state} (${install})`;
+    },
+    enabled: (name: string) =>
+      `✅ Feature '${name}' enabled.\nℹ️ Restart the worker to fully load it.`,
+    disabled: (name: string) =>
+      `✅ Feature '${name}' disabled.\nℹ️ Restart the worker to fully unload it.`,
+    unknown: (name: string) =>
+      `❌ Unknown feature '${name}'. Use /feature list.`,
+    notInstalled: (name: string) =>
+      `❌ Feature '${name}' requires system dependencies. Re-run the install script with ${name} enabled.`,
+    alreadyEnabled: (name: string) => `ℹ️ Feature '${name}' is already enabled`,
+    alreadyDisabled: (name: string) =>
+      `ℹ️ Feature '${name}' is already disabled`,
+    enableFailed: '❌ Failed to enable feature',
+    disableFailed: '❌ Failed to disable feature',
+    listFailed: '❌ Failed to list features',
+  },
   status: {
     header: '📊 System Status',
     none: 'No sensors configured. Use /config to add sensors.',
@@ -263,6 +288,7 @@ export const en = {
       '/invite — issue a one-time invite code',
       '/promote <user> — promote a user to admin',
       '/demote <user> — demote an admin to user',
+      '/feature enable|disable|list — toggle optional features',
       '/update — pull and install latest version',
       '/rollback — revert to previous version',
       '/restart — restart the worker',
