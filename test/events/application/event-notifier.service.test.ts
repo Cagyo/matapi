@@ -4,11 +4,13 @@ import { NotifierPort } from '../../../src/events/domain/ports/notifier.port';
 
 function makeNotifier(ready = true): NotifierPort & {
   notify: ReturnType<typeof vi.fn>;
+  notifyUser: ReturnType<typeof vi.fn>;
   isReady: ReturnType<typeof vi.fn>;
 } {
   return {
     isReady: vi.fn(() => ready),
     notify: vi.fn().mockResolvedValue(undefined),
+    notifyUser: vi.fn().mockResolvedValue(undefined),
   };
 }
 

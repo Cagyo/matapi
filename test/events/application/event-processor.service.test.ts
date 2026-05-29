@@ -27,15 +27,18 @@ function makeEvent(): SensorEvent {
 }
 
 describe('EventProcessorService', () => {
-  it('subscribes to sensor events, enqueues them, and drains the queue', async () => {
+  it('subscribes to sensor events, enqueues them, and processes notifications', async () => {
     const source = new TestSensorEventSource();
+    const queued = { id: 7 };
     const eventQueue = {
-      enqueueSensorEvent: vi.fn().mockResolvedValue({ id: 7 }),
+      enqueueSensorEvent: vi.fn().mockResolvedValue(queued),
     };
     const drainEventQueue = { execute: vi.fn().mockResolvedValue(undefined) };
+    const notifications = { process: vi.fn().mockResolvedValue(undefined) };
     const service = new EventProcessorService(
       eventQueue as never,
       drainEventQueue as never,
+      notifications as never,
       source,
     );
 
@@ -45,7 +48,8 @@ describe('EventProcessorService', () => {
     await flushAsync();
 
     expect(eventQueue.enqueueSensorEvent).toHaveBeenCalledWith(event);
-    expect(drainEventQueue.execute).toHaveBeenCalledTimes(1);
+    expect(notifications.process).toHaveBeenCalledWith(queued);
+    expect(drainEventQueue.execute).not.toHaveBeenCalled();
   });
 
   it('exposes a direct drain method for startup and manual retries', async () => {
@@ -54,6 +58,7 @@ describe('EventProcessorService', () => {
     const service = new EventProcessorService(
       { enqueueSensorEvent: vi.fn() } as never,
       drainEventQueue as never,
+      { process: vi.fn() } as never,
       source,
     );
 
@@ -62,15 +67,17 @@ describe('EventProcessorService', () => {
     expect(drainEventQueue.execute).toHaveBeenCalledTimes(1);
   });
 
-  it('does not drain when enqueueing the event fails', async () => {
+  it('does not process notifications when enqueueing the event fails', async () => {
     const source = new TestSensorEventSource();
     const eventQueue = {
       enqueueSensorEvent: vi.fn().mockRejectedValue(new Error('db offline')),
     };
     const drainEventQueue = { execute: vi.fn().mockResolvedValue(undefined) };
+    const notifications = { process: vi.fn().mockResolvedValue(undefined) };
     const service = new EventProcessorService(
       eventQueue as never,
       drainEventQueue as never,
+      notifications as never,
       source,
     );
 
@@ -78,6 +85,6 @@ describe('EventProcessorService', () => {
     source.emit(makeEvent());
     await flushAsync();
 
-    expect(drainEventQueue.execute).not.toHaveBeenCalled();
+    expect(notifications.process).not.toHaveBeenCalled();
   });
 });

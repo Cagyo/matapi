@@ -23,6 +23,13 @@ class RecordingNotifier implements NotifierPort {
       throw new Error('telegram offline');
     }
   }
+
+  async notifyUser(_telegramId: number, message: NotificationMessage): Promise<void> {
+    this.messages.push(message);
+    if (this.fail) {
+      throw new Error('telegram offline');
+    }
+  }
 }
 
 const baseOptions: EventQueueOptions = {
