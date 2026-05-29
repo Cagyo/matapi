@@ -1,7 +1,8 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { count, eq } from 'drizzle-orm';
+import { count, eq, sql } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../database/database.module';
 import { users } from '../../database/schema';
+import { UserNotFoundError } from '../domain/errors/user-not-found.error';
 import { UserRepositoryPort } from '../domain/ports/user-repository.port';
 import { Role } from '../domain/role';
 import { NewUser, User } from '../domain/user.entity';
@@ -30,6 +31,17 @@ export class DrizzleUserRepository implements UserRepositoryPort {
     return row ? this.toUser(row) : null;
   }
 
+  async findByName(name: string): Promise<User | null> {
+    const needle = name.replace(/^@/, '').toLowerCase();
+    if (!needle) return null;
+    const row = this.db
+      .select()
+      .from(users)
+      .where(sql`LOWER(${users.name}) = ${needle}`)
+      .get();
+    return row ? this.toUser(row) : null;
+  }
+
   async createAdmin(user: NewUser): Promise<User> {
     const [row] = this.db
       .insert(users)
@@ -45,6 +57,31 @@ export class DrizzleUserRepository implements UserRepositoryPort {
       })
       .returning()
       .all();
+    return this.toUser(row);
+  }
+
+  async createUser(user: NewUser): Promise<User> {
+    const [row] = this.db
+      .insert(users)
+      .values({
+        telegramId: user.telegramId,
+        name: user.name,
+        role: user.role,
+        createdAt: user.createdAt,
+      })
+      .returning()
+      .all();
+    return this.toUser(row);
+  }
+
+  async updateRole(telegramId: number, role: Role): Promise<User> {
+    const [row] = this.db
+      .update(users)
+      .set({ role })
+      .where(eq(users.telegramId, telegramId))
+      .returning()
+      .all();
+    if (!row) throw new UserNotFoundError(String(telegramId));
     return this.toUser(row);
   }
 

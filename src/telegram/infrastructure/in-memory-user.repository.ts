@@ -1,4 +1,6 @@
+import { UserNotFoundError } from '../domain/errors/user-not-found.error';
 import { UserRepositoryPort } from '../domain/ports/user-repository.port';
+import { Role } from '../domain/role';
 import { NewUser, User } from '../domain/user.entity';
 
 /**
@@ -26,6 +28,15 @@ export class InMemoryUserRepository implements UserRepositoryPort {
     return this.store.get(telegramId) ?? null;
   }
 
+  async findByName(name: string): Promise<User | null> {
+    const needle = name.replace(/^@/, '').toLowerCase();
+    if (!needle) return null;
+    for (const user of this.store.values()) {
+      if (user.name.toLowerCase() === needle) return user;
+    }
+    return null;
+  }
+
   async createAdmin(user: NewUser): Promise<User> {
     const persisted: User = {
       telegramId: user.telegramId,
@@ -35,6 +46,25 @@ export class InMemoryUserRepository implements UserRepositoryPort {
     };
     this.store.set(persisted.telegramId, persisted);
     return persisted;
+  }
+
+  async createUser(user: NewUser): Promise<User> {
+    const persisted: User = {
+      telegramId: user.telegramId,
+      name: user.name,
+      role: user.role,
+      createdAt: user.createdAt,
+    };
+    this.store.set(persisted.telegramId, persisted);
+    return persisted;
+  }
+
+  async updateRole(telegramId: number, role: Role): Promise<User> {
+    const existing = this.store.get(telegramId);
+    if (!existing) throw new UserNotFoundError(String(telegramId));
+    const updated: User = { ...existing, role };
+    this.store.set(telegramId, updated);
+    return updated;
   }
 
   async listRecipients(): Promise<User[]> {
