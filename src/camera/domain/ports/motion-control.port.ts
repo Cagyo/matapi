@@ -12,5 +12,11 @@ export const MOTION_CONTROL = Symbol('MOTION_CONTROL');
 export interface MotionControlPort {
   start(): Promise<void>;
   stop(): Promise<void>;
+  /**
+   * Restart the daemon (spec 20 — lifecycle watcher). Unlike `start`, it does
+   * not throw when the unit is already active. Throws `MotionNotInstalledError`
+   * or `MotionStartFailedError` on failure.
+   */
+  restart(): Promise<void>;
   isActive(): Promise<boolean>;
 }
