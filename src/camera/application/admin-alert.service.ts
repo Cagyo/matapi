@@ -23,11 +23,11 @@ export class AdminAlertService implements AdminAlertPort {
     this.delegate = undefined;
   }
 
-  async alert(kind: CameraAdminAlert): Promise<void> {
+  async alert(kind: CameraAdminAlert, detail?: string): Promise<void> {
     if (!this.delegate) {
       this.logger.warn(`No admin-alert delegate registered; dropping "${kind}"`);
       return;
     }
-    await this.delegate.alert(kind);
+    await this.delegate.alert(kind, detail);
   }
 }
