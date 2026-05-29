@@ -1,8 +1,12 @@
 import { Module } from '@nestjs/common';
 import { EventModule } from '../events/event.module';
 import { AdminAlertService } from './application/admin-alert.service';
+import { BackupUploadUseCase } from './application/backup-upload.use-case';
 import { CameraStatusUseCase } from './application/camera-status.use-case';
+import { CleanupDriveUseCase } from './application/cleanup-drive.use-case';
+import { CleanupLocalStorageUseCase } from './application/cleanup-local-storage.use-case';
 import { DisableMotionUseCase } from './application/disable-motion.use-case';
+import { DriveSyncScheduler } from './application/drive-sync.scheduler';
 import { EnableMotionUseCase } from './application/enable-motion.use-case';
 import { GdriveStatusUseCase } from './application/gdrive-status.use-case';
 import { GetMotionPhotoUseCase } from './application/get-motion-photo.use-case';
@@ -14,32 +18,43 @@ import { MotionWatcherService } from './application/motion-watcher.service';
 import { RecordMotionEndUseCase } from './application/record-motion-end.use-case';
 import { RecordMotionStartUseCase } from './application/record-motion-start.use-case';
 import { RecordSnapshotUseCase } from './application/record-snapshot.use-case';
+import { UploadMotionUseCase } from './application/upload-motion.use-case';
 import { CAMERA_MODE } from './camera.tokens';
 import { ADMIN_ALERT } from './domain/ports/admin-alert.port';
+import { DB_BACKUP } from './domain/ports/db-backup.port';
 import { DRIVE_STATUS } from './domain/ports/drive-status.port';
+import { DRIVE_SYNC } from './domain/ports/drive-sync.port';
 import { GDRIVE_SYNC_HEALTH } from './domain/ports/gdrive-sync-health.port';
+import { LOCAL_STORAGE } from './domain/ports/local-storage.port';
 import { MEDIA_FILE } from './domain/ports/media-file.port';
 import { MEDIA_REPOSITORY } from './domain/ports/media-repository.port';
 import { MEDIA_WRITER } from './domain/ports/media-writer.port';
 import { MOTION_ALERT } from './domain/ports/motion-alert.port';
 import { MOTION_CONTROL } from './domain/ports/motion-control.port';
+import { RETENTION_PRUNE } from './domain/ports/retention-prune.port';
 import { SNAPSHOT } from './domain/ports/snapshot.port';
 import { DrizzleMediaRepository } from './infrastructure/drizzle-media.repository';
+import { DrizzleRetentionPruneAdapter } from './infrastructure/drizzle-retention-prune.adapter';
 import { EventsMotionAlertAdapter } from './infrastructure/events-motion-alert.adapter';
 import { FfmpegSnapshotAdapter } from './infrastructure/ffmpeg-snapshot.adapter';
+import { FsLocalStorageAdapter } from './infrastructure/fs-local-storage.adapter';
 import { FsMediaFileAdapter } from './infrastructure/fs-media-file.adapter';
 import { InMemoryGdriveSyncHealth } from './infrastructure/in-memory-gdrive-sync-health';
 import { InMemoryMediaRepository } from './infrastructure/in-memory-media.repository';
 import { MotionDaemonAdapter } from './infrastructure/motion-daemon.adapter';
 import { RcloneDriveStatusAdapter } from './infrastructure/rclone-drive-status.adapter';
+import { RcloneDriveSyncAdapter } from './infrastructure/rclone-drive-sync.adapter';
+import { SqliteDbBackupAdapter } from './infrastructure/sqlite-db-backup.adapter';
+import { StubDbBackupAdapter } from './infrastructure/stub-db-backup.adapter';
 import { StubDriveStatusAdapter } from './infrastructure/stub-drive-status.adapter';
+import { StubDriveSyncAdapter } from './infrastructure/stub-drive-sync.adapter';
+import { StubLocalStorageAdapter } from './infrastructure/stub-local-storage.adapter';
 import { StubMediaFileAdapter } from './infrastructure/stub-media-file.adapter';
 import { StubMotionAlertAdapter } from './infrastructure/stub-motion-alert.adapter';
 import { StubMotionControlAdapter } from './infrastructure/stub-motion-control.adapter';
+import { StubRetentionPruneAdapter } from './infrastructure/stub-retention-prune.adapter';
 import { StubSnapshotAdapter } from './infrastructure/stub-snapshot.adapter';
 import { MotionHooksController } from './interfaces/motion-hooks.controller';
-import { CleanupService } from './cleanup.service';
-import { UploadService } from './upload.service';
 
 export type CameraMode = 'real' | 'stub';
 
@@ -95,6 +110,22 @@ const mode = resolveCameraMode();
       useClass: mode === 'stub' ? StubDriveStatusAdapter : RcloneDriveStatusAdapter,
     },
     {
+      provide: DRIVE_SYNC,
+      useClass: mode === 'stub' ? StubDriveSyncAdapter : RcloneDriveSyncAdapter,
+    },
+    {
+      provide: LOCAL_STORAGE,
+      useClass: mode === 'stub' ? StubLocalStorageAdapter : FsLocalStorageAdapter,
+    },
+    {
+      provide: RETENTION_PRUNE,
+      useClass: mode === 'stub' ? StubRetentionPruneAdapter : DrizzleRetentionPruneAdapter,
+    },
+    {
+      provide: DB_BACKUP,
+      useClass: mode === 'stub' ? StubDbBackupAdapter : SqliteDbBackupAdapter,
+    },
+    {
       provide: MOTION_ALERT,
       useClass: mode === 'stub' ? StubMotionAlertAdapter : EventsMotionAlertAdapter,
     },
@@ -114,8 +145,11 @@ const mode = resolveCameraMode();
     RecordMotionEndUseCase,
     RecordSnapshotUseCase,
     MotionWatcherService,
-    UploadService,
-    CleanupService,
+    UploadMotionUseCase,
+    CleanupLocalStorageUseCase,
+    CleanupDriveUseCase,
+    BackupUploadUseCase,
+    DriveSyncScheduler,
   ],
   exports: [
     GetSnapshotUseCase,
