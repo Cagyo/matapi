@@ -21,7 +21,7 @@ export class MuteSensorUseCase {
 
   async execute(userId: number, sensorName: string): Promise<void> {
     const lookup = await this.sensors.findByName(sensorName);
-    if (!lookup || lookup.kind !== 'active') {
+    if (lookup?.kind !== 'active') {
       throw new SensorNotFoundError(sensorName);
     }
     if (await this.mutes.isMuted(userId, lookup.sensor.id)) {

@@ -59,7 +59,7 @@ describe('PigpioGateway', () => {
     const gpio = { read: vi.fn() } as unknown as PigpioGpio;
     const client = makeClient(gpio);
     pigpioClient.pigpio.mockReturnValue(client);
-    const gateway = new PigpioGateway(pigpioClient as never);
+    const gateway = new PigpioGateway(pigpioClient);
 
     const promise = gateway.connect();
     expect(pigpioClient.pigpio).toHaveBeenCalledWith({ host: 'pi.local', port: 9999 });
@@ -77,7 +77,7 @@ describe('PigpioGateway', () => {
     const gpio = { read: vi.fn() } as unknown as PigpioGpio;
     const client = makeClient(gpio);
     pigpioClient.pigpio.mockReturnValue(client);
-    const gateway = new PigpioGateway(pigpioClient as never);
+    const gateway = new PigpioGateway(pigpioClient);
 
     const first = gateway.connect();
     const second = gateway.connect();
@@ -92,7 +92,7 @@ describe('PigpioGateway', () => {
     const gpio = { read: vi.fn() } as unknown as PigpioGpio;
     const client = makeClient(gpio);
     pigpioClient.pigpio.mockReturnValue(client);
-    const gateway = new PigpioGateway(pigpioClient as never);
+    const gateway = new PigpioGateway(pigpioClient);
 
     const promise = gateway.connect();
     client.emitOnce('error', new Error('refused'));
@@ -105,7 +105,7 @@ describe('PigpioGateway', () => {
     const gpio = { read: vi.fn() } as unknown as PigpioGpio;
     const client = makeClient(gpio);
     pigpioClient.pigpio.mockReturnValue(client);
-    const gateway = new PigpioGateway(pigpioClient as never);
+    const gateway = new PigpioGateway(pigpioClient);
 
     const promise = gateway.connect();
     client.emitOnce('connected');

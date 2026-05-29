@@ -46,6 +46,6 @@ describe('logs.handler — parseDuration', () => {
   });
 
   it.each(['', '5', '5x', '-1h', '0h', undefined])('rejects %s', (input) => {
-    expect(parseDuration(input as string | undefined)).toBeNull();
+    expect(parseDuration(input)).toBeNull();
   });
 });

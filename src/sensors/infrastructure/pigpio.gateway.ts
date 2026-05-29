@@ -110,7 +110,7 @@ export class PigpioGateway implements OnModuleInit, OnModuleDestroy {
         });
       } catch (err) {
         this.connectPromise = null;
-        reject(err as Error);
+        reject(err instanceof Error ? err : new Error(String(err)));
       }
     });
 

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SensorRegistryService } from '../../../src/sensors/application/sensor-registry.service';
 import { Sensor } from '../../../src/sensors/domain/sensor';
 import { SensorDriverPort } from '../../../src/sensors/domain/ports/sensor-driver.port';
@@ -21,7 +21,7 @@ function digitalSensor(over: Partial<Sensor> = {}): Sensor {
 }
 
 function makeRegistry(repo: InMemorySensorRepository, factory: (type: string) => SensorDriverPort) {
-  return new SensorRegistryService(repo, factory as never);
+  return new SensorRegistryService(repo, factory);
 }
 
 describe('SensorRegistryService', () => {
@@ -146,7 +146,7 @@ describe('SensorRegistryService', () => {
       ['digital-2', badDriver],
     ]);
     let i = 0;
-    const registry = makeRegistry(repo, () => [...drivers.values()][i++]!);
+    const registry = makeRegistry(repo, () => [...drivers.values()][i++]);
     await registry.reload();
 
     const result = await registry.probe();

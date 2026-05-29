@@ -155,7 +155,7 @@ export class ConfigHandler implements TelegramHandler {
         return;
       }
       const sensor = await this.sensors.findByName(arg);
-      if (!sensor || sensor.kind !== 'active') {
+      if (sensor?.kind !== 'active') {
         await ctx.reply(en.config.notFound(arg));
         return;
       }
@@ -182,7 +182,7 @@ export class ConfigHandler implements TelegramHandler {
         return;
       }
       const sensor = await this.sensors.findByName(arg);
-      if (!sensor || sensor.kind !== 'active') {
+      if (sensor?.kind !== 'active') {
         await ctx.reply(en.config.notFound(arg));
         return;
       }

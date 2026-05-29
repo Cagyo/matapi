@@ -3,7 +3,6 @@ import { eq } from 'drizzle-orm';
 import { BetterSQLite3Database, drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { AppDatabase } from '../../../src/database/database.module';
 import * as schema from '../../../src/database/schema';
 import { events } from '../../../src/database/schema';
 import { DrizzleEventRepository } from '../../../src/events/infrastructure/drizzle-event.repository';
@@ -19,7 +18,7 @@ describe('DrizzleEventRepository', () => {
     sqlite = new Database(':memory:');
     db = drizzle(sqlite, { schema });
     migrate(db, { migrationsFolder: './migrations' });
-    repository = new DrizzleEventRepository(db as AppDatabase);
+    repository = new DrizzleEventRepository(db);
   });
 
   afterEach(() => {
@@ -75,7 +74,7 @@ describe('DrizzleEventRepository', () => {
       .values({
         sensorId: null,
         type: 'system',
-        payload: 'raw-value' as unknown as Record<string, unknown>,
+        payload: 'raw-value',
         createdAt: new Date('2030-01-01T00:00:00.000Z'),
       })
       .run();

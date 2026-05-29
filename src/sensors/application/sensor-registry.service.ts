@@ -16,7 +16,6 @@ import {
   SENSOR_REPOSITORY,
   SensorRepositoryPort,
 } from '../domain/ports/sensor-repository.port';
-import { Sensor } from '../domain/sensor';
 import { SensorEvent } from '../domain/sensor-event';
 
 /**
@@ -34,7 +33,7 @@ export class SensorRegistryService
 {
   private readonly logger = new Logger(SensorRegistryService.name);
   private readonly active = new Map<string, SensorDriverPort>();
-  private readonly listeners: Array<(event: SensorEvent) => void> = [];
+  private readonly listeners: ((event: SensorEvent) => void)[] = [];
 
   constructor(
     @Inject(SENSOR_REPOSITORY)
@@ -119,7 +118,7 @@ export class SensorRegistryService
     return this.active.get(id);
   }
 
-  list(): Array<{ id: string; driver: SensorDriverPort }> {
+  list(): { id: string; driver: SensorDriverPort }[] {
     return [...this.active.entries()].map(([id, driver]) => ({ id, driver }));
   }
 

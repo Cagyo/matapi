@@ -123,7 +123,7 @@ export class InMemorySensorRepository implements SensorRepositoryPort {
     return this.states.get(id);
   }
 
-  listArchived(): ReadonlyArray<ArchivedRow> {
+  listArchived(): readonly ArchivedRow[] {
     return this.archived;
   }
 }

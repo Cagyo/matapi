@@ -35,7 +35,7 @@ describe('MuteSensorUseCase', () => {
   it('mutes an active sensor for a user', async () => {
     const sensor = activeSensor('door-1', 'door_1');
     const query = makeQuery(
-      new Map([['door_1', { kind: 'active', sensor } as SensorLookup]]),
+      new Map([['door_1', { kind: 'active', sensor }]]),
     );
     const mutes = new InMemoryUserSensorMuteRepository();
     const useCase = new MuteSensorUseCase(query, mutes);
@@ -79,7 +79,7 @@ describe('MuteSensorUseCase', () => {
   it('throws SensorAlreadyMutedError when re-muting', async () => {
     const sensor = activeSensor('door-1', 'door_1');
     const query = makeQuery(
-      new Map([['door_1', { kind: 'active', sensor } as SensorLookup]]),
+      new Map([['door_1', { kind: 'active', sensor }]]),
     );
     const mutes = new InMemoryUserSensorMuteRepository();
     await mutes.mute(42, 'door-1');

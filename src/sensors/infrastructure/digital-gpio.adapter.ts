@@ -67,7 +67,7 @@ export class DigitalGpioAdapter implements SensorDriverPort {
     this.gpio = gpio;
     this.offline = false;
     this.logger.log(
-      `Digital "${config.name}" ready on pin ${this.digital.pin} (pull=${this.digital.pull}, activeLow=${this.digital.activeLow})`,
+      `Digital "${config.name}" ready on pin ${this.digital.pin.value} (pull=${this.digital.pull}, activeLow=${this.digital.activeLow})`,
     );
   }
 
@@ -160,12 +160,12 @@ export class DigitalGpioAdapter implements SensorDriverPort {
 
     const pull = raw?.pull;
     if (pull !== undefined && pull !== 'up' && pull !== 'down' && pull !== 'none') {
-      throw new DigitalConfigInvalidError(`invalid "pull": ${String(pull)}`);
+      throw new DigitalConfigInvalidError(`invalid "pull": ${JSON.stringify(pull)}`);
     }
     return {
       pin,
       activeLow: raw?.activeLow !== undefined ? Boolean(raw.activeLow) : true,
-      pull: (pull as PudMode | undefined) ?? 'up',
+      pull: (pull) ?? 'up',
     };
   }
 }

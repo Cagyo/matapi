@@ -35,7 +35,7 @@ describe('UnmuteSensorUseCase', () => {
   it('unmutes a previously muted sensor', async () => {
     const sensor = activeSensor('door-1', 'door_1');
     const query = makeQuery(
-      new Map([['door_1', { kind: 'active', sensor } as SensorLookup]]),
+      new Map([['door_1', { kind: 'active', sensor }]]),
     );
     const mutes = new InMemoryUserSensorMuteRepository();
     await mutes.mute(42, 'door-1');
@@ -59,7 +59,7 @@ describe('UnmuteSensorUseCase', () => {
   it('throws SensorNotMutedError when the sensor was not muted', async () => {
     const sensor = activeSensor('door-1', 'door_1');
     const query = makeQuery(
-      new Map([['door_1', { kind: 'active', sensor } as SensorLookup]]),
+      new Map([['door_1', { kind: 'active', sensor }]]),
     );
     const useCase = new UnmuteSensorUseCase(
       query,

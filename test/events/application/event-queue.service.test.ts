@@ -23,7 +23,9 @@ class RecordingEventRepository implements EventRepositoryPort {
     return [];
   }
 
-  async markSent(): Promise<void> {}
+  async markSent(): Promise<void> {
+    /* no-op fake */
+  }
 }
 
 function makeSensor(overrides: Partial<Sensor> = {}): Sensor {

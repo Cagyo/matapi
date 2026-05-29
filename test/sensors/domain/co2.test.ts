@@ -24,7 +24,7 @@ describe('co2 domain', () => {
   describe('isValidPpm', () => {
     it.each([0, 400, 5000])('accepts %p', (ppm) => expect(isValidPpm(ppm)).toBe(true));
     it.each([null, undefined, -1, 5001, NaN, Infinity])('rejects %p', (ppm) =>
-      expect(isValidPpm(ppm as number | null | undefined)).toBe(false),
+      expect(isValidPpm(ppm)).toBe(false),
     );
   });
 });

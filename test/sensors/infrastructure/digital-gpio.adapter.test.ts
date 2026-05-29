@@ -115,7 +115,7 @@ describe('DigitalGpioAdapter', () => {
 
   it('rejects missing pin with DigitalConfigInvalidError', async () => {
     await expect(
-      adapter.init({ ...baseConfig, config: {} as Record<string, unknown> }),
+      adapter.init({ ...baseConfig, config: {} }),
     ).rejects.toThrow(DigitalConfigInvalidError);
   });
 

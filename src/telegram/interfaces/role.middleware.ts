@@ -33,7 +33,7 @@ export class RoleMiddleware {
     const id = ctx.from?.id;
     if (!id) return;
     const user = await this.users.findByTelegramId(id);
-    if (!user || user.role !== 'admin') {
+    if (user?.role !== 'admin') {
       try {
         await ctx.reply(en.common.adminRequired);
       } catch (err) {

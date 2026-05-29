@@ -58,8 +58,8 @@ async function bootstrap(): Promise<void> {
   Logger.log(`Home Worker started (pid ${process.pid})`, 'Bootstrap');
 }
 
-bootstrap().catch((err) => {
-  Logger.error(err.stack ?? err.message, 'Bootstrap');
+bootstrap().catch((err: unknown) => {
+  Logger.error(err instanceof Error ? (err.stack ?? err.message) : String(err), 'Bootstrap');
   releaseLock();
   process.exit(1);
 });

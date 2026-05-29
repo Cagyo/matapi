@@ -27,7 +27,7 @@ function formatLine(event: QueuedEvent): string {
 }
 
 function describeEvent(event: QueuedEvent): string {
-  const payload = event.payload as Record<string, unknown> | null;
+  const payload = event.payload;
   if (event.type === 'state_change' && payload && 'newValue' in payload) {
     return String(payload.newValue);
   }
@@ -35,13 +35,13 @@ function describeEvent(event: QueuedEvent): string {
 }
 
 function sensorName(event: QueuedEvent): string | null {
-  const payload = event.payload as Record<string, unknown> | null;
+  const payload = event.payload;
   const value = payload?.name;
   return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
 function severityMarker(event: QueuedEvent): string {
-  const payload = event.payload as Record<string, unknown> | null;
+  const payload = event.payload;
   const severity = payload?.severity as Severity | undefined;
   if (severity === 'warning' || severity === 'critical') return ' ⚠️';
   return '';

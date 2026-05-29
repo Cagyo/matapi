@@ -280,14 +280,14 @@ export const en = {
       ];
       if (sensor.type === 'digital') {
         lines.push(
-          `GPIO: ${sensor.config.pin ?? '?'}`,
+          `GPIO: ${(sensor.config.pin as number | undefined) ?? '?'}`,
           `Active Low: ${sensor.config.activeLow === false ? 'No' : 'Yes'}`,
           `Pull: ${prettyPull(sensor.config.pull as string | undefined)}`,
         );
       } else if (sensor.type === 'uart') {
         lines.push(
-          `Port: ${sensor.config.port ?? '?'}`,
-          `Baud: ${sensor.config.baudRate ?? '?'}`,
+          `Port: ${(sensor.config.port as string | undefined) ?? '?'}`,
+          `Baud: ${(sensor.config.baudRate as number | undefined) ?? '?'}`,
           `Warn: ${(sensor.config.thresholds as { warning?: number } | undefined)?.warning ?? '?'} ppm`,
           `Crit: ${(sensor.config.thresholds as { critical?: number } | undefined)?.critical ?? '?'} ppm`,
         );

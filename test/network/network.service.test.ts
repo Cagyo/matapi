@@ -25,7 +25,7 @@ describe('NetworkService', () => {
     const fetchMock = vi.fn().mockResolvedValue({});
     delete process.env.HEARTBEAT_URL;
     process.env.HEARTBEAT_INTERVAL_MS = '100';
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    globalThis.fetch = fetchMock;
     vi.useFakeTimers();
 
     const service = new NetworkService();
@@ -39,7 +39,7 @@ describe('NetworkService', () => {
     const fetchMock = vi.fn().mockResolvedValue({});
     process.env.HEARTBEAT_URL = 'https://heartbeat.example/ping';
     process.env.HEARTBEAT_INTERVAL_MS = '100';
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    globalThis.fetch = fetchMock;
     vi.useFakeTimers();
 
     const service = new NetworkService();
@@ -61,7 +61,7 @@ describe('NetworkService', () => {
     const fetchMock = vi.fn().mockRejectedValue(new Error('offline'));
     process.env.HEARTBEAT_URL = 'https://heartbeat.example/ping';
     process.env.HEARTBEAT_INTERVAL_MS = '100';
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    globalThis.fetch = fetchMock;
     vi.useFakeTimers();
 
     const service = new NetworkService();

@@ -21,7 +21,7 @@ export function createTestDatabase(): TestDatabaseContext {
   return {
     sqlite,
     db,
-    appDb: db as AppDatabase,
+    appDb: db,
     close: () => sqlite.close(),
   };
 }

@@ -18,7 +18,7 @@ export class EventNotifierService implements NotifierPort {
   }
 
   async notify(message: NotificationMessage): Promise<void> {
-    if (!this.notifier || !this.notifier.isReady()) {
+    if (!this.notifier?.isReady()) {
       throw new Error('Notifier is not ready');
     }
 
