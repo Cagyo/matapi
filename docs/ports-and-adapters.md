@@ -45,7 +45,7 @@ Status legend: ✅ canonical · 🚧 in transition · 📝 planned
 | Port | Adapters | Status | Source |
 |---|---|---|---|
 | `EventRepositoryPort` (`EVENT_REPOSITORY`) | `DrizzleEventRepository`, `InMemoryEventRepository` (tests/dev) | ✅ canonical | [event-repository.port.ts](../src/events/domain/ports/event-repository.port.ts) |
-| `NotifierPort` (`NOTIFIER`) | `EventNotifierService` (delegating application adapter), `TelegramNotifierAdapter` | 🚧 — Telegram implements the sender, while bot gateway extraction is still pending. Now exposes both `notify` (broadcast, used by the offline drain) and `notifyUser` (per-recipient, used by spec 19 filtering). | [notifier.port.ts](../src/events/domain/ports/notifier.port.ts) |
+| `NotifierPort` (`NOTIFIER`) | `EventNotifierService` (delegating application adapter), `TelegramNotifierAdapter`, `ConsoleNotifierAdapter` (dev) | 🚧 — Telegram implements the sender, while bot gateway extraction is still pending. Exposes `notify` (broadcast, offline drain), `notifyUser` (per-recipient text, spec 19 filtering) and `notifyUserPhoto` (photo + caption, spec 19/20 motion events). | [notifier.port.ts](../src/events/domain/ports/notifier.port.ts) |
 | `RecipientDirectoryPort` (`RECIPIENT_DIRECTORY`) | `RecipientDirectoryService` (application seam; empty until registered), `TelegramRecipientDirectoryAdapter` (registered at bootstrap by `GrammyBotGateway`) | ✅ canonical — read model of who receives notifications (`listRecipients`, `isSensorMuted`). Runtime registration seam avoids the events→telegram import cycle, mirroring `NotifierPort`. | [recipient.port.ts](../src/events/domain/ports/recipient.port.ts) |
 | `NotificationOptions` (`NOTIFICATION_OPTIONS`) | factory in `event.module.ts` (timezone from `TIMEZONE` env, default `Europe/Kyiv`) | ✅ canonical — supplies the timezone used for quiet-hours evaluation in `NotificationService`. | [notification-options.port.ts](../src/events/application/ports/notification-options.port.ts) |
 | `SensorEventSourcePort` (`SENSOR_EVENT_SOURCE`) | `SensorRegistryService` (sensors application layer) | ✅ canonical — events imports the application service via the sensors module. | [sensor-event-source.port.ts](../src/events/domain/ports/sensor-event-source.port.ts) |
@@ -64,10 +64,13 @@ Status legend: ✅ canonical · 🚧 in transition · 📝 planned
 
 | Port | Adapters | Status | Source |
 |---|---|---|---|
-| `MotionControlPort` | `MotionDaemonAdapter` (systemctl) | 🚧 | [motion.service.ts](../src/camera/motion.service.ts) |
+| `MotionControlPort` (`MOTION_CONTROL`) | `MotionDaemonAdapter` (systemctl, incl. `restart()`), `StubMotionControlAdapter` (dev) | ✅ | [motion-daemon.adapter.ts](../src/camera/infrastructure/motion-daemon.adapter.ts) |
 | `CloudUploadPort` | `RcloneGdriveUploader`, `NoopUploader` (dev) | 🚧 | [upload.service.ts](../src/camera/upload.service.ts) |
-| `MediaRepositoryPort` | `DrizzleMotionEventRepository` | 📝 | [schema.ts](../src/database/schema.ts) |
-| `SnapshotPort` (`SNAPSHOT`) | `FfmpegSnapshotAdapter` (caches via TTL), `StubSnapshotAdapter` (dev) | 📝 — referenced by [specs/20-camera.md](specs/20-camera.md). Cache TTL lives inside the adapter. | — |
+| `MediaRepositoryPort` (`MEDIA_REPOSITORY`) | `DrizzleMediaRepository`, `InMemoryMediaRepository` (dev) | ✅ read model | [drizzle-media.repository.ts](../src/camera/infrastructure/drizzle-media.repository.ts) |
+| `MediaWriterPort` (`MEDIA_WRITER`) | `DrizzleMediaRepository`, `InMemoryMediaRepository` (dev) — same instance, aliased | ✅ write side for motion hooks (spec 20) | [media-writer.port.ts](../src/camera/domain/ports/media-writer.port.ts) |
+| `SnapshotPort` (`SNAPSHOT`) | `FfmpegSnapshotAdapter` (caches via TTL), `StubSnapshotAdapter` (dev) | ✅ | [snapshot.port.ts](../src/camera/domain/ports/snapshot.port.ts) |
+| `MotionAlertPort` (`MOTION_ALERT`) | `EventsMotionAlertAdapter` (delegates to events `NotificationService`), `StubMotionAlertAdapter` (dev) | ✅ motion notification (spec 19, 20) | [motion-alert.port.ts](../src/camera/domain/ports/motion-alert.port.ts) |
+| `AdminAlertPort` (`ADMIN_ALERT`) | `AdminAlertService` (register/clear seam) ← `TelegramAdminAlertAdapter` registered at bot bootstrap | ✅ daemon up/down alerts (spec 20) | [admin-alert.port.ts](../src/camera/domain/ports/admin-alert.port.ts) |
 
 ### System context
 
