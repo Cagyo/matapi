@@ -1,0 +1,28 @@
+import { Camera } from '../camera.entity';
+import { MotionEvent } from '../motion-event.entity';
+
+export const MEDIA_REPOSITORY = Symbol('MEDIA_REPOSITORY');
+
+/** Aggregate upload counters for `/gdrive status` (spec 15). */
+export interface UploadStats {
+  /** Events whose video has not yet reached Drive. */
+  pending: number;
+  /** Most recent successful upload, or `null` if none. */
+  lastUploadAt: Date | null;
+}
+
+/**
+ * Read model over `cameras` and `motion_events` (specs 14, 15). All times
+ * are JS `Date`; the adapter handles the epoch <-> Date conversion.
+ */
+export interface MediaRepositoryPort {
+  listCameras(): Promise<Camera[]>;
+  /** Case-insensitive name lookup; `null` when absent. */
+  findCameraByName(name: string): Promise<Camera | null>;
+  findEventById(id: number): Promise<MotionEvent | null>;
+  /** Events whose `startedAt` falls within the local-time day of `day`. */
+  listEventsOnDay(day: Date): Promise<MotionEvent[]>;
+  countEventsOnDay(day: Date): Promise<number>;
+  lastEvent(): Promise<MotionEvent | null>;
+  uploadStats(): Promise<UploadStats>;
+}
