@@ -13,13 +13,18 @@ import { EventNotifierService } from '../../events/application/event-notifier.se
 import { EventProcessorService } from '../../events/application/event-processor.service';
 import { ClaimAdminHandler } from '../interfaces/claim-admin.handler';
 import { ConfigHandler } from '../interfaces/config.handler';
+import { DemoteHandler } from '../interfaces/demote.handler';
 import { HealthHandler } from '../interfaces/health.handler';
 import { HelpHandler } from '../interfaces/help.handler';
+import { InviteHandler } from '../interfaces/invite.handler';
 import { LogsHandler } from '../interfaces/logs.handler';
 import { PingHandler } from '../interfaces/ping.handler';
+import { PromoteHandler } from '../interfaces/promote.handler';
+import { StartHandler } from '../interfaces/start.handler';
 import { StatusHandler } from '../interfaces/status.handler';
 import { TelegramHandler } from '../interfaces/telegram-handler';
 import { ConsoleNotifierAdapter } from './console-notifier.adapter';
+import { TelegramDirectMessenger } from './telegram-direct-messenger.adapter';
 import { TelegramNotifierAdapter } from './telegram-notifier.adapter';
 
 /** Token for the env-resolved bot mode. */
@@ -48,6 +53,7 @@ export class GrammyBotGateway implements OnApplicationBootstrap, OnModuleDestroy
     private readonly eventProcessor: EventProcessorService,
     private readonly telegramNotifier: TelegramNotifierAdapter,
     private readonly consoleNotifier: ConsoleNotifierAdapter,
+    private readonly directMessenger: TelegramDirectMessenger,
     private readonly claim: ClaimAdminHandler,
     private readonly status: StatusHandler,
     private readonly ping: PingHandler,
@@ -55,6 +61,10 @@ export class GrammyBotGateway implements OnApplicationBootstrap, OnModuleDestroy
     private readonly logs: LogsHandler,
     private readonly health: HealthHandler,
     private readonly config: ConfigHandler,
+    private readonly invite: InviteHandler,
+    private readonly start: StartHandler,
+    private readonly promote: PromoteHandler,
+    private readonly demote: DemoteHandler,
     @Optional() private readonly token: string | undefined = process.env.TELEGRAM_BOT_TOKEN,
   ) {}
 
@@ -113,6 +123,7 @@ export class GrammyBotGateway implements OnApplicationBootstrap, OnModuleDestroy
     });
 
     this.telegramNotifier.setBot(bot);
+    this.directMessenger.setBot(bot);
     this.eventNotifier.register(this.telegramNotifier);
 
     this.bot = bot;
@@ -128,12 +139,25 @@ export class GrammyBotGateway implements OnApplicationBootstrap, OnModuleDestroy
       await this.runner.stop();
     }
     this.telegramNotifier.clearBot();
+    this.directMessenger.clearBot();
     this.eventNotifier.clear();
     this.bot = undefined;
     this.runner = undefined;
   }
 
   private handlers(): TelegramHandler[] {
-    return [this.claim, this.status, this.ping, this.help, this.logs, this.health, this.config];
+    return [
+      this.claim,
+      this.start,
+      this.status,
+      this.ping,
+      this.help,
+      this.logs,
+      this.health,
+      this.config,
+      this.invite,
+      this.promote,
+      this.demote,
+    ];
   }
 }
