@@ -8,6 +8,7 @@ import {
 import {
   SensorLogRepositoryPort,
 } from '../domain/ports/sensor-log-repository.port';
+import { SimulatableSensorPort } from '../domain/ports/simulatable-sensor.port';
 
 /**
  * In-memory CO2 source for development. By default cycles through a benign
@@ -58,7 +59,7 @@ export class InMemoryCo2Source implements Co2Source {
 }
 
 @Injectable()
-export class MockUartCo2Adapter extends BaseUartCo2Adapter {
+export class MockUartCo2Adapter extends BaseUartCo2Adapter implements SimulatableSensorPort {
   constructor(logs: SensorLogRepositoryPort, source: InMemoryCo2Source = new InMemoryCo2Source()) {
     super(source, logs, MockUartCo2Adapter.name);
   }
@@ -76,5 +77,13 @@ export class MockUartCo2Adapter extends BaseUartCo2Adapter {
   /** Access to the underlying in-memory source (dev panel hook). */
   get inMemorySource(): InMemoryCo2Source {
     return this.source as InMemoryCo2Source;
+  }
+
+  /**
+   * `SimulatableSensorPort` — pin the CO2 source to a fixed ppm so the next
+   * read cycle reports it (dev simulator slider, spec 26).
+   */
+  simulate(value: number): void {
+    this.inMemorySource.setSequence([Math.round(value)]);
   }
 }

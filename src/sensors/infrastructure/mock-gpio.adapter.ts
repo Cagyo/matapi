@@ -1,15 +1,16 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { SensorDriverPort } from '../domain/ports/sensor-driver.port';
+import { SimulatableSensorPort } from '../domain/ports/simulatable-sensor.port';
 import { SensorConfig } from '../domain/sensor';
 import { SensorEvent } from '../domain/sensor-event';
 import { SensorReading } from '../domain/sensor-reading';
 
 /**
  * Mock GPIO adapter for development. State changes are triggered manually via
- * `simulateChange()` (e.g. from the future dev simulator HTTP panel).
+ * `simulateChange()` (e.g. from the dev simulator HTTP panel, spec 26).
  */
 @Injectable()
-export class MockGpioAdapter implements SensorDriverPort {
+export class MockGpioAdapter implements SensorDriverPort, SimulatableSensorPort {
   private readonly logger = new Logger(MockGpioAdapter.name);
   private config?: SensorConfig;
   private currentValue: 0 | 1 = 0;
@@ -52,5 +53,10 @@ export class MockGpioAdapter implements SensorDriverPort {
       newValue: value,
       timestamp: this.lastTimestamp,
     });
+  }
+
+  /** `SimulatableSensorPort` — any non-zero value is treated as HIGH. */
+  simulate(value: number): void {
+    this.simulateChange(value >= 1 ? 1 : 0);
   }
 }
