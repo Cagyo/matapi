@@ -23,8 +23,10 @@ yarn start:dev
 ```
 
 In dev mode (`NODE_ENV=development`), digital sensors use `MockGpioDriver`.
-A simulator panel will be exposed at `http://localhost:3001/dev/simulate`
-(scaffolded; UI to be added per [docs/26-dev.md](docs/26-dev.md)).
+A simulator panel is served at `http://localhost:3001/dev/simulate`
+(on the worker's loopback HTTP port) — toggle digital sensors ON/OFF and slide
+the CO₂ value to drive the same pipeline as real hardware. See
+[docs/specs/26-dev.md](docs/specs/26-dev.md).
 
 ## Production install
 
