@@ -45,7 +45,9 @@ Status legend: ✅ canonical · 🚧 in transition · 📝 planned
 | Port | Adapters | Status | Source |
 |---|---|---|---|
 | `EventRepositoryPort` (`EVENT_REPOSITORY`) | `DrizzleEventRepository`, `InMemoryEventRepository` (tests/dev) | ✅ canonical | [event-repository.port.ts](../src/events/domain/ports/event-repository.port.ts) |
-| `NotifierPort` (`NOTIFIER`) | `EventNotifierService` (delegating application adapter), `TelegramNotifierAdapter` | 🚧 — Telegram implements the sender, while bot gateway extraction is still pending. | [notifier.port.ts](../src/events/domain/ports/notifier.port.ts) |
+| `NotifierPort` (`NOTIFIER`) | `EventNotifierService` (delegating application adapter), `TelegramNotifierAdapter` | 🚧 — Telegram implements the sender, while bot gateway extraction is still pending. Now exposes both `notify` (broadcast, used by the offline drain) and `notifyUser` (per-recipient, used by spec 19 filtering). | [notifier.port.ts](../src/events/domain/ports/notifier.port.ts) |
+| `RecipientDirectoryPort` (`RECIPIENT_DIRECTORY`) | `RecipientDirectoryService` (application seam; empty until registered), `TelegramRecipientDirectoryAdapter` (registered at bootstrap by `GrammyBotGateway`) | ✅ canonical — read model of who receives notifications (`listRecipients`, `isSensorMuted`). Runtime registration seam avoids the events→telegram import cycle, mirroring `NotifierPort`. | [recipient.port.ts](../src/events/domain/ports/recipient.port.ts) |
+| `NotificationOptions` (`NOTIFICATION_OPTIONS`) | factory in `event.module.ts` (timezone from `TIMEZONE` env, default `Europe/Kyiv`) | ✅ canonical — supplies the timezone used for quiet-hours evaluation in `NotificationService`. | [notification-options.port.ts](../src/events/application/ports/notification-options.port.ts) |
 | `SensorEventSourcePort` (`SENSOR_EVENT_SOURCE`) | `SensorRegistryService` (sensors application layer) | ✅ canonical — events imports the application service via the sensors module. | [sensor-event-source.port.ts](../src/events/domain/ports/sensor-event-source.port.ts) |
 
 ### Telegram context
