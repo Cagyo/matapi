@@ -51,6 +51,30 @@ export interface LogLineView {
   timestamp: Date;
 }
 
+export interface MotionEventView {
+  id: number;
+  startedAt: Date | null;
+  durationSec: number | null;
+  hasSnapshot: boolean;
+}
+
+export interface CameraStatusView {
+  running: boolean;
+  lastEventAt: Date | null;
+  localStorageBytes: number | null;
+  eventsToday: number;
+}
+
+export interface GdriveStatusView {
+  usedBytes: number;
+  totalBytes: number;
+  lastUploadAt: Date | null;
+  pendingUploads: number;
+  failedUploads: number;
+  lastError: string | null;
+  cleanupMinAgeDays: number;
+}
+
 function gb(bytes: number | null): string {
   if (bytes === null) return 'N/A';
   return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
@@ -213,6 +237,7 @@ export const en = {
       '/mute <sensor> — mute a sensor for yourself',
       '/unmute <sensor> — re-enable a sensor for yourself',
       '/quiet_hours HH:MM-HH:MM | off — silence info notifications',
+      '/camera <snapshot|events|video|photo|status> — camera & motion',
       '/ping — check bot response',
       '/help — this message',
     ].join('\n'),
@@ -224,6 +249,7 @@ export const en = {
       '/mute <sensor> — mute a sensor for yourself',
       '/unmute <sensor> — re-enable a sensor for yourself',
       '/quiet_hours HH:MM-HH:MM | off — silence info notifications',
+      '/camera <snapshot|events|video|photo|status> — camera & motion',
       '/ping — check bot response',
       '/help — this message',
       '',
@@ -237,6 +263,8 @@ export const en = {
       '/update — pull and install latest version',
       '/rollback — revert to previous version',
       '/restart — restart the worker',
+      '/camera enable|disable — start/stop motion daemon',
+      '/gdrive status — Google Drive sync status',
       '/claim_admin — claim admin (first run only)',
     ].join('\n'),
   },
@@ -354,6 +382,76 @@ export const en = {
     restarting: '🔄 Restarting...',
     restartComplete: '✅ Restart complete. Uptime reset.',
     restartFailed: (reason: string) => `❌ Restart failed: ${reason}`,
+  },
+
+  camera: {
+    usage:
+      'Usage: /camera <snapshot|events [DD.MM.YYYY]|video <id>|photo <id>|enable|disable|status>',
+    snapshotCaption: (name: string, at: Date) => `📸 ${name} | ${fmtDate(at)}`,
+    eventsHeader: (day: Date) => `📹 Motion events for ${format(day, 'dd.MM.yyyy')}:`,
+    eventLine: (e: MotionEventView): string => {
+      const time = e.startedAt ? format(e.startedAt, 'HH:mm:ss') : '--:--:--';
+      const dur = e.durationSec !== null ? ` (${e.durationSec}s)` : '';
+      const snap = e.hasSnapshot ? ' 📷' : '';
+      return `#${e.id} — ${time}${dur}${snap}`;
+    },
+    eventsFooter: (count: number) =>
+      `${count} event${count === 1 ? '' : 's'}. Use /camera video <id> or /camera photo <id>`,
+    eventsNone: (day: Date) => `No motion events on ${format(day, 'dd.MM.yyyy')}`,
+    videoCaption: (id: number, at: Date | null, cam: string) =>
+      `📹 Event #${id} | ${fmtDate(at, true)} | ${cam}`,
+    photoCaption: (id: number, at: Date | null, cam: string) =>
+      `📸 Event #${id} | ${fmtDate(at, true)} | ${cam}`,
+    driveLinkFallback: (id: number, url: string | null) =>
+      url
+        ? `📹 Event #${id} is too large for Telegram.\nGoogle Drive: ${url}`
+        : `📹 Event #${id} is too large for Telegram and has no Drive link yet.`,
+    statusHeader: '📹 Camera Status',
+    statusBody: (v: CameraStatusView): string =>
+      [
+        `Motion: ${v.running ? '✅ Running' : '❌ Stopped'}`,
+        `Last event: ${fmtDate(v.lastEventAt)}`,
+        `Local storage: ${mb(v.localStorageBytes)}`,
+        `Events today: ${v.eventsToday}`,
+      ].join('\n'),
+    motionStarted: '✅ Motion daemon started.',
+    motionStopped: '✅ Motion daemon stopped.',
+    alreadyRunning: 'ℹ️ Motion daemon is already running.',
+    cameraNotFound: (name: string) => `❌ Camera '${name}' not found.`,
+    noCameras: '❌ No cameras configured.',
+    motionNotRunning: '❌ Motion daemon is not running. Admin: /camera enable',
+    snapshotFailed: '❌ Failed to capture snapshot.',
+    invalidDate: '❌ Invalid date. Use format: DD.MM.YYYY',
+    eventNotFound: (id: number) => `❌ Event #${id} not found.`,
+    videoUnavailable: '❌ Video file is no longer available.',
+    noSnapshotForEvent: (id: number) => `❌ No snapshot available for event #${id}.`,
+    snapshotFileGone: '❌ Snapshot file is no longer available.',
+    startFailed: (reason: string) => `❌ Failed to start motion daemon: ${reason}`,
+    stopFailed: (reason: string) => `❌ Failed to stop motion daemon: ${reason}`,
+    notInstalled: '❌ Motion is not installed. Re-run install with the camera feature.',
+  },
+
+  gdrive: {
+    usage: 'Usage: /gdrive status',
+    header: '☁️ Google Drive Status',
+    body: (v: GdriveStatusView): string => {
+      const lines = [
+        `📦 Used: ${gb(v.usedBytes)} / ${gb(v.totalBytes)} (${percent(v.usedBytes, v.totalBytes)})`,
+        `📤 Last upload: ${fmtDate(v.lastUploadAt)}`,
+        `📋 Pending uploads: ${v.pendingUploads} file${v.pendingUploads === 1 ? '' : 's'}`,
+        v.failedUploads > 0 && v.lastError
+          ? `⚠️ Failed uploads: ${v.failedUploads} (last error: ${v.lastError})`
+          : `⚠️ Failed uploads: ${v.failedUploads}`,
+        `🗑️ Auto-cleanup: active (min age: ${v.cleanupMinAgeDays} days)`,
+      ];
+      if (v.failedUploads >= 5) {
+        lines.push(`🚨 Sync unhealthy — ${v.failedUploads} consecutive failures`);
+      }
+      return lines.join('\n');
+    },
+    notInstalled: '❌ rclone is not installed.',
+    notConfigured: '❌ Google Drive is not configured. Run rclone config.',
+    statusFailed: (reason: string) => `❌ Failed to check Drive status: ${reason}`,
   },
 };
 
