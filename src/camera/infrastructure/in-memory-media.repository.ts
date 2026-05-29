@@ -110,6 +110,48 @@ export class InMemoryMediaRepository implements MediaRepositoryPort, MediaWriter
     ).length;
     return { pending, lastUploadAt: null };
   }
+
+  async findPendingUploads(): Promise<MotionEvent[]> {
+    return this.events
+      .filter(
+        (e) =>
+          !e.uploadedToGdrive &&
+          !e.localDeleted &&
+          e.videoPath !== null &&
+          e.endedAt !== null,
+      )
+      .sort((a, b) => (a.startedAt?.getTime() ?? 0) - (b.startedAt?.getTime() ?? 0));
+  }
+
+  async findUploadedNotDeleted(): Promise<MotionEvent[]> {
+    return this.events
+      .filter((e) => e.uploadedToGdrive && !e.localDeleted)
+      .sort((a, b) => (a.startedAt?.getTime() ?? 0) - (b.startedAt?.getTime() ?? 0));
+  }
+
+  async markUploaded(id: number, remotePath: string): Promise<void> {
+    const event = this.events.find((e) => e.id === id);
+    if (event) {
+      event.uploadedToGdrive = true;
+      event.gdriveFileId = remotePath;
+    }
+  }
+
+  async markLocalDeleted(id: number): Promise<void> {
+    const event = this.events.find((e) => e.id === id);
+    if (event) event.localDeleted = true;
+  }
+
+  async clearGdriveForEventsOlderThan(cutoff: Date): Promise<number> {
+    let changed = 0;
+    for (const e of this.events) {
+      if (e.startedAt && e.startedAt < cutoff && e.gdriveFileId !== null) {
+        e.gdriveFileId = null;
+        changed += 1;
+      }
+    }
+    return changed;
+  }
 }
 
 function dayBounds(day: Date): { start: Date; end: Date } {

@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, desc, eq, gte, isNull, lt } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, isNotNull, isNull, lt } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../database/database.module';
 import { cameras, motionEvents } from '../../database/schema';
 import { Camera } from '../domain/camera.entity';
@@ -138,6 +138,65 @@ export class DrizzleMediaRepository implements MediaRepositoryPort, MediaWriterP
       .filter((row) => row.videoPath !== null && row.localDeleted !== true).length;
 
     return { pending, lastUploadAt: null };
+  }
+
+  async findPendingUploads(): Promise<MotionEvent[]> {
+    return this.db
+      .select()
+      .from(motionEvents)
+      .where(
+        and(
+          eq(motionEvents.uploadedToGdrive, false),
+          eq(motionEvents.localDeleted, false),
+          isNotNull(motionEvents.videoPath),
+          isNotNull(motionEvents.endedAt),
+        ),
+      )
+      .orderBy(asc(motionEvents.startedAt))
+      .all()
+      .map((row) => this.toEvent(row));
+  }
+
+  async findUploadedNotDeleted(): Promise<MotionEvent[]> {
+    return this.db
+      .select()
+      .from(motionEvents)
+      .where(
+        and(
+          eq(motionEvents.uploadedToGdrive, true),
+          eq(motionEvents.localDeleted, false),
+        ),
+      )
+      .orderBy(asc(motionEvents.startedAt))
+      .all()
+      .map((row) => this.toEvent(row));
+  }
+
+  async markUploaded(id: number, remotePath: string): Promise<void> {
+    this.db
+      .update(motionEvents)
+      .set({ uploadedToGdrive: true, gdriveFileId: remotePath })
+      .where(eq(motionEvents.id, id))
+      .run();
+  }
+
+  async markLocalDeleted(id: number): Promise<void> {
+    this.db
+      .update(motionEvents)
+      .set({ localDeleted: true })
+      .where(eq(motionEvents.id, id))
+      .run();
+  }
+
+  async clearGdriveForEventsOlderThan(cutoff: Date): Promise<number> {
+    const result = this.db
+      .update(motionEvents)
+      .set({ gdriveFileId: null })
+      .where(
+        and(lt(motionEvents.startedAt, cutoff), isNotNull(motionEvents.gdriveFileId)),
+      )
+      .run();
+    return result.changes;
   }
 
   private toCamera(row: CameraRow): Camera {
