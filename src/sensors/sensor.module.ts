@@ -1,5 +1,10 @@
 import { Module } from '@nestjs/common';
+import { CLOCK } from '../events/domain/ports/clock.port';
+import { SystemClockAdapter } from '../events/infrastructure/system-clock.adapter';
+import { AddSensorUseCase } from './application/add-sensor.use-case';
+import { ModifySensorUseCase } from './application/modify-sensor.use-case';
 import { ReloadSensorsUseCase } from './application/reload-sensors.use-case';
+import { RemoveSensorUseCase } from './application/remove-sensor.use-case';
 import { SensorRegistryService } from './application/sensor-registry.service';
 import { SENSOR_HEALTH } from './application/ports/sensor-health.port';
 import {
@@ -22,7 +27,11 @@ import { SensorDriverFactoryProvider } from './infrastructure/sensor-driver.fact
   providers: [
     SensorRegistryService,
     ReloadSensorsUseCase,
+    AddSensorUseCase,
+    ModifySensorUseCase,
+    RemoveSensorUseCase,
     PigpioGateway,
+    { provide: CLOCK, useClass: SystemClockAdapter },
     { provide: SENSOR_REPOSITORY, useClass: DrizzleSensorRepository },
     { provide: SENSOR_LOG_REPOSITORY, useClass: DrizzleSensorLogRepository },
     { provide: SENSOR_QUERY, useClass: DrizzleSensorQuery },
@@ -40,6 +49,9 @@ import { SensorDriverFactoryProvider } from './infrastructure/sensor-driver.fact
   exports: [
     SensorRegistryService,
     ReloadSensorsUseCase,
+    AddSensorUseCase,
+    ModifySensorUseCase,
+    RemoveSensorUseCase,
     PigpioGateway,
     SENSOR_REPOSITORY,
     SENSOR_LOG_REPOSITORY,
