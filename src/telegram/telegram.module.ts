@@ -10,6 +10,7 @@ import { GrammyBotGateway, BOT_MODE, BotMode } from './infrastructure/grammy-bot
 import { InMemoryUserRepository } from './infrastructure/in-memory-user.repository';
 import { TelegramNotifierAdapter } from './infrastructure/telegram-notifier.adapter';
 import { ClaimAdminHandler } from './interfaces/claim-admin.handler';
+import { ConfigHandler } from './interfaces/config.handler';
 import { HealthHandler } from './interfaces/health.handler';
 import { HelpHandler } from './interfaces/help.handler';
 import { LogsHandler } from './interfaces/logs.handler';
@@ -53,6 +54,7 @@ const mode = resolveBotMode();
     HelpHandler,
     LogsHandler,
     HealthHandler,
+    ConfigHandler,
     TelegramNotifierAdapter,
     ConsoleNotifierAdapter,
     GrammyBotGateway,

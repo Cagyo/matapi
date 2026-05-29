@@ -1,5 +1,5 @@
 import { format } from 'date-fns';
-import { SensorType } from '../sensors/domain/sensor';
+import { SensorSeverity, SensorType } from '../sensors/domain/sensor';
 
 const DATE_FNS_FMT = 'dd.MM.yyyy HH:mm';
 const DATE_FNS_FMT_SECONDS = 'dd.MM.yyyy HH:mm:ss';
@@ -201,7 +201,118 @@ export const en = {
       '🔧 Admin Commands',
       '',
       '/health — system health',
+      '/config add|modify|remove — manage sensors',
       '/claim_admin — claim admin (first run only)',
     ].join('\n'),
   },
+  config: {
+    typeQuestion: 'What type of sensor?',
+    nameQuestion: 'Sensor name?',
+    pinQuestion: 'GPIO pin number?',
+    activeQuestion: 'Active high or low?',
+    pullQuestion: 'Pull resistor?',
+    severityQuestion: 'Severity level?',
+    portQuestion: 'Serial port path?',
+    baudQuestion: 'Baud rate?',
+    warningQuestion: 'Warning threshold (ppm)?',
+    criticalQuestion: 'Critical threshold (ppm)?',
+    removeConfirm: (name: string) =>
+      `Remove sensor "${name}"? This will archive it.`,
+    removed: (name: string) => `✅ Sensor "${name}" archived.`,
+    cancelled: 'Cancelled.',
+    addedDigital: (
+      name: string,
+      pin: number,
+      activeLow: boolean,
+      pull: 'up' | 'down' | 'none',
+      severity: SensorSeverity,
+    ) =>
+      `✅ Sensor "${name}" added (GPIO ${pin}, active ${
+        activeLow ? 'low' : 'high'
+      }, pull ${pull}, ${severity})`,
+    addedUart: (
+      name: string,
+      port: string,
+      baud: number,
+      warning: number,
+      critical: number,
+    ) =>
+      `✅ Sensor "${name}" added (UART ${port}, ${baud} baud, warn: ${warning}, crit: ${critical})`,
+    modifyHeader: (sensor: ConfigDisplay) => {
+      const lines = [
+        `Current config for "${sensor.name}":`,
+        `Type: ${prettyType(sensor.type)}`,
+      ];
+      if (sensor.type === 'digital') {
+        lines.push(
+          `GPIO: ${sensor.config.pin ?? '?'}`,
+          `Active Low: ${sensor.config.activeLow === false ? 'No' : 'Yes'}`,
+          `Pull: ${prettyPull(sensor.config.pull as string | undefined)}`,
+        );
+      } else if (sensor.type === 'uart') {
+        lines.push(
+          `Port: ${sensor.config.port ?? '?'}`,
+          `Baud: ${sensor.config.baudRate ?? '?'}`,
+          `Warn: ${(sensor.config.thresholds as { warning?: number } | undefined)?.warning ?? '?'} ppm`,
+          `Crit: ${(sensor.config.thresholds as { critical?: number } | undefined)?.critical ?? '?'} ppm`,
+        );
+      }
+      lines.push(
+        `Debounce: ${sensor.debounceMs}ms`,
+        `Severity: ${sensor.severity}`,
+        '',
+        'What to change?',
+      );
+      return lines.join('\n');
+    },
+    modifyMenuPrompt: 'What to change?',
+    modifiedField: (field: string) => `✅ ${field} updated. Anything else?`,
+    modifyDone: (name: string) => `✅ Sensor "${name}" updated.`,
+    nameTaken: (name: string) => `❌ Sensor '${name}' already exists`,
+    notFound: (name: string) => `❌ Sensor '${name}' not found`,
+    pinTaken: (pin: number, owner: string) =>
+      `❌ GPIO ${pin} already used by '${owner}'`,
+    invalidPin: '❌ GPIO pin must be 0-27',
+    invalidName:
+      '❌ Invalid sensor name. Use alphanumerics and underscores only.',
+    invalidNumber: '❌ Please enter a valid number.',
+    invalidPort: '❌ Serial port path must be a non-empty string.',
+    thresholdsOrder: '❌ Warning threshold must be less than critical.',
+    missingArg: (cmd: string) => `❌ Usage: /config ${cmd} <sensor_name>`,
+    addStarted: 'Starting /config add — reply with answers below.',
+  },
 };
+
+function prettyType(type: SensorType): string {
+  switch (type) {
+    case 'digital':
+      return 'Digital';
+    case 'uart':
+      return 'UART';
+    case 'mqtt':
+      return 'MQTT';
+    case 'camera':
+      return 'Camera';
+  }
+}
+
+function prettyPull(pull: string | undefined): string {
+  switch (pull) {
+    case 'up':
+      return 'Up';
+    case 'down':
+      return 'Down';
+    case 'none':
+      return 'None';
+    default:
+      return 'Up';
+  }
+}
+
+export interface ConfigDisplay {
+  name: string;
+  type: SensorType;
+  config: Record<string, unknown>;
+  debounceMs: number;
+  severity: SensorSeverity;
+}

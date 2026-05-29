@@ -12,6 +12,7 @@ import { Bot, GrammyError, HttpError } from 'grammy';
 import { EventNotifierService } from '../../events/application/event-notifier.service';
 import { EventProcessorService } from '../../events/application/event-processor.service';
 import { ClaimAdminHandler } from '../interfaces/claim-admin.handler';
+import { ConfigHandler } from '../interfaces/config.handler';
 import { HealthHandler } from '../interfaces/health.handler';
 import { HelpHandler } from '../interfaces/help.handler';
 import { LogsHandler } from '../interfaces/logs.handler';
@@ -53,6 +54,7 @@ export class GrammyBotGateway implements OnApplicationBootstrap, OnModuleDestroy
     private readonly help: HelpHandler,
     private readonly logs: LogsHandler,
     private readonly health: HealthHandler,
+    private readonly config: ConfigHandler,
     @Optional() private readonly token: string | undefined = process.env.TELEGRAM_BOT_TOKEN,
   ) {}
 
@@ -132,6 +134,6 @@ export class GrammyBotGateway implements OnApplicationBootstrap, OnModuleDestroy
   }
 
   private handlers(): TelegramHandler[] {
-    return [this.claim, this.status, this.ping, this.help, this.logs, this.health];
+    return [this.claim, this.status, this.ping, this.help, this.logs, this.health, this.config];
   }
 }
