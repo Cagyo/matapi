@@ -94,7 +94,7 @@ CO2_CRITICAL_PPM=1200
 # Motion / Camera
 MOTION_VIDEO_SEGMENT_SEC=30
 MOTION_LOCAL_DIR=/var/lib/motion
-MOTION_HOOK_PORT=3001            # loopback HTTP port for Motion daemon hooks
+MOTION_HOOK_PORT=4000            # loopback HTTP port for Motion daemon hooks
 MOTION_HEALTH_INTERVAL_MS=60000  # motion-daemon watchdog poll interval
 
 # Google Drive

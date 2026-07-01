@@ -127,7 +127,7 @@ export class MockGpioAdapter implements SensorDriverPort {
 }
 ```
 
-In dev mode, a small web panel at `http://localhost:3001/dev/simulate` (see 26-dev.md) calls `simulateChange()` to fire the same pipeline as real GPIO.
+In dev mode, a small web panel at `http://localhost:4000/dev/simulate` (see 26-dev.md) calls `simulateChange()` to fire the same pipeline as real GPIO.
 
 ## Error Handling
 

@@ -14,7 +14,7 @@
 
 ## Mock GPIO Simulator
 
-Web panel at `http://localhost:3001/dev/simulate`:
+Web panel at `http://localhost:4000/dev/simulate`:
 
 ```
 ┌─────────────────────────────────────┐

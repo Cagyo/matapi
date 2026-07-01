@@ -21,9 +21,9 @@ homeworker ALL=(ALL) NOPASSWD: /bin/systemctl start motion, /bin/systemctl stop 
 
 ```
 # motion.conf
-on_event_start curl -s http://localhost:3001/motion/event-start?camera=%t
-on_event_end curl -s http://localhost:3001/motion/event-end?camera=%t&file=%f
-on_picture_save curl -s http://localhost:3001/motion/snapshot?file=%f
+on_event_start curl -s http://localhost:4000/motion/event-start?camera=%t
+on_event_end curl -s http://localhost:4000/motion/event-end?camera=%t&file=%f
+on_picture_save curl -s http://localhost:4000/motion/snapshot?file=%f
 ```
 
 Worker exposes internal HTTP endpoints (not public) for these hooks.

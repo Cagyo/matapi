@@ -641,7 +641,7 @@ providers: [{
 }]
 ```
 
-In dev mode, a web panel at `http://localhost:3001/dev/simulate` provides toggle buttons for each sensor to trigger state changes manually.
+In dev mode, a web panel at `http://localhost:4000/dev/simulate` provides toggle buttons for each sensor to trigger state changes manually.
 
 ---
 
@@ -883,9 +883,9 @@ homeworker ALL=(ALL) NOPASSWD: /bin/systemctl start motion, /bin/systemctl stop 
 
 ```
 # motion.conf
-on_event_start curl -s http://localhost:3001/motion/event-start?camera=%t
-on_event_end curl -s http://localhost:3001/motion/event-end?camera=%t&file=%f
-on_picture_save curl -s http://localhost:3001/motion/snapshot?file=%f
+on_event_start curl -s http://localhost:4000/motion/event-start?camera=%t
+on_event_end curl -s http://localhost:4000/motion/event-end?camera=%t&file=%f
+on_picture_save curl -s http://localhost:4000/motion/snapshot?file=%f
 ```
 
 ### 11.2 File Structure
@@ -1479,7 +1479,7 @@ PM2 `max_restarts: 10` prevents infinite restart loops. `max_memory_restart: 512
 
 - Run on any machine (Mac/Linux/Windows with WSL)
 - `NODE_ENV=development` activates MockGpioDriver
-- Dev simulator web panel at `http://localhost:3001/dev/simulate` with toggle buttons per sensor
+- Dev simulator web panel at `http://localhost:4000/dev/simulate` with toggle buttons per sensor
 - SQLite runs natively (no Pi needed)
 - grammY connects to real Telegram API (use a separate test bot token)
 - Motion integration: skip or mock (no camera in dev)

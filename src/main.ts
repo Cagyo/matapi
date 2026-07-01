@@ -67,7 +67,7 @@ async function bootstrap(): Promise<void> {
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
 
-  const hookPort = Number(process.env.MOTION_HOOK_PORT) || 3001;
+  const hookPort = Number(process.env.MOTION_HOOK_PORT || process.env.PORT) || 4000;
   // Bind to loopback only — the Motion daemon runs on the same host and the
   // hook routes must never be reachable off-box (spec 20).
   await app.listen(hookPort, '127.0.0.1');
