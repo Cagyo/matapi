@@ -5,6 +5,7 @@ import {
   OnApplicationBootstrap,
   OnModuleDestroy,
   Optional,
+  forwardRef,
 } from '@nestjs/common';
 import { autoRetry } from '@grammyjs/auto-retry';
 import { run, RunnerHandle } from '@grammyjs/runner';
@@ -88,6 +89,7 @@ export class GrammyBotGateway
     private readonly ping: PingHandler,
     private readonly help: HelpHandler,
     private readonly logs: LogsHandler,
+    @Inject(forwardRef(() => HealthHandler))
     private readonly health: HealthHandler,
     private readonly config: ConfigHandler,
     private readonly invite: InviteHandler,

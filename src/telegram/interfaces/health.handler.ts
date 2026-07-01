@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, forwardRef } from '@nestjs/common';
 import { Composer, Context } from 'grammy';
 import { en } from '../../locales/en';
 import {
@@ -33,6 +33,7 @@ export class HealthHandler implements TelegramHandler {
     @Inject(SYSTEM_HEALTH) private readonly system: SystemHealthPort,
     @Inject(SENSOR_QUERY) private readonly sensorQuery: SensorQueryPort,
     @Inject(SENSOR_HEALTH) private readonly sensorHealth: SensorHealthPort,
+    @Inject(forwardRef(() => GrammyBotGateway))
     private readonly bot: GrammyBotGateway,
     private readonly guard: RoleMiddleware,
   ) {}

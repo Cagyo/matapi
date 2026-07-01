@@ -1,17 +1,15 @@
 import { Global, Module, Logger } from '@nestjs/common';
 import Database from 'better-sqlite3';
-import { drizzle, BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
+import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { resolve } from 'node:path';
 import { DatabaseLifecycle } from './database-lifecycle';
 import { DatabaseRecoveryState } from './database-recovery.state';
 import { openSqliteWithIntegrity } from './integrity';
 import * as schema from './schema';
+import { AppDatabase, DB, SQLITE } from './database.tokens';
 
-export type AppDatabase = BetterSQLite3Database<typeof schema>;
-
-export const DB = Symbol('DB');
-export const SQLITE = Symbol('SQLITE');
+export * from './database.tokens';
 
 @Global()
 @Module({

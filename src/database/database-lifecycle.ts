@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger, OnApplicationShutdown } from '@nestjs/common';
 import Database from 'better-sqlite3';
-import { SQLITE } from './database.module';
+import { SQLITE } from './database.tokens';
 
 /**
  * Closes the SQLite connection on shutdown (spec 23 — Graceful Shutdown step

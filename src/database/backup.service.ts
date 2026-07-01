@@ -2,7 +2,7 @@ import { Injectable, Inject, Logger } from '@nestjs/common';
 import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { SQLITE } from './database.module';
+import { SQLITE } from './database.tokens';
 
 /**
  * SQLite Online Backup wrapper. Scheduled via @nestjs/schedule in higher-level
