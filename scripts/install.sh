@@ -15,6 +15,7 @@ main() {
   setup_pigpiod
   setup_tmpfs
   prompt_config
+  install_selected_features
   run_migrations
   setup_pm2
   print_done
@@ -54,13 +55,16 @@ install_node() {
   curl -fsSL "https://deb.nodesource.com/setup_${NODE_VERSION}.x" | sudo -E bash -
   sudo apt-get install -y nodejs
   echo "Node.js installed: $(node -v)"
-  # Enable corepack so the yarn version pinned in package.json is used.
   sudo corepack enable
 }
 
 install_app() {
   if [ -d "$INSTALL_DIR/.git" ]; then
     echo "Updating existing installation..."
+    if command -v pm2 &>/dev/null; then
+      echo "Stopping running PM2 worker instances before update..."
+      sudo -u "$USER" pm2 stop ecosystem.config.js 2>/dev/null || true
+    fi
     cd "$INSTALL_DIR"
     sudo -u "$USER" git pull origin main
   else
@@ -88,16 +92,65 @@ setup_tmpfs() {
 }
 
 prompt_config() {
-  if [ -f "$INSTALL_DIR/.env" ]; then
-    echo ".env already exists, skipping config"
+  if [ -f "$INSTALL_DIR/.env" ] && [ -f "$INSTALL_DIR/features.json" ]; then
+    echo "Configuration exists (.env and features.json found), skipping setup wizard"
     return
   fi
-  read -rp "Telegram Bot Token: " BOT_TOKEN
-  cp "$INSTALL_DIR/.env.example" "$INSTALL_DIR/.env"
-  sed -i "s|^TELEGRAM_BOT_TOKEN=.*|TELEGRAM_BOT_TOKEN=$BOT_TOKEN|" "$INSTALL_DIR/.env"
-  sudo chown "$USER:$USER" "$INSTALL_DIR/.env"
-  sudo chmod 600 "$INSTALL_DIR/.env"
-  echo ".env configured"
+
+  # Clean up partial state
+  rm -f "$INSTALL_DIR/.env.tmp" "$INSTALL_DIR/features.json.tmp"
+  if [ -f "$INSTALL_DIR/.env" ]; then
+    echo "WARNING: Partial config detected (.env exists without features.json), restarting wizard"
+    rm -f "$INSTALL_DIR/.env"
+  fi
+
+  # Fix 1c: Filter hostname -I for IPv4 address
+  local IP
+  IP=$(hostname -I 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+  if [ -z "$IP" ]; then
+    IP="localhost"
+  fi
+
+  echo ""
+  echo "============================================"
+  echo "  Open http://$IP:3000 to continue setup"
+  echo "============================================"
+  echo ""
+
+  # Fix 6c: Explicit PATH and full env for node execution under homeworker user
+  if ! sudo -u "$USER" /usr/bin/env PATH="$PATH:/usr/bin:/usr/local/bin" node "$INSTALL_DIR/scripts/setup-wizard/index.js"; then
+    echo "ERROR: Setup wizard failed or timed out"
+    exit 1
+  fi
+
+  if [ ! -f "$INSTALL_DIR/.env" ]; then
+    echo "ERROR: Wizard exited without creating .env"
+    exit 1
+  fi
+}
+
+install_selected_features() {
+  local features_file="$INSTALL_DIR/features.json"
+  if [ ! -f "$features_file" ]; then
+    return
+  fi
+
+  local failed=""
+  local features
+  features=$(node -e "try { const f = require('$features_file'); (f.enabled || []).forEach(n => console.log(n)); } catch {}")
+
+  while IFS= read -r feature; do
+    if [ -z "$feature" ]; then continue; fi
+    echo "Installing dependencies for feature: $feature"
+    if ! "$INSTALL_DIR/scripts/install-feature.sh" "$feature"; then
+      echo "WARNING: Failed to install dependencies for $feature"
+      failed="$failed $feature"
+    fi
+  done <<< "$features"
+
+  if [ -n "$failed" ]; then
+    echo "⚠️ Failed feature installations:$failed (worker will start without these dependencies)"
+  fi
 }
 
 run_migrations() {

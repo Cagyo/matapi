@@ -1,0 +1,8 @@
+[
+  { "name": "digital", "description": "GPIO sensors" },
+  { "name": "uart", "description": "CO2 serial sensor" },
+  { "name": "zigbee", "description": "Zigbee2MQTT gateway" },
+  { "name": "motion", "description": "Motion camera" },
+  { "name": "neobox", "description": "Neobox intercom" },
+  { "name": "4g", "description": "4G failover" }
+]

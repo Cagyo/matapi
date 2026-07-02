@@ -4,14 +4,9 @@
  * this constant is the source of truth for which names are valid and the
  * human-readable description shown by `/feature list`.
  */
-export const FEATURE_CATALOG = [
-  { name: 'digital', description: 'GPIO sensors' },
-  { name: 'uart', description: 'CO2 serial sensor' },
-  { name: 'zigbee', description: 'Zigbee2MQTT gateway' },
-  { name: 'motion', description: 'Motion camera' },
-  { name: 'neobox', description: 'Neobox intercom' },
-  { name: '4g', description: '4G failover' },
-] as const;
+import catalog from '../../../config/feature-catalog.json';
+
+export const FEATURE_CATALOG = catalog as readonly { name: string; description: string }[];
 
 export type FeatureName = (typeof FEATURE_CATALOG)[number]['name'];
 

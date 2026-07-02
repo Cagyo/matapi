@@ -1,7 +1,7 @@
-# env
 .env
 .env.*
 !.env.example
+features.json
 
 # deps
 node_modules/

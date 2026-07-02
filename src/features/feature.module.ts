@@ -6,6 +6,7 @@ import { FEATURE_QUERY } from './domain/ports/feature-query.port';
 import { FEATURE_REPOSITORY } from './domain/ports/feature-repository.port';
 import { DrizzleFeatureQuery } from './infrastructure/drizzle-feature.query';
 import { DrizzleFeatureRepository } from './infrastructure/drizzle-feature.repository';
+import { FeatureSeederService } from './application/feature-seeder.service';
 
 /**
  * Features composition root. Exposes a read projection of the `features` table
@@ -20,6 +21,7 @@ import { DrizzleFeatureRepository } from './infrastructure/drizzle-feature.repos
     EnableFeatureUseCase,
     DisableFeatureUseCase,
     ListFeaturesUseCase,
+    FeatureSeederService,
   ],
   exports: [
     FEATURE_QUERY,
