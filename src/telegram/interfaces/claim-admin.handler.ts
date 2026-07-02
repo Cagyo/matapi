@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Composer, Context } from 'grammy';
 import { en } from '../../locales/en';
 import { ClaimAdminUseCase } from '../application/claim-admin.use-case';
+import { BotCommandsMenuService } from '../application/bot-commands-menu.service';
 import { AdminAlreadyClaimedError } from '../domain/errors/admin-already-claimed.error';
 import { TelegramHandler } from './telegram-handler';
 
@@ -9,7 +10,10 @@ import { TelegramHandler } from './telegram-handler';
 export class ClaimAdminHandler implements TelegramHandler {
   private readonly logger = new Logger(ClaimAdminHandler.name);
 
-  constructor(private readonly claimAdmin: ClaimAdminUseCase) {}
+  constructor(
+    private readonly claimAdmin: ClaimAdminUseCase,
+    private readonly botCommandsMenu: BotCommandsMenuService,
+  ) {}
 
   register(composer: Composer<Context>): void {
     composer.command('claim_admin', async (ctx: Context) => {
@@ -22,6 +26,7 @@ export class ClaimAdminHandler implements TelegramHandler {
           name: from.first_name || from.username || `user-${from.id}`,
         });
         await ctx.reply(en.claim.success);
+        await this.botCommandsMenu.updateUserMenu(from.id, 'admin');
       } catch (err) {
         if (err instanceof AdminAlreadyClaimedError) {
           await ctx.reply(en.claim.alreadyClaimed);

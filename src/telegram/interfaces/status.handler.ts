@@ -32,37 +32,41 @@ export class StatusHandler implements TelegramHandler {
   ) {}
 
   register(composer: Composer<Context>): void {
-    composer.command('status', this.guard.registered, async (ctx) => {
-      try {
-        const sensors = await this.sensors.listEnabled();
-        if (sensors.length === 0) {
-          await ctx.reply(en.status.none);
-          return;
-        }
+    composer.command('status', this.guard.registered, (ctx) =>
+      this.handleCommand(ctx),
+    );
+  }
 
-        const health = await this.health.probe();
-        const rows: StatusRow[] = sensors.map((sensor) => ({
-          name: sensor.name,
-          type: sensor.type,
-          lastValue: sensor.lastValue,
-          lastValueAt: sensor.lastValueAt,
-          online: health.get(sensor.id) ?? false,
-          thresholdLevel: thresholdLevelFor(sensor),
-        }));
-
-        const offlineCount = rows.filter((r) => !r.online).length;
-        const body = rows.map((r) => en.status.line(r)).join('\n');
-        const footer = en.status.footer(offlineCount === 0, offlineCount, new Date());
-
-        await ctx.reply(`${en.status.header}\n\n${body}\n\n${footer}`);
-      } catch (err) {
-        this.logger.error(
-          `/status failed: ${(err as Error).message}`,
-          (err as Error).stack,
-        );
-        await ctx.reply(en.status.readFailed);
+  async handleCommand(ctx: Context): Promise<void> {
+    try {
+      const sensors = await this.sensors.listEnabled();
+      if (sensors.length === 0) {
+        await ctx.reply(en.status.none);
+        return;
       }
-    });
+
+      const health = await this.health.probe();
+      const rows: StatusRow[] = sensors.map((sensor) => ({
+        name: sensor.name,
+        type: sensor.type,
+        lastValue: sensor.lastValue,
+        lastValueAt: sensor.lastValueAt,
+        online: health.get(sensor.id) ?? false,
+        thresholdLevel: thresholdLevelFor(sensor),
+      }));
+
+      const offlineCount = rows.filter((r) => !r.online).length;
+      const body = rows.map((r) => en.status.line(r)).join('\n');
+      const footer = en.status.footer(offlineCount === 0, offlineCount, new Date());
+
+      await ctx.reply(`${en.status.header}\n\n${body}\n\n${footer}`);
+    } catch (err) {
+      this.logger.error(
+        `/status failed: ${(err as Error).message}`,
+        (err as Error).stack,
+      );
+      await ctx.reply(en.status.readFailed);
+    }
   }
 }
 

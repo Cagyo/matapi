@@ -188,7 +188,7 @@ export class CameraHandler implements TelegramHandler {
     await ctx.reply(en.camera.motionStopped);
   }
 
-  private async handleStatus(ctx: Context): Promise<void> {
+  async handleStatus(ctx: Context): Promise<void> {
     const result = await this.status.execute();
     const message = `${en.camera.statusHeader}\n\n${en.camera.statusBody(result)}`;
     await ctx.reply(message);

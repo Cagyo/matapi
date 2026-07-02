@@ -9,6 +9,7 @@ import {
   DIRECT_MESSENGER,
   DirectMessengerPort,
 } from '../domain/ports/direct-messenger.port';
+import { BotCommandsMenuService } from '../application/bot-commands-menu.service';
 import { TelegramHandler } from './telegram-handler';
 
 @Injectable()
@@ -18,6 +19,7 @@ export class StartHandler implements TelegramHandler {
   constructor(
     private readonly registerUser: RegisterUserUseCase,
     @Inject(DIRECT_MESSENGER) private readonly dm: DirectMessengerPort,
+    private readonly botCommandsMenu: BotCommandsMenuService,
   ) {}
 
   register(composer: Composer<Context>): void {
@@ -38,6 +40,7 @@ export class StartHandler implements TelegramHandler {
           code,
         });
         await ctx.reply(en.users.welcomed(result.user.name));
+        await this.botCommandsMenu.updateUserMenu(from.id, result.user.role);
 
         if (result.invitedBy !== null) {
           await this.dm.send(

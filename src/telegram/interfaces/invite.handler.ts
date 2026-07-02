@@ -15,19 +15,23 @@ export class InviteHandler implements TelegramHandler {
   ) {}
 
   register(composer: Composer<Context>): void {
-    composer.command('invite', this.guard.adminOnly, async (ctx: Context) => {
-      const from = ctx.from;
-      if (!from) return;
-      try {
-        const invite = await this.invite.execute({ invitedBy: from.id });
-        await ctx.reply(en.users.inviteIssued(invite.code));
-      } catch (err) {
-        this.logger.error(
-          `/invite failed: ${(err as Error).message}`,
-          (err as Error).stack,
-        );
-        await ctx.reply(en.users.inviteFailed);
-      }
-    });
+    composer.command('invite', this.guard.adminOnly, (ctx: Context) =>
+      this.handleCommand(ctx),
+    );
+  }
+
+  async handleCommand(ctx: Context): Promise<void> {
+    const from = ctx.from;
+    if (!from) return;
+    try {
+      const invite = await this.invite.execute({ invitedBy: from.id });
+      await ctx.reply(en.users.inviteIssued(invite.code));
+    } catch (err) {
+      this.logger.error(
+        `/invite failed: ${(err as Error).message}`,
+        (err as Error).stack,
+      );
+      await ctx.reply(en.users.inviteFailed);
+    }
   }
 }

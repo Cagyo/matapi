@@ -21,11 +21,11 @@ export class ExportConfigHandler implements TelegramHandler {
 
   register(composer: Composer<Context>): void {
     composer.command('export_config', this.guard.adminOnly, (ctx) =>
-      this.onCommand(ctx),
+      this.handleCommand(ctx),
     );
   }
 
-  private async onCommand(ctx: Context): Promise<void> {
+  async handleCommand(ctx: Context): Promise<void> {
     try {
       const { yaml, filename } = await this.exportConfig.execute();
       const file = new InputFile(Buffer.from(yaml, 'utf8'), filename);

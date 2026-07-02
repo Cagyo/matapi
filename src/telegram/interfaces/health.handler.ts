@@ -39,41 +39,45 @@ export class HealthHandler implements TelegramHandler {
   ) {}
 
   register(composer: Composer<Context>): void {
-    composer.command('health', this.guard.adminOnly, async (ctx) => {
-      try {
-        const [snap, enabled, probe] = await Promise.all([
-          this.system.collect(),
-          this.sensorQuery.listEnabled(),
-          this.sensorHealth.probe(),
-        ]);
+    composer.command('health', this.guard.adminOnly, (ctx) =>
+      this.handleCommand(ctx),
+    );
+  }
 
-        const online = enabled.filter((s) => probe.get(s.id) === true).length;
-        const lastUpdate = this.bot.getLastUpdateAt();
-        const lastUpdateAgoSec = lastUpdate
-          ? Math.max(0, Math.round((Date.now() - lastUpdate.getTime()) / 1000))
-          : null;
+  async handleCommand(ctx: Context): Promise<void> {
+    try {
+      const [snap, enabled, probe] = await Promise.all([
+        this.system.collect(),
+        this.sensorQuery.listEnabled(),
+        this.sensorHealth.probe(),
+      ]);
 
-        const body = en.health.body({
-          diskUsedBytes: snap.diskUsedBytes,
-          diskTotalBytes: snap.diskTotalBytes,
-          cpuTempC: snap.cpuTempC,
-          memoryUsedBytes: snap.memoryUsedBytes,
-          memoryTotalBytes: snap.memoryTotalBytes,
-          uptimeSec: snap.uptimeSec,
-          dbSizeBytes: snap.dbSizeBytes,
-          botLastUpdateAgoSec: lastUpdateAgoSec,
-          sensorsOnline: online,
-          sensorsTotal: enabled.length,
-        });
+      const online = enabled.filter((s) => probe.get(s.id) === true).length;
+      const lastUpdate = this.bot.getLastUpdateAt();
+      const lastUpdateAgoSec = lastUpdate
+        ? Math.max(0, Math.round((Date.now() - lastUpdate.getTime()) / 1000))
+        : null;
 
-        await ctx.reply(`${en.health.header}\n\n${body}`);
-      } catch (err) {
-        this.logger.error(
-          `/health failed: ${(err as Error).message}`,
-          (err as Error).stack,
-        );
-        await ctx.reply(en.health.collectFailed);
-      }
-    });
+      const body = en.health.body({
+        diskUsedBytes: snap.diskUsedBytes,
+        diskTotalBytes: snap.diskTotalBytes,
+        cpuTempC: snap.cpuTempC,
+        memoryUsedBytes: snap.memoryUsedBytes,
+        memoryTotalBytes: snap.memoryTotalBytes,
+        uptimeSec: snap.uptimeSec,
+        dbSizeBytes: snap.dbSizeBytes,
+        botLastUpdateAgoSec: lastUpdateAgoSec,
+        sensorsOnline: online,
+        sensorsTotal: enabled.length,
+      });
+
+      await ctx.reply(`${en.health.header}\n\n${body}`);
+    } catch (err) {
+      this.logger.error(
+        `/health failed: ${(err as Error).message}`,
+        (err as Error).stack,
+      );
+      await ctx.reply(en.health.collectFailed);
+    }
   }
 }

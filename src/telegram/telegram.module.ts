@@ -66,6 +66,8 @@ import { StatusHandler } from './interfaces/status.handler';
 import { SystemUpdateHandler } from './interfaces/system-update.handler';
 import { UnmuteHandler } from './interfaces/unmute.handler';
 import { UpdateHandler } from './interfaces/update.handler';
+import { MenuHandler } from './interfaces/menu.handler';
+import { BotCommandsMenuService } from './application/bot-commands-menu.service';
 
 function resolveBotMode(): BotMode {
   if (process.env.BOT_MODE === 'mock') return 'mock';
@@ -134,6 +136,7 @@ const mode = resolveBotMode();
     RestartSystemUseCase,
     RestartConfirmationService,
     SystemOnlineNotifier,
+    BotCommandsMenuService,
     ExportConfigUseCase,
     { provide: CONFIG_CODEC, useClass: YamlConfigCodec },
     RoleMiddleware,
@@ -160,6 +163,7 @@ const mode = resolveBotMode();
     ExportConfigHandler,
     ImportConfigHandler,
     FeatureHandler,
+    MenuHandler,
     TelegramNotifierAdapter,
     ConsoleNotifierAdapter,
     TelegramAdminAlertAdapter,

@@ -9,6 +9,7 @@ import {
   DirectMessengerPort,
 } from '../domain/ports/direct-messenger.port';
 import { RoleMiddleware } from './role.middleware';
+import { BotCommandsMenuService } from '../application/bot-commands-menu.service';
 import { TelegramHandler } from './telegram-handler';
 
 @Injectable()
@@ -19,6 +20,7 @@ export class DemoteHandler implements TelegramHandler {
     private readonly demote: DemoteUserUseCase,
     private readonly guard: RoleMiddleware,
     @Inject(DIRECT_MESSENGER) private readonly dm: DirectMessengerPort,
+    private readonly botCommandsMenu: BotCommandsMenuService,
   ) {}
 
   register(composer: Composer<Context>): void {
@@ -33,6 +35,7 @@ export class DemoteHandler implements TelegramHandler {
       try {
         const demoted = await this.demote.execute(target);
         await ctx.reply(en.users.demoted(demoted.name));
+        await this.botCommandsMenu.updateUserMenu(demoted.telegramId, 'user');
         const adminName = from.first_name || from.username || `user-${from.id}`;
         await this.dm.send(
           demoted.telegramId,

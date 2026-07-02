@@ -28,23 +28,26 @@ export class GdriveHandler implements TelegramHandler {
         await ctx.reply(en.gdrive.usage);
         return;
       }
-
-      try {
-        const result = await this.status.execute();
-        const body = en.gdrive.body({
-          usedBytes: result.quota.usedBytes,
-          totalBytes: result.quota.totalBytes,
-          lastUploadAt: result.lastUploadAt,
-          pendingUploads: result.pendingUploads,
-          failedUploads: result.failedUploads,
-          lastError: result.lastError,
-          cleanupMinAgeDays: result.cleanupMinAgeDays,
-        });
-        await ctx.reply(`${en.gdrive.header}\n\n${body}`);
-      } catch (err) {
-        await this.handleError(ctx, err);
-      }
+      await this.handleStatus(ctx);
     });
+  }
+
+  async handleStatus(ctx: Context): Promise<void> {
+    try {
+      const result = await this.status.execute();
+      const body = en.gdrive.body({
+        usedBytes: result.quota.usedBytes,
+        totalBytes: result.quota.totalBytes,
+        lastUploadAt: result.lastUploadAt,
+        pendingUploads: result.pendingUploads,
+        failedUploads: result.failedUploads,
+        lastError: result.lastError,
+        cleanupMinAgeDays: result.cleanupMinAgeDays,
+      });
+      await ctx.reply(`${en.gdrive.header}\n\n${body}`);
+    } catch (err) {
+      await this.handleError(ctx, err);
+    }
   }
 
   private async handleError(ctx: Context, err: unknown): Promise<void> {

@@ -42,6 +42,8 @@ import { SystemUpdateHandler } from '../interfaces/system-update.handler';
 import { TelegramHandler } from '../interfaces/telegram-handler';
 import { UnmuteHandler } from '../interfaces/unmute.handler';
 import { UpdateHandler } from '../interfaces/update.handler';
+import { MenuHandler } from '../interfaces/menu.handler';
+import { BotCommandsMenuService } from '../application/bot-commands-menu.service';
 import { ConsoleNotifierAdapter } from './console-notifier.adapter';
 import { TelegramAdminAlertAdapter } from './telegram-admin-alert.adapter';
 import { TelegramDirectMessenger } from './telegram-direct-messenger.adapter';
@@ -108,6 +110,8 @@ export class GrammyBotGateway
     private readonly exportConfig: ExportConfigHandler,
     private readonly importConfig: ImportConfigHandler,
     private readonly feature: FeatureHandler,
+    private readonly menu: MenuHandler,
+    private readonly botCommandsMenu: BotCommandsMenuService,
     @Optional() private readonly token: string | undefined = process.env.TELEGRAM_BOT_TOKEN,
   ) {}
 
@@ -185,6 +189,7 @@ export class GrammyBotGateway
 
     this.telegramNotifier.setBot(bot);
     this.directMessenger.setBot(bot);
+    this.botCommandsMenu.setBot(bot);
     this.eventNotifier.register(this.telegramNotifier);
     this.recipientDirectory.register(this.telegramRecipients);
     this.adminAlertService.register(this.telegramAdminAlert);
@@ -192,6 +197,7 @@ export class GrammyBotGateway
     this.bot = bot;
     this.runner = run(bot);
     this.botRunnerRegistry.register(this);
+    void this.botCommandsMenu.syncAllUsers();
     this.logger.log('Telegram bot started');
 
     // Report the outcome of the previous restart (user /restart, OTA
@@ -223,6 +229,7 @@ export class GrammyBotGateway
     }
     this.telegramNotifier.clearBot();
     this.directMessenger.clearBot();
+    this.botCommandsMenu.clearBot();
     this.eventNotifier.clear();
     this.recipientDirectory.clear();
     this.adminAlertService.clear();
@@ -255,6 +262,7 @@ export class GrammyBotGateway
       this.exportConfig,
       this.importConfig,
       this.feature,
+      this.menu,
     ];
   }
 }

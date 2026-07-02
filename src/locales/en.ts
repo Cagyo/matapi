@@ -134,7 +134,156 @@ function fmtRowValue(row: StatusRow): string {
   }
 }
 
+export interface CommandDescriptor {
+  command: string;
+  description: string;
+  usage: string;
+  scope: 'user' | 'admin';
+}
+
+export const commands: CommandDescriptor[] = [
+  {
+    command: 'menu',
+    description: 'Interactive command dashboard',
+    usage: '/menu — interactive command dashboard',
+    scope: 'user',
+  },
+  {
+    command: 'status',
+    description: 'Sensor status',
+    usage: '/status — sensor status',
+    scope: 'user',
+  },
+  {
+    command: 'logs',
+    description: 'Sensor logs',
+    usage: '/logs <sensor> [count] — sensor logs',
+    scope: 'user',
+  },
+  {
+    command: 'mute',
+    description: 'Mute a sensor for yourself',
+    usage: '/mute <sensor> — mute a sensor for yourself',
+    scope: 'user',
+  },
+  {
+    command: 'unmute',
+    description: 'Re-enable a sensor for yourself',
+    usage: '/unmute <sensor> — re-enable a sensor for yourself',
+    scope: 'user',
+  },
+  {
+    command: 'quiet_hours',
+    description: 'Silence info notifications',
+    usage: '/quiet_hours HH:MM-HH:MM | off — silence info notifications',
+    scope: 'user',
+  },
+  {
+    command: 'camera',
+    description: 'Camera & motion',
+    usage: '/camera <snapshot|events|video|photo|status> — camera & motion',
+    scope: 'user',
+  },
+  {
+    command: 'ping',
+    description: 'Check bot response',
+    usage: '/ping — check bot response',
+    scope: 'user',
+  },
+  {
+    command: 'help',
+    description: 'Available commands & help',
+    usage: '/help — this message',
+    scope: 'user',
+  },
+  {
+    command: 'health',
+    description: 'System health',
+    usage: '/health — system health',
+    scope: 'admin',
+  },
+  {
+    command: 'config',
+    description: 'Manage sensors',
+    usage: '/config add|modify|remove — manage sensors',
+    scope: 'admin',
+  },
+  {
+    command: 'export_config',
+    description: 'Download current config as YAML',
+    usage: '/export_config — download current config as YAML',
+    scope: 'admin',
+  },
+  {
+    command: 'import_config',
+    description: 'Import sensors from a YAML file',
+    usage: '/import_config — import sensors from a YAML file',
+    scope: 'admin',
+  },
+  {
+    command: 'invite',
+    description: 'Issue a one-time invite code',
+    usage: '/invite — issue a one-time invite code',
+    scope: 'admin',
+  },
+  {
+    command: 'promote',
+    description: 'Promote a user to admin',
+    usage: '/promote <user> — promote a user to admin',
+    scope: 'admin',
+  },
+  {
+    command: 'demote',
+    description: 'Demote an admin to user',
+    usage: '/demote <user> — demote an admin to user',
+    scope: 'admin',
+  },
+  {
+    command: 'feature',
+    description: 'Toggle optional features',
+    usage: '/feature enable|disable|list — toggle optional features',
+    scope: 'admin',
+  },
+  {
+    command: 'update',
+    description: 'Pull and install latest version',
+    usage: '/update — pull and install latest version',
+    scope: 'admin',
+  },
+  {
+    command: 'rollback',
+    description: 'Revert to previous version',
+    usage: '/rollback — revert to previous version',
+    scope: 'admin',
+  },
+  {
+    command: 'system_update',
+    description: 'Update OS dependencies',
+    usage: '/system_update — update OS dependencies (apt, rclone, node)',
+    scope: 'admin',
+  },
+  {
+    command: 'restart',
+    description: 'Restart the worker',
+    usage: '/restart — restart the worker',
+    scope: 'admin',
+  },
+  {
+    command: 'gdrive',
+    description: 'Google Drive sync status',
+    usage: '/gdrive status — Google Drive sync status',
+    scope: 'admin',
+  },
+  {
+    command: 'claim_admin',
+    description: 'Claim admin (first run only)',
+    usage: '/claim_admin — claim admin (first run only)',
+    scope: 'admin',
+  },
+];
+
 export const en = {
+  commands,
   common: {
     adminRequired: '❌ Admin access required',
     error: (action: string, reason: string) => `❌ Failed to ${action}: ${reason}`,
@@ -268,45 +417,48 @@ export const en = {
     user: [
       '📖 Available Commands',
       '',
-      '/status — sensor status',
-      '/logs <sensor> [count] — sensor logs',
-      '/mute <sensor> — mute a sensor for yourself',
-      '/unmute <sensor> — re-enable a sensor for yourself',
-      '/quiet_hours HH:MM-HH:MM | off — silence info notifications',
-      '/camera <snapshot|events|video|photo|status> — camera & motion',
-      '/ping — check bot response',
-      '/help — this message',
+      ...commands.filter((c) => c.scope === 'user').map((c) => c.usage),
     ].join('\n'),
     admin: [
       '📖 Available Commands',
       '',
-      '/status — sensor status',
-      '/logs <sensor> [count] — sensor logs',
-      '/mute <sensor> — mute a sensor for yourself',
-      '/unmute <sensor> — re-enable a sensor for yourself',
-      '/quiet_hours HH:MM-HH:MM | off — silence info notifications',
-      '/camera <snapshot|events|video|photo|status> — camera & motion',
-      '/ping — check bot response',
-      '/help — this message',
+      ...commands.filter((c) => c.scope === 'user').map((c) => c.usage),
       '',
       '🔧 Admin Commands',
       '',
-      '/health — system health',
-      '/config add|modify|remove — manage sensors',
-      '/export_config — download current config as YAML',
-      '/import_config — import sensors from a YAML file',
-      '/invite — issue a one-time invite code',
-      '/promote <user> — promote a user to admin',
-      '/demote <user> — demote an admin to user',
-      '/feature enable|disable|list — toggle optional features',
-      '/update — pull and install latest version',
-      '/rollback — revert to previous version',
-      '/system_update — update OS dependencies (apt, rclone, node)',
-      '/restart — restart the worker',
-      '/camera enable|disable — start/stop motion daemon',
-      '/gdrive status — Google Drive sync status',
-      '/claim_admin — claim admin (first run only)',
+      ...commands.filter((c) => c.scope === 'admin').map((c) => c.usage),
     ].join('\n'),
+  },
+  menu: {
+    title: '🎛️ Interactive Command Dashboard\nSelect a category or command below:',
+    categories: {
+      sensors: '📊 Status & Sensors',
+      media: '📷 Camera & Media',
+      admin: '⚙️ Admin & Config',
+      lifecycle: '🔄 Lifecycle & Maintenance',
+    },
+    buttons: {
+      status: '📊 Status',
+      health: '🏥 Health',
+      logs: '📋 Logs',
+      mute: '🔇 Mute',
+      cameraStatus: '📷 Camera Status',
+      gdrive: '☁️ Drive Sync',
+      config: '⚙️ Config',
+      invite: '🔗 Invite',
+      feature: '🔧 Features',
+      update: '⬆️ Update',
+      restart: '🔄 Restart',
+      exportConfig: '📤 Export Config',
+    },
+    usage: {
+      logs: 'Usage: /logs <sensor> [count] — e.g. /logs front_door 20',
+      mute: 'Usage: /mute <sensor> — e.g. /mute front_door',
+      config: 'Usage: /config add|modify|remove — manage sensors',
+      feature: 'Usage: /feature list|enable|disable [name] — toggle optional features',
+      update: 'To update the worker to the latest version, send /update',
+      restart: 'To restart the worker, send /restart',
+    },
   },
   config: {
     typeQuestion: 'What type of sensor?',
