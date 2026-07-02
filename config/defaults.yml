@@ -13,10 +13,18 @@ sensor_defaults:
   mqtt:
     debounce_ms: 5000
     severity: info
+    broker_url: mqtt://localhost:1883
+    qos: 0
+    format: auto
+    reconnect_ms: 5000
   camera:
     debounce_ms: 0
     severity: info
     snapshot_cache_ttl_ms: 2000
+    storage_path: $HOME/.matapi/camera
+    resolution:
+      width: 1280
+      height: 720
 
 notifications:
   quiet_hours_default: null

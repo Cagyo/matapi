@@ -23,6 +23,7 @@ import { DrizzleSensorLogRepository } from './infrastructure/drizzle-sensor-log.
 import { DrizzleSensorQuery } from './infrastructure/drizzle-sensor.query';
 import { DrizzleSensorRepository } from './infrastructure/drizzle-sensor.repository';
 import { PigpioGateway } from './infrastructure/pigpio.gateway';
+import { MqttConnectionPool } from './infrastructure/mqtt-connection.pool';
 import { SensorDriverFactoryProvider } from './infrastructure/sensor-driver.factory';
 import { DevSimulatorController } from './interfaces/dev-simulator.controller';
 
@@ -42,6 +43,7 @@ const devControllers =
     ImportSensorsUseCase,
     SimulateSensorUseCase,
     PigpioGateway,
+    MqttConnectionPool,
     { provide: CLOCK, useClass: SystemClockAdapter },
     { provide: SENSOR_REPOSITORY, useClass: DrizzleSensorRepository },
     { provide: SENSOR_LOG_REPOSITORY, useClass: DrizzleSensorLogRepository },
@@ -52,9 +54,10 @@ const devControllers =
       useFactory: (
         pigpio: PigpioGateway,
         sensorLogs: SensorLogRepositoryPort,
+        mqttPool: MqttConnectionPool,
       ): SensorDriverFactory =>
-        SensorDriverFactoryProvider.build({ pigpio, sensorLogs }),
-      inject: [PigpioGateway, SENSOR_LOG_REPOSITORY],
+        SensorDriverFactoryProvider.build({ pigpio, sensorLogs, mqttPool }),
+      inject: [PigpioGateway, SENSOR_LOG_REPOSITORY, MqttConnectionPool],
     },
   ],
   exports: [
@@ -66,6 +69,7 @@ const devControllers =
     ImportSensorsUseCase,
     SimulateSensorUseCase,
     PigpioGateway,
+    MqttConnectionPool,
     SENSOR_REPOSITORY,
     SENSOR_LOG_REPOSITORY,
     SENSOR_QUERY,

@@ -4,8 +4,11 @@ import { SensorLogRepositoryPort } from '../domain/ports/sensor-log-repository.p
 import { SensorType } from '../domain/sensor';
 import { CameraSensorAdapter } from './camera-sensor.adapter';
 import { DigitalGpioAdapter } from './digital-gpio.adapter';
+import { MockCameraAdapter } from './mock-camera.adapter';
 import { MockGpioAdapter } from './mock-gpio.adapter';
+import { MockMqttAdapter } from './mock-mqtt.adapter';
 import { MockUartCo2Adapter } from './mock-uart-co2.adapter';
+import { MqttConnectionPool } from './mqtt-connection.pool';
 import { MqttSensorAdapter } from './mqtt-sensor.adapter';
 import { PigpioGateway } from './pigpio.gateway';
 import { UartCo2Adapter } from './uart-co2.adapter';
@@ -13,19 +16,18 @@ import { UartCo2Adapter } from './uart-co2.adapter';
 export interface SensorDriverFactoryDeps {
   pigpio: PigpioGateway;
   sensorLogs: SensorLogRepositoryPort;
+  mqttPool: MqttConnectionPool;
 }
 
 /**
  * Build the env-driven driver factory.
  *
- * - NODE_ENV=development  →  digital/uart use in-memory mocks.
- * - otherwise              →  digital uses pigpiod, uart uses serialport.
- *
- * MQTT and camera adapters are still phase-1 stubs in both modes.
+ * - NODE_ENV=development  →  digital/uart/mqtt/camera use in-memory mocks.
+ * - otherwise              →  production hardware and protocol adapters.
  */
 @Injectable()
 export class SensorDriverFactoryProvider {
-  static build({ pigpio, sensorLogs }: SensorDriverFactoryDeps): SensorDriverFactory {
+  static build({ pigpio, sensorLogs, mqttPool }: SensorDriverFactoryDeps): SensorDriverFactory {
     const isDev = process.env.NODE_ENV === 'development';
     return (type: SensorType): SensorDriverPort => {
       switch (type) {
@@ -36,9 +38,9 @@ export class SensorDriverFactoryProvider {
             ? new MockUartCo2Adapter(sensorLogs)
             : new UartCo2Adapter(sensorLogs);
         case 'mqtt':
-          return new MqttSensorAdapter();
+          return isDev ? new MockMqttAdapter() : new MqttSensorAdapter(mqttPool);
         case 'camera':
-          return new CameraSensorAdapter();
+          return isDev ? new MockCameraAdapter() : new CameraSensorAdapter();
       }
     };
   }
