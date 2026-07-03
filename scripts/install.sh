@@ -32,16 +32,48 @@ create_user() {
     sudo useradd -r -m -s /bin/bash "$USER"
     echo "Created system user: $USER"
   fi
+  if [ ! -d "/home/$USER" ]; then
+    sudo mkdir -p "/home/$USER"
+    sudo chown "$USER:$USER" "/home/$USER"
+  fi
 }
 
 install_system_deps() {
   echo "Installing system dependencies..."
   sudo apt-get update
   sudo apt-get install -y \
-    git sqlite3 libsqlite3-dev \
-    pigpio python3-pigpio \
+    git sqlite3 libsqlite3-dev build-essential python3 python3-setuptools \
     ffmpeg \
     usb-modeswitch
+
+  install_pigpio
+}
+
+install_pigpio() {
+  if command -v pigpiod &>/dev/null; then
+    echo "pigpiod already installed: $(command -v pigpiod)"
+    return 0
+  fi
+
+  if apt-cache show pigpio &>/dev/null 2>&1; then
+    echo "Installing pigpio from apt repository..."
+    if sudo apt-get install -y pigpio python3-pigpio; then
+      return 0
+    fi
+  fi
+
+  echo "Package pigpio not found in apt repository. Building pigpio from source..."
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  if git clone --depth 1 https://github.com/joan2937/pigpio.git "$tmpdir/pigpio" && \
+     make -C "$tmpdir/pigpio" && \
+     sudo make -C "$tmpdir/pigpio" install; then
+    sudo ldconfig || true
+    echo "pigpiod built and installed from source successfully."
+  else
+    echo "WARNING: Failed to install pigpio from source. Continuing installation without pigpiod."
+  fi
+  rm -rf "$tmpdir" || true
 }
 
 install_node() {
@@ -78,6 +110,33 @@ install_app() {
 }
 
 setup_pigpiod() {
+  if ! command -v pigpiod &>/dev/null; then
+    echo "WARNING: pigpiod binary not found, skipping daemon setup"
+    return 0
+  fi
+
+  if ! systemctl list-unit-files pigpiod.service &>/dev/null 2>&1; then
+    if [ ! -f /lib/systemd/system/pigpiod.service ] && [ ! -f /etc/systemd/system/pigpiod.service ]; then
+      local pigpiod_bin
+      pigpiod_bin=$(command -v pigpiod)
+      echo "Creating systemd service unit for pigpiod ($pigpiod_bin)..."
+      cat <<EOF | sudo tee /etc/systemd/system/pigpiod.service >/dev/null
+[Unit]
+Description=Daemon required to control GPIO pins via pigpio
+Documentation=man:pigpiod(8)
+
+[Service]
+ExecStart=${pigpiod_bin} -l
+ExecStop=/bin/systemctl kill -s SIGKILL pigpiod
+Type=forking
+
+[Install]
+WantedBy=multi-user.target
+EOF
+      sudo systemctl daemon-reload || true
+    fi
+  fi
+
   sudo systemctl enable pigpiod || true
   sudo systemctl start pigpiod || true
   echo "pigpiod enabled and started"

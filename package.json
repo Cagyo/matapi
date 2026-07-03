@@ -20,7 +20,8 @@
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio",
     "dev:seed": "ts-node scripts/dev-seed.ts",
-    "dev:reset": "ts-node scripts/dev-seed.ts --reset"
+    "dev:reset": "ts-node scripts/dev-seed.ts --reset",
+    "dev:deploy": "bash scripts/dev-deploy.sh"
   },
   "dependencies": {
     "@grammyjs/auto-retry": "^2.0.2",

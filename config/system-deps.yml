@@ -11,8 +11,11 @@ core:
     - git
     - sqlite3
     - libsqlite3-dev
-    - pigpio
-    - python3-pigpio
+    - build-essential
+    - python3
+    - python3-setuptools
+    # pigpio & python3-pigpio are installed via apt when available (Debian < 12),
+    # or built from source automatically by scripts/install.sh on modern OSes.
 
 motion:
   apt:
