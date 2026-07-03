@@ -14,6 +14,20 @@ import { Pm2ProcessRestarter } from './infrastructure/pm2-process-restarter.adap
 import { ShellOtaAdapter } from './infrastructure/shell-ota.adapter';
 import { ShellSystemDepsAdapter } from './infrastructure/shell-system-deps.adapter';
 import { TimedatectlClockSyncAdapter } from './infrastructure/timedatectl-clock-sync.adapter';
+import { StubOtaAdapter } from './infrastructure/stub-ota.adapter';
+import { StubProcessRestarter } from './infrastructure/stub-process-restarter.adapter';
+import { StubSystemDepsAdapter } from './infrastructure/stub-system-deps.adapter';
+
+export type SystemMode = 'real' | 'stub';
+
+export function resolveSystemMode(): SystemMode {
+  if (process.env.SYSTEM_MODE === 'stub') return 'stub';
+  if (process.env.SYSTEM_MODE === 'real') return 'real';
+  if (process.env.NODE_ENV === 'test' || process.env.NODE_ENV === 'development') return 'stub';
+  return process.platform === 'linux' ? 'real' : 'stub';
+}
+
+const mode = resolveSystemMode();
 
 /**
  * Cross-cutting `system/` context — exposes OS-level metrics, OTA control,
@@ -28,9 +42,18 @@ import { TimedatectlClockSyncAdapter } from './infrastructure/timedatectl-clock-
     GracefulShutdownService,
     { provide: SYSTEM_HEALTH, useClass: OsSystemHealthAdapter },
     { provide: SYSTEM_META_REPOSITORY, useClass: DrizzleSystemMetaRepository },
-    { provide: PROCESS_RESTARTER, useClass: Pm2ProcessRestarter },
-    { provide: OTA, useClass: ShellOtaAdapter },
-    { provide: SYSTEM_DEPS, useClass: ShellSystemDepsAdapter },
+    {
+      provide: PROCESS_RESTARTER,
+      useClass: mode === 'stub' ? StubProcessRestarter : Pm2ProcessRestarter,
+    },
+    {
+      provide: OTA,
+      useClass: mode === 'stub' ? StubOtaAdapter : ShellOtaAdapter,
+    },
+    {
+      provide: SYSTEM_DEPS,
+      useClass: mode === 'stub' ? StubSystemDepsAdapter : ShellSystemDepsAdapter,
+    },
     { provide: CLOCK_SYNC_PROBE, useClass: TimedatectlClockSyncAdapter },
   ],
   exports: [
@@ -45,3 +68,4 @@ import { TimedatectlClockSyncAdapter } from './infrastructure/timedatectl-clock-
   ],
 })
 export class SystemModule {}
+

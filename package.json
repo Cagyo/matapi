@@ -18,7 +18,9 @@
     "test:watch": "vitest",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
-    "db:studio": "drizzle-kit studio"
+    "db:studio": "drizzle-kit studio",
+    "dev:seed": "ts-node scripts/dev-seed.ts",
+    "dev:reset": "ts-node scripts/dev-seed.ts --reset"
   },
   "dependencies": {
     "@grammyjs/auto-retry": "^2.0.2",

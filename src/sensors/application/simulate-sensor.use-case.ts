@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable, forwardRef } from '@nestjs/common';
 import { SensorNotSimulatableError } from '../domain/errors/sensor-not-simulatable.error';
 import { isSimulatable } from '../domain/ports/simulatable-sensor.port';
 import { SensorRegistryService } from './sensor-registry.service';
@@ -13,7 +13,10 @@ import { SensorRegistryService } from './sensor-registry.service';
  */
 @Injectable()
 export class SimulateSensorUseCase {
-  constructor(private readonly registry: SensorRegistryService) {}
+  constructor(
+    @Inject(forwardRef(() => SensorRegistryService))
+    private readonly registry: SensorRegistryService,
+  ) {}
 
   execute(sensorId: string, value: number): void {
     const driver = this.registry.getDriver(sensorId);

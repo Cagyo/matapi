@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable, forwardRef } from '@nestjs/common';
 import { SensorRegistryService } from './sensor-registry.service';
 
 /**
@@ -8,7 +8,10 @@ import { SensorRegistryService } from './sensor-registry.service';
  */
 @Injectable()
 export class ReloadSensorsUseCase {
-  constructor(private readonly registry: SensorRegistryService) {}
+  constructor(
+    @Inject(forwardRef(() => SensorRegistryService))
+    private readonly registry: SensorRegistryService,
+  ) {}
 
   execute(): Promise<void> {
     return this.registry.reload();

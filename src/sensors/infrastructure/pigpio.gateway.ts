@@ -52,6 +52,13 @@ export class PigpioGateway implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   async onModuleInit(): Promise<void> {
+    if (
+      process.env.NODE_ENV === 'development' ||
+      process.env.NODE_ENV === 'test' ||
+      process.env.PIGPIOD_ENABLED === 'false'
+    ) {
+      return;
+    }
     // Best-effort: don't crash app if pigpiod is down on Pi-less dev hosts.
     try {
       await this.connect();

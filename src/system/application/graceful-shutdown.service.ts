@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, forwardRef } from '@nestjs/common';
 import { EventNotifierService } from '../../events/application/event-notifier.service';
 import { EventProcessorService } from '../../events/application/event-processor.service';
 import { en } from '../../locales/en';
@@ -22,7 +22,9 @@ export class GracefulShutdownService {
   private readonly logger = new Logger(GracefulShutdownService.name);
 
   constructor(
+    @Inject(forwardRef(() => EventProcessorService))
     private readonly eventProcessor: EventProcessorService,
+    @Inject(forwardRef(() => EventNotifierService))
     private readonly notifier: EventNotifierService,
   ) {}
 

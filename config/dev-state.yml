@@ -1,0 +1,88 @@
+# Development State Configuration
+# Representative initial state for full local simulation in dev mode (spec 26).
+
+sensors:
+  - id: door_1
+    name: door_1
+    type: digital
+    config:
+      pin: 17
+    debounceMs: 1000
+    severity: info
+    enabled: true
+  - id: door_2
+    name: door_2
+    type: digital
+    config:
+      pin: 27
+    debounceMs: 1000
+    severity: info
+    enabled: true
+  - id: water_1
+    name: water_1
+    type: digital
+    config:
+      pin: 22
+    debounceMs: 1000
+    severity: warning
+    enabled: true
+  - id: water_2
+    name: water_2
+    type: digital
+    config:
+      pin: 23
+    debounceMs: 1000
+    severity: critical
+    enabled: true
+  - id: window_1
+    name: window_1
+    type: digital
+    config:
+      pin: 24
+    debounceMs: 1000
+    severity: info
+    enabled: true
+  - id: co2
+    name: co2
+    type: uart
+    config:
+      port: /dev/mock_co2
+      thresholds:
+        warning: 800
+        critical: 1200
+    debounceMs: 0
+    severity: warning
+    enabled: true
+
+cameras:
+  - id: front_door_cam
+    name: front_door_cam
+    type: rtsp
+    config:
+      url: rtsp://localhost:8554/live
+    enabled: true
+
+users:
+  - telegramId: 532677740
+    name: Dev Admin
+    role: admin
+    muted: false
+
+invite_codes:
+  - code: DEV-ADMIN-CODE
+    role: admin
+    createdBy: 532677740
+  - code: DEV-USER-CODE
+    role: user
+    createdBy: 532677740
+
+features:
+  - name: camera_snapshots
+    enabled: true
+    installed: true
+  - name: motion_recording
+    enabled: true
+    installed: true
+  - name: gdrive_upload
+    enabled: true
+    installed: true

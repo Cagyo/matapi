@@ -48,7 +48,7 @@ export class NotificationService {
     @Inject(EVENT_REPOSITORY) private readonly events: EventRepositoryPort,
     @Inject(CLOCK) private readonly clock: ClockPort,
     @Inject(NOTIFICATION_OPTIONS) private readonly options: NotificationOptions,
-    private readonly debounce: DebounceService,
+    @Inject(DebounceService) private readonly debounce: DebounceService,
   ) {}
 
   async process(event: QueuedEvent): Promise<void> {

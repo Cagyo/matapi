@@ -8,6 +8,7 @@ import {
   Logger,
   Post,
 } from '@nestjs/common';
+import { DevSeederService, SeedResult } from '../application/dev-seeder.service';
 import { SimulateSensorUseCase } from '../application/simulate-sensor.use-case';
 import { SensorNotSimulatableError } from '../domain/errors/sensor-not-simulatable.error';
 import {
@@ -40,6 +41,7 @@ export class DevSimulatorController {
   constructor(
     private readonly simulate: SimulateSensorUseCase,
     @Inject(SENSOR_QUERY) private readonly sensors: SensorQueryPort,
+    private readonly devSeeder: DevSeederService,
   ) {}
 
   @Get()
@@ -47,6 +49,11 @@ export class DevSimulatorController {
   async panel(): Promise<string> {
     const sensors = await this.sensors.listEnabled();
     return renderPanel(sensors);
+  }
+
+  @Post('seed')
+  async seed(@Body() body: { reset?: unknown }): Promise<SeedResult> {
+    return this.devSeeder.seed({ reset: body?.reset !== false });
   }
 
   @Post('digital')
@@ -149,8 +156,9 @@ function renderPanel(sensors: Sensor[]): string {
   <style>
     :root { color-scheme: dark; }
     body { font-family: system-ui, sans-serif; background: #11151a; color: #e6e6e6; margin: 0; padding: 2rem; }
+    .header { display: flex; justify-content: space-between; align-items: flex-start; max-width: 640px; margin-bottom: 1.5rem; }
     h1 { font-size: 1.25rem; margin: 0 0 .25rem; }
-    p.sub { color: #8a949e; margin: 0 0 1.5rem; }
+    p.sub { color: #8a949e; margin: 0; }
     .panel { max-width: 640px; border: 1px solid #2a313a; border-radius: 12px; overflow: hidden; }
     .row { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 1rem; padding: .85rem 1.1rem; border-bottom: 1px solid #20262e; }
     .row:last-child { border-bottom: 0; }
@@ -158,18 +166,37 @@ function renderPanel(sensors: Sensor[]): string {
     .state { min-width: 5.5rem; text-align: center; font-variant-numeric: tabular-nums; color: #9ad; }
     button { cursor: pointer; border: 0; border-radius: 8px; padding: .4rem .9rem; font-weight: 600; background: #2e7d32; color: #fff; }
     button.off { background: #5a3030; }
+    button.reset { background: #1976d2; }
     button:hover { filter: brightness(1.15); }
     input[type=range] { width: 220px; }
     .empty { color: #8a949e; padding: 1.5rem 1.1rem; }
   </style>
 </head>
 <body>
-  <h1>Home Worker — Dev Simulator</h1>
-  <p class="sub">NODE_ENV=development · drives the same pipeline as real GPIO/UART.</p>
+  <div class="header">
+    <div>
+      <h1>Home Worker — Dev Simulator</h1>
+      <p class="sub">NODE_ENV=development · drives the same pipeline as real GPIO/UART.</p>
+    </div>
+    <button class="reset" onclick="resetDevState()">Reset Dev State</button>
+  </div>
   <div class="panel">
     ${rows || empty}
   </div>
   <script>
+    async function resetDevState() {
+      try {
+        const res = await fetch('/dev/simulate/seed', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ reset: true }),
+        });
+        if (!res.ok) throw new Error(await res.text());
+        location.reload();
+      } catch (err) {
+        alert('Failed to reset dev state: ' + err.message);
+      }
+    }
     async function post(path, payload, id, render) {
       const el = document.getElementById('state-' + id);
       try {

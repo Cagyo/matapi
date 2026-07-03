@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { CLOCK } from '../events/domain/ports/clock.port';
 import { SystemClockAdapter } from '../events/infrastructure/system-clock.adapter';
 import { AddSensorUseCase } from './application/add-sensor.use-case';
+import { DevSeederService } from './application/dev-seeder.service';
 import { ImportSensorsUseCase } from './application/import-sensors.use-case';
 import { ModifySensorUseCase } from './application/modify-sensor.use-case';
 import { ReloadSensorsUseCase } from './application/reload-sensors.use-case';
@@ -35,6 +36,7 @@ const devControllers =
 @Module({
   controllers: devControllers,
   providers: [
+    DevSeederService,
     SensorRegistryService,
     ReloadSensorsUseCase,
     AddSensorUseCase,
@@ -61,6 +63,7 @@ const devControllers =
     },
   ],
   exports: [
+    DevSeederService,
     SensorRegistryService,
     ReloadSensorsUseCase,
     AddSensorUseCase,

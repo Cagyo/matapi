@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleInit, forwardRef } from '@nestjs/common';
 import { EventQueueService } from './event-queue.service';
 import { DrainEventQueueUseCase } from './drain-event-queue.use-case';
 import { NotificationService } from './notification.service';
@@ -15,8 +15,11 @@ export class EventProcessorService implements OnModuleInit {
   private inFlight = 0;
 
   constructor(
+    @Inject(forwardRef(() => EventQueueService))
     private readonly eventQueue: EventQueueService,
+    @Inject(forwardRef(() => DrainEventQueueUseCase))
     private readonly drainEventQueue: DrainEventQueueUseCase,
+    @Inject(forwardRef(() => NotificationService))
     private readonly notifications: NotificationService,
     @Inject(SENSOR_EVENT_SOURCE)
     private readonly sensorEvents: SensorEventSourcePort,

@@ -72,6 +72,7 @@ import { BotCommandsMenuService } from './application/bot-commands-menu.service'
 function resolveBotMode(): BotMode {
   if (process.env.BOT_MODE === 'mock') return 'mock';
   if (process.env.BOT_MODE === 'real') return 'real';
+  if (process.env.NODE_ENV === 'test') return 'mock';
   return process.env.TELEGRAM_BOT_TOKEN ? 'real' : 'mock';
 }
 

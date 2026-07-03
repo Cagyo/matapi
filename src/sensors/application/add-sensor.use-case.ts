@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, forwardRef } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { CLOCK, ClockPort } from '../../events/domain/ports/clock.port';
 import { DigitalConfigInvalidError } from '../domain/errors/digital-config-invalid.error';
@@ -40,6 +40,7 @@ export class AddSensorUseCase {
     @Inject(SENSOR_REPOSITORY)
     private readonly repository: SensorRepositoryPort,
     @Inject(CLOCK) private readonly clock: ClockPort,
+    @Inject(forwardRef(() => ReloadSensorsUseCase))
     private readonly reload: ReloadSensorsUseCase,
   ) {}
 

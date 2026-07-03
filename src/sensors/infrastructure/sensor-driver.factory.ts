@@ -28,7 +28,10 @@ export interface SensorDriverFactoryDeps {
 @Injectable()
 export class SensorDriverFactoryProvider {
   static build({ pigpio, sensorLogs, mqttPool }: SensorDriverFactoryDeps): SensorDriverFactory {
-    const isDev = process.env.NODE_ENV === 'development';
+    const isDev =
+      process.env.NODE_ENV === 'development' ||
+      process.env.NODE_ENV === 'test' ||
+      process.env.SENSOR_MODE === 'stub';
     return (type: SensorType): SensorDriverPort => {
       switch (type) {
         case 'digital':

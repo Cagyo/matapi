@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, forwardRef } from '@nestjs/common';
 import { CLOCK, ClockPort } from '../../events/domain/ports/clock.port';
 import { DigitalConfigInvalidError } from '../domain/errors/digital-config-invalid.error';
 import {
@@ -39,6 +39,7 @@ export class ModifySensorUseCase {
     @Inject(SENSOR_REPOSITORY)
     private readonly repository: SensorRepositoryPort,
     @Inject(CLOCK) private readonly clock: ClockPort,
+    @Inject(forwardRef(() => ReloadSensorsUseCase))
     private readonly reload: ReloadSensorsUseCase,
   ) {}
 

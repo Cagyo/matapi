@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, forwardRef } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { CLOCK, ClockPort } from '../../events/domain/ports/clock.port';
 import { ImportedSensor } from '../domain/config-import';
@@ -47,6 +47,7 @@ export class ImportSensorsUseCase {
     @Inject(SENSOR_REPOSITORY)
     private readonly repository: SensorRepositoryPort,
     @Inject(CLOCK) private readonly clock: ClockPort,
+    @Inject(forwardRef(() => ReloadSensorsUseCase))
     private readonly reload: ReloadSensorsUseCase,
   ) {}
 

@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, forwardRef } from '@nestjs/common';
 import { CLOCK, ClockPort } from '../../events/domain/ports/clock.port';
 import { SensorNotFoundError } from '../domain/errors/sensor-not-found.error';
 import {
@@ -18,6 +18,7 @@ export class RemoveSensorUseCase {
     @Inject(SENSOR_REPOSITORY)
     private readonly repository: SensorRepositoryPort,
     @Inject(CLOCK) private readonly clock: ClockPort,
+    @Inject(forwardRef(() => ReloadSensorsUseCase))
     private readonly reload: ReloadSensorsUseCase,
   ) {}
 
