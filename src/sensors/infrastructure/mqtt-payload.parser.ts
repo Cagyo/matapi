@@ -70,7 +70,7 @@ function parseTasmota(json: Record<string, unknown>, valueKey?: string): ParsedP
       const metricKeys = ['Power', 'Temperature', 'Humidity', 'Total'];
       for (const mKey of metricKeys) {
         if (mKey in sub && isPrimitive(sub[mKey])) {
-          return { value: sub[mKey] as string | number | boolean, raw: json };
+          return { value: sub[mKey], raw: json };
         }
       }
     }
@@ -87,7 +87,7 @@ function parseGenericJson(json: Record<string, unknown>, valueKey?: string): Par
   }
   for (const key of Object.keys(json)) {
     if (isPrimitive(json[key])) {
-      return { value: json[key] as string | number | boolean, raw: json };
+      return { value: json[key], raw: json };
     }
   }
   return null;
@@ -104,14 +104,14 @@ export function parseMqttPayload(
 
     if (rawString.startsWith('{') || rawString.startsWith('[')) {
       try {
-        const parsed = JSON.parse(rawString);
+        const parsed: unknown = JSON.parse(rawString);
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
           const jsonObj = parsed as Record<string, unknown>;
           if (format === 'zigbee2mqtt') {
-            return parseZigbee2Mqtt(jsonObj, valueKey) || parseGenericJson(jsonObj, valueKey);
+            return parseZigbee2Mqtt(jsonObj, valueKey) ?? parseGenericJson(jsonObj, valueKey);
           }
           if (format === 'tasmota') {
-            return parseTasmota(jsonObj, valueKey) || parseGenericJson(jsonObj, valueKey);
+            return parseTasmota(jsonObj, valueKey) ?? parseGenericJson(jsonObj, valueKey);
           }
           if (format === 'json') {
             return parseGenericJson(jsonObj, valueKey);

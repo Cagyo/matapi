@@ -16,7 +16,9 @@ describe('FeatureSeederService', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockDb = {
-      transaction: vi.fn((fn) => fn(mockTx)),
+      transaction: vi.fn((fn: (tx: typeof mockTx) => void) => {
+        fn(mockTx);
+      }),
     };
     mockQuery = {
       listAll: vi.fn(),

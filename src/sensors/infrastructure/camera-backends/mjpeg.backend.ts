@@ -8,7 +8,7 @@ export class MjpegBackend implements CameraBackendPort {
     const headers: Record<string, string> = {};
     if (this.config.username) {
       const auth = Buffer.from(`${this.config.username}:${this.config.password || ''}`).toString('base64');
-      headers['Authorization'] = `Basic ${auth}`;
+      headers.Authorization = `Basic ${auth}`;
     }
     return headers;
   }
@@ -42,7 +42,7 @@ export class MjpegBackend implements CameraBackendPort {
       let buffer = Buffer.alloc(0);
 
       while (true) {
-        const { done, value } = await reader.read();
+        const { done, value } = (await reader.read()) as { done: boolean; value?: Uint8Array };
         if (done) break;
         if (value) {
           buffer = Buffer.concat([buffer, Buffer.from(value)]);
@@ -51,7 +51,7 @@ export class MjpegBackend implements CameraBackendPort {
             const eoi = buffer.indexOf(Buffer.from([0xff, 0xd9]), soi + 2);
             if (eoi !== -1) {
               const frame = buffer.subarray(soi, eoi + 2);
-              reader.cancel();
+              void reader.cancel();
               return Buffer.from(frame);
             }
           }
@@ -79,7 +79,7 @@ export class MjpegBackend implements CameraBackendPort {
       });
       if (res.body) {
         const reader = res.body.getReader();
-        reader.cancel();
+        void reader.cancel();
       }
       return res.ok;
     } catch {

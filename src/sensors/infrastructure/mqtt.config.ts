@@ -36,7 +36,7 @@ export function parseMqttConfig(raw: Record<string, unknown> | null | undefined)
   } else if (process.env.MQTT_DEFAULT_QOS) {
     const envQos = Number(process.env.MQTT_DEFAULT_QOS);
     if (envQos === 0 || envQos === 1 || envQos === 2) {
-      qos = envQos as 0 | 1 | 2;
+      qos = envQos;
     }
   }
 

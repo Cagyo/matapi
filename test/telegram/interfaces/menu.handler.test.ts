@@ -26,8 +26,8 @@ describe('MenuHandler', () => {
       exportConfigHandler,
     );
 
-    const commandCallbacks: Record<string, Function> = {};
-    const callbackQueryCallbacks: Array<{ regex: RegExp; fn: Function }> = [];
+    const commandCallbacks: Record<string, (...args: any[]) => any> = {};
+    const callbackQueryCallbacks: { regex: RegExp; fn: (...args: any[]) => any }[] = [];
 
     const composer = {
       command: vi.fn((cmd, middleware, fn) => {
@@ -79,7 +79,7 @@ describe('MenuHandler', () => {
       reply,
     };
 
-    await commandCallbacks['menu'](ctx);
+    await commandCallbacks.menu(ctx);
     expect(reply).toHaveBeenCalledTimes(1);
     expect(reply.mock.calls[0][0]).toContain('Interactive Command Dashboard');
     expect(reply.mock.calls[0][1]).toHaveProperty('reply_markup');

@@ -37,8 +37,13 @@ export class FeatureSeederService implements OnModuleInit {
       try {
         // Fix 5b: Try/catch around JSON.parse to prevent corrupt features.json from crashing NestJS boot
         const raw = readFileSync(featuresFile, 'utf-8');
-        const parsed = JSON.parse(raw);
-        enabledList = Array.isArray(parsed.enabled) ? parsed.enabled : [];
+        const parsed: unknown = JSON.parse(raw);
+        if (typeof parsed === 'object' && parsed !== null && 'enabled' in parsed) {
+          const { enabled } = parsed as { enabled?: unknown };
+          if (Array.isArray(enabled)) {
+            enabledList = enabled.filter((item: unknown): item is string => typeof item === 'string');
+          }
+        }
       } catch (err) {
         this.logger.warn(`Invalid features.json — skipping feature seeding: ${(err as Error).message}`);
         return;

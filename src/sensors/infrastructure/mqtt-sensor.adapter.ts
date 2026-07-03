@@ -45,7 +45,7 @@ export class MqttSensorAdapter implements SensorDriverPort {
         if (err) {
           this.logger.warn(`Failed to subscribe to ${this.mqttConfig!.topic}: ${err.message}`);
           this.subscriptionFailed = true;
-        } else if (granted && granted.some((g) => g.qos === 128)) {
+        } else if (granted?.some((g) => g.qos === 128)) {
           this.logger.warn(`Broker rejected subscription to ${this.mqttConfig!.topic} (SUBACK 0x80)`);
           this.subscriptionFailed = true;
         } else {
@@ -60,7 +60,7 @@ export class MqttSensorAdapter implements SensorDriverPort {
     };
 
     this.messageHandler = (topic: string, payload: Buffer) => {
-      if (!this.mqttConfig || topic !== this.mqttConfig.topic) return;
+      if (topic !== this.mqttConfig?.topic) return;
 
       // Enforce 64 KB max payload (EC-6)
       if (payload.length > 65536) {

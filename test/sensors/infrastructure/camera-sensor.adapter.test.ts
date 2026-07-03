@@ -10,11 +10,11 @@ import { SensorEvent } from '../../../src/sensors/domain/sensor-event';
 vi.mock('child_process', () => ({
   execFile: vi.fn((cmd, args, opts, cb) => {
     const callback = typeof opts === 'function' ? opts : cb;
-    if (args && args.includes('-version')) {
+    if (args?.includes('-version')) {
       callback(null, { stdout: Buffer.from('ffmpeg version 6.0'), stderr: Buffer.from('') });
-    } else if (args && args.includes('image2pipe')) {
+    } else if (args?.includes('image2pipe')) {
       callback(null, { stdout: Buffer.from('mock_jpeg_buffer'), stderr: Buffer.from('') });
-    } else if (args && args.includes('-f') && args.includes('null')) {
+    } else if (args?.includes('-f') && args.includes('null')) {
       callback(null, { stdout: Buffer.from('probe ok'), stderr: Buffer.from('') });
     } else {
       callback(null, { stdout: Buffer.from('ok'), stderr: Buffer.from('') });
