@@ -92,16 +92,47 @@ install_node() {
 
 install_app() {
   if [ -d "$INSTALL_DIR/.git" ]; then
-    echo "Updating existing installation..."
+    echo "Updating existing git installation..."
     if command -v pm2 &>/dev/null; then
       echo "Stopping running PM2 worker instances before update..."
       sudo -u "$USER" pm2 stop ecosystem.config.js 2>/dev/null || true
     fi
     cd "$INSTALL_DIR"
     sudo -u "$USER" git pull origin main
+  elif [ -f "$INSTALL_DIR/package.json" ]; then
+    echo "Using existing manually deployed application files in $INSTALL_DIR (non-git installation)..."
+    if command -v pm2 &>/dev/null; then
+      echo "Stopping running PM2 worker instances before update..."
+      sudo -u "$USER" pm2 stop ecosystem.config.js 2>/dev/null || true
+    fi
+    sudo chown -R "$USER:$USER" "$INSTALL_DIR"
   else
-    echo "Cloning repository..."
-    sudo git clone "$REPO" "$INSTALL_DIR"
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local local_app_root
+    local_app_root="$(cd "$script_dir/.." && pwd)"
+    local local_source="${REPO#file://}"
+
+    if [ -d "$local_source" ]; then
+      if [ -d "$local_source/.git" ]; then
+        echo "Cloning local git repository from $local_source..."
+        sudo git clone "$local_source" "$INSTALL_DIR"
+      elif [ -f "$local_source/package.json" ]; then
+        echo "Copying manually deployed application files from $local_source to $INSTALL_DIR..."
+        sudo mkdir -p "$INSTALL_DIR"
+        sudo cp -a "$local_source/." "$INSTALL_DIR/"
+      else
+        echo "ERROR: Local source directory '$local_source' does not contain package.json or a git repository."
+        exit 1
+      fi
+    elif [ "$REPO" = "https://github.com/CHANGE_ME/home-worker.git" ] && [ -f "$local_app_root/package.json" ] && [ "$local_app_root" != "$INSTALL_DIR" ]; then
+      echo "Copying local application files from $local_app_root to $INSTALL_DIR..."
+      sudo mkdir -p "$INSTALL_DIR"
+      sudo cp -a "$local_app_root/." "$INSTALL_DIR/"
+    else
+      echo "Cloning repository from $REPO..."
+      sudo git clone "$REPO" "$INSTALL_DIR"
+    fi
     sudo chown -R "$USER:$USER" "$INSTALL_DIR"
   fi
   cd "$INSTALL_DIR"

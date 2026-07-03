@@ -45,6 +45,11 @@ rollback_to_tag() {
   pm2 restart "$APP_NAME" || true
 }
 
+if [[ ! -d "$INSTALL_DIR/.git" ]]; then
+  echo "ERROR: Cannot perform OTA update: $INSTALL_DIR is not a git repository (manual or offline deployment)." >&2
+  exit 1
+fi
+
 CURRENT_COMMIT="$(git rev-parse HEAD)"
 git fetch origin
 REMOTE_COMMIT="$(git rev-parse origin/main)"

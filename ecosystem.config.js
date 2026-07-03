@@ -3,7 +3,7 @@ module.exports = {
     {
       name: 'worker',
       script: 'dist/main.js',
-      cwd: '/opt/home-worker',
+      cwd: process.env.HOME_WORKER_INSTALL_DIR || __dirname,
       instances: 1,
       max_memory_restart: process.env.PM2_MAX_MEMORY_RESTART || '512M',
       max_restarts: parseInt(process.env.PM2_MAX_RESTARTS || '10', 10),
