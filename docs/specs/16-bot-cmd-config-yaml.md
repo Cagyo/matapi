@@ -35,7 +35,7 @@ sensors:
   - name: co2_living
     type: uart
     config:
-      port: /dev/ttyS0
+      port: /dev/serial0
       baudRate: 9600
       thresholds:
         warning: 800

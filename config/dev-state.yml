@@ -7,6 +7,8 @@ sensors:
     type: digital
     config:
       pin: 17
+      stepType: contact
+      invert: true
     debounceMs: 1000
     severity: info
     enabled: true
@@ -15,6 +17,8 @@ sensors:
     type: digital
     config:
       pin: 27
+      stepType: contact
+      invert: true
     debounceMs: 1000
     severity: info
     enabled: true
@@ -23,6 +27,8 @@ sensors:
     type: digital
     config:
       pin: 22
+      stepType: leak_hazard
+      invert: true
     debounceMs: 1000
     severity: warning
     enabled: true
@@ -31,6 +37,8 @@ sensors:
     type: digital
     config:
       pin: 23
+      stepType: leak_hazard
+      invert: true
     debounceMs: 1000
     severity: critical
     enabled: true
@@ -39,6 +47,8 @@ sensors:
     type: digital
     config:
       pin: 24
+      stepType: motion
+      invert: false
     debounceMs: 1000
     severity: info
     enabled: true

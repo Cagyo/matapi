@@ -13,7 +13,7 @@ import {
   SENSOR_REPOSITORY,
   SensorRepositoryPort,
 } from '../domain/ports/sensor-repository.port';
-import { Sensor, SensorSeverity } from '../domain/sensor';
+import { isDigitalStepType, Sensor, SensorSeverity } from '../domain/sensor';
 import { ReloadSensorsUseCase } from './reload-sensors.use-case';
 
 export interface ModifySensorInput {
@@ -67,6 +67,7 @@ export class ModifySensorUseCase {
       if (owner && owner.id !== current.id) {
         throw new PinAlreadyInUseError(pin, owner.name);
       }
+      validateDigitalConfigExtras(input.patch.config);
     }
 
     const updated = await this.repository.update(current.id, {
@@ -75,5 +76,20 @@ export class ModifySensorUseCase {
     });
     await this.reload.execute();
     return updated;
+  }
+}
+
+function validateDigitalConfigExtras(config: Record<string, unknown>): void {
+  const stepType = config?.stepType;
+  if (stepType !== undefined && !isDigitalStepType(stepType)) {
+    throw new DigitalConfigInvalidError(`invalid "stepType": ${JSON.stringify(stepType)}`);
+  }
+  const invert = config?.invert;
+  if (invert !== undefined && typeof invert !== 'boolean') {
+    throw new DigitalConfigInvalidError(`invalid "invert": ${JSON.stringify(invert)}`);
+  }
+  const activeLow = config?.activeLow;
+  if (activeLow !== undefined && typeof activeLow !== 'boolean') {
+    throw new DigitalConfigInvalidError(`invalid "activeLow": ${JSON.stringify(activeLow)}`);
   }
 }

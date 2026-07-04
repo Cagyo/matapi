@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
 import { UnmuteHandler } from '../../../src/telegram/interfaces/unmute.handler';
-import { SensorNotMutedError } from '../../../src/telegram/domain/errors/sensor-not-muted.error';
 import { en } from '../../../src/locales/en';
 
 describe('UnmuteHandler', () => {

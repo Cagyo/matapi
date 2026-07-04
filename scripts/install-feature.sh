@@ -23,7 +23,8 @@ case "$FEATURE" in
   uart)
     echo "Configuring UART serial..."
     if command -v raspi-config &>/dev/null; then
-      sudo raspi-config nonint do_serial 2 || true
+      sudo raspi-config nonint do_serial_hw 0 || true
+      sudo raspi-config nonint do_serial_cons 1 || true
     fi
     ;;
   4g)

@@ -39,15 +39,8 @@ type ConfigState =
   | { kind: 'addType' }
   | { kind: 'addName'; type: AddType }
   | { kind: 'addDigitalPin'; name: string }
-  | { kind: 'addDigitalActiveLow'; name: string; pin: number }
-  | { kind: 'addDigitalPull'; name: string; pin: number; activeLow: boolean }
-  | {
-      kind: 'addDigitalSeverity';
-      name: string;
-      pin: number;
-      activeLow: boolean;
-      pull: Pull;
-    }
+  | { kind: 'addDigitalStepType'; name: string; pin: number }
+  | { kind: 'addDigitalSeverity'; name: string; pin: number; stepType: string }
   | { kind: 'addUartPort'; name: string }
   | { kind: 'addUartBaud'; name: string; port: string }
   | { kind: 'addUartWarning'; name: string; port: string; baud: number }
@@ -62,6 +55,7 @@ type ConfigState =
   | { kind: 'modifyName'; sensorId: string; currentName: string }
   | { kind: 'modifyPin'; sensorId: string; currentName: string }
   | { kind: 'modifyDebounce'; sensorId: string; currentName: string }
+  | { kind: 'modifyStepType'; sensorId: string; currentName: string }
   | { kind: 'removeConfirm'; sensorName: string }
   | { kind: 'selectModify' }
   | { kind: 'selectRemove' };
@@ -71,6 +65,7 @@ interface DigitalDefaults {
   severity: SensorSeverity;
   pull: Pull;
   activeLow: boolean;
+  stepType: string;
 }
 
 interface UartDefaults {
@@ -108,6 +103,7 @@ export class ConfigHandler implements TelegramHandler {
       severity: severityOr(defaults?.digital?.severity, 'info'),
       pull: pullOr(defaults?.digital?.pull, 'up'),
       activeLow: defaults?.digital?.active_low !== false,
+      stepType: 'contact',
     };
     this.uartDefaults = {
       debounceMs: numberOr(defaults?.uart?.debounce_ms, 0),
@@ -329,12 +325,14 @@ export class ConfigHandler implements TelegramHandler {
       return;
     }
     // cfg:default:digital
-    if (state.kind === 'addDigitalActiveLow' && data === 'cfg:default:digital') {
+    if (state.kind === 'addDigitalStepType' && data === 'cfg:default:digital') {
       const created = await this.addSensor.execute({
         name: state.name,
         type: 'digital',
         config: {
           pin: state.pin,
+          stepType: 'contact',
+          invert: this.digitalDefaults.activeLow,
           activeLow: this.digitalDefaults.activeLow,
           pull: this.digitalDefaults.pull,
         },
@@ -346,37 +344,22 @@ export class ConfigHandler implements TelegramHandler {
         en.config.addedDigital(
           created.name,
           state.pin,
-          this.digitalDefaults.activeLow,
-          this.digitalDefaults.pull,
+          'contact',
           this.digitalDefaults.severity,
         ),
       );
       return;
     }
-    // cfg:active:<low|high>
-    if (state.kind === 'addDigitalActiveLow' && data.startsWith('cfg:active:')) {
-      const activeLow = data.endsWith(':low');
-      this.states.set(userId, {
-        kind: 'addDigitalPull',
-        name: state.name,
-        pin: state.pin,
-        activeLow,
-      });
-      await ctx.reply(en.config.step5Digital(state.name, state.pin, activeLow), { reply_markup: pullKeyboard() });
-      return;
-    }
-    // cfg:pull:<up|down|none>
-    if (state.kind === 'addDigitalPull' && data.startsWith('cfg:pull:')) {
-      const pull = data.slice('cfg:pull:'.length) as Pull;
-      if (pull !== 'up' && pull !== 'down' && pull !== 'none') return;
+    // cfg:st:<stepType> during add
+    if (state.kind === 'addDigitalStepType' && data.startsWith('cfg:st:')) {
+      const stepType = data.slice('cfg:st:'.length);
       this.states.set(userId, {
         kind: 'addDigitalSeverity',
         name: state.name,
         pin: state.pin,
-        activeLow: state.activeLow,
-        pull,
+        stepType,
       });
-      await ctx.reply(en.config.step6Digital(state.name, state.pin, state.activeLow, pull), {
+      await ctx.reply(en.config.step5Digital(state.name, state.pin, stepType), {
         reply_markup: severityKeyboard(),
       });
       return;
@@ -388,7 +371,13 @@ export class ConfigHandler implements TelegramHandler {
       const created = await this.addSensor.execute({
         name: state.name,
         type: 'digital',
-        config: { pin: state.pin, activeLow: state.activeLow, pull: state.pull },
+        config: {
+          pin: state.pin,
+          stepType: state.stepType,
+          invert: this.digitalDefaults.activeLow,
+          activeLow: this.digitalDefaults.activeLow,
+          pull: this.digitalDefaults.pull,
+        },
         debounceMs: this.digitalDefaults.debounceMs,
         severity,
       });
@@ -397,8 +386,7 @@ export class ConfigHandler implements TelegramHandler {
         en.config.addedDigital(
           created.name,
           state.pin,
-          state.activeLow,
-          state.pull,
+          state.stepType,
           severity,
         ),
       );
@@ -421,6 +409,26 @@ export class ConfigHandler implements TelegramHandler {
     if (state.kind === 'modifyMenu' && data.startsWith('cfg:modify:')) {
       const field = data.slice('cfg:modify:'.length);
       await this.modifyFieldPrompt(ctx, userId, state, field);
+      return;
+    }
+    // cfg:st:<stepType> during modify
+    if (state.kind === 'modifyStepType' && data.startsWith('cfg:st:')) {
+      const stepType = data.slice('cfg:st:'.length);
+      const current = await this.sensors.findById(state.sensorId);
+      if (!current) throw new SensorNotFoundError(state.currentName);
+      const nextConfig = { ...current.config, stepType };
+      await this.modifySensor.execute({
+        currentName: state.currentName,
+        patch: { config: nextConfig },
+      });
+      this.states.set(userId, {
+        kind: 'modifyMenu',
+        sensorId: state.sensorId,
+        currentName: state.currentName,
+      });
+      await ctx.reply(en.config.modifiedField('Step Type'), {
+        reply_markup: modifyMenu(current.type),
+      });
       return;
     }
     // cfg:msev:<severity>  — modify a sensor's severity in one step
@@ -480,8 +488,8 @@ export class ConfigHandler implements TelegramHandler {
         const pin = parseIntStrict(text);
         if (pin === null || pin < 0 || pin > 27)
           return void ctx.reply(en.config.invalidPinRange);
-        this.states.set(userId, { kind: 'addDigitalActiveLow', name: state.name, pin });
-        await ctx.reply(en.config.step4Digital(state.name, pin), { reply_markup: activeKeyboard() });
+        this.states.set(userId, { kind: 'addDigitalStepType', name: state.name, pin });
+        await ctx.reply(en.config.step4Digital(state.name, pin), { reply_markup: stepTypeKeyboard('addDigitalPin') });
         return;
       }
       case 'addUartPort': {
@@ -622,6 +630,33 @@ export class ConfigHandler implements TelegramHandler {
       });
       return;
     }
+    if (field === 'invert') {
+      const current = await this.sensors.findById(state.sensorId);
+      if (!current) throw new SensorNotFoundError(state.currentName);
+      const oldInvert = current.config.invert ?? current.config.activeLow ?? true;
+      const newInvert = !oldInvert;
+      const nextConfig = { ...current.config, invert: newInvert, activeLow: newInvert };
+      await this.modifySensor.execute({
+        currentName: state.currentName,
+        patch: { config: nextConfig },
+      });
+      const stateStr = newInvert ? 'Inverted (Active Low)' : 'Direct (Active High)';
+      await ctx.reply(en.config.invertToggleSuccess(state.currentName, stateStr), {
+        reply_markup: modifyMenu(current.type),
+      });
+      return;
+    }
+    if (field === 'steptype') {
+      this.states.set(userId, {
+        kind: 'modifyStepType',
+        sensorId: state.sensorId,
+        currentName: state.currentName,
+      });
+      await ctx.reply(en.config.stepTypeQuestion, {
+        reply_markup: stepTypeKeyboard('modifyMenu'),
+      });
+      return;
+    }
     if (field === 'debounce') {
       this.states.set(userId, {
         kind: 'modifyDebounce',
@@ -668,8 +703,7 @@ export class ConfigHandler implements TelegramHandler {
       case 'addName': {
         const type =
           state.kind === 'addDigitalPin' ||
-          state.kind === 'addDigitalActiveLow' ||
-          state.kind === 'addDigitalPull' ||
+          state.kind === 'addDigitalStepType' ||
           state.kind === 'addDigitalSeverity'
             ? 'digital'
             : 'uart';
@@ -686,31 +720,16 @@ export class ConfigHandler implements TelegramHandler {
         }
         break;
       }
-      case 'addDigitalActiveLow': {
+      case 'addDigitalStepType': {
         if ('name' in state && 'pin' in state) {
           this.states.set(userId, {
-            kind: 'addDigitalActiveLow',
+            kind: 'addDigitalStepType',
             name: state.name,
             pin: state.pin,
           });
           await ctx.reply(en.config.step4Digital(state.name, state.pin), {
-            reply_markup: activeKeyboard(),
+            reply_markup: stepTypeKeyboard('addDigitalPin'),
           });
-        }
-        break;
-      }
-      case 'addDigitalPull': {
-        if ('name' in state && 'pin' in state && 'activeLow' in state) {
-          this.states.set(userId, {
-            kind: 'addDigitalPull',
-            name: state.name,
-            pin: state.pin,
-            activeLow: state.activeLow,
-          });
-          await ctx.reply(
-            en.config.step5Digital(state.name, state.pin, state.activeLow),
-            { reply_markup: pullKeyboard() },
-          );
         }
         break;
       }
@@ -833,25 +852,22 @@ function backCancelKeyboard(backTarget: string): InlineKeyboard {
     .text(en.common.cancelButton, 'cfg:cancel');
 }
 
-function activeKeyboard(): InlineKeyboard {
-  return new InlineKeyboard()
-    .text('Active High', 'cfg:active:high')
-    .text('Active Low', 'cfg:active:low')
+function stepTypeKeyboard(backTarget: string): InlineKeyboard {
+  const kb = new InlineKeyboard()
+    .text('🚪 Contact', 'cfg:st:contact')
+    .text('💧 Leak', 'cfg:st:leak_hazard')
+    .text('🚨 Alarm', 'cfg:st:alarm')
     .row()
-    .text(en.config.defaultButton, 'cfg:default:digital')
-    .row()
-    .text(en.common.backButton, 'cfg:back:addDigitalPin')
+    .text('⚡ Power', 'cfg:st:power')
+    .text('🏃 Motion', 'cfg:st:motion')
+    .text('🔘 Button', 'cfg:st:button')
+    .row();
+  if (backTarget !== 'modifyMenu') {
+    kb.text(en.config.defaultButton, 'cfg:default:digital').row();
+  }
+  kb.text(en.common.backButton, `cfg:back:${backTarget}`)
     .text(en.common.cancelButton, 'cfg:cancel');
-}
-
-function pullKeyboard(): InlineKeyboard {
-  return new InlineKeyboard()
-    .text('Pull Up', 'cfg:pull:up')
-    .text('Pull Down', 'cfg:pull:down')
-    .text('None', 'cfg:pull:none')
-    .row()
-    .text(en.common.backButton, 'cfg:back:addDigitalActiveLow')
-    .text(en.common.cancelButton, 'cfg:cancel');
+  return kb;
 }
 
 function severityKeyboard(): InlineKeyboard {
@@ -860,7 +876,7 @@ function severityKeyboard(): InlineKeyboard {
     .text('Warning', 'cfg:sev:warning')
     .text('Critical', 'cfg:sev:critical')
     .row()
-    .text(en.common.backButton, 'cfg:back:addDigitalPull')
+    .text(en.common.backButton, 'cfg:back:addDigitalStepType')
     .text(en.common.cancelButton, 'cfg:cancel');
 }
 
@@ -893,6 +909,7 @@ function modifyMenu(type: SensorType): InlineKeyboard {
   const kb = new InlineKeyboard().text('Name', 'cfg:modify:name');
   if (type === 'digital') {
     kb.text('Pin', 'cfg:modify:pin').row();
+    kb.text('Invert State', 'cfg:modify:invert').text('Step Type', 'cfg:modify:steptype').row();
   } else {
     kb.row();
   }
@@ -916,12 +933,13 @@ function isSeverity(value: string): value is SensorSeverity {
 
 function isModifyState(
   state: ConfigState,
-): state is Extract<ConfigState, { kind: 'modifyMenu' | 'modifyName' | 'modifyPin' | 'modifyDebounce' }> {
+): state is Extract<ConfigState, { kind: 'modifyMenu' | 'modifyName' | 'modifyPin' | 'modifyDebounce' | 'modifyStepType' }> {
   return (
     state.kind === 'modifyMenu' ||
     state.kind === 'modifyName' ||
     state.kind === 'modifyPin' ||
-    state.kind === 'modifyDebounce'
+    state.kind === 'modifyDebounce' ||
+    state.kind === 'modifyStepType'
   );
 }
 

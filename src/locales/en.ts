@@ -44,6 +44,7 @@ export interface StatusRow {
   online: boolean;
   /** Co2 ppm classification (uart only). */
   thresholdLevel?: 'normal' | 'warning' | 'critical';
+  stepType?: string;
 }
 
 export interface HealthSnapshotView {
@@ -119,8 +120,13 @@ function fmtUptime(sec: number): string {
   return `${days}d ${hours}h ${minutes}m`;
 }
 
-function fmtDigital(value: string | null): string {
-  if (value === null) return 'unknown';
+function fmtDigital(value: string | null, stepType?: string, online = true): string {
+  if (!online || value === null) return 'unknown';
+  const steps = (en.sensors?.steps as Record<string, Record<string, string>>)?.[stepType ?? 'contact'];
+  if (steps) {
+    if (value === 'true' || value === '1') return steps.true ?? 'OPENED';
+    if (value === 'false' || value === '0') return steps.false ?? 'CLOSED';
+  }
   if (value === 'true' || value === '1') return 'OPEN';
   if (value === 'false' || value === '0') return 'CLOSED';
   return value.toUpperCase();
@@ -136,7 +142,7 @@ function fmtUart(value: string | null, level?: StatusRow['thresholdLevel']): str
 function fmtRowValue(row: StatusRow): string {
   switch (row.type) {
     case 'digital':
-      return fmtDigital(row.lastValue);
+      return fmtDigital(row.lastValue, row.stepType, row.online);
     case 'uart':
       return fmtUart(row.lastValue, row.thresholdLevel);
     default:
@@ -300,6 +306,22 @@ export const commands: CommandDescriptor[] = [
 
 export const en = {
   commands,
+  sensors: {
+    steps: {
+      contact:     { false: 'Closed',   true: 'Opened',        offline: '❓ Offline' },
+      leak_hazard: { false: 'Dry',      true: 'Leak Detected', offline: '❓ Offline' },
+      alarm:       { false: 'Normal',   true: 'Alarm',         offline: '❓ Offline' },
+      power:       { false: 'Grid OK',  true: 'Outage',        offline: '❓ Offline' },
+      motion:      { false: 'Clear',    true: 'Motion',        offline: '❓ Offline' },
+      button:      { false: 'Released', true: 'Pressed',       offline: '❓ Offline' },
+    },
+    notifications: {
+      alarmTriggered: (name: string, state: string) => `🚨 *CRITICAL ALARM:* ${name} is now *${state}*!`,
+      alarmResolved:  (name: string, state: string) => `✅ *RESOLVED:* ${name} is back to *${state}*.`,
+      infoChange:     (name: string, state: string, oldState: string) => `ℹ️ *${name}:* ${state} (was ${oldState})`,
+      flappingFault:  (name: string) => `⚠️ *FAULT:* Sensor *${name}* switched to polled sampling due to flapping!`,
+    },
+  },
   common: {
     adminRequired: '❌ Admin access required',
     error: (action: string, reason: string) => `❌ Failed to ${action}: ${reason}`,
@@ -366,7 +388,11 @@ export const en = {
     none: 'No sensors configured. Use /config to add sensors.',
     line(row: StatusRow): string {
       const icon = TYPE_ICONS[row.type] ?? '•';
-      const value = fmtRowValue(row);
+      let value = fmtRowValue(row);
+      if (!row.online) {
+        const offlineStep = (en.sensors?.steps as Record<string, Record<string, string>>)?.[row.stepType ?? 'contact']?.offline;
+        value = offlineStep ?? '❓ Offline';
+      }
       const ago = fmtAgo(row.lastValueAt);
       let suffix = '';
       if (!row.online) {
@@ -528,18 +554,18 @@ export const en = {
     selectModify: '✏️ *Select Sensor to Modify*\n\nChoose an active sensor to edit its configuration:',
     selectRemove: '🗑️ *Select Sensor to Remove*\n\nChoose an active sensor to delete:',
     noActiveSensors: 'ℹ️ No active sensors configured.',
-    step1: 'Step 1 of 6 — What type of sensor?',
-    step2: (type: string) => `Step 2 of 6 (${type})\n\nSensor name?`,
-    step3Digital: (name: string, usedPins?: string) => `Step 3 of 6 (Digital: "${name}")\n\nGPIO pin number (0–27)?${usedPins ? `\n\nCurrently used: ${usedPins}` : ''}`,
-    step4Digital: (name: string, pin: number) => `Step 4 of 6 (Digital: "${name}", Pin ${pin})\n\nActive high or low?\n💡 _Hint: Active Low = triggered when grounded/0V (common for magnetic door/window sensors); Active High = triggered at 3.3V._`,
-    step5Digital: (name: string, pin: number, activeLow: boolean) => `Step 5 of 6 (Digital: "${name}", Pin ${pin}, Active ${activeLow ? 'Low' : 'High'})\n\nPull resistor?\n💡 _Hint: Pull Up keeps line high when open (standard for magnetic sensors); Pull Down keeps it low; None uses external resistor._`,
-    step6Digital: (name: string, pin: number, activeLow: boolean, pull: string) => `Step 6 of 6 (Digital: "${name}", Pin ${pin}, Active ${activeLow ? 'Low' : 'High'}, Pull ${pull})\n\nSeverity level?\n💡 _Hint: Info = silent log; Warning = standard alert; Critical = urgent alarm._`,
-    step3Uart: (name: string) => `Step 3 of 5 (UART: "${name}")\n\nSerial port path? (e.g. /dev/ttyAMA0)`,
+    step1: 'Step 1 of 5 — What type of sensor?',
+    step2: (type: string) => `Step 2 of 5 (${type})\n\nSensor name?`,
+    step3Digital: (name: string, usedPins?: string) => `Step 3 of 5 (Digital: "${name}")\n\nGPIO pin number (0–27)?${usedPins ? `\n\nCurrently used: ${usedPins}` : ''}`,
+    step4Digital: (name: string, pin: number) => `Step 4 of 5 (Digital: "${name}", Pin ${pin})\n\nSelect Step Type (device class):`,
+    step5Digital: (name: string, pin: number, stepType: string) => `Step 5 of 5 (Digital: "${name}", Pin ${pin}, ${stepType})\n\nSeverity level?\n💡 _Hint: Info = silent log; Warning = standard alert; Critical = urgent alarm._`,
+    step3Uart: (name: string) => `Step 3 of 5 (UART: "${name}")\n\nSerial port path? (e.g. /dev/serial0)`,
     step4Uart: (name: string, port: string) => `Step 4 of 5 (UART: "${name}", Port ${port})\n\nBaud rate?\n💡 _Hint: Communication speed in bits/sec. 9600 is standard for most CO2 sensors._`,
     step5Uart: (name: string, port: string, baud: number) => `Step 5 of 5 (UART: "${name}", Port ${port}, ${baud} baud)\n\nWarning threshold (ppm)?\n💡 _Hint: CO2 level in ppm that triggers a warning alert (e.g., 1000)._`,
     typeQuestion: 'What type of sensor?',
     nameQuestion: 'Sensor name?',
     pinQuestion: 'GPIO pin number?',
+    stepTypeQuestion: 'Select Step Type (device class):',
     activeQuestion: 'Active high or low?',
     pullQuestion: 'Pull resistor?',
     severityQuestion: 'Severity level?',
@@ -548,7 +574,8 @@ export const en = {
     warningQuestion: 'Warning threshold (ppm)?',
     criticalQuestion: 'Critical threshold (ppm)?\n💡 _Hint: Urgent CO2 level (must be higher than warning, e.g., 1500)._',
     debouncePrompt: 'Debounce (ms)?\n💡 _Hint: Time in milliseconds to ignore button chatter or rapid toggling (e.g., 10000 = 10s)._',
-    defaultButton: '⚡ Use Defaults (Active Low, Pull Up, Info)',
+    defaultButton: '⚡ Use Defaults (Contact, Info)',
+    invertToggleSuccess: (name: string, newState: string) => `✅ Inverted logical state for sensor "${name}". Current state is now: ${newState}`,
     removeConfirm: (name: string) =>
       `Remove sensor "${name}"? This will archive it.`,
     removed: (name: string) => `✅ Sensor "${name}" archived.`,
@@ -556,13 +583,10 @@ export const en = {
     addedDigital: (
       name: string,
       pin: number,
-      activeLow: boolean,
-      pull: 'up' | 'down' | 'none',
+      stepType: string,
       severity: SensorSeverity,
     ) =>
-      `✅ Sensor "${name}" added (GPIO ${pin}, active ${
-        activeLow ? 'low' : 'high'
-      }, pull ${pull}, ${severity})`,
+      `✅ Sensor "${name}" added (GPIO ${pin}, ${stepType}, ${severity})`,
     addedUart: (
       name: string,
       port: string,
@@ -577,9 +601,11 @@ export const en = {
         `Type: ${prettyType(sensor.type)}`,
       ];
       if (sensor.type === 'digital') {
+        const inv = sensor.config.invert ?? sensor.config.activeLow ?? true;
         lines.push(
           `GPIO: ${(sensor.config.pin as number | undefined) ?? '?'}`,
-          `Active Low: ${sensor.config.activeLow === false ? 'No' : 'Yes'}`,
+          `Step Type: ${(sensor.config.stepType as string | undefined) ?? 'contact'}`,
+          `Invert (Active Low): ${inv === false ? 'No' : 'Yes'}`,
           `Pull: ${prettyPull(sensor.config.pull as string | undefined)}`,
         );
       } else if (sensor.type === 'uart') {

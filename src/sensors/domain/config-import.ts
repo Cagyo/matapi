@@ -1,5 +1,5 @@
 import { isValidSensorName } from './errors/invalid-sensor-name.error';
-import { SensorSeverity, SensorType } from './sensor';
+import { DIGITAL_STEP_TYPES, isDigitalStepType, SensorSeverity, SensorType } from './sensor';
 
 /** Standard baud rates accepted for UART sensors (spec 16 § Validation). */
 export const ALLOWED_BAUD_RATES = [9600, 19200, 38400, 57600, 115200] as const;
@@ -158,6 +158,20 @@ function validateTypeConfig(
       );
     } else {
       pinOwners.set(pin, label);
+    }
+    const stepType = config.stepType;
+    if (stepType !== undefined && !isDigitalStepType(stepType)) {
+      errors.push(
+        `Sensor ${label}: invalid stepType '${JSON.stringify(stepType)}' (expected ${DIGITAL_STEP_TYPES.join(', ')})`,
+      );
+    }
+    const invert = config.invert;
+    if (invert !== undefined && typeof invert !== 'boolean') {
+      errors.push(`Sensor ${label}: invert must be a boolean`);
+    }
+    const activeLow = config.activeLow;
+    if (activeLow !== undefined && typeof activeLow !== 'boolean') {
+      errors.push(`Sensor ${label}: activeLow must be a boolean`);
     }
     return;
   }

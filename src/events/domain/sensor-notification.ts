@@ -1,3 +1,4 @@
+import { en } from '../../locales/en';
 import { SensorSeverity, SensorType } from '../../sensors/domain/sensor';
 
 const TYPE_ICONS: Record<SensorType, string> = {
@@ -14,7 +15,9 @@ export interface SensorNotificationView {
   name: string;
   /** Raw new value from the event payload (boolean, number, string, …). */
   value: unknown;
+  oldValue?: unknown;
   severity: SensorSeverity;
+  stepType?: string;
 }
 
 /**
@@ -26,6 +29,25 @@ export interface SensorNotificationView {
  */
 export function formatSensorNotification(view: SensorNotificationView): string {
   const icon = view.type ? TYPE_ICONS[view.type] : '•';
+  if (view.type === 'digital' && typeof view.stepType === 'string') {
+    const steps = (en.sensors?.steps as Record<string, Record<string, string>>)?.[view.stepType] || en.sensors.steps.contact;
+    const isTrue = view.value === true || view.value === 'true' || view.value === '1';
+    const wasTrue = view.oldValue === true || view.oldValue === 'true' || view.oldValue === '1';
+    const stateStr = isTrue ? steps.true : steps.false;
+    const oldStateStr = wasTrue ? steps.true : (view.oldValue === undefined || view.oldValue === null ? 'unknown' : steps.false);
+
+    // Boot-Time & Critical Triggered rule:
+    if ((view.stepType === 'leak_hazard' || view.stepType === 'alarm') && isTrue) {
+      return en.sensors.notifications.alarmTriggered(view.name, stateStr);
+    }
+    // Critical Resolved rule:
+    if ((view.stepType === 'leak_hazard' || view.stepType === 'alarm') && !isTrue && wasTrue) {
+      return en.sensors.notifications.alarmResolved(view.name, stateStr);
+    }
+    // Routine change:
+    return en.sensors.notifications.infoChange(view.name, stateStr, oldStateStr);
+  }
+
   const value = formatValue(view.type, view.value);
   const marker =
     view.severity === 'warning' || view.severity === 'critical' ? ' ⚠️' : '';

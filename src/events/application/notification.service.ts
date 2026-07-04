@@ -80,7 +80,9 @@ export class NotificationService {
       type: sensor?.type ?? null,
       name: sensor?.name ?? readName(event) ?? sensorId,
       value: newValue,
+      oldValue: (event.payload as { oldValue?: unknown } | null)?.oldValue,
       severity,
+      stepType: typeof sensor?.config?.stepType === 'string' ? sensor.config.stepType : undefined,
     });
 
     const recipients = await this.recipients.listRecipients();

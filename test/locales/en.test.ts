@@ -2,28 +2,42 @@ import { describe, expect, it } from 'vitest';
 import { en, HealthSnapshotView, StatusRow } from '../../src/locales/en';
 
 describe('en.status.line', () => {
-  it('renders digital CLOSED', () => {
+  it('renders digital Closed for contact stepType', () => {
     const row: StatusRow = {
       name: 'front_door',
       type: 'digital',
+      stepType: 'contact',
       lastValue: 'false',
       lastValueAt: new Date('2030-01-01T12:00:00Z'),
       online: true,
     };
-    expect(en.status.line(row)).toContain('CLOSED');
+    expect(en.status.line(row)).toContain('Closed');
     expect(en.status.line(row)).not.toContain('since');
   });
 
-  it('renders digital OPEN with `since`', () => {
+  it('renders digital Opened with `since` for contact stepType', () => {
     const row: StatusRow = {
       name: 'front_door',
       type: 'digital',
+      stepType: 'contact',
       lastValue: 'true',
       lastValueAt: new Date('2030-01-01T14:23:00Z'),
       online: true,
     };
-    expect(en.status.line(row)).toContain('OPEN');
+    expect(en.status.line(row)).toContain('Opened');
     expect(en.status.line(row)).toMatch(/since \d{2}:\d{2}/);
+  });
+
+  it('renders digital Leak Detected for leak_hazard stepType', () => {
+    const row: StatusRow = {
+      name: 'basement_leak',
+      type: 'digital',
+      stepType: 'leak_hazard',
+      lastValue: 'true',
+      lastValueAt: new Date('2030-01-01T14:23:00Z'),
+      online: true,
+    };
+    expect(en.status.line(row)).toContain('Leak Detected');
   });
 
   it('renders uart with critical marker', () => {

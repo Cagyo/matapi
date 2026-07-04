@@ -25,7 +25,7 @@ describe('selectAptPackages', () => {
   });
 
   it('tolerates features without apt lists', () => {
-    const config = { node: '20', uart: { 'raspi-config': ['do_serial 2'] } };
+    const config = { node: '20', uart: { 'raspi-config': ['do_serial_cons 1', 'do_serial_hw 0'] } };
     expect(selectAptPackages(config)).toEqual([]);
   });
 });

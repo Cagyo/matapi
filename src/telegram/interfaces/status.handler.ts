@@ -53,6 +53,7 @@ export class StatusHandler implements TelegramHandler {
         lastValueAt: sensor.lastValueAt,
         online: health.get(sensor.id) ?? false,
         thresholdLevel: thresholdLevelFor(sensor),
+        stepType: typeof sensor.config?.stepType === 'string' ? sensor.config.stepType : undefined,
       }));
 
       const offlineCount = rows.filter((r) => !r.online).length;

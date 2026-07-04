@@ -575,7 +575,7 @@ export interface SensorEvent {
 ```typescript
 // Example sensor config in SQLite
 {
-  "port": "/dev/ttyS0",
+  "port": "/dev/serial0",
   "baudRate": 9600,
   "thresholds": {
     "warning": 800,

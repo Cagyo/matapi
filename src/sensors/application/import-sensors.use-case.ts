@@ -114,9 +114,15 @@ function describeChange(existing: Sensor, entry: ImportedSensor): string | null 
   const reasons: string[] = [];
 
   if (existing.type === 'digital') {
-    const before = numberOrNull(existing.config.pin);
-    const after = numberOrNull(entry.config.pin);
-    if (before !== after) reasons.push(`pin ${before ?? '?'}→${after ?? '?'}`);
+    const beforePin = numberOrNull(existing.config.pin);
+    const afterPin = numberOrNull(entry.config.pin);
+    if (beforePin !== afterPin) reasons.push(`pin ${beforePin ?? '?'}→${afterPin ?? '?'}`);
+    const beforeStep = existing.config.stepType ?? 'contact';
+    const afterStep = entry.config.stepType ?? 'contact';
+    if (beforeStep !== afterStep) reasons.push(`stepType ${JSON.stringify(beforeStep)}→${JSON.stringify(afterStep)}`);
+    const beforeInvert = existing.config.invert ?? existing.config.activeLow ?? true;
+    const afterInvert = entry.config.invert ?? entry.config.activeLow ?? true;
+    if (beforeInvert !== afterInvert) reasons.push('invert changed');
   }
 
   if (existing.type === 'uart') {

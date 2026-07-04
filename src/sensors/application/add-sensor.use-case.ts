@@ -13,7 +13,7 @@ import {
   SENSOR_REPOSITORY,
   SensorRepositoryPort,
 } from '../domain/ports/sensor-repository.port';
-import { Sensor, SensorSeverity, SensorType } from '../domain/sensor';
+import { isDigitalStepType, Sensor, SensorSeverity, SensorType } from '../domain/sensor';
 import { ReloadSensorsUseCase } from './reload-sensors.use-case';
 
 export interface AddSensorInput {
@@ -57,6 +57,7 @@ export class AddSensorUseCase {
       new GpioPin(pin);
       const owner = await this.repository.findActivePinOwner(pin);
       if (owner) throw new PinAlreadyInUseError(pin, owner.name);
+      validateDigitalConfigExtras(input.config);
     }
 
     const now = this.clock.now();
@@ -81,4 +82,19 @@ function readPin(raw: Record<string, unknown>): number {
     throw new DigitalConfigInvalidError('missing required numeric "pin"');
   }
   return pin;
+}
+
+function validateDigitalConfigExtras(config: Record<string, unknown>): void {
+  const stepType = config?.stepType;
+  if (stepType !== undefined && !isDigitalStepType(stepType)) {
+    throw new DigitalConfigInvalidError(`invalid "stepType": ${JSON.stringify(stepType)}`);
+  }
+  const invert = config?.invert;
+  if (invert !== undefined && typeof invert !== 'boolean') {
+    throw new DigitalConfigInvalidError(`invalid "invert": ${JSON.stringify(invert)}`);
+  }
+  const activeLow = config?.activeLow;
+  if (activeLow !== undefined && typeof activeLow !== 'boolean') {
+    throw new DigitalConfigInvalidError(`invalid "activeLow": ${JSON.stringify(activeLow)}`);
+  }
 }

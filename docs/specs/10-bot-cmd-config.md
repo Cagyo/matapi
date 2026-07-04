@@ -51,7 +51,7 @@ Admin: [UART]
 Bot: Sensor name?
 Admin: co2_living
 Bot: Serial port path?
-Admin: /dev/ttyS0
+Admin: /dev/serial0
 Bot: Baud rate?
      [9600] [115200]
 Admin: [9600]
@@ -59,7 +59,7 @@ Bot: Warning threshold (ppm)?
 Admin: 800
 Bot: Critical threshold (ppm)?
 Admin: 1200
-Bot: ✅ Sensor "co2_living" added (UART /dev/ttyS0, 9600 baud, warn: 800, crit: 1200)
+Bot: ✅ Sensor "co2_living" added (UART /dev/serial0, 9600 baud, warn: 800, crit: 1200)
 ```
 
 ### Inline Validations

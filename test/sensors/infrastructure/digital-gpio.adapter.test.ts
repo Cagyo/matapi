@@ -70,12 +70,14 @@ describe('DigitalGpioAdapter', () => {
   });
 
   it('emits state_change when pin level transitions', async () => {
+    vi.useFakeTimers();
     const events: SensorEvent[] = [];
     adapter.onEvent((e) => events.push(e));
     await adapter.init(baseConfig);
 
     const cb = (gpio.notify as ReturnType<typeof vi.fn>).mock.calls[0][0] as (l: 0 | 1) => void;
     cb(0);
+    vi.advanceTimersByTime(100);
 
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
@@ -84,6 +86,7 @@ describe('DigitalGpioAdapter', () => {
       oldValue: false,
       newValue: true,
     });
+    vi.useRealTimers();
   });
 
   it('respects activeLow=false', async () => {
@@ -95,16 +98,104 @@ describe('DigitalGpioAdapter', () => {
     expect(adapter.getState().value).toBe(true);
   });
 
+  it('respects invert=false aliasing activeLow', async () => {
+    await adapter.init({
+      ...baseConfig,
+      config: { pin: 17, invert: false, pull: 'down' },
+    });
+    expect(adapter.getState().value).toBe(true);
+  });
+
   it('debounces transitions within window', async () => {
+    vi.useFakeTimers();
     const events: SensorEvent[] = [];
     adapter.onEvent((e) => events.push(e));
     await adapter.init({ ...baseConfig, debounceMs: 1000 });
 
     const cb = (gpio.notify as ReturnType<typeof vi.fn>).mock.calls[0][0] as (l: 0 | 1) => void;
     cb(0);
+    vi.advanceTimersByTime(300);
     cb(1);
+    vi.advanceTimersByTime(300);
+    cb(0);
+    vi.advanceTimersByTime(1000);
+
+    expect(events).toHaveLength(1);
+    vi.useRealTimers();
+  });
+
+  it('uses asymmetric debounce for leak_hazard (fast trigger, slow release)', async () => {
+    vi.useFakeTimers();
+    const events: SensorEvent[] = [];
+    adapter.onEvent((e) => events.push(e));
+    await adapter.init({
+      ...baseConfig,
+      config: { pin: 17, stepType: 'leak_hazard', activeLow: true },
+      debounceMs: 5000, // 5s requested
+    });
+
+    const cb = (gpio.notify as ReturnType<typeof vi.fn>).mock.calls[0][0] as (l: 0 | 1) => void;
+    // Rising edge (dry -> leak): capped at 50ms
+    cb(0);
+    vi.advanceTimersByTime(50);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ oldValue: false, newValue: true });
+
+    // Falling edge (leak -> dry): min 60s cooldown
+    cb(1);
+    vi.advanceTimersByTime(5000);
+    expect(events).toHaveLength(1); // still 1!
+    vi.advanceTimersByTime(55_000);
+    expect(events).toHaveLength(2);
+    expect(events[1]).toMatchObject({ oldValue: true, newValue: false });
+    vi.useRealTimers();
+  });
+
+  it('uses asymmetric debounce for motion (instant trigger, cooldown release)', async () => {
+    vi.useFakeTimers();
+    const events: SensorEvent[] = [];
+    adapter.onEvent((e) => events.push(e));
+    await adapter.init({
+      ...baseConfig,
+      config: { pin: 17, stepType: 'motion', activeLow: true },
+      debounceMs: 1000,
+    });
+
+    const cb = (gpio.notify as ReturnType<typeof vi.fn>).mock.calls[0][0] as (l: 0 | 1) => void;
+    // Rising edge: 0ms instant
     cb(0);
     expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ oldValue: false, newValue: true });
+
+    // Falling edge: min 5000ms cooldown
+    cb(1);
+    vi.advanceTimersByTime(1000);
+    expect(events).toHaveLength(1);
+    vi.advanceTimersByTime(4000);
+    expect(events).toHaveLength(2);
+    vi.useRealTimers();
+  });
+
+  it('triggers circuit breaker on flapping (>30 transitions/min) and switches to polled mode', async () => {
+    vi.useFakeTimers();
+    const events: SensorEvent[] = [];
+    adapter.onEvent((e) => events.push(e));
+    await adapter.init({ ...baseConfig, debounceMs: 0 });
+
+    const cb = (gpio.notify as ReturnType<typeof vi.fn>).mock.calls[0][0] as (l: 0 | 1) => void;
+    // Emit 31 rapid transitions
+    for (let i = 0; i <= 30; i++) {
+      cb((i % 2) as 0 | 1);
+    }
+
+    expect(gpio.endNotify).toHaveBeenCalled();
+
+    // Now in polled mode (every 10s)
+    gpio.read.mockResolvedValue(0); // level 0 -> true
+    vi.advanceTimersByTime(10_000);
+    expect(gpio.read).toHaveBeenCalled();
+
+    vi.useRealTimers();
   });
 
   it('rejects out-of-range pin with InvalidGpioPinError', async () => {
@@ -137,7 +228,7 @@ describe('DigitalGpioAdapter', () => {
     await expect(adapter.init(baseConfig)).rejects.toThrow(DriverUnavailableError);
   });
 
-  it('destroy unregisters notify', async () => {
+  it('destroy unregisters notify and clears timers/intervals', async () => {
     await adapter.init(baseConfig);
     await adapter.destroy();
     expect(gpio.endNotify).toHaveBeenCalled();

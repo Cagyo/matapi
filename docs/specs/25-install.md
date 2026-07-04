@@ -281,8 +281,9 @@ install_feature() {
       # Install zigbee2mqtt (from npm or official installer)
       ;;
     uart)
-      # Enable serial port
-      sudo raspi-config nonint do_serial 2  # enable UART, disable console
+      # Enable serial port (enable UART hardware, disable login console)
+      sudo raspi-config nonint do_serial_hw 0 || true
+      sudo raspi-config nonint do_serial_cons 1 || true
       ;;
   esac
 }

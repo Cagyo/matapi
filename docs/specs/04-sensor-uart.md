@@ -12,7 +12,7 @@ CO2 sensor connected via UART serial port. Uses `serialport` npm package.
 
 ```typescript
 {
-  "port": "/dev/ttyS0",
+  "port": "/dev/serial0",
   "baudRate": 9600,
   "thresholds": {
     "warning": 800,

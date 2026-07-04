@@ -26,7 +26,8 @@ motion:
 
 uart:
   raspi-config:
-    - "do_serial 2"
+    - "do_serial_cons 1"
+    - "do_serial_hw 0"
 
 zigbee:
   apt:

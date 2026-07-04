@@ -6,6 +6,10 @@ INSTALL_DIR="${HOME_WORKER_INSTALL_DIR:-/opt/home-worker}"
 NODE_VERSION="${HOME_WORKER_NODE_VERSION:-20}"
 USER="${HOME_WORKER_USER:-homeworker}"
 
+export DEBIAN_FRONTEND=noninteractive
+export APT_LISTCHANGES_FRONTEND=none
+export NEEDRESTART_MODE=a
+
 main() {
   check_raspberry_pi
   setup_hardware_resources
@@ -16,6 +20,8 @@ main() {
   setup_pigpiod
   setup_tmpfs
   prompt_config
+  configure_serial_headless
+  patch_legacy_feature_serial_calls
   install_selected_features
   run_migrations
   setup_pm2
@@ -49,7 +55,7 @@ setup_hardware_resources() {
       fi
     fi
     if command -v raspi-config >/dev/null 2>&1; then
-      sudo raspi-config --expand-rootfs 2>/dev/null || true
+      sudo raspi-config nonint do_expand_rootfs >/dev/null 2>&1 || true
     fi
   fi
 
@@ -296,6 +302,114 @@ prompt_config() {
     echo "ERROR: Wizard exited without creating .env"
     exit 1
   fi
+}
+
+boot_file() {
+  local name="$1"
+  if [ -f "/boot/firmware/$name" ]; then
+    printf '/boot/firmware/%s\n' "$name"
+  else
+    printf '/boot/%s\n' "$name"
+  fi
+}
+
+set_boot_config_var() {
+  local key="$1"
+  local value="$2"
+  local file="$3"
+
+  sudo touch "$file"
+
+  if sudo grep -qE "^[#[:space:]]*${key}=" "$file"; then
+    sudo sed -i -E "s|^[#[:space:]]*${key}=.*|${key}=${value}|" "$file"
+  else
+    echo "${key}=${value}" | sudo tee -a "$file" >/dev/null
+  fi
+}
+
+remove_serial_console_from_cmdline() {
+  local file="$1"
+  [ -f "$file" ] || return 0
+
+  sudo cp "$file" "${file}.bak.homeworker.$(date +%s)" || true
+
+  sudo sed -i -E \
+    -e 's/(^|[[:space:]])console=(serial0|ttyAMA0|ttyS0|ttyAMA10)(,[^[:space:]]*)?//g' \
+    -e 's/[[:space:]]+/ /g' \
+    -e 's/^ //' \
+    -e 's/ $//' \
+    "$file"
+}
+
+configure_serial_headless() {
+  echo "Configuring UART non-interactively: hardware ON, serial login console OFF..."
+
+  local config_file
+  local cmdline_file
+  config_file="$(boot_file config.txt)"
+  cmdline_file="$(boot_file cmdline.txt)"
+
+  # Bookworm/newer raspi-config path. Values are inverted: 0 = enable, 1 = disable.
+  if command -v raspi-config >/dev/null 2>&1; then
+    sudo raspi-config nonint do_serial_hw 0 || true
+    sudo raspi-config nonint do_serial_cons 1 || true
+  fi
+
+  # Hard fallback/enforcement. This prevents a whiptail dialog from being required.
+  set_boot_config_var enable_uart 1 "$config_file"
+  remove_serial_console_from_cmdline "$cmdline_file"
+
+  # Stop login shells on UART if they were already enabled.
+  for svc in \
+    serial-getty@serial0.service \
+    serial-getty@ttyAMA0.service \
+    serial-getty@ttyS0.service \
+    serial-getty@ttyAMA10.service
+  do
+    sudo systemctl disable --now "$svc" 2>/dev/null || true
+  done
+
+  echo "UART configured. Reboot required before /dev/serial0 is guaranteed."
+}
+
+patch_legacy_feature_serial_calls() {
+  [ -d "$INSTALL_DIR/scripts" ] || return 0
+
+  echo "Checking feature installers for legacy raspi-config serial commands..."
+
+  sudo grep -RIlE 'raspi-config[[:space:]]+nonint[[:space:]]+do_serial([[:space:]]|$)' "$INSTALL_DIR/scripts" 2>/dev/null |
+  while IFS= read -r file; do
+    echo "Patching legacy serial command in: $file"
+    sudo cp "$file" "${file}.bak.serial.$(date +%s)" || true
+
+    sudo python3 - "$file" <<'PY'
+import pathlib
+import re
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+
+# Replace lines like:
+#   sudo raspi-config nonint do_serial 2
+#   raspi-config nonint do_serial 1 || true
+#
+# with the noninteractive split commands:
+#   sudo raspi-config nonint do_serial_hw 0 || true
+#   sudo raspi-config nonint do_serial_cons 1 || true
+pattern = re.compile(
+    r'(?m)^(\s*)(sudo\s+)?raspi-config\s+nonint\s+do_serial\s+\S+.*$'
+)
+
+replacement = (
+    r'\1\2raspi-config nonint do_serial_hw 0 || true\n'
+    r'\1\2raspi-config nonint do_serial_cons 1 || true'
+)
+
+text = pattern.sub(replacement, text)
+path.write_text(text)
+PY
+  done
 }
 
 install_selected_features() {
