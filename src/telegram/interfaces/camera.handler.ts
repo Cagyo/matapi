@@ -122,6 +122,7 @@ export class CameraHandler implements TelegramHandler {
           return;
         }
         if (data === 'close') {
+          await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => undefined);
           await ctx.reply(en.camera.closed);
           return;
         }
@@ -141,7 +142,7 @@ export class CameraHandler implements TelegramHandler {
     });
   }
 
-  private async handleDashboard(ctx: Context): Promise<void> {
+  async handleDashboard(ctx: Context): Promise<void> {
     const kb = new InlineKeyboard()
       .text(en.camera.dashboardButtons.snapshot, 'cam:snapshot')
       .text(en.camera.dashboardButtons.eventsToday, 'cam:events')

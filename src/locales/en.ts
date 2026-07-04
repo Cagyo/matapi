@@ -19,6 +19,16 @@ function fmtTime(date: Date | null | undefined): string {
   return format(date, TIME_FMT);
 }
 
+function fmtAgo(date: Date | null | undefined): string {
+  if (!date) return '';
+  const diffSec = Math.floor((Date.now() - date.getTime()) / 1000);
+  if (diffSec < 0) return '';
+  if (diffSec < 60) return ' (<1m ago)';
+  if (diffSec < 3600) return ` (${Math.floor(diffSec / 60)}m ago)`;
+  if (diffSec < 86400) return ` (${Math.floor(diffSec / 3600)}h ago)`;
+  return ` (${Math.floor(diffSec / 86400)}d ago)`;
+}
+
 export const TYPE_ICONS: Record<SensorType, string> = {
   digital: '🚪',
   uart: '🌬️',
@@ -295,6 +305,8 @@ export const en = {
     error: (action: string, reason: string) => `❌ Failed to ${action}: ${reason}`,
     interrupted: 'Previous operation was interrupted. Please start again.',
     cancelButton: '❌ Cancel',
+    closeButton: '❌ Close',
+    quietModeButton: '🌙 Quiet Mode',
     noActiveWizard: 'ℹ️ No active configuration wizard to cancel.',
   },
   claim: {
@@ -354,15 +366,18 @@ export const en = {
     line(row: StatusRow): string {
       const icon = TYPE_ICONS[row.type] ?? '•';
       const value = fmtRowValue(row);
+      const ago = fmtAgo(row.lastValueAt);
       let suffix = '';
       if (!row.online) {
-        suffix = ' ⚠️ offline';
+        suffix = ` ⚠️ offline${ago}`;
       } else if (
         row.type === 'digital' &&
         (row.lastValue === 'true' || row.lastValue === '1') &&
         row.lastValueAt
       ) {
-        suffix = ` ⚠️ (since ${fmtTime(row.lastValueAt)})`;
+        suffix = ` ⚠️ (since ${fmtTime(row.lastValueAt)}${ago})`;
+      } else if (ago) {
+        suffix = ago;
       }
       return `${icon} ${row.name}: ${value}${suffix}`;
     },
@@ -440,6 +455,7 @@ export const en = {
   },
   menu: {
     title: '🎛️ Interactive Command Dashboard\nSelect a category or command below:',
+    closed: 'Dashboard closed.',
     categories: {
       sensors: '📊 Status & Sensors',
       media: '📷 Camera & Media',
@@ -460,6 +476,42 @@ export const en = {
       restart: '🔄 Restart',
       exportConfig: '📤 Export Config',
     },
+    submenus: {
+      configTitle: '⚙️ *Sensor Configuration*\n\nSelect an operation:',
+      configAdd: '➕ Add Sensor',
+      configModify: '✏️ Modify Sensor',
+      configRemove: '🗑️ Remove Sensor',
+      featuresTitle: '🔧 *Feature Management*\n\nSelect a feature to toggle or view:',
+      featuresList: '📋 List All Features',
+      restartConfirmTitle: '⚠️ *Confirm System Restart*\n\nAre you sure you want to restart the worker service?',
+      updateConfirmTitle: '⬆️ *Confirm System Update*\n\nCheck for and apply the latest code updates?',
+      confirmYes: '⚠️ Yes, Proceed',
+      confirmNo: '❌ Cancel',
+      sensorsTitle: '📊 *Sensor Operations*\n\nSelect an action:',
+      sensorsMute: '🔇 Mute Sensor',
+      sensorsUnmute: '🔊 Unmute Sensor',
+      systemTitle: '🔄 *System & Maintenance*\n\nSelect an operation:',
+      systemUpdate: '⬆️ Check for Updates',
+      systemRestart: '🔄 Restart Worker',
+      systemHealth: '🏥 System Health',
+      systemDrive: '☁️ Drive Sync Status',
+      systemInvite: '🔗 Create Invite Code',
+      backToMenu: '« Back to Dashboard',
+      quietTitle: '🌙 *Quiet Mode (Schedule)*\n\nSelect a preset quiet hours schedule:',
+      quiet22_07: '🌙 22:00 - 07:00 (10h)',
+      quiet23_06: '🌙 23:00 - 06:00 (8h)',
+      quiet00_08: '🌙 00:00 - 08:00 (8h)',
+      quietDisable: '🔔 Disable Quiet Mode',
+    },
+    quietMode: {
+      title: '🌙 *Quiet Mode*\n\nSelect how long to suppress info notifications:',
+      h1: '1 Hour',
+      h4: '4 Hours',
+      h8: '8 Hours',
+      off: '🔔 Unmute All (Normal Mode)',
+      activated: (hours: number) => `🌙 *Quiet Mode Activated*\nAll info notifications suppressed for ${hours} hour${hours === 1 ? '' : 's'}. Critical alerts will still be delivered.`,
+      deactivated: '🔔 *Quiet Mode Deactivated*\nNormal notifications restored.',
+    },
     usage: {
       logs: 'Usage: /logs <sensor> [count] — e.g. /logs front_door 20',
       mute: 'Usage: /mute <sensor> — e.g. /mute front_door',
@@ -470,6 +522,18 @@ export const en = {
     },
   },
   config: {
+    selectModify: '✏️ *Select Sensor to Modify*\n\nChoose an active sensor to edit its configuration:',
+    selectRemove: '🗑️ *Select Sensor to Remove*\n\nChoose an active sensor to delete:',
+    noActiveSensors: 'ℹ️ No active sensors configured.',
+    step1: 'Step 1 of 6 — What type of sensor?',
+    step2: (type: string) => `Step 2 of 6 (${type})\n\nSensor name?`,
+    step3Digital: (name: string) => `Step 3 of 6 (Digital: "${name}")\n\nGPIO pin number (0–27)?`,
+    step4Digital: (name: string, pin: number) => `Step 4 of 6 (Digital: "${name}", Pin ${pin})\n\nActive high or low?`,
+    step5Digital: (name: string, pin: number, activeLow: boolean) => `Step 5 of 6 (Digital: "${name}", Pin ${pin}, Active ${activeLow ? 'Low' : 'High'})\n\nPull resistor?`,
+    step6Digital: (name: string, pin: number, activeLow: boolean, pull: string) => `Step 6 of 6 (Digital: "${name}", Pin ${pin}, Active ${activeLow ? 'Low' : 'High'}, Pull ${pull})\n\nSeverity level?`,
+    step3Uart: (name: string) => `Step 3 of 5 (UART: "${name}")\n\nSerial port path? (e.g. /dev/ttyAMA0)`,
+    step4Uart: (name: string, port: string) => `Step 4 of 5 (UART: "${name}", Port ${port})\n\nBaud rate?`,
+    step5Uart: (name: string, port: string, baud: number) => `Step 5 of 5 (UART: "${name}", Port ${port}, ${baud} baud)\n\nWarning threshold (ppm)?`,
     typeQuestion: 'What type of sensor?',
     nameQuestion: 'Sensor name?',
     pinQuestion: 'GPIO pin number?',

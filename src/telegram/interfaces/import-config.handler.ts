@@ -46,7 +46,7 @@ export class ImportConfigHandler implements TelegramHandler {
 
   register(composer: Composer<Context>): void {
     composer.command('import_config', this.guard.adminOnly, (ctx) =>
-      this.onCommand(ctx),
+      this.handleCommand(ctx),
     );
     composer.command('cancel', this.guard.adminOnly, async (ctx) => {
       const userId = ctx.from?.id;
@@ -71,7 +71,7 @@ export class ImportConfigHandler implements TelegramHandler {
     });
   }
 
-  private async onCommand(ctx: Context): Promise<void> {
+  async handleCommand(ctx: Context): Promise<void> {
     const userId = ctx.from?.id;
     if (!userId) return;
     this.states.set(userId, { kind: 'awaitingFile' });
@@ -152,7 +152,8 @@ export class ImportConfigHandler implements TelegramHandler {
   private async onCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
     const userId = ctx.from?.id;
     const data = ctx.callbackQuery.data;
-    await ctx.answerCallbackQuery();
+    await ctx.answerCallbackQuery().catch(() => undefined);
+    await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => undefined);
 
     if (!userId) return;
     const state = this.states.get(userId);

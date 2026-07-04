@@ -11,10 +11,18 @@ describe('MenuHandler', () => {
 
     const statusHandler = { handleCommand: vi.fn() } as any;
     const healthHandler = { handleCommand: vi.fn() } as any;
-    const cameraHandler = { handleStatus: vi.fn() } as any;
+    const cameraHandler = { handleStatus: vi.fn(), handleDashboard: vi.fn() } as any;
     const gdriveHandler = { handleStatus: vi.fn() } as any;
     const inviteHandler = { handleCommand: vi.fn() } as any;
     const exportConfigHandler = { handleCommand: vi.fn() } as any;
+    const logsHandler = { handleEmpty: vi.fn() } as any;
+    const muteHandler = { handleEmpty: vi.fn() } as any;
+    const unmuteHandler = { handleEmpty: vi.fn() } as any;
+    const configHandler = { handleSubcommand: vi.fn() } as any;
+    const importConfigHandler = { handleCommand: vi.fn() } as any;
+    const systemUpdateHandler = { handleCommand: vi.fn() } as any;
+    const restartHandler = { handleCommand: vi.fn() } as any;
+    const quietHoursHandler = { handlePreset: vi.fn() } as any;
 
     const handler = new MenuHandler(
       guard,
@@ -24,6 +32,14 @@ describe('MenuHandler', () => {
       gdriveHandler,
       inviteHandler,
       exportConfigHandler,
+      logsHandler,
+      muteHandler,
+      unmuteHandler,
+      configHandler,
+      importConfigHandler,
+      systemUpdateHandler,
+      restartHandler,
+      quietHoursHandler,
     );
 
     const commandCallbacks: Record<string, (...args: any[]) => any> = {};
@@ -52,6 +68,14 @@ describe('MenuHandler', () => {
       gdriveHandler,
       inviteHandler,
       exportConfigHandler,
+      logsHandler,
+      muteHandler,
+      unmuteHandler,
+      configHandler,
+      importConfigHandler,
+      systemUpdateHandler,
+      restartHandler,
+      quietHoursHandler,
     };
   }
 
@@ -85,13 +109,14 @@ describe('MenuHandler', () => {
     expect(reply.mock.calls[0][1]).toHaveProperty('reply_markup');
   });
 
-  it('delegates action callbacks to handlers or replies with usage', async () => {
-    const { callbackQueryCallbacks, statusHandler, healthHandler } =
+  it('delegates action callbacks and renders interactive submenus', async () => {
+    const { callbackQueryCallbacks, statusHandler, healthHandler, logsHandler } =
       createTestSetup();
     const cbFn = callbackQueryCallbacks[0].fn;
 
     const answerCallbackQuery = vi.fn().mockResolvedValue(true);
     const reply = vi.fn().mockResolvedValue(true);
+    const editMessageText = vi.fn().mockResolvedValue(true);
 
     // Test status delegation
     const statusCtx = {
@@ -99,6 +124,7 @@ describe('MenuHandler', () => {
       match: ['menu:status', 'status'],
       answerCallbackQuery,
       reply,
+      editMessageText,
     };
     await cbFn(statusCtx);
     expect(answerCallbackQuery).toHaveBeenCalled();
@@ -110,11 +136,37 @@ describe('MenuHandler', () => {
       match: ['menu:health', 'health'],
       answerCallbackQuery,
       reply,
+      editMessageText,
     };
     await cbFn(healthCtx);
     expect(healthHandler.handleCommand).not.toHaveBeenCalled();
     expect(reply).toHaveBeenCalledWith(
       expect.stringContaining('Admin access required'),
     );
+
+    // Test submenu navigation (sub:sensors)
+    const sensorsCtx = {
+      from: { id: 100 },
+      match: ['menu:sub:sensors', 'sub:sensors'],
+      answerCallbackQuery,
+      reply,
+      editMessageText,
+    };
+    await cbFn(sensorsCtx);
+    expect(editMessageText).toHaveBeenCalledWith(
+      expect.stringContaining('Sensor Operations'),
+      expect.objectContaining({ reply_markup: expect.anything() }),
+    );
+
+    // Test logs delegation
+    const logsCtx = {
+      from: { id: 100 },
+      match: ['menu:sub:logs', 'sub:logs'],
+      answerCallbackQuery,
+      reply,
+      editMessageText,
+    };
+    await cbFn(logsCtx);
+    expect(logsHandler.handleEmpty).toHaveBeenCalledWith(logsCtx);
   });
 });

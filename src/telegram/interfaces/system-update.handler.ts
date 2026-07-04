@@ -30,14 +30,14 @@ export class SystemUpdateHandler implements TelegramHandler {
 
   register(composer: Composer<Context>): void {
     composer.command('system_update', this.guard.adminOnly, (ctx) =>
-      this.onCommand(ctx),
+      this.handleCommand(ctx),
     );
     composer.callbackQuery(/^sysupd:/, this.guard.adminOnly, (ctx) =>
       this.onCallback(ctx),
     );
   }
 
-  private async onCommand(ctx: Context): Promise<void> {
+  async handleCommand(ctx: Context): Promise<void> {
     const userId = ctx.from?.id;
     if (!userId) return;
 
@@ -86,6 +86,7 @@ export class SystemUpdateHandler implements TelegramHandler {
     const userId = ctx.from?.id;
     const data = ctx.callbackQuery.data;
     await ctx.answerCallbackQuery().catch(() => undefined);
+    await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => undefined);
 
     if (!userId) return;
     const pending = this.pending.get(userId);

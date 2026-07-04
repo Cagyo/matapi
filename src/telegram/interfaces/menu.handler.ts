@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, forwardRef } from '@nestjs/common';
 import { Composer, Context, InlineKeyboard } from 'grammy';
 import { en } from '../../locales/en';
 import { RoleMiddleware } from './role.middleware';
@@ -9,6 +9,14 @@ import { CameraHandler } from './camera.handler';
 import { GdriveHandler } from './gdrive.handler';
 import { InviteHandler } from './invite.handler';
 import { ExportConfigHandler } from './export-config.handler';
+import { LogsHandler } from './logs.handler';
+import { MuteHandler } from './mute.handler';
+import { UnmuteHandler } from './unmute.handler';
+import { ConfigHandler } from './config.handler';
+import { ImportConfigHandler } from './import-config.handler';
+import { SystemUpdateHandler } from './system-update.handler';
+import { RestartHandler } from './restart.handler';
+import { QuietHoursHandler } from './quiet-hours.handler';
 
 @Injectable()
 export class MenuHandler implements TelegramHandler {
@@ -22,6 +30,22 @@ export class MenuHandler implements TelegramHandler {
     private readonly gdriveHandler: GdriveHandler,
     private readonly inviteHandler: InviteHandler,
     private readonly exportConfigHandler: ExportConfigHandler,
+    @Inject(forwardRef(() => LogsHandler))
+    private readonly logsHandler: LogsHandler,
+    @Inject(forwardRef(() => MuteHandler))
+    private readonly muteHandler: MuteHandler,
+    @Inject(forwardRef(() => UnmuteHandler))
+    private readonly unmuteHandler: UnmuteHandler,
+    @Inject(forwardRef(() => ConfigHandler))
+    private readonly configHandler: ConfigHandler,
+    @Inject(forwardRef(() => ImportConfigHandler))
+    private readonly importConfigHandler: ImportConfigHandler,
+    @Inject(forwardRef(() => SystemUpdateHandler))
+    private readonly systemUpdateHandler: SystemUpdateHandler,
+    @Inject(forwardRef(() => RestartHandler))
+    private readonly restartHandler: RestartHandler,
+    @Inject(forwardRef(() => QuietHoursHandler))
+    private readonly quietHoursHandler: QuietHoursHandler,
   ) {}
 
   register(composer: Composer<Context>): void {
@@ -44,24 +68,85 @@ export class MenuHandler implements TelegramHandler {
         if (!action) return;
 
         switch (action) {
+          case 'top':
+            await this.renderSubmenu(
+              ctx,
+              en.menu.title,
+              this.buildKeyboard(role === 'admin'),
+            );
+            break;
           case 'status':
             await this.statusHandler.handleCommand(ctx);
             break;
+          case 'sub:sensors': {
+            const kb = new InlineKeyboard()
+              .text(en.menu.submenus.sensorsMute, 'menu:act:mute')
+              .text(en.menu.submenus.sensorsUnmute, 'menu:act:unmute')
+              .row()
+              .text(en.menu.submenus.backToMenu, 'menu:top');
+            await this.renderSubmenu(ctx, en.menu.submenus.sensorsTitle, kb);
+            break;
+          }
+          case 'sub:logs':
+            await this.logsHandler.handleEmpty(ctx);
+            break;
+          case 'sub:camera':
+            await this.cameraHandler.handleDashboard(ctx);
+            break;
+          case 'sub:quiet': {
+            const kb = new InlineKeyboard()
+              .text(en.menu.submenus.quiet22_07, 'menu:act:quiet:22:00-07:00')
+              .text(en.menu.submenus.quiet23_06, 'menu:act:quiet:23:00-06:00')
+              .row()
+              .text(en.menu.submenus.quiet00_08, 'menu:act:quiet:00:00-08:00')
+              .text(en.menu.submenus.quietDisable, 'menu:act:quiet:off')
+              .row()
+              .text(en.menu.submenus.backToMenu, 'menu:top');
+            await this.renderSubmenu(ctx, en.menu.submenus.quietTitle, kb);
+            break;
+          }
+          case 'sub:system': {
+            if (role !== 'admin') {
+              await ctx.reply(en.common.adminRequired);
+              break;
+            }
+            const kb = new InlineKeyboard()
+              .text(en.menu.submenus.systemHealth, 'menu:health')
+              .text(en.menu.submenus.systemDrive, 'menu:gdrive')
+              .row()
+              .text(en.menu.submenus.systemUpdate, 'menu:act:sys_update')
+              .text(en.menu.submenus.systemRestart, 'menu:act:sys_restart')
+              .row()
+              .text(en.menu.submenus.systemInvite, 'menu:invite')
+              .row()
+              .text(en.menu.submenus.backToMenu, 'menu:top');
+            await this.renderSubmenu(ctx, en.menu.submenus.systemTitle, kb);
+            break;
+          }
+          case 'sub:config': {
+            if (role !== 'admin') {
+              await ctx.reply(en.common.adminRequired);
+              break;
+            }
+            const kb = new InlineKeyboard()
+              .text(en.menu.submenus.configAdd, 'menu:act:cfg_add')
+              .text(en.menu.submenus.configModify, 'menu:act:cfg_mod')
+              .row()
+              .text(en.menu.submenus.configRemove, 'menu:act:cfg_rem')
+              .text(en.menu.buttons.exportConfig, 'menu:export_config')
+              .row()
+              .text('📥 Import Config', 'menu:act:cfg_imp')
+              .row()
+              .text(en.menu.submenus.backToMenu, 'menu:top');
+            await this.renderSubmenu(ctx, en.menu.submenus.configTitle, kb);
+            break;
+          }
           case 'health':
             if (role !== 'admin') {
               await ctx.reply(en.common.adminRequired);
               break;
             }
             await this.healthHandler.handleCommand(ctx);
-            break;
-          case 'logs':
-            await ctx.reply(en.menu.usage.logs);
-            break;
-          case 'mute':
-            await ctx.reply(en.menu.usage.mute);
-            break;
-          case 'camera_status':
-            await this.cameraHandler.handleStatus(ctx);
             break;
           case 'gdrive':
             if (role !== 'admin') {
@@ -70,40 +155,12 @@ export class MenuHandler implements TelegramHandler {
             }
             await this.gdriveHandler.handleStatus(ctx);
             break;
-          case 'config':
-            if (role !== 'admin') {
-              await ctx.reply(en.common.adminRequired);
-              break;
-            }
-            await ctx.reply(en.menu.usage.config);
-            break;
           case 'invite':
             if (role !== 'admin') {
               await ctx.reply(en.common.adminRequired);
               break;
             }
             await this.inviteHandler.handleCommand(ctx);
-            break;
-          case 'feature':
-            if (role !== 'admin') {
-              await ctx.reply(en.common.adminRequired);
-              break;
-            }
-            await ctx.reply(en.menu.usage.feature);
-            break;
-          case 'update':
-            if (role !== 'admin') {
-              await ctx.reply(en.common.adminRequired);
-              break;
-            }
-            await ctx.reply(en.menu.usage.update);
-            break;
-          case 'restart':
-            if (role !== 'admin') {
-              await ctx.reply(en.common.adminRequired);
-              break;
-            }
-            await ctx.reply(en.menu.usage.restart);
             break;
           case 'export_config':
             if (role !== 'admin') {
@@ -112,47 +169,97 @@ export class MenuHandler implements TelegramHandler {
             }
             await this.exportConfigHandler.handleCommand(ctx);
             break;
+          case 'act:mute':
+            await this.muteHandler.handleEmpty(ctx);
+            break;
+          case 'act:unmute':
+            await this.unmuteHandler.handleEmpty(ctx);
+            break;
+          case 'act:cfg_add':
+            if (role !== 'admin') {
+              await ctx.reply(en.common.adminRequired);
+              break;
+            }
+            await this.configHandler.handleSubcommand(ctx, 'add');
+            break;
+          case 'act:cfg_mod':
+            if (role !== 'admin') {
+              await ctx.reply(en.common.adminRequired);
+              break;
+            }
+            await this.configHandler.handleSubcommand(ctx, 'modify');
+            break;
+          case 'act:cfg_rem':
+            if (role !== 'admin') {
+              await ctx.reply(en.common.adminRequired);
+              break;
+            }
+            await this.configHandler.handleSubcommand(ctx, 'remove');
+            break;
+          case 'act:cfg_imp':
+            if (role !== 'admin') {
+              await ctx.reply(en.common.adminRequired);
+              break;
+            }
+            await this.importConfigHandler.handleCommand(ctx);
+            break;
+          case 'act:sys_update':
+            if (role !== 'admin') {
+              await ctx.reply(en.common.adminRequired);
+              break;
+            }
+            await this.systemUpdateHandler.handleCommand(ctx);
+            break;
+          case 'act:sys_restart':
+            if (role !== 'admin') {
+              await ctx.reply(en.common.adminRequired);
+              break;
+            }
+            await this.restartHandler.handleCommand(ctx);
+            break;
           default:
+            if (action.startsWith('act:quiet:')) {
+              const preset = action.slice('act:quiet:'.length);
+              await this.quietHoursHandler.handlePreset(ctx, preset);
+            }
             break;
         }
       },
     );
   }
 
+  private async renderSubmenu(
+    ctx: Context,
+    text: string,
+    kb: InlineKeyboard,
+  ): Promise<void> {
+    try {
+      await ctx.editMessageText(text, {
+        reply_markup: kb,
+        parse_mode: 'Markdown',
+      });
+    } catch {
+      await ctx.reply(text, {
+        reply_markup: kb,
+        parse_mode: 'Markdown',
+      });
+    }
+  }
+
   private buildKeyboard(isAdmin: boolean): InlineKeyboard {
-    const keyboard = new InlineKeyboard();
+    const keyboard = new InlineKeyboard()
+      .text('📊 Status', 'menu:status')
+      .text('🎛️ Sensors', 'menu:sub:sensors')
+      .text('📋 Logs', 'menu:sub:logs')
+      .row()
+      .text('📷 Camera', 'menu:sub:camera')
+      .text('🌙 Quiet Mode', 'menu:sub:quiet');
 
-    // Category 1: Status & Sensors
-    keyboard
-      .text(en.menu.buttons.status, 'menu:status')
-      .text(en.menu.buttons.logs, 'menu:logs')
-      .text(en.menu.buttons.mute, 'menu:mute');
     if (isAdmin) {
-      keyboard.text(en.menu.buttons.health, 'menu:health');
-    }
-    keyboard.row();
-
-    // Category 2: Camera & Media
-    keyboard.text(en.menu.buttons.cameraStatus, 'menu:camera_status');
-    if (isAdmin) {
-      keyboard.text(en.menu.buttons.gdrive, 'menu:gdrive');
-    }
-    keyboard.row();
-
-    // Admin-only categories
-    if (isAdmin) {
-      // Category 3: Admin & Config
       keyboard
-        .text(en.menu.buttons.config, 'menu:config')
-        .text(en.menu.buttons.invite, 'menu:invite')
-        .text(en.menu.buttons.feature, 'menu:feature')
-        .row();
-
-      // Category 4: Lifecycle & Maintenance
-      keyboard
-        .text(en.menu.buttons.update, 'menu:update')
-        .text(en.menu.buttons.restart, 'menu:restart')
-        .text(en.menu.buttons.exportConfig, 'menu:export_config');
+        .row()
+        .text('⚙️ Config', 'menu:sub:config')
+        .text('🔄 System', 'menu:sub:system');
     }
 
     return keyboard;

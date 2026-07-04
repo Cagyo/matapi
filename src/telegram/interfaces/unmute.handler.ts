@@ -21,23 +21,27 @@ export class UnmuteHandler implements TelegramHandler {
     private readonly guard: RoleMiddleware,
   ) {}
 
+  async handleEmpty(ctx: Context): Promise<void> {
+    const sensors = await this.sensors.listEnabled();
+    if (sensors.length === 0) {
+      await ctx.reply(en.status.none);
+      return;
+    }
+    const kb = new InlineKeyboard();
+    for (const s of sensors) {
+      const icon = TYPE_ICONS[s.type] ?? '•';
+      kb.text(`${icon} ${s.name}`, `unmute:${s.name}`).row();
+    }
+    await ctx.reply(en.mute.selectUnmute, { reply_markup: kb });
+  }
+
   register(composer: Composer<Context>): void {
     composer.command('unmute', this.guard.registered, async (ctx: Context) => {
       const userId = ctx.from?.id;
       if (!userId) return;
       const target = (ctx.match ?? '').toString().trim();
       if (!target) {
-        const sensors = await this.sensors.listEnabled();
-        if (sensors.length === 0) {
-          await ctx.reply(en.status.none);
-          return;
-        }
-        const kb = new InlineKeyboard();
-        for (const s of sensors) {
-          const icon = TYPE_ICONS[s.type] ?? '•';
-          kb.text(`${icon} ${s.name}`, `unmute:${s.name}`).row();
-        }
-        await ctx.reply(en.mute.selectUnmute, { reply_markup: kb });
+        await this.handleEmpty(ctx);
         return;
       }
       try {
@@ -64,6 +68,7 @@ export class UnmuteHandler implements TelegramHandler {
       const userId = ctx.from?.id;
       if (!userId) return;
       await ctx.answerCallbackQuery().catch(() => undefined);
+      await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => undefined);
       const target = (ctx.callbackQuery?.data ?? '').slice('unmute:'.length).trim();
       if (!target) return;
       try {

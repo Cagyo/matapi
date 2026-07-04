@@ -41,21 +41,25 @@ export class LogsHandler implements TelegramHandler {
     private readonly guard: RoleMiddleware,
   ) {}
 
+  async handleEmpty(ctx: Context): Promise<void> {
+    const sensors = await this.sensors.listEnabled();
+    if (sensors.length === 0) {
+      await ctx.reply(en.status.none);
+      return;
+    }
+    const kb = new InlineKeyboard();
+    for (const s of sensors) {
+      const icon = TYPE_ICONS[s.type] ?? '•';
+      kb.text(`${icon} ${s.name}`, `logs:${s.name}`).row();
+    }
+    await ctx.reply(en.logs.selectSensor, { reply_markup: kb });
+  }
+
   register(composer: Composer<Context>): void {
     composer.command('logs', this.guard.registered, async (ctx) => {
       const raw = (ctx.match ?? '').toString().trim();
       if (!raw) {
-        const sensors = await this.sensors.listEnabled();
-        if (sensors.length === 0) {
-          await ctx.reply(en.status.none);
-          return;
-        }
-        const kb = new InlineKeyboard();
-        for (const s of sensors) {
-          const icon = TYPE_ICONS[s.type] ?? '•';
-          kb.text(`${icon} ${s.name}`, `logs:${s.name}`).row();
-        }
-        await ctx.reply(en.logs.selectSensor, { reply_markup: kb });
+        await this.handleEmpty(ctx);
         return;
       }
 
@@ -100,6 +104,7 @@ export class LogsHandler implements TelegramHandler {
       const userId = ctx.from?.id;
       if (!userId) return;
       await ctx.answerCallbackQuery().catch(() => undefined);
+      await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => undefined);
       const target = (ctx.callbackQuery?.data ?? '').slice('logs:'.length).trim();
       if (!target) return;
       try {

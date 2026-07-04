@@ -14,19 +14,22 @@ export class RestartHandler implements TelegramHandler {
     private readonly guard: RoleMiddleware,
   ) {}
 
+  async handleCommand(ctx: Context): Promise<void> {
+    try {
+      await ctx.reply(en.ota.restarting);
+      await this.restart.execute();
+    } catch (err) {
+      this.logger.error(
+        `/restart failed: ${(err as Error).message}`,
+        (err as Error).stack,
+      );
+      await ctx.reply(en.ota.restartFailed((err as Error).message));
+    }
+  }
+
   register(composer: Composer<Context>): void {
     composer.command('restart', this.guard.adminOnly, async (ctx: Context) => {
-      try {
-        // Must flush the reply before pm2 sends SIGINT.
-        await ctx.reply(en.ota.restarting);
-        await this.restart.execute();
-      } catch (err) {
-        this.logger.error(
-          `/restart failed: ${(err as Error).message}`,
-          (err as Error).stack,
-        );
-        await ctx.reply(en.ota.restartFailed((err as Error).message));
-      }
+      await this.handleCommand(ctx);
     });
   }
 }

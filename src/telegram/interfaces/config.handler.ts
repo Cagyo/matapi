@@ -62,7 +62,9 @@ type ConfigState =
   | { kind: 'modifyName'; sensorId: string; currentName: string }
   | { kind: 'modifyPin'; sensorId: string; currentName: string }
   | { kind: 'modifyDebounce'; sensorId: string; currentName: string }
-  | { kind: 'removeConfirm'; sensorName: string };
+  | { kind: 'removeConfirm'; sensorName: string }
+  | { kind: 'selectModify' }
+  | { kind: 'selectRemove' };
 
 interface DigitalDefaults {
   debounceMs: number;
@@ -146,6 +148,46 @@ export class ConfigHandler implements TelegramHandler {
 
   // ───────── entry point ─────────
 
+  async handleSubcommand(ctx: Context, sub: string): Promise<void> {
+    const userId = ctx.from?.id;
+    if (!userId) return;
+    if (sub === 'add') {
+      this.states.set(userId, { kind: 'addType' });
+      await ctx.reply(en.config.step1, { reply_markup: typeKeyboard() });
+      return;
+    }
+    if (sub === 'modify') {
+      const sensors = await this.sensors.listEnabled();
+      if (sensors.length === 0) {
+        await ctx.reply(en.config.noActiveSensors);
+        return;
+      }
+      this.states.set(userId, { kind: 'selectModify' });
+      const kb = new InlineKeyboard();
+      for (const s of sensors) {
+        kb.text(s.name, `cfg:mod:${s.name}`).row();
+      }
+      kb.text(en.common.cancelButton, 'cfg:cancel');
+      await ctx.reply(en.config.selectModify, { reply_markup: kb, parse_mode: 'Markdown' });
+      return;
+    }
+    if (sub === 'remove') {
+      const sensors = await this.sensors.listEnabled();
+      if (sensors.length === 0) {
+        await ctx.reply(en.config.noActiveSensors);
+        return;
+      }
+      this.states.set(userId, { kind: 'selectRemove' });
+      const kb = new InlineKeyboard();
+      for (const s of sensors) {
+        kb.text(s.name, `cfg:rem:${s.name}`).row();
+      }
+      kb.text(en.common.cancelButton, 'cfg:cancel');
+      await ctx.reply(en.config.selectRemove, { reply_markup: kb, parse_mode: 'Markdown' });
+      return;
+    }
+  }
+
   private async onCommand(ctx: CommandContext<Context>): Promise<void> {
     const userId = ctx.from?.id;
     if (!userId) return;
@@ -155,12 +197,12 @@ export class ConfigHandler implements TelegramHandler {
 
     if (sub === 'add') {
       this.states.set(userId, { kind: 'addType' });
-      await ctx.reply(en.config.typeQuestion, { reply_markup: typeKeyboard() });
+      await ctx.reply(en.config.step1, { reply_markup: typeKeyboard() });
       return;
     }
     if (sub === 'modify') {
       if (!arg) {
-        await ctx.reply(en.config.missingArg('modify <sensor_name>'));
+        await this.handleSubcommand(ctx, 'modify');
         return;
       }
       const sensor = await this.sensors.findByName(arg);
@@ -187,7 +229,7 @@ export class ConfigHandler implements TelegramHandler {
     }
     if (sub === 'remove') {
       if (!arg) {
-        await ctx.reply(en.config.missingArg('remove <sensor_name>'));
+        await this.handleSubcommand(ctx, 'remove');
         return;
       }
       const sensor = await this.sensors.findByName(arg);
@@ -213,6 +255,7 @@ export class ConfigHandler implements TelegramHandler {
     const state = this.states.get(userId);
     // Always ack so the spinner stops, even if we ignore.
     await ctx.answerCallbackQuery().catch(() => undefined);
+    await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => undefined);
     if (!state) {
       await ctx.reply(en.common.interrupted);
       return;
@@ -235,12 +278,49 @@ export class ConfigHandler implements TelegramHandler {
       await ctx.reply(en.config.cancelled);
       return;
     }
+    if (data.startsWith('cfg:mod:')) {
+      const name = data.slice('cfg:mod:'.length).trim();
+      const sensor = await this.sensors.findByName(name);
+      if (sensor?.kind !== 'active') {
+        await ctx.reply(en.config.notFound(name));
+        return;
+      }
+      this.states.set(userId, {
+        kind: 'modifyMenu',
+        sensorId: sensor.sensor.id,
+        currentName: sensor.sensor.name,
+      });
+      await ctx.reply(
+        en.config.modifyHeader({
+          name: sensor.sensor.name,
+          type: sensor.sensor.type,
+          config: sensor.sensor.config,
+          debounceMs: sensor.sensor.debounceMs,
+          severity: sensor.sensor.severity,
+        }),
+        { reply_markup: modifyMenu(sensor.sensor.type) },
+      );
+      return;
+    }
+    if (data.startsWith('cfg:rem:')) {
+      const name = data.slice('cfg:rem:'.length).trim();
+      const sensor = await this.sensors.findByName(name);
+      if (sensor?.kind !== 'active') {
+        await ctx.reply(en.config.notFound(name));
+        return;
+      }
+      this.states.set(userId, { kind: 'removeConfirm', sensorName: sensor.sensor.name });
+      await ctx.reply(en.config.removeConfirm(sensor.sensor.name), {
+        reply_markup: confirmKeyboard(),
+      });
+      return;
+    }
     // cfg:type:<digital|uart>
     if (state.kind === 'addType' && data.startsWith('cfg:type:')) {
       const type = data.slice('cfg:type:'.length) as AddType;
       if (type !== 'digital' && type !== 'uart') return;
       this.states.set(userId, { kind: 'addName', type });
-      await ctx.reply(en.config.nameQuestion);
+      await ctx.reply(en.config.step2(type));
       return;
     }
     // cfg:active:<low|high>
@@ -252,7 +332,7 @@ export class ConfigHandler implements TelegramHandler {
         pin: state.pin,
         activeLow,
       });
-      await ctx.reply(en.config.pullQuestion, { reply_markup: pullKeyboard() });
+      await ctx.reply(en.config.step5Digital(state.name, state.pin, activeLow), { reply_markup: pullKeyboard() });
       return;
     }
     // cfg:pull:<up|down|none>
@@ -266,7 +346,7 @@ export class ConfigHandler implements TelegramHandler {
         activeLow: state.activeLow,
         pull,
       });
-      await ctx.reply(en.config.severityQuestion, {
+      await ctx.reply(en.config.step6Digital(state.name, state.pin, state.activeLow, pull), {
         reply_markup: severityKeyboard(),
       });
       return;
@@ -304,7 +384,7 @@ export class ConfigHandler implements TelegramHandler {
         port: state.port,
         baud,
       });
-      await ctx.reply(en.config.warningQuestion);
+      await ctx.reply(en.config.step5Uart(state.name, state.port, baud));
       return;
     }
     // cfg:modify:<field|done>
@@ -355,10 +435,10 @@ export class ConfigHandler implements TelegramHandler {
       case 'addName': {
         if (state.type === 'digital') {
           this.states.set(userId, { kind: 'addDigitalPin', name: text });
-          await ctx.reply(en.config.pinQuestion);
+          await ctx.reply(en.config.step3Digital(text));
         } else {
           this.states.set(userId, { kind: 'addUartPort', name: text });
-          await ctx.reply(en.config.portQuestion);
+          await ctx.reply(en.config.step3Uart(text));
         }
         return;
       }
@@ -367,13 +447,13 @@ export class ConfigHandler implements TelegramHandler {
         if (pin === null || pin < 0 || pin > 27)
           return void ctx.reply(en.config.invalidPinRange);
         this.states.set(userId, { kind: 'addDigitalActiveLow', name: state.name, pin });
-        await ctx.reply(en.config.activeQuestion, { reply_markup: activeKeyboard() });
+        await ctx.reply(en.config.step4Digital(state.name, pin), { reply_markup: activeKeyboard() });
         return;
       }
       case 'addUartPort': {
         if (!text) return void ctx.reply(en.config.invalidPortPath);
         this.states.set(userId, { kind: 'addUartBaud', name: state.name, port: text });
-        await ctx.reply(en.config.baudQuestion, { reply_markup: baudKeyboard() });
+        await ctx.reply(en.config.step4Uart(state.name, text), { reply_markup: baudKeyboard() });
         return;
       }
       case 'addUartWarning': {
