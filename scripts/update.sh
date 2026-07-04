@@ -1,7 +1,8 @@
 #!/bin/bash
-# OTA update — fetches origin/main, tags a rollback point, installs, builds,
+# OTA update — fetches release tarball from GitHub Releases (with git fetch fallback),
+# snapshots current state to data/rollbacks/, installs production deps without building,
 # migrates, pm2-restarts, then runs a post-restart health check. On failure
-# resets to the rollback tag, reinstalls, restarts again, and lets the
+# restores from rollback snapshot, reinstalls, restarts again, and lets the
 # worker surface the outcome via the `update_status` flag in system_meta
 # on next boot.
 #
@@ -35,52 +36,122 @@ write_meta() {
   fi
 }
 
-rollback_to_tag() {
-  local tag="$1"
-  git reset --hard "$tag" || true
-  corepack yarn install --immutable || true
-  corepack yarn build || true
+install_production_deps() {
+  echo "Configuring low-memory Yarn settings in $INSTALL_DIR/.yarnrc.yml..."
+  cat <<'YAML' | tee "$INSTALL_DIR/.yarnrc.yml" >/dev/null
+networkConcurrency: 4
+compressionLevel: 0
+enableGlobalCache: true
+enableProgressBars: false
+nodeLinker: node-modules
+nmMode: hardlinks-global
+YAML
+
+  echo "Installing production dependencies with single-threaded job limits (jobs=1)..."
+  export NODE_OPTIONS="--max-old-space-size=512"
+  export npm_config_jobs=1
+  export JOBS=1
+  env NODE_OPTIONS="$NODE_OPTIONS" npm_config_jobs=1 JOBS=1 corepack yarn workspaces focus -A --production
+}
+
+rollback_to_snapshot() {
+  local identifier="$1"
+  echo "Rolling back to $identifier..." >&2
+  if [[ -f "$identifier" ]]; then
+    tar -xzf "$identifier" -C "$INSTALL_DIR" || true
+  elif [[ -d "$INSTALL_DIR/.git" ]] && git rev-parse "$identifier" >/dev/null 2>&1; then
+    git reset --hard "$identifier" || true
+  else
+    local newest
+    newest="$(ls -t "$INSTALL_DIR/data/rollbacks"/rollback-*.tar.gz 2>/dev/null | head -1 || true)"
+    if [[ -n "$newest" ]]; then
+      tar -xzf "$newest" -C "$INSTALL_DIR" || true
+    fi
+  fi
+  install_production_deps || true
   write_meta "restart_reason" "ota_update_failed"
   write_meta "update_status" "failed"
   pm2 restart "$APP_NAME" || true
 }
 
-if [[ ! -d "$INSTALL_DIR/.git" ]]; then
-  echo "ERROR: Cannot perform OTA update: $INSTALL_DIR is not a git repository (manual or offline deployment)." >&2
-  exit 1
+# Create rollback snapshot before updating
+mkdir -p "$INSTALL_DIR/data/rollbacks"
+ROLLBACK_SNAPSHOT="$INSTALL_DIR/data/rollbacks/rollback-$(date +%s).tar.gz"
+echo "Creating pre-update rollback snapshot: $ROLLBACK_SNAPSHOT..."
+tar -czf "$ROLLBACK_SNAPSHOT" --exclude="data" --exclude="node_modules" --exclude=".git" -C "$INSTALL_DIR" .
+
+# Prune old rollback snapshots (retain only 3 most recent)
+ls -t "$INSTALL_DIR/data/rollbacks"/rollback-*.tar.gz 2>/dev/null | tail -n +4 | xargs -I {} rm -f "{}" || true
+
+# Determine if updating via GitHub Release tarball or Git fallback
+REPO_URL="${HOME_WORKER_REPO:-}"
+if [[ -z "$REPO_URL" ]] && [[ -d "$INSTALL_DIR/.git" ]]; then
+  REPO_URL="$(git -C "$INSTALL_DIR" config --get remote.origin.url || true)"
 fi
 
-CURRENT_COMMIT="$(git rev-parse HEAD)"
-git fetch origin
-REMOTE_COMMIT="$(git rev-parse origin/main)"
-
-if [[ "$CURRENT_COMMIT" == "$REMOTE_COMMIT" ]]; then
-  echo "Already up to date"
-  exit 0
+RELEASE_URL="${HOME_WORKER_RELEASE_URL:-}"
+if [[ -z "$RELEASE_URL" ]] && [[ -n "$REPO_URL" ]]; then
+  CLEAN_URL="$(echo "$REPO_URL" | sed -E 's|^(git@github\.com:|https://github\.com/)|https://github.com/|; s|\.git$||')"
+  if [[ "$CLEAN_URL" != "https://github.com/CHANGE_ME/home-worker" ]]; then
+    RELEASE_URL="${CLEAN_URL}/releases/latest/download/home-worker-release.tar.gz"
+  fi
 fi
 
-ROLLBACK_TAG="rollback-$(date +%s)"
-git tag "$ROLLBACK_TAG" "$CURRENT_COMMIT"
-git reset --hard origin/main
-NEW_COMMIT="$(git rev-parse HEAD)"
+UPDATED_VIA="git"
+NEW_COMMIT=""
+
+if [[ -n "$RELEASE_URL" ]] && curl --output /dev/null --silent --head --fail "$RELEASE_URL" 2>/dev/null; then
+  echo "Downloading release tarball from $RELEASE_URL..."
+  TMP_TAR="/tmp/home-worker-release.tar.gz"
+  STAGING_DIR="/tmp/home-worker-staging-$$"
+  rm -rf "$STAGING_DIR" "$TMP_TAR"
+  
+  if curl -fsSL "$RELEASE_URL" -o "$TMP_TAR" && tar -tzf "$TMP_TAR" >/dev/null 2>&1; then
+    mkdir -p "$STAGING_DIR"
+    tar -xzf "$TMP_TAR" -C "$STAGING_DIR"
+    echo "Syncing staged release over $INSTALL_DIR..."
+    rsync -av --delete --exclude="data" --exclude="node_modules" --exclude=".git" "$STAGING_DIR/" "$INSTALL_DIR/"
+    rm -rf "$STAGING_DIR" "$TMP_TAR"
+    UPDATED_VIA="tarball"
+    NEW_COMMIT="release-$(date +%s)"
+  else
+    echo "WARNING: Failed to download or verify release tarball from $RELEASE_URL. Falling back to git..."
+    rm -rf "$STAGING_DIR" "$TMP_TAR"
+  fi
+fi
+
+if [[ "$UPDATED_VIA" == "git" ]]; then
+  if [[ ! -d "$INSTALL_DIR/.git" ]]; then
+    echo "ERROR: Cannot perform OTA update: No release tarball available and $INSTALL_DIR is not a git repository." >&2
+    rm -f "$ROLLBACK_SNAPSHOT"
+    exit 1
+  fi
+  CURRENT_COMMIT="$(git rev-parse HEAD)"
+  git fetch origin
+  REMOTE_COMMIT="$(git rev-parse origin/main)"
+  if [[ "$CURRENT_COMMIT" == "$REMOTE_COMMIT" ]]; then
+    echo "Already up to date"
+    rm -f "$ROLLBACK_SNAPSHOT"
+    exit 0
+  fi
+  ROLLBACK_TAG="rollback-$(date +%s)"
+  git tag "$ROLLBACK_TAG" "$CURRENT_COMMIT"
+  git reset --hard origin/main
+  NEW_COMMIT="$(git rev-parse HEAD)"
+fi
 
 write_meta "restart_reason" "ota_update"
 write_meta "update_commit" "$NEW_COMMIT"
-write_meta "update_rollback_tag" "$ROLLBACK_TAG"
+write_meta "update_rollback_snapshot" "$ROLLBACK_SNAPSHOT"
 
-if ! corepack yarn install --immutable; then
-  echo "yarn install failed, rolling back" >&2
-  rollback_to_tag "$ROLLBACK_TAG"
-  exit 1
-fi
-if ! corepack yarn build; then
-  echo "yarn build failed, rolling back" >&2
-  rollback_to_tag "$ROLLBACK_TAG"
+if ! install_production_deps; then
+  echo "production dependencies install failed, rolling back" >&2
+  rollback_to_snapshot "$ROLLBACK_SNAPSHOT"
   exit 1
 fi
 if ! corepack yarn db:migrate; then
   echo "migrations failed, rolling back" >&2
-  rollback_to_tag "$ROLLBACK_TAG"
+  rollback_to_snapshot "$ROLLBACK_SNAPSHOT"
   exit 1
 fi
 
@@ -94,7 +165,7 @@ STATUS="$(APP_NAME="$APP_NAME" pm2 jlist 2>/dev/null | node -e "let s='';process
 
 if [[ "$STATUS" != "online" ]]; then
   echo "Health check failed (pm2 status=$STATUS), rolling back" >&2
-  rollback_to_tag "$ROLLBACK_TAG"
+  rollback_to_snapshot "$ROLLBACK_SNAPSHOT"
   exit 1
 fi
 

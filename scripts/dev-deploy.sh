@@ -16,9 +16,17 @@ else
   sshpass -p "raspberry" ssh pi@matapitest.local "mkdir -p ~/matapi"
 fi
 
+# Build TypeScript locally off the Pi before deployment
+echo "Building TypeScript locally off the Pi..."
+corepack yarn build
+
 # Sync worker codebase to development Raspberry Pi
 echo "Uploading files to pi@matapitest.local:~/matapi..."
 sshpass -p "raspberry" rsync -avz --exclude 'node_modules' --exclude '.git' --exclude '.yarn' -e 'sshpass -p "raspberry" ssh' /Users/cagyo/projects/matapi_ai/worker pi@matapitest.local:~/matapi
+
+# Ensure scripts are executable after upload
+echo "Setting executable permissions on scripts..."
+sshpass -p "raspberry" ssh pi@matapitest.local 'chmod +x ~/matapi/worker/scripts/*.sh 2>/dev/null || true'
 
 # Run install script on remote host
 echo "Running install script on remote host..."
