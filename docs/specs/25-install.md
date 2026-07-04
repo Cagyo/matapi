@@ -25,6 +25,7 @@ USER="homeworker"
 
 main() {
   check_raspberry_pi
+  setup_hardware_resources
   create_user
   install_system_deps
   install_node
@@ -43,6 +44,34 @@ check_raspberry_pi() {
   fi
 }
 
+setup_hardware_resources() {
+  echo "Tuning kernel memory behavior (vm.swappiness=10)..."
+  sudo sysctl -w vm.swappiness=10 2>/dev/null || true
+  if [ -f /etc/sysctl.conf ] && ! grep -q "vm.swappiness" /etc/sysctl.conf; then
+    echo "vm.swappiness=10" | sudo tee -a /etc/sysctl.conf >/dev/null || true
+  fi
+
+  local total_mem total_swap
+  total_mem=$(free -m | awk '/^Mem:/{print $2}' || echo 0)
+  total_swap=$(free -m | awk '/^Swap:/{print $2}' || echo 0)
+  if [ "$((total_mem + total_swap))" -lt 2048 ]; then
+    echo "Configuring 2GB persistent swapfile..."
+    if command -v dphys-swapfile >/dev/null 2>&1; then
+      sudo dphys-swapfile swapoff 2>/dev/null || true
+      sudo systemctl disable --now dphys-swapfile 2>/dev/null || true
+    fi
+    if [ ! -f /swapfile ]; then
+      sudo fallocate -l 2G /swapfile 2>/dev/null || sudo dd if=/dev/zero of=/swapfile bs=1M count=2048
+      sudo chmod 600 /swapfile
+      sudo mkswap /swapfile
+    fi
+    sudo swapon /swapfile 2>/dev/null || true
+    if [ -f /etc/fstab ] && ! grep -q "/swapfile" /etc/fstab; then
+      echo "/swapfile none swap sw 0 0" | sudo tee -a /etc/fstab >/dev/null
+    fi
+  fi
+}
+
 create_user() {
   if ! id "$USER" &>/dev/null; then
     sudo useradd -r -s /bin/false "$USER"
@@ -54,7 +83,7 @@ install_system_deps() {
   echo "Installing system dependencies..."
   sudo apt-get update
   sudo apt-get install -y \
-    git sqlite3 libsqlite3-dev \
+    git sqlite3 libsqlite3-dev build-essential python3 python3-setuptools \
     pigpio python3-pigpio \
     ffmpeg \
     usb-modeswitch
@@ -74,6 +103,24 @@ install_node() {
   sudo corepack enable
 }
 
+install_production_deps() {
+  echo "Configuring low-memory Yarn settings in $INSTALL_DIR/.yarnrc.yml..."
+  cat <<'YAML' | sudo -u "$USER" tee "$INSTALL_DIR/.yarnrc.yml" >/dev/null
+networkConcurrency: 4
+compressionLevel: 0
+enableGlobalCache: true
+enableProgressBars: false
+nodeLinker: node-modules
+nmMode: hardlinks-global
+YAML
+
+  echo "Installing production dependencies with single-threaded job limits (jobs=1)..."
+  export NODE_OPTIONS="--max-old-space-size=512"
+  export npm_config_jobs=1
+  export JOBS=1
+  sudo -u "$USER" env NODE_OPTIONS="$NODE_OPTIONS" npm_config_jobs=1 JOBS=1 corepack yarn workspaces focus -A --production
+}
+
 install_app() {
   if [ -d "$INSTALL_DIR" ]; then
     echo "Updating existing installation..."
@@ -85,7 +132,7 @@ install_app() {
     sudo chown -R "$USER:$USER" "$INSTALL_DIR"
   fi
   cd "$INSTALL_DIR"
-  sudo -u "$USER" corepack yarn install --immutable
+  install_production_deps
 }
 
 setup_pigpiod() {
@@ -133,7 +180,11 @@ setup_pm2() {
   fi
 
   cd "$INSTALL_DIR"
-  sudo -u "$USER" pm2 start ecosystem.config.js
+  if sudo -u "$USER" pm2 jlist 2>/dev/null | grep -q "\"name\":\"worker\""; then
+    sudo -u "$USER" pm2 reload ecosystem.config.js 2>/dev/null || sudo -u "$USER" pm2 restart worker
+  else
+    sudo -u "$USER" pm2 start ecosystem.config.js
+  fi
   sudo -u "$USER" pm2 save
   sudo env PATH=$PATH:/usr/bin pm2 startup systemd -u "$USER" --hp "/home/$USER"
 

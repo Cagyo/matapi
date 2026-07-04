@@ -35,6 +35,32 @@ export class UnmuteHandler implements TelegramHandler {
     await ctx.reply(en.mute.selectUnmute, { reply_markup: kb });
   }
 
+  async handleUnmuteAll(ctx: Context): Promise<void> {
+    const userId = ctx.from?.id;
+    if (!userId) return;
+    const sensors = await this.sensors.listEnabled();
+    if (sensors.length === 0) {
+      await ctx.reply(en.mute.noSensorsToUnmute);
+      return;
+    }
+    let unmutedCount = 0;
+    for (const s of sensors) {
+      try {
+        await this.unmute.execute(userId, s.name);
+        unmutedCount++;
+      } catch (err) {
+        if (!(err instanceof SensorNotMutedError)) {
+          this.logger.error(`Failed to unmute ${s.name}: ${(err as Error).message}`);
+        }
+      }
+    }
+    if (unmutedCount === 0) {
+      await ctx.reply(en.mute.noSensorsToUnmute);
+    } else {
+      await ctx.reply(en.mute.unmutedAll(unmutedCount));
+    }
+  }
+
   register(composer: Composer<Context>): void {
     composer.command('unmute', this.guard.registered, async (ctx: Context) => {
       const userId = ctx.from?.id;
@@ -42,6 +68,10 @@ export class UnmuteHandler implements TelegramHandler {
       const target = (ctx.match ?? '').toString().trim();
       if (!target) {
         await this.handleEmpty(ctx);
+        return;
+      }
+      if (target.toLowerCase() === 'all') {
+        await this.handleUnmuteAll(ctx);
         return;
       }
       try {

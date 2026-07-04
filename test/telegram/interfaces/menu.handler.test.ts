@@ -16,8 +16,8 @@ describe('MenuHandler', () => {
     const inviteHandler = { handleCommand: vi.fn() } as any;
     const exportConfigHandler = { handleCommand: vi.fn() } as any;
     const logsHandler = { handleEmpty: vi.fn() } as any;
-    const muteHandler = { handleEmpty: vi.fn() } as any;
-    const unmuteHandler = { handleEmpty: vi.fn() } as any;
+    const muteHandler = { handleEmpty: vi.fn(), handleMuteAll: vi.fn() } as any;
+    const unmuteHandler = { handleEmpty: vi.fn(), handleUnmuteAll: vi.fn() } as any;
     const configHandler = { handleSubcommand: vi.fn() } as any;
     const importConfigHandler = { handleCommand: vi.fn() } as any;
     const systemUpdateHandler = { handleCommand: vi.fn() } as any;
@@ -110,7 +110,7 @@ describe('MenuHandler', () => {
   });
 
   it('delegates action callbacks and renders interactive submenus', async () => {
-    const { callbackQueryCallbacks, statusHandler, healthHandler, logsHandler } =
+    const { callbackQueryCallbacks, statusHandler, healthHandler, logsHandler, muteHandler, unmuteHandler } =
       createTestSetup();
     const cbFn = callbackQueryCallbacks[0].fn;
 
@@ -168,5 +168,27 @@ describe('MenuHandler', () => {
     };
     await cbFn(logsCtx);
     expect(logsHandler.handleEmpty).toHaveBeenCalledWith(logsCtx);
+
+    // Test mute all delegation
+    const muteAllCtx = {
+      from: { id: 100 },
+      match: ['menu:act:mute_all', 'act:mute_all'],
+      answerCallbackQuery,
+      reply,
+      editMessageText,
+    };
+    await cbFn(muteAllCtx);
+    expect(muteHandler.handleMuteAll).toHaveBeenCalledWith(muteAllCtx);
+
+    // Test unmute all delegation
+    const unmuteAllCtx = {
+      from: { id: 100 },
+      match: ['menu:act:unmute_all', 'act:unmute_all'],
+      answerCallbackQuery,
+      reply,
+      editMessageText,
+    };
+    await cbFn(unmuteAllCtx);
+    expect(unmuteHandler.handleUnmuteAll).toHaveBeenCalledWith(unmuteAllCtx);
   });
 });

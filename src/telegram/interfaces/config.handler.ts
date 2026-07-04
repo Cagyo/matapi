@@ -278,6 +278,11 @@ export class ConfigHandler implements TelegramHandler {
       await ctx.reply(en.config.cancelled);
       return;
     }
+    if (data.startsWith('cfg:back:')) {
+      const backTarget = data.slice('cfg:back:'.length);
+      await this.handleBack(ctx, userId, state, backTarget);
+      return;
+    }
     if (data.startsWith('cfg:mod:')) {
       const name = data.slice('cfg:mod:'.length).trim();
       const sensor = await this.sensors.findByName(name);
@@ -320,7 +325,32 @@ export class ConfigHandler implements TelegramHandler {
       const type = data.slice('cfg:type:'.length) as AddType;
       if (type !== 'digital' && type !== 'uart') return;
       this.states.set(userId, { kind: 'addName', type });
-      await ctx.reply(en.config.step2(type));
+      await ctx.reply(en.config.step2(type), { reply_markup: backCancelKeyboard('addType') });
+      return;
+    }
+    // cfg:default:digital
+    if (state.kind === 'addDigitalActiveLow' && data === 'cfg:default:digital') {
+      const created = await this.addSensor.execute({
+        name: state.name,
+        type: 'digital',
+        config: {
+          pin: state.pin,
+          activeLow: this.digitalDefaults.activeLow,
+          pull: this.digitalDefaults.pull,
+        },
+        debounceMs: this.digitalDefaults.debounceMs,
+        severity: this.digitalDefaults.severity,
+      });
+      this.states.delete(userId);
+      await ctx.reply(
+        en.config.addedDigital(
+          created.name,
+          state.pin,
+          this.digitalDefaults.activeLow,
+          this.digitalDefaults.pull,
+          this.digitalDefaults.severity,
+        ),
+      );
       return;
     }
     // cfg:active:<low|high>
@@ -435,10 +465,14 @@ export class ConfigHandler implements TelegramHandler {
       case 'addName': {
         if (state.type === 'digital') {
           this.states.set(userId, { kind: 'addDigitalPin', name: text });
-          await ctx.reply(en.config.step3Digital(text));
+          await ctx.reply(en.config.step3Digital(text, await this.getUsedPinsText()), {
+            reply_markup: backCancelKeyboard('addName'),
+          });
         } else {
           this.states.set(userId, { kind: 'addUartPort', name: text });
-          await ctx.reply(en.config.step3Uart(text));
+          await ctx.reply(en.config.step3Uart(text), {
+            reply_markup: backCancelKeyboard('addName'),
+          });
         }
         return;
       }
@@ -467,7 +501,9 @@ export class ConfigHandler implements TelegramHandler {
           baud: state.baud,
           warning,
         });
-        await ctx.reply(en.config.criticalQuestion);
+        await ctx.reply(en.config.criticalQuestion, {
+          reply_markup: backCancelKeyboard('addUartWarning'),
+        });
         return;
       }
       case 'addUartCritical': {
@@ -569,7 +605,9 @@ export class ConfigHandler implements TelegramHandler {
         sensorId: state.sensorId,
         currentName: state.currentName,
       });
-      await ctx.reply(en.config.nameQuestion);
+      await ctx.reply(en.config.nameQuestion, {
+        reply_markup: backCancelKeyboard('modifyMenu'),
+      });
       return;
     }
     if (field === 'pin') {
@@ -578,7 +616,10 @@ export class ConfigHandler implements TelegramHandler {
         sensorId: state.sensorId,
         currentName: state.currentName,
       });
-      await ctx.reply(en.config.pinQuestion);
+      const used = await this.getUsedPinsText();
+      await ctx.reply(`${en.config.pinQuestion}\n\nCurrently used: ${used}`, {
+        reply_markup: backCancelKeyboard('modifyMenu'),
+      });
       return;
     }
     if (field === 'debounce') {
@@ -587,7 +628,9 @@ export class ConfigHandler implements TelegramHandler {
         sensorId: state.sensorId,
         currentName: state.currentName,
       });
-      await ctx.reply('Debounce (ms)?');
+      await ctx.reply(en.config.debouncePrompt, {
+        reply_markup: backCancelKeyboard('modifyMenu'),
+      });
       return;
     }
     if (field === 'severity') {
@@ -596,6 +639,140 @@ export class ConfigHandler implements TelegramHandler {
         reply_markup: modifySeverityKeyboard(),
       });
       return;
+    }
+  }
+
+  private async getUsedPinsText(): Promise<string> {
+    const sensors = await this.sensors.listEnabled();
+    const used: string[] = [];
+    for (const s of sensors) {
+      if (s.type === 'digital' && typeof s.config.pin === 'number') {
+        used.push(`Pin ${s.config.pin} (${s.name})`);
+      }
+    }
+    return used.length > 0 ? used.join(', ') : 'none';
+  }
+
+  private async handleBack(
+    ctx: Context,
+    userId: number,
+    state: ConfigState,
+    target: string,
+  ): Promise<void> {
+    switch (target) {
+      case 'addType': {
+        this.states.set(userId, { kind: 'addType' });
+        await ctx.reply(en.config.step1, { reply_markup: typeKeyboard() });
+        break;
+      }
+      case 'addName': {
+        const type =
+          state.kind === 'addDigitalPin' ||
+          state.kind === 'addDigitalActiveLow' ||
+          state.kind === 'addDigitalPull' ||
+          state.kind === 'addDigitalSeverity'
+            ? 'digital'
+            : 'uart';
+        this.states.set(userId, { kind: 'addName', type });
+        await ctx.reply(en.config.step2(type), { reply_markup: backCancelKeyboard('addType') });
+        break;
+      }
+      case 'addDigitalPin': {
+        if ('name' in state) {
+          this.states.set(userId, { kind: 'addDigitalPin', name: state.name });
+          await ctx.reply(en.config.step3Digital(state.name, await this.getUsedPinsText()), {
+            reply_markup: backCancelKeyboard('addName'),
+          });
+        }
+        break;
+      }
+      case 'addDigitalActiveLow': {
+        if ('name' in state && 'pin' in state) {
+          this.states.set(userId, {
+            kind: 'addDigitalActiveLow',
+            name: state.name,
+            pin: state.pin,
+          });
+          await ctx.reply(en.config.step4Digital(state.name, state.pin), {
+            reply_markup: activeKeyboard(),
+          });
+        }
+        break;
+      }
+      case 'addDigitalPull': {
+        if ('name' in state && 'pin' in state && 'activeLow' in state) {
+          this.states.set(userId, {
+            kind: 'addDigitalPull',
+            name: state.name,
+            pin: state.pin,
+            activeLow: state.activeLow,
+          });
+          await ctx.reply(
+            en.config.step5Digital(state.name, state.pin, state.activeLow),
+            { reply_markup: pullKeyboard() },
+          );
+        }
+        break;
+      }
+      case 'addUartPort': {
+        if ('name' in state) {
+          this.states.set(userId, { kind: 'addUartPort', name: state.name });
+          await ctx.reply(en.config.step3Uart(state.name), {
+            reply_markup: backCancelKeyboard('addName'),
+          });
+        }
+        break;
+      }
+      case 'addUartBaud': {
+        if ('name' in state && 'port' in state) {
+          this.states.set(userId, {
+            kind: 'addUartBaud',
+            name: state.name,
+            port: state.port,
+          });
+          await ctx.reply(en.config.step4Uart(state.name, state.port), {
+            reply_markup: baudKeyboard(),
+          });
+        }
+        break;
+      }
+      case 'addUartWarning': {
+        if ('name' in state && 'port' in state && 'baud' in state) {
+          this.states.set(userId, {
+            kind: 'addUartWarning',
+            name: state.name,
+            port: state.port,
+            baud: state.baud,
+          });
+          await ctx.reply(en.config.step5Uart(state.name, state.port, state.baud), {
+            reply_markup: backCancelKeyboard('addUartBaud'),
+          });
+        }
+        break;
+      }
+      case 'modifyMenu': {
+        if (isModifyState(state)) {
+          this.states.set(userId, {
+            kind: 'modifyMenu',
+            sensorId: state.sensorId,
+            currentName: state.currentName,
+          });
+          const sensor = await this.sensors.findById(state.sensorId);
+          if (sensor) {
+            await ctx.reply(
+              en.config.modifyHeader({
+                name: sensor.name,
+                type: sensor.type,
+                config: sensor.config,
+                debounceMs: sensor.debounceMs,
+                severity: sensor.severity,
+              }),
+              { reply_markup: modifyMenu(sensor.type) },
+            );
+          }
+        }
+        break;
+      }
     }
   }
 
@@ -650,11 +827,20 @@ function typeKeyboard(): InlineKeyboard {
     .text(en.common.cancelButton, 'cfg:cancel');
 }
 
+function backCancelKeyboard(backTarget: string): InlineKeyboard {
+  return new InlineKeyboard()
+    .text(en.common.backButton, `cfg:back:${backTarget}`)
+    .text(en.common.cancelButton, 'cfg:cancel');
+}
+
 function activeKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text('Active High', 'cfg:active:high')
     .text('Active Low', 'cfg:active:low')
     .row()
+    .text(en.config.defaultButton, 'cfg:default:digital')
+    .row()
+    .text(en.common.backButton, 'cfg:back:addDigitalPin')
     .text(en.common.cancelButton, 'cfg:cancel');
 }
 
@@ -664,6 +850,7 @@ function pullKeyboard(): InlineKeyboard {
     .text('Pull Down', 'cfg:pull:down')
     .text('None', 'cfg:pull:none')
     .row()
+    .text(en.common.backButton, 'cfg:back:addDigitalActiveLow')
     .text(en.common.cancelButton, 'cfg:cancel');
 }
 
@@ -673,6 +860,7 @@ function severityKeyboard(): InlineKeyboard {
     .text('Warning', 'cfg:sev:warning')
     .text('Critical', 'cfg:sev:critical')
     .row()
+    .text(en.common.backButton, 'cfg:back:addDigitalPull')
     .text(en.common.cancelButton, 'cfg:cancel');
 }
 
@@ -682,6 +870,7 @@ function modifySeverityKeyboard(): InlineKeyboard {
     .text('Warning', 'cfg:msev:warning')
     .text('Critical', 'cfg:msev:critical')
     .row()
+    .text(en.common.backButton, 'cfg:back:modifyMenu')
     .text(en.common.cancelButton, 'cfg:cancel');
 }
 
@@ -690,6 +879,7 @@ function baudKeyboard(): InlineKeyboard {
     .text('9600', 'cfg:baud:9600')
     .text('115200', 'cfg:baud:115200')
     .row()
+    .text(en.common.backButton, 'cfg:back:addUartPort')
     .text(en.common.cancelButton, 'cfg:cancel');
 }
 

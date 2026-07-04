@@ -35,6 +35,32 @@ export class MuteHandler implements TelegramHandler {
     await ctx.reply(en.mute.selectMute, { reply_markup: kb });
   }
 
+  async handleMuteAll(ctx: Context): Promise<void> {
+    const userId = ctx.from?.id;
+    if (!userId) return;
+    const sensors = await this.sensors.listEnabled();
+    if (sensors.length === 0) {
+      await ctx.reply(en.mute.noSensorsToMute);
+      return;
+    }
+    let mutedCount = 0;
+    for (const s of sensors) {
+      try {
+        await this.mute.execute(userId, s.name);
+        mutedCount++;
+      } catch (err) {
+        if (!(err instanceof SensorAlreadyMutedError)) {
+          this.logger.error(`Failed to mute ${s.name}: ${(err as Error).message}`);
+        }
+      }
+    }
+    if (mutedCount === 0) {
+      await ctx.reply(en.mute.noSensorsToMute);
+    } else {
+      await ctx.reply(en.mute.mutedAll(mutedCount));
+    }
+  }
+
   register(composer: Composer<Context>): void {
     composer.command('mute', this.guard.registered, async (ctx: Context) => {
       const userId = ctx.from?.id;
@@ -42,6 +68,10 @@ export class MuteHandler implements TelegramHandler {
       const target = (ctx.match ?? '').toString().trim();
       if (!target) {
         await this.handleEmpty(ctx);
+        return;
+      }
+      if (target.toLowerCase() === 'all') {
+        await this.handleMuteAll(ctx);
         return;
       }
       try {

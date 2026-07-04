@@ -83,6 +83,9 @@ export class MenuHandler implements TelegramHandler {
               .text(en.menu.submenus.sensorsMute, 'menu:act:mute')
               .text(en.menu.submenus.sensorsUnmute, 'menu:act:unmute')
               .row()
+              .text(en.menu.submenus.sensorsMuteAll, 'menu:act:mute_all')
+              .text(en.menu.submenus.sensorsUnmuteAll, 'menu:act:unmute_all')
+              .row()
               .text(en.menu.submenus.backToMenu, 'menu:top');
             await this.renderSubmenu(ctx, en.menu.submenus.sensorsTitle, kb);
             break;
@@ -174,6 +177,12 @@ export class MenuHandler implements TelegramHandler {
             break;
           case 'act:unmute':
             await this.unmuteHandler.handleEmpty(ctx);
+            break;
+          case 'act:mute_all':
+            await this.muteHandler.handleMuteAll(ctx);
+            break;
+          case 'act:unmute_all':
+            await this.unmuteHandler.handleUnmuteAll(ctx);
             break;
           case 'act:cfg_add':
             if (role !== 'admin') {

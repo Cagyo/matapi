@@ -21,18 +21,35 @@ touch "$LOCKFILE"
 trap "rm -f $LOCKFILE" EXIT
 
 cd /opt/home-worker
-PREV_COMMIT=$(git rev-parse HEAD)
-git fetch origin main
 
-REMOTE=$(git rev-parse origin/main)
-if [ "$PREV_COMMIT" = "$REMOTE" ]; then
-  echo "Already up to date"
-  exit 0
+# Create pre-update rollback snapshot
+mkdir -p /opt/home-worker/data/rollbacks
+ROLLBACK_SNAPSHOT="/opt/home-worker/data/rollbacks/rollback-$(date +%s).tar.gz"
+tar -czf "$ROLLBACK_SNAPSHOT" --exclude="data" --exclude="node_modules" --exclude=".git" -C /opt/home-worker .
+
+# Prune old snapshots (retain only 3 newest)
+ls -t /opt/home-worker/data/rollbacks/rollback-*.tar.gz 2>/dev/null | tail -n +4 | xargs -I {} rm -f "{}" || true
+
+# Download release tarball from GitHub Releases (or fallback to git fetch)
+RELEASE_URL="${HOME_WORKER_RELEASE_URL:-}"
+if [ -n "$RELEASE_URL" ] && curl --output /dev/null --silent --head --fail "$RELEASE_URL" 2>/dev/null; then
+  TMP_TAR="/tmp/home-worker-release.tar.gz"
+  STAGING="/tmp/staging-$$"
+  curl -fsSL "$RELEASE_URL" -o "$TMP_TAR"
+  mkdir -p "$STAGING"
+  tar -xzf "$TMP_TAR" -C "$STAGING"
+  rsync -av --delete --exclude="data" --exclude="node_modules" --exclude=".git" "$STAGING/" /opt/home-worker/
+  rm -rf "$STAGING" "$TMP_TAR"
+else
+  git fetch origin main
+  git reset --hard origin/main
 fi
 
-git tag "rollback-$(date +%s)" "$PREV_COMMIT"
-git reset --hard origin/main
-corepack yarn install --immutable
+# Install production deps without building (jobs=1 sequential native rebuilds)
+export NODE_OPTIONS="--max-old-space-size=512"
+export npm_config_jobs=1
+export JOBS=1
+corepack yarn workspaces focus -A --production
 
 # Run DB migrations
 corepack yarn db:migrate
@@ -43,8 +60,8 @@ pm2 restart worker
 sleep 30
 if ! pm2 show worker | grep -q "online"; then
   echo "Health check failed, rolling back"
-  git reset --hard "$PREV_COMMIT"
-  corepack yarn install --immutable
+  tar -xzf "$ROLLBACK_SNAPSHOT" -C /opt/home-worker
+  corepack yarn workspaces focus -A --production
   pm2 restart worker
   curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
     -d "chat_id=${ADMIN_TELEGRAM_ID}" \
@@ -63,15 +80,18 @@ echo "Update successful"
 set -euo pipefail
 
 cd /opt/home-worker
-PREV=$(git tag --list 'rollback-*' --sort=-creatordate | head -1)
+PREV=$(ls -t /opt/home-worker/data/rollbacks/rollback-*.tar.gz 2>/dev/null | head -1 || true)
 
 if [ -z "$PREV" ]; then
-  echo "No rollback tag found"
+  echo "No rollback snapshot found"
   exit 1
 fi
 
-git reset --hard "$PREV"
-corepack yarn install --immutable
+tar -xzf "$PREV" -C /opt/home-worker
+export NODE_OPTIONS="--max-old-space-size=512"
+export npm_config_jobs=1
+export JOBS=1
+corepack yarn workspaces focus -A --production
 pm2 restart worker
 echo "Rolled back to $PREV"
 ```
@@ -172,7 +192,7 @@ If the check fails, rollback is automatic.
 - Major upgrades (20→22) require:
   1. Manual edit of `system-deps.yml`
   2. Awareness that all native modules (`better-sqlite3`, `pigpio`) recompile
-  3. `yarn install` after Node upgrade rebuilds native addons
+  3. `install_production_deps` after Node upgrade rebuilds native addons sequentially with `jobs=1`
   4. If rebuild fails, health check catches it
 
 ## Migration Safety
