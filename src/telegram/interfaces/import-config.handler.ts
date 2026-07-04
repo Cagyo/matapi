@@ -48,6 +48,15 @@ export class ImportConfigHandler implements TelegramHandler {
     composer.command('import_config', this.guard.adminOnly, (ctx) =>
       this.onCommand(ctx),
     );
+    composer.command('cancel', this.guard.adminOnly, async (ctx) => {
+      const userId = ctx.from?.id;
+      if (userId && this.states.has(userId)) {
+        this.states.delete(userId);
+        await ctx.reply(en.importConfig.cancelled);
+      } else {
+        await ctx.reply(en.common.noActiveWizard);
+      }
+    });
     composer.callbackQuery(/^imp:/, this.guard.adminOnly, (ctx) =>
       this.onCallback(ctx),
     );

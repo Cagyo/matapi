@@ -118,6 +118,15 @@ export class ConfigHandler implements TelegramHandler {
 
   register(composer: Composer<Context>): void {
     composer.command('config', this.guard.adminOnly, (ctx) => this.onCommand(ctx));
+    composer.command('cancel', this.guard.adminOnly, async (ctx, next) => {
+      const userId = ctx.from?.id;
+      if (userId && this.states.has(userId)) {
+        this.states.delete(userId);
+        await ctx.reply(en.config.cancelled);
+        return;
+      }
+      return next();
+    });
     composer.callbackQuery(/^cfg:/, this.guard.adminOnly, (ctx) =>
       this.onCallback(ctx),
     );
@@ -221,6 +230,11 @@ export class ConfigHandler implements TelegramHandler {
     state: ConfigState,
     data: string,
   ): Promise<void> {
+    if (data === 'cfg:cancel') {
+      this.states.delete(userId);
+      await ctx.reply(en.config.cancelled);
+      return;
+    }
     // cfg:type:<digital|uart>
     if (state.kind === 'addType' && data.startsWith('cfg:type:')) {
       const type = data.slice('cfg:type:'.length) as AddType;
@@ -350,13 +364,14 @@ export class ConfigHandler implements TelegramHandler {
       }
       case 'addDigitalPin': {
         const pin = parseIntStrict(text);
-        if (pin === null) return void ctx.reply(en.config.invalidNumber);
+        if (pin === null || pin < 0 || pin > 27)
+          return void ctx.reply(en.config.invalidPinRange);
         this.states.set(userId, { kind: 'addDigitalActiveLow', name: state.name, pin });
         await ctx.reply(en.config.activeQuestion, { reply_markup: activeKeyboard() });
         return;
       }
       case 'addUartPort': {
-        if (!text) return void ctx.reply(en.config.invalidPort);
+        if (!text) return void ctx.reply(en.config.invalidPortPath);
         this.states.set(userId, { kind: 'addUartBaud', name: state.name, port: text });
         await ctx.reply(en.config.baudQuestion, { reply_markup: baudKeyboard() });
         return;
@@ -380,7 +395,7 @@ export class ConfigHandler implements TelegramHandler {
         if (critical === null || critical <= 0)
           return void ctx.reply(en.config.invalidNumber);
         if (critical <= state.warning)
-          return void ctx.reply(en.config.thresholdsOrder);
+          return void ctx.reply(en.config.invalidThresholdOrder(state.warning));
         await this.addSensor.execute({
           name: state.name,
           type: 'uart',
@@ -417,7 +432,7 @@ export class ConfigHandler implements TelegramHandler {
       }
       case 'modifyPin': {
         const pin = parseIntStrict(text);
-        if (pin === null) return void ctx.reply(en.config.invalidNumber);
+        if (pin === null || pin < 0 || pin > 27) return void ctx.reply(en.config.invalidPinRange);
         const current = await this.sensors.findById(state.sensorId);
         if (!current) throw new SensorNotFoundError(state.currentName);
         const nextConfig = { ...current.config, pin };
@@ -437,7 +452,7 @@ export class ConfigHandler implements TelegramHandler {
       }
       case 'modifyDebounce': {
         const ms = parseIntStrict(text);
-        if (ms === null || ms < 0) return void ctx.reply(en.config.invalidNumber);
+        if (ms === null || ms < 0) return void ctx.reply(en.config.invalidDebounce);
         await this.modifySensor.execute({
           currentName: state.currentName,
           patch: { debounceMs: ms },
@@ -550,40 +565,52 @@ export class ConfigHandler implements TelegramHandler {
 function typeKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text('Digital', 'cfg:type:digital')
-    .text('UART', 'cfg:type:uart');
+    .text('UART', 'cfg:type:uart')
+    .row()
+    .text(en.common.cancelButton, 'cfg:cancel');
 }
 
 function activeKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text('Active High', 'cfg:active:high')
-    .text('Active Low', 'cfg:active:low');
+    .text('Active Low', 'cfg:active:low')
+    .row()
+    .text(en.common.cancelButton, 'cfg:cancel');
 }
 
 function pullKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text('Pull Up', 'cfg:pull:up')
     .text('Pull Down', 'cfg:pull:down')
-    .text('None', 'cfg:pull:none');
+    .text('None', 'cfg:pull:none')
+    .row()
+    .text(en.common.cancelButton, 'cfg:cancel');
 }
 
 function severityKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text('Info', 'cfg:sev:info')
     .text('Warning', 'cfg:sev:warning')
-    .text('Critical', 'cfg:sev:critical');
+    .text('Critical', 'cfg:sev:critical')
+    .row()
+    .text(en.common.cancelButton, 'cfg:cancel');
 }
 
 function modifySeverityKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text('Info', 'cfg:msev:info')
     .text('Warning', 'cfg:msev:warning')
-    .text('Critical', 'cfg:msev:critical');
+    .text('Critical', 'cfg:msev:critical')
+    .row()
+    .text(en.common.cancelButton, 'cfg:cancel');
 }
 
 function baudKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text('9600', 'cfg:baud:9600')
-    .text('115200', 'cfg:baud:115200');
+    .text('115200', 'cfg:baud:115200')
+    .row()
+    .text(en.common.cancelButton, 'cfg:cancel');
 }
 
 function confirmKeyboard(): InlineKeyboard {
@@ -600,7 +627,8 @@ function modifyMenu(type: SensorType): InlineKeyboard {
     kb.row();
   }
   kb.text('Debounce', 'cfg:modify:debounce').text('Severity', 'cfg:modify:severity').row();
-  kb.text('Done', 'cfg:modify:done');
+  kb.text('Done', 'cfg:modify:done').row();
+  kb.text(en.common.cancelButton, 'cfg:cancel');
   return kb;
 }
 

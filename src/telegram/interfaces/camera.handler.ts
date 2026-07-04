@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { parse } from 'date-fns';
-import { Composer, Context, InputFile } from 'grammy';
+import { Composer, Context, InlineKeyboard, InputFile } from 'grammy';
 import { CameraStatusUseCase } from '../../camera/application/camera-status.use-case';
 import { DisableMotionUseCase } from '../../camera/application/disable-motion.use-case';
 import { EnableMotionUseCase } from '../../camera/application/enable-motion.use-case';
@@ -34,7 +34,9 @@ type Subcommand =
   | 'photo'
   | 'enable'
   | 'disable'
-  | 'status';
+  | 'status'
+  | 'menu'
+  | 'dashboard';
 
 /**
  * `/camera <subcommand>` — spec 14.
@@ -66,6 +68,11 @@ export class CameraHandler implements TelegramHandler {
 
       try {
         switch (sub) {
+          case '':
+          case 'menu':
+          case 'dashboard':
+            await this.handleDashboard(ctx);
+            return;
           case 'snapshot':
             await this.handleSnapshot(ctx, arg || undefined);
             return;
@@ -94,6 +101,54 @@ export class CameraHandler implements TelegramHandler {
         await this.handleError(ctx, err, `/camera ${sub}`);
       }
     });
+
+    composer.callbackQuery(/^cam:/, this.guard.registered, async (ctx: Context) => {
+      const userId = ctx.from?.id;
+      if (!userId) return;
+      await ctx.answerCallbackQuery().catch(() => undefined);
+      const data = (ctx.callbackQuery?.data ?? '').slice('cam:'.length).trim();
+      if (!data) return;
+      try {
+        if (data === 'snapshot') {
+          await this.handleSnapshot(ctx);
+          return;
+        }
+        if (data === 'events') {
+          await this.handleEvents(ctx);
+          return;
+        }
+        if (data === 'status') {
+          await this.handleStatus(ctx);
+          return;
+        }
+        if (data === 'close') {
+          await ctx.reply(en.camera.closed);
+          return;
+        }
+        if (data.startsWith('video:')) {
+          const idStr = data.slice('video:'.length);
+          await this.handleVideo(ctx, idStr);
+          return;
+        }
+        if (data.startsWith('photo:')) {
+          const idStr = data.slice('photo:'.length);
+          await this.handlePhoto(ctx, idStr);
+          return;
+        }
+      } catch (err) {
+        await this.handleError(ctx, err, `/camera callback (${data})`);
+      }
+    });
+  }
+
+  private async handleDashboard(ctx: Context): Promise<void> {
+    const kb = new InlineKeyboard()
+      .text(en.camera.dashboardButtons.snapshot, 'cam:snapshot')
+      .text(en.camera.dashboardButtons.eventsToday, 'cam:events')
+      .row()
+      .text(en.camera.dashboardButtons.status, 'cam:status')
+      .text(en.camera.dashboardButtons.close, 'cam:close');
+    await ctx.reply(en.camera.dashboardTitle, { reply_markup: kb });
   }
 
   private async handleSnapshot(ctx: Context, name?: string): Promise<void> {
@@ -136,7 +191,17 @@ export class CameraHandler implements TelegramHandler {
       '',
       en.camera.eventsFooter(events.length),
     ].join('\n');
-    await ctx.reply(message);
+
+    const kb = new InlineKeyboard();
+    const recent = events.slice(0, 5);
+    for (const e of recent) {
+      kb.text(en.camera.eventButtons.video(e.id), `cam:video:${e.id}`);
+      if (e.snapshotPath) {
+        kb.text(en.camera.eventButtons.photo(e.id), `cam:photo:${e.id}`);
+      }
+      kb.row();
+    }
+    await ctx.reply(message, { reply_markup: kb });
   }
 
   private async handleVideo(ctx: Context, arg: string): Promise<void> {

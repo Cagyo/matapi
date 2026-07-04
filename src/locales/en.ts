@@ -19,7 +19,7 @@ function fmtTime(date: Date | null | undefined): string {
   return format(date, TIME_FMT);
 }
 
-const TYPE_ICONS: Record<SensorType, string> = {
+export const TYPE_ICONS: Record<SensorType, string> = {
   digital: '🚪',
   uart: '🌬️',
   mqtt: '📡',
@@ -209,6 +209,12 @@ export const commands: CommandDescriptor[] = [
     scope: 'admin',
   },
   {
+    command: 'cancel',
+    description: 'Cancel an active configuration wizard',
+    usage: '/cancel — cancel an active configuration wizard',
+    scope: 'admin',
+  },
+  {
     command: 'export_config',
     description: 'Download current config as YAML',
     usage: '/export_config — download current config as YAML',
@@ -288,6 +294,8 @@ export const en = {
     adminRequired: '❌ Admin access required',
     error: (action: string, reason: string) => `❌ Failed to ${action}: ${reason}`,
     interrupted: 'Previous operation was interrupted. Please start again.',
+    cancelButton: '❌ Cancel',
+    noActiveWizard: 'ℹ️ No active configuration wizard to cancel.',
   },
   claim: {
     success: '✅ You are now the admin of this Home Worker.',
@@ -411,6 +419,7 @@ export const en = {
     notFound: (name: string) => `❌ Sensor '${name}' not found`,
     invalidDuration: '❌ Invalid duration format. Use: 30m, 2h, 1d, 7d',
     invalidCount: '❌ Invalid count. Use a positive number.',
+    selectSensor: '📋 Select a sensor to view recent logs:',
     readFailed: '❌ Failed to read logs',
   },
   help: {
@@ -531,6 +540,13 @@ export const en = {
     invalidName:
       '❌ Invalid sensor name. Use alphanumerics and underscores only.',
     invalidNumber: '❌ Please enter a valid number.',
+    invalidPinRange: '❌ Invalid GPIO pin number. Please enter a valid number between 0 and 27:',
+    invalidThresholdOrder: (warn: number) =>
+      `❌ Critical threshold must be greater than warning threshold (${warn} ppm). Please enter a critical threshold > ${warn}:`,
+    invalidPortPath:
+      '❌ Serial port path must be a non-empty string (e.g. /dev/ttyUSB0):',
+    invalidDebounce:
+      '❌ Please enter debounce time in milliseconds (0 or greater):',
     invalidPort: '❌ Serial port path must be a non-empty string.',
     thresholdsOrder: '❌ Warning threshold must be less than critical.',
     missingArg: (cmd: string) => `❌ Usage: /config ${cmd} <sensor_name>`,
@@ -539,6 +555,8 @@ export const en = {
   mute: {
     missingSensor: '❌ Usage: /mute <sensor_name>',
     missingSensorUnmute: '❌ Usage: /unmute <sensor_name>',
+    selectMute: '🔇 Select a sensor to mute:',
+    selectUnmute: '🔔 Select a sensor to unmute:',
     notFound: (name: string) => `❌ Sensor '${name}' not found`,
     muted: (name: string) => `🔇 Notifications muted for ${name}.`,
     alreadyMuted: (name: string) => `ℹ️ ${name} is already muted`,
@@ -611,6 +629,18 @@ export const en = {
   camera: {
     usage:
       'Usage: /camera <snapshot|events [DD.MM.YYYY]|video <id>|photo <id>|enable|disable|status>',
+    dashboardTitle: '📹 Camera Dashboard\nSelect an action below:',
+    dashboardButtons: {
+      snapshot: '📸 Take Snapshot',
+      eventsToday: '📹 Today\'s Events',
+      status: '⚙️ Status',
+      close: '❌ Close',
+    },
+    eventButtons: {
+      video: (id: number) => `📹 Video #${id}`,
+      photo: (id: number) => `📸 Photo #${id}`,
+    },
+    closed: '📹 Camera dashboard closed.',
     snapshotCaption: (name: string, at: Date) => `📸 ${name} | ${fmtDate(at)}`,
     eventsHeader: (day: Date) => `📹 Motion events for ${format(day, 'dd.MM.yyyy')}:`,
     eventLine: (e: MotionEventView): string => {

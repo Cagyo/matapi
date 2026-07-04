@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { Composer, Context, InputFile } from 'grammy';
-import { en } from '../../locales/en';
+import { Composer, Context, InlineKeyboard, InputFile } from 'grammy';
+import { en, TYPE_ICONS } from '../../locales/en';
 import {
   SENSOR_LOG_REPOSITORY,
   SensorLogEntry,
@@ -45,7 +45,17 @@ export class LogsHandler implements TelegramHandler {
     composer.command('logs', this.guard.registered, async (ctx) => {
       const raw = (ctx.match ?? '').toString().trim();
       if (!raw) {
-        await ctx.reply('Usage: /logs <sensor> [count] | /logs <sensor> --since 30m');
+        const sensors = await this.sensors.listEnabled();
+        if (sensors.length === 0) {
+          await ctx.reply(en.status.none);
+          return;
+        }
+        const kb = new InlineKeyboard();
+        for (const s of sensors) {
+          const icon = TYPE_ICONS[s.type] ?? '•';
+          kb.text(`${icon} ${s.name}`, `logs:${s.name}`).row();
+        }
+        await ctx.reply(en.logs.selectSensor, { reply_markup: kb });
         return;
       }
 
@@ -80,6 +90,35 @@ export class LogsHandler implements TelegramHandler {
       } catch (err) {
         this.logger.error(
           `/logs failed: ${(err as Error).message}`,
+          (err as Error).stack,
+        );
+        await ctx.reply(en.logs.readFailed);
+      }
+    });
+
+    composer.callbackQuery(/^logs:/, this.guard.registered, async (ctx) => {
+      const userId = ctx.from?.id;
+      if (!userId) return;
+      await ctx.answerCallbackQuery().catch(() => undefined);
+      const target = (ctx.callbackQuery?.data ?? '').slice('logs:'.length).trim();
+      if (!target) return;
+      try {
+        const lookup = await this.sensors.findByName(target);
+        if (!lookup) {
+          await ctx.reply(en.logs.notFound(target));
+          return;
+        }
+        const entries = await this.logs.findRecent(lookup.sensor.id, {
+          limit: DEFAULT_COUNT,
+        });
+        if (entries.length === 0) {
+          await ctx.reply(en.logs.none(target));
+          return;
+        }
+        await this.deliver(ctx, target, entries);
+      } catch (err) {
+        this.logger.error(
+          `/logs callback failed: ${(err as Error).message}`,
           (err as Error).stack,
         );
         await ctx.reply(en.logs.readFailed);
