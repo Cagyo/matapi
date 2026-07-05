@@ -26,6 +26,7 @@ main() {
   run_migrations
   setup_pm2
   print_done
+  reboot_system
 }
 
 check_raspberry_pi() {
@@ -490,6 +491,11 @@ print_done() {
   Status:  sudo -u $USER pm2 status
 
 EOF
+}
+
+reboot_system() {
+  echo "Rebooting system to apply changes..."
+  sudo reboot
 }
 
 main "$@"
