@@ -21,7 +21,7 @@ export class InMemoryCo2Source implements Co2Source {
   private cursor = 0;
   private failures = 0;
 
-  constructor(sequence: number[] = [620, 650, 700, 820, 950, 1100, 1300, 900, 700]) {
+  constructor(sequence: number[] = [620, 650, 680, 710, 740, 710, 680, 650]) {
     this.sequence = [...sequence];
   }
 

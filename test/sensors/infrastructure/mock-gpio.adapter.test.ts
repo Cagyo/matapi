@@ -53,4 +53,24 @@ describe('MockGpioAdapter', () => {
 
     expect(listener).not.toHaveBeenCalled();
   });
+
+  it('records state changes to sensor_logs when repository is provided', async () => {
+    const now = new Date('2030-01-01T00:00:00.000Z');
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const logs = { appendBatch: vi.fn().mockResolvedValue(undefined), findRecent: vi.fn() };
+    const adapter = new MockGpioAdapter(logs);
+    await adapter.init(config);
+
+    adapter.simulateChange(1);
+
+    expect(logs.appendBatch).toHaveBeenCalledWith([
+      {
+        sensorId: 'front_door',
+        level: 'info',
+        message: 'State changed: CLOSED → OPEN',
+        timestamp: now,
+      },
+    ]);
+  });
 });

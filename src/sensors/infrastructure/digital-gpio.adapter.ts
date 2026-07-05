@@ -3,9 +3,11 @@ import { GpioPin } from '../domain/gpio-pin.value-object';
 import { DigitalConfigInvalidError } from '../domain/errors/digital-config-invalid.error';
 import { DriverUnavailableError } from '../domain/errors/driver-unavailable.error';
 import { SensorDriverPort } from '../domain/ports/sensor-driver.port';
+import { SensorLogRepositoryPort } from '../domain/ports/sensor-log-repository.port';
 import { DigitalStepType, isDigitalStepType, SensorConfig } from '../domain/sensor';
 import { SensorEvent } from '../domain/sensor-event';
 import { SensorReading } from '../domain/sensor-reading';
+import { en } from '../../locales/en';
 import { PigpioGateway, PigpioGpio, PudMode } from './pigpio.gateway';
 
 interface DigitalConfig {
@@ -40,9 +42,13 @@ export class DigitalGpioAdapter implements SensorDriverPort {
   private activeTimers = new Set<NodeJS.Timeout>();
   private transitionTimestamps: number[] = [];
   private isFlapping = false;
+  private debounceLogged = false;
   private polledInterval?: NodeJS.Timeout;
 
-  constructor(private readonly gateway: PigpioGateway) {}
+  constructor(
+    private readonly gateway: PigpioGateway,
+    private readonly logs?: SensorLogRepositoryPort,
+  ) {}
 
   async init(config: SensorConfig): Promise<void> {
     this.clearActiveTimers();
@@ -52,6 +58,7 @@ export class DigitalGpioAdapter implements SensorDriverPort {
     }
     this.transitionTimestamps = [];
     this.isFlapping = false;
+    this.debounceLogged = false;
 
     this.config = config;
     this.digital = this.parseConfig(config.config);
@@ -143,9 +150,16 @@ export class DigitalGpioAdapter implements SensorDriverPort {
       this.transitionTimestamps.shift();
     }
     if (this.transitionTimestamps.length > 30 && !this.isFlapping) {
-      this.logger.warn(
-        `Sensor "${this.config.name}" (pin ${this.digital.pin.value}) flapping! Switching to 10s polled sampling mode.`,
-      );
+      const msg = en.logs.flappingFault(this.config.name, this.digital.pin.value);
+      this.logger.warn(msg);
+      void this.logs?.appendBatch([
+        {
+          sensorId: this.config.id,
+          level: 'warn',
+          message: msg,
+          timestamp: new Date(now),
+        },
+      ]);
       this.isFlapping = true;
       this.startPolledSampling();
       return;
@@ -180,6 +194,22 @@ export class DigitalGpioAdapter implements SensorDriverPort {
     this.rawLevel = level;
     this.lastTimestamp = new Date(now);
 
+    if (this.activeTimers.size > 0 && !this.debounceLogged) {
+      this.debounceLogged = true;
+      const recentCount = Math.max(
+        2,
+        this.transitionTimestamps.filter((t) => now - t <= 1000).length,
+      );
+      void this.logs?.appendBatch([
+        {
+          sensorId: this.config.id,
+          level: 'warn',
+          message: en.logs.debounceTriggered(recentCount, 1),
+          timestamp: new Date(now),
+        },
+      ]);
+    }
+
     const candidateValue = this.mapValue(level);
     if (candidateValue === this.currentValue) {
       this.clearActiveTimers();
@@ -191,12 +221,14 @@ export class DigitalGpioAdapter implements SensorDriverPort {
 
     if (delay === 0) {
       this.clearActiveTimers();
+      this.debounceLogged = false;
       this.commitValueChange(candidateValue, now);
     } else {
       this.clearActiveTimers();
       const timer = setTimeout(() => {
         this.activeTimers.delete(timer);
         if (this.mapValue(this.rawLevel) === candidateValue) {
+          this.debounceLogged = false;
           this.commitValueChange(candidateValue, Date.now());
         }
       }, delay);
@@ -228,6 +260,16 @@ export class DigitalGpioAdapter implements SensorDriverPort {
     this.lastTimestamp = new Date(now);
 
     if (!this.config) return;
+    const stepType = (this.digital?.stepType as string) || 'contact';
+    void this.logs?.appendBatch([
+      {
+        sensorId: this.config.id,
+        level: 'info',
+        message: en.logs.stateChange(stepType, oldValue, newValue),
+        timestamp: this.lastTimestamp,
+      },
+    ]);
+
     this.listener?.({
       sensorId: this.config.id,
       type: 'state_change',

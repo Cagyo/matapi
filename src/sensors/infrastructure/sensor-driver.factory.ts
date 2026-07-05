@@ -35,7 +35,9 @@ export class SensorDriverFactoryProvider {
     return (type: SensorType): SensorDriverPort => {
       switch (type) {
         case 'digital':
-          return isDev ? new MockGpioAdapter() : new DigitalGpioAdapter(pigpio);
+          return isDev
+            ? new MockGpioAdapter(sensorLogs)
+            : new DigitalGpioAdapter(pigpio, sensorLogs);
         case 'uart':
           return isDev
             ? new MockUartCo2Adapter(sensorLogs)

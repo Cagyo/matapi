@@ -1,9 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { SensorDriverPort } from '../domain/ports/sensor-driver.port';
+import { SensorLogRepositoryPort } from '../domain/ports/sensor-log-repository.port';
 import { SimulatableSensorPort } from '../domain/ports/simulatable-sensor.port';
 import { SensorConfig } from '../domain/sensor';
 import { SensorEvent } from '../domain/sensor-event';
 import { SensorReading } from '../domain/sensor-reading';
+import { en } from '../../locales/en';
 
 /**
  * Mock GPIO adapter for development. State changes are triggered manually via
@@ -16,6 +18,8 @@ export class MockGpioAdapter implements SensorDriverPort, SimulatableSensorPort 
   private currentValue: 0 | 1 = 0;
   private lastTimestamp = new Date();
   private listener?: (event: SensorEvent) => void;
+
+  constructor(private readonly logs?: SensorLogRepositoryPort) {}
 
   async init(config: SensorConfig): Promise<void> {
     this.config = config;
@@ -46,6 +50,17 @@ export class MockGpioAdapter implements SensorDriverPort, SimulatableSensorPort 
     const oldValue = this.currentValue;
     this.currentValue = value;
     this.lastTimestamp = new Date();
+    const stepType = (this.config.config?.stepType as string) || 'contact';
+    const oldVal = oldValue === 1;
+    const newVal = value === 1;
+    void this.logs?.appendBatch([
+      {
+        sensorId: this.config.id,
+        level: 'info',
+        message: en.logs.stateChange(stepType, oldVal, newVal),
+        timestamp: this.lastTimestamp,
+      },
+    ]);
     this.listener?.({
       sensorId: this.config.id,
       type: 'state_change',

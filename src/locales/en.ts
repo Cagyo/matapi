@@ -479,6 +479,22 @@ export const en = {
     line(entry: LogLineView): string {
       return `${fmtDate(entry.timestamp, true)} [${entry.level.toUpperCase()}] ${entry.message}`;
     },
+    stateChange(stepType: string, oldVal: boolean, newVal: boolean): string {
+      const steps = (en.sensors?.steps as Record<string, Record<string, string>>)?.[stepType] || en.sensors.steps.contact;
+      let oldStr = (oldVal ? steps.true : steps.false).toUpperCase();
+      let newStr = (newVal ? steps.true : steps.false).toUpperCase();
+      if (stepType === 'contact') {
+        if (oldStr === 'OPENED') oldStr = 'OPEN';
+        if (newStr === 'OPENED') newStr = 'OPEN';
+      }
+      return `State changed: ${oldStr} → ${newStr}`;
+    },
+    debounceTriggered(count: number, windowSec: number): string {
+      return `Debounce triggered (${count} events in ${windowSec}s)`;
+    },
+    flappingFault(name: string, pin: number): string {
+      return `Sensor "${name}" (pin ${pin}) flapping! Switching to 10s polled sampling mode.`;
+    },
     fileName(name: string): string {
       return `logs_${name}_${format(new Date(), 'yyyy-MM-dd')}.txt`;
     },

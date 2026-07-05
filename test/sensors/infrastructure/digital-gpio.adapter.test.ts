@@ -251,4 +251,64 @@ describe('DigitalGpioAdapter', () => {
     expect(DigitalGpioAdapter.getPin({})).toBeNull();
     expect(DigitalGpioAdapter.getPin(null)).toBeNull();
   });
+
+  it('records state change to sensor_logs when repository is provided', async () => {
+    const logs = { appendBatch: vi.fn().mockResolvedValue(undefined), findRecent: vi.fn() };
+    const loggedAdapter = new DigitalGpioAdapter(gateway, logs);
+    await loggedAdapter.init({ ...baseConfig, debounceMs: 0 });
+
+    const cb = gpio.notify.mock.calls[0][0];
+    cb(0); // activeLow: 0 is active/true
+
+    expect(logs.appendBatch).toHaveBeenCalledWith([
+      expect.objectContaining({
+        sensorId: 'sensor_1',
+        level: 'info',
+        message: 'State changed: CLOSED → OPEN',
+      }),
+    ]);
+  });
+
+  it('records debounce triggered warning to sensor_logs when bouncing occurs', async () => {
+    vi.useFakeTimers();
+    const logs = { appendBatch: vi.fn().mockResolvedValue(undefined), findRecent: vi.fn() };
+    const loggedAdapter = new DigitalGpioAdapter(gateway, logs);
+    await loggedAdapter.init({ ...baseConfig, debounceMs: 500 });
+
+    const cb = gpio.notify.mock.calls[0][0];
+    cb(0); // transition 0 -> active
+    vi.advanceTimersByTime(100);
+    cb(1); // bounce back to 1 while debounce timer is active
+
+    expect(logs.appendBatch).toHaveBeenCalledWith([
+      expect.objectContaining({
+        sensorId: 'sensor_1',
+        level: 'warn',
+        message: expect.stringContaining('Debounce triggered'),
+      }),
+    ]);
+    vi.useRealTimers();
+  });
+
+  it('records flapping fault warning to sensor_logs when circuit breaker trips', async () => {
+    vi.useFakeTimers();
+    const logs = { appendBatch: vi.fn().mockResolvedValue(undefined), findRecent: vi.fn() };
+    const loggedAdapter = new DigitalGpioAdapter(gateway, logs);
+    await loggedAdapter.init(baseConfig);
+
+    const cb = gpio.notify.mock.calls[0][0];
+    for (let i = 0; i < 35; i++) {
+      vi.advanceTimersByTime(1000);
+      cb(i % 2 as 0 | 1);
+    }
+
+    expect(logs.appendBatch).toHaveBeenCalledWith([
+      expect.objectContaining({
+        sensorId: 'sensor_1',
+        level: 'warn',
+        message: expect.stringContaining('flapping!'),
+      }),
+    ]);
+    vi.useRealTimers();
+  });
 });
