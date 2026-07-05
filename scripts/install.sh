@@ -176,6 +176,12 @@ YAML
 }
 
 install_app() {
+  local script_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  local local_app_root
+  local_app_root="$(cd "$script_dir/.." && pwd)"
+  local local_source="${REPO#file://}"
+
   if [ -d "$INSTALL_DIR/.git" ]; then
     echo "Updating existing git installation..."
     if command -v pm2 &>/dev/null; then
@@ -190,14 +196,15 @@ install_app() {
       echo "Stopping running PM2 worker instances before update..."
       sudo -u "$USER" pm2 stop ecosystem.config.js 2>/dev/null || true
     fi
+    if [ -d "$local_source" ] && [ "$local_source" != "$INSTALL_DIR" ] && [ -f "$local_source/package.json" ]; then
+      echo "Copying updated application files from $local_source to $INSTALL_DIR..."
+      sudo cp -a "$local_source/." "$INSTALL_DIR/"
+    elif [ -f "$local_app_root/package.json" ] && [ "$local_app_root" != "$INSTALL_DIR" ]; then
+      echo "Copying updated application files from $local_app_root to $INSTALL_DIR..."
+      sudo cp -a "$local_app_root/." "$INSTALL_DIR/"
+    fi
     sudo chown -R "$USER:$USER" "$INSTALL_DIR"
   else
-    local script_dir
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local local_app_root
-    local_app_root="$(cd "$script_dir/.." && pwd)"
-    local local_source="${REPO#file://}"
-
     if [ -d "$local_source" ]; then
       if [ -d "$local_source/.git" ]; then
         echo "Cloning local git repository from $local_source..."
@@ -438,6 +445,15 @@ install_selected_features() {
 
 run_migrations() {
   cd "$INSTALL_DIR"
+  local db_path
+  db_path=$(grep -E '^DATABASE_PATH=' "$INSTALL_DIR/.env" 2>/dev/null | cut -d'=' -f2- | tr -d '"'\'' ' || true)
+  if [ -z "$db_path" ]; then
+    db_path="$INSTALL_DIR/data/worker.db"
+  fi
+  local db_dir
+  db_dir="$(dirname "$db_path")"
+  sudo mkdir -p "$INSTALL_DIR/data" "$db_dir"
+  sudo chown -R "$USER:$USER" "$INSTALL_DIR/data" "$db_dir"
   sudo -u "$USER" corepack yarn db:migrate
   echo "Database migrations applied"
 }
