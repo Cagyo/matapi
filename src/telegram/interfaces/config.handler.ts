@@ -475,6 +475,7 @@ export class ConfigHandler implements TelegramHandler {
           this.states.set(userId, { kind: 'addDigitalPin', name: text });
           await ctx.reply(en.config.step3Digital(text, await this.getUsedPinsText()), {
             reply_markup: backCancelKeyboard('addName'),
+            parse_mode: 'HTML',
           });
         } else {
           this.states.set(userId, { kind: 'addUartPort', name: text });
@@ -625,8 +626,9 @@ export class ConfigHandler implements TelegramHandler {
         currentName: state.currentName,
       });
       const used = await this.getUsedPinsText();
-      await ctx.reply(`${en.config.pinQuestion}\n\nCurrently used: ${used}`, {
+      await ctx.reply(en.config.pinQuestion(used), {
         reply_markup: backCancelKeyboard('modifyMenu'),
+        parse_mode: 'HTML',
       });
       return;
     }
@@ -716,6 +718,7 @@ export class ConfigHandler implements TelegramHandler {
           this.states.set(userId, { kind: 'addDigitalPin', name: state.name });
           await ctx.reply(en.config.step3Digital(state.name, await this.getUsedPinsText()), {
             reply_markup: backCancelKeyboard('addName'),
+            parse_mode: 'HTML',
           });
         }
         break;

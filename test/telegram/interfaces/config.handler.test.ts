@@ -81,6 +81,10 @@ describe('ConfigHandler', () => {
     expect(sensors.listEnabled).toHaveBeenCalled();
     expect(reply).toHaveBeenCalledWith(
       expect.stringContaining('Currently used: Pin 4 (front_door), Pin 17 (motion)'),
+      expect.objectContaining({ parse_mode: 'HTML' }),
+    );
+    expect(reply).toHaveBeenCalledWith(
+      expect.stringContaining('Raspberry Pi GPIO Pinout (BCM)'),
       expect.anything(),
     );
   });
@@ -152,5 +156,41 @@ describe('ConfigHandler', () => {
     await cbFn(backCtx);
 
     expect(reply).toHaveBeenCalledWith(en.config.step2('digital'), expect.anything());
+  });
+
+  it('displays Raspberry Pi pinout schema when modifying GPIO pin', async () => {
+    const { handler, callbackQueryCallbacks, sensors } = createTestSetup();
+    const cbFn = callbackQueryCallbacks[0].fn;
+
+    const reply = vi.fn().mockResolvedValue(true);
+    const answerCallbackQuery = vi.fn().mockResolvedValue(true);
+    const editMessageReplyMarkup = vi.fn().mockResolvedValue(true);
+
+    sensors.findByName.mockResolvedValue({
+      kind: 'active',
+      sensor: { id: 's-1', name: 'front_door', type: 'digital', config: { pin: 4 }, debounceMs: 100, severity: 'info' },
+    });
+
+    await handler.handleSubcommand({ from: { id: 503 }, reply } as any, 'modify');
+    await cbFn({
+      from: { id: 503 },
+      callbackQuery: { data: 'cfg:mod:front_door' },
+      answerCallbackQuery,
+      editMessageReplyMarkup,
+      reply,
+    } as any);
+
+    await cbFn({
+      from: { id: 503 },
+      callbackQuery: { data: 'cfg:modify:pin' },
+      answerCallbackQuery,
+      editMessageReplyMarkup,
+      reply,
+    } as any);
+
+    expect(reply).toHaveBeenCalledWith(
+      expect.stringContaining('Raspberry Pi GPIO Pinout (BCM)'),
+      expect.objectContaining({ parse_mode: 'HTML' }),
+    );
   });
 });

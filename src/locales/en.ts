@@ -304,6 +304,30 @@ export const commands: CommandDescriptor[] = [
   },
 ];
 
+const PINOUT_SCHEMA = `<pre>📌 Raspberry Pi GPIO Pinout (BCM)
+[xx] = Physical Pin | BCM = GPIO #
+
+       3.3V [01] [02] 5V
+      SDA 2 [03] [04] 5V
+      SCL 3 [05] [06] GND
+          4 [07] [08] 14 TXD
+        GND [09] [10] 15 RXD
+         17 [11] [12] 18
+         27 [13] [14] GND
+         22 [15] [16] 23
+       3.3V [17] [18] 24
+    MOSI 10 [19] [20] GND
+     MISO 9 [21] [22] 25
+    SCLK 11 [23] [24] 8 CE0
+        GND [25] [26] 7 CE1
+    ID_SD 0 [27] [28] 1 ID_SC
+          5 [29] [30] GND
+          6 [31] [32] 12 PWM0
+    PWM1 13 [33] [34] GND
+    MISO 19 [35] [36] 16
+         26 [37] [38] 20 MOSI
+        GND [39] [40] 21 SCLK</pre>`;
+
 export const en = {
   commands,
   sensors: {
@@ -556,7 +580,10 @@ export const en = {
     noActiveSensors: 'ℹ️ No active sensors configured.',
     step1: 'Step 1 of 5 — What type of sensor?',
     step2: (type: string) => `Step 2 of 5 (${type})\n\nSensor name?`,
-    step3Digital: (name: string, usedPins?: string) => `Step 3 of 5 (Digital: "${name}")\n\nGPIO pin number (0–27)?${usedPins ? `\n\nCurrently used: ${usedPins}` : ''}`,
+    step3Digital: (name: string, usedPins?: string) =>
+      `Step 3 of 5 (Digital: "${name}")\n\nGPIO pin number (0–27)?\n\n${PINOUT_SCHEMA}${
+        usedPins ? `\n\nCurrently used: ${usedPins}` : ''
+      }`,
     step4Digital: (name: string, pin: number) => `Step 4 of 5 (Digital: "${name}", Pin ${pin})\n\nSelect Step Type (device class):`,
     step5Digital: (name: string, pin: number, stepType: string) => `Step 5 of 5 (Digital: "${name}", Pin ${pin}, ${stepType})\n\nSeverity level?\n💡 _Hint: Info = silent log; Warning = standard alert; Critical = urgent alarm._`,
     step3Uart: (name: string) => `Step 3 of 5 (UART: "${name}")\n\nSerial port path? (e.g. /dev/serial0)`,
@@ -564,7 +591,10 @@ export const en = {
     step5Uart: (name: string, port: string, baud: number) => `Step 5 of 5 (UART: "${name}", Port ${port}, ${baud} baud)\n\nWarning threshold (ppm)?\n💡 _Hint: CO2 level in ppm that triggers a warning alert (e.g., 1000)._`,
     typeQuestion: 'What type of sensor?',
     nameQuestion: 'Sensor name?',
-    pinQuestion: 'GPIO pin number?',
+    pinQuestion: (usedPins?: string) =>
+      `GPIO pin number (0–27)?\n\n${PINOUT_SCHEMA}${
+        usedPins ? `\n\nCurrently used: ${usedPins}` : ''
+      }`,
     stepTypeQuestion: 'Select Step Type (device class):',
     activeQuestion: 'Active high or low?',
     pullQuestion: 'Pull resistor?',
