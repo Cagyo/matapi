@@ -108,6 +108,7 @@ export class SettingsHandler implements TelegramHandler {
       .text(en.settings.buttons.t85, 'settings:set:85')
       .text(en.settings.buttons.t90, 'settings:set:90')
       .row()
-      .text(en.settings.buttons.cleanNow, 'clean:trigger');
+      .text(en.settings.buttons.cleanNow, 'clean:trigger')
+      .text(en.gdriveAuth.button, 'gdauth:start');
   }
 }

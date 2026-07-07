@@ -45,6 +45,7 @@ import { UpdateHandler } from '../interfaces/update.handler';
 import { MenuHandler } from '../interfaces/menu.handler';
 import { SettingsHandler } from '../interfaces/settings.handler';
 import { CleanHandler } from '../interfaces/clean.handler';
+import { GdriveAuthHandler } from '../interfaces/gdrive-auth.handler';
 import { BotCommandsMenuService } from '../application/bot-commands-menu.service';
 import { ConsoleNotifierAdapter } from './console-notifier.adapter';
 import { TelegramAdminAlertAdapter } from './telegram-admin-alert.adapter';
@@ -146,6 +147,8 @@ export class GrammyBotGateway
     private readonly importConfig: ImportConfigHandler,
     @Inject(forwardRef(() => FeatureHandler))
     private readonly feature: FeatureHandler,
+    @Inject(forwardRef(() => GdriveAuthHandler))
+    private readonly gdriveAuth: GdriveAuthHandler,
     @Inject(forwardRef(() => MenuHandler))
     private readonly menu: MenuHandler,
     @Inject(forwardRef(() => SettingsHandler))
@@ -304,6 +307,7 @@ export class GrammyBotGateway
       this.exportConfig,
       this.importConfig,
       this.feature,
+      this.gdriveAuth,
       this.menu,
       this.settings,
       this.clean,

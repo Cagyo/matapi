@@ -60,7 +60,7 @@ describe('CleanupCoordinatorService', () => {
     local.execute = vi.fn(async () => {
       await localPromise;
       return { thresholdUsed: 80 };
-    }) as unknown as typeof local.execute;
+    });
 
     const coordinator = new CleanupCoordinatorService(local, drive);
 

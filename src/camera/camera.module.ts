@@ -22,9 +22,11 @@ import { RecordMotionStartUseCase } from './application/record-motion-start.use-
 import { RecordSnapshotUseCase } from './application/record-snapshot.use-case';
 import { TriggerCleanUseCase } from './application/trigger-clean.use-case';
 import { UploadMotionUseCase } from './application/upload-motion.use-case';
+import { UpdateGdriveAuthUseCase } from './application/update-gdrive-auth.use-case';
 import { CAMERA_MODE } from './camera.tokens';
 import { ADMIN_ALERT } from './domain/ports/admin-alert.port';
 import { DB_BACKUP } from './domain/ports/db-backup.port';
+import { DRIVE_AUTH } from './domain/ports/drive-auth.port';
 import { DRIVE_STATUS } from './domain/ports/drive-status.port';
 import { DRIVE_SYNC } from './domain/ports/drive-sync.port';
 import { GDRIVE_SYNC_HEALTH } from './domain/ports/gdrive-sync-health.port';
@@ -45,10 +47,12 @@ import { FsMediaFileAdapter } from './infrastructure/fs-media-file.adapter';
 import { InMemoryGdriveSyncHealth } from './infrastructure/in-memory-gdrive-sync-health';
 import { InMemoryMediaRepository } from './infrastructure/in-memory-media.repository';
 import { MotionDaemonAdapter } from './infrastructure/motion-daemon.adapter';
+import { RcloneDriveAuthAdapter } from './infrastructure/rclone-drive-auth.adapter';
 import { RcloneDriveStatusAdapter } from './infrastructure/rclone-drive-status.adapter';
 import { RcloneDriveSyncAdapter } from './infrastructure/rclone-drive-sync.adapter';
 import { SqliteDbBackupAdapter } from './infrastructure/sqlite-db-backup.adapter';
 import { StubDbBackupAdapter } from './infrastructure/stub-db-backup.adapter';
+import { StubDriveAuthAdapter } from './infrastructure/stub-drive-auth.adapter';
 import { StubDriveStatusAdapter } from './infrastructure/stub-drive-status.adapter';
 import { StubDriveSyncAdapter } from './infrastructure/stub-drive-sync.adapter';
 import { StubLocalStorageAdapter } from './infrastructure/stub-local-storage.adapter';
@@ -113,6 +117,10 @@ const mode = resolveCameraMode();
       useClass: mode === 'stub' ? StubDriveStatusAdapter : RcloneDriveStatusAdapter,
     },
     {
+      provide: DRIVE_AUTH,
+      useClass: mode === 'stub' ? StubDriveAuthAdapter : RcloneDriveAuthAdapter,
+    },
+    {
       provide: DRIVE_SYNC,
       useClass: mode === 'stub' ? StubDriveSyncAdapter : RcloneDriveSyncAdapter,
     },
@@ -155,6 +163,7 @@ const mode = resolveCameraMode();
     TriggerCleanUseCase,
     BackupUploadUseCase,
     DriveSyncScheduler,
+    UpdateGdriveAuthUseCase,
   ],
   exports: [
     GetSnapshotUseCase,
@@ -171,6 +180,7 @@ const mode = resolveCameraMode();
     GDRIVE_SYNC_HEALTH,
     CleanupCoordinatorService,
     TriggerCleanUseCase,
+    UpdateGdriveAuthUseCase,
   ],
 })
 export class CameraModule {}

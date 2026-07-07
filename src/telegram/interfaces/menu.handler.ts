@@ -19,6 +19,7 @@ import { RestartHandler } from './restart.handler';
 import { QuietHoursHandler } from './quiet-hours.handler';
 import { SettingsHandler } from './settings.handler';
 import { CleanHandler } from './clean.handler';
+import { GdriveAuthHandler } from './gdrive-auth.handler';
 
 @Injectable()
 export class MenuHandler implements TelegramHandler {
@@ -52,6 +53,8 @@ export class MenuHandler implements TelegramHandler {
     private readonly settingsHandler: SettingsHandler,
     @Inject(forwardRef(() => CleanHandler))
     private readonly cleanHandler: CleanHandler,
+    @Inject(forwardRef(() => GdriveAuthHandler))
+    private readonly gdriveAuthHandler: GdriveAuthHandler,
   ) {}
 
   register(composer: Composer<Context>): void {
@@ -131,6 +134,8 @@ export class MenuHandler implements TelegramHandler {
               .row()
               .text(en.menu.submenus.systemInvite, 'menu:invite')
               .row()
+              .text(en.gdriveAuth.button, 'menu:gdrive_auth')
+              .row()
               .text(en.menu.submenus.backToMenu, 'menu:top');
             await this.renderSubmenu(ctx, en.menu.submenus.systemTitle, kb);
             break;
@@ -166,6 +171,13 @@ export class MenuHandler implements TelegramHandler {
               break;
             }
             await this.gdriveHandler.handleStatus(ctx);
+            break;
+          case 'gdrive_auth':
+            if (role !== 'admin') {
+              await ctx.reply(en.common.adminRequired);
+              break;
+            }
+            await this.gdriveAuthHandler.handleCommand(ctx);
             break;
           case 'settings':
             if (role !== 'admin') {

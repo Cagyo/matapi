@@ -44,7 +44,9 @@ export class GdriveHandler implements TelegramHandler {
         lastError: result.lastError,
         cleanupMinAgeDays: result.cleanupMinAgeDays,
       });
-      const kb = new InlineKeyboard().text(en.gdrive.cleanButton, 'clean:trigger');
+      const kb = new InlineKeyboard()
+        .text(en.gdrive.cleanButton, 'clean:trigger')
+        .text(en.gdriveAuth.button, 'gdauth:start');
       await ctx.reply(`${en.gdrive.header}\n\n${body}`, { reply_markup: kb });
     } catch (err) {
       await this.handleError(ctx, err);

@@ -98,7 +98,7 @@ export interface SystemOnlineView {
   now: Date;
 }
 
-function gb(bytes: number | null): string {
+export function gb(bytes: number | null): string {
   if (bytes === null) return 'N/A';
   return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
 }
@@ -294,6 +294,12 @@ export const commands: CommandDescriptor[] = [
     command: 'gdrive',
     description: 'Google Drive sync status',
     usage: '/gdrive status — Google Drive sync status',
+    scope: 'admin',
+  },
+  {
+    command: 'gdrive_auth',
+    description: 'Set up Google Drive authentication',
+    usage: '/gdrive_auth — set up or replace Google Drive credentials',
     scope: 'admin',
   },
   {
@@ -879,6 +885,22 @@ export const en = {
     notConfigured: '❌ Google Drive is not configured. Run rclone config.',
     statusFailed: (reason: string) => `❌ Failed to check Drive status: ${reason}`,
     cleanButton: '🧹 Trigger Clean Now',
+  },
+
+  gdriveAuth: {
+    prompt:
+      '☁️ *Google Drive Auth Setup*\n\nPaste your rclone `[gdrive]` config section below, or upload an `rclone.conf` file.\n\nTo generate one, SSH into your Pi and run `rclone config`.',
+    success: (used: string, total: string) =>
+      `✅ Google Drive connected!\n📦 ${used} / ${total}`,
+    failed: (reason: string) =>
+      `❌ Auth update failed: ${reason}\nPrevious config has been restored.`,
+    notInstalled:
+      '❌ rclone is not installed. Re-run install with the camera feature.',
+    alreadyInProgress: '⏳ Auth update already in progress. Send /cancel to abort.',
+    cancelled: '☁️ Google Drive auth setup cancelled.',
+    invalidSnippet:
+      "❌ That doesn't look like an rclone config section. Expected a `[gdrive]` header.",
+    button: '☁️ Set GDrive Auth',
   },
 
   settings: {

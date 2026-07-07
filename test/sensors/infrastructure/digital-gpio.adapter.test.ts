@@ -299,7 +299,7 @@ describe('DigitalGpioAdapter', () => {
     const cb = gpio.notify.mock.calls[0][0];
     for (let i = 0; i < 35; i++) {
       vi.advanceTimersByTime(1000);
-      cb(i % 2 as 0 | 1);
+      cb(i % 2);
     }
 
     expect(logs.appendBatch).toHaveBeenCalledWith([

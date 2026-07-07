@@ -68,6 +68,18 @@ EOF
     if ! command -v rclone &>/dev/null; then
       curl -sSL https://rclone.org/install.sh | sudo bash
     fi
+    mkdir -p "$HOME/.config/rclone"
+    chmod 700 "$HOME/.config/rclone"
+    if rclone listremotes 2>/dev/null | grep -q "^gdrive:"; then
+      echo "rclone remote 'gdrive:' already configured."
+    else
+      echo ""
+      echo "⚠️  rclone installed but no 'gdrive:' remote configured."
+      echo "   After install, either:"
+      echo "     1. SSH in and run: rclone config"
+      echo "     2. Or use /gdrive_auth in Telegram to paste config"
+      echo ""
+    fi
     echo "$USER ALL=(ALL) NOPASSWD: /bin/systemctl start motion, /bin/systemctl stop motion, /bin/systemctl restart motion" \
       | sudo tee /etc/sudoers.d/homeworker >/dev/null
     sudo chmod 440 /etc/sudoers.d/homeworker
