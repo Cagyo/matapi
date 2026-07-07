@@ -17,6 +17,8 @@ import { ImportConfigHandler } from './import-config.handler';
 import { SystemUpdateHandler } from './system-update.handler';
 import { RestartHandler } from './restart.handler';
 import { QuietHoursHandler } from './quiet-hours.handler';
+import { SettingsHandler } from './settings.handler';
+import { CleanHandler } from './clean.handler';
 
 @Injectable()
 export class MenuHandler implements TelegramHandler {
@@ -46,6 +48,10 @@ export class MenuHandler implements TelegramHandler {
     private readonly restartHandler: RestartHandler,
     @Inject(forwardRef(() => QuietHoursHandler))
     private readonly quietHoursHandler: QuietHoursHandler,
+    @Inject(forwardRef(() => SettingsHandler))
+    private readonly settingsHandler: SettingsHandler,
+    @Inject(forwardRef(() => CleanHandler))
+    private readonly cleanHandler: CleanHandler,
   ) {}
 
   register(composer: Composer<Context>): void {
@@ -117,6 +123,9 @@ export class MenuHandler implements TelegramHandler {
               .text(en.menu.submenus.systemHealth, 'menu:health')
               .text(en.menu.submenus.systemDrive, 'menu:gdrive')
               .row()
+              .text(en.menu.submenus.systemSettings, 'menu:settings')
+              .text(en.menu.submenus.systemClean, 'menu:clean')
+              .row()
               .text(en.menu.submenus.systemUpdate, 'menu:act:sys_update')
               .text(en.menu.submenus.systemRestart, 'menu:act:sys_restart')
               .row()
@@ -157,6 +166,20 @@ export class MenuHandler implements TelegramHandler {
               break;
             }
             await this.gdriveHandler.handleStatus(ctx);
+            break;
+          case 'settings':
+            if (role !== 'admin') {
+              await ctx.reply(en.common.adminRequired);
+              break;
+            }
+            await this.settingsHandler.handleCommand(ctx);
+            break;
+          case 'clean':
+            if (role !== 'admin') {
+              await ctx.reply(en.common.adminRequired);
+              break;
+            }
+            await this.cleanHandler.handleCommand(ctx);
             break;
           case 'invite':
             if (role !== 'admin') {

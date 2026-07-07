@@ -43,6 +43,8 @@ import { TelegramHandler } from '../interfaces/telegram-handler';
 import { UnmuteHandler } from '../interfaces/unmute.handler';
 import { UpdateHandler } from '../interfaces/update.handler';
 import { MenuHandler } from '../interfaces/menu.handler';
+import { SettingsHandler } from '../interfaces/settings.handler';
+import { CleanHandler } from '../interfaces/clean.handler';
 import { BotCommandsMenuService } from '../application/bot-commands-menu.service';
 import { ConsoleNotifierAdapter } from './console-notifier.adapter';
 import { TelegramAdminAlertAdapter } from './telegram-admin-alert.adapter';
@@ -146,6 +148,10 @@ export class GrammyBotGateway
     private readonly feature: FeatureHandler,
     @Inject(forwardRef(() => MenuHandler))
     private readonly menu: MenuHandler,
+    @Inject(forwardRef(() => SettingsHandler))
+    private readonly settings: SettingsHandler,
+    @Inject(forwardRef(() => CleanHandler))
+    private readonly clean: CleanHandler,
     @Inject(forwardRef(() => BotCommandsMenuService))
     private readonly botCommandsMenu: BotCommandsMenuService,
     @Optional() private readonly token: string | undefined = process.env.TELEGRAM_BOT_TOKEN,
@@ -299,6 +305,8 @@ export class GrammyBotGateway
       this.importConfig,
       this.feature,
       this.menu,
+      this.settings,
+      this.clean,
     ];
   }
 }

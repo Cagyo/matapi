@@ -297,6 +297,18 @@ export const commands: CommandDescriptor[] = [
     scope: 'admin',
   },
   {
+    command: 'settings',
+    description: 'System runtime settings & auto-clean threshold',
+    usage: '/settings — system runtime settings',
+    scope: 'admin',
+  },
+  {
+    command: 'clean',
+    description: 'Manually trigger storage cleanup',
+    usage: '/clean [threshold] — manually trigger storage cleanup',
+    scope: 'admin',
+  },
+  {
     command: 'claim_admin',
     description: 'Claim admin (first run only)',
     usage: '/claim_admin — claim admin (first run only)',
@@ -537,6 +549,8 @@ export const en = {
       cameraStatus: '📷 Camera Status',
       gdrive: '☁️ Drive Sync',
       config: '⚙️ Config',
+      settings: '⚙️ Settings',
+      clean: '🧹 Trigger Clean',
       invite: '🔗 Invite',
       feature: '🔧 Features',
       update: '⬆️ Update',
@@ -564,6 +578,8 @@ export const en = {
       systemRestart: '🔄 Restart Worker',
       systemHealth: '🏥 System Health',
       systemDrive: '☁️ Drive Sync Status',
+      systemSettings: '⚙️ System Settings',
+      systemClean: '🧹 Trigger Clean Now',
       systemInvite: '🔗 Create Invite Code',
       backToMenu: '« Back to Dashboard',
       quietTitle: '🌙 *Quiet Mode (Schedule)*\n\nSelect a preset quiet hours schedule:',
@@ -862,6 +878,31 @@ export const en = {
     notInstalled: '❌ rclone is not installed.',
     notConfigured: '❌ Google Drive is not configured. Run rclone config.',
     statusFailed: (reason: string) => `❌ Failed to check Drive status: ${reason}`,
+    cleanButton: '🧹 Trigger Clean Now',
+  },
+
+  settings: {
+    title: (threshold: number) =>
+      `⚙️ *System Runtime Settings*\n\n*Auto Clean Trigger Threshold:* ${threshold}%\n_(When disk or Drive usage reaches this level, uploaded media and old files are cleaned up automatically.)_\n\nSelect a preset threshold or trigger a cleanup:`,
+    updated: (threshold: number) =>
+      `✅ Auto clean threshold updated to *${threshold}%*.`,
+    buttons: {
+      t70: '70%',
+      t75: '75%',
+      t80: '80%',
+      t85: '85%',
+      t90: '90%',
+      cleanNow: '🧹 Trigger Clean Now',
+    },
+    invalidThreshold: '⚠️ Invalid threshold: must be between 10% and 99%.',
+  },
+
+  clean: {
+    triggered: (threshold: number) =>
+      `🧹 *Manual Cleanup Triggered*\n\nStorage cleanup executed across local disk and Google Drive (threshold used: *${threshold}%*). Old and uploaded files were checked and pruned.`,
+    inProgress: '⏳ A storage cleanup is already in progress. Please try again in a moment.',
+    invalidThreshold: '⚠️ Invalid threshold: must be an integer between 10% and 99%.',
+    button: '🧹 Trigger Clean Now',
   },
 
   exportConfig: {

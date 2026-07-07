@@ -1,4 +1,8 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
+import {
+  SYSTEM_META_REPOSITORY,
+  SystemMetaRepositoryPort,
+} from '../../system/domain/ports/system-meta-repository.port';
 import { ADMIN_ALERT, AdminAlertPort } from '../domain/ports/admin-alert.port';
 import {
   LOCAL_STORAGE,
@@ -25,11 +29,11 @@ const DEFAULT_EMERGENCY_PERCENT = 95;
 
 /**
  * Local storage cleanup loop (spec 21, 23). At `DISK_WARN_PERCENT` it logs a
- * warning and alerts admins once per pass. At `DISK_CRITICAL_PERCENT` it
- * deletes the local copies of events already on Drive (oldest first) and
- * prunes empty day-directories. At `DISK_EMERGENCY_PERCENT` it additionally
- * prunes day-old sent events and sensor logs, stops the Motion daemon, and
- * alerts admins.
+ * warning and alerts admins once per pass. At `DISK_CRITICAL_PERCENT` (or
+ * configured `auto_clean_threshold`) it deletes the local copies of events
+ * already on Drive (oldest first) and prunes empty day-directories. At
+ * `DISK_EMERGENCY_PERCENT` it additionally prunes day-old sent events and
+ * sensor logs, stops the Motion daemon, and alerts admins.
  *
  * **Invariant:** only events with `uploadedToGdrive = true` are ever deleted,
  * so footage that never reached Drive is preserved even when the disk fills.
@@ -45,18 +49,19 @@ export class CleanupLocalStorageUseCase {
     @Inject(RETENTION_PRUNE) private readonly retention: RetentionPrunePort,
     @Inject(MOTION_CONTROL) private readonly motion: MotionControlPort,
     @Inject(ADMIN_ALERT) private readonly adminAlert: AdminAlertPort,
+    @Inject(SYSTEM_META_REPOSITORY) private readonly meta: SystemMetaRepositoryPort,
   ) {}
 
-  async execute(): Promise<void> {
+  async execute(customThreshold?: number): Promise<{ thresholdUsed: number }> {
     const usage = await this.storage.usagePercent();
-    const critical = this.percentEnv('DISK_CRITICAL_PERCENT', DEFAULT_CRITICAL_PERCENT);
+    const critical = await this.resolveThreshold(customThreshold);
     if (usage < critical) {
       const warn = this.percentEnv('DISK_WARN_PERCENT', DEFAULT_WARN_PERCENT);
       if (usage >= warn) {
         this.logger.warn(`Disk at ${usage}% (warn ${warn}%) — approaching critical`);
         await this.adminAlert.alert('disk-warning');
       }
-      return;
+      return { thresholdUsed: critical };
     }
 
     this.logger.warn(`Disk at ${usage}% (critical ${critical}%) — cleaning uploaded media`);
@@ -72,9 +77,10 @@ export class CleanupLocalStorageUseCase {
       'DISK_EMERGENCY_PERCENT',
       DEFAULT_EMERGENCY_PERCENT,
     );
-    if (usage < emergency) return;
+    if (usage < emergency) return { thresholdUsed: critical };
 
     await this.runEmergency();
+    return { thresholdUsed: critical };
   }
 
   private async runEmergency(): Promise<void> {
@@ -88,6 +94,24 @@ export class CleanupLocalStorageUseCase {
       this.logger.warn(`Failed to stop motion during emergency: ${(err as Error).message}`);
     }
     await this.adminAlert.alert('emergency-disk-cleanup');
+  }
+
+  private async resolveThreshold(custom?: number): Promise<number> {
+    if (custom !== undefined && Number.isFinite(custom) && custom >= 10 && custom <= 99) {
+      return Math.trunc(custom);
+    }
+    const rawMeta = await this.meta.get('auto_clean_threshold');
+    if (rawMeta !== null) {
+      const val = Number(rawMeta);
+      if (Number.isFinite(val) && val >= 10 && val <= 99) {
+        return Math.trunc(val);
+      }
+    }
+    const envVal = Number(process.env.DISK_CRITICAL_PERCENT);
+    if (Number.isFinite(envVal) && envVal >= 10 && envVal <= 99) {
+      return Math.trunc(envVal);
+    }
+    return DEFAULT_CRITICAL_PERCENT;
   }
 
   private percentEnv(key: string, fallback: number): number {

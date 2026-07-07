@@ -1,8 +1,10 @@
 import { Module } from '@nestjs/common';
 import { EventModule } from '../events/event.module';
+import { SystemModule } from '../system/system.module';
 import { AdminAlertService } from './application/admin-alert.service';
 import { BackupUploadUseCase } from './application/backup-upload.use-case';
 import { CameraStatusUseCase } from './application/camera-status.use-case';
+import { CleanupCoordinatorService } from './application/cleanup-coordinator.service';
 import { CleanupDriveUseCase } from './application/cleanup-drive.use-case';
 import { CleanupLocalStorageUseCase } from './application/cleanup-local-storage.use-case';
 import { DisableMotionUseCase } from './application/disable-motion.use-case';
@@ -18,6 +20,7 @@ import { MotionWatcherService } from './application/motion-watcher.service';
 import { RecordMotionEndUseCase } from './application/record-motion-end.use-case';
 import { RecordMotionStartUseCase } from './application/record-motion-start.use-case';
 import { RecordSnapshotUseCase } from './application/record-snapshot.use-case';
+import { TriggerCleanUseCase } from './application/trigger-clean.use-case';
 import { UploadMotionUseCase } from './application/upload-motion.use-case';
 import { CAMERA_MODE } from './camera.tokens';
 import { ADMIN_ALERT } from './domain/ports/admin-alert.port';
@@ -80,7 +83,7 @@ const mode = resolveCameraMode();
  * without those binaries installed.
  */
 @Module({
-  imports: [EventModule],
+  imports: [EventModule, SystemModule],
   controllers: [MotionHooksController],
   providers: [
     { provide: CAMERA_MODE, useValue: mode },
@@ -148,6 +151,8 @@ const mode = resolveCameraMode();
     UploadMotionUseCase,
     CleanupLocalStorageUseCase,
     CleanupDriveUseCase,
+    CleanupCoordinatorService,
+    TriggerCleanUseCase,
     BackupUploadUseCase,
     DriveSyncScheduler,
   ],
@@ -164,6 +169,8 @@ const mode = resolveCameraMode();
     AdminAlertService,
     MotionWatcherService,
     GDRIVE_SYNC_HEALTH,
+    CleanupCoordinatorService,
+    TriggerCleanUseCase,
   ],
 })
 export class CameraModule {}

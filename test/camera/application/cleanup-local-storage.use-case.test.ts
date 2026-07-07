@@ -4,6 +4,7 @@ import { CameraAdminAlert } from '../../../src/camera/domain/ports/admin-alert.p
 import { LocalStoragePort } from '../../../src/camera/domain/ports/local-storage.port';
 import { MotionControlPort } from '../../../src/camera/domain/ports/motion-control.port';
 import { RetentionPrunePort } from '../../../src/camera/domain/ports/retention-prune.port';
+import { SystemMetaRepositoryPort } from '../../../src/system/domain/ports/system-meta-repository.port';
 import { MotionEvent } from '../../../src/camera/domain/motion-event.entity';
 import { InMemoryMediaRepository } from '../../../src/camera/infrastructure/in-memory-media.repository';
 
@@ -60,6 +61,14 @@ function fakeAlert() {
   return { calls, alert: vi.fn(async (kind: CameraAdminAlert) => void calls.push(kind)) };
 }
 
+function fakeMeta(val: string | null = null): SystemMetaRepositoryPort {
+  return {
+    get: vi.fn(async () => val),
+    set: vi.fn(async () => {}),
+    delete: vi.fn(async () => {}),
+  };
+}
+
 afterEach(() => {
   delete process.env.DISK_CRITICAL_PERCENT;
   delete process.env.DISK_EMERGENCY_PERCENT;
@@ -71,15 +80,17 @@ describe('CleanupLocalStorageUseCase', () => {
     repo.seedEvents([uploadedEvent(1)]);
     const storage = fakeStorage(50);
 
-    await new CleanupLocalStorageUseCase(
+    const res = await new CleanupLocalStorageUseCase(
       storage,
       repo,
       repo,
       fakeRetention(),
       fakeMotion(),
       fakeAlert(),
+      fakeMeta(),
     ).execute();
 
+    expect(res).toEqual({ thresholdUsed: 80 });
     expect(storage.deleteFile).not.toHaveBeenCalled();
     expect((await repo.findUploadedNotDeleted()).length).toBe(1);
   });
@@ -91,22 +102,63 @@ describe('CleanupLocalStorageUseCase', () => {
     const motion = fakeMotion();
     const alert = fakeAlert();
 
-    await new CleanupLocalStorageUseCase(
+    const res = await new CleanupLocalStorageUseCase(
       storage,
       repo,
       repo,
       fakeRetention(),
       motion,
       alert,
+      fakeMeta(),
     ).execute();
 
-    // event 1 (uploaded): video + snapshot deleted; event 2 untouched
+    expect(res).toEqual({ thresholdUsed: 80 });
     expect(storage.deleteFile).toHaveBeenCalledWith('/var/lib/motion/1.mp4');
     expect(storage.deleteFile).toHaveBeenCalledWith('/var/lib/motion/1.jpg');
     expect(storage.deleteFile).not.toHaveBeenCalledWith('/var/lib/motion/2.mp4');
     expect(storage.pruneEmptyDirs).toHaveBeenCalledOnce();
     expect(motion.stop).not.toHaveBeenCalled();
     expect(alert.alert).not.toHaveBeenCalled();
+  });
+
+  it('uses auto_clean_threshold from metadata repository', async () => {
+    const repo = new InMemoryMediaRepository();
+    repo.seedEvents([uploadedEvent(1)]);
+    const storage = fakeStorage(75);
+
+    // With auto_clean_threshold = 70, 75% usage should trigger cleanup
+    const res = await new CleanupLocalStorageUseCase(
+      storage,
+      repo,
+      repo,
+      fakeRetention(),
+      fakeMotion(),
+      fakeAlert(),
+      fakeMeta('70'),
+    ).execute();
+
+    expect(res).toEqual({ thresholdUsed: 70 });
+    expect(storage.deleteFile).toHaveBeenCalledWith('/var/lib/motion/1.mp4');
+  });
+
+  it('uses custom override threshold when provided', async () => {
+    const repo = new InMemoryMediaRepository();
+    repo.seedEvents([uploadedEvent(1)]);
+    const storage = fakeStorage(65);
+
+    // Override threshold = 60, should trigger cleanup even if DB is 80
+    const res = await new CleanupLocalStorageUseCase(
+      storage,
+      repo,
+      repo,
+      fakeRetention(),
+      fakeMotion(),
+      fakeAlert(),
+      fakeMeta('80'),
+    ).execute(60);
+
+    expect(res).toEqual({ thresholdUsed: 60 });
+    expect(storage.deleteFile).toHaveBeenCalledWith('/var/lib/motion/1.mp4');
   });
 
   it('prunes logs, stops motion and alerts at the emergency threshold', async () => {
@@ -123,6 +175,7 @@ describe('CleanupLocalStorageUseCase', () => {
       retention,
       motion,
       alert,
+      fakeMeta(),
     ).execute();
 
     expect(retention.pruneEventsOlderThan).toHaveBeenCalledOnce();

@@ -23,6 +23,8 @@ describe('MenuHandler', () => {
     const systemUpdateHandler = { handleCommand: vi.fn() } as any;
     const restartHandler = { handleCommand: vi.fn() } as any;
     const quietHoursHandler = { handlePreset: vi.fn() } as any;
+    const settingsHandler = { handleCommand: vi.fn() } as any;
+    const cleanHandler = { handleCommand: vi.fn() } as any;
 
     const handler = new MenuHandler(
       guard,
@@ -40,6 +42,8 @@ describe('MenuHandler', () => {
       systemUpdateHandler,
       restartHandler,
       quietHoursHandler,
+      settingsHandler,
+      cleanHandler,
     );
 
     const commandCallbacks: Record<string, (...args: any[]) => any> = {};
@@ -76,6 +80,8 @@ describe('MenuHandler', () => {
       systemUpdateHandler,
       restartHandler,
       quietHoursHandler,
+      settingsHandler,
+      cleanHandler,
     };
   }
 
@@ -110,7 +116,7 @@ describe('MenuHandler', () => {
   });
 
   it('delegates action callbacks and renders interactive submenus', async () => {
-    const { callbackQueryCallbacks, statusHandler, healthHandler, logsHandler, muteHandler, unmuteHandler } =
+    const { callbackQueryCallbacks, statusHandler, healthHandler, logsHandler, muteHandler, unmuteHandler, guard, settingsHandler, cleanHandler } =
       createTestSetup();
     const cbFn = callbackQueryCallbacks[0].fn;
 
@@ -190,5 +196,32 @@ describe('MenuHandler', () => {
     };
     await cbFn(unmuteAllCtx);
     expect(unmuteHandler.handleUnmuteAll).toHaveBeenCalledWith(unmuteAllCtx);
+
+    // Test settings delegation
+    const settingsCtx = {
+      from: { id: 100 },
+      match: ['menu:settings', 'settings'],
+      answerCallbackQuery,
+      reply,
+      editMessageText,
+    };
+    await cbFn(settingsCtx);
+    expect(settingsCtx.reply).toHaveBeenCalledWith(expect.stringContaining('Admin access required'));
+
+    // Admin settings delegation
+    (guard.resolveRole as any).mockResolvedValue('admin');
+    await cbFn(settingsCtx);
+    expect(settingsHandler.handleCommand).toHaveBeenCalledWith(settingsCtx);
+
+    // Admin clean delegation
+    const cleanCtx = {
+      from: { id: 100 },
+      match: ['menu:clean', 'clean'],
+      answerCallbackQuery,
+      reply,
+      editMessageText,
+    };
+    await cbFn(cleanCtx);
+    expect(cleanHandler.handleCommand).toHaveBeenCalledWith(cleanCtx);
   });
 });

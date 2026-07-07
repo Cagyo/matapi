@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Composer, Context } from 'grammy';
+import { Composer, Context, InlineKeyboard } from 'grammy';
 import { GdriveStatusUseCase } from '../../camera/application/gdrive-status.use-case';
 import { GdriveNotConfiguredError } from '../../camera/domain/errors/gdrive-not-configured.error';
 import { GdriveNotInstalledError } from '../../camera/domain/errors/gdrive-not-installed.error';
@@ -44,7 +44,8 @@ export class GdriveHandler implements TelegramHandler {
         lastError: result.lastError,
         cleanupMinAgeDays: result.cleanupMinAgeDays,
       });
-      await ctx.reply(`${en.gdrive.header}\n\n${body}`);
+      const kb = new InlineKeyboard().text(en.gdrive.cleanButton, 'clean:trigger');
+      await ctx.reply(`${en.gdrive.header}\n\n${body}`, { reply_markup: kb });
     } catch (err) {
       await this.handleError(ctx, err);
     }

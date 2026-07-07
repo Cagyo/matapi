@@ -67,6 +67,8 @@ import { SystemUpdateHandler } from './interfaces/system-update.handler';
 import { UnmuteHandler } from './interfaces/unmute.handler';
 import { UpdateHandler } from './interfaces/update.handler';
 import { MenuHandler } from './interfaces/menu.handler';
+import { SettingsHandler } from './interfaces/settings.handler';
+import { CleanHandler } from './interfaces/clean.handler';
 import { BotCommandsMenuService } from './application/bot-commands-menu.service';
 
 function resolveBotMode(): BotMode {
@@ -165,6 +167,8 @@ const mode = resolveBotMode();
     ImportConfigHandler,
     FeatureHandler,
     MenuHandler,
+    SettingsHandler,
+    CleanHandler,
     TelegramNotifierAdapter,
     ConsoleNotifierAdapter,
     TelegramAdminAlertAdapter,
