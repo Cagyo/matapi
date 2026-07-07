@@ -274,7 +274,7 @@ install_feature() {
   case $1 in
     motion)
       sudo apt-get install -y motion
-      mkdir -p /var/lib/motion
+      mkdir -p /home/pi/motion/videos
       # Install rclone
       curl https://rclone.org/install.sh | sudo bash
       # Configure sudoers for motion control

@@ -7,8 +7,64 @@ case "$FEATURE" in
   motion)
     echo "Installing motion & ffmpeg dependencies..."
     sudo apt-get install -y motion ffmpeg
-    sudo mkdir -p /var/lib/motion
-    sudo chown -R "$USER:$USER" /var/lib/motion || true
+
+    # Add user to motion and video groups for shared access
+    sudo usermod -aG motion,video "$USER" 2>/dev/null || true
+
+    # Create target video storage directory
+    sudo mkdir -p /home/pi/motion/videos
+    sudo chown -R motion:motion /home/pi/motion/videos 2>/dev/null || sudo chown -R "$USER:$USER" /home/pi/motion/videos
+    sudo chmod -R 775 /home/pi/motion/videos
+
+    # Ensure log directory exists and persist across tmpfs reboots via systemd-tmpfiles
+    sudo mkdir -p /var/log/motion
+    sudo chown -R motion:motion /var/log/motion 2>/dev/null || true
+    if [ -d /etc/tmpfiles.d ]; then
+      cat <<EOF | sudo tee /etc/tmpfiles.d/motion.conf >/dev/null
+d /var/log/motion 0755 motion motion - -
+d /home/pi/motion/videos 0775 motion motion - -
+EOF
+      sudo systemd-tmpfiles --create /etc/tmpfiles.d/motion.conf 2>/dev/null || true
+    fi
+
+    # Configure /etc/motion/motion.conf
+    if [ -f /etc/motion/motion.conf ]; then
+      echo "Configuring /etc/motion/motion.conf..."
+
+      set_motion_conf() {
+        local key="$1"
+        local val="$2"
+        if sudo grep -qE "^[#[:space:]]*${key}[[:space:]]+" /etc/motion/motion.conf; then
+          sudo sed -i -E "s|^[#[:space:]]*${key}[[:space:]]+.*|${key} ${val}|" /etc/motion/motion.conf
+        else
+          echo "${key} ${val}" | sudo tee -a /etc/motion/motion.conf >/dev/null
+        fi
+      }
+
+      set_motion_conf videodevice /dev/video0
+      set_motion_conf target_dir /home/pi/motion/videos
+      set_motion_conf log_file /var/log/motion/motion.log
+      set_motion_conf width 640
+      set_motion_conf height 480
+      set_motion_conf framerate 8
+      set_motion_conf max_movie_time 30
+      set_motion_conf movie_output on
+      set_motion_conf movie_filename "%Y/%m/%d/%H%M%S"
+      set_motion_conf picture_output on
+      set_motion_conf picture_filename "%Y/%m/%d/%H%M%S"
+      set_motion_conf stream_port 8081
+      set_motion_conf stream_localhost on
+
+      # Add Spec 20 internal webhooks if not already present
+      if ! grep -q "http://localhost:4000/motion/event-start" /etc/motion/motion.conf; then
+        cat <<'EOF' | sudo tee -a /etc/motion/motion.conf >/dev/null
+on_event_start curl -s http://localhost:4000/motion/event-start?camera=%t
+on_event_end curl -s http://localhost:4000/motion/event-end?camera=%t&file=%f
+on_picture_save curl -s http://localhost:4000/motion/snapshot?file=%f
+EOF
+      fi
+    fi
+
     if ! command -v rclone &>/dev/null; then
       curl -sSL https://rclone.org/install.sh | sudo bash
     fi

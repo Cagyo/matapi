@@ -21,10 +21,10 @@ sensor_defaults:
     debounce_ms: 0
     severity: info
     snapshot_cache_ttl_ms: 2000
-    storage_path: $HOME/.matapi/camera
+    storage_path: /home/pi/motion/videos
     resolution:
-      width: 1280
-      height: 720
+      width: 640
+      height: 480
 
 notifications:
   quiet_hours_default: null

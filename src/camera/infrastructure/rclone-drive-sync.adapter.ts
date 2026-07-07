@@ -28,7 +28,7 @@ export class RcloneDriveSyncAdapter implements DriveSyncPort {
   private readonly logger = new Logger(RcloneDriveSyncAdapter.name);
   private readonly remote = process.env.GDRIVE_REMOTE_NAME ?? 'gdrive';
   private readonly motionPath = process.env.GDRIVE_REMOTE_PATH ?? 'home-security/motion';
-  private readonly localDir = process.env.MOTION_LOCAL_DIR ?? '/var/lib/motion';
+  private readonly localDir = process.env.MOTION_LOCAL_DIR ?? '/home/pi/motion/videos';
 
   /** Backups live alongside the motion path, e.g. `home-security/backups`. */
   private get backupsPath(): string {

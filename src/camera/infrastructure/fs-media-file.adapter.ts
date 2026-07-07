@@ -15,7 +15,7 @@ const exec = promisify(execFile);
 @Injectable()
 export class FsMediaFileAdapter implements MediaFilePort {
   private readonly logger = new Logger(FsMediaFileAdapter.name);
-  private readonly localDir = process.env.MOTION_LOCAL_DIR ?? '/var/lib/motion';
+  private readonly localDir = process.env.MOTION_LOCAL_DIR ?? '/home/pi/motion/videos';
 
   async exists(path: string): Promise<boolean> {
     try {

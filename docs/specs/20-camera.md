@@ -31,7 +31,7 @@ Worker exposes internal HTTP endpoints (not public) for these hooks.
 ## File Structure
 
 ```
-/var/lib/motion/
+/home/pi/motion/videos/
 ├── 2026/
 │   ├── 03/
 │   │   └── 08/
@@ -96,7 +96,7 @@ Worker monitors motion daemon health:
 ## Video Delivery
 
 Telegram file limit: 50MB.
-- 30s clips at 720p: typically under 50MB
+- 30s clips at 640x480 (8 fps): typically under 50MB
 - If over 50MB: compress with ffmpeg (lower bitrate)
 - If still over: send Google Drive link instead
 

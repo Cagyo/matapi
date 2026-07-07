@@ -34,7 +34,7 @@ rclone copy (per-file, ionice -c3)
 ### rclone Command
 
 ```bash
-ionice -c3 rclone copy /var/lib/motion/ gdrive:home-security/motion/ \
+ionice -c3 rclone copy /home/pi/motion/videos/ gdrive:home-security/motion/ \
   --min-age 1m \
   --transfers 2 \
   --bwlimit 1M

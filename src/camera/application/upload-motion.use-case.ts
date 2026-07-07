@@ -28,7 +28,7 @@ const FAILURE_ALERT_THRESHOLD = 5;
 @Injectable()
 export class UploadMotionUseCase {
   private readonly logger = new Logger(UploadMotionUseCase.name);
-  private readonly localDir = process.env.MOTION_LOCAL_DIR ?? '/var/lib/motion';
+  private readonly localDir = process.env.MOTION_LOCAL_DIR ?? '/home/pi/motion/videos';
   private readonly remotePath = process.env.GDRIVE_REMOTE_PATH ?? 'home-security/motion';
 
   constructor(

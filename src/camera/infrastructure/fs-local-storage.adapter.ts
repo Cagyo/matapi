@@ -16,7 +16,7 @@ const exec = promisify(execFile);
 @Injectable()
 export class FsLocalStorageAdapter implements LocalStoragePort {
   private readonly logger = new Logger(FsLocalStorageAdapter.name);
-  private readonly localDir = process.env.MOTION_LOCAL_DIR ?? '/var/lib/motion';
+  private readonly localDir = process.env.MOTION_LOCAL_DIR ?? '/home/pi/motion/videos';
 
   async usagePercent(): Promise<number> {
     try {
