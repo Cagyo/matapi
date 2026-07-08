@@ -10,7 +10,7 @@ set -euo pipefail
 INSTALL_DIR="${HOME_WORKER_INSTALL_DIR:-/opt/home-worker}"
 LOCKFILE="${HOME_WORKER_UPDATE_LOCK:-/tmp/home-worker-updating.lock}"
 APP_NAME="${PM2_APP_NAME:-worker}"
-DB_PATH="${DATABASE_PATH:-$INSTALL_DIR/data/dev.db}"
+DB_PATH="${DATABASE_PATH:-$INSTALL_DIR/data/worker.db}"
 
 if [[ -e "$LOCKFILE" ]]; then
   echo "Update already in progress (lockfile $LOCKFILE exists)" >&2
