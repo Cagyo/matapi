@@ -100,8 +100,8 @@ export function evaluateNode(
       kind: 'node-major',
     };
   }
-  // Same major: minor/patch bumps are handled by the apply script at
-  // upgrade time; we don't query NodeSource here (spec 18 decision).
+  // Same major: minor/patch bumps stay as a manual update step; we don't
+  // query NodeSource here (spec 18 decision).
   return { name: 'node', current, available: current, kind: 'none' };
 }
 

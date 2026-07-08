@@ -7,7 +7,8 @@ export const SYSTEM_DEPS = Symbol('SYSTEM_DEPS');
  *  - `upgrade`       — an apt/rclone upgrade is available (`current` → `available`).
  *  - `none`          — installed and up to date.
  *  - `not-installed` — package is absent on this host.
- *  - `node-minor`    — node minor/patch bump within the desired major (auto-applied).
+ *  - `node-minor`    — node minor/patch bump within the desired major (manual update
+ *                      instructions are printed by `system-update.sh`).
  *  - `node-major`    — node major change vs desired; requires manual intervention.
  *  - `unknown`       — version could not be determined (e.g. apt unavailable on dev host).
  */
@@ -40,7 +41,8 @@ export interface SystemDepsCheck {
  *
  * The adapter inspects apt packages, rclone and node, and delegates the
  * actual upgrade to `scripts/system-update.sh` (which owns the snapshot,
- * apt upgrade, rclone selfupdate, node minor bump, health check and the
+ * apt upgrade, rclone selfupdate, and health check, while printing manual
+ * node update instructions for same-major bumps and handling the
  * curl-based failure notification).
  */
 export interface SystemDepsPort {
