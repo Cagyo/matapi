@@ -77,5 +77,24 @@ export function openSqliteWithIntegrity(dbPath: string, logger: Logger): OpenRes
   }
 
   const recovery = recover(dbPath, logger);
-  return { sqlite: openWithPragmas(dbPath), recovery };
+
+  // A restored backup must itself pass integrity_check; a corrupt backup must
+  // never silently become the live database (spec 23).
+  let restored: Database.Database | undefined;
+  try {
+    restored = openWithPragmas(dbPath);
+    if (recovery !== 'restored_from_backup' || isHealthy(restored)) {
+      return { sqlite: restored, recovery };
+    }
+    logger.error('Restored backup failed integrity_check — recreating empty');
+  } catch (err) {
+    logger.error(`Restored backup could not be opened: ${(err as Error).message}`);
+  }
+  // Close the reopened handle on every non-return path — including isHealthy()
+  // throwing on a garbage backup — before clearing the files, so a failed
+  // restore never leaks a handle to an unlinked database file.
+  restored?.close();
+
+  removeDatabaseFiles(dbPath);
+  return { sqlite: openWithPragmas(dbPath), recovery: 'recreated_empty' };
 }
