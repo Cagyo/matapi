@@ -23,6 +23,7 @@ main() {
   configure_serial_headless
   patch_legacy_feature_serial_calls
   install_selected_features
+  setup_system_update_sudoers
   run_migrations
   setup_pm2
   print_done
@@ -303,6 +304,30 @@ setup_tmpfs() {
     echo "tmpfs /var/log tmpfs defaults,noatime,nosuid,size=50m 0 0" | sudo tee -a /etc/fstab
     echo "tmpfs entries added to /etc/fstab (effective after reboot)"
   fi
+}
+
+setup_system_update_sudoers() {
+  # /system_update runs as $USER and shells these exact commands through sudo.
+  # sudoers matches command paths AND arguments literally, so keep this list
+  # in lockstep with scripts/system-update.sh (the lockstep check in the plan's
+  # final verification greps both files). Both /usr/bin and /bin path variants
+  # are listed (usr-merged vs older images). rclone's official installer puts
+  # the binary in /usr/bin; if a future install lands in /usr/local/bin, add
+  # that variant here too.
+  local tmp
+  tmp="$(mktemp)"
+  cat > "$tmp" <<EOF
+$USER ALL=(ALL) NOPASSWD: /usr/bin/apt-get update, /bin/apt-get update
+$USER ALL=(ALL) NOPASSWD: /usr/bin/apt-get install -y --only-upgrade motion ffmpeg mosquitto, /bin/apt-get install -y --only-upgrade motion ffmpeg mosquitto
+$USER ALL=(ALL) NOPASSWD: /usr/bin/rclone selfupdate, /bin/rclone selfupdate
+EOF
+  if sudo visudo -c -f "$tmp" >/dev/null; then
+    sudo install -m 440 -o root -g root "$tmp" /etc/sudoers.d/homeworker-sysupdate
+    echo "system-update sudoers installed"
+  else
+    echo "WARNING: system-update sudoers failed validation; /system_update will not work" >&2
+  fi
+  rm -f "$tmp"
 }
 
 prompt_config() {

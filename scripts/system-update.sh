@@ -21,6 +21,8 @@ snapshot_current() {
 }
 
 update_apt() {
+  # NOTE: every sudo command below must exactly match an entry in
+  # /etc/sudoers.d/homeworker-sysupdate (written by install.sh) — args included.
   sudo apt-get update
   sudo apt-get install -y --only-upgrade motion ffmpeg mosquitto
 }
@@ -33,21 +35,16 @@ update_rclone() {
 
 update_node_minor() {
   DESIRED_MAJOR=$(grep '^node:' "$DEPS_FILE" | awk '{print $2}' | tr -d '"')
-  if [ -z "$DESIRED_MAJOR" ]; then
-    echo "No desired node major in system-deps.yml; skipping node update."
-    return
-  fi
   CURRENT_MAJOR=$(node -v | cut -d'.' -f1 | tr -d 'v')
 
-  if [ "$CURRENT_MAJOR" != "$DESIRED_MAJOR" ]; then
-    echo "Node major version mismatch ($CURRENT_MAJOR vs $DESIRED_MAJOR). Skipping."
-    return
+  if [ -n "$DESIRED_MAJOR" ] && [ "$CURRENT_MAJOR" != "$DESIRED_MAJOR" ]; then
+    echo "Node major version mismatch ($CURRENT_MAJOR installed vs $DESIRED_MAJOR desired)."
   fi
 
-  # Only minor/patch update within the same major.
-  curl -fsSL "https://deb.nodesource.com/setup_${DESIRED_MAJOR}.x" | sudo -E bash -
-  sudo apt-get install -y nodejs
-  cd "$INSTALL_DIR" && corepack yarn install --immutable
+  # Node upgrades pipe a remote script into root bash — too much power for a
+  # bot-triggered path and impossible to whitelist in sudoers. Manual only:
+  echo "Node updates are not performed by /system_update. To update, SSH in and run:"
+  echo "  curl -fsSL https://deb.nodesource.com/setup_<major>.x | sudo -E bash - && sudo apt-get install -y nodejs"
 }
 
 health_check() {
