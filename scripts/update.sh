@@ -144,6 +144,8 @@ fi
 
 UPDATED_VIA="git"
 NEW_COMMIT=""
+CURRENT_COMMIT=""
+ROLLBACK_TAG=""
 
 if [[ -n "$RELEASE_URL" ]] && curl --output /dev/null --silent --head --fail "$RELEASE_URL" 2>/dev/null; then
   echo "Downloading release tarball from $RELEASE_URL..."
