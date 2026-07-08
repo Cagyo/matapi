@@ -26,6 +26,10 @@ export class InMemoryEventRepository implements EventRepositoryPort {
       .map((event) => this.toQueuedEvent(event));
   }
 
+  async countPending(): Promise<number> {
+    return this.events.filter((event) => event.sentAt === null).length;
+  }
+
   async markSent(ids: number[], sentAt: Date): Promise<void> {
     const idSet = new Set(ids);
     for (const event of this.events) {

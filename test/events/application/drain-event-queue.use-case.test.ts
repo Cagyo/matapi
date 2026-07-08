@@ -190,4 +190,29 @@ describe('DrainEventQueueUseCase', () => {
     expect(notifier.messages).toHaveLength(0);
     expect(await repository.pending()).toHaveLength(1);
   });
+
+  it('forces file delivery based on total backlog, not batch size', async () => {
+    const { repository, notifier, useCase } = makeUseCase({
+      batchSize: 1,
+      maxQueueBeforeForceAggregate: 2,
+    });
+    await repository.enqueue({
+      sensorId: 'front_door',
+      type: 'state_change',
+      payload: { newValue: true },
+      createdAt: new Date('2029-12-31T23:59:00.000Z'),
+    });
+    await repository.enqueue({
+      sensorId: 'back_door',
+      type: 'state_change',
+      payload: { newValue: false },
+      createdAt: new Date('2030-01-01T00:00:00.000Z'),
+    });
+
+    await useCase.execute();
+
+    // First batch carried only 1 event, but the backlog was 2 (>= threshold),
+    // so delivery is still forced to a file.
+    expect(notifier.messages[0].asFile).toBe(true);
+  });
 });

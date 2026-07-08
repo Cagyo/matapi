@@ -23,6 +23,10 @@ class RecordingEventRepository implements EventRepositoryPort {
     return [];
   }
 
+  async countPending(): Promise<number> {
+    return 0;
+  }
+
   async markSent(): Promise<void> {
     /* no-op fake */
   }

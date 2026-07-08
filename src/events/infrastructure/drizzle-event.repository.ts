@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { asc, inArray, isNull } from 'drizzle-orm';
+import { asc, count, inArray, isNull } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../database/database.module';
 import { events } from '../../database/schema';
 import {
@@ -39,6 +39,15 @@ export class DrizzleEventRepository implements EventRepositoryPort {
       .limit(limit)
       .all()
       .map((row) => this.toQueuedEvent(row));
+  }
+
+  async countPending(): Promise<number> {
+    const [{ value }] = this.db
+      .select({ value: count() })
+      .from(events)
+      .where(isNull(events.sentAt))
+      .all();
+    return value;
   }
 
   async markSent(ids: number[], sentAt: Date): Promise<void> {

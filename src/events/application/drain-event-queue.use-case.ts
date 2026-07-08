@@ -38,10 +38,13 @@ export class DrainEventQueueUseCase {
     this.isDraining = true;
     try {
       while (true) {
+        const backlog = await this.eventRepository.countPending();
+        if (backlog === 0) break;
+
         const batch = await this.eventRepository.pending(this.options.batchSize);
         if (batch.length === 0) break;
 
-        const forceFile = batch.length >= this.options.maxQueueBeforeForceAggregate;
+        const forceFile = backlog >= this.options.maxQueueBeforeForceAggregate;
 
         try {
           await this.notifier.notify({
