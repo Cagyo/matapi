@@ -19,11 +19,15 @@ import {
   RecipientDirectoryPort,
 } from '../domain/ports/recipient.port';
 import { QueuedEvent } from '../domain/queued-event.entity';
+import { forEachWithConcurrency } from './concurrency';
 import { DebounceService } from './debounce.service';
 import {
   NOTIFICATION_OPTIONS,
   NotificationOptions,
 } from './ports/notification-options.port';
+
+/** Max simultaneous Telegram sends per event — one slow chat cannot block the rest. */
+const SEND_CONCURRENCY = 5;
 
 /**
  * Output side of the event queue (spec 19). For each freshly-queued event it
@@ -95,9 +99,8 @@ export class NotificationService {
     let delivered = 0;
     let failures = 0;
 
-    for (const recipient of recipients) {
-      if (await this.isSuppressed(recipient, sensorId, severity, now)) continue;
-
+    await forEachWithConcurrency(recipients, SEND_CONCURRENCY, async (recipient) => {
+      if (await this.isSuppressed(recipient, sensorId, severity, now)) return;
       try {
         await this.notifier.notifyUser(recipient.telegramId, { text, asFile: false });
         delivered += 1;
@@ -107,7 +110,7 @@ export class NotificationService {
           `Notification to ${recipient.telegramId} failed: ${(error as Error).message}`,
         );
       }
-    }
+    });
 
     // Every eligible delivery failed (e.g. notifier down mid-send) → keep the
     // event queued so the drain retries it.
@@ -143,30 +146,21 @@ export class NotificationService {
     }
 
     const now = this.clock.now();
-    for (const recipient of recipients) {
-      if (recipient.muted) continue;
-      if (isInQuietHours(recipient, now, this.options.timezone)) continue;
-
+    await forEachWithConcurrency(recipients, SEND_CONCURRENCY, async (recipient) => {
+      if (recipient.muted) return;
+      if (isInQuietHours(recipient, now, this.options.timezone)) return;
       try {
         if (photo) {
-          await this.notifier.notifyUserPhoto(recipient.telegramId, {
-            buffer: photo,
-            caption,
-          });
+          await this.notifier.notifyUserPhoto(recipient.telegramId, { buffer: photo, caption });
         } else {
-          await this.notifier.notifyUser(recipient.telegramId, {
-            text: caption,
-            asFile: false,
-          });
+          await this.notifier.notifyUser(recipient.telegramId, { text: caption, asFile: false });
         }
       } catch (error) {
         this.logger.warn(
-          `Motion notification to ${recipient.telegramId} failed: ${
-            (error as Error).message
-          }`,
+          `Motion notification to ${recipient.telegramId} failed: ${(error as Error).message}`,
         );
       }
-    }
+    });
   }
 
   private async isSuppressed(

@@ -139,7 +139,7 @@ describe('NotificationService', () => {
 
     await service.process(event);
 
-    expect(notifier.userSends.map((s) => s.telegramId)).toEqual([1, 2]);
+    expect(notifier.userSends.map((s) => s.telegramId).sort((a, b) => a - b)).toEqual([1, 2]);
     expect(notifier.userSends[0].message.text).toBe('🚪 front_door: OPENED');
     expect(repo.sentAtFor(event.id)).toBe(FIXED_NOW);
   });
@@ -267,7 +267,7 @@ describe('NotificationService.notifyMotion', () => {
 
     await service.notifyMotion('front_door', MOTION_AT, Buffer.from('jpeg'));
 
-    expect(notifier.photoSends.map((s) => s.telegramId)).toEqual([1, 2]);
+    expect(notifier.photoSends.map((s) => s.telegramId).sort((a, b) => a - b)).toEqual([1, 2]);
     expect(notifier.photoSends[0].photo.caption).toBe(EXPECTED_CAPTION);
     expect(notifier.photoSends[0].photo.buffer.toString()).toBe('jpeg');
   });
