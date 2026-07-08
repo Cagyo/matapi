@@ -2,11 +2,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { UploadMotionUseCase } from '../../../src/camera/application/upload-motion.use-case';
 import { CameraAdminAlert } from '../../../src/camera/domain/ports/admin-alert.port';
 import { DriveSyncPort } from '../../../src/camera/domain/ports/drive-sync.port';
+import { MediaFilePort } from '../../../src/camera/domain/ports/media-file.port';
 import { MotionEvent } from '../../../src/camera/domain/motion-event.entity';
 import { InMemoryGdriveSyncHealth } from '../../../src/camera/infrastructure/in-memory-gdrive-sync-health';
 import { InMemoryMediaRepository } from '../../../src/camera/infrastructure/in-memory-media.repository';
 
 const TWO_MIN_AGO = new Date(Date.now() - 2 * 60_000);
+const OLD_MTIME = Date.now() - 10 * 60_000;
 
 function event(id: number, endedAt: Date | null): MotionEvent {
   return {
@@ -41,6 +43,18 @@ function okDrive(): DriveSyncPort {
   };
 }
 
+/** By default every file exists with a comfortably old mtime. */
+function fakeFiles(mtimes: Record<string, number | null> = {}): MediaFilePort {
+  return {
+    exists: vi.fn(async () => true),
+    sizeBytes: vi.fn(async () => 1024),
+    localUsageBytes: vi.fn(async () => null),
+    mtimeMs: vi.fn(async (path: string) =>
+      path in mtimes ? mtimes[path] : OLD_MTIME,
+    ),
+  };
+}
+
 afterEach(() => {
   delete process.env.MOTION_LOCAL_DIR;
   delete process.env.GDRIVE_REMOTE_PATH;
@@ -55,7 +69,14 @@ describe('UploadMotionUseCase', () => {
     const health = new InMemoryGdriveSyncHealth();
     const drive = okDrive();
 
-    await new UploadMotionUseCase(repo, repo, drive, health, fakeAlert()).execute();
+    await new UploadMotionUseCase(
+      repo,
+      repo,
+      drive,
+      health,
+      fakeAlert(),
+      fakeFiles(),
+    ).execute();
 
     expect(drive.copyMotionFiles).toHaveBeenCalledOnce();
     const [pending] = await repo.findPendingUploads();
@@ -65,7 +86,7 @@ describe('UploadMotionUseCase', () => {
     expect(health.snapshot().consecutiveFailures).toBe(0);
   });
 
-  it('skips files younger than the min-age and does not copy', async () => {
+  it('skips events younger than the min-age and does not copy', async () => {
     const repo = new InMemoryMediaRepository();
     repo.seedEvents([event(1, new Date())]);
     const drive = okDrive();
@@ -76,6 +97,69 @@ describe('UploadMotionUseCase', () => {
       drive,
       new InMemoryGdriveSyncHealth(),
       fakeAlert(),
+      fakeFiles(),
+    ).execute();
+
+    expect(drive.copyMotionFiles).not.toHaveBeenCalled();
+    expect((await repo.findUploadedNotDeleted()).length).toBe(0);
+  });
+
+  it('does not mark an event whose file mtime is too fresh for --min-age', async () => {
+    const repo = new InMemoryMediaRepository();
+    const fresh = event(1, TWO_MIN_AGO);
+    const old = event(2, TWO_MIN_AGO);
+    repo.seedEvents([fresh, old]);
+    const drive = okDrive();
+
+    await new UploadMotionUseCase(
+      repo,
+      repo,
+      drive,
+      new InMemoryGdriveSyncHealth(),
+      fakeAlert(),
+      fakeFiles({ [fresh.videoPath!]: Date.now() - 10_000 }),
+    ).execute();
+
+    expect(drive.copyMotionFiles).toHaveBeenCalledOnce();
+    const uploadedIds = (await repo.findUploadedNotDeleted()).map((e) => e.id);
+    expect(uploadedIds).toEqual([2]);
+  });
+
+  it('does not mark an event whose snapshot is too fresh for --min-age', async () => {
+    const repo = new InMemoryMediaRepository();
+    const withSnap = {
+      ...event(1, TWO_MIN_AGO),
+      snapshotPath: '/var/lib/motion/2026/04/08/1.jpg',
+    };
+    repo.seedEvents([withSnap, event(2, TWO_MIN_AGO)]);
+    const drive = okDrive();
+
+    await new UploadMotionUseCase(
+      repo,
+      repo,
+      drive,
+      new InMemoryGdriveSyncHealth(),
+      fakeAlert(),
+      fakeFiles({ '/var/lib/motion/2026/04/08/1.jpg': Date.now() - 10_000 }),
+    ).execute();
+
+    expect(drive.copyMotionFiles).toHaveBeenCalledOnce();
+    expect((await repo.findUploadedNotDeleted()).map((e) => e.id)).toEqual([2]);
+  });
+
+  it('does not mark an event whose local file is missing', async () => {
+    const repo = new InMemoryMediaRepository();
+    const gone = event(1, TWO_MIN_AGO);
+    repo.seedEvents([gone]);
+    const drive = okDrive();
+
+    await new UploadMotionUseCase(
+      repo,
+      repo,
+      drive,
+      new InMemoryGdriveSyncHealth(),
+      fakeAlert(),
+      fakeFiles({ [gone.videoPath!]: null }),
     ).execute();
 
     expect(drive.copyMotionFiles).not.toHaveBeenCalled();
@@ -92,7 +176,14 @@ describe('UploadMotionUseCase', () => {
     });
     const alert = fakeAlert();
 
-    await new UploadMotionUseCase(repo, repo, drive, health, alert).execute();
+    await new UploadMotionUseCase(
+      repo,
+      repo,
+      drive,
+      health,
+      alert,
+      fakeFiles(),
+    ).execute();
 
     expect(health.snapshot().consecutiveFailures).toBe(1);
     expect((await repo.findUploadedNotDeleted()).length).toBe(0);
@@ -108,7 +199,14 @@ describe('UploadMotionUseCase', () => {
       throw new Error('boom');
     });
     const alert = fakeAlert();
-    const useCase = new UploadMotionUseCase(repo, repo, drive, health, alert);
+    const useCase = new UploadMotionUseCase(
+      repo,
+      repo,
+      drive,
+      health,
+      alert,
+      fakeFiles(),
+    );
 
     for (let i = 0; i < 6; i++) await useCase.execute();
 
