@@ -91,7 +91,13 @@ export class CleanupLocalStorageUseCase {
     await this.retention.pruneSensorLogsOlderThan(cutoff);
     // Record the stop as intentional so the watcher doesn't immediately
     // restart Motion and refill the disk. /camera enable re-arms it.
-    await this.meta.set(MOTION_DESIRED_STATE_KEY, 'off');
+    try {
+      await this.meta.set(MOTION_DESIRED_STATE_KEY, 'off');
+    } catch (err) {
+      this.logger.warn(
+        `Failed to record desired motion state during emergency: ${(err as Error).message}`,
+      );
+    }
     try {
       await this.motion.stop();
     } catch (err) {

@@ -62,10 +62,17 @@ function fakeAlert() {
   return { calls, alert: vi.fn(async (kind: CameraAdminAlert) => void calls.push(kind)) };
 }
 
-function fakeMeta(val: string | null = null): SystemMetaRepositoryPort {
+function fakeMeta(
+  val: string | null = null,
+  options?: { setError?: boolean },
+): SystemMetaRepositoryPort {
   return {
     get: vi.fn(async () => val),
-    set: vi.fn(async () => {}),
+    set: vi.fn(async () => {
+      if (options?.setError) {
+        throw new Error('system_meta unavailable');
+      }
+    }),
     delete: vi.fn(async () => {}),
   };
 }
@@ -169,6 +176,31 @@ describe('CleanupLocalStorageUseCase', () => {
     const motion = fakeMotion();
     const alert = fakeAlert();
     const meta = fakeMeta();
+
+    await new CleanupLocalStorageUseCase(
+      fakeStorage(96),
+      repo,
+      repo,
+      retention,
+      motion,
+      alert,
+      meta,
+    ).execute();
+
+    expect(retention.pruneEventsOlderThan).toHaveBeenCalledOnce();
+    expect(retention.pruneSensorLogsOlderThan).toHaveBeenCalledOnce();
+    expect(meta.set).toHaveBeenCalledWith(MOTION_DESIRED_STATE_KEY, 'off');
+    expect(motion.stop).toHaveBeenCalledOnce();
+    expect(alert.calls).toEqual(['emergency-disk-cleanup']);
+  });
+
+  it('stops motion and alerts even when desired-state persistence fails', async () => {
+    const repo = new InMemoryMediaRepository();
+    repo.seedEvents([uploadedEvent(1)]);
+    const retention = fakeRetention();
+    const motion = fakeMotion();
+    const alert = fakeAlert();
+    const meta = fakeMeta(null, { setError: true });
 
     await new CleanupLocalStorageUseCase(
       fakeStorage(96),
