@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, utimes, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -80,5 +80,26 @@ describe('FsLocalStorageAdapter', () => {
     const files = await new FsLocalStorageAdapter().listFilesOlderThan(new Date());
 
     expect(files).toEqual([]);
+  });
+
+  it('returns an empty list when a nested directory cannot be read', async () => {
+    const goodDir = join(root, '2026', '01', '01');
+    const badDir = join(root, '2026', '01', '02');
+    await mkdir(goodDir, { recursive: true });
+    await mkdir(badDir, { recursive: true });
+    const oldFile = join(goodDir, '120000.mp4');
+    await writeFile(oldFile, 'x');
+    const tenDaysAgoSec = (Date.now() - 10 * 24 * 60 * 60 * 1000) / 1000;
+    await utimes(oldFile, tenDaysAgoSec, tenDaysAgoSec);
+
+    try {
+      await chmod(badDir, 0o000);
+      const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+      const files = await new FsLocalStorageAdapter().listFilesOlderThan(cutoff);
+
+      expect(files).toEqual([]);
+    } finally {
+      await chmod(badDir, 0o755).catch(() => {});
+    }
   });
 });

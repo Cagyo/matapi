@@ -81,12 +81,7 @@ export class FsLocalStorageAdapter implements LocalStoragePort {
   }
 
   private async collectOldFiles(dir: string, cutoffMs: number, out: LocalFileInfo[]): Promise<void> {
-    let entries;
-    try {
-      entries = await readdir(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
+    const entries = await readdir(dir, { withFileTypes: true });
     for (const entry of entries) {
       const full = join(dir, entry.name);
       if (entry.isDirectory()) {

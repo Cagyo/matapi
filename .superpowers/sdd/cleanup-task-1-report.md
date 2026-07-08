@@ -61,3 +61,17 @@
   - note: the expected warning still appeared for the directory-delete failure-path test
 - `yarn build`
   - passed
+
+## Fix: nested directory scan failures now return `[]`
+- Updated `FsLocalStorageAdapter.collectOldFiles()` to let `readdir()` failures propagate to the top-level `listFilesOlderThan()` wrapper instead of returning partial results from a subtree.
+- Kept stat races skippable for individual files, so transient deletions still do not fail the whole scan.
+- Added a focused regression test that makes a nested directory unreadable and verifies `listFilesOlderThan()` returns an empty list instead of a partial result set.
+
+## Verification for this fix
+- `yarn test test/camera/infrastructure/fs-local-storage.adapter.test.ts`
+  - passed: 7 tests green
+  - expected warning observed: `listFilesOlderThan failed: EACCES: permission denied` for the unreadable nested directory case
+- `yarn lint`
+  - passed
+- `yarn build`
+  - passed
