@@ -278,8 +278,11 @@ install_feature() {
       # Install rclone
       curl https://rclone.org/install.sh | sudo bash
       # Configure sudoers for motion control
-      echo "$USER ALL=(ALL) NOPASSWD: /bin/systemctl start motion, /bin/systemctl stop motion, /bin/systemctl restart motion" \
-        | sudo tee /etc/sudoers.d/homeworker
+      cat > /tmp/homeworker-motion.sudoers <<'EOF'
+homeworker ALL=(ALL) NOPASSWD: /usr/bin/systemctl start motion, /usr/bin/systemctl stop motion, /usr/bin/systemctl restart motion
+homeworker ALL=(ALL) NOPASSWD: /bin/systemctl start motion, /bin/systemctl stop motion, /bin/systemctl restart motion
+EOF
+      sudo mv /tmp/homeworker-motion.sudoers /etc/sudoers.d/homeworker-motion
       ;;
     zigbee)
       # Install mosquitto

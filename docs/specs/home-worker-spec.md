@@ -875,7 +875,8 @@ If the bot restarts during a multi-step conversation (e.g., `/config add`), the 
 - Worker controls it via passwordless sudo:
 
 ```bash
-# /etc/sudoers.d/homeworker
+# /etc/sudoers.d/homeworker-motion
+homeworker ALL=(ALL) NOPASSWD: /usr/bin/systemctl start motion, /usr/bin/systemctl stop motion, /usr/bin/systemctl restart motion
 homeworker ALL=(ALL) NOPASSWD: /bin/systemctl start motion, /bin/systemctl stop motion, /bin/systemctl restart motion
 ```
 
@@ -883,9 +884,11 @@ homeworker ALL=(ALL) NOPASSWD: /bin/systemctl start motion, /bin/systemctl stop 
 
 ```
 # motion.conf
-on_event_start curl -s http://localhost:4000/motion/event-start?camera=%t
-on_event_end curl -s http://localhost:4000/motion/event-end?camera=%t&file=%f
-on_picture_save curl -s http://localhost:4000/motion/snapshot?file=%f
+# URLs must be quoted: Motion runs hooks via `sh -c`,
+# and an unquoted `&` backgrounds curl and silently drops `file=%f`.
+on_event_start curl -s "http://localhost:4000/motion/event-start?camera=%t"
+on_event_end curl -s "http://localhost:4000/motion/event-end?camera=%t&file=%f"
+on_picture_save curl -s "http://localhost:4000/motion/snapshot?file=%f"
 ```
 
 ### 11.2 File Structure
