@@ -14,7 +14,7 @@ function uploadedEvent(id: number): MotionEvent {
   return {
     id,
     cameraId: 'front_door',
-    startedAt: new Date(Date.now() - id * 1000), // older ids sort first
+    startedAt: new Date(Date.now() - id * 1000), // larger ids are older
     endedAt: new Date(),
     videoPath: `/var/lib/motion/${id}.mp4`,
     snapshotPath: `/var/lib/motion/${id}.jpg`,
@@ -34,7 +34,7 @@ function notUploadedEvent(id: number): MotionEvent {
  */
 function fakeStorage(
   usages: number | number[],
-  orphans: Array<string | { path: string; mtimeMs: number; ctimeMs: number }> = [],
+  orphans: (string | { path: string; mtimeMs: number; ctimeMs: number })[] = [],
   deleteResults: Record<string, boolean> = {},
 ) {
   const seq = Array.isArray(usages) ? usages : [usages];
@@ -221,7 +221,10 @@ describe('CleanupLocalStorageUseCase', () => {
 
     await useCase.execute();
 
-    expect((await r.findUploadedNotDeleted()).length).toBe(24); // 1 deleted, 24 kept
+    expect((await r.findUploadedNotDeleted()).map((event) => event.id)).toEqual([
+      24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6,
+      5, 4, 3, 2, 1,
+    ]);
   });
 
   it('prunes logs, records desired=off, stops motion and alerts at emergency', async () => {
@@ -274,6 +277,17 @@ describe('CleanupLocalStorageUseCase', () => {
     expect(alert.calls).toEqual(['disk-warning']);
   });
 
+  it('does not persist the warning cooldown when alert delivery fails', async () => {
+    const { store, meta } = memMeta();
+    const alert = fakeAlert();
+    alert.alert.mockRejectedValueOnce(new Error('notify failed'));
+    const { useCase } = build({ storage: fakeStorage(75), alert, meta });
+
+    await expect(useCase.execute()).resolves.toEqual({ thresholdUsed: 80 });
+
+    expect(store.has('last_alert_disk_warning')).toBe(false);
+  });
+
   it('sends the emergency alert at most once per cooldown window', async () => {
     const repo = new InMemoryMediaRepository();
     repo.seedEvents([uploadedEvent(1)]);
@@ -284,6 +298,64 @@ describe('CleanupLocalStorageUseCase', () => {
     const second = build({ repo, storage: fakeStorage([96, 96]), alert, meta });
     await second.useCase.execute();
 
+    expect(alert.calls).toEqual(['emergency-disk-cleanup']);
+  });
+
+  it('does not persist the emergency cooldown when alert delivery fails', async () => {
+    const repo = new InMemoryMediaRepository();
+    repo.seedEvents([uploadedEvent(1)]);
+    const { store, meta } = memMeta();
+    const retention = fakeRetention();
+    const motion = fakeMotion();
+    const alert = fakeAlert();
+    alert.alert.mockRejectedValueOnce(new Error('notify failed'));
+    const { useCase } = build({
+      repo,
+      storage: fakeStorage([96, 96]),
+      retention,
+      motion,
+      alert,
+      meta,
+    });
+
+    await expect(useCase.execute()).resolves.toEqual({ thresholdUsed: 80 });
+
+    expect(retention.pruneEventsOlderThan).toHaveBeenCalledOnce();
+    expect(retention.pruneSensorLogsOlderThan).toHaveBeenCalledOnce();
+    expect(motion.stop).toHaveBeenCalledOnce();
+    expect(store.get(MOTION_DESIRED_STATE_KEY)).toBe('off');
+    expect(store.has('last_alert_emergency_cleanup')).toBe(false);
+  });
+
+  it('still stops motion and alerts when desired-state persistence fails', async () => {
+    const repo = new InMemoryMediaRepository();
+    repo.seedEvents([uploadedEvent(1)]);
+    const retention = fakeRetention();
+    const motion = fakeMotion();
+    const alert = fakeAlert();
+    const meta: SystemMetaRepositoryPort = {
+      get: async () => null,
+      set: async (key) => {
+        if (key === MOTION_DESIRED_STATE_KEY) {
+          throw new Error('system_meta unavailable');
+        }
+      },
+      delete: async () => undefined,
+    };
+    const { useCase } = build({
+      repo,
+      storage: fakeStorage([96, 96]),
+      retention,
+      motion,
+      alert,
+      meta,
+    });
+
+    await expect(useCase.execute()).resolves.toEqual({ thresholdUsed: 80 });
+
+    expect(retention.pruneEventsOlderThan).toHaveBeenCalledOnce();
+    expect(retention.pruneSensorLogsOlderThan).toHaveBeenCalledOnce();
+    expect(motion.stop).toHaveBeenCalledOnce();
     expect(alert.calls).toEqual(['emergency-disk-cleanup']);
   });
 

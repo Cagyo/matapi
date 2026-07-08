@@ -81,9 +81,11 @@ export class CleanupLocalStorageUseCase {
       const warn = this.percentEnv('DISK_WARN_PERCENT', DEFAULT_WARN_PERCENT);
       if (usage >= warn) {
         this.logger.warn(`Disk at ${usage}% (warn ${warn}%) — approaching critical`);
-        if (await this.shouldAlert(WARN_ALERT_KEY, WARN_ALERT_COOLDOWN_MS)) {
-          await this.adminAlert.alert('disk-warning');
-        }
+        await this.sendCooldownAlert(
+          WARN_ALERT_KEY,
+          WARN_ALERT_COOLDOWN_MS,
+          'disk-warning',
+        );
       }
       return { thresholdUsed: critical };
     }
@@ -180,24 +182,58 @@ export class CleanupLocalStorageUseCase {
     await this.retention.pruneSensorLogsOlderThan(cutoff);
     // Record the stop as intentional so the watcher doesn't immediately
     // restart Motion and refill the disk. /camera enable re-arms it.
-    await this.meta.set(MOTION_DESIRED_STATE_KEY, 'off');
+    try {
+      await this.meta.set(MOTION_DESIRED_STATE_KEY, 'off');
+    } catch (err) {
+      this.logger.warn(
+        `Failed to record desired motion state during emergency: ${(err as Error).message}`,
+      );
+    }
     try {
       await this.motion.stop();
     } catch (err) {
       this.logger.warn(`Failed to stop motion during emergency: ${(err as Error).message}`);
     }
-    if (await this.shouldAlert(EMERGENCY_ALERT_KEY, EMERGENCY_ALERT_COOLDOWN_MS)) {
-      await this.adminAlert.alert('emergency-disk-cleanup');
+    await this.sendCooldownAlert(
+      EMERGENCY_ALERT_KEY,
+      EMERGENCY_ALERT_COOLDOWN_MS,
+      'emergency-disk-cleanup',
+    );
+  }
+
+  /**
+   * Sends the alert once per cooldown window; records the cooldown only after
+   * a successful send so a failed delivery can be retried later.
+   */
+  private async sendCooldownAlert(
+    key: string,
+    cooldownMs: number,
+    kind: 'disk-warning' | 'emergency-disk-cleanup',
+  ): Promise<void> {
+    if (!(await this.shouldSendAlert(key, cooldownMs))) return;
+    try {
+      await this.adminAlert.alert(kind);
+    } catch (err) {
+      this.logger.warn(`Failed to send ${kind} alert: ${(err as Error).message}`);
+      return;
+    }
+    try {
+      await this.meta.set(key, String(Date.now()));
+    } catch (err) {
+      this.logger.warn(`Failed to record ${kind} alert cooldown: ${(err as Error).message}`);
     }
   }
 
-  /** True once per cooldown window; records the send time in system_meta. */
-  private async shouldAlert(key: string, cooldownMs: number): Promise<boolean> {
-    const raw = await this.meta.get(key);
-    const last = raw === null ? NaN : Number(raw);
-    if (Number.isFinite(last) && Date.now() - last < cooldownMs) return false;
-    await this.meta.set(key, String(Date.now()));
-    return true;
+  /** True when the cooldown window has elapsed or can't be checked safely. */
+  private async shouldSendAlert(key: string, cooldownMs: number): Promise<boolean> {
+    try {
+      const raw = await this.meta.get(key);
+      const last = raw === null ? NaN : Number(raw);
+      return !(Number.isFinite(last) && Date.now() - last < cooldownMs);
+    } catch (err) {
+      this.logger.warn(`Failed to read ${key} cooldown: ${(err as Error).message}`);
+      return true;
+    }
   }
 
   private async resolveThreshold(custom?: number): Promise<number> {
