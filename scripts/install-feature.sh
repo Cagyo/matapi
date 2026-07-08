@@ -47,7 +47,10 @@ EOF
       set_motion_conf width 640
       set_motion_conf height 480
       set_motion_conf framerate 8
-      set_motion_conf max_movie_time 30
+      # Motion 4.x renamed max_movie_time -> movie_max_time (4.x maps the old
+      # name with a warning; 5.x drops it). Migrate any legacy line first.
+      sudo sed -i -E 's/^[#[:space:]]*max_movie_time[[:space:]]+.*/movie_max_time 30/' /etc/motion/motion.conf
+      set_motion_conf movie_max_time 30
       set_motion_conf movie_output on
       set_motion_conf movie_filename "%Y/%m/%d/%H%M%S"
       set_motion_conf picture_output on
