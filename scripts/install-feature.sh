@@ -74,7 +74,7 @@ EOF
     fi
     # The worker runs rclone as $USER (homeworker), so the remote must live in
     # THAT user's config — not in the home of whoever ran this installer.
-    WORKER_HOME="$(getent passwd "$USER" | cut -d: -f6)"
+    WORKER_HOME="$(getent passwd "$USER" | cut -d: -f6 || true)"
     if [ -z "$WORKER_HOME" ]; then
       echo "ERROR: cannot resolve home directory for user $USER" >&2
       exit 1
