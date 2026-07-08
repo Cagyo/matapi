@@ -6,6 +6,7 @@ import { MotionControlPort } from '../../../src/camera/domain/ports/motion-contr
 import { RetentionPrunePort } from '../../../src/camera/domain/ports/retention-prune.port';
 import { SystemMetaRepositoryPort } from '../../../src/system/domain/ports/system-meta-repository.port';
 import { MotionEvent } from '../../../src/camera/domain/motion-event.entity';
+import { MOTION_DESIRED_STATE_KEY } from '../../../src/camera/domain/motion-desired-state';
 import { InMemoryMediaRepository } from '../../../src/camera/infrastructure/in-memory-media.repository';
 
 function uploadedEvent(id: number): MotionEvent {
@@ -167,6 +168,7 @@ describe('CleanupLocalStorageUseCase', () => {
     const retention = fakeRetention();
     const motion = fakeMotion();
     const alert = fakeAlert();
+    const meta = fakeMeta();
 
     await new CleanupLocalStorageUseCase(
       fakeStorage(96),
@@ -175,11 +177,12 @@ describe('CleanupLocalStorageUseCase', () => {
       retention,
       motion,
       alert,
-      fakeMeta(),
+      meta,
     ).execute();
 
     expect(retention.pruneEventsOlderThan).toHaveBeenCalledOnce();
     expect(retention.pruneSensorLogsOlderThan).toHaveBeenCalledOnce();
+    expect(meta.set).toHaveBeenCalledWith(MOTION_DESIRED_STATE_KEY, 'off');
     expect(motion.stop).toHaveBeenCalledOnce();
     expect(alert.calls).toEqual(['emergency-disk-cleanup']);
   });

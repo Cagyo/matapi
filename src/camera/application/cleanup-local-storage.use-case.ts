@@ -21,6 +21,7 @@ import {
   RETENTION_PRUNE,
   RetentionPrunePort,
 } from '../domain/ports/retention-prune.port';
+import { MOTION_DESIRED_STATE_KEY } from '../domain/motion-desired-state';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_WARN_PERCENT = 70;
@@ -88,6 +89,9 @@ export class CleanupLocalStorageUseCase {
     const cutoff = new Date(Date.now() - DAY_MS);
     await this.retention.pruneEventsOlderThan(cutoff);
     await this.retention.pruneSensorLogsOlderThan(cutoff);
+    // Record the stop as intentional so the watcher doesn't immediately
+    // restart Motion and refill the disk. /camera enable re-arms it.
+    await this.meta.set(MOTION_DESIRED_STATE_KEY, 'off');
     try {
       await this.motion.stop();
     } catch (err) {
