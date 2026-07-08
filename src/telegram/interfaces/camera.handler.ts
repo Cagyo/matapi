@@ -22,7 +22,7 @@ import { MotionStopFailedError } from '../../camera/domain/errors/motion-stop-fa
 import { NoCamerasConfiguredError } from '../../camera/domain/errors/no-cameras-configured.error';
 import { NoSnapshotForEventError } from '../../camera/domain/errors/no-snapshot-for-event.error';
 import { SnapshotFailedError } from '../../camera/domain/errors/snapshot-failed.error';
-import { MotionEvent, eventDurationSec } from '../../camera/domain/motion-event.entity';
+import { eventDurationSec } from '../../camera/domain/motion-event.entity';
 import { en } from '../../locales/en';
 import { RoleMiddleware } from './role.middleware';
 import { TelegramHandler } from './telegram-handler';
@@ -214,7 +214,8 @@ export class CameraHandler implements TelegramHandler {
 
     const delivery = await this.video.execute(id);
     if (delivery.kind === 'drive') {
-      await ctx.reply(en.camera.driveLinkFallback(id, driveUrl(delivery.event)));
+      // gdriveFileId holds the rclone remote path (not a Drive file id).
+      await ctx.reply(en.camera.driveLinkFallback(id, delivery.event.gdriveFileId));
       return;
     }
 
@@ -326,12 +327,6 @@ function caption(delivery: Extract<VideoDelivery, { kind: 'local' }>, id: number
     delivery.event.startedAt,
     delivery.event.cameraId ?? '—',
   );
-}
-
-function driveUrl(event: MotionEvent): string | null {
-  return event.gdriveFileId
-    ? `https://drive.google.com/file/d/${event.gdriveFileId}/view`
-    : null;
 }
 
 export function parseEventId(arg: string): number | null {

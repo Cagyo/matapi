@@ -823,10 +823,10 @@ export const en = {
       `📹 Event #${id} | ${fmtDate(at, true)} | ${cam}`,
     photoCaption: (id: number, at: Date | null, cam: string) =>
       `📸 Event #${id} | ${fmtDate(at, true)} | ${cam}`,
-    driveLinkFallback: (id: number, url: string | null) =>
-      url
-        ? `📹 Event #${id} is too large for Telegram.\nGoogle Drive: ${url}`
-        : `📹 Event #${id} is too large for Telegram and has no Drive link yet.`,
+    driveLinkFallback: (id: number, remotePath: string | null) =>
+      remotePath
+        ? `📹 Event #${id} is too large for Telegram.\nIt is archived on Google Drive at:\n${remotePath}`
+        : `📹 Event #${id} is too large for Telegram and has no Drive copy yet.`,
     statusHeader: '📹 Camera Status',
     statusBody: (v: CameraStatusView): string =>
       [

@@ -111,6 +111,8 @@ export const motionEvents = sqliteTable(
     videoPath: text('video_path'),
     snapshotPath: text('snapshot_path'),
     uploadedToGdrive: integer('uploaded_to_gdrive', { mode: 'boolean' }).default(false),
+    /** With the rclone adapter this holds the remote *path* (e.g.
+     * `home-security/motion/2026/07/08/1.mp4`), NOT a Google Drive API file id. */
     gdriveFileId: text('gdrive_file_id'),
     localDeleted: integer('local_deleted', { mode: 'boolean' }).default(false),
   },
