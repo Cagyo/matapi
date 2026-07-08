@@ -34,6 +34,7 @@ export class SensorRegistryService
   private readonly logger = new Logger(SensorRegistryService.name);
   private readonly active = new Map<string, SensorDriverPort>();
   private readonly listeners: ((event: SensorEvent) => void)[] = [];
+  private reloadChain: Promise<void> = Promise.resolve();
 
   constructor(
     @Inject(SENSOR_REPOSITORY)
@@ -61,8 +62,17 @@ export class SensorRegistryService
     this.active.clear();
   }
 
-  /** Sync in-memory drivers to the repository's enabled set. */
+  /** Public entry point — serialized so overlapping callers never interleave. */
   async reload(): Promise<void> {
+    this.reloadChain = this.reloadChain.then(
+      () => this.doReload(),
+      () => this.doReload(),
+    );
+    return this.reloadChain;
+  }
+
+  /** Sync in-memory drivers to the repository's enabled set. */
+  private async doReload(): Promise<void> {
     const wanted = await this.repository.loadEnabled();
     const wantedIds = new Set(wanted.map((s) => s.id));
 

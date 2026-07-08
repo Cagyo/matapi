@@ -155,4 +155,25 @@ describe('SensorRegistryService', () => {
     expect(result.get('bad')).toBe(false);
     expect(result.size).toBe(2);
   });
+
+  it('serializes concurrent reloads so a sensor is initialised once', async () => {
+    const repo = new InMemorySensorRepository([digitalSensor()]);
+    let created = 0;
+    const registry = makeRegistry(repo, () => {
+      created += 1;
+      const driver = new MockGpioAdapter();
+      const realInit = driver.init.bind(driver);
+      // Slow init widens the interleaving window that the bug relies on.
+      driver.init = async (cfg) => {
+        await new Promise((r) => setTimeout(r, 5));
+        return realInit(cfg);
+      };
+      return driver;
+    });
+
+    await Promise.all([registry.reload(), registry.reload()]);
+
+    expect(created).toBe(1);
+    expect(registry.list()).toHaveLength(1);
+  });
 });
