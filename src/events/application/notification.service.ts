@@ -179,7 +179,12 @@ export class NotificationService {
     if (await this.recipients.isSensorMuted(recipient.telegramId, sensorId)) {
       return true;
     }
-    if (severity === 'info' && isInQuietHours(recipient, now, this.options.timezone)) {
+    // Quiet hours always silence `info`. `warning` always passes. `critical`
+    // is silenced only when the operator disables critical-ignores-quiet-hours.
+    const quietable =
+      severity === 'info' ||
+      (severity === 'critical' && !this.options.criticalIgnoresQuietHours);
+    if (quietable && isInQuietHours(recipient, now, this.options.timezone)) {
       return true;
     }
     return false;

@@ -97,6 +97,7 @@ async function setup(opts: {
   sensor?: Sensor | null;
   recipients?: NotificationRecipient[];
   sensorMutes?: { telegramId: number; sensorId: string }[];
+  criticalIgnoresQuietHours?: boolean;
 }) {
   const repo = new InMemoryEventRepository();
   const sensor = opts.sensor === undefined ? makeSensor() : opts.sensor;
@@ -111,7 +112,7 @@ async function setup(opts: {
     sensorQuery,
     repo,
     clock,
-    { timezone: TZ },
+    { timezone: TZ, criticalIgnoresQuietHours: opts.criticalIgnoresQuietHours ?? true },
     debounce,
   );
   return { repo, notifier, service };
@@ -233,6 +234,25 @@ describe('NotificationService', () => {
     await service.process(event);
 
     expect(repo.sentAtFor(event.id)).toBeNull();
+  });
+
+  it('delivers critical events during quiet hours by default (flag on)', async () => {
+    const { repo, notifier, service } = await setup({
+      sensor: makeSensor({ severity: 'critical' }),
+      recipients: [recipient({ telegramId: 1, quietStart: '14:00', quietEnd: '16:00' })],
+    });
+    await service.process(await enqueueStateChange(repo));
+    expect(notifier.userSends).toHaveLength(1);
+  });
+
+  it('suppresses critical events during quiet hours when the flag is off', async () => {
+    const { repo, notifier, service } = await setup({
+      sensor: makeSensor({ severity: 'critical' }),
+      criticalIgnoresQuietHours: false,
+      recipients: [recipient({ telegramId: 1, quietStart: '14:00', quietEnd: '16:00' })],
+    });
+    await service.process(await enqueueStateChange(repo));
+    expect(notifier.userSends).toHaveLength(0);
   });
 });
 

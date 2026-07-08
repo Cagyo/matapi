@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { loadDefaults } from '../config/config.loader';
 import { SensorRegistryService } from '../sensors/application/sensor-registry.service';
 import { SensorModule } from '../sensors/sensor.module';
 import { DebounceService } from './application/debounce.service';
@@ -29,6 +30,11 @@ function positiveIntegerFromEnv(value: string | undefined, fallback: number): nu
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function boolFromEnv(value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined) return fallback;
+  return value === 'true' || value === '1';
+}
+
 @Module({
   imports: [SensorModule],
   providers: [
@@ -46,19 +52,29 @@ function positiveIntegerFromEnv(value: string | undefined, fallback: number): nu
     { provide: SENSOR_EVENT_SOURCE, useExisting: SensorRegistryService },
     {
       provide: EVENT_QUEUE_OPTIONS,
-      useFactory: (): EventQueueOptions => ({
-        batchSize: 50,
-        maxQueueBeforeForceAggregate: positiveIntegerFromEnv(
-          process.env.MAX_QUEUE_BEFORE_FORCE_AGGREGATE,
-          100,
-        ),
-      }),
+      useFactory: (): EventQueueOptions => {
+        const defaults = loadDefaults().notifications;
+        return {
+          batchSize: 50,
+          maxQueueBeforeForceAggregate: positiveIntegerFromEnv(
+            process.env.MAX_QUEUE_BEFORE_FORCE_AGGREGATE,
+            defaults.max_queue_before_force_aggregate,
+          ),
+        };
+      },
     },
     {
       provide: NOTIFICATION_OPTIONS,
-      useFactory: (): NotificationOptions => ({
-        timezone: process.env.TIMEZONE || 'Europe/Kyiv',
-      }),
+      useFactory: (): NotificationOptions => {
+        const defaults = loadDefaults().notifications;
+        return {
+          timezone: process.env.TIMEZONE || 'Europe/Kyiv',
+          criticalIgnoresQuietHours: boolFromEnv(
+            process.env.CRITICAL_IGNORES_QUIET_HOURS,
+            defaults.critical_ignores_quiet_hours,
+          ),
+        };
+      },
     },
   ],
   exports: [
