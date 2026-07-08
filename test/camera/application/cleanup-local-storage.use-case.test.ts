@@ -31,9 +31,11 @@ function fakeStorage(usage: number) {
   return {
     usagePercent: vi.fn(async () => usage),
     deleteFile: vi.fn(async () => true),
+    listFilesOlderThan: vi.fn(async () => []),
     pruneEmptyDirs: vi.fn(async () => {}),
   } satisfies LocalStoragePort & {
     deleteFile: ReturnType<typeof vi.fn>;
+    listFilesOlderThan: ReturnType<typeof vi.fn>;
     pruneEmptyDirs: ReturnType<typeof vi.fn>;
   };
 }
