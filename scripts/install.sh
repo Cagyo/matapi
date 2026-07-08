@@ -182,6 +182,7 @@ install_app() {
   local local_app_root
   local_app_root="$(cd "$script_dir/.." && pwd)"
   local local_source="${REPO#file://}"
+  local needs_build=0
 
   if [ -d "$INSTALL_DIR/.git" ]; then
     echo "Updating existing git installation..."
@@ -190,7 +191,30 @@ install_app() {
       sudo -u "$USER" pm2 stop ecosystem.config.js 2>/dev/null || true
     fi
     cd "$INSTALL_DIR"
-    sudo -u "$USER" git pull origin main
+    local before after branch
+    before="$(sudo -u "$USER" git rev-parse HEAD 2>/dev/null || true)"
+    branch="$(sudo -u "$USER" git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||' || true)"
+    if [ -z "$branch" ]; then
+      sudo -u "$USER" git remote set-head origin --auto >/dev/null 2>&1 || true
+      branch="$(sudo -u "$USER" git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||' || true)"
+    fi
+    if [ -z "$branch" ]; then
+      for candidate in master main; do
+        if sudo -u "$USER" git rev-parse --verify "origin/$candidate" >/dev/null 2>&1; then
+          branch="$candidate"
+          break
+        fi
+      done
+    fi
+    if [ -z "$branch" ]; then
+      echo "ERROR: cannot determine origin default branch" >&2
+      exit 1
+    fi
+    sudo -u "$USER" git pull origin "$branch"
+    after="$(sudo -u "$USER" git rev-parse HEAD 2>/dev/null || true)"
+    if [ -n "$before" ] && [ -n "$after" ] && [ "$before" != "$after" ]; then
+      needs_build=1
+    fi
   elif [ -f "$INSTALL_DIR/package.json" ]; then
     echo "Using existing manually deployed application files in $INSTALL_DIR (non-git installation)..."
     if command -v pm2 &>/dev/null; then
@@ -230,7 +254,14 @@ install_app() {
   fi
   cd "$INSTALL_DIR"
   sudo chmod +x "$INSTALL_DIR/scripts/"*.sh 2>/dev/null || true
-  install_production_deps
+  if [ ! -f "$INSTALL_DIR/dist/main.js" ] || [ "$needs_build" = "1" ]; then
+    echo "Building dist/ from source (slow on a Pi; swap was configured earlier)..."
+    sudo -u "$USER" env NODE_OPTIONS="--max-old-space-size=512" npm_config_jobs=1 JOBS=1 corepack yarn install --immutable
+    sudo -u "$USER" env NODE_OPTIONS="--max-old-space-size=512" npm_config_jobs=1 JOBS=1 corepack yarn build
+    sudo -u "$USER" env NODE_OPTIONS="--max-old-space-size=512" npm_config_jobs=1 JOBS=1 corepack yarn workspaces focus -A --production
+  else
+    install_production_deps
+  fi
 }
 
 setup_pigpiod() {
