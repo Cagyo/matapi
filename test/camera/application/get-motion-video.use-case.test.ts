@@ -28,6 +28,7 @@ function files(opts: { exists?: boolean; size?: number | null }): MediaFilePort 
   return {
     exists: async () => opts.exists ?? true,
     sizeBytes: async () => opts.size ?? 1024,
+    mtimeMs: async () => null,
     localUsageBytes: async () => null,
   };
 }

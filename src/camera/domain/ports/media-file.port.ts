@@ -10,6 +10,8 @@ export interface MediaFilePort {
   exists(path: string): Promise<boolean>;
   /** File size in bytes, or `null` when the file is gone or unreadable. */
   sizeBytes(path: string): Promise<number | null>;
+  /** File mtime in ms since epoch, or `null` when the file is gone or unreadable. */
+  mtimeMs(path: string): Promise<number | null>;
   /** Total bytes used under the Motion storage dir, or `null` on failure. */
   localUsageBytes(): Promise<number | null>;
 }

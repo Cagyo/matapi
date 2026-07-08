@@ -15,6 +15,7 @@ const motion = (active: boolean): MotionControlPort => ({
 const files = (bytes: number | null): MediaFilePort => ({
   exists: async () => true,
   sizeBytes: async () => bytes,
+  mtimeMs: async () => (bytes === null ? null : Date.now() - 10 * 60_000),
   localUsageBytes: async () => bytes,
 });
 

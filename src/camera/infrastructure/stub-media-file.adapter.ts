@@ -15,6 +15,10 @@ export class StubMediaFileAdapter implements MediaFilePort {
     return 1024 * 1024; // 1 MB
   }
 
+  async mtimeMs(): Promise<number | null> {
+    return Date.now() - 10 * 60_000; // comfortably older than any min-age
+  }
+
   async localUsageBytes(): Promise<number | null> {
     return null;
   }

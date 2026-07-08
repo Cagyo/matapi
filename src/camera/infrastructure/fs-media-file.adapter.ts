@@ -34,6 +34,14 @@ export class FsMediaFileAdapter implements MediaFilePort {
     }
   }
 
+  async mtimeMs(path: string): Promise<number | null> {
+    try {
+      return (await stat(path)).mtimeMs;
+    } catch {
+      return null;
+    }
+  }
+
   async localUsageBytes(): Promise<number | null> {
     try {
       const { stdout } = await exec('du', ['-sk', this.localDir], {
