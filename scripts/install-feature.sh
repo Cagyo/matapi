@@ -84,9 +84,23 @@ EOF
       echo "     2. Or use /gdrive_auth in Telegram to paste config"
       echo ""
     fi
-    echo "$USER ALL=(ALL) NOPASSWD: /bin/systemctl start motion, /bin/systemctl stop motion, /bin/systemctl restart motion" \
-      | sudo tee /etc/sudoers.d/homeworker >/dev/null
-    sudo chmod 440 /etc/sudoers.d/homeworker
+    # sudoers matches command paths as literal strings. On usr-merged Debian
+    # (Bookworm) `sudo systemctl` resolves to /usr/bin/systemctl, on older
+    # images to /bin/systemctl — list both so the worker's non-interactive
+    # `sudo systemctl {start,stop,restart} motion` is never denied.
+    SUDOERS_TMP="$(mktemp)"
+    cat > "$SUDOERS_TMP" <<EOF
+$USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl start motion, /usr/bin/systemctl stop motion, /usr/bin/systemctl restart motion
+$USER ALL=(ALL) NOPASSWD: /bin/systemctl start motion, /bin/systemctl stop motion, /bin/systemctl restart motion
+EOF
+    if sudo visudo -c -f "$SUDOERS_TMP" >/dev/null; then
+      sudo install -m 440 -o root -g root "$SUDOERS_TMP" /etc/sudoers.d/homeworker
+    else
+      echo "ERROR: generated sudoers file failed validation; leaving existing rules untouched" >&2
+      rm -f "$SUDOERS_TMP"
+      exit 1
+    fi
+    rm -f "$SUDOERS_TMP"
     ;;
   zigbee)
     echo "Installing zigbee dependencies (mosquitto)..."
