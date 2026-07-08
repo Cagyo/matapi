@@ -13,7 +13,8 @@ Motion daemon captures video on movement detection. Worker receives events via H
 Systemd service, independent of worker:
 
 ```bash
-# /etc/sudoers.d/homeworker
+# /etc/sudoers.d/homeworker-motion
+homeworker ALL=(ALL) NOPASSWD: /usr/bin/systemctl start motion, /usr/bin/systemctl stop motion, /usr/bin/systemctl restart motion
 homeworker ALL=(ALL) NOPASSWD: /bin/systemctl start motion, /bin/systemctl stop motion, /bin/systemctl restart motion
 ```
 

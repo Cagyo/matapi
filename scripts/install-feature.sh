@@ -60,8 +60,8 @@ EOF
 
       # Spec 20 internal webhooks. Motion runs these via `sh -c`, so the URLs
       # MUST be quoted — an unquoted `&` backgrounds curl and drops `file=%f`.
-      # Delete any previous (possibly unquoted) versions, then append fresh.
-      sudo sed -i -E '/^on_(event_start|event_end|picture_save) curl -s "?http:\/\/localhost:4000\/motion\//d' /etc/motion/motion.conf
+      # Delete any previous hook definitions, then append fresh quoted hooks.
+      sudo sed -i -E '/^[#[:space:]]*on_(event_start|event_end|picture_save)[[:space:]]/d' /etc/motion/motion.conf
       cat <<'EOF' | sudo tee -a /etc/motion/motion.conf >/dev/null
 on_event_start curl -s "http://localhost:4000/motion/event-start?camera=%t"
 on_event_end curl -s "http://localhost:4000/motion/event-end?camera=%t&file=%f"
@@ -95,14 +95,15 @@ EOF
     # sudoers matches command paths as literal strings. On usr-merged Debian
     # (Bookworm) `sudo systemctl` resolves to /usr/bin/systemctl, on older
     # images to /bin/systemctl — list both so the worker's non-interactive
-    # `sudo systemctl {start,stop,restart} motion` is never denied.
+    # `sudo systemctl {start,stop,restart} motion` is never denied. The
+    # generated rules live in the dedicated per-feature sudoers file.
     SUDOERS_TMP="$(mktemp)"
     cat > "$SUDOERS_TMP" <<EOF
 $USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl start motion, /usr/bin/systemctl stop motion, /usr/bin/systemctl restart motion
 $USER ALL=(ALL) NOPASSWD: /bin/systemctl start motion, /bin/systemctl stop motion, /bin/systemctl restart motion
 EOF
     if sudo visudo -c -f "$SUDOERS_TMP" >/dev/null; then
-      sudo install -m 440 -o root -g root "$SUDOERS_TMP" /etc/sudoers.d/homeworker
+      sudo install -m 440 -o root -g root "$SUDOERS_TMP" /etc/sudoers.d/homeworker-motion
     else
       echo "ERROR: generated sudoers file failed validation; leaving existing rules untouched" >&2
       rm -f "$SUDOERS_TMP"

@@ -19,7 +19,7 @@ interface ExecError extends Error {
  * Production `MotionControlPort` — drives the Motion systemd unit (spec 20).
  *
  * `start`/`stop` go through `sudo systemctl`, whitelisted in
- * `/etc/sudoers.d/homeworker`. The worker never runs as root and never
+ * `/etc/sudoers.d/homeworker-motion`. The worker never runs as root and never
  * calls the Motion binary directly.
  */
 @Injectable()
