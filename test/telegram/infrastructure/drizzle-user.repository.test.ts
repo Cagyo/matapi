@@ -86,4 +86,27 @@ describe('DrizzleUserRepository', () => {
     expect(updated.role).toBe('admin');
     expect(await repo.countAdmins()).toBe(1);
   });
+
+  it('claimFirstAdmin creates once, then returns null', async () => {
+    const ctx = createTestDatabase();
+    const repo = new DrizzleUserRepository(ctx.appDb);
+
+    const first = await repo.claimFirstAdmin({
+      telegramId: 1,
+      name: 'A',
+      role: 'admin',
+      createdAt: new Date(),
+    });
+    const second = await repo.claimFirstAdmin({
+      telegramId: 2,
+      name: 'B',
+      role: 'admin',
+      createdAt: new Date(),
+    });
+
+    expect(first?.role).toBe('admin');
+    expect(second).toBeNull();
+    expect(await repo.countAdmins()).toBe(1);
+    ctx.close();
+  });
 });

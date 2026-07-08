@@ -5,6 +5,12 @@ export const USER_REPOSITORY = Symbol('USER_REPOSITORY');
 
 export interface UserRepositoryPort {
   countAdmins(): Promise<number>;
+  /**
+   * Atomically create the first admin. Returns the created admin, or `null` if
+   * an admin already exists. The count + insert run in one transaction so two
+   * concurrent `/claim_admin` messages cannot both succeed (spec 11).
+   */
+  claimFirstAdmin(user: NewUser): Promise<User | null>;
   findByTelegramId(telegramId: number): Promise<User | null>;
   /** Case-insensitive name lookup; returns first match. Strips leading `@`. */
   findByName(name: string): Promise<User | null>;

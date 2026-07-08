@@ -24,6 +24,13 @@ export class InMemoryUserRepository implements UserRepositoryPort {
     return count;
   }
 
+  async claimFirstAdmin(user: NewUser): Promise<User | null> {
+    for (const existing of this.store.values()) {
+      if (existing.role === 'admin') return null;
+    }
+    return this.createAdmin(user);
+  }
+
   async findByTelegramId(telegramId: number): Promise<User | null> {
     return this.store.get(telegramId) ?? null;
   }

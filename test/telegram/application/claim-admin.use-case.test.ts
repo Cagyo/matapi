@@ -46,4 +46,18 @@ describe('ClaimAdminUseCase', () => {
 
     expect(await users.countAdmins()).toBe(1);
   });
+
+  it('lets only one of two concurrent claims win', async () => {
+    const users = new InMemoryUserRepository();
+    const useCase = new ClaimAdminUseCase(users, clock);
+
+    const results = await Promise.allSettled([
+      useCase.execute({ telegramId: 1, name: 'A' }),
+      useCase.execute({ telegramId: 2, name: 'B' }),
+    ]);
+
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter((r) => r.status === 'rejected')).toHaveLength(1);
+    expect(await users.countAdmins()).toBe(1);
+  });
 });

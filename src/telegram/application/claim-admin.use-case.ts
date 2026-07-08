@@ -24,16 +24,13 @@ export class ClaimAdminUseCase {
   ) {}
 
   async execute(input: ClaimAdminInput): Promise<User> {
-    const adminCount = await this.users.countAdmins();
-    if (adminCount > 0) {
-      throw new AdminAlreadyClaimedError();
-    }
-
-    return this.users.createAdmin({
+    const admin = await this.users.claimFirstAdmin({
       telegramId: input.telegramId,
       name: input.name,
       role: 'admin',
       createdAt: this.clock.now(),
     });
+    if (!admin) throw new AdminAlreadyClaimedError();
+    return admin;
   }
 }

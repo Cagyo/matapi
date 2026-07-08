@@ -22,6 +22,33 @@ export class DrizzleUserRepository implements UserRepositoryPort {
     return value;
   }
 
+  async claimFirstAdmin(user: NewUser): Promise<User | null> {
+    return this.db.transaction((tx) => {
+      const [{ value }] = tx
+        .select({ value: count() })
+        .from(users)
+        .where(eq(users.role, 'admin'))
+        .all();
+      if (value > 0) return null;
+
+      const [row] = tx
+        .insert(users)
+        .values({
+          telegramId: user.telegramId,
+          name: user.name,
+          role: user.role,
+          createdAt: user.createdAt,
+        })
+        .onConflictDoUpdate({
+          target: users.telegramId,
+          set: { role: user.role, name: user.name },
+        })
+        .returning()
+        .all();
+      return this.toUser(row);
+    });
+  }
+
   async findByTelegramId(telegramId: number): Promise<User | null> {
     const row = this.db
       .select()
