@@ -359,6 +359,36 @@ describe('CleanupLocalStorageUseCase', () => {
     expect(alert.calls).toEqual(['emergency-disk-cleanup']);
   });
 
+  it('continues into emergency handling when orphan reference loading fails', async () => {
+    const repo = new InMemoryMediaRepository();
+    repo.seedEvents([uploadedEvent(1)]);
+    vi.spyOn(repo, 'listAllMediaPaths').mockRejectedValueOnce(new Error('db unavailable'));
+    const { store, meta } = memMeta();
+    const retention = fakeRetention();
+    const motion = fakeMotion();
+    const alert = fakeAlert();
+    const storage = fakeStorage([96, 96, 96], ['/var/lib/motion/2026/01/01/999.mp4']);
+    const { useCase } = build({
+      repo,
+      storage,
+      retention,
+      motion,
+      alert,
+      meta,
+      health: fakeHealth(new Date()),
+    });
+
+    await expect(useCase.execute()).resolves.toEqual({ thresholdUsed: 80 });
+
+    expect(storage.listFilesOlderThan).not.toHaveBeenCalled();
+    expect(storage.usagePercent).toHaveBeenCalledTimes(3);
+    expect(retention.pruneEventsOlderThan).toHaveBeenCalledOnce();
+    expect(retention.pruneSensorLogsOlderThan).toHaveBeenCalledOnce();
+    expect(store.get(MOTION_DESIRED_STATE_KEY)).toBe('off');
+    expect(motion.stop).toHaveBeenCalledOnce();
+    expect(alert.calls).toEqual(['emergency-disk-cleanup']);
+  });
+
   it('sweeps old unreferenced files when Drive sync succeeded recently', async () => {
     const repo = new InMemoryMediaRepository();
     repo.seedEvents([uploadedEvent(1), notUploadedEvent(2)]);

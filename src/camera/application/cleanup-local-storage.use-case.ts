@@ -158,20 +158,26 @@ export class CleanupLocalStorageUseCase {
       this.logger.debug('Skipping orphan sweep — no recent Drive sync success');
       return;
     }
-    const cutoff = new Date(Date.now() - ORPHAN_MIN_AGE_DAYS * DAY_MS);
-    const copySafeBeforeMs = lastSuccessAt.getTime() - RCLONE_COPY_MIN_AGE_MS;
-    const referenced = new Set((await this.media.listAllMediaPaths()).map((p) => resolve(p)));
-    const oldFiles = await this.storage.listFilesOlderThan(cutoff);
-    let swept = 0;
-    for (const file of oldFiles) {
-      const path = resolve(file.path);
-      if (referenced.has(path)) continue;
-      if (file.mtimeMs > copySafeBeforeMs || file.ctimeMs > copySafeBeforeMs) continue;
-      if (await this.storage.deleteFile(path)) swept += 1;
-    }
-    if (swept > 0) {
-      this.logger.log(`Swept ${swept} orphaned media file(s) older than ${ORPHAN_MIN_AGE_DAYS}d`);
-      await this.storage.pruneEmptyDirs();
+    try {
+      const cutoff = new Date(Date.now() - ORPHAN_MIN_AGE_DAYS * DAY_MS);
+      const copySafeBeforeMs = lastSuccessAt.getTime() - RCLONE_COPY_MIN_AGE_MS;
+      const referenced = new Set((await this.media.listAllMediaPaths()).map((p) => resolve(p)));
+      const oldFiles = await this.storage.listFilesOlderThan(cutoff);
+      let swept = 0;
+      for (const file of oldFiles) {
+        const path = resolve(file.path);
+        if (referenced.has(path)) continue;
+        if (file.mtimeMs > copySafeBeforeMs || file.ctimeMs > copySafeBeforeMs) continue;
+        if (await this.storage.deleteFile(path)) swept += 1;
+      }
+      if (swept > 0) {
+        this.logger.log(
+          `Swept ${swept} orphaned media file(s) older than ${ORPHAN_MIN_AGE_DAYS}d`,
+        );
+        await this.storage.pruneEmptyDirs();
+      }
+    } catch (err) {
+      this.logger.warn(`Skipping orphan sweep after error: ${(err as Error).message}`);
     }
   }
 
