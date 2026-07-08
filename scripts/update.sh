@@ -13,7 +13,7 @@ INSTALL_DIR="${HOME_WORKER_INSTALL_DIR:-/opt/home-worker}"
 LOCKFILE="${HOME_WORKER_UPDATE_LOCK:-/tmp/home-worker-updating.lock}"
 APP_NAME="${PM2_APP_NAME:-worker}"
 HEALTH_CHECK_SEC="${UPDATE_HEALTH_CHECK_SEC:-30}"
-DB_PATH="${DATABASE_PATH:-$INSTALL_DIR/data/dev.db}"
+DB_PATH="${DATABASE_PATH:-$INSTALL_DIR/data/worker.db}"
 
 if [[ -e "$LOCKFILE" ]]; then
   echo "Update already in progress (lockfile $LOCKFILE exists)" >&2
@@ -30,7 +30,9 @@ write_meta() {
   local key="$1"
   local value="$2"
   if command -v sqlite3 >/dev/null 2>&1; then
-    sqlite3 "$DB_PATH" "INSERT INTO system_meta(key, value) VALUES('$key', '$value') ON CONFLICT(key) DO UPDATE SET value=excluded.value;"
+    local esc_key=${key//"'"/"''"}
+    local esc_value=${value//"'"/"''"}
+    sqlite3 "$DB_PATH" "INSERT INTO system_meta(key, value) VALUES('$esc_key', '$esc_value') ON CONFLICT(key) DO UPDATE SET value=excluded.value;"
   else
     KEY="$key" VAL="$value" DBP="$DB_PATH" INST="$INSTALL_DIR" node -e "const Database=require(process.env.INST+'/node_modules/better-sqlite3');const db=new Database(process.env.DBP);db.prepare('INSERT INTO system_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(process.env.KEY,process.env.VAL);db.close();"
   fi
@@ -52,6 +54,45 @@ YAML
   export npm_config_jobs=1
   export JOBS=1
   env NODE_OPTIONS="$NODE_OPTIONS" npm_config_jobs=1 JOBS=1 corepack yarn workspaces focus -A --production
+}
+
+# Default branch of origin (main/master/...). Returns nonzero when undetectable.
+default_branch() {
+  local head
+  head="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+  if [[ -z "$head" ]]; then
+    git remote set-head origin --auto >/dev/null 2>&1 || true
+    head="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+  fi
+  if [[ -n "$head" && "$head" == origin/* ]]; then
+    echo "${head#origin/}"
+    return 0
+  fi
+  for candidate in master main; do
+    if git rev-parse --verify "origin/$candidate" >/dev/null 2>&1; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Rebuild dist/ from source. Git updates ship no dist (it is gitignored), so
+# restarting without this step re-runs the OLD code while reporting success.
+# Same low-memory discipline as install_production_deps — the full dev-deps
+# install + nest build is the most OOM-prone step this script runs on a 1GB Pi.
+# The explicit `|| return 1` lines matter: this runs inside `if ! build_dist`,
+# which suspends errexit within the function.
+build_dist() {
+  echo "Building dist/ from source (git update path)..."
+  export NODE_OPTIONS="--max-old-space-size=512"
+  export npm_config_jobs=1
+  export JOBS=1
+  corepack yarn install --immutable || return 1
+  corepack yarn build || return 1
+  # Slim node_modules back to production (also refreshes the low-memory
+  # .yarnrc.yml that install_production_deps maintains).
+  install_production_deps
 }
 
 rollback_to_snapshot() {
@@ -128,7 +169,16 @@ if [[ "$UPDATED_VIA" == "git" ]]; then
   fi
   CURRENT_COMMIT="$(git rev-parse HEAD)"
   git fetch origin
-  REMOTE_COMMIT="$(git rev-parse origin/main)"
+  # Same resolution order as ShellOtaAdapter: explicit pin beats detection,
+  # so the apply path can never target a different branch than the check did.
+  if [[ -n "${HOME_WORKER_GIT_BRANCH:-}" ]]; then
+    BRANCH="$HOME_WORKER_GIT_BRANCH"
+  elif ! BRANCH="$(default_branch)"; then
+    echo "ERROR: cannot determine origin default branch" >&2
+    rollback_to_snapshot "$ROLLBACK_SNAPSHOT"
+    exit 1
+  fi
+  REMOTE_COMMIT="$(git rev-parse "origin/$BRANCH")"
   if [[ "$CURRENT_COMMIT" == "$REMOTE_COMMIT" ]]; then
     echo "Already up to date"
     rm -f "$ROLLBACK_SNAPSHOT"
@@ -136,7 +186,7 @@ if [[ "$UPDATED_VIA" == "git" ]]; then
   fi
   ROLLBACK_TAG="rollback-$(date +%s)"
   git tag "$ROLLBACK_TAG" "$CURRENT_COMMIT"
-  git reset --hard origin/main
+  git reset --hard "origin/$BRANCH"
   NEW_COMMIT="$(git rev-parse HEAD)"
 fi
 
@@ -144,10 +194,18 @@ write_meta "restart_reason" "ota_update"
 write_meta "update_commit" "$NEW_COMMIT"
 write_meta "update_rollback_snapshot" "$ROLLBACK_SNAPSHOT"
 
-if ! install_production_deps; then
-  echo "production dependencies install failed, rolling back" >&2
-  rollback_to_snapshot "$ROLLBACK_SNAPSHOT"
-  exit 1
+if [[ "$UPDATED_VIA" == "git" ]]; then
+  if ! build_dist; then
+    echo "build failed, rolling back" >&2
+    rollback_to_snapshot "$ROLLBACK_SNAPSHOT"
+    exit 1
+  fi
+else
+  if ! install_production_deps; then
+    echo "production dependencies install failed, rolling back" >&2
+    rollback_to_snapshot "$ROLLBACK_SNAPSHOT"
+    exit 1
+  fi
 fi
 if ! corepack yarn db:migrate; then
   echo "migrations failed, rolling back" >&2
