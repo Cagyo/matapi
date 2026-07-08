@@ -55,14 +55,15 @@ EOF
       set_motion_conf stream_port 8081
       set_motion_conf stream_localhost on
 
-      # Add Spec 20 internal webhooks if not already present
-      if ! grep -q "http://localhost:4000/motion/event-start" /etc/motion/motion.conf; then
-        cat <<'EOF' | sudo tee -a /etc/motion/motion.conf >/dev/null
-on_event_start curl -s http://localhost:4000/motion/event-start?camera=%t
-on_event_end curl -s http://localhost:4000/motion/event-end?camera=%t&file=%f
-on_picture_save curl -s http://localhost:4000/motion/snapshot?file=%f
+      # Spec 20 internal webhooks. Motion runs these via `sh -c`, so the URLs
+      # MUST be quoted — an unquoted `&` backgrounds curl and drops `file=%f`.
+      # Delete any previous (possibly unquoted) versions, then append fresh.
+      sudo sed -i -E '/^on_(event_start|event_end|picture_save) curl -s "?http:\/\/localhost:4000\/motion\//d' /etc/motion/motion.conf
+      cat <<'EOF' | sudo tee -a /etc/motion/motion.conf >/dev/null
+on_event_start curl -s "http://localhost:4000/motion/event-start?camera=%t"
+on_event_end curl -s "http://localhost:4000/motion/event-end?camera=%t&file=%f"
+on_picture_save curl -s "http://localhost:4000/motion/snapshot?file=%f"
 EOF
-      fi
     fi
 
     if ! command -v rclone &>/dev/null; then

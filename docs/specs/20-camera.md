@@ -20,10 +20,11 @@ homeworker ALL=(ALL) NOPASSWD: /bin/systemctl start motion, /bin/systemctl stop 
 ## Motion Config Hooks
 
 ```
-# motion.conf
-on_event_start curl -s http://localhost:4000/motion/event-start?camera=%t
-on_event_end curl -s http://localhost:4000/motion/event-end?camera=%t&file=%f
-on_picture_save curl -s http://localhost:4000/motion/snapshot?file=%f
+# motion.conf — URLs must be quoted: Motion runs hooks via `sh -c`,
+# and an unquoted `&` backgrounds curl and silently drops `file=%f`.
+on_event_start curl -s "http://localhost:4000/motion/event-start?camera=%t"
+on_event_end curl -s "http://localhost:4000/motion/event-end?camera=%t&file=%f"
+on_picture_save curl -s "http://localhost:4000/motion/snapshot?file=%f"
 ```
 
 Worker exposes internal HTTP endpoints (not public) for these hooks.
