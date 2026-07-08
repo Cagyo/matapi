@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -28,11 +28,11 @@ describe('FsLocalStorageAdapter', () => {
     await writeFile(file, 'x');
     const adapter = new FsLocalStorageAdapter();
 
-    await adapter.deleteFile(file);
+    await expect(adapter.deleteFile(file)).resolves.toBe(true);
     expect(existsSync(file)).toBe(false);
 
-    // second delete must not throw
-    await expect(adapter.deleteFile(file)).resolves.toBeUndefined();
+    // second delete must not throw — already-absent counts as deleted
+    await expect(adapter.deleteFile(file)).resolves.toBe(true);
   });
 
   it('prunes empty subdirectories but keeps the root and non-empty dirs', async () => {
@@ -48,5 +48,37 @@ describe('FsLocalStorageAdapter', () => {
     expect(existsSync(join(root, '2026', '04'))).toBe(false);
     expect(existsSync(keepDir)).toBe(true);
     expect(existsSync(root)).toBe(true);
+  });
+
+  it('returns false when deleteFile cannot remove the path', async () => {
+    const subdir = join(root, 'not-a-file');
+    await mkdir(subdir);
+
+    await expect(new FsLocalStorageAdapter().deleteFile(subdir)).resolves.toBe(false);
+  });
+
+  it('lists only files older than the cutoff, recursively', async () => {
+    await mkdir(join(root, '2026/01/01'), { recursive: true });
+    const oldFile = join(root, '2026/01/01/120000.mp4');
+    const newFile = join(root, '2026/01/01/120100.mp4');
+    await writeFile(oldFile, 'x');
+    await writeFile(newFile, 'x');
+    const tenDaysAgoSec = (Date.now() - 10 * 24 * 60 * 60 * 1000) / 1000;
+    await utimes(oldFile, tenDaysAgoSec, tenDaysAgoSec);
+
+    const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const files = await new FsLocalStorageAdapter().listFilesOlderThan(cutoff);
+
+    expect(files.map((f) => f.path)).toEqual([oldFile]);
+    expect(files[0].mtimeMs).toBeLessThan(cutoff.getTime());
+    expect(files[0].ctimeMs).toBeGreaterThan(0);
+  });
+
+  it('returns an empty list when the directory is missing', async () => {
+    process.env.MOTION_LOCAL_DIR = '/nonexistent/motion/dir';
+
+    const files = await new FsLocalStorageAdapter().listFilesOlderThan(new Date());
+
+    expect(files).toEqual([]);
   });
 });

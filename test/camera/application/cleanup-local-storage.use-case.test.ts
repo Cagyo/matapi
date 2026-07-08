@@ -30,7 +30,7 @@ function notUploadedEvent(id: number): MotionEvent {
 function fakeStorage(usage: number) {
   return {
     usagePercent: vi.fn(async () => usage),
-    deleteFile: vi.fn(async () => {}),
+    deleteFile: vi.fn(async () => true),
     pruneEmptyDirs: vi.fn(async () => {}),
   } satisfies LocalStoragePort & {
     deleteFile: ReturnType<typeof vi.fn>;

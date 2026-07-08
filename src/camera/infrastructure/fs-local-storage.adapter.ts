@@ -1,17 +1,16 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { execFile } from 'node:child_process';
-import { readdir, rm, rmdir } from 'node:fs/promises';
+import { readdir, rm, rmdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { LocalStoragePort } from '../domain/ports/local-storage.port';
+import { LocalFileInfo, LocalStoragePort } from '../domain/ports/local-storage.port';
 
 const exec = promisify(execFile);
 
 /**
  * Production `LocalStoragePort` over `MOTION_LOCAL_DIR` (spec 21). `usagePercent`
  * shells to `df -P`; deletions use `fs`. Every method degrades safely — a
- * failed `df` reports 0% so cleanup never deletes on bad data, and missing
- * files are treated as already gone.
+ * failed `df` reports 0% so cleanup never deletes on bad data.
  */
 @Injectable()
 export class FsLocalStorageAdapter implements LocalStoragePort {
@@ -30,11 +29,13 @@ export class FsLocalStorageAdapter implements LocalStoragePort {
     }
   }
 
-  async deleteFile(path: string): Promise<void> {
+  async deleteFile(path: string): Promise<boolean> {
     try {
       await rm(path, { force: true });
+      return true;
     } catch (err) {
       this.logger.warn(`Failed to delete ${path}: ${(err as Error).message}`);
+      return false;
     }
   }
 
@@ -44,6 +45,17 @@ export class FsLocalStorageAdapter implements LocalStoragePort {
     } catch (err) {
       this.logger.warn(`pruneEmptyDirs failed: ${(err as Error).message}`);
     }
+  }
+
+  async listFilesOlderThan(cutoff: Date): Promise<LocalFileInfo[]> {
+    const out: LocalFileInfo[] = [];
+    try {
+      await this.collectOldFiles(this.localDir, cutoff.getTime(), out);
+    } catch (err) {
+      this.logger.warn(`listFilesOlderThan failed: ${(err as Error).message}`);
+      return [];
+    }
+    return out;
   }
 
   /** Depth-first: remove now-empty subdirectories; never removes the root. */
@@ -65,6 +77,30 @@ export class FsLocalStorageAdapter implements LocalStoragePort {
       if (remaining.length === 0) await rmdir(dir);
     } catch {
       // non-empty or already gone — leave it
+    }
+  }
+
+  private async collectOldFiles(dir: string, cutoffMs: number, out: LocalFileInfo[]): Promise<void> {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await this.collectOldFiles(full, cutoffMs, out);
+      } else if (entry.isFile()) {
+        try {
+          const info = await stat(full);
+          if (info.mtimeMs < cutoffMs) {
+            out.push({ path: full, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs });
+          }
+        } catch {
+          // stat raced a deletion — skip
+        }
+      }
     }
   }
 }

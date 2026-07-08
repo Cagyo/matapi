@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { LocalStoragePort } from '../domain/ports/local-storage.port';
+import { LocalFileInfo, LocalStoragePort } from '../domain/ports/local-storage.port';
 
 /**
  * Dev/test `LocalStoragePort`. Reports the disk comfortably below every
@@ -18,11 +18,15 @@ export class StubLocalStorageAdapter implements LocalStoragePort {
     return this.usage;
   }
 
-  async deleteFile(): Promise<void> {
-    // no-op
+  async deleteFile(): Promise<boolean> {
+    return true;
   }
 
   async pruneEmptyDirs(): Promise<void> {
     // no-op
+  }
+
+  async listFilesOlderThan(): Promise<LocalFileInfo[]> {
+    return [];
   }
 }
