@@ -7,10 +7,15 @@ import {
 } from '@nestjs/common';
 import { CAMERA_MODE, CameraMode } from '../camera.tokens';
 import { ADMIN_ALERT, AdminAlertPort } from '../domain/ports/admin-alert.port';
+import { MOTION_DESIRED_STATE_KEY } from '../domain/motion-desired-state';
 import {
   MOTION_CONTROL,
   MotionControlPort,
 } from '../domain/ports/motion-control.port';
+import {
+  SYSTEM_META_REPOSITORY,
+  SystemMetaRepositoryPort,
+} from '../../system/domain/ports/system-meta-repository.port';
 
 const DEFAULT_INTERVAL_MS = 60_000;
 const MAX_RESTART_ATTEMPTS = 3;
@@ -18,10 +23,11 @@ const RESTART_BACKOFF_MS = 2_000;
 
 /**
  * Watches the Motion daemon health (spec 20, 23). On each tick it checks
- * `isActive()`; if the daemon is down it attempts up to three restarts with
- * backoff. A persistent failure alerts admins once and marks the camera
- * subsystem degraded; recovery alerts once and clears the flag. Only active
- * in `real` mode — stub mode has no daemon to watch.
+ * `isActive()`; if the daemon is down — and `motion_desired_state` is not
+ * `'off'` — it attempts up to three restarts with backoff. A persistent
+ * failure alerts admins once and marks the camera subsystem degraded;
+ * recovery alerts once and clears the flag. Only active in `real` mode —
+ * stub mode has no daemon to watch.
  */
 @Injectable()
 export class MotionWatcherService
@@ -36,6 +42,7 @@ export class MotionWatcherService
     @Inject(CAMERA_MODE) private readonly mode: CameraMode,
     @Inject(MOTION_CONTROL) private readonly motion: MotionControlPort,
     @Inject(ADMIN_ALERT) private readonly adminAlert: AdminAlertPort,
+    @Inject(SYSTEM_META_REPOSITORY) private readonly meta: SystemMetaRepositoryPort,
   ) {}
 
   onApplicationBootstrap(): void {
@@ -69,6 +76,13 @@ export class MotionWatcherService
         return;
       }
 
+      if ((await this.meta.get(MOTION_DESIRED_STATE_KEY)) === 'off') {
+        // Deliberate stop (/camera disable or emergency cleanup) — not a
+        // failure. Stand down silently; /camera enable re-arms the watcher.
+        this.degraded = false;
+        return;
+      }
+
       const restored = await this.tryRestart();
       if (restored) {
         if (this.degraded) await this.recover();
@@ -84,6 +98,14 @@ export class MotionWatcherService
 
   private async tryRestart(): Promise<boolean> {
     for (let attempt = 1; attempt <= MAX_RESTART_ATTEMPTS; attempt++) {
+      if ((await this.meta.get(MOTION_DESIRED_STATE_KEY)) === 'off') {
+        // A deliberate stop landed while we were mid-recovery — e.g.
+        // /camera disable during the ~2s backoff between attempts. The
+        // tick-top gate can't catch this, and a restart that wins here
+        // sticks: the healthy path never consults desired state again.
+        this.degraded = false;
+        return true;
+      }
       try {
         await this.motion.restart();
         if (await this.motion.isActive()) {
