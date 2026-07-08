@@ -75,9 +75,22 @@ describe('MockUartCo2Adapter (base UART CO2 behaviour)', () => {
     expect(adapter.getState().value).toBe(1300);
 
     await adapter.flushNow();
-    expect(logs.entries.length).toBe(4);
+    expect(logs.entries.length).toBe(3); // 620 (first), 850 (→warning), 1300 (→critical)
     expect(logs.entries[0]).toMatchObject({ sensorId: 'co2_living', level: 'info' });
 
+    await adapter.destroy();
+  });
+
+  it('logs at most one sample per interval in steady state', async () => {
+    const logs = new InMemorySensorLogRepository();
+    const source = new InMemoryCo2Source([620, 640, 660, 680]); // all 'normal'
+    const adapter = new MockUartCo2Adapter(logs, source);
+    await adapter.init(uartConfig());
+
+    for (let i = 0; i < 4; i += 1) await adapter.pollOnce();
+    await adapter.flushNow();
+
+    expect(logs.entries.length).toBe(1); // first sample only; rest throttled
     await adapter.destroy();
   });
 

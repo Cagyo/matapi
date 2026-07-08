@@ -28,6 +28,13 @@ export interface UartCo2Config {
 
 const MAX_CONSECUTIVE_BAD_READS = 10;
 
+const DEFAULT_SAMPLE_LOG_MS = 5 * 60 * 1000;
+
+function sampleLogIntervalFromEnv(): number {
+  const parsed = Number(process.env.UART_SAMPLE_LOG_MS);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_SAMPLE_LOG_MS;
+}
+
 export function parseUartCo2Config(
   raw: Record<string, unknown>,
   defaults: UartCo2Defaults,
@@ -89,6 +96,8 @@ export abstract class BaseUartCo2Adapter implements SensorDriverPort {
   private readTimer: NodeJS.Timeout | null = null;
   private flushTimer: NodeJS.Timeout | null = null;
   private buffer: SensorLogEntry[] = [];
+  private lastSampleLoggedAt = 0;
+  private readonly sampleLogIntervalMs = sampleLogIntervalFromEnv();
 
   private currentPpm: number | null = null;
   private currentLevel: Co2Level = 'normal';
@@ -209,20 +218,26 @@ export abstract class BaseUartCo2Adapter implements SensorDriverPort {
     }
 
     const now = new Date();
-    this.buffer.push({
-      sensorId: this.config.id,
-      level: 'info',
-      message: `ppm=${ppm}`,
-      timestamp: now,
-    });
-
     const previousLevel = this.currentLevel;
     const nextLevel = classifyCo2(ppm, this.uart.thresholds);
+    const levelChanged = previousLevel !== nextLevel;
+    const dueForSample = now.getTime() - this.lastSampleLoggedAt >= this.sampleLogIntervalMs;
+
+    if (levelChanged || dueForSample) {
+      this.lastSampleLoggedAt = now.getTime();
+      this.buffer.push({
+        sensorId: this.config.id,
+        level: 'info',
+        message: `ppm=${ppm}`,
+        timestamp: now,
+      });
+    }
+
     this.currentPpm = ppm;
     this.currentLevel = nextLevel;
     this.lastTimestamp = now;
 
-    if (previousLevel !== nextLevel) {
+    if (levelChanged) {
       this.listener?.({
         sensorId: this.config.id,
         type: 'threshold',
