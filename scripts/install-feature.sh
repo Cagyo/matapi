@@ -72,15 +72,23 @@ EOF
     if ! command -v rclone &>/dev/null; then
       curl -sSL https://rclone.org/install.sh | sudo bash
     fi
-    mkdir -p "$HOME/.config/rclone"
-    chmod 700 "$HOME/.config/rclone"
-    if rclone listremotes 2>/dev/null | grep -q "^gdrive:"; then
-      echo "rclone remote 'gdrive:' already configured."
+    # The worker runs rclone as $USER (homeworker), so the remote must live in
+    # THAT user's config — not in the home of whoever ran this installer.
+    WORKER_HOME="$(getent passwd "$USER" | cut -d: -f6)"
+    if [ -z "$WORKER_HOME" ]; then
+      echo "ERROR: cannot resolve home directory for user $USER" >&2
+      exit 1
+    fi
+    RCLONE_CONFIG="$WORKER_HOME/.config/rclone/rclone.conf"
+    sudo -H -u "$USER" mkdir -p "$WORKER_HOME/.config/rclone"
+    sudo -H -u "$USER" chmod 700 "$WORKER_HOME/.config/rclone"
+    if sudo -H -u "$USER" env RCLONE_CONFIG="$RCLONE_CONFIG" rclone listremotes 2>/dev/null | grep -q "^gdrive:"; then
+      echo "rclone remote 'gdrive:' already configured for $USER."
     else
       echo ""
-      echo "⚠️  rclone installed but no 'gdrive:' remote configured."
+      echo "⚠️  rclone installed but no 'gdrive:' remote configured for $USER."
       echo "   After install, either:"
-      echo "     1. SSH in and run: rclone config"
+      echo "     1. SSH in and run: sudo -H -u $USER env RCLONE_CONFIG=$RCLONE_CONFIG rclone config"
       echo "     2. Or use /gdrive_auth in Telegram to paste config"
       echo ""
     fi
