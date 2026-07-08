@@ -311,4 +311,23 @@ describe('DigitalGpioAdapter', () => {
     ]);
     vi.useRealTimers();
   });
+
+  it('resumes hardware notifications after the flap cooldown', async () => {
+    vi.useFakeTimers();
+    await adapter.init(baseConfig);
+    const cb = (gpio.notify as ReturnType<typeof vi.fn>).mock.calls[0][0] as (l: 0 | 1) => void;
+
+    // Trip the anti-flap breaker: >30 transitions inside the 60s window.
+    for (let i = 0; i < 32; i += 1) cb((i % 2) as 0 | 1);
+    expect(gpio.endNotify).toHaveBeenCalled(); // switched to polled mode
+    const notifyCallsBefore = (gpio.notify as ReturnType<typeof vi.fn>).mock.calls.length;
+
+    // Advance past the recovery window; the 10s polled tick performs the check.
+    await vi.advanceTimersByTimeAsync(5 * 60_000 + 10_000);
+
+    expect((gpio.notify as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(
+      notifyCallsBefore,
+    );
+    vi.useRealTimers();
+  });
 });

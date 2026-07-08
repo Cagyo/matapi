@@ -44,6 +44,8 @@ export class DigitalGpioAdapter implements SensorDriverPort {
   private isFlapping = false;
   private debounceLogged = false;
   private polledInterval?: NodeJS.Timeout;
+  private polledSince = 0;
+  private static readonly FLAP_RECOVERY_MS = 5 * 60 * 1000;
 
   constructor(
     private readonly gateway: PigpioGateway,
@@ -175,9 +177,14 @@ export class DigitalGpioAdapter implements SensorDriverPort {
       this.logger.warn(`endNotify during flapping failed: ${(err as Error).message}`);
     });
 
+    this.polledSince = Date.now();
     this.polledInterval = setInterval(() => {
       void (async () => {
         if (!this.gpio || !this.config || !this.digital) return;
+        if (Date.now() - this.polledSince >= DigitalGpioAdapter.FLAP_RECOVERY_MS) {
+          this.resumeFromFlapping();
+          return;
+        }
         try {
           const level = await this.gpio.read();
           this.processLevelChange(level, Date.now());
@@ -187,6 +194,21 @@ export class DigitalGpioAdapter implements SensorDriverPort {
         }
       })();
     }, 10_000);
+  }
+
+  /** After the cooldown, drop back to hardware notifications; re-trips if still noisy. */
+  private resumeFromFlapping(): void {
+    if (this.polledInterval) {
+      clearInterval(this.polledInterval);
+      this.polledInterval = undefined;
+    }
+    this.isFlapping = false;
+    this.transitionTimestamps = [];
+    this.debounceLogged = false;
+    this.gpio?.notify((level) => this.handleNotify(level));
+    this.logger.log(
+      `Digital "${this.config?.name}" resumed hardware notifications after flap cooldown`,
+    );
   }
 
   private processLevelChange(level: 0 | 1, now: number): void {
