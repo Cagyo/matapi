@@ -281,7 +281,7 @@ export const commands: CommandDescriptor[] = [
   {
     command: 'system_update',
     description: 'Update OS dependencies',
-    usage: '/system_update — update OS dependencies (apt, rclone, node)',
+    usage: '/system_update — update OS dependencies (apt, rclone; Node major upgrades are manual)',
     scope: 'admin',
   },
   {
