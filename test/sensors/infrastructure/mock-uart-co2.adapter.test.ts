@@ -173,4 +173,27 @@ describe('MockUartCo2Adapter (base UART CO2 behaviour)', () => {
 
     expect(logs.entries.length).toBe(1);
   });
+
+  it('caps the log buffer so a persistent DB outage cannot grow memory unbounded', async () => {
+    const prev = process.env.UART_SAMPLE_LOG_MS;
+    process.env.UART_SAMPLE_LOG_MS = '0'; // log every read for this test
+    try {
+      const logs = new InMemorySensorLogRepository();
+      vi.spyOn(logs, 'appendBatch').mockRejectedValue(new Error('db down'));
+      const source = new InMemoryCo2Source(
+        Array.from({ length: 2000 }, (_, i) => 400 + (i % 50)),
+      );
+      const adapter = new MockUartCo2Adapter(logs, source);
+      await adapter.init(uartConfig({ readIntervalMs: 60_000, flushIntervalMs: 600_000 }));
+
+      for (let i = 0; i < 1500; i += 1) await adapter.pollOnce();
+      await adapter.flushNow(); // fails, re-adds, must stay capped
+
+      expect(adapter.pendingLogCount).toBeLessThanOrEqual(500);
+      await adapter.destroy();
+    } finally {
+      if (prev === undefined) delete process.env.UART_SAMPLE_LOG_MS;
+      else process.env.UART_SAMPLE_LOG_MS = prev;
+    }
+  });
 });

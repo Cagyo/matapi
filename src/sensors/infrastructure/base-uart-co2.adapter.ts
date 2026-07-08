@@ -29,6 +29,7 @@ export interface UartCo2Config {
 const MAX_CONSECUTIVE_BAD_READS = 10;
 
 const DEFAULT_SAMPLE_LOG_MS = 5 * 60 * 1000;
+const MAX_LOG_BUFFER = 500;
 
 function sampleLogIntervalFromEnv(): number {
   const parsed = Number(process.env.UART_SAMPLE_LOG_MS);
@@ -170,6 +171,11 @@ export abstract class BaseUartCo2Adapter implements SensorDriverPort {
     };
   }
 
+  /** Test/diagnostic accessor for the pending-log buffer depth. */
+  get pendingLogCount(): number {
+    return this.buffer.length;
+  }
+
   onEvent(callback: (event: SensorEvent) => void): void {
     this.listener = callback;
   }
@@ -231,6 +237,7 @@ export abstract class BaseUartCo2Adapter implements SensorDriverPort {
         message: `ppm=${ppm}`,
         timestamp: now,
       });
+      this.capBuffer();
     }
 
     this.currentPpm = ppm;
@@ -258,6 +265,12 @@ export abstract class BaseUartCo2Adapter implements SensorDriverPort {
     }
   }
 
+  private capBuffer(): void {
+    if (this.buffer.length > MAX_LOG_BUFFER) {
+      this.buffer = this.buffer.slice(this.buffer.length - MAX_LOG_BUFFER);
+    }
+  }
+
   private async flush(): Promise<void> {
     if (this.buffer.length === 0) return;
     const batch = this.buffer;
@@ -265,8 +278,10 @@ export abstract class BaseUartCo2Adapter implements SensorDriverPort {
     try {
       await this.logs.appendBatch(batch);
     } catch (err) {
-      // Restore the batch for the next attempt; better partial loss than crash.
+      // Restore the batch for the next attempt, capped so a persistent DB
+      // outage cannot grow memory without bound.
       this.buffer = [...batch, ...this.buffer];
+      this.capBuffer();
       this.logger.warn(`appendBatch failed: ${(err as Error).message}`);
     }
   }
