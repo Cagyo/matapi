@@ -172,6 +172,19 @@ export class DrizzleMediaRepository implements MediaRepositoryPort, MediaWriterP
       .map((row) => this.toEvent(row));
   }
 
+  async listAllMediaPaths(): Promise<string[]> {
+    const rows = this.db
+      .select({
+        videoPath: motionEvents.videoPath,
+        snapshotPath: motionEvents.snapshotPath,
+      })
+      .from(motionEvents)
+      .all();
+    return rows
+      .flatMap((row) => [row.videoPath, row.snapshotPath])
+      .filter((p): p is string => p !== null);
+  }
+
   async markUploaded(id: number, remotePath: string): Promise<void> {
     this.db
       .update(motionEvents)

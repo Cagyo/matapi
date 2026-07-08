@@ -129,6 +129,12 @@ export class InMemoryMediaRepository implements MediaRepositoryPort, MediaWriter
       .sort((a, b) => (a.startedAt?.getTime() ?? 0) - (b.startedAt?.getTime() ?? 0));
   }
 
+  async listAllMediaPaths(): Promise<string[]> {
+    return this.events
+      .flatMap((e) => [e.videoPath, e.snapshotPath])
+      .filter((p): p is string => p !== null);
+  }
+
   async markUploaded(id: number, remotePath: string): Promise<void> {
     const event = this.events.find((e) => e.id === id);
     if (event) {

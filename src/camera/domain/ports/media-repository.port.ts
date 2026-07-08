@@ -37,4 +37,10 @@ export interface MediaRepositoryPort {
    * the local cleanup loop (spec 21).
    */
   findUploadedNotDeleted(): Promise<MotionEvent[]>;
+  /**
+   * Every non-null video/snapshot path the DB references, regardless of
+   * upload/delete flags. Used by the orphan sweep: a local file NOT in this
+   * list belongs to no event and is safe to age out.
+   */
+  listAllMediaPaths(): Promise<string[]>;
 }
