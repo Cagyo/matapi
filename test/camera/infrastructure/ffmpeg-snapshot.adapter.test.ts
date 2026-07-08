@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { Logger } from '@nestjs/common';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FfmpegSnapshotAdapter } from '../../../src/camera/infrastructure/ffmpeg-snapshot.adapter';
 import { SnapshotFailedError } from '../../../src/camera/domain/errors/snapshot-failed.error';
 
@@ -19,6 +20,7 @@ class TestAdapter extends FfmpegSnapshotAdapter {
 afterEach(() => {
   delete process.env.MOTION_SNAPSHOT_SOURCE;
   delete process.env.MOTION_SNAPSHOT_SOURCE_FRONT_DOOR;
+  vi.restoreAllMocks();
 });
 
 describe('FfmpegSnapshotAdapter source fallback', () => {
@@ -68,5 +70,20 @@ describe('FfmpegSnapshotAdapter source fallback', () => {
     await adapter.grab('front_door', 'Front door');
 
     expect(adapter.attempts).toHaveLength(1);
+  });
+
+  it('redacts credentials from snapshot failure warnings', async () => {
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
+    process.env.MOTION_SNAPSHOT_SOURCE = 'rtsp://user:pass@cam.local/stream';
+    const adapter = new TestAdapter();
+    adapter.failFor.add('rtsp://user:pass@cam.local/stream');
+
+    await expect(adapter.grab('front_door', 'Front door')).rejects.toBeInstanceOf(
+      SnapshotFailedError,
+    );
+
+    const warning = warn.mock.calls.at(-1)?.[0];
+    expect(warning).toContain('rtsp://cam.local/stream');
+    expect(warning).not.toContain('user:pass');
   });
 });

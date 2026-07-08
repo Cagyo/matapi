@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MotionWatcherService } from '../../../src/camera/application/motion-watcher.service';
 import { CameraMode } from '../../../src/camera/camera.tokens';
@@ -67,7 +68,10 @@ function build(
 
 describe('MotionWatcherService', () => {
   beforeEach(() => vi.useFakeTimers());
-  afterEach(() => vi.useRealTimers());
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
 
   it('does nothing while the daemon is healthy', async () => {
     const motion = new FakeMotion(true);
@@ -187,5 +191,55 @@ describe('MotionWatcherService', () => {
     expect(motion.restartCalls).toBe(1); // attempts 2 and 3 never fire
     expect(admin.alerts).toEqual([]); // deliberate stop - no failure alert
     expect(watcher.isDegraded()).toBe(false);
+  });
+
+  it('fails open when desired-state read throws at tick start', async () => {
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
+    const motion = new FakeMotion(false);
+    const meta: SystemMetaRepositoryPort = {
+      get: vi.fn().mockRejectedValue(new Error('meta offline')),
+      set: vi.fn(),
+      delete: vi.fn(),
+    };
+    const admin = new RecordingAdminAlert();
+    const watcher = new MotionWatcherService('real', motion, admin, meta);
+
+    await tick(watcher);
+
+    expect(motion.restartCalls).toBe(1);
+    expect(motion.active).toBe(true);
+    expect(admin.alerts).toEqual([]);
+    expect(warn).toHaveBeenCalledWith(
+      'Failed to read motion desired state; assuming on: meta offline',
+    );
+  });
+
+  it('fails open when desired-state read throws during restart backoff', async () => {
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
+    const motion = new FakeMotion(false);
+    motion.restartSucceeds = false;
+    const metaGet = vi
+      .fn<SystemMetaRepositoryPort['get']>()
+      .mockResolvedValueOnce('on')
+      .mockRejectedValueOnce(new Error('meta offline'))
+      .mockRejectedValueOnce(new Error('meta offline'));
+    const meta: SystemMetaRepositoryPort = {
+      get: metaGet,
+      set: vi.fn(),
+      delete: vi.fn(),
+    };
+    const admin = new RecordingAdminAlert();
+    const watcher = new MotionWatcherService('real', motion, admin, meta);
+
+    const ticking = tick(watcher);
+    await vi.runAllTimersAsync();
+    await ticking;
+
+    expect(motion.restartCalls).toBe(3);
+    expect(admin.alerts).toEqual(['motion-daemon-down']);
+    expect(watcher.isDegraded()).toBe(true);
+    expect(warn).toHaveBeenCalledWith(
+      'Failed to read motion desired state; assuming on: meta offline',
+    );
   });
 });

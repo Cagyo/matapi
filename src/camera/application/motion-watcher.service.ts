@@ -76,7 +76,7 @@ export class MotionWatcherService
         return;
       }
 
-      if ((await this.meta.get(MOTION_DESIRED_STATE_KEY)) === 'off') {
+      if (await this.isMotionDesiredOff()) {
         // Deliberate stop (/camera disable or emergency cleanup) — not a
         // failure. Stand down silently; /camera enable re-arms the watcher.
         this.degraded = false;
@@ -98,7 +98,7 @@ export class MotionWatcherService
 
   private async tryRestart(): Promise<boolean> {
     for (let attempt = 1; attempt <= MAX_RESTART_ATTEMPTS; attempt++) {
-      if ((await this.meta.get(MOTION_DESIRED_STATE_KEY)) === 'off') {
+      if (await this.isMotionDesiredOff()) {
         // A deliberate stop landed while we were mid-recovery — e.g.
         // /camera disable during the ~2s backoff between attempts. The
         // tick-top gate can't catch this, and a restart that wins here
@@ -120,6 +120,17 @@ export class MotionWatcherService
       if (attempt < MAX_RESTART_ATTEMPTS) await this.sleep(RESTART_BACKOFF_MS);
     }
     return false;
+  }
+
+  private async isMotionDesiredOff(): Promise<boolean> {
+    try {
+      return (await this.meta.get(MOTION_DESIRED_STATE_KEY)) === 'off';
+    } catch (error) {
+      this.logger.warn(
+        `Failed to read motion desired state; assuming on: ${(error as Error).message}`,
+      );
+      return false;
+    }
   }
 
   private async markDown(): Promise<void> {

@@ -14,6 +14,7 @@ const MAX_SNAPSHOT_BYTES = 5 * 1024 * 1024;
 const DEFAULT_STREAM_SOURCE = 'http://127.0.0.1:8081';
 /** Raw device - only opens while Motion is NOT running (exclusive V4L2). */
 const DEFAULT_DEVICE_SOURCE = '/dev/video0';
+const URL_WITH_CREDENTIALS_PATTERN = /\b[a-z][a-z0-9+.-]*:\/\/[^\s'"]+/gi;
 
 /**
  * Production `SnapshotPort` - grabs a single JPEG frame with ffmpeg
@@ -56,7 +57,9 @@ export class FfmpegSnapshotAdapter implements SnapshotPort {
         return await this.capture(source, cameraName);
       } catch (err) {
         lastError = err;
-        this.logger.warn(`snapshot via ${source} failed: ${(err as Error).message}`);
+        this.logger.warn(
+          `snapshot via ${this.redactSource(source)} failed: ${this.redactText((err as Error).message)}`,
+        );
       }
     }
     throw lastError;
@@ -98,5 +101,22 @@ export class FfmpegSnapshotAdapter implements SnapshotPort {
         },
       );
     });
+  }
+
+  private redactText(text: string): string {
+    return text.replace(URL_WITH_CREDENTIALS_PATTERN, (value) => this.redactSource(value));
+  }
+
+  private redactSource(source: string): string {
+    if (!source.includes('://')) return source;
+    try {
+      const url = new URL(source);
+      if (!url.username && !url.password) return source;
+      url.username = '';
+      url.password = '';
+      return url.toString();
+    } catch {
+      return source.replace(/\/\/[^@/]+@/, '//');
+    }
   }
 }
