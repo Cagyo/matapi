@@ -1,56 +1,48 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { DrizzleInviteCodeRepository } from '../../../src/telegram/infrastructure/drizzle-invite-code.repository';
 import { DrizzleUserRepository } from '../../../src/telegram/infrastructure/drizzle-user.repository';
-import { InvalidInviteCodeError } from '../../../src/telegram/domain/errors/invalid-invite-code.error';
-import {
-  createTestDatabase,
-  TestDatabaseContext,
-} from '../../helpers/database';
+import { createTestDatabase } from '../../helpers/database';
+
+// `invite_codes.created_by` has a FK to `users.telegram_id` (enforced in the
+// test DB), so the creating admin must exist before a code can be inserted.
+async function seedCreatorAdmin(ctx: ReturnType<typeof createTestDatabase>) {
+  await new DrizzleUserRepository(ctx.appDb).createAdmin({
+    telegramId: 1,
+    name: 'Admin',
+    role: 'admin',
+    createdAt: new Date(),
+  });
+}
 
 describe('DrizzleInviteCodeRepository', () => {
-  let ctx: TestDatabaseContext;
-  let repo: DrizzleInviteCodeRepository;
-  let users: DrizzleUserRepository;
-
-  beforeEach(async () => {
-    ctx = createTestDatabase();
-    repo = new DrizzleInviteCodeRepository(ctx.appDb);
-    users = new DrizzleUserRepository(ctx.appDb);
-    await users.createAdmin({
-      telegramId: 1001,
-      name: 'Ada',
-      role: 'admin',
-      createdAt: new Date('2030-01-01T00:00:00.000Z'),
-    });
+  it('creates and finds a code', async () => {
+    const ctx = createTestDatabase();
+    const repo = new DrizzleInviteCodeRepository(ctx.appDb);
+    await seedCreatorAdmin(ctx);
+    await repo.create({ code: 'ABC', role: 'user', createdBy: 1, createdAt: new Date() });
+    expect((await repo.findByCode('ABC'))?.role).toBe('user');
+    ctx.close();
   });
 
-  afterEach(() => ctx.close());
+  it('redeems an unused code exactly once', async () => {
+    const ctx = createTestDatabase();
+    const repo = new DrizzleInviteCodeRepository(ctx.appDb);
+    await seedCreatorAdmin(ctx);
+    await repo.create({ code: 'ABC', role: 'user', createdBy: 1, createdAt: new Date() });
 
-  it('creates, looks up, and marks codes used', async () => {
-    const created = await repo.create({
-      code: 'ABCDEFGH',
-      role: 'user',
-      createdBy: 1001,
-      createdAt: new Date('2030-01-01T00:00:00.000Z'),
-    });
-    expect(created.usedBy).toBeNull();
+    const first = await repo.redeem('ABC', 42, new Date('2030-01-01T00:00:00Z'));
+    const second = await repo.redeem('ABC', 99, new Date('2030-01-02T00:00:00Z'));
 
-    const found = await repo.findByCode('ABCDEFGH');
-    expect(found?.createdBy).toBe(1001);
-
-    const used = await repo.markUsed(
-      'ABCDEFGH',
-      2002,
-      new Date('2030-02-02T00:00:00.000Z'),
-    );
-    expect(used.usedBy).toBe(2002);
-    expect(used.usedAt).toEqual(new Date('2030-02-02T00:00:00.000Z'));
+    expect(first?.usedBy).toBe(42);
+    expect(second).toBeNull();
+    expect((await repo.findByCode('ABC'))?.usedBy).toBe(42);
+    ctx.close();
   });
 
-  it('returns null for unknown codes and throws when marking unknown', async () => {
-    expect(await repo.findByCode('NOPE')).toBeNull();
-    await expect(
-      repo.markUsed('NOPE', 1, new Date()),
-    ).rejects.toBeInstanceOf(InvalidInviteCodeError);
+  it('returns null for an unknown code', async () => {
+    const ctx = createTestDatabase();
+    const repo = new DrizzleInviteCodeRepository(ctx.appDb);
+    expect(await repo.redeem('NOPE', 1, new Date())).toBeNull();
+    ctx.close();
   });
 });

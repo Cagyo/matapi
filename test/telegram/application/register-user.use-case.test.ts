@@ -58,7 +58,7 @@ describe('RegisterUserUseCase', () => {
 
   it('rejects an already-used code', async () => {
     const { invites, useCase } = setup();
-    await invites.markUsed('GOODCODE', 9999, new Date());
+    await invites.redeem('GOODCODE', 9999, new Date());
     await expect(
       useCase.execute({ telegramId: 2002, name: 'Alex', code: 'GOODCODE' }),
     ).rejects.toBeInstanceOf(InviteCodeUsedError);
@@ -75,5 +75,27 @@ describe('RegisterUserUseCase', () => {
     await expect(
       useCase.execute({ telegramId: 2002, name: 'Alex', code: 'GOODCODE' }),
     ).rejects.toBeInstanceOf(AlreadyRegisteredError);
+  });
+
+  it('lets only one of two concurrent redemptions of the same code win', async () => {
+    const { users, useCase } = setup();
+
+    const results = await Promise.allSettled([
+      useCase.execute({ telegramId: 3001, name: 'A', code: 'GOODCODE' }),
+      useCase.execute({ telegramId: 3002, name: 'B', code: 'GOODCODE' }),
+    ]);
+
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const rejected = results.filter(
+      (r): r is PromiseRejectedResult => r.status === 'rejected',
+    );
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toBeInstanceOf(InviteCodeUsedError);
+
+    const created = [
+      await users.findByTelegramId(3001),
+      await users.findByTelegramId(3002),
+    ].filter((u) => u !== null);
+    expect(created).toHaveLength(1);
   });
 });

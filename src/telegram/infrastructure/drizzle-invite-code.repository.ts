@@ -1,8 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../database/database.module';
 import { inviteCodes } from '../../database/schema';
-import { InvalidInviteCodeError } from '../domain/errors/invalid-invite-code.error';
 import { InviteCode, NewInviteCode } from '../domain/invite-code.entity';
 import { InviteCodeRepositoryPort } from '../domain/ports/invite-code-repository.port';
 import { Role } from '../domain/role';
@@ -36,15 +35,18 @@ export class DrizzleInviteCodeRepository implements InviteCodeRepositoryPort {
     return row ? this.toEntity(row) : null;
   }
 
-  async markUsed(code: string, usedBy: number, usedAt: Date): Promise<InviteCode> {
+  async redeem(
+    code: string,
+    usedBy: number,
+    usedAt: Date,
+  ): Promise<InviteCode | null> {
     const [row] = this.db
       .update(inviteCodes)
       .set({ usedBy, usedAt })
-      .where(eq(inviteCodes.code, code))
+      .where(and(eq(inviteCodes.code, code), isNull(inviteCodes.usedBy)))
       .returning()
       .all();
-    if (!row) throw new InvalidInviteCodeError(code);
-    return this.toEntity(row);
+    return row ? this.toEntity(row) : null;
   }
 
   private toEntity(row: InviteRow): InviteCode {

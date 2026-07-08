@@ -45,13 +45,17 @@ export class RegisterUserUseCase {
     }
 
     const now = this.clock.now();
+    // Claim the code atomically FIRST — the conditional update is the real gate
+    // against concurrent redemption. Only create the user once the code is ours.
+    const claimed = await this.invites.redeem(invite.code, input.telegramId, now);
+    if (!claimed) throw new InviteCodeUsedError(input.code);
+
     const user = await this.users.createUser({
       telegramId: input.telegramId,
       name: input.name,
       role: invite.role,
       createdAt: now,
     });
-    await this.invites.markUsed(invite.code, input.telegramId, now);
 
     return { user, invitedBy: invite.createdBy };
   }

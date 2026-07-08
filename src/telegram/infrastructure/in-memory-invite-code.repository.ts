@@ -1,4 +1,3 @@
-import { InvalidInviteCodeError } from '../domain/errors/invalid-invite-code.error';
 import { InviteCode, NewInviteCode } from '../domain/invite-code.entity';
 import { InviteCodeRepositoryPort } from '../domain/ports/invite-code-repository.port';
 
@@ -26,9 +25,15 @@ export class InMemoryInviteCodeRepository implements InviteCodeRepositoryPort {
     return this.store.get(code) ?? null;
   }
 
-  async markUsed(code: string, usedBy: number, usedAt: Date): Promise<InviteCode> {
+  async redeem(
+    code: string,
+    usedBy: number,
+    usedAt: Date,
+  ): Promise<InviteCode | null> {
     const existing = this.store.get(code);
-    if (!existing) throw new InvalidInviteCodeError(code);
+    if (existing?.usedBy !== null || existing.usedAt !== null) {
+      return null;
+    }
     const updated: InviteCode = { ...existing, usedBy, usedAt };
     this.store.set(code, updated);
     return updated;
