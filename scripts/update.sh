@@ -1,10 +1,10 @@
 #!/bin/bash
 # OTA update — fetches release tarball from GitHub Releases (with git fetch fallback),
-# snapshots current state to data/rollbacks/, installs production deps without building,
-# migrates, pm2-restarts, then runs a post-restart health check. On failure
-# restores from rollback snapshot, reinstalls, restarts again, and lets the
-# worker surface the outcome via the `update_status` flag in system_meta
-# on next boot.
+# snapshots current state to data/rollbacks/, uses prebuilt dist/ from release
+# tarballs but rebuilds dist/ on the git fallback path, migrates, pm2-restarts,
+# then runs a post-restart health check. On failure restores from rollback
+# snapshot, reinstalls, restarts again, and lets the worker surface the outcome
+# via the `update_status` flag in system_meta on next boot.
 #
 # Spec 13 (/update) + spec 24 (OTA).
 set -euo pipefail
@@ -97,7 +97,11 @@ build_dist() {
 
 rollback_to_snapshot() {
   local identifier="$1"
+  local git_ref="${2:-}"
   echo "Rolling back to $identifier..." >&2
+  if [[ -n "$git_ref" && -d "$INSTALL_DIR/.git" ]] && git rev-parse "$git_ref" >/dev/null 2>&1; then
+    git reset --hard "$git_ref" || true
+  fi
   if [[ -f "$identifier" ]]; then
     tar -xzf "$identifier" -C "$INSTALL_DIR" || true
   elif [[ -d "$INSTALL_DIR/.git" ]] && git rev-parse "$identifier" >/dev/null 2>&1; then
@@ -197,7 +201,7 @@ write_meta "update_rollback_snapshot" "$ROLLBACK_SNAPSHOT"
 if [[ "$UPDATED_VIA" == "git" ]]; then
   if ! build_dist; then
     echo "build failed, rolling back" >&2
-    rollback_to_snapshot "$ROLLBACK_SNAPSHOT"
+    rollback_to_snapshot "$ROLLBACK_SNAPSHOT" "${ROLLBACK_TAG:-$CURRENT_COMMIT}"
     exit 1
   fi
 else
@@ -209,7 +213,7 @@ else
 fi
 if ! corepack yarn db:migrate; then
   echo "migrations failed, rolling back" >&2
-  rollback_to_snapshot "$ROLLBACK_SNAPSHOT"
+  rollback_to_snapshot "$ROLLBACK_SNAPSHOT" "${ROLLBACK_TAG:-$CURRENT_COMMIT}"
   exit 1
 fi
 
@@ -223,7 +227,7 @@ STATUS="$(APP_NAME="$APP_NAME" pm2 jlist 2>/dev/null | node -e "let s='';process
 
 if [[ "$STATUS" != "online" ]]; then
   echo "Health check failed (pm2 status=$STATUS), rolling back" >&2
-  rollback_to_snapshot "$ROLLBACK_SNAPSHOT"
+  rollback_to_snapshot "$ROLLBACK_SNAPSHOT" "${ROLLBACK_TAG:-$CURRENT_COMMIT}"
   exit 1
 fi
 

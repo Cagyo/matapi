@@ -3,7 +3,7 @@
 # Triggered by the /system_update bot command after admin confirmation.
 #
 # Sequence: snapshot current state -> apt upgrade (curated set) ->
-# rclone selfupdate -> node minor bump (same major only) -> health check.
+# rclone selfupdate -> print manual Node update instructions -> health check.
 # On health-check failure, notify the admin via a direct curl to the
 # Telegram API (the worker may be down) and exit non-zero.
 set -euo pipefail
