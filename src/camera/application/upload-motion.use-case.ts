@@ -57,12 +57,12 @@ export class UploadMotionUseCase {
       if (!event.videoPath) continue;
       await this.writer.markUploaded(event.id, this.remotePathFor(event.videoPath));
     }
-    this.health.recordSuccess(now);
+    await this.health.recordSuccess(now);
     this.logger.log(`Uploaded ${eligible.length} motion file(s) to Drive`);
   }
 
   private async handleFailure(err: Error): Promise<void> {
-    this.health.recordFailure(err.message);
+    await this.health.recordFailure(err.message);
     const { consecutiveFailures } = this.health.snapshot();
     this.logger.warn(
       `Drive upload failed (${consecutiveFailures} in a row): ${err.message}`,

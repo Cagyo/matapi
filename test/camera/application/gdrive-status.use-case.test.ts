@@ -37,7 +37,7 @@ describe('GdriveStatusUseCase', () => {
     repo.seedEvents([pendingEvent(1), pendingEvent(2)]);
     const health = new InMemoryGdriveSyncHealth();
     const at = new Date('2026-04-08T15:30:00Z');
-    health.recordSuccess(at);
+    await health.recordSuccess(at);
 
     const result = await new GdriveStatusUseCase(drive, repo, health).execute();
 
@@ -50,8 +50,8 @@ describe('GdriveStatusUseCase', () => {
 
   it('reports consecutive failures and last error from the health record', async () => {
     const health = new InMemoryGdriveSyncHealth();
-    health.recordFailure('auth token expired');
-    health.recordFailure('auth token expired');
+    await health.recordFailure('auth token expired');
+    await health.recordFailure('auth token expired');
 
     const result = await new GdriveStatusUseCase(
       drive,

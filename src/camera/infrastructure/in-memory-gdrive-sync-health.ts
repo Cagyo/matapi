@@ -23,13 +23,13 @@ export class InMemoryGdriveSyncHealth implements GdriveSyncHealthPort {
     };
   }
 
-  recordSuccess(at: Date): void {
+  async recordSuccess(at: Date): Promise<void> {
     this.consecutiveFailures = 0;
     this.lastError = null;
     this.lastSuccessAt = at;
   }
 
-  recordFailure(error: string): void {
+  async recordFailure(error: string): Promise<void> {
     this.consecutiveFailures += 1;
     this.lastError = error;
   }

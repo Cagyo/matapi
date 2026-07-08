@@ -46,6 +46,7 @@ import { FsLocalStorageAdapter } from './infrastructure/fs-local-storage.adapter
 import { FsMediaFileAdapter } from './infrastructure/fs-media-file.adapter';
 import { InMemoryGdriveSyncHealth } from './infrastructure/in-memory-gdrive-sync-health';
 import { InMemoryMediaRepository } from './infrastructure/in-memory-media.repository';
+import { MetaGdriveSyncHealth } from './infrastructure/meta-gdrive-sync-health';
 import { MotionDaemonAdapter } from './infrastructure/motion-daemon.adapter';
 import { RcloneDriveAuthAdapter } from './infrastructure/rclone-drive-auth.adapter';
 import { RcloneDriveStatusAdapter } from './infrastructure/rclone-drive-status.adapter';
@@ -142,7 +143,10 @@ const mode = resolveCameraMode();
     },
     AdminAlertService,
     { provide: ADMIN_ALERT, useExisting: AdminAlertService },
-    { provide: GDRIVE_SYNC_HEALTH, useClass: InMemoryGdriveSyncHealth },
+    {
+      provide: GDRIVE_SYNC_HEALTH,
+      useClass: mode === 'stub' ? InMemoryGdriveSyncHealth : MetaGdriveSyncHealth,
+    },
     GetSnapshotUseCase,
     ListMotionEventsUseCase,
     GetMotionVideoUseCase,

@@ -17,6 +17,6 @@ export interface GdriveSyncHealthSnapshot {
  */
 export interface GdriveSyncHealthPort {
   snapshot(): GdriveSyncHealthSnapshot;
-  recordSuccess(at: Date): void;
-  recordFailure(error: string): void;
+  recordSuccess(at: Date): Promise<void>;
+  recordFailure(error: string): Promise<void>;
 }
