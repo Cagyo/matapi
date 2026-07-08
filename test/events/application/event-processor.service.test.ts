@@ -161,4 +161,58 @@ describe('EventProcessorService', () => {
 
     await expect(service.waitForIdle(60)).resolves.toBeUndefined();
   });
+
+  it('caps the number of concurrently handled events', async () => {
+    const source = new TestSensorEventSource();
+    let active = 0;
+    let maxActive = 0;
+    const releases: (() => void)[] = [];
+    const notifications = {
+      process: vi.fn(() => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        return new Promise<void>((resolve) => {
+          releases.push(() => {
+            active -= 1;
+            resolve();
+          });
+        });
+      }),
+    };
+    const eventQueue = {
+      enqueueSensorEvent: vi.fn(async (e: SensorEvent) => ({
+        id: Math.random(),
+        sensorId: e.sensorId,
+        type: e.type,
+        payload: {},
+        createdAt: e.timestamp,
+      })),
+    };
+
+    const prev = process.env.EVENT_MAX_CONCURRENCY;
+    process.env.EVENT_MAX_CONCURRENCY = '2';
+    try {
+      const service = new EventProcessorService(
+        eventQueue as never,
+        { execute: vi.fn() } as never,
+        notifications as never,
+        source,
+      );
+      service.onModuleInit();
+      for (let i = 0; i < 5; i += 1) source.emit(makeEvent());
+      await flushAsync();
+
+      expect(maxActive).toBeLessThanOrEqual(2);
+      expect(active).toBe(2); // exactly the cap is busy; 3 wait in the queue
+
+      while (releases.length > 0) {
+        releases.shift()!();
+        await flushAsync();
+      }
+      expect(active).toBe(0);
+    } finally {
+      if (prev === undefined) delete process.env.EVENT_MAX_CONCURRENCY;
+      else process.env.EVENT_MAX_CONCURRENCY = prev;
+    }
+  });
 });

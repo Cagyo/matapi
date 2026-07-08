@@ -13,6 +13,8 @@ export class EventProcessorService implements OnModuleInit {
   private readonly logger = new Logger(EventProcessorService.name);
   private shuttingDown = false;
   private inFlight = 0;
+  private readonly pending: SensorEvent[] = [];
+  private readonly maxConcurrent = maxConcurrencyFromEnv();
 
   constructor(
     @Inject(forwardRef(() => EventQueueService))
@@ -27,15 +29,9 @@ export class EventProcessorService implements OnModuleInit {
 
   onModuleInit(): void {
     this.sensorEvents.onEvent((event) => {
-      if (this.shuttingDown) return;
-      this.inFlight += 1;
-      void this.handle(event)
-        .catch((error) => {
-          this.logger.error(`Event processing failed: ${(error as Error).message}`);
-        })
-        .finally(() => {
-          this.inFlight -= 1;
-        });
+      if (this.shuttingDown) return; // stop accepting new work (spec 23)
+      this.pending.push(event);
+      this.pump();
     });
   }
 
@@ -49,16 +45,33 @@ export class EventProcessorService implements OnModuleInit {
   }
 
   /**
-   * Resolve once no events are mid-flight, or after `timeoutMs` (spec 23 —
-   * Graceful Shutdown step 3). Bounded so shutdown never hangs.
+   * Resolve once no events are mid-flight or queued, or after `timeoutMs`
+   * (spec 23 — Graceful Shutdown step 3). Bounded so shutdown never hangs.
    */
   async waitForIdle(timeoutMs: number): Promise<void> {
     const deadline = Date.now() + timeoutMs;
-    while (this.inFlight > 0 && Date.now() < deadline) {
+    while ((this.inFlight > 0 || this.pending.length > 0) && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
-    if (this.inFlight > 0) {
-      this.logger.warn(`Shutdown timeout — ${this.inFlight} event(s) still in flight`);
+    const outstanding = this.inFlight + this.pending.length;
+    if (outstanding > 0) {
+      this.logger.warn(`Shutdown timeout — ${outstanding} event(s) still outstanding`);
+    }
+  }
+
+  /** Start handlers up to the concurrency cap; already-queued work drains even during shutdown. */
+  private pump(): void {
+    while (this.inFlight < this.maxConcurrent && this.pending.length > 0) {
+      const event = this.pending.shift()!;
+      this.inFlight += 1;
+      void this.handle(event)
+        .catch((error) => {
+          this.logger.error(`Event processing failed: ${(error as Error).message}`);
+        })
+        .finally(() => {
+          this.inFlight -= 1;
+          this.pump();
+        });
     }
   }
 
@@ -67,4 +80,9 @@ export class EventProcessorService implements OnModuleInit {
     this.logger.debug(`Queued event #${queued.id} for ${event.sensorId}`);
     await this.notifications.process(queued);
   }
+}
+
+function maxConcurrencyFromEnv(): number {
+  const parsed = Number(process.env.EVENT_MAX_CONCURRENCY);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 4;
 }
