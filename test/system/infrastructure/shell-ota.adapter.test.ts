@@ -7,11 +7,18 @@ import {
 
 interface Call { file: string; args: string[] }
 
-function fakeExec(stdoutByCmd: Record<string, string> = {}) {
+function fakeExec(
+  stdoutByCmd: Record<string, string> = {},
+  rejectByCmd: Record<string, string> = {},
+) {
   const calls: Call[] = [];
   const exec = vi.fn(async (file: string, args: string[]) => {
     calls.push({ file, args });
-    return { stdout: stdoutByCmd[args.join(' ')] ?? '', stderr: '' };
+    const key = args.join(' ');
+    if (rejectByCmd[key]) {
+      throw new Error(rejectByCmd[key]);
+    }
+    return { stdout: stdoutByCmd[key] ?? '', stderr: '' };
   });
   return { exec, calls };
 }
@@ -78,6 +85,40 @@ describe('ShellOtaAdapter.checkForUpdates', () => {
     expect(joined).toContain('remote set-head origin --auto');
     expect(joined).toContain('rev-parse --verify origin/master');
     expect(joined).not.toContain('rev-parse --verify origin/main');
+  });
+
+  it('falls back to main when origin/master is absent', async () => {
+    delete process.env.HOME_WORKER_GIT_BRANCH;
+    const { exec, calls } = fakeExec(
+      {
+        'rev-parse HEAD': 'same\n',
+        'rev-parse --verify origin/main': 'same\n',
+        'rev-parse origin/main': 'same\n',
+      },
+      {
+        'rev-parse --verify origin/master': 'fatal: ambiguous argument',
+      },
+    );
+
+    const result = await new ShellOtaAdapter(exec).checkForUpdates();
+
+    expect(result).toEqual({
+      hasUpdates: false,
+      localCommit: 'same',
+      remoteCommit: 'same',
+    });
+
+    const joined = calls.map((c) => c.args.join(' '));
+    expect(joined).toEqual([
+      'fetch origin',
+      'symbolic-ref --short refs/remotes/origin/HEAD',
+      'remote set-head origin --auto',
+      'symbolic-ref --short refs/remotes/origin/HEAD',
+      'rev-parse --verify origin/master',
+      'rev-parse --verify origin/main',
+      'rev-parse HEAD',
+      'rev-parse origin/main',
+    ]);
   });
 
   it('honours HOME_WORKER_GIT_BRANCH as an explicit pin (no detection)', async () => {
