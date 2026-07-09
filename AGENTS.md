@@ -102,3 +102,7 @@ Pair each spec doc with the relevant architecture doc above.
 ## Excluded From Context
 
 See [.claudeignore](.claudeignore). In short: `data/`, `dist/`, `node_modules/`, `migrations/meta/`, `*.db*`, `*.log`, `.env*`, lockfiles.
+
+## Advisor subagent (Claude Code only)
+<!-- codex/non-Claude agents: ignore this section — it relies on the Claude Code Task/subagent system, which you do not have. -->
+An `advisor` subagent (Fable 5, or Opus 4.8 if Fable is unavailable; read-only) is available for high-leverage calls. Consult it ONLY when the task is: an architecture decision with lasting consequences, a plan review before a large slice, debugging that has resisted 2+ fix attempts, or a risky data-model / concurrency / sync tradeoff. Do NOT use it for routine questions, lookups, or anything a grep would settle — it is the most expensive model in the fleet. Prefer resuming the same advisor (SendMessage) over spawning a fresh one, to avoid cold-start context cost.
