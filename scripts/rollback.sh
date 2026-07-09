@@ -25,7 +25,9 @@ write_meta() {
   local key="$1"
   local value="$2"
   if command -v sqlite3 >/dev/null 2>&1; then
-    sqlite3 "$DB_PATH" "INSERT INTO system_meta(key, value) VALUES('$key', '$value') ON CONFLICT(key) DO UPDATE SET value=excluded.value;"
+    local esc_key=${key//"'"/"''"}
+    local esc_value=${value//"'"/"''"}
+    sqlite3 "$DB_PATH" "INSERT INTO system_meta(key, value) VALUES('$esc_key', '$esc_value') ON CONFLICT(key) DO UPDATE SET value=excluded.value;"
   else
     KEY="$key" VAL="$value" DBP="$DB_PATH" INST="$INSTALL_DIR" node -e "const Database=require(process.env.INST+'/node_modules/better-sqlite3');const db=new Database(process.env.DBP);db.prepare('INSERT INTO system_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(process.env.KEY,process.env.VAL);db.close();"
   fi
