@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { parse } from 'date-fns';
 import { Composer, Context, InlineKeyboard, InputFile } from 'grammy';
+import { BrowseMotionEventsUseCase } from '../../camera/application/browse-motion-events.use-case';
 import { CameraStatusUseCase } from '../../camera/application/camera-status.use-case';
 import { DisableMotionUseCase } from '../../camera/application/disable-motion.use-case';
 import { EnableMotionUseCase } from '../../camera/application/enable-motion.use-case';
@@ -21,8 +22,9 @@ import { MotionStartFailedError } from '../../camera/domain/errors/motion-start-
 import { MotionStopFailedError } from '../../camera/domain/errors/motion-stop-failed.error';
 import { NoCamerasConfiguredError } from '../../camera/domain/errors/no-cameras-configured.error';
 import { NoSnapshotForEventError } from '../../camera/domain/errors/no-snapshot-for-event.error';
+import { BrowseMotionEvent } from '../../camera/domain/ports/media-repository.port';
 import { SnapshotFailedError } from '../../camera/domain/errors/snapshot-failed.error';
-import { eventDurationSec } from '../../camera/domain/motion-event.entity';
+import { eventDurationSec, MotionEvent } from '../../camera/domain/motion-event.entity';
 import { en } from '../../locales/en';
 import { RoleMiddleware } from './role.middleware';
 import { TelegramHandler } from './telegram-handler';
@@ -38,6 +40,25 @@ type Subcommand =
   | 'menu'
   | 'dashboard';
 
+const CAMERA_BROWSE_TTL_MS = 10 * 60_000;
+
+type CameraBrowsePendingInput =
+  | { kind: 'awaiting-date'; createdAtMs: number }
+  | {
+      kind: 'awaiting-range';
+      selectedDate: Date;
+      promptLabel: string;
+      dateLabel: string;
+      createdAtMs: number;
+    };
+
+interface CameraBrowseLastResults {
+  events: BrowseMotionEvent[];
+  header: string;
+  hasMore: boolean;
+  createdAtMs: number;
+}
+
 /**
  * `/camera <subcommand>` — spec 14.
  *
@@ -48,10 +69,13 @@ type Subcommand =
 @Injectable()
 export class CameraHandler implements TelegramHandler {
   private readonly logger = new Logger(CameraHandler.name);
+  private readonly pendingBrowseInputs = new Map<number, CameraBrowsePendingInput>();
+  private readonly browseLastResults = new Map<number, CameraBrowseLastResults>();
 
   constructor(
     private readonly snapshot: GetSnapshotUseCase,
     private readonly listEvents: ListMotionEventsUseCase,
+    private readonly browseEvents: BrowseMotionEventsUseCase,
     private readonly video: GetMotionVideoUseCase,
     private readonly photo: GetMotionPhotoUseCase,
     private readonly enable: EnableMotionUseCase,
@@ -126,6 +150,41 @@ export class CameraHandler implements TelegramHandler {
           await ctx.reply(en.camera.closed);
           return;
         }
+        if (data === 'browse') {
+          await this.handleBrowseMenu(ctx);
+          return;
+        }
+        if (data === 'browse:today') {
+          await this.handleBrowseRelativeDate(ctx, 'today');
+          return;
+        }
+        if (data === 'browse:yesterday') {
+          await this.handleBrowseRelativeDate(ctx, 'yesterday');
+          return;
+        }
+        if (data === 'browse:pick-date') {
+          await this.handleBrowsePickDate(ctx);
+          return;
+        }
+        if (data === 'browse:latest') {
+          await this.handleBrowseLatest(ctx);
+          return;
+        }
+        if (data === 'browse:back') {
+          await this.handleBrowseBack(ctx);
+          return;
+        }
+        if (data === 'browse:cancel') {
+          this.clearBrowseInput(ctx);
+          await ctx.reply(en.camera.browse.cancelled);
+          return;
+        }
+        if (data === 'browse:close') {
+          this.clearAllBrowseState(ctx);
+          await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => undefined);
+          await ctx.reply(en.camera.closed);
+          return;
+        }
         if (data.startsWith('video:')) {
           const idStr = data.slice('video:'.length);
           await this.handleVideo(ctx, idStr);
@@ -140,16 +199,272 @@ export class CameraHandler implements TelegramHandler {
         await this.handleError(ctx, err, `/camera callback (${data})`);
       }
     });
+
+    composer.on('message:text', this.guard.registered, async (ctx, next) => {
+      const userId = ctx.from?.id;
+      if (!userId || !this.pendingBrowseInputs.has(userId)) return next();
+      if (ctx.message?.text?.startsWith('/')) return next();
+      try {
+        await this.handleBrowseText(ctx, userId, ctx.message.text.trim());
+      } catch (err) {
+        await this.handleError(ctx, err, '/camera browse text');
+      }
+    });
   }
 
   async handleDashboard(ctx: Context): Promise<void> {
+    const userId = ctx.from?.id;
+    if (userId) this.pendingBrowseInputs.delete(userId);
+
     const kb = new InlineKeyboard()
       .text(en.camera.dashboardButtons.snapshot, 'cam:snapshot')
-      .text(en.camera.dashboardButtons.eventsToday, 'cam:events')
+      .text(en.camera.dashboardButtons.browseEvents, 'cam:browse')
       .row()
+      .text(en.camera.dashboardButtons.eventsToday, 'cam:events')
       .text(en.camera.dashboardButtons.status, 'cam:status')
+      .row()
       .text(en.camera.dashboardButtons.close, 'cam:close');
     await ctx.reply(en.camera.dashboardTitle, { reply_markup: kb });
+  }
+
+  private async handleBrowseMenu(ctx: Context): Promise<void> {
+    this.clearBrowseInput(ctx);
+    this.clearBrowseResults(ctx);
+
+    const kb = new InlineKeyboard()
+      .text(en.camera.browse.buttons.today, 'cam:browse:today')
+      .text(en.camera.browse.buttons.yesterday, 'cam:browse:yesterday')
+      .row()
+      .text(en.camera.browse.buttons.pickDate, 'cam:browse:pick-date')
+      .text(en.camera.browse.buttons.latest, 'cam:browse:latest')
+      .row()
+      .text(en.camera.browse.buttons.back, 'cam:browse:back')
+      .text(en.camera.browse.buttons.close, 'cam:browse:close');
+    await ctx.reply(en.camera.browse.menuTitle, { reply_markup: kb });
+  }
+
+  private async handleBrowsePickDate(ctx: Context): Promise<void> {
+    const userId = ctx.from?.id;
+    if (!userId) return;
+    this.pendingBrowseInputs.set(userId, {
+      kind: 'awaiting-date',
+      createdAtMs: Date.now(),
+    });
+    await ctx.reply(en.camera.browse.datePrompt, {
+      reply_markup: browseBackCancelKeyboard(),
+    });
+  }
+
+  private async handleBrowseRelativeDate(
+    ctx: Context,
+    mode: 'today' | 'yesterday',
+  ): Promise<void> {
+    const userId = ctx.from?.id;
+    if (!userId) return;
+    const selectedDate = new Date();
+    if (mode === 'yesterday') selectedDate.setDate(selectedDate.getDate() - 1);
+    const promptLabel = mode;
+    const dateLabel = formatBrowseDateLabel(selectedDate);
+
+    this.pendingBrowseInputs.set(userId, {
+      kind: 'awaiting-range',
+      selectedDate,
+      promptLabel,
+      dateLabel,
+      createdAtMs: Date.now(),
+    });
+    await ctx.reply(en.camera.browse.timeRangePrompt(promptLabel), {
+      reply_markup: browseBackCancelKeyboard(),
+    });
+  }
+
+  private async handleBrowseText(
+    ctx: Context,
+    userId: number,
+    text: string,
+  ): Promise<void> {
+    const state = this.pendingBrowseInputs.get(userId);
+    if (!state) return;
+    if (Date.now() - state.createdAtMs > CAMERA_BROWSE_TTL_MS) {
+      this.pendingBrowseInputs.delete(userId);
+      await ctx.reply(en.camera.browse.expiredInput);
+      return;
+    }
+
+    if (state.kind === 'awaiting-date') {
+      const parsedDate = parseBrowseDateInput(text);
+      if (!parsedDate.ok) {
+        await ctx.reply(en.camera.browse.invalidDate);
+        return;
+      }
+      this.pendingBrowseInputs.set(userId, {
+        kind: 'awaiting-range',
+        selectedDate: parsedDate.date,
+        promptLabel: parsedDate.dateLabel,
+        dateLabel: parsedDate.dateLabel,
+        createdAtMs: Date.now(),
+      });
+      await ctx.reply(en.camera.browse.timeRangePrompt(parsedDate.dateLabel), {
+        reply_markup: browseBackCancelKeyboard(),
+      });
+      return;
+    }
+
+    const parsedRange = parseTimeRangeInput(text);
+    if (!parsedRange.ok) {
+      await ctx.reply(
+        parsedRange.reason === 'order'
+          ? en.camera.browse.invalidTimeOrder
+          : en.camera.browse.invalidTimeRange,
+      );
+      return;
+    }
+
+    const range = buildBrowseRange(state.selectedDate, parsedRange);
+    this.pendingBrowseInputs.delete(userId);
+    const result = await this.browseEvents.between(range.start, range.end);
+    await this.replyBrowseResults(ctx, {
+      kind: 'range',
+      events: result.events,
+      hasMore: result.hasMore,
+      dateLabel: state.dateLabel,
+      rangeLabel: range.rangeLabel,
+    });
+  }
+
+  private async handleBrowseLatest(ctx: Context): Promise<void> {
+    const result = await this.browseEvents.latest();
+    await this.replyBrowseResults(ctx, {
+      kind: 'latest',
+      events: result.events,
+      hasMore: result.hasMore,
+    });
+  }
+
+  private async replyBrowseResults(
+    ctx: Context,
+    result:
+      | {
+          kind: 'latest';
+          events: BrowseMotionEvent[];
+          hasMore: boolean;
+        }
+      | {
+          kind: 'range';
+          events: BrowseMotionEvent[];
+          hasMore: boolean;
+          dateLabel: string;
+          rangeLabel: string;
+        },
+  ): Promise<void> {
+    if (result.events.length === 0) {
+      const empty =
+        result.kind === 'latest'
+          ? en.camera.browse.emptyLatest
+          : en.camera.browse.emptyRange(result.dateLabel, result.rangeLabel);
+      const userId = ctx.from?.id;
+      if (userId) {
+        this.browseLastResults.set(userId, {
+          events: [],
+          header: '',
+          hasMore: result.hasMore,
+          createdAtMs: Date.now(),
+        });
+      }
+      await ctx.reply(empty, { reply_markup: browseResultNavKeyboard() });
+      return;
+    }
+
+    const header =
+      result.kind === 'latest'
+        ? en.camera.browse.latestHeader(result.events.length)
+        : en.camera.browse.rangeHeader(
+            result.dateLabel,
+            result.rangeLabel,
+            result.events.length,
+            result.hasMore,
+          );
+    const lines = result.events.map((event) =>
+      en.camera.browse.eventLine(this.toBrowseLineView(event)),
+    );
+    const message = [header, '', ...lines].join('\n');
+    const userId = ctx.from?.id;
+    if (userId) {
+      this.browseLastResults.set(userId, {
+        events: result.events,
+        header,
+        hasMore: result.hasMore,
+        createdAtMs: Date.now(),
+      });
+    }
+    await ctx.reply(message, { reply_markup: this.browseResultsKeyboard(result.events) });
+  }
+
+  private browseResultsKeyboard(events: BrowseMotionEvent[]): InlineKeyboard {
+    const kb = new InlineKeyboard();
+    for (const event of events) {
+      kb.text(
+        en.camera.browse.eventButton(this.toBrowseButtonView(event)),
+        `cam:browse:event:${event.id}`,
+      ).row();
+    }
+    kb.text(en.camera.browse.buttons.back, 'cam:browse:back')
+      .text(en.camera.browse.buttons.close, 'cam:browse:close');
+    return kb;
+  }
+
+  private toBrowseLineView(event: BrowseMotionEvent) {
+    return {
+      id: event.id,
+      startedAt: event.startedAt,
+      camera: cameraName(event),
+      duration: durationLabel(event),
+      media: mediaLabel(event),
+    };
+  }
+
+  private toBrowseButtonView(event: BrowseMotionEvent) {
+    return {
+      id: event.id,
+      startedAt: event.startedAt,
+      camera: cameraName(event),
+      duration: durationLabel(event),
+    };
+  }
+
+  private async handleBrowseBack(ctx: Context): Promise<void> {
+    const userId = ctx.from?.id;
+    const hadPending = userId ? this.pendingBrowseInputs.has(userId) : false;
+    const hadResults = userId ? this.browseLastResults.has(userId) : false;
+
+    if (userId) {
+      this.pendingBrowseInputs.delete(userId);
+      this.browseLastResults.delete(userId);
+    }
+
+    if (hadPending || hadResults) {
+      await this.handleBrowseMenu(ctx);
+      return;
+    }
+
+    await this.handleDashboard(ctx);
+  }
+
+  private clearBrowseInput(ctx: Context): void {
+    const userId = ctx.from?.id;
+    if (!userId) return;
+    this.pendingBrowseInputs.delete(userId);
+  }
+
+  private clearBrowseResults(ctx: Context): void {
+    const userId = ctx.from?.id;
+    if (!userId) return;
+    this.browseLastResults.delete(userId);
+  }
+
+  private clearAllBrowseState(ctx: Context): void {
+    this.clearBrowseInput(ctx);
+    this.clearBrowseResults(ctx);
   }
 
   private async handleSnapshot(ctx: Context, name?: string): Promise<void> {
@@ -327,6 +642,38 @@ function caption(delivery: Extract<VideoDelivery, { kind: 'local' }>, id: number
     delivery.event.startedAt,
     delivery.event.cameraId ?? '—',
   );
+}
+
+function browseBackCancelKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text(en.camera.browse.buttons.back, 'cam:browse:back')
+    .text(en.camera.browse.buttons.cancel, 'cam:browse:cancel');
+}
+
+function browseResultNavKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text(en.camera.browse.buttons.back, 'cam:browse:back')
+    .text(en.camera.browse.buttons.close, 'cam:browse:close');
+}
+
+function cameraName(event: BrowseMotionEvent): string {
+  return event.cameraName ?? event.cameraId ?? en.camera.browse.cameraFallback;
+}
+
+function durationLabel(event: MotionEvent): string {
+  return en.camera.browse.duration(
+    event.startedAt,
+    event.endedAt,
+    eventDurationSec(event),
+  );
+}
+
+function mediaLabel(event: MotionEvent): string {
+  return en.camera.browse.media({
+    hasLocalVideo: !!event.videoPath && !event.localDeleted,
+    hasDriveVideo: !!event.gdriveFileId,
+    hasPhoto: !!event.snapshotPath && !event.localDeleted,
+  });
 }
 
 export function parseEventId(arg: string): number | null {
