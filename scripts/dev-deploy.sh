@@ -1,19 +1,39 @@
 #!/bin/bash
+
+# If running under zsh (whether sourced with '.' or executed directly),
+# switch to bash since this script uses bash syntax (`#!/bin/bash`).
+if [ -n "${ZSH_VERSION:-}" ]; then
+  _script_path="${(%):-%x}"
+  if [[ "${ZSH_EVAL_CONTEXT:-}" =~ :file$ ]]; then
+    echo "Notice: dev-deploy.sh was sourced in zsh; launching in bash subshell..." >&2
+  fi
+  bash "$_script_path" "$@"
+  return $? 2>/dev/null || exit $?
+fi
+
+# If sourced inside bash, re-launch as a clean subshell so traps and set -e don't affect the parent shell.
+if [ -n "${BASH_SOURCE:-}" ] && [ "${BASH_SOURCE[0]:-$0}" != "${0:-}" ]; then
+  echo "Notice: dev-deploy.sh was sourced in bash; launching in bash subshell..." >&2
+  bash "${BASH_SOURCE[0]}" "$@"
+  return $? 2>/dev/null || exit $?
+fi
+
 set -euo pipefail
 
 # Trap any exit with non-zero status to prevent terminal window from closing immediately
 REMOTE_USER="${REMOTE_USER:-pi}"
 REMOTE_HOST="${REMOTE_HOST:-matapitest.local}"
 REMOTE_PASS="${REMOTE_PASS:-raspberry}"
-SSH_OPTS="-4 -o ConnectTimeout=10 -o ControlMaster=auto -o ControlPath=/tmp/matapi-dev-deploy-ssh-%r@%h:%p -o ControlPersist=300"
+SSH_OPTS=(-4 -o ConnectTimeout=10 -o ControlMaster=auto -o ControlPath=/tmp/matapi-dev-deploy-ssh-%r@%h:%p -o ControlPersist=300)
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_script_path="${BASH_SOURCE[0]:-$0}"
+SCRIPT_DIR="$(cd "$(dirname "$_script_path")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Trap any exit with non-zero status to prevent terminal window from closing immediately
 on_exit() {
   local exit_code=$?
-  ssh $SSH_OPTS -O exit "$REMOTE_USER@$REMOTE_HOST" 2>/dev/null || true
+  ssh "${SSH_OPTS[@]}" -O exit "$REMOTE_USER@$REMOTE_HOST" 2>/dev/null || true
   if [ $exit_code -ne 0 ]; then
     echo "" >&2
     echo "❌ Error: dev-deploy.sh terminated with exit code $exit_code." >&2
@@ -58,10 +78,10 @@ done
 
 if [[ "$RESET" == "true" ]]; then
   echo "Removing target directory ~/matapi/worker on $REMOTE_HOST..."
-  sshpass -p "$REMOTE_PASS" ssh $SSH_OPTS "$REMOTE_USER@$REMOTE_HOST" "rm -rf ~/matapi/worker && mkdir -p ~/matapi"
+  sshpass -p "$REMOTE_PASS" ssh "${SSH_OPTS[@]}" "$REMOTE_USER@$REMOTE_HOST" "rm -rf ~/matapi/worker && mkdir -p ~/matapi"
 else
   echo "Ensuring target base directory ~/matapi exists on $REMOTE_HOST..."
-  sshpass -p "$REMOTE_PASS" ssh $SSH_OPTS "$REMOTE_USER@$REMOTE_HOST" "mkdir -p ~/matapi"
+  sshpass -p "$REMOTE_PASS" ssh "${SSH_OPTS[@]}" "$REMOTE_USER@$REMOTE_HOST" "mkdir -p ~/matapi"
 fi
 
 # Build TypeScript locally off the Pi before deployment
@@ -70,12 +90,12 @@ corepack yarn build
 
 # Sync worker codebase to development Raspberry Pi
 echo "Uploading files to $REMOTE_USER@$REMOTE_HOST:~/matapi..."
-sshpass -p "$REMOTE_PASS" rsync -avz --exclude 'node_modules' --exclude '.git' --exclude '.yarn' -e "sshpass -p '$REMOTE_PASS' ssh $SSH_OPTS" "$PROJECT_ROOT" "$REMOTE_USER@$REMOTE_HOST:~/matapi"
+sshpass -p "$REMOTE_PASS" rsync -avz --exclude 'node_modules' --exclude '.git' --exclude '.yarn' -e "sshpass -p '$REMOTE_PASS' ssh ${SSH_OPTS[*]}" "$PROJECT_ROOT" "$REMOTE_USER@$REMOTE_HOST:~/matapi"
 
 # Ensure scripts are executable after upload
 echo "Setting executable permissions on scripts..."
-sshpass -p "$REMOTE_PASS" ssh $SSH_OPTS "$REMOTE_USER@$REMOTE_HOST" 'chmod +x ~/matapi/worker/scripts/*.sh 2>/dev/null || true'
+sshpass -p "$REMOTE_PASS" ssh "${SSH_OPTS[@]}" "$REMOTE_USER@$REMOTE_HOST" 'chmod +x ~/matapi/worker/scripts/*.sh 2>/dev/null || true'
 
 # Run install script on remote host
 echo "Running install script on remote host..."
-sshpass -p "$REMOTE_PASS" ssh -t $SSH_OPTS "$REMOTE_USER@$REMOTE_HOST" "cd ~/matapi/worker && echo '$REMOTE_PASS' | sudo -S HOME_WORKER_REPO=\"\$(pwd)\" ./scripts/install.sh"
+sshpass -p "$REMOTE_PASS" ssh -t "${SSH_OPTS[@]}" "$REMOTE_USER@$REMOTE_HOST" "cd ~/matapi/worker && echo '$REMOTE_PASS' | sudo -S HOME_WORKER_REPO=\"\$(pwd)\" ./scripts/install.sh"

@@ -77,3 +77,13 @@ describe('en.gdrive', () => {
     expect(body).toContain('🚨 Sync unhealthy — 5 consecutive failures');
   });
 });
+
+describe('en.gdriveAuth', () => {
+  it('shows the SSH command for configuring rclone on the Pi', () => {
+    expect(en.gdriveAuth.prompt).toContain('ssh pi@<pi-host>');
+    expect(en.gdriveAuth.prompt).toContain(
+      'sudo -H -u homeworker env RCLONE_CONFIG=/home/homeworker/.config/rclone/rclone.conf rclone config',
+    );
+    expect(en.gdriveAuth.prompt).toContain('rclone authorize "drive"');
+  });
+});
