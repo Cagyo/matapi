@@ -45,6 +45,106 @@ describe('en.camera', () => {
     expect(en.camera.eventsFooter(1)).toContain('1 event.');
     expect(en.camera.eventsFooter(3)).toContain('3 events.');
   });
+
+  it('renders Browse Events dashboard and menu copy', () => {
+    expect(en.camera.dashboardTitle).toBe('📹 Camera Dashboard\nSelect an action:');
+    expect(en.camera.dashboardButtons.browseEvents).toBe('📹 Browse Events');
+    expect(en.camera.browse.menuTitle).toContain('📹 Browse Motion Events');
+    expect(en.camera.browse.menuTitle).toContain(
+      'Pick date will ask for a time range',
+    );
+  });
+
+  it('renders Browse Events prompts and validation messages', () => {
+    expect(en.camera.browse.datePrompt).toContain('Format: DD.MM.YYYY');
+    expect(en.camera.browse.timeRangePrompt('today')).toContain(
+      'Send the time range for today.',
+    );
+    expect(en.camera.browse.timeRangePrompt('08.04.2026')).toContain(
+      'Send the time range for 08.04.2026.',
+    );
+    expect(en.camera.browse.invalidDate).toContain(
+      'Date needs to be DD.MM.YYYY',
+    );
+    expect(en.camera.browse.invalidTimeRange).toContain(
+      'Time range needs to be HH:MM-HH:MM',
+    );
+    expect(en.camera.browse.invalidTimeOrder).toContain(
+      'Overnight ranges are not supported yet',
+    );
+  });
+
+  it('renders Browse Events headers, event lines, and compact buttons', () => {
+    expect(
+      en.camera.browse.rangeHeader('08.04.2026', '18:00-23:00', 12, false),
+    ).toBe('📹 Events for 08.04.2026, 18:00-23:00\nNewest first. Showing 12 events.');
+    expect(
+      en.camera.browse.rangeHeader('08.04.2026', '18:00-23:00', 20, true),
+    ).toContain('Showing the newest 20 matches');
+    expect(en.camera.browse.latestHeader(20)).toBe(
+      '📹 Latest Motion Events\nNewest first. Showing 20 events.',
+    );
+    expect(
+      en.camera.browse.eventLine({
+        id: 42,
+        startedAt: new Date('2026-04-08T12:51:06'),
+        camera: 'front_door',
+        duration: '30s',
+        media: 'Video + Photo',
+      }),
+    ).toBe('#42 12:51 - front_door - 30s - Video + Photo');
+    expect(
+      en.camera.browse.eventButton({
+        id: 42,
+        startedAt: new Date('2026-04-08T12:51:06'),
+        camera: 'front_door_camera_with_long_name',
+        duration: '30s',
+      }),
+    ).toBe('12:51 | #42 | 30s | front_door_came…');
+    expect(en.camera.browse.duration(null, null, null)).toBe('unknown');
+    expect(
+      en.camera.browse.duration(new Date('2026-04-08T12:51:06'), null, null),
+    ).toBe('recording');
+    expect(
+      en.camera.browse.duration(
+        new Date('2026-04-08T12:51:06'),
+        new Date('2026-04-08T12:51:36'),
+        30,
+      ),
+    ).toBe('30s');
+    expect(
+      en.camera.browse.media({
+        hasLocalVideo: true,
+        hasDriveVideo: false,
+        hasPhoto: true,
+      }),
+    ).toBe('Video + Photo');
+    expect(
+      en.camera.browse.media({
+        hasLocalVideo: false,
+        hasDriveVideo: true,
+        hasPhoto: false,
+      }),
+    ).toBe('Video archived on Drive');
+  });
+
+  it('renders Browse Events action screen and empty states', () => {
+    expect(en.camera.browse.emptyRange('08.04.2026', '18:00-23:00')).toContain(
+      'No motion events found for 08.04.2026, 18:00-23:00.',
+    );
+    expect(en.camera.browse.emptyLatest).toBe('No motion events recorded yet.');
+    expect(
+      en.camera.browse.actionHeader({
+        id: 42,
+        startedAt: new Date('2026-04-08T12:51:06'),
+        camera: 'front_door',
+        duration: '30s',
+        media: 'Video + Photo',
+      }),
+    ).toContain('Media: Video + Photo');
+    expect(en.camera.browse.resultsExpired).toContain('expired');
+    expect(en.camera.browse.expiredInput).toContain('expired');
+  });
 });
 
 describe('en.gdrive', () => {

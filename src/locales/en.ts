@@ -19,6 +19,10 @@ function fmtTime(date: Date | null | undefined): string {
   return format(date, TIME_FMT);
 }
 
+function truncateCamera(camera: string): string {
+  return camera.length <= 16 ? camera : `${camera.slice(0, 15)}…`;
+}
+
 function fmtAgo(date: Date | null | undefined): string {
   if (!date) return '';
   const diffSec = Math.floor((Date.now() - date.getTime()) / 1000);
@@ -71,6 +75,29 @@ export interface MotionEventView {
   startedAt: Date | null;
   durationSec: number | null;
   hasSnapshot: boolean;
+}
+
+export interface BrowseEventLineView {
+  id: number;
+  startedAt: Date | null;
+  camera: string;
+  duration: string;
+  media: string;
+}
+
+export interface BrowseEventButtonView {
+  id: number;
+  startedAt: Date | null;
+  camera: string;
+  duration: string;
+}
+
+export interface BrowseEventActionView extends BrowseEventLineView {}
+
+export interface BrowseEventMediaView {
+  hasLocalVideo: boolean;
+  hasDriveVideo: boolean;
+  hasPhoto: boolean;
 }
 
 export interface CameraStatusView {
@@ -796,9 +823,10 @@ export const en = {
   camera: {
     usage:
       'Usage: /camera <snapshot|events [DD.MM.YYYY]|video <id>|photo <id>|enable|disable|status>',
-    dashboardTitle: '📹 Camera Dashboard\nSelect an action below:',
+    dashboardTitle: '📹 Camera Dashboard\nSelect an action:',
     dashboardButtons: {
       snapshot: '📸 Take Snapshot',
+      browseEvents: '📹 Browse Events',
       eventsToday: '📹 Today\'s Events',
       status: '⚙️ Status',
       close: '❌ Close',
@@ -806,6 +834,82 @@ export const en = {
     eventButtons: {
       video: (id: number) => `📹 Video #${id}`,
       photo: (id: number) => `📸 Photo #${id}`,
+    },
+    browse: {
+      menuTitle:
+        '📹 Browse Motion Events\nChoose a search mode.\n\nToday, Yesterday, and Pick date will ask for a time range next.',
+      buttons: {
+        today: 'Today',
+        yesterday: 'Yesterday',
+        pickDate: 'Pick date',
+        latest: 'Latest 20',
+        back: 'Back',
+        close: 'Close',
+        cancel: 'Cancel',
+        video: 'Video',
+        photo: 'Photo',
+        backToResults: 'Back to results',
+      },
+      datePrompt:
+        'Send the date to search.\n\nFormat: DD.MM.YYYY\nExample: 08.04.2026',
+      timeRangePrompt: (label: string) =>
+        `Send the time range for ${label}.\n\nFormat: HH:MM-HH:MM\nExample: 18:00-23:00`,
+      invalidDate: 'Date needs to be DD.MM.YYYY.\nExample: 08.04.2026',
+      invalidTimeRange:
+        'Time range needs to be HH:MM-HH:MM.\nExample: 18:00-23:00',
+      invalidTimeOrder:
+        'End time must be after start time.\nOvernight ranges are not supported yet.',
+      cancelled: 'Browse Events cancelled.',
+      expiredInput:
+        'This browse search expired. Open Browse Events to start again.',
+      resultsExpired: 'That results list expired. Start a new browse search.',
+      rangeHeader: (
+        dateLabel: string,
+        rangeLabel: string,
+        count: number,
+        hasMore: boolean,
+      ) =>
+        hasMore
+          ? `📹 Events for ${dateLabel}, ${rangeLabel}\nNewest first. Showing the newest 20 matches.\nNarrow the time range if the event is missing.`
+          : `📹 Events for ${dateLabel}, ${rangeLabel}\nNewest first. Showing ${count} event${count === 1 ? '' : 's'}.`,
+      latestHeader: (count: number) =>
+        `📹 Latest Motion Events\nNewest first. Showing ${count} event${count === 1 ? '' : 's'}.`,
+      eventLine: (event: BrowseEventLineView) =>
+        `#${event.id} ${fmtTime(event.startedAt)} - ${event.camera} - ${event.duration} - ${event.media}`,
+      eventButton: (event: BrowseEventButtonView) =>
+        `${fmtTime(event.startedAt)} | #${event.id} | ${event.duration} | ${truncateCamera(event.camera)}`,
+      cameraFallback: 'camera',
+      duration: (
+        startedAt: Date | null,
+        endedAt: Date | null,
+        durationSec: number | null,
+      ) => {
+        if (!startedAt) return 'unknown';
+        if (!endedAt) return 'recording';
+        return durationSec === null ? 'unknown' : `${durationSec}s`;
+      },
+      media: (media: BrowseEventMediaView) => {
+        if (media.hasLocalVideo && media.hasPhoto) return 'Video + Photo';
+        if (media.hasLocalVideo) return 'Video';
+        if (media.hasDriveVideo) {
+          return media.hasPhoto ? 'Video + Photo' : 'Video archived on Drive';
+        }
+        if (media.hasPhoto) return 'Photo';
+        return 'Not ready yet';
+      },
+      emptyRange: (dateLabel: string, rangeLabel: string) =>
+        `No motion events found for ${dateLabel}, ${rangeLabel}.\nTry a wider time range.`,
+      emptyLatest: 'No motion events recorded yet.',
+      actionHeader: (event: BrowseEventActionView) =>
+        [
+          `📹 Event #${event.id}`,
+          `Started: ${fmtDate(event.startedAt, true)}`,
+          `Camera: ${event.camera}`,
+          `Duration: ${event.duration}`,
+          `Media: ${event.media}`,
+        ].join('\n'),
+      videoUnavailable: (id: number) =>
+        `Video for event #${id} is not available anymore.`,
     },
     closed: '📹 Camera dashboard closed.',
     snapshotCaption: (name: string, at: Date) => `📸 ${name} | ${fmtDate(at)}`,
