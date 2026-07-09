@@ -3,6 +3,7 @@ import { EventModule } from '../events/event.module';
 import { SystemModule } from '../system/system.module';
 import { AdminAlertService } from './application/admin-alert.service';
 import { BackupUploadUseCase } from './application/backup-upload.use-case';
+import { BrowseMotionEventsUseCase } from './application/browse-motion-events.use-case';
 import { CameraStatusUseCase } from './application/camera-status.use-case';
 import { CleanupCoordinatorService } from './application/cleanup-coordinator.service';
 import { CleanupDriveUseCase } from './application/cleanup-drive.use-case';
@@ -148,6 +149,7 @@ const mode = resolveCameraMode();
       useClass: mode === 'stub' ? InMemoryGdriveSyncHealth : MetaGdriveSyncHealth,
     },
     GetSnapshotUseCase,
+    BrowseMotionEventsUseCase,
     ListMotionEventsUseCase,
     GetMotionVideoUseCase,
     GetMotionPhotoUseCase,
@@ -171,6 +173,7 @@ const mode = resolveCameraMode();
   ],
   exports: [
     GetSnapshotUseCase,
+    BrowseMotionEventsUseCase,
     ListMotionEventsUseCase,
     GetMotionVideoUseCase,
     GetMotionPhotoUseCase,

@@ -22,6 +22,16 @@ export interface MediaRepositoryPort {
   findEventById(id: number): Promise<MotionEvent | null>;
   /** Events whose `startedAt` falls within the local-time day of `day`. */
   listEventsOnDay(day: Date): Promise<MotionEvent[]>;
+  /**
+   * Newest motion events first. Callers pass `visibleLimit + 1` when they need
+   * to detect whether more rows exist without a count query.
+   */
+  listLatestEvents(limit: number): Promise<MotionEvent[]>;
+  /**
+   * Events whose `startedAt` is in `[start, end)`, newest first. Callers pass
+   * `visibleLimit + 1` when they need `hasMore`.
+   */
+  listEventsStartedBetween(start: Date, end: Date, limit: number): Promise<MotionEvent[]>;
   countEventsOnDay(day: Date): Promise<number>;
   lastEvent(): Promise<MotionEvent | null>;
   uploadStats(): Promise<UploadStats>;

@@ -37,3 +37,50 @@ describe('InMemoryMediaRepository.listAllMediaPaths', () => {
     expect(paths.sort()).toEqual(['/m/1.jpg', '/m/1.mp4', '/m/2.mp4', '/m/3.jpg']);
   });
 });
+
+describe('InMemoryMediaRepository browse queries', () => {
+  function browseEvent(id: number, startedAt: string): MotionEvent {
+    return {
+      id,
+      cameraId: 'front_door',
+      startedAt: new Date(startedAt),
+      endedAt: new Date(new Date(startedAt).getTime() + 30_000),
+      videoPath: `/m/${id}.mp4`,
+      snapshotPath: null,
+      uploadedToGdrive: false,
+      gdriveFileId: null,
+      localDeleted: false,
+    };
+  }
+
+  it('lists latest events newest first with the requested raw limit', async () => {
+    const repo = new InMemoryMediaRepository();
+    repo.seedEvents([
+      browseEvent(1, '2026-04-08T12:00:00'),
+      browseEvent(2, '2026-04-08T12:05:00'),
+      browseEvent(3, '2026-04-08T12:10:00'),
+    ]);
+
+    const rows = await repo.listLatestEvents(2);
+
+    expect(rows.map((e) => e.id)).toEqual([3, 2]);
+  });
+
+  it('lists events started inside the requested range newest first', async () => {
+    const repo = new InMemoryMediaRepository();
+    repo.seedEvents([
+      browseEvent(1, '2026-04-08T17:59:59'),
+      browseEvent(2, '2026-04-08T18:00:00'),
+      browseEvent(3, '2026-04-08T22:59:59'),
+      browseEvent(4, '2026-04-08T23:00:00'),
+    ]);
+
+    const rows = await repo.listEventsStartedBetween(
+      new Date('2026-04-08T18:00:00'),
+      new Date('2026-04-08T23:00:00'),
+      10,
+    );
+
+    expect(rows.map((e) => e.id)).toEqual([3, 2]);
+  });
+});

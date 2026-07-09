@@ -115,6 +115,32 @@ export class DrizzleMediaRepository implements MediaRepositoryPort, MediaWriterP
       .map((row) => this.toEvent(row));
   }
 
+  async listLatestEvents(limit: number): Promise<MotionEvent[]> {
+    return this.db
+      .select()
+      .from(motionEvents)
+      .where(isNotNull(motionEvents.startedAt))
+      .orderBy(desc(motionEvents.startedAt))
+      .limit(limit)
+      .all()
+      .map((row) => this.toEvent(row));
+  }
+
+  async listEventsStartedBetween(
+    start: Date,
+    end: Date,
+    limit: number,
+  ): Promise<MotionEvent[]> {
+    return this.db
+      .select()
+      .from(motionEvents)
+      .where(and(gte(motionEvents.startedAt, start), lt(motionEvents.startedAt, end)))
+      .orderBy(desc(motionEvents.startedAt))
+      .limit(limit)
+      .all()
+      .map((row) => this.toEvent(row));
+  }
+
   async countEventsOnDay(day: Date): Promise<number> {
     return (await this.listEventsOnDay(day)).length;
   }

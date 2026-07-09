@@ -74,3 +74,60 @@ describe('DrizzleMediaRepository.listAllMediaPaths', () => {
     expect(paths.sort()).toEqual(['/m/1.jpg', '/m/1.mp4', '/m/2.mp4', '/m/3.jpg']);
   });
 });
+
+describe('DrizzleMediaRepository browse queries', () => {
+  let sqlite: Database.Database;
+  let db: AppDatabase;
+  let repo: DrizzleMediaRepository;
+
+  beforeEach(() => {
+    sqlite = new Database(':memory:');
+    db = drizzle(sqlite, { schema });
+    migrate(db, { migrationsFolder: './migrations' });
+    repo = new DrizzleMediaRepository(db);
+  });
+
+  afterEach(() => {
+    sqlite.close();
+  });
+
+  function insertEvent(idOffset: number, startedAt: string): void {
+    db.insert(motionEvents)
+      .values({
+        cameraId: null,
+        startedAt: new Date(startedAt),
+        endedAt: new Date(new Date(startedAt).getTime() + 30_000),
+        videoPath: `/m/${idOffset}.mp4`,
+        snapshotPath: null,
+        uploadedToGdrive: false,
+        gdriveFileId: null,
+        localDeleted: false,
+      })
+      .run();
+  }
+
+  it('lists latest events newest first with the requested raw limit', async () => {
+    insertEvent(1, '2026-04-08T12:00:00');
+    insertEvent(2, '2026-04-08T12:05:00');
+    insertEvent(3, '2026-04-08T12:10:00');
+
+    const rows = await repo.listLatestEvents(2);
+
+    expect(rows.map((e) => e.videoPath)).toEqual(['/m/3.mp4', '/m/2.mp4']);
+  });
+
+  it('lists started-between events newest first and excludes the end boundary', async () => {
+    insertEvent(1, '2026-04-08T17:59:59');
+    insertEvent(2, '2026-04-08T18:00:00');
+    insertEvent(3, '2026-04-08T22:59:59');
+    insertEvent(4, '2026-04-08T23:00:00');
+
+    const rows = await repo.listEventsStartedBetween(
+      new Date('2026-04-08T18:00:00'),
+      new Date('2026-04-08T23:00:00'),
+      10,
+    );
+
+    expect(rows.map((e) => e.videoPath)).toEqual(['/m/3.mp4', '/m/2.mp4']);
+  });
+});

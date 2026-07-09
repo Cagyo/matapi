@@ -92,6 +92,24 @@ export class InMemoryMediaRepository implements MediaRepositoryPort, MediaWriter
       .sort((a, b) => (a.startedAt!.getTime() - b.startedAt!.getTime()));
   }
 
+  async listLatestEvents(limit: number): Promise<MotionEvent[]> {
+    return [...this.events]
+      .filter((e) => e.startedAt !== null)
+      .sort((a, b) => b.startedAt!.getTime() - a.startedAt!.getTime())
+      .slice(0, limit);
+  }
+
+  async listEventsStartedBetween(
+    start: Date,
+    end: Date,
+    limit: number,
+  ): Promise<MotionEvent[]> {
+    return this.events
+      .filter((e) => e.startedAt && e.startedAt >= start && e.startedAt < end)
+      .sort((a, b) => b.startedAt!.getTime() - a.startedAt!.getTime())
+      .slice(0, limit);
+  }
+
   async countEventsOnDay(day: Date): Promise<number> {
     return (await this.listEventsOnDay(day)).length;
   }
