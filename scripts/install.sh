@@ -23,6 +23,7 @@ main() {
   configure_serial_headless
   patch_legacy_feature_serial_calls
   install_selected_features
+  ensure_motion_video_storage_permissions
   setup_system_update_sudoers
   run_migrations
   setup_pm2
@@ -498,6 +499,23 @@ install_selected_features() {
   if [ -n "$failed" ]; then
     echo "⚠️ Failed feature installations:$failed (worker will start without these dependencies)"
   fi
+}
+
+ensure_motion_video_storage_permissions() {
+  local motion_dir="/home/pi/motion/videos"
+  if [ ! -d "$motion_dir" ]; then
+    return
+  fi
+
+  echo "Ensuring Motion video storage permissions..."
+  sudo chmod 755 /home/pi
+  if id motion &>/dev/null; then
+    sudo chown -R motion:motion /home/pi/motion
+  else
+    sudo chown -R "$USER:$USER" /home/pi/motion
+  fi
+  sudo chmod 755 /home/pi/motion
+  sudo chmod -R 775 "$motion_dir"
 }
 
 run_migrations() {

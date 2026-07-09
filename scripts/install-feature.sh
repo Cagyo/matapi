@@ -11,9 +11,12 @@ case "$FEATURE" in
     # Add user to motion and video groups for shared access
     sudo usermod -aG motion,video "$USER" 2>/dev/null || true
 
-    # Create target video storage directory
+    # Create target video storage directory and make the whole path traversable
+    # by the Motion daemon. Some Pi images keep /home/pi at 700 by default.
     sudo mkdir -p /home/pi/motion/videos
-    sudo chown -R motion:motion /home/pi/motion/videos 2>/dev/null || sudo chown -R "$USER:$USER" /home/pi/motion/videos
+    sudo chmod 755 /home/pi
+    sudo chown -R motion:motion /home/pi/motion 2>/dev/null || sudo chown -R "$USER:$USER" /home/pi/motion
+    sudo chmod 755 /home/pi/motion
     sudo chmod -R 775 /home/pi/motion/videos
 
     # Ensure log directory exists and persist across tmpfs reboots via systemd-tmpfiles
@@ -22,6 +25,7 @@ case "$FEATURE" in
     if [ -d /etc/tmpfiles.d ]; then
       cat <<EOF | sudo tee /etc/tmpfiles.d/motion.conf >/dev/null
 d /var/log/motion 0755 motion motion - -
+d /home/pi/motion 0755 motion motion - -
 d /home/pi/motion/videos 0775 motion motion - -
 EOF
       sudo systemd-tmpfiles --create /etc/tmpfiles.d/motion.conf 2>/dev/null || true
