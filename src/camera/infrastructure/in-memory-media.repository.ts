@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { Camera } from '../domain/camera.entity';
 import { MotionEvent } from '../domain/motion-event.entity';
 import {
+  BrowseMotionEvent,
   MediaRepositoryPort,
   UploadStats,
 } from '../domain/ports/media-repository.port';
@@ -92,10 +93,11 @@ export class InMemoryMediaRepository implements MediaRepositoryPort, MediaWriter
       .sort((a, b) => (a.startedAt!.getTime() - b.startedAt!.getTime()));
   }
 
-  async listLatestEvents(limit: number): Promise<MotionEvent[]> {
+  async listLatestEvents(limit: number): Promise<BrowseMotionEvent[]> {
     return [...this.events]
       .filter((e) => e.startedAt !== null)
       .sort((a, b) => b.startedAt!.getTime() - a.startedAt!.getTime())
+      .map((event) => this.toBrowseEvent(event))
       .slice(0, limit);
   }
 
@@ -103,11 +105,22 @@ export class InMemoryMediaRepository implements MediaRepositoryPort, MediaWriter
     start: Date,
     end: Date,
     limit: number,
-  ): Promise<MotionEvent[]> {
+  ): Promise<BrowseMotionEvent[]> {
     return this.events
       .filter((e) => e.startedAt && e.startedAt >= start && e.startedAt < end)
       .sort((a, b) => b.startedAt!.getTime() - a.startedAt!.getTime())
+      .map((event) => this.toBrowseEvent(event))
       .slice(0, limit);
+  }
+
+  private toBrowseEvent(event: MotionEvent): BrowseMotionEvent {
+    return {
+      ...event,
+      cameraName:
+        event.cameraId === null
+          ? null
+          : this.cameras.find((camera) => camera.id === event.cameraId)?.name ?? null,
+    };
   }
 
   async countEventsOnDay(day: Date): Promise<number> {

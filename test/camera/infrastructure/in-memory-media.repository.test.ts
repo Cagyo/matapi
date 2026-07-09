@@ -84,3 +84,37 @@ describe('InMemoryMediaRepository browse queries', () => {
     expect(rows.map((e) => e.id)).toEqual([3, 2]);
   });
 });
+
+describe('InMemoryMediaRepository browse camera names', () => {
+  function namedEvent(id: number, cameraId: string): MotionEvent {
+    return {
+      id,
+      cameraId,
+      startedAt: new Date('2026-04-08T12:00:00'),
+      endedAt: new Date('2026-04-08T12:00:30'),
+      videoPath: `/m/${id}.mp4`,
+      snapshotPath: null,
+      uploadedToGdrive: false,
+      gdriveFileId: null,
+      localDeleted: false,
+    };
+  }
+
+  it('attaches camera display names to in-memory browse rows', async () => {
+    const repo = new InMemoryMediaRepository();
+    repo.seedCameras([
+      {
+        id: 'front_door',
+        name: 'Front Door',
+        type: 'motion',
+        config: null,
+        enabled: true,
+      },
+    ]);
+    repo.seedEvents([namedEvent(1, 'front_door')]);
+
+    const rows = await repo.listLatestEvents(10);
+
+    expect(rows[0].cameraName).toBe('Front Door');
+  });
+});

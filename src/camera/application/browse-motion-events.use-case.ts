@@ -1,6 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { MotionEvent } from '../domain/motion-event.entity';
 import {
+  BrowseMotionEvent,
   MEDIA_REPOSITORY,
   MediaRepositoryPort,
 } from '../domain/ports/media-repository.port';
@@ -8,7 +8,7 @@ import {
 export const BROWSE_MOTION_EVENTS_LIMIT = 20;
 
 export interface BrowseMotionEventsResult {
-  events: MotionEvent[];
+  events: BrowseMotionEvent[];
   hasMore: boolean;
 }
 
@@ -35,7 +35,7 @@ export class BrowseMotionEventsUseCase {
     );
   }
 
-  private cap(events: MotionEvent[], limit: number): BrowseMotionEventsResult {
+  private cap(events: BrowseMotionEvent[], limit: number): BrowseMotionEventsResult {
     return {
       events: events.slice(0, limit),
       hasMore: events.length > limit,

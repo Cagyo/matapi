@@ -11,6 +11,11 @@ export interface UploadStats {
   lastUploadAt: Date | null;
 }
 
+export interface BrowseMotionEvent extends MotionEvent {
+  /** Display name from `cameras.name`, or `null` when the camera row is gone. */
+  cameraName: string | null;
+}
+
 /**
  * Read model over `cameras` and `motion_events` (specs 14, 15). All times
  * are JS `Date`; the adapter handles the epoch <-> Date conversion.
@@ -26,12 +31,12 @@ export interface MediaRepositoryPort {
    * Newest motion events first. Callers pass `visibleLimit + 1` when they need
    * to detect whether more rows exist without a count query.
    */
-  listLatestEvents(limit: number): Promise<MotionEvent[]>;
+  listLatestEvents(limit: number): Promise<BrowseMotionEvent[]>;
   /**
    * Events whose `startedAt` is in `[start, end)`, newest first. Callers pass
    * `visibleLimit + 1` when they need `hasMore`.
    */
-  listEventsStartedBetween(start: Date, end: Date, limit: number): Promise<MotionEvent[]>;
+  listEventsStartedBetween(start: Date, end: Date, limit: number): Promise<BrowseMotionEvent[]>;
   countEventsOnDay(day: Date): Promise<number>;
   lastEvent(): Promise<MotionEvent | null>;
   uploadStats(): Promise<UploadStats>;

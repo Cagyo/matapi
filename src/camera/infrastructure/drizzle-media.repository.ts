@@ -5,6 +5,7 @@ import { cameras, motionEvents } from '../../database/schema';
 import { Camera } from '../domain/camera.entity';
 import { MotionEvent } from '../domain/motion-event.entity';
 import {
+  BrowseMotionEvent,
   MediaRepositoryPort,
   UploadStats,
 } from '../domain/ports/media-repository.port';
@@ -115,30 +116,32 @@ export class DrizzleMediaRepository implements MediaRepositoryPort, MediaWriterP
       .map((row) => this.toEvent(row));
   }
 
-  async listLatestEvents(limit: number): Promise<MotionEvent[]> {
+  async listLatestEvents(limit: number): Promise<BrowseMotionEvent[]> {
     return this.db
-      .select()
+      .select({ event: motionEvents, cameraName: cameras.name })
       .from(motionEvents)
+      .leftJoin(cameras, eq(motionEvents.cameraId, cameras.id))
       .where(isNotNull(motionEvents.startedAt))
       .orderBy(desc(motionEvents.startedAt))
       .limit(limit)
       .all()
-      .map((row) => this.toEvent(row));
+      .map((row) => this.toBrowseEvent(row));
   }
 
   async listEventsStartedBetween(
     start: Date,
     end: Date,
     limit: number,
-  ): Promise<MotionEvent[]> {
+  ): Promise<BrowseMotionEvent[]> {
     return this.db
-      .select()
+      .select({ event: motionEvents, cameraName: cameras.name })
       .from(motionEvents)
+      .leftJoin(cameras, eq(motionEvents.cameraId, cameras.id))
       .where(and(gte(motionEvents.startedAt, start), lt(motionEvents.startedAt, end)))
       .orderBy(desc(motionEvents.startedAt))
       .limit(limit)
       .all()
-      .map((row) => this.toEvent(row));
+      .map((row) => this.toBrowseEvent(row));
   }
 
   async countEventsOnDay(day: Date): Promise<number> {
@@ -259,6 +262,16 @@ export class DrizzleMediaRepository implements MediaRepositoryPort, MediaWriterP
       uploadedToGdrive: row.uploadedToGdrive ?? false,
       gdriveFileId: row.gdriveFileId,
       localDeleted: row.localDeleted ?? false,
+    };
+  }
+
+  private toBrowseEvent(row: {
+    event: MotionEventRow;
+    cameraName: string | null;
+  }): BrowseMotionEvent {
+    return {
+      ...this.toEvent(row.event),
+      cameraName: row.cameraName,
     };
   }
 }

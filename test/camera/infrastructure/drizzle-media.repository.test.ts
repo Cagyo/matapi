@@ -131,3 +131,48 @@ describe('DrizzleMediaRepository browse queries', () => {
     expect(rows.map((e) => e.videoPath)).toEqual(['/m/3.mp4', '/m/2.mp4']);
   });
 });
+
+describe('DrizzleMediaRepository browse camera names', () => {
+  let sqlite: Database.Database;
+  let db: AppDatabase;
+  let repo: DrizzleMediaRepository;
+
+  beforeEach(() => {
+    sqlite = new Database(':memory:');
+    db = drizzle(sqlite, { schema });
+    migrate(db, { migrationsFolder: './migrations' });
+    repo = new DrizzleMediaRepository(db);
+  });
+
+  afterEach(() => {
+    sqlite.close();
+  });
+
+  it('attaches camera display names to Drizzle browse rows', async () => {
+    db.insert(schema.cameras)
+      .values({
+        id: 'front_door',
+        name: 'Front Door',
+        type: 'motion',
+        config: null,
+        enabled: true,
+      })
+      .run();
+    db.insert(motionEvents)
+      .values({
+        cameraId: 'front_door',
+        startedAt: new Date('2026-04-08T12:00:00'),
+        endedAt: new Date('2026-04-08T12:00:30'),
+        videoPath: '/m/1.mp4',
+        snapshotPath: null,
+        uploadedToGdrive: false,
+        gdriveFileId: null,
+        localDeleted: false,
+      })
+      .run();
+
+    const rows = await repo.listLatestEvents(10);
+
+    expect(rows[0].cameraName).toBe('Front Door');
+  });
+});
