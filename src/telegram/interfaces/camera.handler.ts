@@ -334,3 +334,103 @@ export function parseEventId(arg: string): number | null {
   const n = Number(arg.trim());
   return Number.isInteger(n) && n > 0 ? n : null;
 }
+
+export type BrowseDateParseResult =
+  | { ok: true; date: Date; dateLabel: string }
+  | { ok: false };
+
+export type BrowseTimeRangeParseResult =
+  | {
+      ok: true;
+      startHour: number;
+      startMinute: number;
+      endHour: number;
+      endMinute: number;
+      label: string;
+    }
+  | { ok: false; reason: 'format' | 'order' };
+
+export function parseBrowseDateInput(text: string): BrowseDateParseResult {
+  const match = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(text.trim());
+  if (!match) return { ok: false };
+
+  const day = Number(match[1]);
+  const month = Number(match[2]);
+  const year = Number(match[3]);
+  const date = new Date(year, month - 1, day);
+
+  if (
+    date.getFullYear() !== year ||
+    date.getMonth() !== month - 1 ||
+    date.getDate() !== day
+  ) {
+    return { ok: false };
+  }
+
+  return {
+    ok: true,
+    date,
+    dateLabel: `${match[1]}.${match[2]}.${match[3]}`,
+  };
+}
+
+export function parseTimeRangeInput(text: string): BrowseTimeRangeParseResult {
+  const match = /^(\d{2}):(\d{2})\s*-\s*(\d{2}):(\d{2})$/.exec(text.trim());
+  if (!match) return { ok: false, reason: 'format' };
+
+  const startHour = Number(match[1]);
+  const startMinute = Number(match[2]);
+  const endHour = Number(match[3]);
+  const endMinute = Number(match[4]);
+
+  if (
+    startHour > 23 ||
+    endHour > 23 ||
+    startMinute > 59 ||
+    endMinute > 59
+  ) {
+    return { ok: false, reason: 'format' };
+  }
+
+  const startTotal = startHour * 60 + startMinute;
+  const endTotal = endHour * 60 + endMinute;
+  if (endTotal <= startTotal) return { ok: false, reason: 'order' };
+
+  return {
+    ok: true,
+    startHour,
+    startMinute,
+    endHour,
+    endMinute,
+    label: `${match[1]}:${match[2]}-${match[3]}:${match[4]}`,
+  };
+}
+
+export function buildBrowseRange(
+  selectedDate: Date,
+  range: Extract<BrowseTimeRangeParseResult, { ok: true }>,
+): { start: Date; end: Date; rangeLabel: string } {
+  return {
+    start: new Date(
+      selectedDate.getFullYear(),
+      selectedDate.getMonth(),
+      selectedDate.getDate(),
+      range.startHour,
+      range.startMinute,
+    ),
+    end: new Date(
+      selectedDate.getFullYear(),
+      selectedDate.getMonth(),
+      selectedDate.getDate(),
+      range.endHour,
+      range.endMinute,
+    ),
+    rangeLabel: range.label,
+  };
+}
+
+export function formatBrowseDateLabel(date: Date): string {
+  const day = String(date.getDate()).padStart(2, '0');
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  return `${day}.${month}.${date.getFullYear()}`;
+}
