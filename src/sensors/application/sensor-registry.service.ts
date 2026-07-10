@@ -16,6 +16,7 @@ import {
   SENSOR_REPOSITORY,
   SensorRepositoryPort,
 } from '../domain/ports/sensor-repository.port';
+import { Sensor } from '../domain/sensor';
 import { SensorEvent } from '../domain/sensor-event';
 import { DriverUnavailableError } from '../domain/errors/driver-unavailable.error';
 
@@ -36,6 +37,7 @@ export class SensorRegistryService
 {
   private readonly logger = new Logger(SensorRegistryService.name);
   private readonly active = new Map<string, SensorDriverPort>();
+  private readonly activeConfigKeys = new Map<string, string>();
   private readonly listeners: ((event: SensorEvent) => void)[] = [];
   private reloadChain: Promise<void> = Promise.resolve();
   private shuttingDown = false;
@@ -120,6 +122,21 @@ export class SensorRegistryService
       if (!wantedIds.has(id)) {
         await this.active.get(id)?.destroy().catch(() => undefined);
         this.active.delete(id);
+        this.activeConfigKeys.delete(id);
+      }
+    }
+
+    // A driver holds a snapshot of the sensor configuration from `init`.
+    // Replace it when a config edit changes that snapshot (e.g. GPIO pin),
+    // otherwise `/config modify` would only take effect after a process restart.
+    for (const sensor of wanted) {
+      if (
+        this.active.has(sensor.id) &&
+        this.activeConfigKeys.get(sensor.id) !== driverConfigKey(sensor)
+      ) {
+        await this.active.get(sensor.id)?.destroy().catch(() => undefined);
+        this.active.delete(sensor.id);
+        this.activeConfigKeys.delete(sensor.id);
       }
     }
 
@@ -158,10 +175,12 @@ export class SensorRegistryService
         });
         driver.onEvent((event) => this.fanOut(event));
         this.active.set(sensor.id, driver);
+        this.activeConfigKeys.set(sensor.id, driverConfigKey(sensor));
       } catch (err) {
         if (err instanceof DriverUnavailableError) {
           driver.onEvent((event) => this.fanOut(event));
           this.active.set(sensor.id, driver);
+          this.activeConfigKeys.set(sensor.id, driverConfigKey(sensor));
           this.logger.warn(
             `Driver for "${sensor.name}" is offline and will recover when available`,
           );
@@ -224,4 +243,14 @@ export class SensorRegistryService
 function extractPin(rawConfig: Record<string, unknown> | null | undefined): number | null {
   const pin = rawConfig?.pin;
   return typeof pin === 'number' ? pin : null;
+}
+
+function driverConfigKey(sensor: Sensor): string {
+  return JSON.stringify([
+    sensor.name,
+    sensor.type,
+    sensor.config,
+    sensor.debounceMs,
+    sensor.severity,
+  ]);
 }

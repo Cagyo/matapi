@@ -73,6 +73,27 @@ describe('SensorRegistryService', () => {
     expect(registry.getDriver('front_door')).toBeUndefined();
   });
 
+  it('replaces an active driver when its sensor configuration changes', async () => {
+    const initial = digitalSensor({ config: { pin: 11 } });
+    const repo = new InMemorySensorRepository([initial]);
+    const firstDriver = new MockGpioAdapter();
+    const replacementDriver = new MockGpioAdapter();
+    const destroy = vi.spyOn(firstDriver, 'destroy');
+    const factory = vi
+      .fn<(type: string) => SensorDriverPort>()
+      .mockReturnValueOnce(firstDriver)
+      .mockReturnValueOnce(replacementDriver);
+    const registry = makeRegistry(repo, factory);
+
+    await registry.reload();
+    repo.setSensors([{ ...initial, config: { pin: 17 } }]);
+    await registry.reload();
+
+    expect(destroy).toHaveBeenCalledTimes(1);
+    expect(factory).toHaveBeenCalledTimes(2);
+    expect(registry.getDriver('front_door')).toBe(replacementDriver);
+  });
+
   it('skips duplicate digital sensors that share a pin', async () => {
     const repo = new InMemorySensorRepository([
       digitalSensor({ id: 'front_door', name: 'Front door', config: { pin: 17 } }),

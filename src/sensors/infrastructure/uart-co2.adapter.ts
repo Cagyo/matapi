@@ -125,7 +125,7 @@ export class SerialPortCo2Source implements Co2Source {
 
   read(): Promise<number | null> {
     const port = this.port;
-    if (!port || !port.isOpen) return Promise.resolve(null);
+    if (!port?.isOpen) return Promise.resolve(null);
     if (this.pendingResponse) return Promise.reject(new Error('UART read already in progress'));
 
     this.rxBuffer = Buffer.alloc(0);

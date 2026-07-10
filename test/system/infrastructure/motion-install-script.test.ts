@@ -12,7 +12,7 @@ import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 function motionCase(script: string): string {
-  const match = /\n  motion\)\n([\s\S]*?)\n    ;;\n  zigbee\)/.exec(script);
+  const match = /\n {2}motion\)\n([\s\S]*?)\n {4};;\n {2}zigbee\)/.exec(script);
   expect(match).not.toBeNull();
   return match?.[1] ?? '';
 }

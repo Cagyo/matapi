@@ -447,13 +447,13 @@ class FlakyCo2Source implements Co2Source {
   private nextOpen?: Deferred<void> & { started: Promise<void>; signalStarted: () => void };
   private nextRead?: Deferred<number | null> & { started: Promise<void>; signalStarted: () => void };
   private readInFlight = false;
-  private readonly readings: Array<number | null>;
+  private readonly readings: (number | null)[];
 
   openCalls = 0;
   closeCalls = 0;
   readCalls = 0;
 
-  constructor(readings: Array<number | null> = []) {
+  constructor(readings: (number | null)[] = []) {
     this.readings = [...readings];
   }
 
@@ -465,7 +465,7 @@ class FlakyCo2Source implements Co2Source {
     this.readFailures += count;
   }
 
-  queueReadings(...readings: Array<number | null>): void {
+  queueReadings(...readings: (number | null)[]): void {
     this.readings.push(...readings);
   }
 
