@@ -1,13 +1,30 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const { randomBytes } = require('node:crypto');
 const { cleanToken } = require('./token-validator');
+
+function replaceOrAppendEnvLine(envContent, key, value) {
+  const linePattern = new RegExp(`^${key}=.*$`, 'm');
+  const line = `${key}=${value}`;
+
+  if (linePattern.test(envContent)) {
+    return envContent.replace(linePattern, line);
+  }
+
+  return `${envContent.trimEnd()}\n${line}\n`;
+}
 
 /**
  * Writes .env and features.json atomically.
  * Handles edge cases: missing .env.example (Fix 3a), disk full ENOSPC (Fix 3b),
  * and CRLF line normalization (Fix 3d).
  */
-function writeConfig(installDir, token, enabledFeatures) {
+function writeConfig(
+  installDir,
+  token,
+  enabledFeatures,
+  claimAdminToken = randomBytes(24).toString('base64url')
+) {
   const examplePath = path.join(installDir, '.env.example');
 
   // Fix 3a: Check for .env.example existence
@@ -26,16 +43,16 @@ function writeConfig(installDir, token, enabledFeatures) {
   const normalizedExample = rawExample.replace(/\r\n/g, '\n');
 
   const cleanedToken = cleanToken(token);
-  // Replace TELEGRAM_BOT_TOKEN line
-  let envContent;
-  if (/^TELEGRAM_BOT_TOKEN=.*$/m.test(normalizedExample)) {
-    envContent = normalizedExample.replace(
-      /^TELEGRAM_BOT_TOKEN=.*$/m,
-      `TELEGRAM_BOT_TOKEN=${cleanedToken}`
-    );
-  } else {
-    envContent = normalizedExample.trimEnd() + `\nTELEGRAM_BOT_TOKEN=${cleanedToken}\n`;
-  }
+  const envWithBotToken = replaceOrAppendEnvLine(
+    normalizedExample,
+    'TELEGRAM_BOT_TOKEN',
+    cleanedToken
+  );
+  const envContent = replaceOrAppendEnvLine(
+    envWithBotToken,
+    'CLAIM_ADMIN_TOKEN',
+    claimAdminToken
+  );
 
   const featuresData = JSON.stringify(
     {
@@ -75,6 +92,8 @@ function writeConfig(installDir, token, enabledFeatures) {
     }
     throw new Error(`Failed to write configuration files: ${err.message}`);
   }
+
+  return { claimAdminToken };
 }
 
 module.exports = {

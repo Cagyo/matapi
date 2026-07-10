@@ -228,8 +228,9 @@ function renderStep2(token, botUsername, catalog = []) {
   return renderLayout('Select Features', content);
 }
 
-function renderDone(botUsername) {
+function renderDone(botUsername, claimAdminToken) {
   const safeUser = escapeHtml(botUsername || 'your_bot');
+  const safeClaimToken = escapeHtml(claimAdminToken);
   const content = `
     <h1>Setup Complete!</h1>
     <p class="subtitle">Configuration saved successfully.</p>
@@ -237,7 +238,7 @@ function renderDone(botUsername) {
       <b>Next Steps:</b>
       <p style="margin-top: 0.5rem; font-size: 0.875rem;">
         1. Terminal is installing feature dependencies... this may take a few minutes.<br>
-        2. Once the terminal shows "Installation complete", send <code>/claim_admin</code> to <b>@${safeUser}</b> in Telegram.
+        2. Once the terminal shows "Installation complete", send <code>/claim_admin ${safeClaimToken}</code> to <b>@${safeUser}</b> in Telegram.
       </p>
     </div>
     <p style="color: var(--text-muted); font-size: 0.825rem; text-align: center;">

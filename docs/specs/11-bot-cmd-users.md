@@ -12,26 +12,29 @@
 ## /claim_admin
 
 ### Access
-Anyone — but only valid until the first admin is created.
+Anyone holding the setup-generated claim token — but only valid until the first admin is created.
 
 ### Syntax
 ```
-/claim_admin
+/claim_admin <claim-token>
 ```
 
 ### Behavior
-First-boot admin bootstrap. Handler delegates to `ClaimAdminUseCase`:
+First-boot admin bootstrap. The setup wizard generates `CLAIM_ADMIN_TOKEN`, writes it only to the mode-`0600` `.env`, and shows `/claim_admin <claim-token>` once on the local completion page. The handler delegates to `ClaimAdminUseCase`:
 
 1. `UserRepositoryPort.countAdmins()` — if `> 0`, throw `AdminAlreadyClaimedError`.
-2. Insert sender into `users` with `role = 'admin'` and `createdBy = NULL`.
-3. Reply: "✅ You are now the admin of this Home Worker."
+2. `AdminClaimCredentialPort` verifies the supplied token against `CLAIM_ADMIN_TOKEN`.
+3. `UserRepositoryPort.claimFirstAdmin()` atomically inserts the sender with `role = 'admin'` and `createdBy = NULL`.
+4. Reply: "✅ You are now the admin of this Home Worker."
 
-No time window, no claim code. After success, every subsequent `/claim_admin` is rejected by the same use case.
+The token remains in `.env`, but `claimFirstAdmin()` allows only one successful claim. After success, every subsequent `/claim_admin <claim-token>` is rejected by the same use case, including concurrent attempts.
 
 ### Error Cases
 | Condition | Domain error | Reply (from `en.ts`) |
 |-----------|--------------|----------------------|
 | Admin already exists | `AdminAlreadyClaimedError` | "❌ This Home Worker already has an admin." |
+| Missing or invalid claim token | `InvalidAdminClaimTokenError` | "❌ Invalid setup claim token. Use the command shown by the setup wizard." |
+| Claim token is not configured | `AdminClaimNotConfiguredError` | "❌ Admin claiming is disabled until CLAIM_ADMIN_TOKEN is configured." |
 | DB write fails | (unmapped — generic) | "❌ Failed to claim admin role." |
 
 ---

@@ -154,10 +154,10 @@ const server = http.createServer(async (req, res) => {
       }
 
       const features = Array.isArray(body.features) ? body.features : (body.features ? [body.features] : []);
-      writeConfig(INSTALL_DIR, body.token, features);
+      const { claimAdminToken } = writeConfig(INSTALL_DIR, body.token, features);
 
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(renderDone(body.botUsername || ''));
+      res.end(renderDone(body.botUsername || '', claimAdminToken));
 
       console.log('Setup configuration written successfully. Shutting down wizard...');
       server.close();

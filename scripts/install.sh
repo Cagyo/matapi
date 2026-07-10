@@ -609,7 +609,7 @@ print_done() {
 ============================================
 
   Bot is running.
-  Send /claim_admin to your bot to become admin.
+  Use the complete command shown by the setup wizard to become admin.
 
   Logs:    sudo -u $USER pm2 logs
   Status:  sudo -u $USER pm2 status

@@ -199,7 +199,7 @@ print_done() {
   echo "============================================"
   echo ""
   echo "  Bot is running."
-  echo "  Send /claim_admin to your bot to become admin."
+  echo "  Use the complete command shown by the setup wizard to become admin."
   echo ""
   echo "  Logs: sudo -u $USER pm2 logs"
   echo "  Status: sudo -u $USER pm2 status"
@@ -262,10 +262,10 @@ Standalone lightweight HTTP server (not NestJS):
 1. Install script runs unattended (no prompts)
 2. Starts `scripts/setup-wizard/index.ts` on `:3000`
 3. Wizard: bot token → feature selection → feature config
-4. Writes `.env` + `features.json`
+4. Generates `CLAIM_ADMIN_TOKEN`, writes it only to the mode-`0600` `.env`, and writes `features.json`
 5. Triggers feature dep installation per selection
 6. Starts NestJS worker, shuts itself down
-7. Final page: "Send /claim_admin to your bot"
+7. Final page shows `/claim_admin <claim-token>` once; the installer never reads or prints the token
 
 ### Feature Installation at Install Time
 

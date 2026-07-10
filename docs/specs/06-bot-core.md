@@ -79,12 +79,14 @@ Applied as middleware on admin-only commands.
 See [11-bot-cmd-users.md → /claim_admin](11-bot-cmd-users.md#claim_admin) for the full UX and use-case shape. Summary:
 
 1. Worker starts; `UserRepositoryPort.countAdmins()` returns 0.
-2. Worker enters "awaiting admin" mode — indefinitely waits for `/claim_admin`.
-3. First user to send `/claim_admin` becomes admin (via `ClaimAdminUseCase`).
-4. Command rejected after first successful claim.
-5. Additional admins added via `/promote`.
+2. Setup has generated `CLAIM_ADMIN_TOKEN`, stored it only in the mode-`0600` `.env`, and shown `/claim_admin <claim-token>` once on the local completion page.
+3. Worker enters "awaiting admin" mode — indefinitely waits for a valid `/claim_admin <claim-token>`.
+4. First user with that token becomes admin (via `ClaimAdminUseCase`).
+5. `UserRepositoryPort.claimFirstAdmin()` is atomic, so the credential is unusable after the first successful claim, including for concurrent attempts.
+6. All later claim commands are rejected.
+7. Additional admins added via `/promote`.
 
-No time window, no claim code. Simple infinite wait.
+There is no time window. The setup token is required only until the first claim succeeds.
 
 ## Interrupted Conversations
 
