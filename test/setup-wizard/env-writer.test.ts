@@ -2,8 +2,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import * as envWriter from '../../scripts/setup-wizard/env-writer';
 
-const { writeConfig } = require('../../scripts/setup-wizard/env-writer');
+const { writeConfig } = envWriter;
 
 const installDirs: string[] = [];
 

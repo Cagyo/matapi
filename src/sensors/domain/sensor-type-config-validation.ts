@@ -100,7 +100,7 @@ function render(value: unknown): string {
 
   try {
     const serialized = JSON.stringify(value);
-    return serialized === undefined ? `[${typeof value}]` : serialized;
+    return serialized ?? `[${typeof value}]`;
   } catch {
     return '[unserializable value]';
   }

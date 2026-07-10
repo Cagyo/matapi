@@ -92,7 +92,7 @@ export interface BrowseEventButtonView {
   duration: string;
 }
 
-export interface BrowseEventActionView extends BrowseEventLineView {}
+export type BrowseEventActionView = BrowseEventLineView;
 
 export interface BrowseEventMediaView {
   hasLocalVideo: boolean;

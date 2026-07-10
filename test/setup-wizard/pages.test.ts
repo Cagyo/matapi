@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import * as pages from '../../scripts/setup-wizard/pages';
 
-const { renderDone } = require('../../scripts/setup-wizard/pages');
+const { renderDone } = pages;
 
 describe('renderDone', () => {
   it('escapes the claim token in the complete claim command', () => {
