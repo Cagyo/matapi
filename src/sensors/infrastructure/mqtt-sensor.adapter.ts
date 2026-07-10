@@ -4,6 +4,7 @@ import { SensorDriverPort } from '../domain/ports/sensor-driver.port';
 import { SensorConfig } from '../domain/sensor';
 import { SensorEvent } from '../domain/sensor-event';
 import { SensorReading } from '../domain/sensor-reading';
+import { completeWithinShutdownTimeout, safeErrorMessage } from '../domain/shutdown-safety';
 import { MqttConnectionPool } from './mqtt-connection.pool';
 import { MqttSensorConfig, parseMqttConfig } from './mqtt.config';
 import { parseMqttPayload } from './mqtt-payload.parser';
@@ -124,11 +125,14 @@ export class MqttSensorAdapter implements SensorDriverPort {
     if (this.connectHandler) client.off('connect', this.connectHandler);
 
     try {
-      await new Promise<void>((resolve) => {
+      const unsubscribed = await completeWithinShutdownTimeout(new Promise<void>((resolve) => {
         client.unsubscribe(topic, () => resolve());
-      });
+      }));
+      if (!unsubscribed) {
+        this.logger.warn(`MQTT unsubscribe timed out for sensor "${this.config?.name ?? 'unknown'}"`);
+      }
     } catch (err) {
-      this.logger.warn(`Unsubscribe error during destroy: ${(err as Error).message}`);
+      this.logger.warn(`Unsubscribe error during destroy: ${safeErrorMessage(err)}`);
     }
 
     this.client = undefined;

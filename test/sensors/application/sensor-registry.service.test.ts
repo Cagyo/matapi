@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SensorRegistryService } from '../../../src/sensors/application/sensor-registry.service';
 import { Sensor } from '../../../src/sensors/domain/sensor';
@@ -93,6 +94,25 @@ describe('SensorRegistryService', () => {
     await registry.reload();
 
     expect(registry.list()).toHaveLength(0);
+  });
+
+  it('redacts broker credentials from driver and reload errors', async () => {
+    const error = vi.spyOn(Logger.prototype, 'error');
+    const warn = vi.spyOn(Logger.prototype, 'warn');
+    const brokerUrl = 'mqtt://user:secret@broker.example:1883';
+    const repo = new InMemorySensorRepository([digitalSensor()]);
+    const driver = new MockGpioAdapter();
+    vi.spyOn(driver, 'init').mockRejectedValueOnce(new Error(`init failed for ${brokerUrl}`));
+    const registry = makeRegistry(repo, () => driver);
+
+    await registry.reload();
+    (registry as SensorRegistryService & { reloadChain: Promise<void> }).reloadChain =
+      Promise.reject(new Error(`reload failed for ${brokerUrl}`));
+    await registry.shutdown();
+
+    const messages = [...error.mock.calls, ...warn.mock.calls].map(([message]) => String(message));
+    expect(messages).not.toContainEqual(expect.stringContaining('user'));
+    expect(messages).not.toContainEqual(expect.stringContaining('secret'));
   });
 
   it('retains a startup-unavailable driver and subscribes it for a later rebind', async () => {

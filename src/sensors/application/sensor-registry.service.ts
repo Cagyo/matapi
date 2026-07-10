@@ -17,6 +17,10 @@ import {
 } from '../domain/ports/sensor-repository.port';
 import { SensorEvent } from '../domain/sensor-event';
 import { DriverUnavailableError } from '../domain/errors/driver-unavailable.error';
+import {
+  completeWithinShutdownTimeout,
+  safeErrorMessage,
+} from '../domain/shutdown-safety';
 
 /**
  * Application-tier coordinator for the live sensor pipeline.
@@ -67,14 +71,15 @@ export class SensorRegistryService
     try {
       await this.reloadChain;
     } catch (err) {
-      this.logger.warn(`Sensor reload failed before shutdown: ${(err as Error).message}`);
+      this.logger.warn(`Sensor reload failed before shutdown: ${safeErrorMessage(err)}`);
     }
 
     for (const driver of this.active.values()) {
       try {
-        await driver.destroy();
+        const destroyed = await completeWithinShutdownTimeout(driver.destroy());
+        if (!destroyed) this.logger.warn('Driver destroy timed out during shutdown');
       } catch (err) {
-        this.logger.warn(`Driver destroy failed: ${(err as Error).message}`);
+        this.logger.warn(`Driver destroy failed: ${safeErrorMessage(err)}`);
       }
     }
     this.active.clear();
@@ -142,11 +147,11 @@ export class SensorRegistryService
           driver.onEvent((event) => this.fanOut(event));
           this.active.set(sensor.id, driver);
           this.logger.warn(
-            `Driver for "${sensor.name}" is offline and will recover when available: ${err.message}`,
+            `Driver for "${sensor.name}" is offline and will recover when available: ${safeErrorMessage(err)}`,
           );
           continue;
         }
-        this.logger.error(`Failed to init "${sensor.name}": ${(err as Error).message}`);
+        this.logger.error(`Failed to init "${sensor.name}": ${safeErrorMessage(err)}`);
       }
     }
   }
@@ -167,7 +172,7 @@ export class SensorRegistryService
         result.set(id, await driver.healthCheck());
       } catch (err) {
         this.logger.warn(
-          `healthCheck failed for ${id}: ${(err as Error).message}`,
+          `healthCheck failed for ${id}: ${safeErrorMessage(err)}`,
         );
         result.set(id, false);
       }
@@ -182,7 +187,7 @@ export class SensorRegistryService
       try {
         cb(event);
       } catch (err) {
-        this.logger.error(`Listener error: ${(err as Error).message}`);
+        this.logger.error(`Listener error: ${safeErrorMessage(err)}`);
       }
     }
   }
@@ -198,7 +203,7 @@ export class SensorRegistryService
       );
     } catch (err) {
       this.logger.warn(
-        `persistState failed for ${event.sensorId}: ${(err as Error).message}`,
+        `persistState failed for ${event.sensorId}: ${safeErrorMessage(err)}`,
       );
     }
   }

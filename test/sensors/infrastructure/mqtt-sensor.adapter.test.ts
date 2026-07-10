@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'events';
 import { MqttSensorAdapter } from '../../../src/sensors/infrastructure/mqtt-sensor.adapter';
 import { MqttConnectionPool } from '../../../src/sensors/infrastructure/mqtt-connection.pool';
@@ -39,6 +39,8 @@ describe('MqttSensorAdapter', () => {
       release: vi.fn().mockResolvedValue(undefined),
     } as unknown as MqttConnectionPool;
   });
+
+  afterEach(() => vi.useRealTimers());
 
   it('initializes and subscribes to topic', async () => {
     const adapter = new MqttSensorAdapter(pool);
@@ -102,5 +104,22 @@ describe('MqttSensorAdapter', () => {
 
     expect(mockClient.unsubscribe).toHaveBeenCalledWith('zigbee2mqtt/motion', expect.any(Function));
     expect(pool.release).toHaveBeenCalledWith('mqtt://localhost:1883');
+  });
+
+  it('releases the client after an unsubscribe callback never arrives', async () => {
+    vi.useFakeTimers();
+    mockClient.unsubscribe.mockImplementation(() => undefined);
+    const adapter = new MqttSensorAdapter(pool);
+    await adapter.init(config);
+
+    let settled = false;
+    void adapter.destroy().then(() => {
+      settled = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(pool.release).toHaveBeenCalledWith('mqtt://localhost:1883');
+    expect(settled).toBe(true);
   });
 });

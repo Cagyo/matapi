@@ -30,7 +30,10 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
 }
 
 describe('SensorResourcesLifecycleAdapter', () => {
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
 
   it('finishes every driver before closing shared gateways and shares one teardown', async () => {
     const order: string[] = [];
@@ -122,5 +125,39 @@ describe('SensorResourcesLifecycleAdapter', () => {
 
     expect(warn).toHaveBeenCalledWith('Pigpio gateway close failed');
     expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('secret'));
+  });
+
+  it('continues to shared gateways when a driver destroy never settles', async () => {
+    vi.useFakeTimers();
+    const driver: SensorDriverPort = {
+      init: vi.fn().mockResolvedValue(undefined),
+      destroy: vi.fn(() => new Promise<void>(() => undefined)),
+      getState: vi.fn(),
+      onEvent: vi.fn(),
+      healthCheck: vi.fn().mockResolvedValue(true),
+    };
+    const registry = new SensorRegistryService(
+      new InMemorySensorRepository([digitalSensor()]),
+      vi.fn(() => driver),
+    );
+    await registry.reload();
+    const pigpio = { close: vi.fn().mockResolvedValue(undefined) };
+    const mqtt = { destroyAll: vi.fn().mockResolvedValue(undefined) };
+    const lifecycle = new SensorResourcesLifecycleAdapter(
+      registry,
+      pigpio as never,
+      mqtt as never,
+    );
+
+    let settled = false;
+    void lifecycle.onModuleDestroy().then(() => {
+      settled = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(pigpio.close).toHaveBeenCalledTimes(1);
+    expect(mqtt.destroyAll).toHaveBeenCalledTimes(1);
+    expect(settled).toBe(true);
   });
 });

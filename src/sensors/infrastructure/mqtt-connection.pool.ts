@@ -1,6 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
 import * as mqtt from 'mqtt';
 import { IClientOptions, MqttClient } from 'mqtt';
+import {
+  completeWithinShutdownTimeout,
+  safeBrokerUrl,
+  safeErrorMessage,
+} from '../domain/shutdown-safety';
 
 @Injectable()
 export class MqttConnectionPool {
@@ -14,11 +19,13 @@ export class MqttConnectionPool {
     const existing = this.pool.get(normalizedUrl);
     if (existing) {
       existing.refCount += 1;
-      this.logger.debug(`Reusing MQTT client for ${normalizedUrl} (refCount: ${existing.refCount})`);
+      this.logger.debug(
+        `Reusing MQTT client for ${safeBrokerUrl(normalizedUrl)} (refCount: ${existing.refCount})`,
+      );
       return existing.client;
     }
 
-    this.logger.log(`Creating new MQTT client for ${normalizedUrl}`);
+    this.logger.log(`Creating new MQTT client for ${safeBrokerUrl(normalizedUrl)}`);
     // Using connect() ensures non-blocking fire-and-forget connection behavior (EC-2)
     const client = mqtt.connect(normalizedUrl, {
       reconnectPeriod: 5000,
@@ -27,19 +34,21 @@ export class MqttConnectionPool {
     });
 
     client.on('error', (err) => {
-      this.logger.warn(`MQTT connection error (${normalizedUrl}): ${err.message}`);
+      this.logger.warn(
+        `MQTT connection error (${safeBrokerUrl(normalizedUrl)}): ${safeErrorMessage(err)}`,
+      );
     });
 
     client.on('offline', () => {
-      this.logger.debug(`MQTT client offline (${normalizedUrl})`);
+      this.logger.debug(`MQTT client offline (${safeBrokerUrl(normalizedUrl)})`);
     });
 
     client.on('reconnect', () => {
-      this.logger.debug(`MQTT client reconnecting (${normalizedUrl})`);
+      this.logger.debug(`MQTT client reconnecting (${safeBrokerUrl(normalizedUrl)})`);
     });
 
     client.on('connect', () => {
-      this.logger.log(`MQTT client connected (${normalizedUrl})`);
+      this.logger.log(`MQTT client connected (${safeBrokerUrl(normalizedUrl)})`);
     });
 
     this.pool.set(normalizedUrl, { client, refCount: 1 });
@@ -53,15 +62,22 @@ export class MqttConnectionPool {
     if (!existing) return;
 
     existing.refCount -= 1;
-    this.logger.debug(`Released MQTT client for ${normalizedUrl} (refCount: ${existing.refCount})`);
+    this.logger.debug(
+      `Released MQTT client for ${safeBrokerUrl(normalizedUrl)} (refCount: ${existing.refCount})`,
+    );
 
     if (existing.refCount <= 0) {
       this.pool.delete(normalizedUrl);
-      this.logger.log(`Closing MQTT connection for ${normalizedUrl}`);
+      this.logger.log(`Closing MQTT connection for ${safeBrokerUrl(normalizedUrl)}`);
       try {
-        await existing.client.endAsync(true);
+        const closed = await completeWithinShutdownTimeout(existing.client.endAsync(true));
+        if (!closed) {
+          this.logger.warn(`MQTT client close timed out (${safeBrokerUrl(normalizedUrl)})`);
+        }
       } catch (err) {
-        this.logger.warn(`Error closing MQTT client (${normalizedUrl}): ${(err as Error).message}`);
+        this.logger.warn(
+          `Error closing MQTT client (${safeBrokerUrl(normalizedUrl)}): ${safeErrorMessage(err)}`,
+        );
       }
     }
   }
@@ -77,11 +93,16 @@ export class MqttConnectionPool {
     const entries = Array.from(this.pool.entries());
     this.pool.clear();
     for (const [url, entry] of entries) {
-      this.logger.log(`Force closing MQTT client for ${url}`);
+      this.logger.log(`Force closing MQTT client for ${safeBrokerUrl(url)}`);
       try {
-        await entry.client.endAsync(true);
+        const closed = await completeWithinShutdownTimeout(entry.client.endAsync(true));
+        if (!closed) {
+          this.logger.warn(`MQTT client force-close timed out (${safeBrokerUrl(url)})`);
+        }
       } catch (err) {
-        this.logger.warn(`Error force closing MQTT client (${url}): ${(err as Error).message}`);
+        this.logger.warn(
+          `Error force closing MQTT client (${safeBrokerUrl(url)}): ${safeErrorMessage(err)}`,
+        );
       }
     }
   }
