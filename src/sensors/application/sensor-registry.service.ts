@@ -9,6 +9,7 @@ import {
   SENSOR_DRIVER_FACTORY,
   SensorDriverFactory,
   SensorDriverPort,
+  SensorDriverShutdownContext,
 } from '../domain/ports/sensor-driver.port';
 import { SensorHealthPort } from './ports/sensor-health.port';
 import {
@@ -17,6 +18,8 @@ import {
 } from '../domain/ports/sensor-repository.port';
 import { SensorEvent } from '../domain/sensor-event';
 import { DriverUnavailableError } from '../domain/errors/driver-unavailable.error';
+
+const DRIVER_SHUTDOWN_TIMEOUT_MS = 5_000;
 
 /**
  * Application-tier coordinator for the live sensor pipeline.
@@ -72,12 +75,30 @@ export class SensorRegistryService
 
     for (const driver of this.active.values()) {
       try {
-        await driver.destroy();
+        await this.destroyDriver(driver);
       } catch {
         this.logger.warn('Driver destroy failed during shutdown');
       }
     }
     this.active.clear();
+  }
+
+  /**
+   * The registry deliberately awaits the driver's own bounded teardown rather
+   * than racing it here. This preserves driver-before-gateway ordering while
+   * making cancellation a port-level responsibility for each adapter.
+   */
+  private async destroyDriver(driver: SensorDriverPort): Promise<void> {
+    const controller = new AbortController();
+    const deadlineAt = Date.now() + DRIVER_SHUTDOWN_TIMEOUT_MS;
+    const timeout = setTimeout(() => controller.abort(), DRIVER_SHUTDOWN_TIMEOUT_MS);
+    timeout.unref?.();
+    const context: SensorDriverShutdownContext = { signal: controller.signal, deadlineAt };
+    try {
+      await driver.destroy(context);
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   /** Public entry point — serialized so overlapping callers never interleave. */

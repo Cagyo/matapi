@@ -176,6 +176,23 @@ describe('SensorRegistryService', () => {
     expect(registry.getDriver('back_door')).toBeUndefined();
   });
 
+  it('passes each shutdown driver a cancellable deadline context', async () => {
+    const repo = new InMemorySensorRepository([digitalSensor()]);
+    const driver = new MockGpioAdapter();
+    const destroy = vi.spyOn(driver, 'destroy');
+    const registry = makeRegistry(repo, () => driver);
+
+    await registry.reload();
+    await registry.shutdown();
+
+    expect(destroy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        signal: expect.any(AbortSignal),
+        deadlineAt: expect.any(Number),
+      }),
+    );
+  });
+
   it('does not finish shutdown while an active driver is still destroying', async () => {
     vi.useFakeTimers();
     const repo = new InMemorySensorRepository([digitalSensor()]);

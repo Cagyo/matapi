@@ -5,6 +5,9 @@ import { MqttSensorAdapter } from '../../../src/sensors/infrastructure/mqtt-sens
 import { MqttConnectionPool } from '../../../src/sensors/infrastructure/mqtt-connection.pool';
 import { SensorConfig } from '../../../src/sensors/domain/sensor';
 import { SensorEvent } from '../../../src/sensors/domain/sensor-event';
+import * as mqtt from 'mqtt';
+
+vi.mock('mqtt', () => ({ connect: vi.fn() }));
 
 class MockMqttClient extends EventEmitter {
   connected = true;
@@ -122,6 +125,20 @@ describe('MqttSensorAdapter', () => {
 
     expect(pool.release).toHaveBeenCalledWith('mqtt://localhost:1883');
     expect(settled).toBe(true);
+  });
+
+  it('defers a last-reference client end until lifecycle shutdown after adapter destruction', async () => {
+    vi.mocked(mqtt.connect).mockReturnValue(mockClient as never);
+    const realPool = new MqttConnectionPool();
+    const adapter = new MqttSensorAdapter(realPool);
+    await adapter.init(config);
+
+    realPool.beginLifecycleShutdown();
+    await adapter.destroy();
+
+    expect(mockClient.endAsync).not.toHaveBeenCalled();
+    await realPool.destroyAll();
+    expect(mockClient.endAsync).toHaveBeenCalledWith(true);
   });
 
   it('does not log raw unsubscribe errors during destroy', async () => {

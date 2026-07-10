@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { SensorRegistryService } from '../application/sensor-registry.service';
 import { MqttConnectionPool } from './mqtt-connection.pool';
 import { PigpioGateway } from './pigpio.gateway';
@@ -10,8 +10,11 @@ export class SensorResourcesLifecycleAdapter implements OnModuleDestroy {
   private shutdownPromise: Promise<void> | null = null;
 
   constructor(
+    @Inject(SensorRegistryService)
     private readonly registry: SensorRegistryService,
+    @Inject(PigpioGateway)
     private readonly pigpio: PigpioGateway,
+    @Inject(MqttConnectionPool)
     private readonly mqtt: MqttConnectionPool,
   ) {}
 
@@ -22,6 +25,7 @@ export class SensorResourcesLifecycleAdapter implements OnModuleDestroy {
   }
 
   private async shutdownResources(): Promise<void> {
+    this.mqtt.beginLifecycleShutdown();
     await this.registry.shutdown();
     const results = await Promise.allSettled([
       this.pigpio.close(),

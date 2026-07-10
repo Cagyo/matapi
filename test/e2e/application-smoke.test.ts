@@ -14,6 +14,8 @@ import { AddSensorUseCase } from '../../src/sensors/application/add-sensor.use-c
 import { SensorRegistryService } from '../../src/sensors/application/sensor-registry.service';
 import { SimulateSensorUseCase } from '../../src/sensors/application/simulate-sensor.use-case';
 import { SENSOR_QUERY, SensorQueryPort } from '../../src/sensors/domain/ports/sensor-query.port';
+import { MqttConnectionPool } from '../../src/sensors/infrastructure/mqtt-connection.pool';
+import { SensorResourcesLifecycleAdapter } from '../../src/sensors/infrastructure/sensor-resources-lifecycle.adapter';
 import { GracefulShutdownService } from '../../src/system/application/graceful-shutdown.service';
 import { SYSTEM_DEPS, SystemDepsPort } from '../../src/system/domain/ports/system-deps.port';
 import { SystemUpdateUseCase } from '../../src/telegram/application/system-update.use-case';
@@ -55,6 +57,13 @@ describe('Application E2E Smoke Integration Tests (Dev/Test Mode)', () => {
     expect(app).toBeDefined();
     const db = app.get(DB);
     expect(db).toBeDefined();
+  });
+
+  it('wires MQTT resources into the sensor lifecycle owner', () => {
+    const lifecycle = app.get(SensorResourcesLifecycleAdapter);
+    const mqtt = app.get(MqttConnectionPool);
+
+    expect((lifecycle as unknown as { mqtt: MqttConnectionPool }).mqtt).toBe(mqtt);
   });
 
   it('initializes the Telegram gateway in mock mode and binds ConsoleNotifier', () => {

@@ -1,7 +1,10 @@
 import { Logger } from '@nestjs/common';
 import { Co2Level, Co2Thresholds, classifyCo2, isValidPpm } from '../domain/co2';
 import { UartConfigInvalidError } from '../domain/errors/uart-config-invalid.error';
-import { SensorDriverPort } from '../domain/ports/sensor-driver.port';
+import {
+  SensorDriverPort,
+  SensorDriverShutdownContext,
+} from '../domain/ports/sensor-driver.port';
 import {
   SensorLogEntry,
   SensorLogRepositoryPort,
@@ -9,6 +12,7 @@ import {
 import { SensorConfig } from '../domain/sensor';
 import { SensorEvent } from '../domain/sensor-event';
 import { SensorReading } from '../domain/sensor-reading';
+import { completeWithinDriverShutdownContext } from './driver-shutdown';
 
 export interface UartCo2Defaults {
   warning: number;
@@ -148,23 +152,25 @@ export abstract class BaseUartCo2Adapter implements SensorDriverPort {
     );
   }
 
-  async destroy(): Promise<void> {
+  async destroy(context?: SensorDriverShutdownContext): Promise<void> {
     this.destroyed = true;
     if (this.readTimer) clearInterval(this.readTimer);
     if (this.flushTimer) clearInterval(this.flushTimer);
     this.readTimer = null;
     this.flushTimer = null;
-    try {
-      await this.flush();
-    } catch (err) {
-      this.logger.warn(`flush on destroy failed: ${(err as Error).message}`);
-    }
-    try {
-      await this.source.close();
-    } catch (err) {
-      this.logger.warn(`source close failed: ${(err as Error).message}`);
-    }
     this.listener = undefined;
+
+    const [flushResult, closeResult] = await Promise.all([
+      completeWithinDriverShutdownContext(Promise.resolve().then(() => this.flush()), context),
+      completeWithinDriverShutdownContext(
+        Promise.resolve().then(() => this.source.close()),
+        context,
+      ),
+    ]);
+    if (flushResult === 'cancelled') this.logger.warn('UART flush timed out during destroy');
+    if (flushResult === 'failed') this.logger.warn('UART flush failed during destroy');
+    if (closeResult === 'cancelled') this.logger.warn('UART source close timed out during destroy');
+    if (closeResult === 'failed') this.logger.warn('UART source close failed during destroy');
   }
 
   getState(): SensorReading {

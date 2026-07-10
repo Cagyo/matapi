@@ -2,7 +2,10 @@ import { Injectable, Logger } from '@nestjs/common';
 import { GpioPin } from '../domain/gpio-pin.value-object';
 import { DigitalConfigInvalidError } from '../domain/errors/digital-config-invalid.error';
 import { DriverUnavailableError } from '../domain/errors/driver-unavailable.error';
-import { SensorDriverPort } from '../domain/ports/sensor-driver.port';
+import {
+  SensorDriverPort,
+  SensorDriverShutdownContext,
+} from '../domain/ports/sensor-driver.port';
 import { SensorLogRepositoryPort } from '../domain/ports/sensor-log-repository.port';
 import { DigitalStepType, isDigitalStepType, SensorConfig } from '../domain/sensor';
 import { SensorEvent } from '../domain/sensor-event';
@@ -14,6 +17,7 @@ import {
   PigpioGpio,
   PudMode,
 } from './pigpio.gateway';
+import { completeWithinDriverShutdownContext } from './driver-shutdown';
 
 interface DigitalConfig {
   pin: GpioPin;
@@ -104,23 +108,30 @@ export class DigitalGpioAdapter implements SensorDriverPort {
     }
   }
 
-  async destroy(): Promise<void> {
+  async destroy(context?: SensorDriverShutdownContext): Promise<void> {
     this.destroyed = true;
     this.gatewayUnsubscribe?.();
     this.gatewayUnsubscribe = undefined;
-    await this.bindPromise;
     this.clearActiveTimers();
     if (this.polledInterval) {
       clearInterval(this.polledInterval);
       this.polledInterval = undefined;
     }
-    try {
-      await this.gpio?.endNotify();
-    } catch (err) {
-      this.logger.warn(`endNotify failed: ${(err as Error).message}`);
-    }
     this.listener = undefined;
+    const gpio = this.gpio;
     this.gpio = undefined;
+
+    const [bindResult, notifyResult] = await Promise.all([
+      completeWithinDriverShutdownContext(this.bindPromise, context),
+      completeWithinDriverShutdownContext(
+        Promise.resolve().then(() => gpio?.endNotify()),
+        context,
+      ),
+    ]);
+    if (bindResult === 'cancelled') this.logger.warn('GPIO bind cleanup timed out during destroy');
+    if (bindResult === 'failed') this.logger.warn('GPIO bind cleanup failed during destroy');
+    if (notifyResult === 'cancelled') this.logger.warn('GPIO notify cleanup timed out during destroy');
+    if (notifyResult === 'failed') this.logger.warn('GPIO notify cleanup failed during destroy');
   }
 
   getState(): SensorReading {

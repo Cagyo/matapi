@@ -31,7 +31,18 @@ Within the sensors module, `SensorResourcesLifecycleAdapter` is the sole Nest
 teardown owner for sensor resources: it first shuts down every active sensor
 driver, then closes the shared pigpio gateway and MQTT connection pool. Driver
 or shared-close failures are isolated so they cannot prevent the remaining
-resources from being released.
+resources from being released. Before driver shutdown begins it places the MQTT
+pool in lifecycle mode, so a final adapter `release()` cannot physically end a
+client ahead of `destroyAll()`.
+
+Each driver receives a `SensorDriverShutdownContext` containing an
+`AbortSignal` and an absolute deadline. A driver must first become inert
+(unsubscribe listeners, clear timers, and disable callbacks), then use the
+context to bound its own pending transport cleanup. The registry awaits each
+driver's completion; it never advances to shared gateways through a generic
+outer timeout. This preserves the strict `drivers → shared resources` order
+while preventing compliant GPIO, UART, camera, and MQTT adapters from stalling
+teardown indefinitely.
 
 ### /restart Handling
 

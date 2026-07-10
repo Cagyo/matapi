@@ -75,6 +75,7 @@ describe('SensorResourcesLifecycleAdapter', () => {
       }),
     };
     const mqtt = {
+      beginLifecycleShutdown: vi.fn(),
       destroyAll: vi.fn(async () => {
         order.push('mqtt');
       }),
@@ -118,7 +119,10 @@ describe('SensorResourcesLifecycleAdapter', () => {
       {
         close: vi.fn().mockRejectedValue(new Error('mqtt://user:secret@broker.example')),
       } as never,
-      { destroyAll: vi.fn().mockResolvedValue(undefined) } as never,
+      {
+        beginLifecycleShutdown: vi.fn(),
+        destroyAll: vi.fn().mockResolvedValue(undefined),
+      } as never,
     );
 
     await expect(lifecycle.onModuleDestroy()).resolves.toBeUndefined();
@@ -147,7 +151,10 @@ describe('SensorResourcesLifecycleAdapter', () => {
     );
     await registry.reload();
     const pigpio = { close: vi.fn().mockResolvedValue(undefined) };
-    const mqtt = { destroyAll: vi.fn().mockResolvedValue(undefined) };
+    const mqtt = {
+      beginLifecycleShutdown: vi.fn(),
+      destroyAll: vi.fn().mockResolvedValue(undefined),
+    };
     const lifecycle = new SensorResourcesLifecycleAdapter(
       registry,
       pigpio as never,

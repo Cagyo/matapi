@@ -3,12 +3,16 @@ import { execFile } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { promisify } from 'util';
-import { SensorDriverPort } from '../domain/ports/sensor-driver.port';
+import {
+  SensorDriverPort,
+  SensorDriverShutdownContext,
+} from '../domain/ports/sensor-driver.port';
 import { SensorConfig } from '../domain/sensor';
 import { SensorEvent } from '../domain/sensor-event';
 import { SensorReading } from '../domain/sensor-reading';
 import { CameraSensorConfig, parseCameraConfig } from './camera.config';
 import { CameraBackendPort, createCameraBackend } from './camera-backends';
+import { completeWithinDriverShutdownContext } from './driver-shutdown';
 
 const execFileAsync = promisify(execFile);
 
@@ -57,16 +61,18 @@ export class CameraSensorAdapter implements SensorDriverPort {
     this.logger.log(`Camera sensor "${config.name}" initialized (type: ${this.cameraConfig.type})`);
   }
 
-  async destroy(): Promise<void> {
-    if (this.backend?.destroy) {
-      try {
-        await this.backend.destroy();
-      } catch (err) {
-        this.logger.warn(`Error destroying camera backend: ${(err as Error).message}`);
-      }
-    }
+  async destroy(context?: SensorDriverShutdownContext): Promise<void> {
+    const backend = this.backend;
     this.backend = undefined;
     this.listener = undefined;
+    if (!backend?.destroy) return;
+
+    const result = await completeWithinDriverShutdownContext(
+      Promise.resolve().then(() => backend.destroy!()),
+      context,
+    );
+    if (result === 'cancelled') this.logger.warn('Camera backend destroy timed out');
+    if (result === 'failed') this.logger.warn('Camera backend destroy failed');
   }
 
   getState(): SensorReading {

@@ -14,7 +14,7 @@ export const SENSOR_DRIVER_FACTORY = Symbol('SENSOR_DRIVER_FACTORY');
 
 export interface SensorDriverPort {
   init(config: SensorConfig): Promise<void>;
-  destroy(): Promise<void>;
+  destroy(context?: SensorDriverShutdownContext): Promise<void>;
   getState(): SensorReading;
   onEvent(cb: (event: SensorEvent) => void): void;
   healthCheck(): Promise<boolean>;
@@ -33,7 +33,7 @@ Status legend: ✅ canonical · 🚧 in transition · 📝 planned
 
 | Port | Adapters | Status | Source |
 |---|---|---|---|
-| `SensorDriverPort` (`SENSOR_DRIVER_FACTORY`) | `DigitalGpioAdapter`, `UartCo2Adapter`, `MqttSensorAdapter`, `CameraSensorAdapter`, `MockGpioAdapter` (dev), `MockUartCo2Adapter` (dev) | ✅ canonical — env-driven factory in [sensor-driver.factory.ts](../src/sensors/infrastructure/sensor-driver.factory.ts) selects mocks for `NODE_ENV=development` | [sensor-driver.port.ts](../src/sensors/domain/ports/sensor-driver.port.ts) |
+| `SensorDriverPort` (`SENSOR_DRIVER_FACTORY`) | `DigitalGpioAdapter`, `UartCo2Adapter`, `MqttSensorAdapter`, `CameraSensorAdapter`, `MockGpioAdapter` (dev), `MockUartCo2Adapter` (dev) | ✅ canonical — env-driven factory in [sensor-driver.factory.ts](../src/sensors/infrastructure/sensor-driver.factory.ts) selects mocks for `NODE_ENV=development`. Lifecycle teardown passes `SensorDriverShutdownContext` (cancellation signal + absolute deadline); adapters become inert before using it to bound transport cleanup. | [sensor-driver.port.ts](../src/sensors/domain/ports/sensor-driver.port.ts) |
 | `SensorRepositoryPort` (`SENSOR_REPOSITORY`) | `DrizzleSensorRepository`, `InMemorySensorRepository` (tests) | ✅ canonical | [sensor-repository.port.ts](../src/sensors/domain/ports/sensor-repository.port.ts) |
 | `SensorLogRepositoryPort` (`SENSOR_LOG_REPOSITORY`) | `DrizzleSensorLogRepository`, `InMemorySensorLogRepository` (tests) | ✅ canonical — drives buffered UART log flushing, digital GPIO event logging, **and** `/logs` recent-entry queries (`findRecent(sensorId, { limit, since })`). | [sensor-log-repository.port.ts](../src/sensors/domain/ports/sensor-log-repository.port.ts) |
 | `SensorQueryPort` (`SENSOR_QUERY`) read model for other contexts | `DrizzleSensorQuery`, `InMemorySensorQuery` (tests) | ✅ canonical — `listEnabled`, `findById`, and `findByName` (returns active **or** archived sensor; `/logs` uses archive fallback). | [sensor-query.port.ts](../src/sensors/domain/ports/sensor-query.port.ts) |

@@ -1,6 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { MqttClient } from 'mqtt';
-import { SensorDriverPort } from '../domain/ports/sensor-driver.port';
+import {
+  SensorDriverPort,
+  SensorDriverShutdownContext,
+} from '../domain/ports/sensor-driver.port';
 import { SensorConfig } from '../domain/sensor';
 import { SensorEvent } from '../domain/sensor-event';
 import { SensorReading } from '../domain/sensor-reading';
@@ -8,6 +11,7 @@ import { completeWithinShutdownTimeout } from './shutdown-safety';
 import { MqttConnectionPool } from './mqtt-connection.pool';
 import { MqttSensorConfig, parseMqttConfig } from './mqtt.config';
 import { parseMqttPayload } from './mqtt-payload.parser';
+import { completeWithinDriverShutdownContext } from './driver-shutdown';
 
 @Injectable()
 export class MqttSensorAdapter implements SensorDriverPort {
@@ -114,7 +118,7 @@ export class MqttSensorAdapter implements SensorDriverPort {
     this.logger.log(`MQTT sensor "${config.name}" initialized on topic "${this.mqttConfig.topic}"`);
   }
 
-  async destroy(): Promise<void> {
+  async destroy(context?: SensorDriverShutdownContext): Promise<void> {
     if (!this.client || !this.mqttConfig) return;
 
     const client = this.client;
@@ -123,21 +127,32 @@ export class MqttSensorAdapter implements SensorDriverPort {
 
     if (this.messageHandler) client.off('message', this.messageHandler);
     if (this.connectHandler) client.off('connect', this.connectHandler);
+    this.client = undefined;
+    this.listener = undefined;
+    this.messageHandler = undefined;
+    this.connectHandler = undefined;
 
     try {
-      const unsubscribed = await completeWithinShutdownTimeout(new Promise<void>((resolve) => {
+      const unsubscribe = new Promise<void>((resolve) => {
         client.unsubscribe(topic, () => resolve());
-      }));
-      if (!unsubscribed) {
+      });
+      const result = context
+        ? await completeWithinDriverShutdownContext(unsubscribe, context)
+        : (await completeWithinShutdownTimeout(unsubscribe))
+          ? 'completed'
+          : 'cancelled';
+      if (result === 'cancelled') {
         this.logger.warn(`MQTT unsubscribe timed out for sensor "${this.config?.name ?? 'unknown'}"`);
       }
     } catch {
       this.logger.warn('MQTT unsubscribe failed during destroy');
     }
 
-    this.client = undefined;
-    this.listener = undefined;
-    await this.pool.release(brokerUrl);
+    if (context) {
+      await this.pool.release(brokerUrl, context);
+    } else {
+      await this.pool.release(brokerUrl);
+    }
   }
 
   getState(): SensorReading {
