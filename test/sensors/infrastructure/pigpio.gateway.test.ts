@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { PigpioGateway, PigpioGpio } from '../../../src/sensors/infrastructure/pigpio.gateway';
+import {
+  PigpioConnectionState,
+  PigpioGateway,
+  PigpioGpio,
+} from '../../../src/sensors/infrastructure/pigpio.gateway';
 
 type PigpioEvent = 'connected' | 'disconnected' | 'error';
 type Handler = (info?: unknown) => void;
@@ -9,6 +13,7 @@ function makeClient(gpio: PigpioGpio) {
   const onHandlers = new Map<PigpioEvent, Handler[]>();
   return {
     gpio: vi.fn(() => gpio),
+    connect: vi.fn(),
     end: vi.fn(),
     once: vi.fn((event: PigpioEvent, handler: Handler) => {
       onceHandlers.set(event, [...(onceHandlers.get(event) ?? []), handler]);
@@ -16,13 +21,10 @@ function makeClient(gpio: PigpioGpio) {
     on: vi.fn((event: PigpioEvent, handler: Handler) => {
       onHandlers.set(event, [...(onHandlers.get(event) ?? []), handler]);
     }),
-    emitOnce(event: PigpioEvent, info?: unknown) {
-      const handlers = onceHandlers.get(event) ?? [];
+    emit(event: PigpioEvent, info?: unknown) {
+      const once = onceHandlers.get(event) ?? [];
       onceHandlers.set(event, []);
-      for (const handler of handlers) handler(info);
-    },
-    emitOn(event: PigpioEvent, info?: unknown) {
-      for (const handler of onHandlers.get(event) ?? []) handler(info);
+      for (const handler of [...(onHandlers.get(event) ?? []), ...once]) handler(info);
     },
   };
 }
@@ -42,11 +44,13 @@ describe('PigpioGateway', () => {
   let pigpioClient: { pigpio: ReturnType<typeof vi.fn> };
 
   beforeEach(() => {
+    vi.useFakeTimers();
     pigpioClient = { pigpio: vi.fn() };
   });
 
   afterEach(() => {
     restoreEnv();
+    vi.useRealTimers();
   });
 
   it('throws when requesting gpio before a connection is ready', () => {
@@ -63,13 +67,13 @@ describe('PigpioGateway', () => {
 
     const promise = gateway.connect();
     expect(pigpioClient.pigpio).toHaveBeenCalledWith({ host: 'pi.local', port: 9999 });
-    client.emitOnce('connected');
+    client.emit('connected');
     await promise;
 
     expect(gateway.isConnected()).toBe(true);
     expect(gateway.gpio(17)).toBe(gpio);
 
-    client.emitOn('disconnected');
+    client.emit('disconnected');
     expect(gateway.isConnected()).toBe(false);
   });
 
@@ -81,7 +85,7 @@ describe('PigpioGateway', () => {
 
     const first = gateway.connect();
     const second = gateway.connect();
-    client.emitOnce('connected');
+    client.emit('connected');
 
     expect(second).toBe(first);
     await first;
@@ -95,10 +99,30 @@ describe('PigpioGateway', () => {
     const gateway = new PigpioGateway(pigpioClient);
 
     const promise = gateway.connect();
-    client.emitOnce('error', new Error('refused'));
+    client.emit('error', new Error('refused'));
 
     await expect(promise).rejects.toThrow('refused');
     expect(gateway.isConnected()).toBe(false);
+  });
+
+  it('creates a fresh root after synchronous initial root creation failure', async () => {
+    const gpio = { read: vi.fn() } as unknown as PigpioGpio;
+    const client = makeClient(gpio);
+    pigpioClient.pigpio
+      .mockImplementationOnce(() => {
+        throw new Error('pigpiod unavailable');
+      })
+      .mockReturnValue(client);
+    const gateway = new PigpioGateway(pigpioClient);
+
+    await expect(gateway.connect()).rejects.toThrow('pigpiod unavailable');
+    expect((gateway as unknown as { client: unknown }).client).toBeNull();
+    expect(vi.getTimerCount()).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(pigpioClient.pigpio).toHaveBeenCalledTimes(2);
+    client.emit('connected');
+    expect(gateway.connectionState()).toEqual({ connected: true, generation: 1 });
   });
 
   it('ends an active client on module destroy', async () => {
@@ -108,11 +132,149 @@ describe('PigpioGateway', () => {
     const gateway = new PigpioGateway(pigpioClient);
 
     const promise = gateway.connect();
-    client.emitOnce('connected');
+    client.emit('connected');
     await promise;
     await gateway.onModuleDestroy();
 
     expect(client.end).toHaveBeenCalledTimes(1);
     expect(gateway.isConnected()).toBe(false);
+  });
+
+  it('publishes the initial connected state with generation one', async () => {
+    const gpio = { read: vi.fn() } as unknown as PigpioGpio;
+    const client = makeClient(gpio);
+    pigpioClient.pigpio.mockReturnValue(client);
+    const gateway = new PigpioGateway(pigpioClient);
+    const states: PigpioConnectionState[] = [];
+    gateway.onConnectionState((state) => states.push(state));
+
+    const promise = gateway.connect();
+    client.emit('connected');
+    await promise;
+
+    expect(gateway.connectionState()).toEqual({ connected: true, generation: 1 });
+    expect(states).toEqual([{ connected: true, generation: 1 }]);
+  });
+
+  it('reconnects the shared root once after a disconnect and advances generation', async () => {
+    const gpio = { read: vi.fn() } as unknown as PigpioGpio;
+    const client = makeClient(gpio);
+    pigpioClient.pigpio.mockReturnValue(client);
+    const gateway = new PigpioGateway(pigpioClient);
+    const states: PigpioConnectionState[] = [];
+    gateway.onConnectionState((state) => states.push(state));
+
+    const initial = gateway.connect();
+    client.emit('connected');
+    await initial;
+    client.emit('disconnected');
+
+    expect(gateway.connectionState()).toEqual({ connected: false, generation: 1 });
+    await vi.advanceTimersByTimeAsync(999);
+    expect(client.connect).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(client.connect).toHaveBeenCalledTimes(1);
+
+    client.emit('connected');
+
+    expect(gateway.connectionState()).toEqual({ connected: true, generation: 2 });
+    expect(states).toEqual([
+      { connected: true, generation: 1 },
+      { connected: false, generation: 1 },
+      { connected: true, generation: 2 },
+    ]);
+    expect((gateway as unknown as { connectPromise: Promise<void> | null }).connectPromise).toBeNull();
+    expect(pigpioClient.pigpio).toHaveBeenCalledTimes(1);
+  });
+
+  it('coalesces error and disconnected signals for one outage into one retry timer', async () => {
+    const gpio = { read: vi.fn() } as unknown as PigpioGpio;
+    const client = makeClient(gpio);
+    pigpioClient.pigpio.mockReturnValue(client);
+    const gateway = new PigpioGateway(pigpioClient);
+
+    const initial = gateway.connect();
+    client.emit('connected');
+    await initial;
+    client.emit('error', new Error('socket failure'));
+    client.emit('disconnected');
+
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(client.connect).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses bounded reconnect delays after repeated connection failures', async () => {
+    const gpio = { read: vi.fn() } as unknown as PigpioGpio;
+    const client = makeClient(gpio);
+    pigpioClient.pigpio.mockReturnValue(client);
+    const gateway = new PigpioGateway(pigpioClient);
+
+    const initial = gateway.connect();
+    client.emit('connected');
+    await initial;
+    client.emit('disconnected');
+
+    const delays = [1_000, 2_000, 5_000, 10_000, 30_000, 30_000];
+    for (const [attempt, delay] of delays.entries()) {
+      expect(vi.getTimerCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(delay - 1);
+      expect(client.connect).toHaveBeenCalledTimes(attempt);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(client.connect).toHaveBeenCalledTimes(attempt + 1);
+      client.emit('error', new Error('refused'));
+    }
+
+    await gateway.onModuleDestroy();
+  });
+
+  it('resets the reconnect delay to one second after a successful connection', async () => {
+    const gpio = { read: vi.fn() } as unknown as PigpioGpio;
+    const client = makeClient(gpio);
+    pigpioClient.pigpio.mockReturnValue(client);
+    const gateway = new PigpioGateway(pigpioClient);
+
+    const initial = gateway.connect();
+    client.emit('connected');
+    await initial;
+    client.emit('disconnected');
+    await vi.advanceTimersByTimeAsync(1_000);
+    client.emit('error', new Error('refused'));
+    expect(vi.getTimerCount()).toBe(1);
+
+    client.emit('connected');
+    expect(vi.getTimerCount()).toBe(0);
+    client.emit('disconnected');
+    await vi.advanceTimersByTimeAsync(999);
+    expect(client.connect).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(client.connect).toHaveBeenCalledTimes(2);
+  });
+
+  it('cleans up a disconnected root and suppresses callbacks after destruction', async () => {
+    const gpio = { read: vi.fn() } as unknown as PigpioGpio;
+    const client = makeClient(gpio);
+    pigpioClient.pigpio.mockReturnValue(client);
+    const gateway = new PigpioGateway(pigpioClient);
+    const states: PigpioConnectionState[] = [];
+    gateway.onConnectionState((state) => states.push(state));
+
+    const initial = gateway.connect();
+    client.emit('connected');
+    await initial;
+    client.emit('disconnected');
+    await gateway.onModuleDestroy();
+    const stateCountAtDestroy = states.length;
+
+    expect(client.end).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+    client.emit('connected');
+    client.emit('error', new Error('late error'));
+    client.emit('disconnected');
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(client.connect).not.toHaveBeenCalled();
+    expect(states).toHaveLength(stateCountAtDestroy);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

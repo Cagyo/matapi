@@ -10,6 +10,7 @@ import {
 const defaultPigpioClientLib = require('pigpio-client') as PigpioClientLib;
 
 export const PIGPIO_CLIENT = Symbol('PIGPIO_CLIENT');
+const PIGPIO_RECONNECT_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 30_000] as const;
 
 export type PudMode = 'up' | 'down' | 'none';
 
@@ -25,6 +26,7 @@ export interface PigpioGpio {
 
 interface PigpioRoot {
   gpio(pin: number): PigpioGpio;
+  connect(): void;
   end(): void;
   on(event: 'connected' | 'disconnected' | 'error', cb: (info?: unknown) => void): void;
   once(event: 'connected' | 'disconnected' | 'error', cb: (info?: unknown) => void): void;
@@ -32,6 +34,11 @@ interface PigpioRoot {
 
 interface PigpioClientLib {
   pigpio(options: { host: string; port: number }): PigpioRoot;
+}
+
+export interface PigpioConnectionState {
+  connected: boolean;
+  generation: number;
 }
 
 /**
@@ -43,7 +50,16 @@ export class PigpioGateway implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(PigpioGateway.name);
   private client: PigpioRoot | null = null;
   private connected = false;
+  private generation = 0;
   private connectPromise: Promise<void> | null = null;
+  private connectResolve: (() => void) | null = null;
+  private connectReject: ((error: Error) => void) | null = null;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectAttempt = 0;
+  private destroyed = false;
+  private readonly connectionStateListeners = new Set<
+    (state: PigpioConnectionState) => void
+  >();
 
   constructor(
     @Optional()
@@ -68,60 +84,68 @@ export class PigpioGateway implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleDestroy(): Promise<void> {
-    if (this.client && this.connected) {
+    this.destroyed = true;
+    this.clearReconnectTimer();
+    this.rejectPendingConnection(new Error('pigpio gateway destroyed'));
+
+    const client = this.client;
+    this.client = null;
+    this.connected = false;
+    this.connectionStateListeners.clear();
+
+    if (client) {
       try {
-        this.client.end();
+        client.end();
       } catch {
         /* ignore */
       }
     }
-    this.client = null;
-    this.connected = false;
-    this.connectPromise = null;
   }
 
   isConnected(): boolean {
     return this.connected;
   }
 
+  connectionState(): PigpioConnectionState {
+    return { connected: this.connected, generation: this.generation };
+  }
+
+  onConnectionState(listener: (state: PigpioConnectionState) => void): () => void {
+    if (this.destroyed) return () => undefined;
+    this.connectionStateListeners.add(listener);
+    return () => this.connectionStateListeners.delete(listener);
+  }
+
   /** Connect (idempotent). Resolves when the 'connected' event fires. */
   connect(): Promise<void> {
+    if (this.destroyed) {
+      return Promise.reject(new Error('pigpio gateway destroyed'));
+    }
     if (this.connected) return Promise.resolve();
     if (this.connectPromise) return this.connectPromise;
 
     const host = process.env.PIGPIOD_HOST || 'localhost';
     const port = Number.parseInt(process.env.PIGPIOD_PORT || '8888', 10);
 
-    this.connectPromise = new Promise<void>((resolve, reject) => {
-      try {
+    const promise = new Promise<void>((resolve, reject) => {
+      this.connectResolve = resolve;
+      this.connectReject = reject;
+    });
+    this.connectPromise = promise;
+
+    try {
+      if (this.client) {
+        this.client.connect();
+      } else {
         const c = this.pigpioClient.pigpio({ host, port });
         this.client = c;
-
-        const onError = (err?: unknown) => {
-          this.connected = false;
-          this.connectPromise = null;
-          reject(err instanceof Error ? err : new Error(String(err)));
-        };
-        c.once('error', onError);
-        c.once('connected', () => {
-          this.connected = true;
-          this.logger.log(`Connected to pigpiod at ${host}:${port}`);
-          c.on('disconnected', () => {
-            this.connected = false;
-            this.logger.warn('Disconnected from pigpiod');
-          });
-          c.on('error', (err) => {
-            this.logger.warn(`pigpiod error: ${(err as Error)?.message ?? String(err)}`);
-          });
-          resolve();
-        });
-      } catch (err) {
-        this.connectPromise = null;
-        reject(err instanceof Error ? err : new Error(String(err)));
+        this.subscribeToRoot(c, host, port);
       }
-    });
+    } catch (err) {
+      this.handleConnectionFailure(err);
+    }
 
-    return this.connectPromise;
+    return promise;
   }
 
   /** Returns a gpio handle. Caller must `await connect()` first. */
@@ -130,5 +154,87 @@ export class PigpioGateway implements OnModuleInit, OnModuleDestroy {
       throw new Error('pigpiod not connected');
     }
     return this.client.gpio(pin);
+  }
+
+  private subscribeToRoot(client: PigpioRoot, host: string, port: number): void {
+    client.on('connected', () => {
+      if (this.destroyed || this.client !== client || this.connected) return;
+
+      this.connected = true;
+      this.generation += 1;
+      this.reconnectAttempt = 0;
+      this.clearReconnectTimer();
+      this.resolvePendingConnection();
+      this.publishConnectionState();
+      this.logger.log(`Connected to pigpiod at ${host}:${port}`);
+    });
+    client.on('disconnected', () => {
+      if (this.destroyed || this.client !== client) return;
+      this.logger.warn('Disconnected from pigpiod');
+      this.handleConnectionFailure();
+    });
+    client.on('error', (err) => {
+      if (this.destroyed || this.client !== client) return;
+      this.logger.warn(`pigpiod error: ${(err as Error)?.message ?? String(err)}`);
+      this.handleConnectionFailure(err);
+    });
+  }
+
+  private handleConnectionFailure(error?: unknown): void {
+    const wasConnected = this.connected;
+    this.connected = false;
+    if (wasConnected) this.publishConnectionState();
+
+    this.rejectPendingConnection(
+      error === undefined ? new Error('pigpiod disconnected') : this.asError(error),
+    );
+    this.scheduleReconnect();
+  }
+
+  private scheduleReconnect(): void {
+    if (this.destroyed || this.connected || this.reconnectTimer) return;
+
+    const delay =
+      PIGPIO_RECONNECT_DELAYS_MS[
+        Math.min(this.reconnectAttempt, PIGPIO_RECONNECT_DELAYS_MS.length - 1)
+      ];
+    this.reconnectAttempt += 1;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.destroyed || this.connected) return;
+      void this.connect().catch(() => undefined);
+    }, delay);
+    this.reconnectTimer.unref();
+  }
+
+  private clearReconnectTimer(): void {
+    if (!this.reconnectTimer) return;
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+  }
+
+  private resolvePendingConnection(): void {
+    const resolve = this.connectResolve;
+    this.connectPromise = null;
+    this.connectResolve = null;
+    this.connectReject = null;
+    resolve?.();
+  }
+
+  private rejectPendingConnection(error: Error): void {
+    const reject = this.connectReject;
+    this.connectPromise = null;
+    this.connectResolve = null;
+    this.connectReject = null;
+    reject?.(error);
+  }
+
+  private publishConnectionState(): void {
+    const state = this.connectionState();
+    for (const listener of this.connectionStateListeners) listener(state);
+  }
+
+  private asError(error: unknown): Error {
+    return error instanceof Error ? error : new Error(String(error));
   }
 }
