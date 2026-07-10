@@ -133,6 +133,6 @@ In dev mode, a small web panel at `http://localhost:4000/dev/simulate` (see 26-d
 
 Domain failures are typed errors in `sensors/domain/errors/` ([../error-handling.md](../error-handling.md)):
 
-- pigpiod down on startup: adapter throws `DriverUnavailableError`; registry marks the affected sensors offline, application notifies admin via `NotifierPort`, bot still starts.
+- pigpiod down on startup: adapter throws `DriverUnavailableError`; this is the explicit recoverable initialization exception. The registry keeps the configured driver active, registers its event listener, and logs it offline so its gateway subscription can rebind after pigpiod later connects. The application notifies admin via `NotifierPort`, while the bot still starts. Invalid configuration and every other initialization failure remain skipped and logged.
 - Mid-runtime driver failure: adapter raises through `onEvent` error path; registry marks sensor offline, notifies admin.
 - `/status` shows offline sensors: `🚪 front_door: ⚠️ OFFLINE (driver error)` (copy in [../../src/locales/en.ts](../../src/locales/en.ts)).

@@ -65,6 +65,11 @@ To prevent loose wires or EMI from starving Node.js CPU without blinding the sys
 ### 3. Timer Lifecycle Cleanup (`destroy()`)
 To prevent memory leaks and ghost event emissions in PM2 long-running workers, `DigitalGpioAdapter` maintains a strict timer registry (`private activeTimers = new Set<NodeJS.Timeout>()`). Every asymmetric latch, cooldown, or polling timer is registered, and `destroy()` unconditionally executes `clearTimeout`/`clearInterval` across the set before disposing the adapter.
 
+### 4. Generation-Aware pigpiod Reconnect
+Reconnecting the shared pigpiod root alone cannot restore pigpiod's daemon-side `NB` monitoring request. Every new connected gateway generation therefore reacquires its pin handle, reapplies input mode, pull and glitch configuration, reads the level, and creates exactly one fresh `notify()` subscription. The restored read is processed through normal state-change logic so a contact or alarm held active during an outage is reconciled rather than silently overwritten. Callbacks from older generations are ignored.
+
+If the anti-flap breaker is active, a reconnect updates the handle used by the existing polled sampler but does not re-register `notify()` until the recovery window expires. On destruction, the adapter first unsubscribes from gateway states, waits for queued rebind work, then clears timers and releases notification resources so later gateway states are inert.
+
 ## i18n & Presentation Contract (`src/locales/en.ts`)
 
 ### 1. i18n Dictionary (3-State Rule)

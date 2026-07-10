@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { DigitalGpioAdapter } from '../../../src/sensors/infrastructure/digital-gpio.adapter';
 import {
+  PigpioConnectionState,
   PigpioGateway,
   PigpioGpio,
 } from '../../../src/sensors/infrastructure/pigpio.gateway';
@@ -29,15 +30,48 @@ function makeFakeGpio(initialLevel: 0 | 1 = 1) {
 }
 
 function makeGateway(gpio: PigpioGpio, connected = true) {
+  let state: PigpioConnectionState = { connected, generation: connected ? 1 : 0 };
+  const connectionStateListeners = new Set<(state: PigpioConnectionState) => void>();
+  const unsubscribe = vi.fn();
+  const publishConnectionState = (next: PigpioConnectionState) => {
+    state = next;
+    for (const listener of connectionStateListeners) listener(next);
+  };
   return {
-    isConnected: vi.fn().mockReturnValue(connected),
-    connect: vi.fn().mockResolvedValue(undefined),
+    isConnected: vi.fn(() => state.connected),
+    connect: vi.fn(async () => {
+      if (!state.connected) {
+        publishConnectionState({ connected: true, generation: state.generation + 1 });
+      }
+    }),
     gpio: vi.fn().mockReturnValue(gpio),
+    connectionState: vi.fn(() => state),
+    onConnectionState: vi.fn((listener: (next: PigpioConnectionState) => void) => {
+      connectionStateListeners.add(listener);
+      return () => {
+        unsubscribe();
+        connectionStateListeners.delete(listener);
+      };
+    }),
+    publishConnectionState,
+    unsubscribe,
   } as unknown as PigpioGateway & {
     isConnected: ReturnType<typeof vi.fn>;
     connect: ReturnType<typeof vi.fn>;
     gpio: ReturnType<typeof vi.fn>;
+    connectionState: ReturnType<typeof vi.fn>;
+    onConnectionState: ReturnType<typeof vi.fn>;
+    publishConnectionState: (state: PigpioConnectionState) => void;
+    unsubscribe: ReturnType<typeof vi.fn>;
   };
+}
+
+async function flushRebind(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
 }
 
 const baseConfig: SensorConfig = {
@@ -222,10 +256,108 @@ describe('DigitalGpioAdapter', () => {
     expect(gateway.connect).toHaveBeenCalledTimes(1);
   });
 
-  it('throws DriverUnavailableError when gateway connect fails', async () => {
+  it('preserves its connection subscription after an unavailable startup connection', async () => {
     gateway.isConnected.mockReturnValue(false);
     gateway.connect.mockRejectedValueOnce(new Error('refused'));
     await expect(adapter.init(baseConfig)).rejects.toThrow(DriverUnavailableError);
+
+    gateway.publishConnectionState({ connected: true, generation: 1 });
+    await flushRebind();
+
+    expect(gpio.modeSet).toHaveBeenCalledWith('input');
+    expect(gpio.notify).toHaveBeenCalledTimes(1);
+  });
+
+  it('restores a fresh GPIO binding once per generation and ignores stale notifications', async () => {
+    const gpioA = makeFakeGpio(1);
+    const gpioB = makeFakeGpio(0);
+    gateway = makeGateway(gpioA);
+    gateway.gpio.mockReturnValueOnce(gpioA).mockReturnValue(gpioB);
+    adapter = new DigitalGpioAdapter(gateway);
+    const events: SensorEvent[] = [];
+    adapter.onEvent((event) => events.push(event));
+
+    await adapter.init({ ...baseConfig, debounceMs: 0 });
+    const staleCallback = gpioA.notify.mock.calls[0][0] as (level: 0 | 1) => void;
+
+    gateway.publishConnectionState({ connected: false, generation: 1 });
+    gateway.publishConnectionState({ connected: true, generation: 2 });
+    await flushRebind();
+
+    expect(gpioA.endNotify).toHaveBeenCalledTimes(1);
+    expect(gpioB.modeSet).toHaveBeenCalledTimes(1);
+    expect(gpioB.modeSet).toHaveBeenCalledWith('input');
+    expect(gpioB.pullUpDown).toHaveBeenCalledWith(2);
+    expect(gpioB.glitchSet).toHaveBeenCalledTimes(1);
+    expect(gpioB.read).toHaveBeenCalledTimes(1);
+    expect(gpioB.notify).toHaveBeenCalledTimes(1);
+    expect(events).toEqual([
+      expect.objectContaining({ oldValue: false, newValue: true }),
+    ]);
+
+    staleCallback(1);
+    expect(events).toHaveLength(1);
+
+    const restoredCallback = gpioB.notify.mock.calls[0][0] as (level: 0 | 1) => void;
+    restoredCallback(1);
+    expect(events).toEqual([
+      expect.objectContaining({ oldValue: false, newValue: true }),
+      expect.objectContaining({ oldValue: true, newValue: false }),
+    ]);
+
+    gateway.publishConnectionState({ connected: true, generation: 2 });
+    await flushRebind();
+    expect(gpioB.notify).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a restored GPIO binding in polled mode while the flap breaker is active', async () => {
+    const gpioA = makeFakeGpio(1);
+    const gpioB = makeFakeGpio(1);
+    gateway = makeGateway(gpioA);
+    gateway.gpio.mockReturnValueOnce(gpioA).mockReturnValue(gpioB);
+    adapter = new DigitalGpioAdapter(gateway);
+    await adapter.init({ ...baseConfig, debounceMs: 0 });
+    const callback = gpioA.notify.mock.calls[0][0] as (level: 0 | 1) => void;
+
+    for (let index = 0; index < 31; index += 1) callback((index % 2) as 0 | 1);
+    expect(gpioA.endNotify).toHaveBeenCalled();
+
+    gateway.publishConnectionState({ connected: false, generation: 1 });
+    gateway.publishConnectionState({ connected: true, generation: 2 });
+    await flushRebind();
+
+    expect(gpioB.modeSet).toHaveBeenCalledTimes(1);
+    expect(gpioB.notify).not.toHaveBeenCalled();
+    await adapter.destroy();
+  });
+
+  it('unsubscribes before destruction and ignores queued or later connection states', async () => {
+    const gpioA = makeFakeGpio(1);
+    const gpioB = makeFakeGpio(1);
+    let resolveModeSet: (() => void) | undefined;
+    gpioB.modeSet.mockImplementation(
+      () => new Promise<void>((resolve) => {
+        resolveModeSet = resolve;
+      }),
+    );
+    gateway = makeGateway(gpioA);
+    gateway.gpio.mockReturnValueOnce(gpioA).mockReturnValue(gpioB);
+    adapter = new DigitalGpioAdapter(gateway);
+    await adapter.init(baseConfig);
+
+    gateway.publishConnectionState({ connected: false, generation: 1 });
+    gateway.publishConnectionState({ connected: true, generation: 2 });
+    await flushRebind();
+    expect(gpioB.modeSet).toHaveBeenCalledTimes(1);
+    const destroy = adapter.destroy();
+    expect(gateway.unsubscribe).toHaveBeenCalledTimes(1);
+    resolveModeSet?.();
+    await destroy;
+    gateway.publishConnectionState({ connected: true, generation: 3 });
+    await flushRebind();
+
+    expect(gpioB.notify).not.toHaveBeenCalled();
+    expect(gpioA.endNotify).toHaveBeenCalledTimes(1);
   });
 
   it('destroy unregisters notify and clears timers/intervals', async () => {

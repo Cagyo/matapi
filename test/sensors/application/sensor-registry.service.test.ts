@@ -4,6 +4,8 @@ import { Sensor } from '../../../src/sensors/domain/sensor';
 import { SensorDriverPort } from '../../../src/sensors/domain/ports/sensor-driver.port';
 import { InMemorySensorRepository } from '../../../src/sensors/infrastructure/in-memory-sensor.repository';
 import { MockGpioAdapter } from '../../../src/sensors/infrastructure/mock-gpio.adapter';
+import { DriverUnavailableError } from '../../../src/sensors/domain/errors/driver-unavailable.error';
+import { SensorEvent } from '../../../src/sensors/domain/sensor-event';
 
 function digitalSensor(over: Partial<Sensor> = {}): Sensor {
   return {
@@ -91,6 +93,39 @@ describe('SensorRegistryService', () => {
     await registry.reload();
 
     expect(registry.list()).toHaveLength(0);
+  });
+
+  it('retains a startup-unavailable driver and subscribes it for a later rebind', async () => {
+    const repo = new InMemorySensorRepository([digitalSensor()]);
+    let eventListener: ((event: SensorEvent) => void) | undefined;
+    const driver: SensorDriverPort = {
+      init: vi.fn().mockRejectedValue(new DriverUnavailableError('pigpiod', 'refused')),
+      destroy: vi.fn().mockResolvedValue(undefined),
+      getState: vi.fn(),
+      onEvent: vi.fn((listener: (event: SensorEvent) => void) => {
+        eventListener = listener;
+      }),
+      healthCheck: vi.fn().mockResolvedValue(false),
+    };
+    const registry = makeRegistry(repo, () => driver);
+    const listener = vi.fn();
+    registry.onEvent(listener);
+
+    await registry.reload();
+    eventListener?.({
+      sensorId: 'front_door',
+      type: 'state_change',
+      oldValue: false,
+      newValue: true,
+      timestamp: new Date('2030-01-01T00:00:00.000Z'),
+    });
+    await Promise.resolve();
+
+    expect(registry.getDriver('front_door')).toBe(driver);
+    expect(driver.onEvent).toHaveBeenCalledTimes(1);
+    expect(listener).toHaveBeenCalledWith(
+      expect.objectContaining({ sensorId: 'front_door', newValue: true }),
+    );
   });
 
   it('destroys every active driver on module shutdown', async () => {

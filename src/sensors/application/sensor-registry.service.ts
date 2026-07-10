@@ -17,6 +17,7 @@ import {
   SensorRepositoryPort,
 } from '../domain/ports/sensor-repository.port';
 import { SensorEvent } from '../domain/sensor-event';
+import { DriverUnavailableError } from '../domain/errors/driver-unavailable.error';
 
 /**
  * Application-tier coordinator for the live sensor pipeline.
@@ -119,6 +120,14 @@ export class SensorRegistryService
         driver.onEvent((event) => this.fanOut(event));
         this.active.set(sensor.id, driver);
       } catch (err) {
+        if (err instanceof DriverUnavailableError) {
+          driver.onEvent((event) => this.fanOut(event));
+          this.active.set(sensor.id, driver);
+          this.logger.warn(
+            `Driver for "${sensor.name}" is offline and will recover when available: ${err.message}`,
+          );
+          continue;
+        }
         this.logger.error(`Failed to init "${sensor.name}": ${(err as Error).message}`);
       }
     }

@@ -8,7 +8,12 @@ import { DigitalStepType, isDigitalStepType, SensorConfig } from '../domain/sens
 import { SensorEvent } from '../domain/sensor-event';
 import { SensorReading } from '../domain/sensor-reading';
 import { en } from '../../locales/en';
-import { PigpioGateway, PigpioGpio, PudMode } from './pigpio.gateway';
+import {
+  PigpioConnectionState,
+  PigpioGateway,
+  PigpioGpio,
+  PudMode,
+} from './pigpio.gateway';
 
 interface DigitalConfig {
   pin: GpioPin;
@@ -32,6 +37,12 @@ export class DigitalGpioAdapter implements SensorDriverPort {
   private digital?: DigitalConfig;
   private gpio?: PigpioGpio;
   private listener?: (event: SensorEvent) => void;
+  private gatewayUnsubscribe?: () => void;
+  private restoredGeneration = 0;
+  private requestedGeneration = 0;
+  private connectedGeneration = 0;
+  private bindPromise: Promise<void> = Promise.resolve();
+  private destroyed = false;
 
   private rawLevel: 0 | 1 = 0;
   private currentValue = false;
@@ -61,43 +72,43 @@ export class DigitalGpioAdapter implements SensorDriverPort {
     this.transitionTimestamps = [];
     this.isFlapping = false;
     this.debounceLogged = false;
+    this.destroyed = false;
+    this.restoredGeneration = 0;
+    this.requestedGeneration = 0;
+    this.connectedGeneration = 0;
+    this.bindPromise = Promise.resolve();
 
     this.config = config;
     this.digital = this.parseConfig(config.config);
 
-    if (!this.gateway.isConnected()) {
+    // Subscribe before the first connect attempt so an unavailable pigpiod at
+    // startup can later restore this configured driver without a registry reload.
+    this.gatewayUnsubscribe = this.gateway.onConnectionState((state) => {
+      this.handleConnectionState(state);
+    });
+
+    if (this.gateway.isConnected()) {
+      this.handleConnectionState(this.gateway.connectionState());
+      await this.bindPromise;
+    } else {
       try {
         await this.gateway.connect();
       } catch (err) {
+        this.offline = true;
+        if (err instanceof DriverUnavailableError) throw err;
         throw new DriverUnavailableError('pigpiod', (err as Error).message);
       }
+      // `connect()` publishes a connected state synchronously before resolving.
+      // Await the binding it queued so a successful init has a configured handle.
+      await this.bindPromise;
     }
-
-    const gpio = this.gateway.gpio(this.digital.pin.value);
-    await gpio.modeSet('input');
-    await gpio.pullUpDown(this.pudCode(this.digital.pull));
-
-    // Hardware glitch filter rejects jitter only. Long debounce stays in JS.
-    // Cap hardware filter at 10ms (within pigpio's 0-300000 µs limit).
-    const glitchUs = Math.min(10_000, Math.max(0, config.debounceMs * 1000));
-    if (glitchUs > 0) {
-      await gpio.glitchSet(glitchUs);
-    }
-
-    this.rawLevel = await gpio.read();
-    this.currentValue = this.mapValue(this.rawLevel);
-    this.lastTimestamp = new Date();
-
-    gpio.notify((level) => this.handleNotify(level));
-
-    this.gpio = gpio;
-    this.offline = false;
-    this.logger.log(
-      `Digital "${config.name}" ready on pin ${this.digital.pin.value} (stepType=${this.digital.stepType}, pull=${this.digital.pull}, invert=${this.digital.invert})`,
-    );
   }
 
   async destroy(): Promise<void> {
+    this.destroyed = true;
+    this.gatewayUnsubscribe?.();
+    this.gatewayUnsubscribe = undefined;
+    await this.bindPromise;
     this.clearActiveTimers();
     if (this.polledInterval) {
       clearInterval(this.polledInterval);
@@ -142,7 +153,98 @@ export class DigitalGpioAdapter implements SensorDriverPort {
     return typeof pin === 'number' ? pin : null;
   }
 
-  private handleNotify(level: 0 | 1): void {
+  private handleConnectionState(state: PigpioConnectionState): void {
+    if (this.destroyed || !this.config || !this.digital) return;
+    if (!state.connected) {
+      this.offline = true;
+      this.connectedGeneration = 0;
+      this.clearActiveTimers();
+      return;
+    }
+    this.connectedGeneration = state.generation;
+    this.queueBind(state.generation);
+  }
+
+  private queueBind(generation: number): void {
+    if (
+      this.destroyed ||
+      generation <= this.restoredGeneration ||
+      generation <= this.requestedGeneration
+    ) {
+      return;
+    }
+    this.requestedGeneration = generation;
+    this.bindPromise = this.bindPromise.then(async () => {
+      if (this.destroyed || generation <= this.restoredGeneration) return;
+      try {
+        await this.bindGpio(generation);
+      } catch (err) {
+        this.offline = true;
+        this.logger.warn(
+          `Digital "${this.config?.name}" failed to bind after pigpiod connection: ${(err as Error).message}`,
+        );
+      }
+    });
+  }
+
+  private async bindGpio(generation: number): Promise<void> {
+    if (!this.config || !this.digital || this.destroyed) return;
+
+    const previousGpio = this.gpio;
+    if (previousGpio) {
+      try {
+        await previousGpio.endNotify();
+      } catch (err) {
+        this.logger.warn(`endNotify before GPIO rebind failed: ${(err as Error).message}`);
+      }
+    }
+    this.gpio = undefined;
+
+    const gpio = this.gateway.gpio(this.digital.pin.value);
+    await gpio.modeSet('input');
+    if (this.destroyed) return;
+    await gpio.pullUpDown(this.pudCode(this.digital.pull));
+    if (this.destroyed) return;
+
+    // Hardware glitch filter rejects jitter only. Long debounce stays in JS.
+    // Cap hardware filter at 10ms (within pigpio's 0-300000 µs limit).
+    const glitchUs = Math.min(10_000, Math.max(0, this.config.debounceMs * 1000));
+    await gpio.glitchSet(glitchUs);
+    if (this.destroyed) return;
+
+    const level = await gpio.read();
+    if (this.destroyed || generation !== this.connectedGeneration) return;
+
+    const isInitialBinding = this.restoredGeneration === 0;
+    this.gpio = gpio;
+    this.restoredGeneration = generation;
+    this.offline = false;
+    if (isInitialBinding) {
+      this.rawLevel = level;
+      this.currentValue = this.mapValue(level);
+      this.lastTimestamp = new Date();
+    } else {
+      this.processLevelChange(level, Date.now());
+    }
+
+    if (!this.isFlapping) {
+      gpio.notify((notifyLevel) => this.handleNotify(generation, notifyLevel));
+    }
+
+    this.logger.log(
+      `Digital "${this.config.name}" ready on pin ${this.digital.pin.value} (stepType=${this.digital.stepType}, pull=${this.digital.pull}, invert=${this.digital.invert})`,
+    );
+  }
+
+  private handleNotify(generation: number, level: 0 | 1): void {
+    if (
+      this.destroyed ||
+      this.offline ||
+      generation !== this.restoredGeneration ||
+      generation !== this.connectedGeneration
+    ) {
+      return;
+    }
     if (!this.config || !this.digital) return;
     const now = Date.now();
 
@@ -180,13 +282,14 @@ export class DigitalGpioAdapter implements SensorDriverPort {
     this.polledSince = Date.now();
     this.polledInterval = setInterval(() => {
       void (async () => {
-        if (!this.gpio || !this.config || !this.digital) return;
+        if (this.offline || !this.gpio || !this.config || !this.digital) return;
         if (Date.now() - this.polledSince >= DigitalGpioAdapter.FLAP_RECOVERY_MS) {
           this.resumeFromFlapping();
           return;
         }
         try {
           const level = await this.gpio.read();
+          if (this.destroyed || this.offline) return;
           this.processLevelChange(level, Date.now());
         } catch (err) {
           this.logger.warn(`Polled read failed: ${(err as Error).message}`);
@@ -205,7 +308,9 @@ export class DigitalGpioAdapter implements SensorDriverPort {
     this.isFlapping = false;
     this.transitionTimestamps = [];
     this.debounceLogged = false;
-    this.gpio?.notify((level) => this.handleNotify(level));
+    if (!this.gpio || this.offline || this.destroyed) return;
+    const generation = this.restoredGeneration;
+    this.gpio.notify((level) => this.handleNotify(generation, level));
     this.logger.log(
       `Digital "${this.config?.name}" resumed hardware notifications after flap cooldown`,
     );
