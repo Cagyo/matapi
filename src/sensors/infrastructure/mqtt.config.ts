@@ -56,7 +56,7 @@ export function parseMqttConfig(raw: Record<string, unknown> | null | undefined)
 
   let reconnectMs = DEFAULT_MQTT_RECONNECT_MS;
   if (raw.reconnectMs !== undefined) {
-    reconnectMs = raw.reconnectMs as number;
+    reconnectMs = raw.reconnectMs;
   } else if (process.env.MQTT_DEFAULT_RECONNECT_MS) {
     const envReconnect = Number(process.env.MQTT_DEFAULT_RECONNECT_MS);
     if (isSafeReconnectPeriod(envReconnect)) {
