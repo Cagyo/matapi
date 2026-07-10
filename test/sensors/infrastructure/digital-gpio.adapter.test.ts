@@ -331,6 +331,45 @@ describe('DigitalGpioAdapter', () => {
     await adapter.destroy();
   });
 
+  it('ignores a stale polled read after the GPIO binding is restored', async () => {
+    vi.useFakeTimers();
+    const gpioA = makeFakeGpio(1);
+    const gpioB = makeFakeGpio(1);
+    let resolveStaleRead: ((level: 0 | 1) => void) | undefined;
+    gateway = makeGateway(gpioA);
+    gateway.gpio.mockReturnValueOnce(gpioA).mockReturnValue(gpioB);
+    adapter = new DigitalGpioAdapter(gateway);
+    const events: SensorEvent[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await adapter.init({ ...baseConfig, debounceMs: 0 });
+    const callback = gpioA.notify.mock.calls[0][0] as (level: 0 | 1) => void;
+
+    for (let index = 0; index < 31; index += 1) callback((index % 2) as 0 | 1);
+    events.length = 0;
+    gpioA.read.mockImplementationOnce(
+      () => new Promise<0 | 1>((resolve) => {
+        resolveStaleRead = resolve;
+      }),
+    );
+
+    vi.advanceTimersByTime(10_000);
+    await Promise.resolve();
+    expect(resolveStaleRead).toBeTypeOf('function');
+
+    gateway.publishConnectionState({ connected: false, generation: 1 });
+    gateway.publishConnectionState({ connected: true, generation: 2 });
+    await flushRebind();
+    expect(adapter.getState().value).toBe(false);
+
+    resolveStaleRead?.(0);
+    await Promise.resolve();
+
+    expect(events).toEqual([]);
+    expect(adapter.getState()).toMatchObject({ value: false, raw: 1 });
+    await adapter.destroy();
+    vi.useRealTimers();
+  });
+
   it('unsubscribes before destruction and ignores queued or later connection states', async () => {
     const gpioA = makeFakeGpio(1);
     const gpioB = makeFakeGpio(1);

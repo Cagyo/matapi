@@ -282,14 +282,23 @@ export class DigitalGpioAdapter implements SensorDriverPort {
     this.polledSince = Date.now();
     this.polledInterval = setInterval(() => {
       void (async () => {
-        if (this.offline || !this.gpio || !this.config || !this.digital) return;
+        const gpio = this.gpio;
+        const generation = this.restoredGeneration;
+        if (this.offline || !gpio || !this.config || !this.digital) return;
         if (Date.now() - this.polledSince >= DigitalGpioAdapter.FLAP_RECOVERY_MS) {
           this.resumeFromFlapping();
           return;
         }
         try {
-          const level = await this.gpio.read();
-          if (this.destroyed || this.offline) return;
+          const level = await gpio.read();
+          if (
+            this.destroyed ||
+            this.offline ||
+            this.gpio !== gpio ||
+            this.restoredGeneration !== generation
+          ) {
+            return;
+          }
           this.processLevelChange(level, Date.now());
         } catch (err) {
           this.logger.warn(`Polled read failed: ${(err as Error).message}`);
