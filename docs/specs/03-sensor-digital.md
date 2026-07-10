@@ -42,10 +42,10 @@ The driver adapter automatically infers debouncing strategy, timings, and defaul
 
 | Step Type (`stepType`) | Normal (`false`) | Triggered (`true`) | Auto-Inferred Debounce Strategy | Default Timings (Rise / Fall) | Default Severity | Primary Behavior |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`contact`** | `"Closed"` | `"Opened"` | **Symmetric** | 10,000 ms / 10,000 ms | `warning` | Perimeter entry monitoring; open-window checks. |
+| **`contact`** | `"Closed"` | `"Opened"` | **Symmetric** | 100 ms / 100 ms | `warning` | Perimeter entry monitoring; open-window checks. |
 | **`leak_hazard`**| `"Dry"` | `"Leak Detected"`| **Asymmetric Alarm** | **50 ms** / 60,000 ms | `critical` | Flood probes. Bypasses Telegram mute/sleep windows. |
 | **`alarm`** | `"Normal"` | `"Alarm"` | **Asymmetric Alarm** | **50 ms** / 60,000 ms | `critical` | Smoke, CO, gas, flame, or enclosure tamper switches. |
-| **`power`** | `"Grid OK"` | `"Outage"` | **Symmetric** | 5,000 ms / 5,000 ms | `warning` | Mains AC monitoring; UPS/battery low-voltage alerts. |
+| **`power`** | `"Grid OK"` | `"Outage"` | **Symmetric** | 100 ms / 100 ms | `warning` | Mains AC monitoring; UPS/battery low-voltage alerts. |
 | **`motion`** | `"Clear"` | `"Motion"` | **Asymmetric Cooldown**| **0 ms** / 5,000 ms | `info` | Auto-triggers camera snapshot/clip recording. |
 | **`button`** | `"Released"` | `"Pressed"` | **Asymmetric Cooldown**| **0 ms** / 3,000 ms | `info` | Doorbells or panic switches (immediate action). |
 

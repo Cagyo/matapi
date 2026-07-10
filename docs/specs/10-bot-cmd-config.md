@@ -93,7 +93,7 @@ Bot: Current config for "front_door":
      GPIO: 17
      Active Low: Yes
      Pull: Up
-     Debounce: 10000ms
+     Debounce: 100ms
      Severity: Info
      
      What to change?

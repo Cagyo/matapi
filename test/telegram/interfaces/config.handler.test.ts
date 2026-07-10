@@ -123,6 +123,7 @@ describe('ConfigHandler', () => {
         name: 'quick_sensor',
         type: 'digital',
         config: expect.objectContaining({ pin: 22, activeLow: true, pull: 'up' }),
+        debounceMs: 100,
       }),
     );
     expect(reply).toHaveBeenCalledWith(expect.stringContaining('quick_sensor'));

@@ -1,5 +1,6 @@
 import { isValidSensorName } from './errors/invalid-sensor-name.error';
 import { DIGITAL_STEP_TYPES, isDigitalStepType, SensorSeverity, SensorType } from './sensor';
+import { defaultDebounceMs } from './default-debounce';
 import {
   cameraConfigIssues,
   mqttConfigIssues,
@@ -10,11 +11,6 @@ export const ALLOWED_BAUD_RATES = [9600, 19200, 38400, 57600, 115200] as const;
 
 const SENSOR_TYPES: readonly SensorType[] = ['digital', 'uart', 'mqtt', 'camera'];
 const SEVERITIES: readonly SensorSeverity[] = ['info', 'warning', 'critical'];
-
-/** Default debounce (ms) applied when an imported sensor omits `debounce_ms`. */
-function defaultDebounceMs(type: SensorType): number {
-  return type === 'uart' ? 0 : 10_000;
-}
 
 /** A sensor entry parsed + validated from an imported config (spec 16). */
 export interface ImportedSensor {

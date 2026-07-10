@@ -19,6 +19,7 @@ import { SensorNameExistsError } from '../../sensors/domain/errors/sensor-name-e
 import { SensorNotFoundError } from '../../sensors/domain/errors/sensor-not-found.error';
 import { UartConfigInvalidError } from '../../sensors/domain/errors/uart-config-invalid.error';
 import { Sensor, SensorSeverity, SensorType } from '../../sensors/domain/sensor';
+import { DEFAULT_DIGITAL_DEBOUNCE_MS } from '../../sensors/domain/default-debounce';
 import {
   SENSOR_QUERY,
   SensorQueryPort,
@@ -99,7 +100,7 @@ export class ConfigHandler implements TelegramHandler {
   ) {
     const defaults = loadDefaults().sensor_defaults;
     this.digitalDefaults = {
-      debounceMs: numberOr(defaults?.digital?.debounce_ms, 10_000),
+      debounceMs: numberOr(defaults?.digital?.debounce_ms, DEFAULT_DIGITAL_DEBOUNCE_MS),
       severity: severityOr(defaults?.digital?.severity, 'info'),
       pull: pullOr(defaults?.digital?.pull, 'up'),
       activeLow: defaults?.digital?.active_low !== false,

@@ -1,6 +1,6 @@
 sensor_defaults:
   digital:
-    debounce_ms: 10000
+    debounce_ms: 100
     severity: info
     pull: up
     active_low: true

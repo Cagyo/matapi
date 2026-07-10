@@ -84,7 +84,7 @@ EVENT_RETENTION_DAYS=30
 LOG_RETENTION_DAYS=30
 
 # Sensor defaults
-DEFAULT_DEBOUNCE_MS=10000
+DEFAULT_DEBOUNCE_MS=100
 DEFAULT_SEVERITY=info
 
 # CO2 defaults
@@ -131,7 +131,7 @@ The setup wizard generates `CLAIM_ADMIN_TOKEN` during first-time configuration, 
 ```yaml
 sensor_defaults:
   digital:
-    debounce_ms: 10000
+    debounce_ms: 100
     severity: info
     pull: up
     active_low: true

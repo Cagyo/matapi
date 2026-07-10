@@ -34,6 +34,15 @@ describe('DrizzleSensorQuery', () => {
           enabled: false,
           severity: 'info',
         },
+        {
+          id: 'legacy_digital',
+          name: 'Legacy digital',
+          type: 'digital',
+          config: { pin: 18 },
+          enabled: true,
+          debounceMs: null,
+          severity: 'info',
+        },
       ])
       .run();
   });
@@ -42,7 +51,7 @@ describe('DrizzleSensorQuery', () => {
 
   it('lists only enabled sensors', async () => {
     const result = await query.listEnabled();
-    expect(result).toHaveLength(1);
+    expect(result).toHaveLength(2);
     expect(result[0]).toMatchObject({
       id: 'front_door',
       name: 'Front door',
@@ -55,6 +64,12 @@ describe('DrizzleSensorQuery', () => {
   it('returns the sensor by id when enabled', async () => {
     const sensor = await query.findById('front_door');
     expect(sensor).toMatchObject({ id: 'front_door', name: 'Front door' });
+  });
+
+  it('uses the digital default for legacy rows with no debounce value', async () => {
+    await expect(query.findById('legacy_digital')).resolves.toMatchObject({
+      debounceMs: 100,
+    });
   });
 
   it('returns null for disabled or unknown sensors', async () => {

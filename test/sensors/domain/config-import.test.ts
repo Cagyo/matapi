@@ -72,7 +72,7 @@ describe('validateImportConfig', () => {
     });
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.sensors[0]).toMatchObject({ debounceMs: 10_000, severity: 'info' });
+      expect(result.sensors[0]).toMatchObject({ debounceMs: 100, severity: 'info' });
       expect(result.sensors[1]).toMatchObject({ debounceMs: 0, severity: 'info' });
     }
   });

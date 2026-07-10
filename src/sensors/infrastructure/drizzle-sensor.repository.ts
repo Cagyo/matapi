@@ -9,6 +9,7 @@ import {
   SensorRepositoryPort,
 } from '../domain/ports/sensor-repository.port';
 import { Sensor, SensorSeverity, SensorType } from '../domain/sensor';
+import { defaultDebounceMs } from '../domain/default-debounce';
 
 type SensorRow = typeof sensors.$inferSelect;
 
@@ -157,13 +158,14 @@ export class DrizzleSensorRepository implements SensorRepositoryPort {
   }
 
   private toSensor(row: SensorRow): Sensor {
+    const type = row.type as SensorType;
     return {
       id: row.id,
       name: row.name,
-      type: row.type as SensorType,
+      type,
       config: (row.config as Record<string, unknown>) ?? {},
       enabled: row.enabled ?? true,
-      debounceMs: row.debounceMs ?? 10000,
+      debounceMs: row.debounceMs ?? defaultDebounceMs(type),
       severity: (row.severity as SensorSeverity) ?? 'info',
       lastValue: row.lastValue ?? null,
       lastValueAt: row.lastValueAt ?? null,

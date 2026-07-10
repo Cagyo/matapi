@@ -54,6 +54,24 @@ describe('DrizzleSensorRepository', () => {
     });
   });
 
+  it('uses the digital default when a legacy row has no debounce value', async () => {
+    db.insert(sensors)
+      .values({
+        id: 'legacy',
+        name: 'Legacy',
+        type: 'digital',
+        enabled: true,
+        config: { pin: 17 },
+        debounceMs: null,
+        severity: 'info',
+      })
+      .run();
+
+    await expect(repo.loadEnabled()).resolves.toEqual([
+      expect.objectContaining({ id: 'legacy', debounceMs: 100 }),
+    ]);
+  });
+
   it('updateState writes lastValue / lastValueAt / updatedAt', async () => {
     db.insert(sensors)
       .values({ id: 'a', name: 'A', type: 'digital', enabled: true, config: { pin: 17 } })

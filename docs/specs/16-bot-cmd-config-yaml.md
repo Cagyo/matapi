@@ -30,7 +30,7 @@ sensors:
       pin: 17
       activeLow: true
       pull: up
-    debounce_ms: 10000
+    debounce_ms: 100
     severity: info
   - name: co2_living
     type: uart
