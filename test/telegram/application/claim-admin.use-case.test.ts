@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ClaimAdminUseCase } from '../../../src/telegram/application/claim-admin.use-case';
 import { AdminAlreadyClaimedError } from '../../../src/telegram/domain/errors/admin-already-claimed.error';
 import { AdminClaimNotConfiguredError } from '../../../src/telegram/domain/errors/admin-claim-not-configured.error';
@@ -71,6 +71,28 @@ describe('ClaimAdminUseCase', () => {
     ).rejects.toBeInstanceOf(AdminAlreadyClaimedError);
 
     expect(await users.countAdmins()).toBe(1);
+  });
+
+  it('rejects an existing admin before checking the claim credential', async () => {
+    const users = new InMemoryUserRepository([
+      {
+        telegramId: 1001,
+        name: 'Ada',
+        role: 'admin',
+        createdAt: new Date('2029-01-01T00:00:00.000Z'),
+      },
+    ]);
+    const isConfigured = vi.fn(() => false);
+    const verify = vi.fn(() => false);
+    const credential: AdminClaimCredentialPort = { isConfigured, verify };
+    const useCase = new ClaimAdminUseCase(users, clock, credential);
+
+    await expect(
+      useCase.execute({ telegramId: 1002, name: 'Linus', token: 'wrong-token' }),
+    ).rejects.toBeInstanceOf(AdminAlreadyClaimedError);
+
+    expect(isConfigured).not.toHaveBeenCalled();
+    expect(verify).not.toHaveBeenCalled();
   });
 
   it('lets only one of two concurrent claims win', async () => {
