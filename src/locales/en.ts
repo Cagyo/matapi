@@ -344,7 +344,7 @@ export const commands: CommandDescriptor[] = [
   {
     command: 'claim_admin',
     description: 'Claim admin (first run only)',
-    usage: '/claim_admin — claim admin (first run only)',
+    usage: '/claim_admin <token> — claim admin (first run only)',
     scope: 'admin',
   },
 ];
@@ -404,6 +404,8 @@ export const en = {
   claim: {
     success: '✅ You are now the admin of this Home Worker.',
     alreadyClaimed: '❌ This Home Worker already has an admin.',
+    invalidToken: '❌ Invalid setup claim token. Use the command shown by the setup wizard.',
+    notConfigured: '❌ Admin claiming is disabled until CLAIM_ADMIN_TOKEN is configured.',
   },
   users: {
     inviteIssued: (code: string) =>
