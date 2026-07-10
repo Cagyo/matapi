@@ -83,7 +83,7 @@ export class MqttSensorAdapter implements SensorDriverPort {
       const wasProlongedOffline = this.prolongedOfflineSignaled;
       this.prolongedOfflineSignaled = false;
       if (wasProlongedOffline) {
-        this.emitAvailabilityEvent('state_change', en.sensors.notifications.mqttRecovered, en.sensors.notifications.mqttOffline);
+        this.emitAvailabilityEvent('error', en.sensors.notifications.mqttRecovered, en.sensors.notifications.mqttOffline);
       }
       this.logger.log(`MQTT connected for sensor "${config.name}", subscribing to ${this.mqttConfig!.topic}`);
       doSubscribe();

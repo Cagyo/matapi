@@ -134,7 +134,7 @@ describe('MqttSensorAdapter', () => {
 
     expect(events).toEqual([
       expect.objectContaining({ type: 'error', newValue: en.sensors.notifications.mqttOffline }),
-      expect.objectContaining({ type: 'state_change', newValue: en.sensors.notifications.mqttRecovered }),
+      expect.objectContaining({ type: 'error', newValue: en.sensors.notifications.mqttRecovered }),
     ]);
     expect(mockClient.subscribe).toHaveBeenCalledTimes(2);
   });
@@ -169,7 +169,7 @@ describe('MqttSensorAdapter', () => {
     mockClient.emit('connect');
 
     expect(events).toHaveLength(2);
-    expect(events[1]).toMatchObject({ type: 'state_change', newValue: en.sensors.notifications.mqttRecovered });
+    expect(events[1]).toMatchObject({ type: 'error', newValue: en.sensors.notifications.mqttRecovered });
     expect(mockClient.subscribe).toHaveBeenCalledTimes(3);
   });
 
