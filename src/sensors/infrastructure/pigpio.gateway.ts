@@ -2,7 +2,6 @@ import {
   Inject,
   Injectable,
   Logger,
-  OnModuleDestroy,
   OnModuleInit,
   Optional,
 } from '@nestjs/common';
@@ -47,7 +46,7 @@ export interface PigpioConnectionState {
  * one socket to pigpiod. Connection is established lazily and re-used.
  */
 @Injectable()
-export class PigpioGateway implements OnModuleInit, OnModuleDestroy {
+export class PigpioGateway implements OnModuleInit {
   private readonly logger = new Logger(PigpioGateway.name);
   private client: PigpioRoot | null = null;
   private connected = false;
@@ -58,6 +57,7 @@ export class PigpioGateway implements OnModuleInit, OnModuleDestroy {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempt = 0;
   private destroyed = false;
+  private closePromise: Promise<void> | null = null;
   private readonly connectionStateListeners = new Set<
     (state: PigpioConnectionState) => void
   >();
@@ -84,7 +84,13 @@ export class PigpioGateway implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async onModuleDestroy(): Promise<void> {
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    this.closePromise = this.closeClient();
+    return this.closePromise;
+  }
+
+  private async closeClient(): Promise<void> {
     this.destroyed = true;
     this.clearReconnectTimer();
     this.rejectPendingConnection(new Error('pigpio gateway destroyed'));

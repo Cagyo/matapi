@@ -1,15 +1,12 @@
-import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import * as mqtt from 'mqtt';
 import { IClientOptions, MqttClient } from 'mqtt';
 
 @Injectable()
-export class MqttConnectionPool implements OnModuleDestroy {
+export class MqttConnectionPool {
   private readonly logger = new Logger(MqttConnectionPool.name);
   private pool = new Map<string, { client: MqttClient; refCount: number }>();
-
-  async onModuleDestroy(): Promise<void> {
-    await this.destroyAll();
-  }
+  private destroyPromise: Promise<void> | null = null;
 
   /** Get or create a shared connection. Increments ref count. */
   async acquire(brokerUrl: string, opts?: IClientOptions): Promise<MqttClient> {
@@ -70,7 +67,13 @@ export class MqttConnectionPool implements OnModuleDestroy {
   }
 
   /** Force-close all connections (module shutdown). */
-  async destroyAll(): Promise<void> {
+  destroyAll(): Promise<void> {
+    if (this.destroyPromise) return this.destroyPromise;
+    this.destroyPromise = this.closeAllConnections();
+    return this.destroyPromise;
+  }
+
+  private async closeAllConnections(): Promise<void> {
     const entries = Array.from(this.pool.entries());
     this.pool.clear();
     for (const [url, entry] of entries) {

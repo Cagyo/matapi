@@ -39,6 +39,7 @@ Status legend: ✅ canonical · 🚧 in transition · 📝 planned
 | `SensorQueryPort` (`SENSOR_QUERY`) read model for other contexts | `DrizzleSensorQuery`, `InMemorySensorQuery` (tests) | ✅ canonical — `listEnabled`, `findById`, and `findByName` (returns active **or** archived sensor; `/logs` uses archive fallback). | [sensor-query.port.ts](../src/sensors/domain/ports/sensor-query.port.ts) |
 | `SensorHealthPort` (`SENSOR_HEALTH`) | `SensorRegistryService` (live `healthCheck()` per active driver; failures coerced to `false`) | ✅ canonical — powers `/status` and `/health` online counts. | [sensor-health.port.ts](../src/sensors/application/ports/sensor-health.port.ts) |
 | `PigpioGateway` | (internal — single implementation, intentional infrastructure-only utility) | ✅ keep as gateway, do not promote to port | [pigpio.gateway.ts](../src/sensors/infrastructure/pigpio.gateway.ts) |
+| `SensorResourcesLifecycleAdapter` | (Nest lifecycle owner for `SensorRegistryService`, `PigpioGateway`, and `MqttConnectionPool`) | ✅ canonical — destroys drivers before closing shared pigpio and MQTT resources; no other sensor resource owns `OnModuleDestroy`. | [sensor-resources-lifecycle.adapter.ts](../src/sensors/infrastructure/sensor-resources-lifecycle.adapter.ts) |
 
 ### Events context
 

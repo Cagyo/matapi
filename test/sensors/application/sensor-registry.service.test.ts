@@ -128,17 +128,28 @@ describe('SensorRegistryService', () => {
     );
   });
 
-  it('destroys every active driver on module shutdown', async () => {
+  it('shares shutdown work, destroys every active driver, and prevents reloads after shutdown starts', async () => {
     const repo = new InMemorySensorRepository([digitalSensor()]);
     const driver = new MockGpioAdapter();
     const destroy = vi.spyOn(driver, 'destroy');
-    const registry = makeRegistry(repo, () => driver);
+    const factory = vi.fn(() => driver);
+    const registry = makeRegistry(repo, factory);
 
     await registry.reload();
-    await registry.onModuleDestroy();
+    const shutdown = registry as SensorRegistryService & { shutdown(): Promise<void> };
+    const first = shutdown.shutdown();
+    const second = shutdown.shutdown();
+    repo.setSensors([
+      digitalSensor({ id: 'back_door', name: 'Back door', config: { pin: 18 } }),
+    ]);
+    await shutdown.reload();
+    await first;
 
+    expect(second).toBe(first);
     expect(destroy).toHaveBeenCalledTimes(1);
+    expect(factory).toHaveBeenCalledTimes(1);
     expect(registry.list()).toEqual([]);
+    expect(registry.getDriver('back_door')).toBeUndefined();
   });
 
   it('onModuleInit triggers a reload', async () => {

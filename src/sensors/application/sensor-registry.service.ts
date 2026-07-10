@@ -2,7 +2,6 @@ import {
   Inject,
   Injectable,
   Logger,
-  OnModuleDestroy,
   OnModuleInit,
 } from '@nestjs/common';
 import { SensorEventSourcePort } from '../../events/domain/ports/sensor-event-source.port';
@@ -30,12 +29,14 @@ import { DriverUnavailableError } from '../domain/errors/driver-unavailable.erro
  */
 @Injectable()
 export class SensorRegistryService
-  implements SensorEventSourcePort, SensorHealthPort, OnModuleInit, OnModuleDestroy
+  implements SensorEventSourcePort, SensorHealthPort, OnModuleInit
 {
   private readonly logger = new Logger(SensorRegistryService.name);
   private readonly active = new Map<string, SensorDriverPort>();
   private readonly listeners: ((event: SensorEvent) => void)[] = [];
   private reloadChain: Promise<void> = Promise.resolve();
+  private shuttingDown = false;
+  private shutdownPromise: Promise<void> | null = null;
 
   constructor(
     @Inject(SENSOR_REPOSITORY)
@@ -45,6 +46,7 @@ export class SensorRegistryService
   ) {}
 
   onEvent(callback: (event: SensorEvent) => void): void {
+    if (this.shuttingDown) return;
     this.listeners.push(callback);
   }
 
@@ -52,7 +54,22 @@ export class SensorRegistryService
     await this.reload();
   }
 
-  async onModuleDestroy(): Promise<void> {
+  shutdown(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise;
+
+    this.shuttingDown = true;
+    this.listeners.length = 0;
+    this.shutdownPromise = this.destroyDrivers();
+    return this.shutdownPromise;
+  }
+
+  private async destroyDrivers(): Promise<void> {
+    try {
+      await this.reloadChain;
+    } catch (err) {
+      this.logger.warn(`Sensor reload failed before shutdown: ${(err as Error).message}`);
+    }
+
     for (const driver of this.active.values()) {
       try {
         await driver.destroy();
@@ -65,6 +82,7 @@ export class SensorRegistryService
 
   /** Public entry point — serialized so overlapping callers never interleave. */
   async reload(): Promise<void> {
+    if (this.shuttingDown) return;
     this.reloadChain = this.reloadChain.then(
       () => this.doReload(),
       () => this.doReload(),
@@ -158,6 +176,7 @@ export class SensorRegistryService
   }
 
   private fanOut(event: SensorEvent): void {
+    if (this.shuttingDown) return;
     void this.persistState(event);
     for (const cb of this.listeners) {
       try {
@@ -169,6 +188,7 @@ export class SensorRegistryService
   }
 
   private async persistState(event: SensorEvent): Promise<void> {
+    if (this.shuttingDown) return;
     if (event.type === 'error') return;
     try {
       await this.repository.updateState(

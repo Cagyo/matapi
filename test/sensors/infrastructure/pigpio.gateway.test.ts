@@ -162,7 +162,7 @@ describe('PigpioGateway', () => {
     expect(gateway.connectionState()).toEqual({ connected: true, generation: 1 });
   });
 
-  it('ends an active client on module destroy', async () => {
+  it('ends an active client through its public close operation', async () => {
     const gpio = { read: vi.fn() } as unknown as PigpioGpio;
     const client = makeClient(gpio);
     pigpioClient.pigpio.mockReturnValue(client);
@@ -171,10 +171,27 @@ describe('PigpioGateway', () => {
     const promise = gateway.connect();
     client.emit('connected');
     await promise;
-    await gateway.onModuleDestroy();
+    await gateway.close();
 
     expect(client.end).toHaveBeenCalledTimes(1);
     expect(gateway.isConnected()).toBe(false);
+  });
+
+  it('shares one close operation across concurrent callers', async () => {
+    const gpio = { read: vi.fn() } as unknown as PigpioGpio;
+    const client = makeClient(gpio);
+    pigpioClient.pigpio.mockReturnValue(client);
+    const gateway = new PigpioGateway(pigpioClient);
+
+    const connected = gateway.connect();
+    client.emit('connected');
+    await connected;
+    const first = gateway.close();
+    const second = gateway.close();
+
+    expect(second).toBe(first);
+    await first;
+    expect(client.end).toHaveBeenCalledTimes(1);
   });
 
   it('publishes the initial connected state with generation one', async () => {
@@ -281,7 +298,7 @@ describe('PigpioGateway', () => {
       client.emit('error', new Error('refused'));
     }
 
-    await gateway.onModuleDestroy();
+    await gateway.close();
   });
 
   it('resets the reconnect delay to one second after a successful connection', async () => {
@@ -319,7 +336,7 @@ describe('PigpioGateway', () => {
     client.emit('connected');
     await initial;
     client.emit('disconnected');
-    await gateway.onModuleDestroy();
+    await gateway.close();
     const stateCountAtDestroy = states.length;
 
     expect(client.end).toHaveBeenCalledTimes(1);

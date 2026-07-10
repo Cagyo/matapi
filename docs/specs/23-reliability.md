@@ -27,6 +27,12 @@ then calls `app.close()` exactly once. `app.close()` triggers Nest teardown
 (`onModuleDestroy`, `beforeApplicationShutdown`, and `onApplicationShutdown`)
 after the coordinator completes.
 
+Within the sensors module, `SensorResourcesLifecycleAdapter` is the sole Nest
+teardown owner for sensor resources: it first shuts down every active sensor
+driver, then closes the shared pigpio gateway and MQTT connection pool. Driver
+or shared-close failures are isolated so they cannot prevent the remaining
+resources from being released.
+
 ### /restart Handling
 
 Before shutdown step 1, store `restart_reason: 'user_command'` in `system_meta`. On boot, check flag → send "✅ Restart complete" → clear flag. Distinguishes user restart from crash.
