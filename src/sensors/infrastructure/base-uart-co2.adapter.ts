@@ -185,10 +185,12 @@ export abstract class BaseUartCo2Adapter implements SensorDriverPort {
   }
 
   async healthCheck(): Promise<boolean> {
-    if (!(await this.ensureOpen())) return false;
+    if (!(await this.ensureOpen()) || this.destroyed) return false;
     try {
       const ppm = await this.readSample();
-      return isValidPpm(ppm);
+      if (this.destroyed || !isValidPpm(ppm)) return false;
+      this.recordValidSample();
+      return true;
     } catch (err) {
       this.logger.warn(`healthCheck read failed: ${(err as Error).message}`);
       return false;
@@ -206,7 +208,7 @@ export abstract class BaseUartCo2Adapter implements SensorDriverPort {
 
   private async tick(): Promise<void> {
     if (!this.config || !this.uart || this.destroyed) return;
-    if (!(await this.ensureOpen())) return;
+    if (!(await this.ensureOpen()) || this.destroyed) return;
 
     let ppm: number | null;
     try {
@@ -214,20 +216,14 @@ export abstract class BaseUartCo2Adapter implements SensorDriverPort {
     } catch {
       return;
     }
+    if (this.destroyed) return;
 
     if (!isValidPpm(ppm)) {
       this.recordBadRead(`out-of-range: ${String(ppm)}`);
       return;
     }
 
-    this.consecutiveBadReads = 0;
-    this.nextReconnectAt = 0;
-    this.reconnectDelayIndex = 0;
-    this.offline = false;
-    if (this.degraded) {
-      this.degraded = false;
-      this.logger.log(`UART "${this.config.name}" recovered from degraded state`);
-    }
+    this.recordValidSample();
 
     const now = new Date();
     const previousLevel = this.currentLevel;
@@ -311,9 +307,21 @@ export abstract class BaseUartCo2Adapter implements SensorDriverPort {
 
   private async handleReadFailure(err: unknown): Promise<void> {
     await this.closeSourceBestEffort('source close after read failure failed');
+    if (this.destroyed) return;
     this.offline = true;
     this.scheduleReconnect();
     this.recordBadRead(`read error: ${(err as Error).message}`);
+  }
+
+  private recordValidSample(): void {
+    this.consecutiveBadReads = 0;
+    this.nextReconnectAt = 0;
+    this.reconnectDelayIndex = 0;
+    this.offline = false;
+    if (this.degraded) {
+      this.degraded = false;
+      this.logger.log(`UART "${this.config?.name}" recovered from degraded state`);
+    }
   }
 
   private scheduleReconnect(): void {
@@ -357,6 +365,7 @@ export abstract class BaseUartCo2Adapter implements SensorDriverPort {
     try {
       await this.logs.appendBatch(batch);
     } catch (err) {
+      if (this.destroyed) return;
       // Restore the batch for the next attempt, capped so a persistent DB
       // outage cannot grow memory without bound.
       this.buffer = [...batch, ...this.buffer];

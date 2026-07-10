@@ -292,6 +292,36 @@ describe('MockUartCo2Adapter (base UART CO2 behaviour)', () => {
     await adapter.destroy();
   });
 
+  it('resets recovery after a valid health check instead of retaining a stale 5s delay', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2030-01-01T00:00:00Z'));
+    const source = new FlakyCo2Source(Array.from({ length: 10 }, () => null));
+    const adapter = new FlakyUartCo2Adapter(new InMemorySensorLogRepository(), source);
+    await adapter.init(uartConfig());
+
+    for (let index = 0; index < 10; index += 1) await adapter.pollOnce();
+    expect(adapter.getState().raw).toMatchObject({ degraded: true, offline: false });
+
+    source.queueReadFailures(1);
+    await adapter.pollOnce();
+    source.queueOpenFailures(1);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(adapter.healthCheck()).resolves.toBe(false);
+
+    source.queueReadings(700);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await expect(adapter.healthCheck()).resolves.toBe(true);
+    expect(adapter.getState().raw).toMatchObject({ degraded: false, offline: false });
+
+    source.queueReadFailures(1);
+    await adapter.pollOnce();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await adapter.pollOnce();
+    expect(source.openCalls).toBe(4);
+
+    await adapter.destroy();
+  });
+
   it('closes, marks offline, and schedules reopen after a read rejection', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2030-01-01T00:00:00Z'));
@@ -372,6 +402,26 @@ describe('MockUartCo2Adapter (base UART CO2 behaviour)', () => {
       if (previousSampleInterval === undefined) delete process.env.UART_SAMPLE_LOG_MS;
       else process.env.UART_SAMPLE_LOG_MS = previousSampleInterval;
     }
+  });
+
+  it('ignores a deferred read that resolves after destroy has flushed', async () => {
+    const logs = new InMemorySensorLogRepository();
+    const source = new FlakyCo2Source();
+    const adapter = new FlakyUartCo2Adapter(logs, source);
+    await adapter.init(uartConfig());
+
+    const read = source.deferNextRead();
+    const tick = adapter.pollOnce();
+    await read.started;
+    const stateBeforeDestroy = adapter.getState();
+
+    await adapter.destroy();
+    read.resolve(1_300);
+    await tick;
+
+    expect(adapter.getState()).toEqual(stateBeforeDestroy);
+    expect(adapter.pendingLogCount).toBe(0);
+    expect(logs.entries).toHaveLength(0);
   });
 });
 
