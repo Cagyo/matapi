@@ -11,10 +11,18 @@ type Handler = (info?: unknown) => void;
 function makeClient(gpio: PigpioGpio) {
   const onceHandlers = new Map<PigpioEvent, Handler[]>();
   const onHandlers = new Map<PigpioEvent, Handler[]>();
+  const connectionInfo = { commandSocket: false, notificationSocket: false };
+  const emitHandlers = (event: PigpioEvent, info?: unknown) => {
+    const once = onceHandlers.get(event) ?? [];
+    onceHandlers.set(event, []);
+    for (const handler of [...(onHandlers.get(event) ?? []), ...once]) handler(info);
+  };
+
   return {
     gpio: vi.fn(() => gpio),
     connect: vi.fn(),
     end: vi.fn(),
+    getInfo: vi.fn(() => connectionInfo),
     once: vi.fn((event: PigpioEvent, handler: Handler) => {
       onceHandlers.set(event, [...(onceHandlers.get(event) ?? []), handler]);
     }),
@@ -22,9 +30,18 @@ function makeClient(gpio: PigpioGpio) {
       onHandlers.set(event, [...(onHandlers.get(event) ?? []), handler]);
     }),
     emit(event: PigpioEvent, info?: unknown) {
-      const once = onceHandlers.get(event) ?? [];
-      onceHandlers.set(event, []);
-      for (const handler of [...(onHandlers.get(event) ?? []), ...once]) handler(info);
+      if (event === 'connected') {
+        connectionInfo.commandSocket = true;
+        connectionInfo.notificationSocket = true;
+      }
+      if (event === 'disconnected') {
+        connectionInfo.commandSocket = false;
+        connectionInfo.notificationSocket = false;
+      }
+      emitHandlers(event, info);
+    },
+    emitStale(event: PigpioEvent, info?: unknown) {
+      emitHandlers(event, info);
     },
   };
 }
@@ -103,6 +120,26 @@ describe('PigpioGateway', () => {
 
     await expect(promise).rejects.toThrow('refused');
     expect(gateway.isConnected()).toBe(false);
+  });
+
+  it('clears a rejected connection promise so an immediate fresh connect can proceed', async () => {
+    const gpio = { read: vi.fn() } as unknown as PigpioGpio;
+    const client = makeClient(gpio);
+    pigpioClient.pigpio.mockReturnValue(client);
+    const gateway = new PigpioGateway(pigpioClient);
+
+    const failed = gateway.connect();
+    client.emit('error', new Error('refused'));
+    await expect(failed).rejects.toThrow('refused');
+
+    const retry = gateway.connect();
+    expect(retry).not.toBe(failed);
+    expect(client.connect).toHaveBeenCalledTimes(1);
+    client.emit('connected');
+    await retry;
+
+    expect((gateway as unknown as { connectPromise: Promise<void> | null }).connectPromise).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('creates a fresh root after synchronous initial root creation failure', async () => {
@@ -185,6 +222,25 @@ describe('PigpioGateway', () => {
     ]);
     expect((gateway as unknown as { connectPromise: Promise<void> | null }).connectPromise).toBeNull();
     expect(pigpioClient.pigpio).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores a delayed disconnected event after the shared root reconnects', async () => {
+    const gpio = { read: vi.fn() } as unknown as PigpioGpio;
+    const client = makeClient(gpio);
+    pigpioClient.pigpio.mockReturnValue(client);
+    const gateway = new PigpioGateway(pigpioClient);
+
+    const initial = gateway.connect();
+    client.emit('connected');
+    await initial;
+    client.emit('disconnected');
+    await vi.advanceTimersByTimeAsync(1_000);
+    client.emit('connected');
+
+    client.emitStale('disconnected');
+
+    expect(gateway.connectionState()).toEqual({ connected: true, generation: 2 });
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('coalesces error and disconnected signals for one outage into one retry timer', async () => {

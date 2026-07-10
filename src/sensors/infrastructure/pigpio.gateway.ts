@@ -28,6 +28,7 @@ interface PigpioRoot {
   gpio(pin: number): PigpioGpio;
   connect(): void;
   end(): void;
+  getInfo(): { commandSocket?: boolean; notificationSocket?: boolean };
   on(event: 'connected' | 'disconnected' | 'error', cb: (info?: unknown) => void): void;
   once(event: 'connected' | 'disconnected' | 'error', cb: (info?: unknown) => void): void;
 }
@@ -170,14 +171,21 @@ export class PigpioGateway implements OnModuleInit, OnModuleDestroy {
     });
     client.on('disconnected', () => {
       if (this.destroyed || this.client !== client) return;
+      if (this.rootIsConnected(client)) return;
       this.logger.warn('Disconnected from pigpiod');
       this.handleConnectionFailure();
     });
     client.on('error', (err) => {
       if (this.destroyed || this.client !== client) return;
+      if (this.rootIsConnected(client)) return;
       this.logger.warn(`pigpiod error: ${(err as Error)?.message ?? String(err)}`);
       this.handleConnectionFailure(err);
     });
+  }
+
+  private rootIsConnected(client: PigpioRoot): boolean {
+    const { commandSocket, notificationSocket } = client.getInfo();
+    return commandSocket === true && notificationSocket === true;
   }
 
   private handleConnectionFailure(error?: unknown): void {
