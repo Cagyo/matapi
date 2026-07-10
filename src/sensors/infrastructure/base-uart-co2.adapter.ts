@@ -27,6 +27,7 @@ export interface UartCo2Config {
 }
 
 const MAX_CONSECUTIVE_BAD_READS = 10;
+const RECONNECT_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 30_000] as const;
 
 const DEFAULT_SAMPLE_LOG_MS = 5 * 60 * 1000;
 const MAX_LOG_BUFFER = 500;
@@ -106,6 +107,11 @@ export abstract class BaseUartCo2Adapter implements SensorDriverPort {
   private offline = true;
   private degraded = false;
   private consecutiveBadReads = 0;
+  private nextReconnectAt = 0;
+  private reconnectDelayIndex = 0;
+  private reconnectInFlight: Promise<boolean> | null = null;
+  private sourceReadInFlight: Promise<number | null> | null = null;
+  private destroyed = false;
 
   protected constructor(
     protected readonly source: Co2Source,
@@ -120,14 +126,11 @@ export abstract class BaseUartCo2Adapter implements SensorDriverPort {
   async init(config: SensorConfig): Promise<void> {
     this.config = config;
     this.uart = parseUartCo2Config(config.config, this.defaults());
-
-    try {
-      await this.source.open(this.uart);
-      this.offline = false;
-    } catch (err) {
-      this.offline = true;
-      this.logger.warn(`UART "${config.name}" open failed: ${(err as Error).message}`);
-    }
+    this.destroyed = false;
+    this.nextReconnectAt = 0;
+    this.reconnectDelayIndex = 0;
+    this.offline = true;
+    await this.ensureOpen();
 
     this.readTimer = setInterval(() => {
       void this.tick().catch((err) =>
@@ -146,6 +149,7 @@ export abstract class BaseUartCo2Adapter implements SensorDriverPort {
   }
 
   async destroy(): Promise<void> {
+    this.destroyed = true;
     if (this.readTimer) clearInterval(this.readTimer);
     if (this.flushTimer) clearInterval(this.flushTimer);
     this.readTimer = null;
@@ -181,9 +185,9 @@ export abstract class BaseUartCo2Adapter implements SensorDriverPort {
   }
 
   async healthCheck(): Promise<boolean> {
-    if (!this.source.isOpen()) return false;
+    if (!(await this.ensureOpen())) return false;
     try {
-      const ppm = await this.source.read();
+      const ppm = await this.readSample();
       return isValidPpm(ppm);
     } catch (err) {
       this.logger.warn(`healthCheck read failed: ${(err as Error).message}`);
@@ -201,14 +205,13 @@ export abstract class BaseUartCo2Adapter implements SensorDriverPort {
   }
 
   private async tick(): Promise<void> {
-    if (!this.config || !this.uart) return;
-    if (!this.source.isOpen()) return;
+    if (!this.config || !this.uart || this.destroyed) return;
+    if (!(await this.ensureOpen())) return;
 
     let ppm: number | null;
     try {
-      ppm = await this.source.read();
-    } catch (err) {
-      this.recordBadRead(`read error: ${(err as Error).message}`);
+      ppm = await this.readSample();
+    } catch {
       return;
     }
 
@@ -218,6 +221,9 @@ export abstract class BaseUartCo2Adapter implements SensorDriverPort {
     }
 
     this.consecutiveBadReads = 0;
+    this.nextReconnectAt = 0;
+    this.reconnectDelayIndex = 0;
+    this.offline = false;
     if (this.degraded) {
       this.degraded = false;
       this.logger.log(`UART "${this.config.name}" recovered from degraded state`);
@@ -252,6 +258,79 @@ export abstract class BaseUartCo2Adapter implements SensorDriverPort {
         newValue: nextLevel,
         timestamp: now,
       });
+    }
+  }
+
+  private async ensureOpen(): Promise<boolean> {
+    if (this.destroyed || !this.uart) return false;
+    if (!this.offline && this.source.isOpen()) return true;
+    if (Date.now() < this.nextReconnectAt) return false;
+    if (this.reconnectInFlight) return this.reconnectInFlight;
+
+    const reconnect = this.openSource();
+    this.reconnectInFlight = reconnect;
+    return reconnect;
+  }
+
+  private async openSource(): Promise<boolean> {
+    try {
+      await this.source.open(this.uart!);
+      if (this.destroyed) {
+        await this.closeSourceBestEffort('source close after destroy failed');
+        return false;
+      }
+      this.offline = false;
+      return true;
+    } catch (err) {
+      if (!this.destroyed) {
+        this.offline = true;
+        this.scheduleReconnect();
+        this.logger.warn(`UART "${this.config?.name}" open failed: ${(err as Error).message}`);
+      }
+      return false;
+    } finally {
+      this.reconnectInFlight = null;
+    }
+  }
+
+  private readSample(): Promise<number | null> {
+    if (this.sourceReadInFlight) return this.sourceReadInFlight;
+
+    const read = Promise.resolve()
+      .then(() => this.source.read())
+      .catch(async (err) => {
+        await this.handleReadFailure(err);
+        throw err;
+      })
+      .finally(() => {
+        if (this.sourceReadInFlight === read) this.sourceReadInFlight = null;
+      });
+    this.sourceReadInFlight = read;
+    return read;
+  }
+
+  private async handleReadFailure(err: unknown): Promise<void> {
+    await this.closeSourceBestEffort('source close after read failure failed');
+    this.offline = true;
+    this.scheduleReconnect();
+    this.recordBadRead(`read error: ${(err as Error).message}`);
+  }
+
+  private scheduleReconnect(): void {
+    if (this.destroyed) return;
+    const delay = RECONNECT_DELAYS_MS[this.reconnectDelayIndex];
+    this.nextReconnectAt = Date.now() + delay;
+    this.reconnectDelayIndex = Math.min(
+      this.reconnectDelayIndex + 1,
+      RECONNECT_DELAYS_MS.length - 1,
+    );
+  }
+
+  private async closeSourceBestEffort(context: string): Promise<void> {
+    try {
+      await this.source.close();
+    } catch (err) {
+      this.logger.warn(`${context}: ${(err as Error).message}`);
     }
   }
 

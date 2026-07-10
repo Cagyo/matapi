@@ -36,7 +36,15 @@ CO2_CRITICAL_PPM=1200
 - Flush buffered readings to `sensor_logs` every 60 seconds
 - On threshold crossing (normal→warning, warning→critical, or reverse): emit `SensorEvent` immediately
 - `getState()` returns current PPM value + level (normal/warning/critical)
-- `healthCheck()` verifies serial port responds to a read command
+- `healthCheck()` verifies serial port responds to a read command; it shares an in-flight command with a simultaneous poll rather than issuing a concurrent UART request
+
+## UART Transport and Recovery
+
+- The serial source is event-driven: incoming `data` chunks are accumulated until a complete MH-Z19 frame can be aligned and checksum-validated. Noise, invalid candidates, and stale trailing data are discarded without polling the port.
+- Serial `error` and `close` events reject the active response, retire the port, and leave the source closed. The base adapter then closes best-effort, marks the driver offline, and counts the failure as a bad read.
+- The adapter owns reconnects using the normal read cadence (no per-driver retry timer). Failed opens become eligible after 1s, 2s, 5s, 10s, then 30s for all later failures. Concurrent polls and health checks share one pending open attempt.
+- A response timeout resolves as `null`: it is a bad reading and can cause degraded state after repeated failures, but it does not close an otherwise open port. A rejected read signals a disconnected or failed port and therefore schedules reconnect.
+- A successful open clears offline state; the next valid sample resets the reconnect sequence and clears degraded state.
 
 ## Data Validation
 

@@ -4,6 +4,12 @@ import { InMemorySensorLogRepository } from '../../../src/sensors/infrastructure
 import { UartConfigInvalidError } from '../../../src/sensors/domain/errors/uart-config-invalid.error';
 import { SensorConfig } from '../../../src/sensors/domain/sensor';
 import { SensorEvent } from '../../../src/sensors/domain/sensor-event';
+import {
+  BaseUartCo2Adapter,
+  Co2Source,
+  UartCo2Config,
+  UartCo2Defaults,
+} from '../../../src/sensors/infrastructure/base-uart-co2.adapter';
 
 function uartConfig(over: Partial<SensorConfig['config']> = {}): SensorConfig {
   return {
@@ -114,7 +120,6 @@ describe('MockUartCo2Adapter (base UART CO2 behaviour)', () => {
   it('marks itself degraded after 10 consecutive bad reads', async () => {
     const logs = new InMemorySensorLogRepository();
     const source = new InMemoryCo2Source([]);
-    source.queueFailures(15);
     const adapter = new MockUartCo2Adapter(logs, source);
     await adapter.init(uartConfig());
 
@@ -122,6 +127,7 @@ describe('MockUartCo2Adapter (base UART CO2 behaviour)', () => {
 
     const raw = adapter.getState().raw as { degraded: boolean };
     expect(raw.degraded).toBe(true);
+    expect(source.isOpen()).toBe(true);
 
     await adapter.destroy();
   });
@@ -151,13 +157,14 @@ describe('MockUartCo2Adapter (base UART CO2 behaviour)', () => {
     await adapter.destroy();
   });
 
-  it('healthCheck returns false when source is closed', async () => {
+  it('healthCheck reopens a closed source before reading it', async () => {
     const source = new InMemoryCo2Source([700]);
     const adapter = new MockUartCo2Adapter(new InMemorySensorLogRepository(), source);
     await adapter.init(uartConfig());
     await source.close();
 
-    expect(await adapter.healthCheck()).toBe(false);
+    expect(await adapter.healthCheck()).toBe(true);
+    expect(source.isOpen()).toBe(true);
 
     await adapter.destroy();
   });
@@ -196,4 +203,301 @@ describe('MockUartCo2Adapter (base UART CO2 behaviour)', () => {
       else process.env.UART_SAMPLE_LOG_MS = prev;
     }
   });
+
+  it('reopens after an initial open failure at the first eligible poll', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2030-01-01T00:00:00Z'));
+    const source = new FlakyCo2Source([700]);
+    source.queueOpenFailures(1);
+    const adapter = new FlakyUartCo2Adapter(new InMemorySensorLogRepository(), source);
+
+    await adapter.init(uartConfig());
+    expect(adapter.getState().raw).toMatchObject({ offline: true });
+    expect(source.openCalls).toBe(1);
+
+    await adapter.pollOnce();
+    expect(source.openCalls).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await adapter.pollOnce();
+    expect(source.openCalls).toBe(2);
+    expect(adapter.getState().raw).toMatchObject({ offline: false });
+
+    await adapter.destroy();
+  });
+
+  it('uses the 1s, 2s, 5s, 10s, and 30s reopen eligibility sequence', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2030-01-01T00:00:00Z'));
+    const source = new FlakyCo2Source();
+    source.queueOpenFailures(6);
+    const adapter = new FlakyUartCo2Adapter(new InMemorySensorLogRepository(), source);
+
+    await adapter.init(uartConfig());
+
+    let expectedOpenCalls = 1;
+    for (const delay of [1_000, 2_000, 5_000, 10_000, 30_000]) {
+      await vi.advanceTimersByTimeAsync(delay - 1);
+      await adapter.pollOnce();
+      expect(source.openCalls).toBe(expectedOpenCalls);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await adapter.pollOnce();
+      expectedOpenCalls += 1;
+      expect(source.openCalls).toBe(expectedOpenCalls);
+    }
+
+    expect(source.openCalls).toBe(6);
+    await adapter.destroy();
+  });
+
+  it('shares one pending reopen attempt across multiple poll ticks', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2030-01-01T00:00:00Z'));
+    const source = new FlakyCo2Source([700]);
+    source.queueOpenFailures(1);
+    const adapter = new FlakyUartCo2Adapter(new InMemorySensorLogRepository(), source);
+
+    await adapter.init(uartConfig());
+    const reopen = source.deferNextOpen();
+    await vi.advanceTimersByTimeAsync(1_000);
+    const firstTick = adapter.pollOnce();
+    await reopen.started;
+    const secondTick = adapter.pollOnce();
+
+    expect(source.openCalls).toBe(2);
+    reopen.resolve();
+    await Promise.all([firstTick, secondTick]);
+    expect(source.openCalls).toBe(2);
+
+    await adapter.destroy();
+  });
+
+  it('shares an in-flight source read between a poll and health check', async () => {
+    const source = new FlakyCo2Source();
+    const adapter = new FlakyUartCo2Adapter(new InMemorySensorLogRepository(), source);
+    await adapter.init(uartConfig());
+
+    const read = source.deferNextRead();
+    const poll = adapter.pollOnce();
+    await read.started;
+    const health = adapter.healthCheck();
+
+    expect(source.readCalls).toBe(1);
+    read.resolve(700);
+    await expect(health).resolves.toBe(true);
+    await poll;
+    expect(source.readCalls).toBe(1);
+
+    await adapter.destroy();
+  });
+
+  it('closes, marks offline, and schedules reopen after a read rejection', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2030-01-01T00:00:00Z'));
+    const source = new FlakyCo2Source([700]);
+    const adapter = new FlakyUartCo2Adapter(new InMemorySensorLogRepository(), source);
+    await adapter.init(uartConfig());
+    source.queueReadFailures(1);
+
+    await adapter.pollOnce();
+    expect(source.closeCalls).toBe(1);
+    expect(source.isOpen()).toBe(false);
+    expect(adapter.getState().raw).toMatchObject({ offline: true });
+
+    await adapter.pollOnce();
+    expect(source.openCalls).toBe(1);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await adapter.pollOnce();
+    expect(source.openCalls).toBe(2);
+
+    await adapter.destroy();
+  });
+
+  it('resets backoff and clears degraded/offline state after a reopened source yields a valid sample', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2030-01-01T00:00:00Z'));
+    const source = new FlakyCo2Source(Array.from({ length: 10 }, () => null));
+    source.queueOpenFailures(2);
+    const adapter = new FlakyUartCo2Adapter(new InMemorySensorLogRepository(), source);
+    await adapter.init(uartConfig());
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await adapter.pollOnce();
+    await vi.advanceTimersByTimeAsync(2_000);
+    await adapter.pollOnce();
+    for (let index = 0; index < 9; index += 1) await adapter.pollOnce();
+    expect(adapter.getState().raw).toMatchObject({ degraded: true, offline: false });
+
+    await source.close();
+    source.queueReadings(700);
+    await adapter.pollOnce();
+
+    expect(adapter.getState().raw).toMatchObject({ degraded: false, offline: false });
+    expect(adapter.getState().value).toBe(700);
+
+    source.queueReadFailures(1);
+    await adapter.pollOnce();
+    await vi.advanceTimersByTimeAsync(999);
+    await adapter.pollOnce();
+    expect(source.openCalls).toBe(4);
+    await vi.advanceTimersByTimeAsync(1);
+    await adapter.pollOnce();
+    expect(source.openCalls).toBe(5);
+
+    await adapter.destroy();
+  });
+
+  it('does not reopen after destroy and flushes the capped buffer', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2030-01-01T00:00:00Z'));
+    const previousSampleInterval = process.env.UART_SAMPLE_LOG_MS;
+    process.env.UART_SAMPLE_LOG_MS = '0';
+    try {
+      const logs = new InMemorySensorLogRepository();
+      const source = new FlakyCo2Source(Array.from({ length: 600 }, () => 700));
+      const adapter = new FlakyUartCo2Adapter(logs, source);
+      await adapter.init(uartConfig());
+
+      for (let index = 0; index < 600; index += 1) await adapter.pollOnce();
+      expect(adapter.pendingLogCount).toBe(500);
+
+      await source.close();
+      await adapter.destroy();
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(source.openCalls).toBe(1);
+      expect(logs.entries).toHaveLength(500);
+    } finally {
+      if (previousSampleInterval === undefined) delete process.env.UART_SAMPLE_LOG_MS;
+      else process.env.UART_SAMPLE_LOG_MS = previousSampleInterval;
+    }
+  });
 });
+
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  return {
+    promise: new Promise<T>((nextResolve) => {
+      resolve = nextResolve;
+    }),
+    resolve,
+  };
+}
+
+class FlakyCo2Source implements Co2Source {
+  private opened = false;
+  private openFailures = 0;
+  private readFailures = 0;
+  private nextOpen?: Deferred<void> & { started: Promise<void>; signalStarted: () => void };
+  private nextRead?: Deferred<number | null> & { started: Promise<void>; signalStarted: () => void };
+  private readInFlight = false;
+  private readonly readings: Array<number | null>;
+
+  openCalls = 0;
+  closeCalls = 0;
+  readCalls = 0;
+
+  constructor(readings: Array<number | null> = []) {
+    this.readings = [...readings];
+  }
+
+  queueOpenFailures(count: number): void {
+    this.openFailures += count;
+  }
+
+  queueReadFailures(count: number): void {
+    this.readFailures += count;
+  }
+
+  queueReadings(...readings: Array<number | null>): void {
+    this.readings.push(...readings);
+  }
+
+  deferNextOpen(): Deferred<void> & { started: Promise<void> } {
+    const attempt = this.createDeferredAttempt<void>();
+    this.nextOpen = attempt;
+    return attempt;
+  }
+
+  deferNextRead(): Deferred<number | null> & { started: Promise<void> } {
+    const attempt = this.createDeferredAttempt<number | null>();
+    this.nextRead = attempt;
+    return attempt;
+  }
+
+  async open(_uart: UartCo2Config): Promise<void> {
+    this.openCalls += 1;
+    if (this.openFailures > 0) {
+      this.openFailures -= 1;
+      throw new Error('simulated open failure');
+    }
+    const pendingOpen = this.nextOpen;
+    this.nextOpen = undefined;
+    if (pendingOpen) {
+      pendingOpen.signalStarted();
+      await pendingOpen.promise;
+    }
+    this.opened = true;
+  }
+
+  async close(): Promise<void> {
+    this.closeCalls += 1;
+    this.opened = false;
+  }
+
+  isOpen(): boolean {
+    return this.opened;
+  }
+
+  async read(): Promise<number | null> {
+    if (this.readInFlight) throw new Error('concurrent source read');
+    this.readCalls += 1;
+    this.readInFlight = true;
+    try {
+      const pendingRead = this.nextRead;
+      this.nextRead = undefined;
+      if (pendingRead) {
+        pendingRead.signalStarted();
+        return await pendingRead.promise;
+      }
+      if (this.readFailures > 0) {
+        this.readFailures -= 1;
+        throw new Error('simulated read failure');
+      }
+      return this.readings.shift() ?? null;
+    } finally {
+      this.readInFlight = false;
+    }
+  }
+
+  private createDeferredAttempt<T>(): Deferred<T> & {
+    started: Promise<void>;
+    signalStarted: () => void;
+  } {
+    const result = deferred<T>();
+    const start = deferred<void>();
+    return { ...result, started: start.promise, signalStarted: () => start.resolve() };
+  }
+}
+
+class FlakyUartCo2Adapter extends BaseUartCo2Adapter {
+  constructor(logs: InMemorySensorLogRepository, source: FlakyCo2Source) {
+    super(source, logs, FlakyUartCo2Adapter.name);
+  }
+
+  protected defaults(): UartCo2Defaults {
+    return {
+      warning: 800,
+      critical: 1200,
+      readIntervalMs: 60_000,
+      flushIntervalMs: 600_000,
+      baudRate: 9600,
+    };
+  }
+}
