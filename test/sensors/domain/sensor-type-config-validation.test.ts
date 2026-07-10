@@ -49,6 +49,12 @@ describe('mqttConfigIssues', () => {
       mqttConfigIssues({ topic: 'home/front-door', reconnectMs: Infinity }),
     ).toContain('invalid "reconnectMs": Infinity');
   });
+
+  it('returns an issue for a BigInt MQTT quality of service', () => {
+    expect(mqttConfigIssues({ topic: 'home/front-door', qos: 1n })).toEqual([
+      'invalid "qos": [unserializable value]',
+    ]);
+  });
 });
 
 describe('cameraConfigIssues', () => {
@@ -97,5 +103,17 @@ describe('cameraConfigIssues', () => {
     expect(
       cameraConfigIssues({ type: 'usb', snapshotCacheTtlMs: Infinity }),
     ).toContain('invalid "snapshotCacheTtlMs": Infinity');
+  });
+
+  it('returns an issue for a circular resolution dimension', () => {
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+
+    expect(
+      cameraConfigIssues({
+        type: 'usb',
+        resolution: { width: circular },
+      }),
+    ).toEqual(['invalid "resolution.width": [unserializable value]']);
   });
 });

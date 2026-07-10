@@ -94,6 +94,14 @@ function render(value: unknown): string {
   if (typeof value === 'number' && !Number.isFinite(value)) {
     return String(value);
   }
-  const serialized = JSON.stringify(value);
-  return serialized === undefined ? String(value) : serialized;
+  if (value === undefined) {
+    return 'undefined';
+  }
+
+  try {
+    const serialized = JSON.stringify(value);
+    return serialized === undefined ? `[${typeof value}]` : serialized;
+  } catch {
+    return '[unserializable value]';
+  }
 }
