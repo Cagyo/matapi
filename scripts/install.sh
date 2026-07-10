@@ -443,7 +443,10 @@ patch_legacy_feature_serial_calls() {
 
   echo "Checking feature installers for legacy raspi-config serial commands..."
 
-  sudo grep -RIlE 'raspi-config[[:space:]]+nonint[[:space:]]+do_serial([[:space:]]|$)' "$INSTALL_DIR/scripts" 2>/dev/null |
+  sudo grep -RIlE \
+    --exclude='*.bak.serial.*' \
+    '^[[:space:]]*(sudo[[:space:]]+)?raspi-config[[:space:]]+nonint[[:space:]]+do_serial[[:space:]]+' \
+    "$INSTALL_DIR/scripts" 2>/dev/null |
   while IFS= read -r file; do
     echo "Patching legacy serial command in: $file"
     sudo cp "$file" "${file}.bak.serial.$(date +%s)" || true

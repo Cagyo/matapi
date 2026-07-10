@@ -3,6 +3,7 @@ import {
   chmodSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -115,6 +116,62 @@ describe('motion install scripts', () => {
 
       expect(script).toMatch(/run_migrations\s*\n\s*seed_motion_camera_metadata/);
       expect(output.trim().split('\n').at(-1)).toBe('front_door_cam|front_door_cam|motion|1');
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('patches only live legacy serial commands, not comments or prior backups', () => {
+    const script = readFileSync(resolve('scripts/install.sh'), 'utf8');
+    const tempDir = mkdtempSync(join(tmpdir(), 'home-worker-serial-patch-'));
+
+    try {
+      const fakeBin = join(tempDir, 'bin');
+      const installDir = join(tempDir, 'install');
+      const scriptsDir = join(installDir, 'scripts');
+      const installer = join(scriptsDir, 'install.sh');
+      const legacyInstaller = join(scriptsDir, 'legacy-feature.sh');
+      const priorBackup = `${legacyInstaller}.bak.serial.1`;
+
+      execFileSync('mkdir', ['-p', fakeBin, scriptsDir]);
+      writeFileSync(
+        join(fakeBin, 'sudo'),
+        '#!/bin/sh\nif [ "$1" = "-u" ]; then shift 2; fi\nexec "$@"\n',
+      );
+      chmodSync(join(fakeBin, 'sudo'), 0o755);
+      writeFileSync(installer, script.replace(/\nmain "\$@"\s*$/, '\n'));
+      writeFileSync(legacyInstaller, 'sudo raspi-config nonint do_serial 2\n');
+      writeFileSync(priorBackup, 'sudo raspi-config nonint do_serial 2\n');
+
+      const harness = join(tempDir, 'patch-legacy-serial.sh');
+      writeFileSync(
+        harness,
+        [
+          '#!/bin/bash',
+          'set -euo pipefail',
+          `export PATH=${shQuote(fakeBin)}:"$PATH"`,
+          `export HOME_WORKER_INSTALL_DIR=${shQuote(installDir)}`,
+          `. ${shQuote(installer)}`,
+          'patch_legacy_feature_serial_calls',
+          '',
+        ].join('\n'),
+      );
+      chmodSync(harness, 0o755);
+
+      execFileSync('bash', [harness]);
+
+      expect(readFileSync(legacyInstaller, 'utf8')).toContain(
+        'raspi-config nonint do_serial_hw 0 || true',
+      );
+      const generatedBackups = readdirSync(scriptsDir);
+      expect(generatedBackups.filter((name) => name.startsWith('install.sh.bak.serial.'))).toHaveLength(
+        0,
+      );
+      expect(
+        generatedBackups.filter((name) =>
+          name.startsWith('legacy-feature.sh.bak.serial.1.bak.serial.'),
+        ),
+      ).toHaveLength(0);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
