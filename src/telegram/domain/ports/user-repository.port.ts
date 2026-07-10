@@ -16,6 +16,11 @@ export interface UserRepositoryPort {
   findByName(name: string): Promise<User | null>;
   createAdmin(user: NewUser): Promise<User>;
   createUser(user: NewUser): Promise<User>;
+  /**
+   * Atomically demote an admin unless that would leave no administrator.
+   * Returns `null` when the target is the final admin.
+   */
+  demoteAdminIfNotLast(telegramId: number): Promise<User | null>;
   updateRole(telegramId: number, role: Role): Promise<User>;
   /** Toggle the user-level global mute (spec 12 — `/mute`, `/unmute`). */
   setMuted(telegramId: number, muted: boolean): Promise<User>;

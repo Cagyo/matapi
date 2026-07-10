@@ -109,4 +109,15 @@ describe('DrizzleUserRepository', () => {
     expect(await repo.countAdmins()).toBe(1);
     ctx.close();
   });
+
+  it('keeps the final admin when demoting atomically', async () => {
+    await repo.createAdmin({
+      telegramId: 1001,
+      name: 'Ada',
+      role: 'admin',
+      createdAt: new Date('2030-01-01T00:00:00.000Z'),
+    });
+    await expect(repo.demoteAdminIfNotLast(1001)).resolves.toBeNull();
+    expect(await repo.countAdmins()).toBe(1);
+  });
 });

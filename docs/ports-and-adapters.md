@@ -56,7 +56,7 @@ Status legend: ✅ canonical · 🚧 in transition · 📝 planned
 | Port | Adapters | Status | Source |
 |---|---|---|---|
 | `BotGateway` | `GrammyBotGateway` | 📝 — single intentional gateway; do not abstract grammY itself further. | [bot.service.ts](../src/telegram/bot.service.ts) |
-| `UserRepositoryPort` (`USER_REPOSITORY`) | `DrizzleUserRepository`, `InMemoryUserRepository` (mock/dev/tests) | ✅ canonical — `findByName` is case-insensitive and strips a leading `@`. | [user-repository.port.ts](../src/telegram/domain/ports/user-repository.port.ts) |
+| `UserRepositoryPort` (`USER_REPOSITORY`) | `DrizzleUserRepository`, `InMemoryUserRepository` (mock/dev/tests) | ✅ canonical — `findByName` is case-insensitive and strips a leading `@`; first-admin claims and final-admin demotion protection are atomic. | [user-repository.port.ts](../src/telegram/domain/ports/user-repository.port.ts) |
 | `AdminClaimCredentialPort` (`ADMIN_CLAIM_CREDENTIAL`) | `EnvAdminClaimCredentialAdapter` | ✅ canonical — verifies the setup-generated `CLAIM_ADMIN_TOKEN` without exposing its value. | [admin-claim-credential.port.ts](../src/telegram/domain/ports/admin-claim-credential.port.ts) |
 | `InviteCodeRepositoryPort` (`INVITE_CODE_REPOSITORY`) | `DrizzleInviteCodeRepository`, `InMemoryInviteCodeRepository` (mock/tests) | ✅ canonical | [invite-code-repository.port.ts](../src/telegram/domain/ports/invite-code-repository.port.ts) |
 | `DirectMessengerPort` (`DIRECT_MESSENGER`) | `TelegramDirectMessenger` (logs in mock mode when no bot is bound) | ✅ canonical — used by `/start`, `/promote`, `/demote` for one-off notifications. | [direct-messenger.port.ts](../src/telegram/domain/ports/direct-messenger.port.ts) |

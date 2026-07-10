@@ -1,4 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
+import { LastAdminDemotionError } from '../domain/errors/last-admin-demotion.error';
 import { NotAdminError } from '../domain/errors/not-admin.error';
 import { UserNotFoundError } from '../domain/errors/user-not-found.error';
 import {
@@ -7,7 +8,7 @@ import {
 } from '../domain/ports/user-repository.port';
 import { User } from '../domain/user.entity';
 
-/** Spec 11 — `/demote <user>` (admin only). Self-demotion is allowed. */
+/** Spec 11 — `/demote <user>` (admin only). Always retains one admin. */
 @Injectable()
 export class DemoteUserUseCase {
   constructor(
@@ -18,6 +19,8 @@ export class DemoteUserUseCase {
     const user = await this.users.findByName(target);
     if (!user) throw new UserNotFoundError(target);
     if (user.role !== 'admin') throw new NotAdminError(user.name);
-    return this.users.updateRole(user.telegramId, 'user');
+    const demoted = await this.users.demoteAdminIfNotLast(user.telegramId);
+    if (!demoted) throw new LastAdminDemotionError();
+    return demoted;
   }
 }

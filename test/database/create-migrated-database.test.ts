@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   createMigratedDatabase,
   MigrationRunner,
@@ -45,5 +45,22 @@ describe('createMigratedDatabase', () => {
 
     expect(thrown).toBe(migrationError);
     expect(sqlite.open).toBe(false);
+  });
+
+  it('preserves the migration error when closing SQLite also fails', () => {
+    const sqlite = new Database(':memory:');
+    const migrationError = new Error('migration failed');
+    const closeError = new Error('close failed');
+    const close = vi.spyOn(sqlite, 'close').mockImplementation(() => {
+      throw closeError;
+    });
+    const runMigrations: MigrationRunner = () => {
+      throw migrationError;
+    };
+
+    expect(() =>
+      createMigratedDatabase(sqlite, '/migrations', runMigrations),
+    ).toThrow(migrationError);
+    expect(close).toHaveBeenCalledOnce();
   });
 });

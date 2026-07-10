@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ClaimAdminUseCase } from '../../../src/telegram/application/claim-admin.use-case';
+import { DemoteUserUseCase } from '../../../src/telegram/application/demote-user.use-case';
 import { AdminAlreadyClaimedError } from '../../../src/telegram/domain/errors/admin-already-claimed.error';
 import { AdminClaimNotConfiguredError } from '../../../src/telegram/domain/errors/admin-claim-not-configured.error';
 import { InvalidAdminClaimTokenError } from '../../../src/telegram/domain/errors/invalid-admin-claim-token.error';
+import { LastAdminDemotionError } from '../../../src/telegram/domain/errors/last-admin-demotion.error';
 import { AdminClaimCredentialPort } from '../../../src/telegram/domain/ports/admin-claim-credential.port';
 import { InMemoryUserRepository } from '../../../src/telegram/infrastructure/in-memory-user.repository';
 import { ClockPort } from '../../../src/events/domain/ports/clock.port';
@@ -71,6 +73,34 @@ describe('ClaimAdminUseCase', () => {
     ).rejects.toBeInstanceOf(AdminAlreadyClaimedError);
 
     expect(await users.countAdmins()).toBe(1);
+  });
+
+  it('keeps the claim token unusable after rejecting final-admin demotion', async () => {
+    const users = new InMemoryUserRepository([
+      {
+        telegramId: 1001,
+        name: 'Ada',
+        role: 'admin',
+        createdAt: new Date('2029-01-01T00:00:00.000Z'),
+      },
+    ]);
+    const demote = new DemoteUserUseCase(users);
+    const claim = new ClaimAdminUseCase(
+      users,
+      clock,
+      claimCredential('owner-token'),
+    );
+
+    await expect(demote.execute('Ada')).rejects.toBeInstanceOf(
+      LastAdminDemotionError,
+    );
+    await expect(
+      claim.execute({
+        telegramId: 1002,
+        name: 'Linus',
+        token: 'owner-token',
+      }),
+    ).rejects.toBeInstanceOf(AdminAlreadyClaimedError);
   });
 
   it('rejects an existing admin before checking the claim credential', async () => {

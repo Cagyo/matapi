@@ -152,7 +152,7 @@ Admin only
 ### Behavior
 1. Find user
 2. If not admin → inform
-3. Update role to `user`
+3. Atomically update role to `user` only if another admin remains
 4. Notify the demoted user
 
 ### Output
@@ -165,4 +165,8 @@ Admin only
 |-----------|----------|
 | User not found | "❌ User not found" |
 | Not admin | "ℹ️ Alex is already a regular user" |
-| Demoting self | Allowed (admin accepts the risk) |
+| Final admin | "❌ Cannot demote the final admin." |
+
+Self-demotion is allowed only while another admin remains. The repository
+performs this check and role update atomically so concurrent demotions cannot
+leave the worker without an admin and reactivate the one-use claim token.

@@ -72,6 +72,21 @@ export class InMemoryUserRepository implements UserRepositoryPort {
     return persisted;
   }
 
+  async demoteAdminIfNotLast(telegramId: number): Promise<User | null> {
+    const existing = this.store.get(telegramId);
+    if (!existing) throw new UserNotFoundError(String(telegramId));
+
+    let adminCount = 0;
+    for (const user of this.store.values()) {
+      if (user.role === 'admin') adminCount += 1;
+    }
+    if (existing.role !== 'admin' || adminCount <= 1) return null;
+
+    const updated: User = { ...existing, role: 'user' };
+    this.store.set(telegramId, updated);
+    return updated;
+  }
+
   async updateRole(telegramId: number, role: Role): Promise<User> {
     const existing = this.store.get(telegramId);
     if (!existing) throw new UserNotFoundError(String(telegramId));

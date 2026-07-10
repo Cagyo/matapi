@@ -30,7 +30,11 @@ export function createMigratedDatabase(
   try {
     runMigrations(database, { migrationsFolder });
   } catch (error) {
-    sqlite.close();
+    try {
+      sqlite.close();
+    } catch {
+      // The migration failure is the actionable error and must be preserved.
+    }
     throw error;
   }
 

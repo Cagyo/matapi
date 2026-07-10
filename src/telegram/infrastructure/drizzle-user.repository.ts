@@ -101,6 +101,25 @@ export class DrizzleUserRepository implements UserRepositoryPort {
     return this.toUser(row);
   }
 
+  async demoteAdminIfNotLast(telegramId: number): Promise<User | null> {
+    return this.db.transaction((tx) => {
+      const [{ value }] = tx
+        .select({ value: count() })
+        .from(users)
+        .where(eq(users.role, 'admin'))
+        .all();
+      if (value <= 1) return null;
+
+      const [row] = tx
+        .update(users)
+        .set({ role: 'user' })
+        .where(eq(users.telegramId, telegramId))
+        .returning()
+        .all();
+      return row ? this.toUser(row) : null;
+    });
+  }
+
   async updateRole(telegramId: number, role: Role): Promise<User> {
     const [row] = this.db
       .update(users)

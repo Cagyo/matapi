@@ -425,6 +425,7 @@ export const en = {
       `🎉 You've been promoted to admin by ${admin}.`,
     demoted: (name: string) => `✅ ${name} demoted to user.`,
     demotedNotice: (admin: string) => `You've been demoted to user by ${admin}.`,
+    finalAdmin: '❌ Cannot demote the final admin.',
     promoteFailed: '❌ Failed to promote user',
     demoteFailed: '❌ Failed to demote user',
     registerFailed: '❌ Failed to register',
