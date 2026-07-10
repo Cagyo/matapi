@@ -11,13 +11,14 @@ case "$FEATURE" in
     # Add user to motion and video groups for shared access
     sudo usermod -aG motion,video "$USER" 2>/dev/null || true
 
-    # Create target video storage directory and make the whole path traversable
+    # Create target media storage directories and make the whole path traversable
     # by the Motion daemon. Some Pi images keep /home/pi at 700 by default.
-    sudo mkdir -p /home/pi/motion/videos
+    sudo mkdir -p /home/pi/motion/videos /home/pi/motion/thumbnails
     sudo chmod 755 /home/pi
     sudo chown -R motion:motion /home/pi/motion 2>/dev/null || sudo chown -R "$USER:$USER" /home/pi/motion
     sudo chmod 755 /home/pi/motion
     sudo chmod -R 775 /home/pi/motion/videos
+    sudo chmod -R 775 /home/pi/motion/thumbnails
 
     # Ensure log directory exists and persist across tmpfs reboots via systemd-tmpfiles
     sudo mkdir -p /var/log/motion
@@ -27,6 +28,7 @@ case "$FEATURE" in
 d /var/log/motion 0755 motion motion - -
 d /home/pi/motion 0755 motion motion - -
 d /home/pi/motion/videos 0775 motion motion - -
+d /home/pi/motion/thumbnails 0775 motion motion - -
 EOF
       sudo systemd-tmpfiles --create /etc/tmpfiles.d/motion.conf 2>/dev/null || true
     fi
@@ -56,19 +58,20 @@ EOF
       sudo sed -i -E 's/^[#[:space:]]*max_movie_time[[:space:]]+.*/movie_max_time 30/' /etc/motion/motion.conf
       set_motion_conf movie_max_time 30
       set_motion_conf movie_output on
-      set_motion_conf movie_filename "%Y/%m/%d/%H%M%S"
-      set_motion_conf picture_output on
-      set_motion_conf picture_filename "%Y/%m/%d/%H%M%S"
+      set_motion_conf movie_codec mpeg4
+      set_motion_conf movie_filename "%Y/%m/%d/%H%M%S-%{eventid}"
+      set_motion_conf picture_output first
+      set_motion_conf picture_filename "../thumbnails/%Y/%m/%d/%H%M%S-%{eventid}"
       set_motion_conf stream_port 8081
       set_motion_conf stream_localhost on
 
       # Spec 20 internal webhooks. Motion runs these via `sh -c`, so the URLs
       # MUST be quoted — an unquoted `&` backgrounds curl and drops `file=%f`.
       # Delete any previous hook definitions, then append fresh quoted hooks.
-      sudo sed -i -E '/^[#[:space:]]*on_(event_start|event_end|picture_save)[[:space:]]/d' /etc/motion/motion.conf
+      sudo sed -i -E '/^[#[:space:]]*on_(event_start|event_end|movie_start|movie_end|picture_save)[[:space:]]/d' /etc/motion/motion.conf
       cat <<'EOF' | sudo tee -a /etc/motion/motion.conf >/dev/null
 on_event_start curl -s "http://localhost:4000/motion/event-start?camera=%t"
-on_event_end curl -s "http://localhost:4000/motion/event-end?camera=%t&file=%f"
+on_movie_end curl -s "http://localhost:4000/motion/movie-end?camera=%t&file=%f"
 on_picture_save curl -s "http://localhost:4000/motion/snapshot?file=%f"
 EOF
     fi

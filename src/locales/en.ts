@@ -992,11 +992,11 @@ export const en = {
   },
 
   gdriveAuth: {
-    prompt:
+    prompt: (sshHost: string) =>
       '☁️ *Google Drive Auth Setup*\n\n' +
       'Paste your rclone `[gdrive]` config section below, or upload an `rclone.conf` file.\n\n' +
       'To configure Drive directly on the Pi instead, run this from your laptop:\n' +
-      '`ssh pi@<pi-host> sudo -H -u homeworker env RCLONE_CONFIG=/home/homeworker/.config/rclone/rclone.conf rclone config`\n\n' +
+      `\`ssh pi@${sshHost} sudo -H -u homeworker env RCLONE_CONFIG=/home/homeworker/.config/rclone/rclone.conf rclone config\`\n\n` +
       'Create or update a remote named `gdrive` with type `drive`. On a headless Pi, answer `n` to browser auth; if rclone prints `rclone authorize "drive"`, run that on a computer with a browser and paste the token back into the SSH session.\n\n' +
       'When direct setup is done, send /cancel here, then run /gdrive status.',
     success: (used: string, total: string) =>

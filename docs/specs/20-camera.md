@@ -33,20 +33,29 @@ Worker exposes internal HTTP endpoints (not public) for these hooks.
 ## File Structure
 
 ```
-/home/pi/motion/videos/
-├── 2026/
-│   ├── 03/
-│   │   └── 08/
-│   │       ├── 125106.mp4
-│   │       ├── 125106.jpg
-│   │       ├── 130042.mp4
-│   │       └── 130042.jpg
-│   └── 04/
-│       └── 08/
-│           └── ...
+/home/pi/motion/
+├── videos/
+│   └── 2026/
+│       ├── 03/
+│       │   └── 08/
+│       │       ├── 133439-1234567890.mkv
+│       │       └── 133501-1234567891.mkv
+│       └── 04/
+│           └── 08/
+│               └── ...
+└── thumbnails/
+    └── 2026/
+        ├── 03/
+        │   └── 08/
+        │       ├── 133439-1234567890.jpg
+        │       └── 133501-1234567891.jpg
+        └── 04/
+            └── 08/
+                └── ...
 ```
 
-Path format: `YYYY/MM/DD/HHMMSS.{mp4,jpg}`
+Video path format: `/home/pi/motion/videos/YYYY/MM/DD/HHMMSS-<motion-event-id>.<movie extension>`
+Thumbnail path format: `/home/pi/motion/thumbnails/YYYY/MM/DD/HHMMSS-<motion-event-id>.jpg`
 
 Videos cut into 30-second segments (`MOTION_VIDEO_SEGMENT_SEC`).
 

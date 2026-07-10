@@ -83,13 +83,30 @@ describe('RecordMotionEndUseCase', () => {
     expect(last?.uploadedToGdrive).toBe(false);
   });
 
-  it('is a no-op when there is no open event', async () => {
+  it('creates a closed event when a movie file ends without an open event', async () => {
     const repo = repoWith([camera('front_door')]);
     const useCase = new RecordMotionEndUseCase(repo, repo);
 
-    await expect(
-      useCase.execute('front_door', '/var/lib/motion/clip.mkv'),
-    ).resolves.toBeUndefined();
+    await useCase.execute('front_door', '/var/lib/motion/clip.mkv');
+
+    const last = await repo.lastEvent();
+    expect(last?.cameraId).toBe('front_door');
+    expect(last?.videoPath).toBe('/var/lib/motion/clip.mkv');
+    expect(last?.startedAt).not.toBeNull();
+    expect(last?.endedAt).not.toBeNull();
+  });
+
+  it('uses the Motion filename timestamp for standalone movie events', async () => {
+    const repo = repoWith([camera('front_door')]);
+    const useCase = new RecordMotionEndUseCase(repo, repo);
+
+    await useCase.execute(
+      'front_door',
+      '/home/pi/motion/videos/2026/07/09/184949-0000020260709184917.avi',
+    );
+
+    const last = await repo.lastEvent();
+    expect(last?.startedAt).toEqual(new Date(2026, 6, 9, 18, 49, 49));
   });
 });
 

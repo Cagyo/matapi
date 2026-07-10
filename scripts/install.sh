@@ -26,6 +26,7 @@ main() {
   ensure_motion_video_storage_permissions
   setup_system_update_sudoers
   run_migrations
+  seed_motion_camera_metadata
   setup_pm2
   print_done
   reboot_system
@@ -503,11 +504,13 @@ install_selected_features() {
 
 ensure_motion_video_storage_permissions() {
   local motion_dir="/home/pi/motion/videos"
+  local thumbnails_dir="/home/pi/motion/thumbnails"
   if [ ! -d "$motion_dir" ]; then
     return
   fi
 
-  echo "Ensuring Motion video storage permissions..."
+  echo "Ensuring Motion media storage permissions..."
+  sudo mkdir -p "$thumbnails_dir"
   sudo chmod 755 /home/pi
   if id motion &>/dev/null; then
     sudo chown -R motion:motion /home/pi/motion
@@ -516,21 +519,68 @@ ensure_motion_video_storage_permissions() {
   fi
   sudo chmod 755 /home/pi/motion
   sudo chmod -R 775 "$motion_dir"
+  sudo chmod -R 775 "$thumbnails_dir"
+}
+
+database_path() {
+  local db_path
+  db_path=$(
+    sed -n -E 's/^[[:space:]]*DATABASE_PATH[[:space:]]*=[[:space:]]*//p' "$INSTALL_DIR/.env" 2>/dev/null |
+    head -1 |
+    sed -E 's/[[:space:]]*$//' || true
+  )
+  case "$db_path" in
+    \"*\") db_path="${db_path#\"}"; db_path="${db_path%\"}" ;;
+    \'*\') db_path="${db_path#\'}"; db_path="${db_path%\'}" ;;
+  esac
+  if [ -z "$db_path" ]; then
+    db_path="$INSTALL_DIR/data/worker.db"
+  fi
+  printf '%s\n' "$db_path"
+}
+
+motion_feature_enabled() {
+  local features_file="$INSTALL_DIR/features.json"
+  [ -f "$features_file" ] || return 1
+
+  node -e "try { const f = require(process.argv[1]); process.exit((f.enabled || []).includes('motion') ? 0 : 1); } catch { process.exit(1); }" "$features_file"
 }
 
 run_migrations() {
   cd "$INSTALL_DIR"
   local db_path
-  db_path=$(grep -E '^DATABASE_PATH=' "$INSTALL_DIR/.env" 2>/dev/null | cut -d'=' -f2- | tr -d '"'\'' ' || true)
-  if [ -z "$db_path" ]; then
-    db_path="$INSTALL_DIR/data/worker.db"
-  fi
+  db_path="$(database_path)"
   local db_dir
   db_dir="$(dirname "$db_path")"
   sudo mkdir -p "$INSTALL_DIR/data" "$db_dir"
   sudo chown -R "$USER:$USER" "$INSTALL_DIR/data" "$db_dir"
   sudo -u "$USER" corepack yarn db:migrate
   echo "Database migrations applied"
+}
+
+seed_motion_camera_metadata() {
+  if ! motion_feature_enabled; then
+    return
+  fi
+
+  cd "$INSTALL_DIR"
+  local db_path
+  db_path="$(database_path)"
+  if [ ! -f "$db_path" ]; then
+    echo "WARNING: Database not found at $db_path; skipping Motion camera seed"
+    return
+  fi
+
+  echo "Ensuring default Motion camera metadata..."
+  sudo -u "$USER" sqlite3 "$db_path" <<'SQL'
+INSERT OR IGNORE INTO cameras (id, name, type, config, enabled)
+SELECT 'front_door_cam', 'front_door_cam', 'motion', NULL, 1
+WHERE NOT EXISTS (SELECT 1 FROM cameras WHERE enabled = 1);
+
+UPDATE cameras SET enabled = 1
+WHERE (id = 'front_door_cam' OR name = 'front_door_cam')
+  AND NOT EXISTS (SELECT 1 FROM cameras WHERE enabled = 1);
+SQL
 }
 
 setup_pm2() {

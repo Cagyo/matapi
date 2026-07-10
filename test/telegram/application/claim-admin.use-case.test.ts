@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { ClaimAdminUseCase } from '../../../src/telegram/application/claim-admin.use-case';
 import { AdminAlreadyClaimedError } from '../../../src/telegram/domain/errors/admin-already-claimed.error';
+import { AdminClaimNotConfiguredError } from '../../../src/telegram/domain/errors/admin-claim-not-configured.error';
+import { InvalidAdminClaimTokenError } from '../../../src/telegram/domain/errors/invalid-admin-claim-token.error';
+import { AdminClaimCredentialPort } from '../../../src/telegram/domain/ports/admin-claim-credential.port';
 import { InMemoryUserRepository } from '../../../src/telegram/infrastructure/in-memory-user.repository';
 import { ClockPort } from '../../../src/events/domain/ports/clock.port';
 
@@ -8,14 +11,29 @@ function fixedClock(now: Date): ClockPort {
   return { now: () => now };
 }
 
+function claimCredential(expected: string | null): AdminClaimCredentialPort {
+  return {
+    isConfigured: () => expected !== null,
+    verify: (candidate: string) => expected !== null && candidate === expected,
+  };
+}
+
 describe('ClaimAdminUseCase', () => {
   const clock = fixedClock(new Date('2030-01-01T00:00:00.000Z'));
 
   it('promotes the first sender to admin', async () => {
     const users = new InMemoryUserRepository();
-    const useCase = new ClaimAdminUseCase(users, clock);
+    const useCase = new ClaimAdminUseCase(
+      users,
+      clock,
+      claimCredential('owner-token'),
+    );
 
-    const admin = await useCase.execute({ telegramId: 1001, name: 'Ada' });
+    const admin = await useCase.execute({
+      telegramId: 1001,
+      name: 'Ada',
+      token: 'owner-token',
+    });
 
     expect(admin).toEqual({
       telegramId: 1001,
@@ -38,10 +56,18 @@ describe('ClaimAdminUseCase', () => {
         createdAt: new Date('2029-01-01T00:00:00.000Z'),
       },
     ]);
-    const useCase = new ClaimAdminUseCase(users, clock);
+    const useCase = new ClaimAdminUseCase(
+      users,
+      clock,
+      claimCredential('owner-token'),
+    );
 
     await expect(
-      useCase.execute({ telegramId: 1002, name: 'Linus' }),
+      useCase.execute({
+        telegramId: 1002,
+        name: 'Linus',
+        token: 'owner-token',
+      }),
     ).rejects.toBeInstanceOf(AdminAlreadyClaimedError);
 
     expect(await users.countAdmins()).toBe(1);
@@ -49,15 +75,51 @@ describe('ClaimAdminUseCase', () => {
 
   it('lets only one of two concurrent claims win', async () => {
     const users = new InMemoryUserRepository();
-    const useCase = new ClaimAdminUseCase(users, clock);
+    const useCase = new ClaimAdminUseCase(
+      users,
+      clock,
+      claimCredential('owner-token'),
+    );
 
     const results = await Promise.allSettled([
-      useCase.execute({ telegramId: 1, name: 'A' }),
-      useCase.execute({ telegramId: 2, name: 'B' }),
+      useCase.execute({ telegramId: 1, name: 'A', token: 'owner-token' }),
+      useCase.execute({ telegramId: 2, name: 'B', token: 'owner-token' }),
     ]);
 
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
-    expect(results.filter((r) => r.status === 'rejected')).toHaveLength(1);
+    expect(
+      results.filter(
+        (result) =>
+          result.status === 'rejected' &&
+          result.reason instanceof AdminAlreadyClaimedError,
+      ),
+    ).toHaveLength(1);
     expect(await users.countAdmins()).toBe(1);
+  });
+
+  it('rejects an unconfigured credential without creating an admin', async () => {
+    const users = new InMemoryUserRepository();
+    const useCase = new ClaimAdminUseCase(users, clock, claimCredential(null));
+
+    await expect(
+      useCase.execute({ telegramId: 1001, name: 'Ada', token: 'owner-token' }),
+    ).rejects.toBeInstanceOf(AdminClaimNotConfiguredError);
+
+    expect(await users.countAdmins()).toBe(0);
+  });
+
+  it('rejects an invalid credential token without creating an admin', async () => {
+    const users = new InMemoryUserRepository();
+    const useCase = new ClaimAdminUseCase(
+      users,
+      clock,
+      claimCredential('owner-token'),
+    );
+
+    await expect(
+      useCase.execute({ telegramId: 1001, name: 'Ada', token: 'wrong-token' }),
+    ).rejects.toBeInstanceOf(InvalidAdminClaimTokenError);
+
+    expect(await users.countAdmins()).toBe(0);
   });
 });

@@ -40,14 +40,30 @@ export class MotionHooksController {
     @Query('camera') camera?: string,
     @Query('file') file?: string,
   ): Promise<HookAck> {
+    return this.recordVideoEnd('event-end', camera, file);
+  }
+
+  @All('movie-end')
+  async movieEnd(
+    @Query('camera') camera?: string,
+    @Query('file') file?: string,
+  ): Promise<HookAck> {
+    return this.recordVideoEnd('movie-end', camera, file);
+  }
+
+  private async recordVideoEnd(
+    hook: 'event-end' | 'movie-end',
+    camera?: string,
+    file?: string,
+  ): Promise<HookAck> {
     try {
       if (!file) {
-        this.logger.warn('event-end hook missing file param — skipped');
+        this.logger.warn(`${hook} hook missing file param — skipped`);
       } else {
         await this.recordEnd.execute(camera, file);
       }
     } catch (error) {
-      this.logger.warn(`event-end hook failed: ${(error as Error).message}`);
+      this.logger.warn(`${hook} hook failed: ${(error as Error).message}`);
     }
     return { ok: true };
   }

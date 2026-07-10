@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { UpdateGdriveAuthUseCase } from '../../../src/camera/application/update-gdrive-auth.use-case';
 import { GdriveAuthHandler } from '../../../src/telegram/interfaces/gdrive-auth.handler';
 import { RoleMiddleware } from '../../../src/telegram/interfaces/role.middleware';
@@ -43,6 +43,10 @@ function createTestSetup() {
 }
 
 describe('GdriveAuthHandler', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it('registers commands and listeners', () => {
     const { composer } = createTestSetup();
     expect(composer.command).toHaveBeenCalledWith('gdrive_auth', expect.anything(), expect.anything());
@@ -61,6 +65,18 @@ describe('GdriveAuthHandler', () => {
 
     expect(reply).toHaveBeenCalledTimes(1);
     expect(reply.mock.calls[0][0]).toContain('Google Drive Auth Setup');
+  });
+
+  it('includes the resolved local SSH host in the prompt', async () => {
+    vi.stubEnv('HOME_WORKER_SSH_HOST', '192.168.1.42');
+    const { commandCallbacks } = createTestSetup();
+    const reply = vi.fn().mockResolvedValue(true);
+    const ctx = { reply, from: { id: 12345 } };
+
+    await commandCallbacks.gdrive_auth(ctx);
+
+    expect(reply.mock.calls[0][0]).toContain('ssh pi@192.168.1.42');
+    expect(reply.mock.calls[0][0]).not.toContain('<pi-host>');
   });
 
   it('rejects text without [gdrive] header when in awaitingConfig state', async () => {

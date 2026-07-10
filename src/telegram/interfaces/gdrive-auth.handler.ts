@@ -1,11 +1,49 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Composer, Context } from 'grammy';
+import { networkInterfaces, NetworkInterfaceInfo } from 'node:os';
 import { UpdateGdriveAuthUseCase } from '../../camera/application/update-gdrive-auth.use-case';
 import { GdriveAuthFailedError } from '../../camera/domain/errors/gdrive-auth-failed.error';
 import { GdriveNotInstalledError } from '../../camera/domain/errors/gdrive-not-installed.error';
 import { en, gb } from '../../locales/en';
 import { RoleMiddleware } from './role.middleware';
 import { TelegramHandler } from './telegram-handler';
+
+const FALLBACK_SSH_HOST = '<pi-host>';
+const SSH_HOST_ENV = 'HOME_WORKER_SSH_HOST';
+
+function interfacePriority(name: string): number {
+  const lower = name.toLowerCase();
+  if (/^(wlan|wl)/.test(lower)) return 0;
+  if (/^(eth|en)/.test(lower)) return 1;
+  if (/^(usb|wwan)/.test(lower)) return 2;
+  if (/^(docker|br-|veth|lo|tun|tap|tailscale|zt)/.test(lower)) return 9;
+  return 5;
+}
+
+function isUsableIpv4(address: NetworkInterfaceInfo): boolean {
+  return (
+    address.family === 'IPv4' &&
+    !address.internal &&
+    !address.address.startsWith('169.254.')
+  );
+}
+
+export function resolveLocalSshHost(): string {
+  const configured = process.env[SSH_HOST_ENV]?.trim();
+  if (configured) return configured;
+
+  const interfaces = networkInterfaces();
+  const names = Object.keys(interfaces).sort(
+    (a, b) => interfacePriority(a) - interfacePriority(b),
+  );
+
+  for (const name of names) {
+    const address = interfaces[name]?.find(isUsableIpv4);
+    if (address) return address.address;
+  }
+
+  return FALLBACK_SSH_HOST;
+}
 
 @Injectable()
 export class GdriveAuthHandler implements TelegramHandler {
@@ -106,7 +144,9 @@ export class GdriveAuthHandler implements TelegramHandler {
       return;
     }
     this.states.set(userId, 'awaitingConfig');
-    await ctx.reply(en.gdriveAuth.prompt, { parse_mode: 'Markdown' });
+    await ctx.reply(en.gdriveAuth.prompt(resolveLocalSshHost()), {
+      parse_mode: 'Markdown',
+    });
   }
 
   private async processSnippet(ctx: Context, userId: number, snippet: string): Promise<void> {

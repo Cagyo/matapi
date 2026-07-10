@@ -51,6 +51,20 @@ describe('MotionHooksController', () => {
     expect(last?.endedAt).toBeNull();
   });
 
+  it('records every movie-end hook as a separate video event', async () => {
+    const { repo, controller } = build();
+
+    expect(await controller.movieEnd('front_door', '/clip-1.avi')).toEqual({ ok: true });
+    expect(await controller.movieEnd('front_door', '/clip-2.avi')).toEqual({ ok: true });
+
+    const events = await repo.listLatestEvents(10);
+    expect(events.map((event) => event.videoPath).sort()).toEqual([
+      '/clip-1.avi',
+      '/clip-2.avi',
+    ]);
+    expect(events.every((event) => event.endedAt !== null)).toBe(true);
+  });
+
   it('never throws — returns ok even with no cameras configured', async () => {
     const repo = new InMemoryMediaRepository();
     const controller = new MotionHooksController(
