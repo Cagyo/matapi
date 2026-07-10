@@ -24,12 +24,14 @@ import { SystemUpdateUseCase } from './application/system-update.use-case';
 import { UnmuteSensorUseCase } from './application/unmute-sensor.use-case';
 import { UpdateSystemUseCase } from './application/update-system.use-case';
 import { ExportConfigUseCase } from './application/export-config.use-case';
+import { ADMIN_CLAIM_CREDENTIAL } from './domain/ports/admin-claim-credential.port';
 import { DIRECT_MESSENGER } from './domain/ports/direct-messenger.port';
 import { CONFIG_CODEC } from './domain/ports/config-codec.port';
 import { INVITE_CODE_REPOSITORY } from './domain/ports/invite-code-repository.port';
 import { USER_REPOSITORY } from './domain/ports/user-repository.port';
 import { USER_SENSOR_MUTE_REPOSITORY } from './domain/ports/user-sensor-mute-repository.port';
 import { ConsoleNotifierAdapter } from './infrastructure/console-notifier.adapter';
+import { EnvAdminClaimCredentialAdapter } from './infrastructure/env-admin-claim-credential.adapter';
 import { TelegramAdminAlertAdapter } from './infrastructure/telegram-admin-alert.adapter';
 import { DrizzleInviteCodeRepository } from './infrastructure/drizzle-invite-code.repository';
 import { DrizzleUserRepository } from './infrastructure/drizzle-user.repository';
@@ -105,6 +107,10 @@ const mode = resolveBotMode();
   ],
   providers: [
     { provide: BOT_MODE, useValue: mode },
+    {
+      provide: ADMIN_CLAIM_CREDENTIAL,
+      useClass: EnvAdminClaimCredentialAdapter,
+    },
     {
       provide: USER_REPOSITORY,
       useClass: mode === 'mock' ? InMemoryUserRepository : DrizzleUserRepository,
