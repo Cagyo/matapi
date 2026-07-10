@@ -1,12 +1,10 @@
 import { Global, Module, Logger } from '@nestjs/common';
 import Database from 'better-sqlite3';
-import { drizzle } from 'drizzle-orm/better-sqlite3';
-import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { resolve } from 'node:path';
+import { createMigratedDatabase } from './create-migrated-database';
 import { DatabaseLifecycle } from './database-lifecycle';
 import { DatabaseRecoveryState } from './database-recovery.state';
 import { openSqliteWithIntegrity } from './integrity';
-import * as schema from './schema';
 import { AppDatabase, DB, SQLITE } from './database.tokens';
 
 export * from './database.tokens';
@@ -30,18 +28,8 @@ export * from './database.tokens';
     {
       provide: DB,
       inject: [SQLITE],
-      useFactory: (sqlite: Database.Database): AppDatabase => {
-        const db = drizzle(sqlite, { schema });
-
-        try {
-          migrate(db, { migrationsFolder: resolve('./migrations') });
-        } catch (err) {
-          new Logger('DatabaseModule').warn(
-            `Migrations skipped or failed: ${(err as Error).message}`,
-          );
-        }
-        return db;
-      },
+      useFactory: (sqlite: Database.Database): AppDatabase =>
+        createMigratedDatabase(sqlite, resolve('./migrations')),
     },
     DatabaseLifecycle,
   ],

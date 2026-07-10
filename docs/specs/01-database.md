@@ -162,6 +162,9 @@ export const systemMeta = sqliteTable('system_meta', {
 
 - Drizzle Kit generates SQL files in `migrations/`
 - On startup, check `system_meta` for schema version, apply pending
+- Integrity recovery happens before migration. Any migration exception is fatal;
+  PM2 may restart the worker, but it must never serve against an incompatible
+  schema.
 - Migrations must be backward-compatible (old code works with new schema for rollback)
 - OTA update runs migrations before PM2 restart
 
