@@ -1,5 +1,7 @@
 import { Logger } from '@nestjs/common';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { MqttConfigInvalidError } from '../../../src/sensors/domain/errors/mqtt-config-invalid.error';
+import { DEFAULT_MQTT_RECONNECT_MS } from '../../../src/sensors/infrastructure/mqtt.config';
 
 const mockClient = {
   on: vi.fn(),
@@ -23,6 +25,57 @@ describe('MqttConnectionPool', () => {
     await pool.destroyAll();
 
     expect(mockClient.endAsync).toHaveBeenCalledWith(true);
+  });
+
+  it('owns MQTT.js reconnect and resubscribe policy when creating a connection', async () => {
+    const pool = new MqttConnectionPool();
+
+    await pool.acquire('mqtt://localhost:1883', {
+      reconnectPeriod: 1_000,
+      username: 'sensor-user',
+      password: 'sensor-password',
+    });
+
+    const mqtt = await import('mqtt');
+    expect(mqtt.connect).toHaveBeenCalledWith('mqtt://localhost:1883', {
+      reconnectPeriod: 1_000,
+      connectTimeout: 10_000,
+      resubscribe: false,
+      reconnectOnConnackError: false,
+      username: 'sensor-user',
+      password: 'sensor-password',
+    });
+  });
+
+  it('uses the safe reconnect default when no caller-specific option is supplied', async () => {
+    const pool = new MqttConnectionPool();
+
+    await pool.acquire('mqtt://localhost:1883');
+
+    const mqtt = await import('mqtt');
+    expect(mqtt.connect).toHaveBeenCalledWith(
+      'mqtt://localhost:1883',
+      expect.objectContaining({ reconnectPeriod: DEFAULT_MQTT_RECONNECT_MS }),
+    );
+  });
+
+  it('rejects conflicting pooled reconnect or auth options without leaking credentials', async () => {
+    const pool = new MqttConnectionPool();
+    const brokerUrl = 'mqtt://broker.example:1883';
+    await pool.acquire(brokerUrl, {
+      reconnectPeriod: 1_000,
+      username: 'first-user',
+      password: 'first-password',
+    });
+
+    const acquire = pool.acquire(brokerUrl, {
+      reconnectPeriod: 5_000,
+      username: 'second-user',
+      password: 'second-password',
+    });
+
+    await expect(acquire).rejects.toThrowError(MqttConfigInvalidError);
+    await expect(acquire).rejects.not.toThrow(/first-user|first-password|second-user|second-password/);
   });
 
   it('shares one destroy operation across concurrent callers', async () => {

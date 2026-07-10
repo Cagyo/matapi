@@ -55,6 +55,20 @@ describe('MqttSensorAdapter', () => {
     expect(await adapter.healthCheck()).toBe(true);
   });
 
+  it('subscribes exactly once for each connect event', async () => {
+    mockClient.connected = false;
+    const adapter = new MqttSensorAdapter(pool);
+    await adapter.init(config);
+
+    expect(mockClient.subscribe).not.toHaveBeenCalled();
+
+    mockClient.emit('connect');
+    expect(mockClient.subscribe).toHaveBeenCalledTimes(1);
+
+    mockClient.emit('connect');
+    expect(mockClient.subscribe).toHaveBeenCalledTimes(2);
+  });
+
   it('receives message and emits state_change event', async () => {
     const adapter = new MqttSensorAdapter(pool);
     const events: SensorEvent[] = [];

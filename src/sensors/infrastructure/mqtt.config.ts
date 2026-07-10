@@ -1,6 +1,10 @@
 import { MqttConfigInvalidError } from '../domain/errors/mqtt-config-invalid.error';
 import { mqttConfigIssues } from '../domain/sensor-type-config-validation';
 
+export const MIN_MQTT_RECONNECT_MS = 1_000;
+export const MAX_MQTT_RECONNECT_MS = 300_000;
+export const DEFAULT_MQTT_RECONNECT_MS = 5_000;
+
 export interface MqttSensorConfig {
   brokerUrl: string;
   topic: string;
@@ -20,6 +24,12 @@ export function parseMqttConfig(raw: Record<string, unknown> | null | undefined)
   const issues = mqttConfigIssues(raw);
   if (issues.length > 0) {
     throw new MqttConfigInvalidError(issues[0]);
+  }
+
+  if (raw.reconnectMs !== undefined && !isSafeReconnectPeriod(raw.reconnectMs)) {
+    throw new MqttConfigInvalidError(
+      `"reconnectMs" must be an integer between ${MIN_MQTT_RECONNECT_MS} and ${MAX_MQTT_RECONNECT_MS}`,
+    );
   }
 
   const brokerUrl =
@@ -44,12 +54,12 @@ export function parseMqttConfig(raw: Record<string, unknown> | null | undefined)
     format = raw.format as typeof format;
   }
 
-  let reconnectMs = 5000;
+  let reconnectMs = DEFAULT_MQTT_RECONNECT_MS;
   if (raw.reconnectMs !== undefined) {
     reconnectMs = raw.reconnectMs as number;
   } else if (process.env.MQTT_DEFAULT_RECONNECT_MS) {
     const envReconnect = Number(process.env.MQTT_DEFAULT_RECONNECT_MS);
-    if (!isNaN(envReconnect) && envReconnect >= 0) {
+    if (isSafeReconnectPeriod(envReconnect)) {
       reconnectMs = envReconnect;
     }
   }
@@ -64,4 +74,14 @@ export function parseMqttConfig(raw: Record<string, unknown> | null | undefined)
     qos,
     reconnectMs,
   };
+}
+
+function isSafeReconnectPeriod(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isFinite(value) &&
+    Number.isInteger(value) &&
+    value >= MIN_MQTT_RECONNECT_MS &&
+    value <= MAX_MQTT_RECONNECT_MS
+  );
 }

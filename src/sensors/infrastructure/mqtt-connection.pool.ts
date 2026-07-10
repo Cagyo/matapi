@@ -1,7 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
 import * as mqtt from 'mqtt';
 import { IClientOptions, MqttClient } from 'mqtt';
+import { MqttConfigInvalidError } from '../domain/errors/mqtt-config-invalid.error';
 import { SensorDriverShutdownContext } from '../domain/ports/sensor-driver.port';
+import { DEFAULT_MQTT_RECONNECT_MS } from './mqtt.config';
 import {
   completeWithinShutdownTimeout,
   safeBrokerUrl,
@@ -11,15 +13,22 @@ import { completeWithinDriverShutdownContext } from './driver-shutdown';
 @Injectable()
 export class MqttConnectionPool {
   private readonly logger = new Logger(MqttConnectionPool.name);
-  private pool = new Map<string, { client: MqttClient; refCount: number }>();
+  private pool = new Map<
+    string,
+    { client: MqttClient; refCount: number; connectionOptions: PooledConnectionOptions }
+  >();
   private destroyPromise: Promise<void> | null = null;
   private lifecycleShutdownStarted = false;
 
   /** Get or create a shared connection. Increments ref count. */
   async acquire(brokerUrl: string, opts?: IClientOptions): Promise<MqttClient> {
     const normalizedUrl = brokerUrl.trim();
+    const connectionOptions = getPooledConnectionOptions(opts);
     const existing = this.pool.get(normalizedUrl);
     if (existing) {
+      if (!samePooledConnectionOptions(existing.connectionOptions, connectionOptions)) {
+        throw new MqttConfigInvalidError('conflicting connection options for pooled broker URL');
+      }
       existing.refCount += 1;
       this.logger.debug(
         `Reusing MQTT client for ${safeBrokerUrl(normalizedUrl)} (refCount: ${existing.refCount})`,
@@ -30,9 +39,12 @@ export class MqttConnectionPool {
     this.logger.log(`Creating new MQTT client for ${safeBrokerUrl(normalizedUrl)}`);
     // Using connect() ensures non-blocking fire-and-forget connection behavior (EC-2)
     const client = mqtt.connect(normalizedUrl, {
-      reconnectPeriod: 5000,
-      connectTimeout: 10000,
-      ...opts,
+      reconnectPeriod: connectionOptions.reconnectPeriod,
+      connectTimeout: 10_000,
+      resubscribe: false,
+      reconnectOnConnackError: false,
+      ...(connectionOptions.username === undefined ? {} : { username: connectionOptions.username }),
+      ...(connectionOptions.password === undefined ? {} : { password: connectionOptions.password }),
     });
 
     client.on('error', () => {
@@ -51,7 +63,7 @@ export class MqttConnectionPool {
       this.logger.log(`MQTT client connected (${safeBrokerUrl(normalizedUrl)})`);
     });
 
-    this.pool.set(normalizedUrl, { client, refCount: 1 });
+    this.pool.set(normalizedUrl, { client, refCount: 1, connectionOptions });
     return client;
   }
 
@@ -117,4 +129,34 @@ export class MqttConnectionPool {
       }
     }
   }
+}
+
+type PooledConnectionOptions = Pick<IClientOptions, 'username' | 'password'> & {
+  reconnectPeriod: number;
+};
+
+function getPooledConnectionOptions(opts?: IClientOptions): PooledConnectionOptions {
+  return {
+    reconnectPeriod: opts?.reconnectPeriod ?? DEFAULT_MQTT_RECONNECT_MS,
+    username: opts?.username,
+    password: opts?.password,
+  };
+}
+
+function samePooledConnectionOptions(
+  left: PooledConnectionOptions,
+  right: PooledConnectionOptions,
+): boolean {
+  return (
+    left.reconnectPeriod === right.reconnectPeriod &&
+    sameCredential(left.username, right.username) &&
+    sameCredential(left.password, right.password)
+  );
+}
+
+function sameCredential(left: string | Buffer | undefined, right: string | Buffer | undefined): boolean {
+  if (Buffer.isBuffer(left) && Buffer.isBuffer(right)) {
+    return left.equals(right);
+  }
+  return left === right;
 }

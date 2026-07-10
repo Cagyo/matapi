@@ -44,6 +44,18 @@ outer timeout. This preserves the strict `drivers → shared resources` order
 while preventing compliant GPIO, UART, camera, and MQTT adapters from stalling
 teardown indefinitely.
 
+### MQTT Recovery Ownership
+
+MQTT.js performs reconnects with the sensor's validated 1,000–300,000 ms
+`reconnectMs` period (default 5,000 ms). Its automatic resubscribe behavior is
+disabled so each MQTT sensor adapter owns exactly one subscribe-and-SUBACK check
+per successful `connect` event. The pool never adds a second application retry
+timer or calls `client.reconnect()`.
+
+Pooled clients are safe only when all sensors using a broker URL resolve to the
+same reconnect and authentication options. A conflicting acquisition fails with
+a non-secret configuration error rather than silently using first-writer values.
+
 ### /restart Handling
 
 Before shutdown step 1, store `restart_reason: 'user_command'` in `system_meta`. On boot, check flag → send "✅ Restart complete" → clear flag. Distinguishes user restart from crash.

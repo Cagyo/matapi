@@ -136,3 +136,17 @@ Domain failures are typed errors in `sensors/domain/errors/` ([../error-handling
 - pigpiod down on startup: adapter throws `DriverUnavailableError`; this is the explicit recoverable initialization exception. The registry keeps the configured driver active, registers its event listener, and logs it offline so its gateway subscription can rebind after pigpiod later connects. The application notifies admin via `NotifierPort`, while the bot still starts. Invalid configuration and every other initialization failure remain skipped and logged.
 - Mid-runtime driver failure: adapter raises through `onEvent` error path; registry marks sensor offline, notifies admin.
 - `/status` shows offline sensors: `🚪 front_door: ⚠️ OFFLINE (driver error)` (copy in [../../src/locales/en.ts](../../src/locales/en.ts)).
+
+## MQTT Reconnect Policy
+
+Each MQTT sensor may set `reconnectMs` to an integer from 1,000 to 300,000 ms.
+When absent, `MQTT_DEFAULT_RECONNECT_MS` supplies the value; an invalid environment
+value falls back to 5,000 ms. MQTT.js owns reconnect attempts. The shared pool
+sets `connectTimeout: 10_000`, `resubscribe: false`, and
+`reconnectOnConnackError: false`; each MQTT adapter subscribes once and validates
+SUBACK after every successful `connect` event.
+
+Sensors sharing a broker URL share one MQTT.js client and therefore must resolve
+to identical connection-level reconnect and authentication options. A conflict is
+rejected as sensor configuration invalid rather than silently retaining the first
+sensor's settings. Error messages must not expose broker credentials.
