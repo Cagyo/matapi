@@ -156,18 +156,23 @@ export class SerialPortCo2Source implements Co2Source {
   private onData(port: SerialPortLike, chunk: Buffer): void {
     if (this.port !== port) return;
     this.rxBuffer = Buffer.concat([this.rxBuffer, chunk]);
-    if (this.rxBuffer.length > MAX_RX_BUFFER_BYTES) {
-      this.rxBuffer = this.rxBuffer.subarray(this.rxBuffer.length - MAX_RX_BUFFER_BYTES);
+    if (!this.pendingResponse) {
+      this.rxBuffer = retainCappedSuffix(this.rxBuffer);
+      return;
     }
 
     while (this.pendingResponse) {
       const sofIndex = findFrameStart(this.rxBuffer);
       if (sofIndex === -1) {
-        this.rxBuffer = this.rxBuffer.at(-1) === 0xff ? this.rxBuffer.subarray(-1) : Buffer.alloc(0);
+        this.rxBuffer =
+          this.rxBuffer.at(-1) === 0xff ? Buffer.from(this.rxBuffer.subarray(-1)) : Buffer.alloc(0);
         return;
       }
       if (sofIndex > 0) this.rxBuffer = this.rxBuffer.subarray(sofIndex);
-      if (this.rxBuffer.length < 9) return;
+      if (this.rxBuffer.length < 9) {
+        this.rxBuffer = retainCappedSuffix(this.rxBuffer);
+        return;
+      }
 
       const ppm = parseMhZ19Frame(this.rxBuffer.subarray(0, 9));
       if (ppm === null) {
@@ -175,7 +180,7 @@ export class SerialPortCo2Source implements Co2Source {
         continue;
       }
 
-      this.rxBuffer = this.rxBuffer.subarray(9);
+      this.rxBuffer = retainCappedSuffix(this.rxBuffer.subarray(9));
       this.resolvePending(this.pendingResponse, ppm);
     }
   }
@@ -186,6 +191,21 @@ export class SerialPortCo2Source implements Co2Source {
     this.rxBuffer = Buffer.alloc(0);
     this.rejectCurrentPending(error);
     port.removeAllListeners();
+    this.retireErroredPort(port);
+  }
+
+  private retireErroredPort(port: SerialPortLike): void {
+    if (!port.isOpen) return;
+    const removeRetirementListeners = () => port.removeAllListeners();
+    port.on('error', () => undefined);
+    port.on('close', removeRetirementListeners);
+    try {
+      port.close((closeError) => {
+        if (!closeError || !port.isOpen) removeRetirementListeners();
+      });
+    } catch {
+      removeRetirementListeners();
+    }
   }
 
   private resolvePending(response: PendingResponse, ppm: number | null): void {
@@ -250,6 +270,14 @@ function findFrameStart(buffer: Buffer): number {
     if (buffer[index] === 0xff && buffer[index + 1] === 0x86) return index;
   }
   return -1;
+}
+
+function retainCappedSuffix(buffer: Buffer): Buffer {
+  const suffix =
+    buffer.length > MAX_RX_BUFFER_BYTES
+      ? buffer.subarray(buffer.length - MAX_RX_BUFFER_BYTES)
+      : buffer;
+  return Buffer.from(suffix);
 }
 
 function asError(error: unknown): Error {

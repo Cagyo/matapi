@@ -61,6 +61,18 @@ describe('SerialPortCo2Source', () => {
     await source.close();
   });
 
+  it('scans a response at the start of a chunk larger than the retained suffix', async () => {
+    const port = new FakeSerialPort();
+    const { source } = createSource(port);
+    await source.open(UART_CONFIG);
+
+    const reading = source.read();
+    port.emitData(Buffer.concat([buildFrame(0x02, 0x6c), Buffer.alloc(128, 0x00)]));
+
+    await expect(reading).resolves.toBe(620);
+    await source.close();
+  });
+
   it('skips noise and a bad checksum candidate before the next valid frame', async () => {
     const port = new FakeSerialPort();
     const { source } = createSource(port);
@@ -167,6 +179,29 @@ describe('SerialPortCo2Source', () => {
     expect(source.isOpen()).toBe(false);
   });
 
+  it('retires an errored open port without letting its late events affect a replacement', async () => {
+    const erroredPort = new FakeSerialPort();
+    erroredPort.deferClose = true;
+    const replacementPort = new FakeSerialPort();
+    const source = createSourceFromPorts(erroredPort, replacementPort);
+    await source.open(UART_CONFIG);
+
+    const reading = source.read();
+    erroredPort.emitError(new Error('connection lost'));
+
+    await expect(reading).rejects.toThrow('connection lost');
+    expect(erroredPort.closeCalls).toBe(1);
+    expect(erroredPort.isOpen).toBe(true);
+    expect(() => erroredPort.emitError(new Error('second error'))).not.toThrow();
+
+    await source.open(UART_CONFIG);
+    erroredPort.completeClose();
+
+    expect(source.isOpen()).toBe(true);
+    expect(erroredPort.listenerCount).toBe(0);
+    await source.close();
+  });
+
   it('rejects a pending read and becomes closed when the port closes', async () => {
     const port = new FakeSerialPort();
     const { source } = createSource(port);
@@ -227,10 +262,21 @@ function createSource(port: FakeSerialPort): {
   return { source, receivedOptions: () => options };
 }
 
+function createSourceFromPorts(...ports: FakeSerialPort[]): SerialPortCo2Source {
+  let portIndex = 0;
+  return new SerialPortCo2Source(() => {
+    const port = ports[portIndex];
+    portIndex += 1;
+    if (!port) throw new Error('unexpected serial port factory call');
+    return port;
+  });
+}
+
 class FakeSerialPort implements SerialPortLike {
   isOpen = false;
   deferOpen = false;
   deferWrite = false;
+  deferClose = false;
   openError: Error | null = null;
   writeError: Error | null = null;
   onWrite?: (data: Uint8Array) => void;
@@ -242,6 +288,11 @@ class FakeSerialPort implements SerialPortLike {
   private readonly closeListeners = new Set<() => void>();
   private openCallback?: (err: Error | null | undefined) => void;
   private writeCallback?: (err: Error | null | undefined) => void;
+  private closeCallback?: (err: Error | null | undefined) => void;
+
+  get listenerCount(): number {
+    return this.dataListeners.size + this.errorListeners.size + this.closeListeners.size;
+  }
 
   open(cb?: (err: Error | null | undefined) => void): void {
     if (this.deferOpen) {
@@ -264,7 +315,12 @@ class FakeSerialPort implements SerialPortLike {
 
   close(cb?: (err: Error | null | undefined) => void): void {
     this.closeCalls += 1;
+    if (this.deferClose) {
+      this.closeCallback = cb;
+      return;
+    }
     this.isOpen = false;
+    for (const listener of this.closeListeners) listener();
     cb?.(null);
   }
 
@@ -294,6 +350,7 @@ class FakeSerialPort implements SerialPortLike {
   }
 
   emitError(error: Error): void {
+    if (this.errorListeners.size === 0) throw error;
     for (const listener of this.errorListeners) listener(error);
   }
 
@@ -311,6 +368,15 @@ class FakeSerialPort implements SerialPortLike {
   completeWrite(error = this.writeError): void {
     this.writeCallback?.(error);
     this.writeCallback = undefined;
+  }
+
+  completeClose(error: Error | null = null): void {
+    if (!error) {
+      this.isOpen = false;
+      for (const listener of this.closeListeners) listener();
+    }
+    this.closeCallback?.(error);
+    this.closeCallback = undefined;
   }
 }
 
