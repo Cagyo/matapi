@@ -86,8 +86,14 @@ Then user uploads a `.yml` file.
   - Digital: `pin` (0-27 integer)
   - UART: `port` (string), `baudRate` (valid standard: 9600, 19200, 38400, 57600, 115200)
   - UART thresholds: numeric, warning < critical
+  - MQTT: non-empty `topic`; optional `qos` is 0, 1, or 2; optional `format` is `zigbee2mqtt`, `tasmota`, `json`, or `auto`; optional `reconnectMs` is a finite non-negative integer (0 is allowed)
+  - Camera: `type` is `rtsp`, `mjpeg`, `usb`, or `libcamera`; RTSP/MJPEG require a non-empty `url`; optional `snapshotCacheTtlMs` is a finite non-negative integer; optional resolution `width` and `height` are positive integers
 - `severity`: if present, one of `info`, `warning`, `critical`
 - `debounce_ms`: if present, non-negative integer
+
+The same MQTT and camera shape checks run when sensor configs are created directly,
+before parser-specific defaults, environment resolution, or camera storage-path
+resolution are applied.
 
 **Cross-sensor:**
 - No duplicate sensor names

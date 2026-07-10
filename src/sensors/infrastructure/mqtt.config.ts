@@ -1,4 +1,5 @@
 import { MqttConfigInvalidError } from '../domain/errors/mqtt-config-invalid.error';
+import { mqttConfigIssues } from '../domain/sensor-type-config-validation';
 
 export interface MqttSensorConfig {
   brokerUrl: string;
@@ -16,23 +17,21 @@ export function parseMqttConfig(raw: Record<string, unknown> | null | undefined)
     throw new MqttConfigInvalidError('missing or invalid configuration object');
   }
 
+  const issues = mqttConfigIssues(raw);
+  if (issues.length > 0) {
+    throw new MqttConfigInvalidError(issues[0]);
+  }
+
   const brokerUrl =
     typeof raw.brokerUrl === 'string' && raw.brokerUrl.trim().length > 0
       ? raw.brokerUrl.trim()
       : process.env.MQTT_DEFAULT_BROKER_URL || 'mqtt://localhost:1883';
 
-  const topic = typeof raw.topic === 'string' ? raw.topic.trim() : '';
-  if (!topic) {
-    throw new MqttConfigInvalidError('missing required string property "topic"');
-  }
+  const topic = (raw.topic as string).trim();
 
   let qos: 0 | 1 | 2 = 0;
   if (raw.qos !== undefined) {
-    if (raw.qos === 0 || raw.qos === 1 || raw.qos === 2) {
-      qos = raw.qos;
-    } else {
-      throw new MqttConfigInvalidError(`invalid "qos": ${JSON.stringify(raw.qos)}`);
-    }
+    qos = raw.qos as 0 | 1 | 2;
   } else if (process.env.MQTT_DEFAULT_QOS) {
     const envQos = Number(process.env.MQTT_DEFAULT_QOS);
     if (envQos === 0 || envQos === 1 || envQos === 2) {
@@ -42,25 +41,12 @@ export function parseMqttConfig(raw: Record<string, unknown> | null | undefined)
 
   let format: 'zigbee2mqtt' | 'tasmota' | 'json' | 'auto' = 'auto';
   if (raw.format !== undefined) {
-    if (
-      raw.format === 'zigbee2mqtt' ||
-      raw.format === 'tasmota' ||
-      raw.format === 'json' ||
-      raw.format === 'auto'
-    ) {
-      format = raw.format;
-    } else {
-      throw new MqttConfigInvalidError(`invalid "format": ${JSON.stringify(raw.format)}`);
-    }
+    format = raw.format as typeof format;
   }
 
   let reconnectMs = 5000;
   if (raw.reconnectMs !== undefined) {
-    if (typeof raw.reconnectMs === 'number' && raw.reconnectMs >= 0) {
-      reconnectMs = raw.reconnectMs;
-    } else {
-      throw new MqttConfigInvalidError(`invalid "reconnectMs": ${JSON.stringify(raw.reconnectMs)}`);
-    }
+    reconnectMs = raw.reconnectMs as number;
   } else if (process.env.MQTT_DEFAULT_RECONNECT_MS) {
     const envReconnect = Number(process.env.MQTT_DEFAULT_RECONNECT_MS);
     if (!isNaN(envReconnect) && envReconnect >= 0) {

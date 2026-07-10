@@ -1,5 +1,9 @@
 import { isValidSensorName } from './errors/invalid-sensor-name.error';
 import { DIGITAL_STEP_TYPES, isDigitalStepType, SensorSeverity, SensorType } from './sensor';
+import {
+  cameraConfigIssues,
+  mqttConfigIssues,
+} from './sensor-type-config-validation';
 
 /** Standard baud rates accepted for UART sensors (spec 16 § Validation). */
 export const ALLOWED_BAUD_RATES = [9600, 19200, 38400, 57600, 115200] as const;
@@ -204,6 +208,13 @@ function validateTypeConfig(
     if (warning >= critical) {
       errors.push(`Sensor ${label}: thresholds.warning must be less than thresholds.critical`);
     }
+    return;
+  }
+
+  const issues =
+    type === 'mqtt' ? mqttConfigIssues(config) : cameraConfigIssues(config);
+  for (const issue of issues) {
+    errors.push(`Sensor ${label}: ${issue}`);
   }
 }
 

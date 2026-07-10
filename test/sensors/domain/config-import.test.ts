@@ -21,12 +21,31 @@ const validUart = {
   severity: 'warning',
 };
 
+const validMqtt = {
+  name: 'front_door_mqtt',
+  type: 'mqtt',
+  config: { topic: 'home/front-door', qos: 1, format: 'json', reconnectMs: 0 },
+};
+
+const validCamera = {
+  name: 'front_door_camera',
+  type: 'camera',
+  config: {
+    type: 'mjpeg',
+    url: 'http://camera.local/mjpeg',
+    snapshotCacheTtlMs: 0,
+    resolution: { width: 1280, height: 720 },
+  },
+};
+
 describe('validateImportConfig', () => {
   it('accepts a valid sensors document', () => {
-    const result = validateImportConfig({ sensors: [validDigital, validUart] });
+    const result = validateImportConfig({
+      sensors: [validDigital, validUart, validMqtt, validCamera],
+    });
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.sensors).toHaveLength(2);
+      expect(result.sensors).toHaveLength(4);
       expect(result.sensors[0]).toMatchObject({
         name: 'front_door',
         type: 'digital',
@@ -199,5 +218,27 @@ describe('validateImportConfig', () => {
       expect(result.errors.some((e) => e.includes('severity'))).toBe(true);
       expect(result.errors.some((e) => e.includes('debounce_ms'))).toBe(true);
     }
+  });
+
+  it('labels a MQTT sensor missing its topic', () => {
+    const result = validateImportConfig({
+      sensors: [{ name: 'mqtt_door', type: 'mqtt', config: {} }],
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      errors: ['Sensor \'mqtt_door\': missing required string property "topic"'],
+    });
+  });
+
+  it('labels a camera sensor missing its type', () => {
+    const result = validateImportConfig({
+      sensors: [{ name: 'camera_door', type: 'camera', config: {} }],
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      errors: ['Sensor \'camera_door\': invalid camera "type": undefined'],
+    });
   });
 });
