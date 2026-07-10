@@ -389,6 +389,8 @@ export const en = {
       alarmResolved:  (name: string, state: string) => `✅ *RESOLVED:* ${name} is back to *${state}*.`,
       infoChange:     (name: string, state: string, oldState: string) => `ℹ️ *${name}:* ${state} (was ${oldState})`,
       flappingFault:  (name: string) => `⚠️ *FAULT:* Sensor *${name}* switched to polled sampling due to flapping!`,
+      mqttOffline: '🔴 MQTT broker offline',
+      mqttRecovered: '🟢 MQTT broker reconnected',
     },
   },
   common: {

@@ -150,3 +150,16 @@ Sensors sharing a broker URL share one MQTT.js client and therefore must resolve
 to identical connection-level reconnect and authentication options. A conflict is
 rejected as sensor configuration invalid rather than silently retaining the first
 sensor's settings. Error messages must not expose broker credentials.
+
+### MQTT Availability Events
+
+Each MQTT sensor adapter observes the pooled client's `offline`, `close`, and
+`connect` events. `offline` and `close` share one deduplicated timer. If the
+client remains unavailable for `MQTT_OFFLINE_ALERT_MS` (default 60,000 ms), the
+adapter emits one localized error event. The next `connect` clears the outage
+state, emits one localized recovery event only after a signaled prolonged outage,
+then performs its normal subscribe-and-SUBACK check. A shorter outage emits no
+availability event.
+
+MQTT.js remains the sole reconnect owner. The adapter never calls `reconnect()`
+or creates a second retry loop.

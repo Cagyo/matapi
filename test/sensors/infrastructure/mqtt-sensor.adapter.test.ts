@@ -5,6 +5,7 @@ import { MqttSensorAdapter } from '../../../src/sensors/infrastructure/mqtt-sens
 import { MqttConnectionPool } from '../../../src/sensors/infrastructure/mqtt-connection.pool';
 import { SensorConfig } from '../../../src/sensors/domain/sensor';
 import { SensorEvent } from '../../../src/sensors/domain/sensor-event';
+import { en } from '../../../src/locales/en';
 import * as mqtt from 'mqtt';
 
 vi.mock('mqtt', () => ({ connect: vi.fn() }));
@@ -69,6 +70,109 @@ describe('MqttSensorAdapter', () => {
     expect(mockClient.subscribe).toHaveBeenCalledTimes(2);
   });
 
+  it('emits nothing before a continuous MQTT outage reaches the alert threshold', async () => {
+    vi.useFakeTimers();
+    const adapter = new MqttSensorAdapter(pool);
+    const events: SensorEvent[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await adapter.init(config);
+
+    mockClient.emit('offline');
+    await vi.advanceTimersByTimeAsync(59_999);
+
+    expect(events).toEqual([]);
+  });
+
+  it('emits one localized error when a continuous MQTT outage reaches the alert threshold', async () => {
+    vi.useFakeTimers();
+    const adapter = new MqttSensorAdapter(pool);
+    const events: SensorEvent[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await adapter.init(config);
+
+    mockClient.emit('offline');
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        sensorId: 'mqtt_1',
+        type: 'error',
+        newValue: en.sensors.notifications.mqttOffline,
+      }),
+    ]);
+  });
+
+  it('deduplicates offline and close events into one delayed MQTT outage event', async () => {
+    vi.useFakeTimers();
+    const adapter = new MqttSensorAdapter(pool);
+    const events: SensorEvent[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await adapter.init(config);
+
+    mockClient.emit('offline');
+    mockClient.emit('close');
+    mockClient.emit('offline');
+
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: 'error', newValue: en.sensors.notifications.mqttOffline });
+  });
+
+  it('emits one recovery after a prolonged MQTT outage and resubscribes once', async () => {
+    vi.useFakeTimers();
+    const adapter = new MqttSensorAdapter(pool);
+    const events: SensorEvent[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await adapter.init(config);
+
+    mockClient.emit('offline');
+    await vi.advanceTimersByTimeAsync(60_000);
+    mockClient.connected = true;
+    mockClient.emit('connect');
+
+    expect(events).toEqual([
+      expect.objectContaining({ type: 'error', newValue: en.sensors.notifications.mqttOffline }),
+      expect.objectContaining({ type: 'state_change', newValue: en.sensors.notifications.mqttRecovered }),
+    ]);
+    expect(mockClient.subscribe).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not emit recovery after a transient MQTT outage', async () => {
+    vi.useFakeTimers();
+    const adapter = new MqttSensorAdapter(pool);
+    const events: SensorEvent[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await adapter.init(config);
+
+    mockClient.emit('offline');
+    await vi.advanceTimersByTimeAsync(59_999);
+    mockClient.connected = true;
+    mockClient.emit('connect');
+
+    expect(events).toEqual([]);
+    expect(mockClient.subscribe).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('does not emit recovery on later connects without a new prolonged outage', async () => {
+    vi.useFakeTimers();
+    const adapter = new MqttSensorAdapter(pool);
+    const events: SensorEvent[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await adapter.init(config);
+
+    mockClient.emit('offline');
+    await vi.advanceTimersByTimeAsync(60_000);
+    mockClient.emit('connect');
+    mockClient.emit('connect');
+
+    expect(events).toHaveLength(2);
+    expect(events[1]).toMatchObject({ type: 'state_change', newValue: en.sensors.notifications.mqttRecovered });
+    expect(mockClient.subscribe).toHaveBeenCalledTimes(3);
+  });
+
   it('receives message and emits state_change event', async () => {
     const adapter = new MqttSensorAdapter(pool);
     const events: SensorEvent[] = [];
@@ -124,6 +228,41 @@ describe('MqttSensorAdapter', () => {
     expect(pool.release).toHaveBeenCalledWith('mqtt://localhost:1883');
   });
 
+  it('cancels the outage timer and removes all MQTT listeners on destroy', async () => {
+    vi.useFakeTimers();
+    const adapter = new MqttSensorAdapter(pool);
+    await adapter.init(config);
+    mockClient.emit('offline');
+
+    expect(mockClient.listenerCount('message')).toBe(1);
+    expect(mockClient.listenerCount('connect')).toBe(1);
+    expect(mockClient.listenerCount('offline')).toBe(1);
+    expect(mockClient.listenerCount('close')).toBe(1);
+    expect(vi.getTimerCount()).toBe(1);
+
+    await adapter.destroy();
+
+    expect(mockClient.listenerCount('message')).toBe(0);
+    expect(mockClient.listenerCount('connect')).toBe(0);
+    expect(mockClient.listenerCount('offline')).toBe(0);
+    expect(mockClient.listenerCount('close')).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('releases the pool immediately without unsubscribe when destroyed while disconnected', async () => {
+    vi.useFakeTimers();
+    mockClient.connected = false;
+    mockClient.unsubscribe.mockImplementation(() => undefined);
+    const adapter = new MqttSensorAdapter(pool);
+    await adapter.init(config);
+
+    await adapter.destroy();
+
+    expect(mockClient.unsubscribe).not.toHaveBeenCalled();
+    expect(pool.release).toHaveBeenCalledWith('mqtt://localhost:1883');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('releases the client after an unsubscribe callback never arrives', async () => {
     vi.useFakeTimers();
     mockClient.unsubscribe.mockImplementation(() => undefined);
@@ -167,5 +306,14 @@ describe('MqttSensorAdapter', () => {
 
     expect(warn).toHaveBeenCalledWith('MQTT unsubscribe failed during destroy');
     expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('another-secret'));
+  });
+
+  it('does not leave a health-check timeout behind', async () => {
+    vi.useFakeTimers();
+    const adapter = new MqttSensorAdapter(pool);
+    await adapter.init(config);
+
+    expect(await adapter.healthCheck()).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

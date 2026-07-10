@@ -56,6 +56,14 @@ Pooled clients are safe only when all sensors using a broker URL resolve to the
 same reconnect and authentication options. A conflicting acquisition fails with
 a non-secret configuration error rather than silently using first-writer values.
 
+For broker availability, MQTT adapters start one shared-per-adapter outage timer
+on either MQTT.js `offline` or `close`. A continuous outage beyond
+`MQTT_OFFLINE_ALERT_MS` (60 seconds by default) emits one sensor error event.
+The first subsequent `connect` emits one recovery event only when the outage was
+previously signaled, then resubscribes the adapter. Transient outages are silent.
+Adapter teardown clears this timer and removes the `message`, `connect`,
+`offline`, and `close` handlers before releasing the pooled client.
+
 ### /restart Handling
 
 Before shutdown step 1, store `restart_reason: 'user_command'` in `system_meta`. On boot, check flag → send "✅ Restart complete" → clear flag. Distinguishes user restart from crash.
