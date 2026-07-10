@@ -20,6 +20,13 @@ Shutdown sequence is **explicit and ordered**. NestJS `onModuleDestroy` hooks al
 8. Delete PID lockfile
 ```
 
+Bootstrap deliberately owns `SIGINT` and `SIGTERM` and does **not** call
+`enableShutdownHooks()`, so there is only one process-signal handler. That
+handler memoizes one shutdown operation, runs the ordered pre-close coordinator,
+then calls `app.close()` exactly once. `app.close()` triggers Nest teardown
+(`onModuleDestroy`, `beforeApplicationShutdown`, and `onApplicationShutdown`)
+after the coordinator completes.
+
 ### /restart Handling
 
 Before shutdown step 1, store `restart_reason: 'user_command'` in `system_meta`. On boot, check flag → send "✅ Restart complete" → clear flag. Distinguishes user restart from crash.
