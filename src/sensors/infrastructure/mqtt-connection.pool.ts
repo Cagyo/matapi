@@ -4,8 +4,7 @@ import { IClientOptions, MqttClient } from 'mqtt';
 import {
   completeWithinShutdownTimeout,
   safeBrokerUrl,
-  safeErrorMessage,
-} from '../domain/shutdown-safety';
+} from './shutdown-safety';
 
 @Injectable()
 export class MqttConnectionPool {
@@ -33,10 +32,8 @@ export class MqttConnectionPool {
       ...opts,
     });
 
-    client.on('error', (err) => {
-      this.logger.warn(
-        `MQTT connection error (${safeBrokerUrl(normalizedUrl)}): ${safeErrorMessage(err)}`,
-      );
+    client.on('error', () => {
+      this.logger.warn(`MQTT connection error (${safeBrokerUrl(normalizedUrl)})`);
     });
 
     client.on('offline', () => {
@@ -74,10 +71,8 @@ export class MqttConnectionPool {
         if (!closed) {
           this.logger.warn(`MQTT client close timed out (${safeBrokerUrl(normalizedUrl)})`);
         }
-      } catch (err) {
-        this.logger.warn(
-          `Error closing MQTT client (${safeBrokerUrl(normalizedUrl)}): ${safeErrorMessage(err)}`,
-        );
+      } catch {
+        this.logger.warn(`MQTT client close failed (${safeBrokerUrl(normalizedUrl)})`);
       }
     }
   }
@@ -99,10 +94,8 @@ export class MqttConnectionPool {
         if (!closed) {
           this.logger.warn(`MQTT client force-close timed out (${safeBrokerUrl(url)})`);
         }
-      } catch (err) {
-        this.logger.warn(
-          `Error force closing MQTT client (${safeBrokerUrl(url)}): ${safeErrorMessage(err)}`,
-        );
+      } catch {
+        this.logger.warn(`MQTT client force-close failed (${safeBrokerUrl(url)})`);
       }
     }
   }

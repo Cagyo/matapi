@@ -3,7 +3,7 @@ export const SENSOR_SHUTDOWN_TIMEOUT_MS = 5_000;
 const URL_PATTERN = /\b[a-z][a-z0-9+.-]*:\/\/[^\s'"<>]+/gi;
 const TRAILING_URL_PUNCTUATION = /[),.;:]+$/;
 
-/** Wait for a third-party cleanup operation without allowing it to stall shutdown. */
+/** Wait for a third-party infrastructure cleanup operation without stalling teardown. */
 export async function completeWithinShutdownTimeout(
   operation: Promise<unknown>,
   timeoutMs = SENSOR_SHUTDOWN_TIMEOUT_MS,
@@ -21,9 +21,9 @@ export async function completeWithinShutdownTimeout(
   }
 }
 
-/** Remove URL user-info, paths, and query strings before writing external errors to logs. */
-export function redactSensitiveUrls(text: string): string {
-  return text.replace(URL_PATTERN, (value) => {
+/** Remove broker credentials, paths, and query strings from connection URLs in logs. */
+export function safeBrokerUrl(brokerUrl: string): string {
+  return brokerUrl.replace(URL_PATTERN, (value) => {
     const trimmed = value.replace(TRAILING_URL_PUNCTUATION, '');
     const suffix = value.slice(trimmed.length);
     try {
@@ -33,12 +33,4 @@ export function redactSensitiveUrls(text: string): string {
       return `[redacted-url]${suffix}`;
     }
   });
-}
-
-export function safeErrorMessage(error: unknown): string {
-  return redactSensitiveUrls(error instanceof Error ? error.message : 'Unknown error');
-}
-
-export function safeBrokerUrl(brokerUrl: string): string {
-  return redactSensitiveUrls(brokerUrl);
 }

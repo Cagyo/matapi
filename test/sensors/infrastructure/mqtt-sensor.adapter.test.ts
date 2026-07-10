@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'events';
 import { MqttSensorAdapter } from '../../../src/sensors/infrastructure/mqtt-sensor.adapter';
@@ -121,5 +122,19 @@ describe('MqttSensorAdapter', () => {
 
     expect(pool.release).toHaveBeenCalledWith('mqtt://localhost:1883');
     expect(settled).toBe(true);
+  });
+
+  it('does not log raw unsubscribe errors during destroy', async () => {
+    const warn = vi.spyOn(Logger.prototype, 'warn');
+    mockClient.unsubscribe.mockImplementation(() => {
+      throw new Error('raw MQTT unsubscribe failure password=another-secret');
+    });
+    const adapter = new MqttSensorAdapter(pool);
+    await adapter.init(config);
+
+    await adapter.destroy();
+
+    expect(warn).toHaveBeenCalledWith('MQTT unsubscribe failed during destroy');
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('another-secret'));
   });
 });

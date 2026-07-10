@@ -96,23 +96,27 @@ describe('SensorRegistryService', () => {
     expect(registry.list()).toHaveLength(0);
   });
 
-  it('redacts broker credentials from driver and reload errors', async () => {
+  it('does not log raw third-party driver or reload errors during shutdown', async () => {
     const error = vi.spyOn(Logger.prototype, 'error');
     const warn = vi.spyOn(Logger.prototype, 'warn');
-    const brokerUrl = 'mqtt://user:secret@broker.example:1883';
     const repo = new InMemorySensorRepository([digitalSensor()]);
     const driver = new MockGpioAdapter();
-    vi.spyOn(driver, 'init').mockRejectedValueOnce(new Error(`init failed for ${brokerUrl}`));
+    vi.spyOn(driver, 'init').mockRejectedValueOnce(
+      new Error('raw driver error mqtt://user:secret@broker.example password=another-secret'),
+    );
     const registry = makeRegistry(repo, () => driver);
 
     await registry.reload();
     (registry as SensorRegistryService & { reloadChain: Promise<void> }).reloadChain =
-      Promise.reject(new Error(`reload failed for ${brokerUrl}`));
+      Promise.reject(new Error('raw reload error password=another-secret'));
     await registry.shutdown();
 
     const messages = [...error.mock.calls, ...warn.mock.calls].map(([message]) => String(message));
-    expect(messages).not.toContainEqual(expect.stringContaining('user'));
-    expect(messages).not.toContainEqual(expect.stringContaining('secret'));
+    expect(messages.join('\n')).not.toContain('raw driver error');
+    expect(messages.join('\n')).not.toContain('raw reload error');
+    expect(messages.join('\n')).not.toContain('another-secret');
+    expect(messages.join('\n')).not.toContain('user');
+    expect(messages.join('\n')).not.toContain('secret');
   });
 
   it('retains a startup-unavailable driver and subscribes it for a later rebind', async () => {
@@ -170,6 +174,39 @@ describe('SensorRegistryService', () => {
     expect(factory).toHaveBeenCalledTimes(1);
     expect(registry.list()).toEqual([]);
     expect(registry.getDriver('back_door')).toBeUndefined();
+  });
+
+  it('does not finish shutdown while an active driver is still destroying', async () => {
+    vi.useFakeTimers();
+    const repo = new InMemorySensorRepository([digitalSensor()]);
+    let finishDestroy!: () => void;
+    const destroy = vi.fn(
+      () => new Promise<void>((resolve) => {
+        finishDestroy = resolve;
+      }),
+    );
+    const driver: SensorDriverPort = {
+      init: vi.fn().mockResolvedValue(undefined),
+      destroy,
+      getState: vi.fn(),
+      onEvent: vi.fn(),
+      healthCheck: vi.fn().mockResolvedValue(true),
+    };
+    const registry = makeRegistry(repo, () => driver);
+    await registry.reload();
+
+    let settled = false;
+    const shutdown = registry.shutdown().then(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(destroy).toHaveBeenCalledTimes(1);
+    expect(settled).toBe(false);
+
+    finishDestroy();
+    await shutdown;
+    expect(settled).toBe(true);
   });
 
   it('onModuleInit triggers a reload', async () => {

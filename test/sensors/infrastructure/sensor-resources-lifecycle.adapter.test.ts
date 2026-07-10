@@ -127,11 +127,16 @@ describe('SensorResourcesLifecycleAdapter', () => {
     expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('secret'));
   });
 
-  it('continues to shared gateways when a driver destroy never settles', async () => {
+  it('does not close shared gateways while a driver destroy is still pending', async () => {
     vi.useFakeTimers();
+    let finishDestroy!: () => void;
     const driver: SensorDriverPort = {
       init: vi.fn().mockResolvedValue(undefined),
-      destroy: vi.fn(() => new Promise<void>(() => undefined)),
+      destroy: vi.fn(
+        () => new Promise<void>((resolve) => {
+          finishDestroy = resolve;
+        }),
+      ),
       getState: vi.fn(),
       onEvent: vi.fn(),
       healthCheck: vi.fn().mockResolvedValue(true),
@@ -150,12 +155,18 @@ describe('SensorResourcesLifecycleAdapter', () => {
     );
 
     let settled = false;
-    void lifecycle.onModuleDestroy().then(() => {
+    const shutdown = lifecycle.onModuleDestroy().then(() => {
       settled = true;
     });
 
     await vi.advanceTimersByTimeAsync(5_000);
 
+    expect(pigpio.close).not.toHaveBeenCalled();
+    expect(mqtt.destroyAll).not.toHaveBeenCalled();
+    expect(settled).toBe(false);
+
+    finishDestroy();
+    await shutdown;
     expect(pigpio.close).toHaveBeenCalledTimes(1);
     expect(mqtt.destroyAll).toHaveBeenCalledTimes(1);
     expect(settled).toBe(true);
