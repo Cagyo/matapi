@@ -3,6 +3,10 @@ import { EventQueueService } from './event-queue.service';
 import { DrainEventQueueUseCase } from './drain-event-queue.use-case';
 import { NotificationService } from './notification.service';
 import {
+  EVENT_PROCESSOR_OPTIONS,
+  EventProcessorOptions,
+} from './ports/event-processor-options.port';
+import {
   SENSOR_EVENT_SOURCE,
   SensorEventSourcePort,
 } from '../domain/ports/sensor-event-source.port';
@@ -14,7 +18,7 @@ export class EventProcessorService implements OnModuleInit {
   private shuttingDown = false;
   private inFlight = 0;
   private readonly pending: SensorEvent[] = [];
-  private readonly maxConcurrent = maxConcurrencyFromEnv();
+  private droppedPending = 0;
 
   constructor(
     @Inject(forwardRef(() => EventQueueService))
@@ -25,11 +29,18 @@ export class EventProcessorService implements OnModuleInit {
     private readonly notifications: NotificationService,
     @Inject(SENSOR_EVENT_SOURCE)
     private readonly sensorEvents: SensorEventSourcePort,
+    @Inject(EVENT_PROCESSOR_OPTIONS)
+    private readonly options: EventProcessorOptions,
   ) {}
 
   onModuleInit(): void {
     this.sensorEvents.onEvent((event) => {
       if (this.shuttingDown) return; // stop accepting new work (spec 23)
+      if (this.pending.length >= this.options.maxPendingEvents) {
+        this.pending.shift();
+        this.droppedPending += 1;
+        this.logPendingDrop();
+      }
       this.pending.push(event);
       this.pump();
     });
@@ -61,7 +72,7 @@ export class EventProcessorService implements OnModuleInit {
 
   /** Start handlers up to the concurrency cap; already-queued work drains even during shutdown. */
   private pump(): void {
-    while (this.inFlight < this.maxConcurrent && this.pending.length > 0) {
+    while (this.inFlight < this.options.maxConcurrent && this.pending.length > 0) {
       const event = this.pending.shift()!;
       this.inFlight += 1;
       void this.handle(event)
@@ -80,9 +91,15 @@ export class EventProcessorService implements OnModuleInit {
     this.logger.debug(`Queued event #${queued.id} for ${event.sensorId}`);
     await this.notifications.process(queued);
   }
+
+  private logPendingDrop(): void {
+    if (!isPowerOfTwo(this.droppedPending)) return;
+    this.logger.warn(
+      `Dropped pending events: ${this.droppedPending}; configured pending bound: ${this.options.maxPendingEvents}`,
+    );
+  }
 }
 
-function maxConcurrencyFromEnv(): number {
-  const parsed = Number(process.env.EVENT_MAX_CONCURRENCY);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : 4;
+function isPowerOfTwo(value: number): boolean {
+  return value > 0 && Number.isInteger(Math.log2(value));
 }

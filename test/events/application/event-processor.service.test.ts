@@ -16,10 +16,11 @@ class TestSensorEventSource implements SensorEventSourcePort {
 }
 
 const flushAsync = () => new Promise((resolve) => setImmediate(resolve));
+const defaultOptions = { maxConcurrent: 4, maxPendingEvents: 500 };
 
-function makeEvent(): SensorEvent {
+function makeEvent(sensorId = 'front_door'): SensorEvent {
   return {
-    sensorId: 'front_door',
+    sensorId,
     type: 'state_change',
     newValue: true,
     timestamp: new Date('2030-01-01T00:00:00.000Z'),
@@ -40,6 +41,7 @@ describe('EventProcessorService', () => {
       drainEventQueue as never,
       notifications as never,
       source,
+      defaultOptions,
     );
 
     service.onModuleInit();
@@ -60,6 +62,7 @@ describe('EventProcessorService', () => {
       drainEventQueue as never,
       { process: vi.fn() } as never,
       source,
+      defaultOptions,
     );
 
     await service.drain();
@@ -79,6 +82,7 @@ describe('EventProcessorService', () => {
       drainEventQueue as never,
       notifications as never,
       source,
+      defaultOptions,
     );
 
     service.onModuleInit();
@@ -97,6 +101,7 @@ describe('EventProcessorService', () => {
       { execute: vi.fn() } as never,
       notifications as never,
       source,
+      defaultOptions,
     );
 
     service.onModuleInit();
@@ -125,6 +130,7 @@ describe('EventProcessorService', () => {
       { execute: vi.fn() } as never,
       notifications as never,
       source,
+      defaultOptions,
     );
 
     service.onModuleInit();
@@ -153,6 +159,7 @@ describe('EventProcessorService', () => {
       { execute: vi.fn() } as never,
       { process: vi.fn() } as never,
       source,
+      defaultOptions,
     );
 
     service.onModuleInit();
@@ -160,6 +167,44 @@ describe('EventProcessorService', () => {
     await flushAsync();
 
     await expect(service.waitForIdle(60)).resolves.toBeUndefined();
+  });
+
+  it('evicts the oldest pending event without evicting the active event', async () => {
+    const source = new TestSensorEventSource();
+    const handled: string[] = [];
+    const releases: (() => void)[] = [];
+    const eventQueue = {
+      enqueueSensorEvent: vi.fn(
+        (event: SensorEvent) =>
+          new Promise<{ id: number }>((resolve) => {
+            handled.push(event.sensorId);
+            releases.push(() => resolve({ id: handled.length }));
+          }),
+      ),
+    };
+    const service = new EventProcessorService(
+      eventQueue as never,
+      { execute: vi.fn() } as never,
+      { process: vi.fn().mockResolvedValue(undefined) } as never,
+      source,
+      { maxConcurrent: 1, maxPendingEvents: 2 },
+    );
+
+    service.onModuleInit();
+    source.emit(makeEvent('event-1'));
+    await flushAsync();
+    source.emit(makeEvent('event-2'));
+    source.emit(makeEvent('event-3'));
+    source.emit(makeEvent('event-4'));
+
+    releases.shift()!();
+    await flushAsync();
+    releases.shift()!();
+    await flushAsync();
+    releases.shift()!();
+    await flushAsync();
+
+    expect(handled).toEqual(['event-1', 'event-3', 'event-4']);
   });
 
   it('caps the number of concurrently handled events', async () => {
@@ -189,30 +234,24 @@ describe('EventProcessorService', () => {
       })),
     };
 
-    const prev = process.env.EVENT_MAX_CONCURRENCY;
-    process.env.EVENT_MAX_CONCURRENCY = '2';
-    try {
-      const service = new EventProcessorService(
-        eventQueue as never,
-        { execute: vi.fn() } as never,
-        notifications as never,
-        source,
-      );
-      service.onModuleInit();
-      for (let i = 0; i < 5; i += 1) source.emit(makeEvent());
+    const service = new EventProcessorService(
+      eventQueue as never,
+      { execute: vi.fn() } as never,
+      notifications as never,
+      source,
+      { maxConcurrent: 2, maxPendingEvents: 500 },
+    );
+    service.onModuleInit();
+    for (let i = 0; i < 5; i += 1) source.emit(makeEvent());
+    await flushAsync();
+
+    expect(maxActive).toBeLessThanOrEqual(2);
+    expect(active).toBe(2); // exactly the cap is busy; 3 wait in the queue
+
+    while (releases.length > 0) {
+      releases.shift()!();
       await flushAsync();
-
-      expect(maxActive).toBeLessThanOrEqual(2);
-      expect(active).toBe(2); // exactly the cap is busy; 3 wait in the queue
-
-      while (releases.length > 0) {
-        releases.shift()!();
-        await flushAsync();
-      }
-      expect(active).toBe(0);
-    } finally {
-      if (prev === undefined) delete process.env.EVENT_MAX_CONCURRENCY;
-      else process.env.EVENT_MAX_CONCURRENCY = prev;
     }
+    expect(active).toBe(0);
   });
 });

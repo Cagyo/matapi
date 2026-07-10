@@ -14,6 +14,25 @@ This spec is a pure application-layer concern. It depends on **ports**, never on
 
 All sensor events written to `events` table with `sent_at = NULL`. EventProcessor attempts immediate send. On failure (no internet), event remains queued indefinitely.
 
+### Ingress Backpressure
+
+Synchronous sensor callbacks first enter a bounded in-memory backlog before
+`EventQueueService` persists them to SQLite. `EVENT_MAX_CONCURRENCY` defaults
+to 4 and limits active persistence/notification handlers; `EVENT_MAX_PENDING`
+defaults to 500 and limits only events waiting to start. This raw
+pre-persistence backlog is distinct from the durable SQLite queue.
+
+When the pending backlog is full, the processor evicts the oldest **pending**
+event before accepting the new one. An active event is never evicted. This is
+an explicit overload trade-off: bounded process survival takes priority over
+retaining unbounded raw callbacks that have not yet reached SQLite. Warnings
+are rate-limited to the first drop and cumulative power-of-two drop counts,
+and include only the count and configured pending bound.
+
+Once an event has been persisted in SQLite, the normal at-least-once delivery
+semantics above remain unchanged: it is retained until notification delivery
+is recorded as sent.
+
 ## Queue Drain on Reconnect
 
 Lives in `src/events/application/drain-event-queue.use-case.ts`. Depends only on ports — **no Drizzle imports, no grammY imports**.
