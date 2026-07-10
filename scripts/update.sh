@@ -147,7 +147,13 @@ NEW_COMMIT=""
 CURRENT_COMMIT=""
 ROLLBACK_TAG=""
 
-if [[ -n "$RELEASE_URL" ]] && curl --output /dev/null --silent --head --fail "$RELEASE_URL" 2>/dev/null; then
+LOCAL_SOURCE="${HOME_WORKER_REPO#file://}"
+if [[ -n "${HOME_WORKER_REPO:-}" ]] && [[ -d "$LOCAL_SOURCE" ]] && [[ "$LOCAL_SOURCE" != "$INSTALL_DIR" ]] && [[ -f "$LOCAL_SOURCE/package.json" ]]; then
+  echo "Syncing local development update from $LOCAL_SOURCE over $INSTALL_DIR..."
+  rsync -av --delete --exclude="data" --exclude="node_modules" --exclude=".git" --exclude=".yarn" --exclude=".env" --exclude=".env.*" --exclude="features.json" "$LOCAL_SOURCE/" "$INSTALL_DIR/"
+  UPDATED_VIA="local"
+  NEW_COMMIT="dev-$(date +%s)"
+elif [[ -n "$RELEASE_URL" ]] && curl --output /dev/null --silent --head --fail "$RELEASE_URL" 2>/dev/null; then
   echo "Downloading release tarball from $RELEASE_URL..."
   TMP_TAR="/tmp/home-worker-release.tar.gz"
   STAGING_DIR="/tmp/home-worker-staging-$$"

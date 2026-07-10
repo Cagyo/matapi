@@ -22,7 +22,9 @@
     "dev:seed": "ts-node scripts/dev-seed.ts",
     "dev:reset": "ts-node scripts/dev-seed.ts --reset",
     "dev:deploy": "bash scripts/dev-deploy.sh",
-    "dev:deploy:reset": "bash scripts/dev-deploy.sh --reset"
+    "dev:deploy:reset": "bash scripts/dev-deploy.sh --reset",
+    "dev:update": "bash scripts/dev-update.sh",
+    "dev:update:reset": "bash scripts/dev-update.sh --reset"
   },
   "dependencies": {
     "@grammyjs/auto-retry": "^2.0.2",
