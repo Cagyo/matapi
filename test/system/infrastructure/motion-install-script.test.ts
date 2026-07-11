@@ -72,6 +72,14 @@ describe('motion install scripts', () => {
     expect(script).toContain('sudo chmod -R 775 "$thumbnails_dir"');
   });
 
+  it('instructs remote operators to reach the loopback-only setup wizard through SSH forwarding', () => {
+    const script = readFileSync(resolve('scripts/install.sh'), 'utf8');
+
+    expect(script).toContain('ssh -L 3000:127.0.0.1:3000');
+    expect(script).toContain('http://127.0.0.1:3000');
+    expect(script).not.toContain('http://$IP:3000');
+  });
+
   it('seeds an enabled Motion camera after database migrations during install', () => {
     const script = readFileSync(resolve('scripts/install.sh'), 'utf8');
     const tempDir = mkdtempSync(join(tmpdir(), 'home worker install '));

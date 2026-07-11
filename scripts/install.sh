@@ -345,16 +345,13 @@ prompt_config() {
     rm -f "$INSTALL_DIR/.env"
   fi
 
-  # Fix 1c: Filter hostname -I for IPv4 address
-  local IP
-  IP=$(hostname -I 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
-  if [ -z "$IP" ]; then
-    IP="localhost"
-  fi
-
   echo ""
   echo "============================================"
-  echo "  Open http://$IP:3000 to continue setup"
+  echo "  The setup wizard listens only on this device."
+  echo "  From your computer, open a second terminal and run:"
+  echo "    ssh -L 3000:127.0.0.1:3000 <ssh-user>@<device-host-or-ip>"
+  echo "  Keep that SSH session open, then open:"
+  echo "    http://127.0.0.1:3000"
   echo "============================================"
   echo ""
 
