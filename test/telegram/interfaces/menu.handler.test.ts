@@ -163,6 +163,7 @@ describe('MenuHandler', () => {
       expect.stringContaining('Sensor Operations'),
       expect.objectContaining({ reply_markup: expect.anything() }),
     );
+    expect(JSON.stringify(editMessageText.mock.calls[0][1].reply_markup)).toContain('« Back');
 
     // Test logs delegation
     const logsCtx = {

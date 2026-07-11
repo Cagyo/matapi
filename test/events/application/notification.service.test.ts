@@ -42,6 +42,9 @@ class StubSensorQuery implements SensorQueryPort {
   async findById(): Promise<Sensor | null> {
     return this.sensor;
   }
+  async findByIdIncludingArchived(): Promise<SensorLookup | null> {
+    return this.sensor ? { kind: 'active', sensor: this.sensor } : null;
+  }
   async findByName(): Promise<SensorLookup | null> {
     return this.sensor ? { kind: 'active', sensor: this.sensor } : null;
   }
@@ -186,6 +189,102 @@ describe('NotificationService', () => {
     ]);
   });
 
+  it('attaches a direct logs action to a triggered alarm', async () => {
+    const { repo, notifier, service } = await setup({
+      sensor: makeSensor({ config: { stepType: 'alarm' } }),
+      recipients: [recipient()],
+    });
+
+    await service.process(await enqueueStateChange(repo, true));
+
+    expect(notifier.userSends[0].message).toMatchObject({
+      text: '🚨 *CRITICAL ALARM:* front_door is now *Alarm*!',
+      actions: [[{ text: '📋 View Logs', callbackData: 'logs:id:front_door' }]],
+    });
+  });
+
+  it('delivers a flapping fault with a direct logs action during quiet hours', async () => {
+    const { repo, notifier, service } = await setup({
+      recipients: [recipient({ quietStart: '14:00', quietEnd: '16:00' })],
+    });
+    const event = await repo.enqueue({
+      sensorId: 'front_door',
+      type: 'system',
+      payload: { newValue: 'flapping_fault', name: 'front_door', severity: 'info' },
+      createdAt: FIXED_NOW,
+    });
+
+    await service.process(event);
+
+    expect(notifier.userSends[0].message).toMatchObject({
+      text: '⚠️ *FAULT:* Sensor *front_door* switched to polled sampling due to flapping!',
+      actions: [[{ text: '📋 View Logs', callbackData: 'logs:id:front_door' }]],
+    });
+  });
+
+  it('uses the stable sensor ID for long sensor-name alert callbacks', async () => {
+    const sensorId = '12345678-1234-4123-8123-123456789abc';
+    const { repo, notifier, service } = await setup({
+      sensor: makeSensor({
+        id: sensorId,
+        name: 'a'.repeat(60),
+        config: { stepType: 'alarm' },
+      }),
+      recipients: [recipient()],
+    });
+
+    await service.process(await enqueueStateChange(repo, true));
+
+    const callbackData = notifier.userSends[0].message.actions?.[0][0].callbackData;
+    expect(callbackData).toBe(`logs:id:${sensorId}`);
+    expect(Buffer.byteLength(callbackData ?? '', 'utf8')).toBeLessThanOrEqual(64);
+  });
+
+  it('delivers an alert without an action when a legacy sensor ID exceeds callback limits', async () => {
+    const { repo, notifier, service } = await setup({
+      sensor: makeSensor({
+        id: 'x'.repeat(65),
+        config: { stepType: 'alarm' },
+      }),
+      recipients: [recipient()],
+    });
+
+    await service.process(await enqueueStateChange(repo, true));
+
+    expect(notifier.userSends[0].message.text).toContain('CRITICAL ALARM');
+    expect(notifier.userSends[0].message.actions).toBeUndefined();
+  });
+
+  it('keeps the direct logs action at the exact 64-byte callback limit', async () => {
+    const sensorId = 'x'.repeat(56); // `logs:id:` adds 8 bytes.
+    const { repo, notifier, service } = await setup({
+      sensor: makeSensor({ id: sensorId, config: { stepType: 'alarm' } }),
+      recipients: [recipient()],
+    });
+
+    await service.process(await enqueueStateChange(repo, true));
+
+    expect(notifier.userSends[0].message.actions?.[0][0].callbackData).toBe(`logs:id:${sensorId}`);
+  });
+
+  it('delivers a flapping fault without an action when a multibyte ID exceeds callback limits', async () => {
+    const { repo, notifier, service } = await setup({
+      sensor: makeSensor({ id: '🔐'.repeat(15) }),
+      recipients: [recipient()],
+    });
+    const event = await repo.enqueue({
+      sensorId: 'front_door',
+      type: 'system',
+      payload: { newValue: 'flapping_fault', name: 'front_door', severity: 'info' },
+      createdAt: FIXED_NOW,
+    });
+
+    await service.process(event);
+
+    expect(notifier.userSends[0].message.text).toContain('FAULT');
+    expect(notifier.userSends[0].message.actions).toBeUndefined();
+  });
+
   it('debounces a repeated identical state change and marks it sent without sending', async () => {
     const { repo, notifier, service } = await setup({
       recipients: [recipient({ telegramId: 1 })],
@@ -289,6 +388,28 @@ describe('NotificationService.notifyMotion', () => {
     });
 
     await service.notifyMotion('front_door', MOTION_AT, Buffer.from('jpeg'));
+
+    expect(notifier.photoSends.map((s) => s.telegramId)).toEqual([2]);
+  });
+
+  it('skips recipients who muted the camera by name', async () => {
+    const { notifier, service } = await setup({
+      recipients: [recipient({ telegramId: 1 }), recipient({ telegramId: 2 })],
+      sensorMutes: [{ telegramId: 1, sensorId: 'front_door' }],
+    });
+
+    await service.notifyMotion('front_door', MOTION_AT, Buffer.from('jpeg'));
+
+    expect(notifier.photoSends.map((s) => s.telegramId)).toEqual([2]);
+  });
+
+  it('skips recipients who muted the camera by ID', async () => {
+    const { notifier, service } = await setup({
+      recipients: [recipient({ telegramId: 1 }), recipient({ telegramId: 2 })],
+      sensorMutes: [{ telegramId: 1, sensorId: 'cam_1' }],
+    });
+
+    await service.notifyMotion('front_door', MOTION_AT, Buffer.from('jpeg'), 'cam_1');
 
     expect(notifier.photoSends.map((s) => s.telegramId)).toEqual([2]);
   });

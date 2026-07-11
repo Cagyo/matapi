@@ -30,6 +30,9 @@ class StubSensorQuery implements SensorQueryPort {
   async findById(): Promise<Sensor | null> {
     return this.sensor;
   }
+  async findByIdIncludingArchived(): Promise<SensorLookup | null> {
+    return this.sensor ? { kind: 'active', sensor: this.sensor } : null;
+  }
   async findByName(): Promise<SensorLookup | null> {
     return this.sensor ? { kind: 'active', sensor: this.sensor } : null;
   }

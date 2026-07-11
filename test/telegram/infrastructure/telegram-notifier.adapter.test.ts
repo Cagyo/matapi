@@ -75,6 +75,24 @@ describe('TelegramNotifierAdapter', () => {
     expect(bot.api.sendDocument).not.toHaveBeenCalled();
   });
 
+  it('passes notification actions as an inline keyboard', async () => {
+    const bot = makeBot();
+    withUsers([makeUser()]);
+    adapter.setBot(bot);
+
+    await adapter.notify({
+      text: 'critical alert',
+      asFile: false,
+      actions: [[{ text: '📋 View Logs', callbackData: 'logs:id:sensor-id' }]],
+    });
+
+    expect(bot.api.sendMessage).toHaveBeenCalledWith(1001, 'critical alert', {
+      reply_markup: {
+        inline_keyboard: [[{ text: '📋 View Logs', callback_data: 'logs:id:sensor-id' }]],
+      },
+    });
+  });
+
   it('sends file notifications as Telegram documents', async () => {
     const bot = makeBot();
     withUsers([makeUser()]);

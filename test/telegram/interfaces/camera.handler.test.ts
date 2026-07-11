@@ -176,6 +176,9 @@ describe('CameraHandler browse menu and input flow', () => {
       expect.stringContaining('Browse Motion Events'),
       expect.objectContaining({ reply_markup: expect.anything() }),
     );
+    const keyboard = JSON.stringify(context.reply.mock.calls[0][1].reply_markup);
+    expect(keyboard).toContain('« Back');
+    expect(keyboard).toContain('❌ Close');
   });
 
   it('runs Latest 20 without pending typed input', async () => {

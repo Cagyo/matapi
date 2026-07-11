@@ -232,6 +232,23 @@ describe('DigitalGpioAdapter', () => {
     vi.useRealTimers();
   });
 
+  it('emits a flapping fault event when the circuit breaker engages', async () => {
+    const events: SensorEvent[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await adapter.init({ ...baseConfig, debounceMs: 0 });
+
+    const cb = gpio.notify.mock.calls[0][0] as (level: 0 | 1) => void;
+    for (let index = 0; index < 31; index += 1) cb((index % 2) as 0 | 1);
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        sensorId: 'sensor_1',
+        type: 'error',
+        newValue: 'flapping_fault',
+      }),
+    );
+  });
+
   it('rejects out-of-range pin with InvalidGpioPinError', async () => {
     await expect(adapter.init({ ...baseConfig, config: { pin: 99 } })).rejects.toThrow(
       InvalidGpioPinError,

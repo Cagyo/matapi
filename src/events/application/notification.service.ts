@@ -3,6 +3,7 @@ import {
   SENSOR_QUERY,
   SensorQueryPort,
 } from '../../sensors/domain/ports/sensor-query.port';
+import { en } from '../../locales/en';
 import { SensorSeverity } from '../../sensors/domain/sensor';
 import { isInQuietHours } from '../domain/quiet-hours';
 import { formatMotionCaption } from '../domain/motion-notification';
@@ -78,20 +79,39 @@ export class NotificationService {
     }
 
     const sensor = await this.sensors.findById(sensorId);
+    const isFlappingFault =
+      event.type === 'system' && newValue === 'flapping_fault';
     const severity: SensorSeverity =
-      sensor?.severity ?? readSeverity(event) ?? 'info';
-    const text = formatSensorNotification({
-      type: sensor?.type ?? null,
-      name: sensor?.name ?? readName(event) ?? sensorId,
-      value: newValue,
-      oldValue: (event.payload as { oldValue?: unknown } | null)?.oldValue,
-      severity,
-      stepType: typeof sensor?.config?.stepType === 'string' ? sensor.config.stepType : undefined,
-    });
+      isFlappingFault ? 'warning' : sensor?.severity ?? readSeverity(event) ?? 'info';
+    const name = sensor?.name ?? readName(event) ?? sensorId;
+    const stepType =
+      typeof sensor?.config?.stepType === 'string' ? sensor.config.stepType : undefined;
+    const text = isFlappingFault
+      ? en.sensors.notifications.flappingFault(name)
+      : formatSensorNotification({
+          type: sensor?.type ?? null,
+          name,
+          value: newValue,
+          oldValue: (event.payload as { oldValue?: unknown } | null)?.oldValue,
+          severity,
+          stepType,
+        });
+    const requiresLogsAction =
+      isFlappingFault ||
+      (event.type === 'state_change' &&
+        (stepType === 'alarm' || stepType === 'leak_hazard') &&
+        isActiveValue(newValue));
+    const logsCallbackData = sensor ? `logs:id:${sensor.id}` : null;
+    const actions =
+      requiresLogsAction &&
+      logsCallbackData &&
+      Buffer.byteLength(logsCallbackData, 'utf8') <= 64
+        ? [[{ text: en.sensors.notifications.viewLogs, callbackData: logsCallbackData }]]
+        : undefined;
 
     const recipients = await this.recipients.listRecipients();
     if (recipients.length === 0) {
-      await this.broadcast(event, text);
+      await this.broadcast(event, text, actions);
       return;
     }
 
@@ -102,7 +122,7 @@ export class NotificationService {
     await forEachWithConcurrency(recipients, SEND_CONCURRENCY, async (recipient) => {
       if (await this.isSuppressed(recipient, sensorId, severity, now)) return;
       try {
-        await this.notifier.notifyUser(recipient.telegramId, { text, asFile: false });
+        await this.notifier.notifyUser(recipient.telegramId, { text, asFile: false, actions });
         delivered += 1;
       } catch (error) {
         failures += 1;
@@ -130,6 +150,7 @@ export class NotificationService {
     cameraName: string,
     at: Date,
     photo: Buffer | null,
+    cameraId?: string,
   ): Promise<void> {
     if (!this.notifier.isReady()) return;
 
@@ -147,8 +168,7 @@ export class NotificationService {
 
     const now = this.clock.now();
     await forEachWithConcurrency(recipients, SEND_CONCURRENCY, async (recipient) => {
-      if (recipient.muted) return;
-      if (isInQuietHours(recipient, now, this.options.timezone)) return;
+      if (await this.isMotionSuppressed(recipient, cameraName, now, cameraId)) return;
       try {
         if (photo) {
           await this.notifier.notifyUserPhoto(recipient.telegramId, { buffer: photo, caption });
@@ -161,6 +181,35 @@ export class NotificationService {
         );
       }
     });
+  }
+
+  private async isMotionSuppressed(
+    recipient: NotificationRecipient,
+    cameraName: string,
+    now: Date,
+    cameraId?: string,
+  ): Promise<boolean> {
+    if (recipient.muted) return true;
+    if (await this.recipients.isSensorMuted(recipient.telegramId, cameraName)) {
+      return true;
+    }
+    if (
+      cameraId &&
+      cameraId !== cameraName &&
+      (await this.recipients.isSensorMuted(recipient.telegramId, cameraId))
+    ) {
+      return true;
+    }
+    const lookup = await this.sensors.findByName(cameraName);
+    if (
+      lookup?.kind === 'active' &&
+      lookup.sensor.id !== cameraName &&
+      lookup.sensor.id !== cameraId &&
+      (await this.recipients.isSensorMuted(recipient.telegramId, lookup.sensor.id))
+    ) {
+      return true;
+    }
+    return isInQuietHours(recipient, now, this.options.timezone);
   }
 
   private async isSuppressed(
@@ -184,11 +233,16 @@ export class NotificationService {
     return false;
   }
 
-  private async broadcast(event: QueuedEvent, text?: string): Promise<void> {
+  private async broadcast(
+    event: QueuedEvent,
+    text?: string,
+    actions?: { text: string; callbackData: string }[][],
+  ): Promise<void> {
     try {
       await this.notifier.notify({
         text: text ?? fallbackText(event),
         asFile: false,
+        actions,
       });
     } catch (error) {
       this.logger.warn(`Broadcast failed, will retry: ${(error as Error).message}`);
@@ -232,4 +286,8 @@ function stringifyValue(value: unknown): string {
     default:
       return JSON.stringify(value) ?? '[unserializable]';
   }
+}
+
+function isActiveValue(value: unknown): boolean {
+  return value === true || value === 'true' || value === '1';
 }

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { sensors } from '../../../src/database/schema';
+import { sensors, sensorsArchive } from '../../../src/database/schema';
 import { DrizzleSensorQuery } from '../../../src/sensors/infrastructure/drizzle-sensor.query';
 import {
   createTestDatabase,
@@ -75,5 +75,27 @@ describe('DrizzleSensorQuery', () => {
   it('returns null for disabled or unknown sensors', async () => {
     expect(await query.findById('archived')).toBeNull();
     expect(await query.findById('unknown')).toBeNull();
+  });
+
+  it('resolves disabled and archived sensors by ID for historical log links', async () => {
+    context.db
+      .insert(sensorsArchive)
+      .values({
+        id: 'removed',
+        name: 'Removed sensor',
+        type: 'digital',
+        config: {},
+        archivedAt: new Date('2026-07-11T08:00:00Z'),
+      })
+      .run();
+
+    await expect(query.findByIdIncludingArchived('archived')).resolves.toMatchObject({
+      kind: 'active',
+      sensor: { id: 'archived', name: 'Archived sensor', enabled: false },
+    });
+    await expect(query.findByIdIncludingArchived('removed')).resolves.toMatchObject({
+      kind: 'archived',
+      sensor: { id: 'removed', name: 'Removed sensor' },
+    });
   });
 });

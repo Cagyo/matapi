@@ -21,6 +21,13 @@ export class InMemorySensorQuery implements SensorQueryPort {
     return found ?? null;
   }
 
+  async findByIdIncludingArchived(id: string): Promise<SensorLookup | null> {
+    const active = this.sensors.find((sensor) => sensor.id === id);
+    if (active) return { kind: 'active', sensor: active };
+    const archived = this.archived.find((sensor) => sensor.id === id);
+    return archived ? { kind: 'archived', sensor: archived } : null;
+  }
+
   async findByName(name: string): Promise<SensorLookup | null> {
     const active = this.sensors.find((s) => s.name === name);
     if (active) return { kind: 'active', sensor: active };

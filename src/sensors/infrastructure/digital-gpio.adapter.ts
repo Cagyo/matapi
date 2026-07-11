@@ -275,6 +275,12 @@ export class DigitalGpioAdapter implements SensorDriverPort {
           timestamp: new Date(now),
         },
       ]);
+      this.listener?.({
+        sensorId: this.config.id,
+        type: 'error',
+        newValue: 'flapping_fault',
+        timestamp: new Date(now),
+      });
       this.isFlapping = true;
       this.startPolledSampling();
       return;

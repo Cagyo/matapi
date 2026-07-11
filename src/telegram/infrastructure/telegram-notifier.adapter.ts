@@ -91,6 +91,20 @@ export class TelegramNotifierAdapter implements NotifierPort {
       return;
     }
 
-    await this.bot.api.sendMessage(recipientId, message.text);
+    if (!message.actions?.length) {
+      await this.bot.api.sendMessage(recipientId, message.text);
+      return;
+    }
+
+    await this.bot.api.sendMessage(recipientId, message.text, {
+      reply_markup: {
+        inline_keyboard: message.actions.map((row) =>
+          row.map((action) => ({
+            text: action.text,
+            callback_data: action.callbackData,
+          })),
+        ),
+      },
+    });
   }
 }

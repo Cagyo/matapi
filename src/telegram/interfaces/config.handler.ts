@@ -31,6 +31,12 @@ import { TelegramHandler } from './telegram-handler';
 type AddType = 'digital' | 'uart';
 type Pull = 'up' | 'down' | 'none';
 
+/** BCM pins exposed in the picker; ID EEPROM and I²C-reserved pins stay out. */
+const SELECTABLE_GPIO_PINS = [
+  4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+  23, 24, 25, 26, 27,
+] as const;
+
 /**
  * Per-user conversation state (spec 10). Held in-memory only; on bot
  * restart the user sees `en.common.interrupted` on their next message
@@ -325,6 +331,22 @@ export class ConfigHandler implements TelegramHandler {
       await ctx.reply(en.config.step2(type), { reply_markup: backCancelKeyboard('addType') });
       return;
     }
+    // cfg:pin:<BCM pin> during digital add
+    if (state.kind === 'addDigitalPin' && data.startsWith('cfg:pin:')) {
+      const pin = parseIntStrict(data.slice('cfg:pin:'.length));
+      if (pin === null || !isSelectableGpioPin(pin)) return;
+      const owner = await this.findPinOwner(pin);
+      if (owner) {
+        await ctx.reply(en.config.pinTaken(pin, owner));
+        await this.showDigitalPinPicker(ctx, state.name);
+        return;
+      }
+      this.states.set(userId, { kind: 'addDigitalStepType', name: state.name, pin });
+      await ctx.reply(en.config.step4Digital(state.name, pin), {
+        reply_markup: stepTypeKeyboard('addDigitalPin'),
+      });
+      return;
+    }
     // cfg:default:digital
     if (state.kind === 'addDigitalStepType' && data === 'cfg:default:digital') {
       const created = await this.addSensor.execute({
@@ -474,10 +496,7 @@ export class ConfigHandler implements TelegramHandler {
       case 'addName': {
         if (state.type === 'digital') {
           this.states.set(userId, { kind: 'addDigitalPin', name: text });
-          await ctx.reply(en.config.step3Digital(text, await this.getUsedPinsText()), {
-            reply_markup: backCancelKeyboard('addName'),
-            parse_mode: 'HTML',
-          });
+          await this.showDigitalPinPicker(ctx, text);
         } else {
           this.states.set(userId, { kind: 'addUartPort', name: text });
           await ctx.reply(en.config.step3Uart(text), {
@@ -487,11 +506,7 @@ export class ConfigHandler implements TelegramHandler {
         return;
       }
       case 'addDigitalPin': {
-        const pin = parseIntStrict(text);
-        if (pin === null || pin < 0 || pin > 27)
-          return void ctx.reply(en.config.invalidPinRange);
-        this.states.set(userId, { kind: 'addDigitalStepType', name: state.name, pin });
-        await ctx.reply(en.config.step4Digital(state.name, pin), { reply_markup: stepTypeKeyboard('addDigitalPin') });
+        await ctx.reply(en.config.gpioPickerOnly);
         return;
       }
       case 'addUartPort': {
@@ -691,6 +706,34 @@ export class ConfigHandler implements TelegramHandler {
     return used.length > 0 ? used.join(', ') : 'none';
   }
 
+  private async findPinOwner(pin: number): Promise<string | null> {
+    const sensors = await this.sensors.listEnabled();
+    const owner = sensors.find(
+      (sensor) => sensor.type === 'digital' && sensor.config.pin === pin,
+    );
+    return owner?.name ?? null;
+  }
+
+  private async showDigitalPinPicker(ctx: Context, name: string): Promise<void> {
+    const sensors = await this.sensors.listEnabled();
+    const usedPins = new Set(
+      sensors
+        .filter((sensor) => sensor.type === 'digital' && typeof sensor.config.pin === 'number')
+        .map((sensor) => sensor.config.pin as number),
+    );
+    const availablePins = SELECTABLE_GPIO_PINS.filter((pin) => !usedPins.has(pin));
+    const usedText = await this.getUsedPinsText();
+    await ctx.reply(
+      availablePins.length > 0
+        ? en.config.step3Digital(name, usedText)
+        : en.config.noAvailableGpioPins,
+      {
+        reply_markup: digitalPinKeyboard(availablePins),
+        parse_mode: 'HTML',
+      },
+    );
+  }
+
   private async handleBack(
     ctx: Context,
     userId: number,
@@ -717,10 +760,7 @@ export class ConfigHandler implements TelegramHandler {
       case 'addDigitalPin': {
         if ('name' in state) {
           this.states.set(userId, { kind: 'addDigitalPin', name: state.name });
-          await ctx.reply(en.config.step3Digital(state.name, await this.getUsedPinsText()), {
-            reply_markup: backCancelKeyboard('addName'),
-            parse_mode: 'HTML',
-          });
+          await this.showDigitalPinPicker(ctx, state.name);
         }
         break;
       }
@@ -856,6 +896,18 @@ function backCancelKeyboard(backTarget: string): InlineKeyboard {
     .text(en.common.cancelButton, 'cfg:cancel');
 }
 
+function digitalPinKeyboard(pins: readonly number[]): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  pins.forEach((pin, index) => {
+    kb.text(`GPIO ${pin}`, `cfg:pin:${pin}`);
+    if ((index + 1) % 3 === 0) kb.row();
+  });
+  if (pins.length % 3 !== 0) kb.row();
+  return kb
+    .text(en.common.backButton, 'cfg:back:addName')
+    .text(en.common.cancelButton, 'cfg:cancel');
+}
+
 function stepTypeKeyboard(backTarget: string): InlineKeyboard {
   const kb = new InlineKeyboard()
     .text('🚪 Contact', 'cfg:st:contact')
@@ -906,7 +958,7 @@ function baudKeyboard(): InlineKeyboard {
 function confirmKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text('Confirm', 'cfg:rm:confirm')
-    .text('Cancel', 'cfg:rm:cancel');
+    .text(en.common.cancelButton, 'cfg:rm:cancel');
 }
 
 function modifyMenu(type: SensorType): InlineKeyboard {
@@ -929,6 +981,10 @@ function parseIntStrict(input: string): number | null {
   if (!/^-?\d+$/.test(input)) return null;
   const n = Number(input);
   return Number.isFinite(n) ? n : null;
+}
+
+function isSelectableGpioPin(pin: number): pin is (typeof SELECTABLE_GPIO_PINS)[number] {
+  return SELECTABLE_GPIO_PINS.includes(pin as (typeof SELECTABLE_GPIO_PINS)[number]);
 }
 
 function isSeverity(value: string): value is SensorSeverity {

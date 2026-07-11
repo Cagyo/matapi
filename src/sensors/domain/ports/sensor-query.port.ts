@@ -23,6 +23,8 @@ export interface SensorQueryPort {
   listEnabled(): Promise<Sensor[]>;
   /** Single sensor by id, or `null` if missing/disabled. */
   findById(id: string): Promise<Sensor | null>;
+  /** Active, disabled, or archived sensor by ID; used for historical log links. */
+  findByIdIncludingArchived(id: string): Promise<SensorLookup | null>;
   /**
    * Resolve a sensor by name. Looks up the active set first, then the
    * archive (spec 09 — `/logs` on archived sensors). Returns `null` if

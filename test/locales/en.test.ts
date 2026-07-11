@@ -122,3 +122,10 @@ describe('en.health.body', () => {
     expect(body).toContain('idle');
   });
 });
+
+describe('en navigation grammar', () => {
+  it('uses the shared cancel label in system update and config import', () => {
+    expect(en.systemUpdate.cancelButton).toBe('❌ Cancel');
+    expect(en.importConfig.cancelButton).toBe('❌ Cancel');
+  });
+});

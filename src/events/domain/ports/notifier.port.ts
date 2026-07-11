@@ -1,8 +1,16 @@
 export const NOTIFIER = Symbol('NOTIFIER');
 
+/** Platform-neutral inline action rendered by a notification adapter. */
+export interface NotificationAction {
+  text: string;
+  callbackData: string;
+}
+
 export interface NotificationMessage {
   text: string;
   asFile: boolean;
+  /** Rows of compact actions shown below a Telegram notification. */
+  actions?: NotificationAction[][];
 }
 
 /** A photo notification — a JPEG buffer with a text caption (spec 19 motion). */

@@ -108,19 +108,22 @@ export class LogsHandler implements TelegramHandler {
       const target = (ctx.callbackQuery?.data ?? '').slice('logs:'.length).trim();
       if (!target) return;
       try {
-        const lookup = await this.sensors.findByName(target);
+        const lookup = target.startsWith('id:')
+          ? await this.sensors.findByIdIncludingArchived(target.slice('id:'.length))
+          : await this.sensors.findByName(target);
         if (!lookup) {
-          await ctx.reply(en.logs.notFound(target));
+          await ctx.reply(en.logs.notFound(target.startsWith('id:') ? 'selected sensor' : target));
           return;
         }
-        const entries = await this.logs.findRecent(lookup.sensor.id, {
+        const sensor = lookup.sensor;
+        const entries = await this.logs.findRecent(sensor.id, {
           limit: DEFAULT_COUNT,
         });
         if (entries.length === 0) {
-          await ctx.reply(en.logs.none(target));
+          await ctx.reply(en.logs.none(sensor.name));
           return;
         }
-        await this.deliver(ctx, target, entries);
+        await this.deliver(ctx, sensor.name, entries);
       } catch (err) {
         this.logger.error(
           `/logs callback failed: ${(err as Error).message}`,
@@ -148,6 +151,7 @@ export class LogsHandler implements TelegramHandler {
     const file = new InputFile(Buffer.from(message, 'utf8'), en.logs.fileName(name));
     await ctx.replyWithDocument(file, { caption: header });
   }
+
 }
 
 export function parseArgs(raw: string): ParsedArgs {

@@ -31,6 +31,20 @@ export class DrizzleSensorQuery implements SensorQueryPort {
     return this.toSensor(row);
   }
 
+  async findByIdIncludingArchived(id: string): Promise<SensorLookup | null> {
+    const active = this.db.select().from(sensors).where(eq(sensors.id, id)).get();
+    if (active) return { kind: 'active', sensor: this.toSensor(active) };
+
+    const archived = this.db
+      .select()
+      .from(sensorsArchive)
+      .where(eq(sensorsArchive.id, id))
+      .get();
+    if (archived) return { kind: 'archived', sensor: this.toArchived(archived) };
+
+    return null;
+  }
+
   async findByName(name: string): Promise<SensorLookup | null> {
     const active = this.db
       .select()

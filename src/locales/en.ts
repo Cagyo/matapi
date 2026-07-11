@@ -389,6 +389,7 @@ export const en = {
       alarmResolved:  (name: string, state: string) => `✅ *RESOLVED:* ${name} is back to *${state}*.`,
       infoChange:     (name: string, state: string, oldState: string) => `ℹ️ *${name}:* ${state} (was ${oldState})`,
       flappingFault:  (name: string) => `⚠️ *FAULT:* Sensor *${name}* switched to polled sampling due to flapping!`,
+      viewLogs: '📋 View Logs',
       mqttOffline: '🔴 MQTT broker offline',
       mqttRecovered: '🟢 MQTT broker reconnected',
     },
@@ -619,7 +620,7 @@ export const en = {
       systemSettings: '⚙️ System Settings',
       systemClean: '🧹 Trigger Clean Now',
       systemInvite: '🔗 Create Invite Code',
-      backToMenu: '« Back to Dashboard',
+      backToMenu: '« Back',
       quietTitle: '🌙 *Quiet Mode (Schedule)*\n\nSelect a preset quiet hours schedule:',
       quiet22_07: '🌙 22:00 - 07:00 (10h)',
       quiet23_06: '🌙 23:00 - 06:00 (8h)',
@@ -651,7 +652,7 @@ export const en = {
     step1: 'Step 1 of 5 — What type of sensor?',
     step2: (type: string) => `Step 2 of 5 (${type})\n\nSensor name?`,
     step3Digital: (name: string, usedPins?: string) =>
-      `Step 3 of 5 (Digital: "${name}")\n\nGPIO pin number (0–27)?\n\n${PINOUT_SCHEMA}${
+      `Step 3 of 5 (Digital: "${name}")\n\nChoose an available GPIO pin.\n\n${PINOUT_SCHEMA}${
         usedPins ? `\n\nCurrently used: ${usedPins}` : ''
       }`,
     step4Digital: (name: string, pin: number) => `Step 4 of 5 (Digital: "${name}", Pin ${pin})\n\nSelect Step Type (device class):`,
@@ -665,6 +666,8 @@ export const en = {
       `GPIO pin number (0–27)?\n\n${PINOUT_SCHEMA}${
         usedPins ? `\n\nCurrently used: ${usedPins}` : ''
       }`,
+    gpioPickerOnly: 'Choose one of the available GPIO buttons below.',
+    noAvailableGpioPins: '❌ No GPIO pins are available. Remove or reconfigure a digital sensor, then try again.',
     stepTypeQuestion: 'Select Step Type (device class):',
     activeQuestion: 'Active high or low?',
     pullQuestion: 'Pull resistor?',
@@ -702,11 +705,12 @@ export const en = {
       ];
       if (sensor.type === 'digital') {
         const inv = sensor.config.invert ?? sensor.config.activeLow ?? true;
+        const pull = sensor.config.pull as string | undefined;
         lines.push(
           `GPIO: ${(sensor.config.pin as number | undefined) ?? '?'}`,
           `Step Type: ${(sensor.config.stepType as string | undefined) ?? 'contact'}`,
-          `Invert (Active Low): ${inv === false ? 'No' : 'Yes'}`,
-          `Pull: ${prettyPull(sensor.config.pull as string | undefined)}`,
+          `Active Low: ${inv === false ? 'No' : 'Yes'} — triggered when the signal is ${inv === false ? 'high' : 'low'}`,
+          `Pull: ${prettyPull(pull)} — ${pull === 'none' ? 'no internal resistor; use external wiring to keep the input stable' : 'keeps the input stable when unconnected'}`,
         );
       } else if (sensor.type === 'uart') {
         lines.push(
@@ -717,7 +721,7 @@ export const en = {
         );
       }
       lines.push(
-        `Debounce: ${sensor.debounceMs}ms`,
+        `Debounce: ${sensor.debounceMs}ms — ignores repeat signals briefly`,
         `Severity: ${sensor.severity}`,
         '',
         'What to change?',
@@ -817,7 +821,7 @@ export const en = {
     nodeMajorWarning: (current: string, desired: string) =>
       `⚠️ Node.js major version change detected (${current} → ${desired}). This requires manual intervention.`,
     applyButton: 'Apply',
-    cancelButton: 'Cancel',
+    cancelButton: '❌ Cancel',
     applying:
       '🔄 Applying system update... I will run a health check and report back when ready.',
     cancelled: 'System update cancelled.',
@@ -848,12 +852,12 @@ export const en = {
         yesterday: 'Yesterday',
         pickDate: 'Pick date',
         latest: 'Latest 20',
-        back: 'Back',
-        close: 'Close',
-        cancel: 'Cancel',
+        back: '« Back',
+        close: '❌ Close',
+        cancel: '❌ Cancel',
         video: 'Video',
         photo: 'Photo',
-        backToResults: 'Back to results',
+        backToResults: '« Back',
       },
       datePrompt:
         'Send the date to search.\n\nFormat: DD.MM.YYYY\nExample: 08.04.2026',
@@ -1079,7 +1083,7 @@ export const en = {
       return lines.join('\n');
     },
     applyButton: 'Apply',
-    cancelButton: 'Cancel',
+    cancelButton: '❌ Cancel',
     applied: (s: ImportSummary): string =>
       `✅ Config imported. ${s.added.length} added, ${s.updated.length} updated, ${s.archived.length} archived.`,
     cancelled: 'Import cancelled. No changes made.',

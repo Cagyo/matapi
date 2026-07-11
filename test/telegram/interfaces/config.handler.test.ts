@@ -87,6 +87,10 @@ describe('ConfigHandler', () => {
       expect.stringContaining('Raspberry Pi GPIO Pinout (BCM)'),
       expect.anything(),
     );
+    const keyboard = JSON.stringify(reply.mock.calls[reply.mock.calls.length - 1][1].reply_markup);
+    expect(keyboard).toContain('cfg:pin:22');
+    expect(keyboard).not.toContain('cfg:pin:4');
+    expect(keyboard).not.toContain('cfg:pin:17');
   });
 
   it('supports smart default creation from step 4 of digital sensor setup', async () => {
@@ -105,8 +109,14 @@ describe('ConfigHandler', () => {
     await cbFn({ from: { id: 501 }, callbackQuery: { data: 'cfg:type:digital' }, answerCallbackQuery, editMessageReplyMarkup, reply } as any);
     // Step 2: name
     await msgFn({ from: { id: 501 }, message: { text: 'quick_sensor' }, reply } as any, vi.fn());
-    // Step 3: pin
-    await msgFn({ from: { id: 501 }, message: { text: '22' }, reply } as any, vi.fn());
+    // Step 3: choose a GPIO pin from the keyboard
+    await cbFn({
+      from: { id: 501 },
+      callbackQuery: { data: 'cfg:pin:22' },
+      answerCallbackQuery,
+      editMessageReplyMarkup,
+      reply,
+    } as any);
 
     // Step 4: click smart defaults button
     const defaultCtx = {
@@ -127,6 +137,39 @@ describe('ConfigHandler', () => {
       }),
     );
     expect(reply).toHaveBeenCalledWith(expect.stringContaining('quick_sensor'));
+  });
+
+  it('rejects a stale GPIO selection and refreshes the available-pin keyboard', async () => {
+    const { handler, callbackQueryCallbacks, messageCallbacks } = createTestSetup();
+    const cbFn = callbackQueryCallbacks[0].fn;
+    const msgFn = messageCallbacks['message:text'];
+    const reply = vi.fn().mockResolvedValue(true);
+    const answerCallbackQuery = vi.fn().mockResolvedValue(true);
+    const editMessageReplyMarkup = vi.fn().mockResolvedValue(true);
+
+    await handler.handleSubcommand({ from: { id: 504 }, reply } as any, 'add');
+    await cbFn({ from: { id: 504 }, callbackQuery: { data: 'cfg:type:digital' }, answerCallbackQuery, editMessageReplyMarkup, reply } as any);
+    await msgFn({ from: { id: 504 }, message: { text: 'garage_door' }, reply } as any, vi.fn());
+    await cbFn({ from: { id: 504 }, callbackQuery: { data: 'cfg:pin:4' }, answerCallbackQuery, editMessageReplyMarkup, reply } as any);
+
+    expect(reply).toHaveBeenCalledWith(en.config.pinTaken(4, 'front_door'));
+    expect(JSON.stringify(reply.mock.calls[reply.mock.calls.length - 1][1].reply_markup)).toContain('cfg:pin:22');
+  });
+
+  it('keeps the wizard on the GPIO keyboard when a pin is typed', async () => {
+    const { handler, callbackQueryCallbacks, messageCallbacks } = createTestSetup();
+    const cbFn = callbackQueryCallbacks[0].fn;
+    const msgFn = messageCallbacks['message:text'];
+    const reply = vi.fn().mockResolvedValue(true);
+    const answerCallbackQuery = vi.fn().mockResolvedValue(true);
+    const editMessageReplyMarkup = vi.fn().mockResolvedValue(true);
+
+    await handler.handleSubcommand({ from: { id: 505 }, reply } as any, 'add');
+    await cbFn({ from: { id: 505 }, callbackQuery: { data: 'cfg:type:digital' }, answerCallbackQuery, editMessageReplyMarkup, reply } as any);
+    await msgFn({ from: { id: 505 }, message: { text: 'shed_door' }, reply } as any, vi.fn());
+    await msgFn({ from: { id: 505 }, message: { text: '22' }, reply } as any, vi.fn());
+
+    expect(reply).toHaveBeenCalledWith(en.config.gpioPickerOnly);
   });
 
   it('supports step-back navigation via cfg:back callbacks', async () => {
@@ -193,5 +236,32 @@ describe('ConfigHandler', () => {
       expect.stringContaining('Raspberry Pi GPIO Pinout (BCM)'),
       expect.objectContaining({ parse_mode: 'HTML' }),
     );
+  });
+
+  it('explains digital hardware terms in the modify summary', () => {
+    const summary = en.config.modifyHeader({
+      name: 'front_door',
+      type: 'digital',
+      config: { pin: 17, activeLow: true, pull: 'up' },
+      debounceMs: 100,
+      severity: 'info',
+    });
+
+    expect(summary).toContain('Active Low: Yes — triggered when the signal is low');
+    expect(summary).toContain('Pull: Up — keeps the input stable when unconnected');
+    expect(summary).toContain('Debounce: 100ms — ignores repeat signals briefly');
+  });
+
+  it('explains active-high and no-pull wiring accurately', () => {
+    const summary = en.config.modifyHeader({
+      name: 'gate_sensor',
+      type: 'digital',
+      config: { pin: 17, activeLow: false, pull: 'none' },
+      debounceMs: 100,
+      severity: 'info',
+    });
+
+    expect(summary).toContain('Active Low: No — triggered when the signal is high');
+    expect(summary).toContain('Pull: None — no internal resistor; use external wiring to keep the input stable');
   });
 });
