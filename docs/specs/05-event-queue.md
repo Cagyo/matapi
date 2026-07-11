@@ -12,7 +12,7 @@ This spec is a pure application-layer concern. It depends on **ports**, never on
 
 ## Write Flow
 
-All sensor events written to `events` table with `sent_at = NULL`. EventProcessor attempts immediate send. On failure (no internet), event remains queued indefinitely.
+All sensor events written to `events` table with `sent_at = NULL`. EventProcessor attempts immediate send. On failure (no internet), the durable queue retains the event until delivery is recorded as sent, subject only to the explicit capacity exception below.
 
 ### Ingress Backpressure
 

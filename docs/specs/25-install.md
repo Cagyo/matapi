@@ -267,6 +267,17 @@ Standalone lightweight HTTP server (not NestJS):
 6. Starts NestJS worker, shuts itself down
 7. Final page shows `/claim_admin <claim-token>` once; the installer never reads or prints the token
 
+The loopback binding is intentional: the setup server is not a LAN service.
+At startup it displays a one-time pairing secret only on the terminal that
+launched the installer. The secret is never placed in the setup URL or wizard
+logs. Each state-changing setup request must present that secret; requests
+without it are rejected before token validation or configuration writes.
+
+Client-side token validation is only a convenience. The server validates the
+bot token again on the final submission and writes configuration only when that
+fresh validation returns a cleaned token. A value supplied by the browser is
+never trusted for the final write on its own.
+
 ### Remote setup over SSH
 
 The wizard is intentionally reachable only from the Raspberry Pi itself. From
@@ -280,7 +291,9 @@ Run the installer from that interactive SSH terminal. The wizard prints a
 one-time pairing secret only to that terminal; enter the secret into the first
 field at `http://127.0.0.1:3000`, then enter the Telegram bot token. Keep the
 SSH session open until setup completes. The pairing secret is never included in
-the setup URL or logged by the wizard.
+the setup URL or logged by the wizard. The server checks the pairing secret on
+every state-changing setup request and performs a fresh final token validation
+before it writes the `.env` or feature configuration.
 
 ### Feature Installation at Install Time
 

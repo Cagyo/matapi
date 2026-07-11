@@ -105,21 +105,25 @@ Anyone (this is how new users register)
 
 ---
 
-## /promote <user>
+## /promote <name|id:telegram_id>
 
 ### Access
 Admin only
 
 ### Syntax
 ```
-/promote <username_or_name>
+/promote <name|id:telegram_id>
 ```
 
 ### Behavior
-1. Find user by Telegram username or display name
+1. Resolve `id:<telegram_id>` directly to that immutable Telegram ID, or accept a name only when it identifies exactly one registered user
 2. If already admin → inform
 3. Update role to `admin`
 4. Notify the promoted user
+
+Names are a convenience selector, not a tie-breaker. If more than one user has
+the requested name, no role is changed. The reply lists the matching candidates
+with their IDs and instructs the admin to retry with `/promote id:<telegram_id>`.
 
 ### Output
 ```
@@ -135,25 +139,30 @@ Admin only
 | Condition | Response |
 |-----------|----------|
 | User not found | "❌ User not found" |
+| Name matches multiple users | List candidate IDs; retry with `/promote id:<telegram_id>` |
 | Already admin | "ℹ️ Alex is already an admin" |
 
 ---
 
-## /demote <user>
+## /demote <name|id:telegram_id>
 
 ### Access
 Admin only
 
 ### Syntax
 ```
-/demote <username_or_name>
+/demote <name|id:telegram_id>
 ```
 
 ### Behavior
-1. Find user
+1. Resolve `id:<telegram_id>` directly to that immutable Telegram ID, or accept a name only when it identifies exactly one registered user
 2. If not admin → inform
 3. Atomically update role to `user` only if another admin remains
 4. Notify the demoted user
+
+If a name is ambiguous, no role is changed. The reply lists the matching
+candidates with their IDs and instructs the admin to retry with
+`/demote id:<telegram_id>`.
 
 ### Output
 ```
@@ -164,6 +173,7 @@ Admin only
 | Condition | Response |
 |-----------|----------|
 | User not found | "❌ User not found" |
+| Name matches multiple users | List candidate IDs; retry with `/demote id:<telegram_id>` |
 | Not admin | "ℹ️ Alex is already a regular user" |
 | Final admin | "❌ Cannot demote the final admin." |
 

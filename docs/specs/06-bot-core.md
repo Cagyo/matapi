@@ -74,6 +74,16 @@ export function adminOnly(roles: RolePort, en: Locale) {
 
 Applied as middleware on admin-only commands.
 
+### Drive-auth continuations
+
+Starting `/gdrive_auth` is not sufficient authorization for its later
+messages. Every Drive-auth continuation resolves the sender's **current** role
+before processing input: this includes both text snippets and uploaded
+configuration documents. A user demoted after starting the flow is rejected
+and their pending Drive-auth state is cleared. The role check is repeated
+immediately before the Drive configuration write as well. The remaining
+role-check-to-filesystem-write boundary is not atomic.
+
 ## Admin Claim Flow (First Boot)
 
 See [11-bot-cmd-users.md → /claim_admin](11-bot-cmd-users.md#claim_admin) for the full UX and use-case shape. Summary:
