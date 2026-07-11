@@ -45,6 +45,7 @@ class RecordingNotifier implements NotifierPort {
 const baseOptions: EventQueueOptions = {
   batchSize: 50,
   maxQueueBeforeForceAggregate: 100,
+  maxUnsentEvents: 500,
 };
 
 function makeUseCase(options: Partial<EventQueueOptions> = {}) {

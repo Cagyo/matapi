@@ -28,12 +28,8 @@ import { RECIPIENT_DIRECTORY } from './domain/ports/recipient.port';
 import { SENSOR_EVENT_SOURCE } from './domain/ports/sensor-event-source.port';
 import { DrizzleEventRepository } from './infrastructure/drizzle-event.repository';
 import { eventProcessorOptionsFromEnv } from './infrastructure/env-event-processor-options';
+import { eventQueueOptionsFromEnv } from './infrastructure/env-event-queue-options';
 import { SystemClockAdapter } from './infrastructure/system-clock.adapter';
-
-function positiveIntegerFromEnv(value: string | undefined, fallback: number): number {
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
-}
 
 function boolFromEnv(value: string | undefined, fallback: boolean): boolean {
   if (value === undefined) return fallback;
@@ -61,16 +57,7 @@ function boolFromEnv(value: string | undefined, fallback: boolean): boolean {
     },
     {
       provide: EVENT_QUEUE_OPTIONS,
-      useFactory: (): EventQueueOptions => {
-        const defaults = loadDefaults().notifications;
-        return {
-          batchSize: 50,
-          maxQueueBeforeForceAggregate: positiveIntegerFromEnv(
-            process.env.MAX_QUEUE_BEFORE_FORCE_AGGREGATE,
-            defaults.max_queue_before_force_aggregate,
-          ),
-        };
-      },
+      useFactory: (): EventQueueOptions => eventQueueOptionsFromEnv(loadDefaults().notifications),
     },
     {
       provide: NOTIFICATION_OPTIONS,

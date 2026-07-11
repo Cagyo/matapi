@@ -29,9 +29,13 @@ retaining unbounded raw callbacks that have not yet reached SQLite. Warnings
 are rate-limited to the first drop and cumulative power-of-two drop counts,
 and include only the count and configured pending bound.
 
-Once an event has been persisted in SQLite, the normal at-least-once delivery
-semantics above remain unchanged: it is retained until notification delivery
-is recorded as sent.
+The durable SQLite queue is also bounded by `EVENT_MAX_UNSENT` (default 500).
+Below that capacity, delivery remains at-least-once: an event is retained until
+notification delivery is recorded as sent. At capacity, this guarantee has an
+explicit overflow exception: the oldest unsent event is deliberately dropped
+before the newest event is stored. Sent rows are never evicted. A warning is
+emitted for the first drop and cumulative power-of-two drop counts; it contains
+only the cumulative drop count and configured queue bound.
 
 ## Queue Drain on Reconnect
 

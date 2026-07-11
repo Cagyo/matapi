@@ -1,7 +1,11 @@
-import { Inject, Injectable } from '@nestjs/common';
-import { asc, count, inArray, isNull } from 'drizzle-orm';
+import { Inject, Injectable, Logger } from '@nestjs/common';
+import { asc, count, eq, inArray, isNull } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../database/database.module';
 import { events } from '../../database/schema';
+import {
+  EVENT_QUEUE_OPTIONS,
+  EventQueueOptions,
+} from '../application/ports/event-queue-options.port';
 import {
   NewQueuedEvent,
   QueuedEvent,
@@ -13,21 +17,53 @@ type EventRow = typeof events.$inferSelect;
 
 @Injectable()
 export class DrizzleEventRepository implements EventRepositoryPort {
-  constructor(@Inject(DB) private readonly db: AppDatabase) {}
+  private readonly logger = new Logger(DrizzleEventRepository.name);
+  private overflowCount = 0;
+
+  constructor(
+    @Inject(DB) private readonly db: AppDatabase,
+    @Inject(EVENT_QUEUE_OPTIONS) private readonly options: EventQueueOptions,
+  ) {}
 
   async enqueue(event: NewQueuedEvent): Promise<QueuedEvent> {
-    const [row] = this.db
-      .insert(events)
-      .values({
-        sensorId: event.sensorId,
-        type: event.type,
-        payload: event.payload,
-        createdAt: event.createdAt,
-      })
-      .returning()
-      .all();
+    const { queued, evicted } = this.db.transaction((tx) => {
+      const [{ value }] = tx
+        .select({ value: count() })
+        .from(events)
+        .where(isNull(events.sentAt))
+        .all();
+      let evicted = false;
 
-    return this.toQueuedEvent(row);
+      if (value >= this.options.maxUnsentEvents) {
+        const oldest = tx
+          .select({ id: events.id })
+          .from(events)
+          .where(isNull(events.sentAt))
+          .orderBy(asc(events.createdAt), asc(events.id))
+          .limit(1)
+          .get();
+        if (oldest) {
+          tx.delete(events).where(eq(events.id, oldest.id)).run();
+          evicted = true;
+        }
+      }
+
+      const [row] = tx
+        .insert(events)
+        .values({
+          sensorId: event.sensorId,
+          type: event.type,
+          payload: event.payload,
+          createdAt: event.createdAt,
+        })
+        .returning()
+        .all();
+
+      return { queued: this.toQueuedEvent(row), evicted };
+    });
+
+    if (evicted) this.recordOverflow();
+    return queued;
   }
 
   async pending(limit = 50): Promise<QueuedEvent[]> {
@@ -72,4 +108,16 @@ export class DrizzleEventRepository implements EventRepositoryPort {
     }
     return { value: payload };
   }
+
+  private recordOverflow(): void {
+    this.overflowCount += 1;
+    if (!isPowerOfTwo(this.overflowCount)) return;
+    this.logger.warn(
+      `Durable unsent queue overflow: count=${this.overflowCount}, bound=${this.options.maxUnsentEvents}`,
+    );
+  }
+}
+
+function isPowerOfTwo(value: number): boolean {
+  return value > 0 && Number.isInteger(Math.log2(value));
 }

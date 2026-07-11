@@ -1,3 +1,5 @@
+import { Logger } from '@nestjs/common';
+import { EventQueueOptions } from '../application/ports/event-queue-options.port';
 import { NewQueuedEvent, QueuedEvent } from '../domain/queued-event.entity';
 import { EventRepositoryPort } from '../domain/ports/event-repository.port';
 
@@ -6,8 +8,24 @@ type StoredQueuedEvent = QueuedEvent & { sentAt: Date | null };
 export class InMemoryEventRepository implements EventRepositoryPort {
   private nextId = 1;
   private readonly events: StoredQueuedEvent[] = [];
+  private readonly logger = new Logger(InMemoryEventRepository.name);
+  private overflowCount = 0;
+
+  constructor(
+    private readonly options: Pick<EventQueueOptions, 'maxUnsentEvents'> = {
+      maxUnsentEvents: 500,
+    },
+  ) {}
 
   async enqueue(event: NewQueuedEvent): Promise<QueuedEvent> {
+    const unsent = this.events.filter((stored) => stored.sentAt === null);
+    if (unsent.length >= this.options.maxUnsentEvents) {
+      const oldest = [...unsent].sort(compareQueuedEvents)[0];
+      const oldestIndex = this.events.findIndex((stored) => stored.id === oldest.id);
+      this.events.splice(oldestIndex, 1);
+      this.recordOverflow();
+    }
+
     const queued: StoredQueuedEvent = {
       ...event,
       id: this.nextId,
@@ -21,7 +39,7 @@ export class InMemoryEventRepository implements EventRepositoryPort {
   async pending(limit = 50): Promise<QueuedEvent[]> {
     return this.events
       .filter((event) => event.sentAt === null)
-      .sort((left, right) => eventTime(left) - eventTime(right))
+      .sort(compareQueuedEvents)
       .slice(0, limit)
       .map((event) => this.toQueuedEvent(event));
   }
@@ -52,8 +70,25 @@ export class InMemoryEventRepository implements EventRepositoryPort {
       createdAt: event.createdAt,
     };
   }
+
+  private recordOverflow(): void {
+    this.overflowCount += 1;
+    if (!isPowerOfTwo(this.overflowCount)) return;
+    this.logger.warn(
+      `Durable unsent queue overflow: count=${this.overflowCount}, bound=${this.options.maxUnsentEvents}`,
+    );
+  }
+}
+
+function compareQueuedEvents(left: QueuedEvent, right: QueuedEvent): number {
+  const byCreatedAt = eventTime(left) - eventTime(right);
+  return byCreatedAt === 0 ? left.id - right.id : byCreatedAt;
 }
 
 function eventTime(event: QueuedEvent): number {
   return event.createdAt?.getTime() ?? Number.MAX_SAFE_INTEGER;
+}
+
+function isPowerOfTwo(value: number): boolean {
+  return value > 0 && Number.isInteger(Math.log2(value));
 }

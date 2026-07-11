@@ -9,6 +9,25 @@ import { DrizzleEventRepository } from '../../../src/events/infrastructure/drizz
 
 type TestDatabase = BetterSQLite3Database<typeof schema>;
 
+const options = {
+  batchSize: 50,
+  maxQueueBeforeForceAggregate: 1,
+  maxUnsentEvents: 500,
+};
+
+async function enqueue(
+  repository: DrizzleEventRepository,
+  sensorId: string,
+  timestamp: string,
+) {
+  return repository.enqueue({
+    sensorId,
+    type: 'state_change',
+    payload: { newValue: true },
+    createdAt: new Date(timestamp),
+  });
+}
+
 describe('DrizzleEventRepository', () => {
   let sqlite: Database.Database;
   let db: TestDatabase;
@@ -18,7 +37,7 @@ describe('DrizzleEventRepository', () => {
     sqlite = new Database(':memory:');
     db = drizzle(sqlite, { schema });
     migrate(db, { migrationsFolder: './migrations' });
-    repository = new DrizzleEventRepository(db);
+    repository = new DrizzleEventRepository(db, options);
   });
 
   afterEach(() => {
@@ -99,5 +118,28 @@ describe('DrizzleEventRepository', () => {
     await repository.markSent([], new Date('2030-01-01T00:01:00.000Z'));
 
     expect((await repository.pending()).map((event) => event.id)).toEqual([queued.id]);
+  });
+
+  it('does not evict sent rows when bounding unsent events', async () => {
+    repository = new DrizzleEventRepository(db, { ...options, maxUnsentEvents: 1 });
+    const sent = await enqueue(repository, 'sent', '2030-01-01T00:00:00.000Z');
+    await repository.markSent([sent.id], new Date('2030-01-01T00:00:01.000Z'));
+    const pending = await enqueue(repository, 'pending', '2030-01-01T00:00:02.000Z');
+
+    expect(await repository.pending()).toEqual([pending]);
+    const [storedSent] = db.select().from(events).where(eq(events.id, sent.id)).all();
+    expect(storedSent.sentAt).not.toBeNull();
+  });
+
+  it('atomically bounds concurrent enqueue calls', async () => {
+    repository = new DrizzleEventRepository(db, { ...options, maxUnsentEvents: 2 });
+
+    await Promise.all([
+      enqueue(repository, 'first', '2030-01-01T00:00:00.000Z'),
+      enqueue(repository, 'second', '2030-01-01T00:01:00.000Z'),
+      enqueue(repository, 'third', '2030-01-01T00:02:00.000Z'),
+    ]);
+
+    expect(await repository.countPending()).toBe(2);
   });
 });
