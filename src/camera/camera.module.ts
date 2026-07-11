@@ -172,6 +172,7 @@ const mode = resolveCameraMode();
     UpdateGdriveAuthUseCase,
   ],
   exports: [
+    MEDIA_REPOSITORY,
     GetSnapshotUseCase,
     BrowseMotionEventsUseCase,
     ListMotionEventsUseCase,

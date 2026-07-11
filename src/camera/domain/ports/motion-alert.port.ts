@@ -10,6 +10,12 @@ export interface MotionAlertPort {
    * @param cameraName human-readable camera name for the caption
    * @param at         event start time (injected; not `new Date()` downstream)
    * @param photo      a snapshot JPEG, or `null` when none could be grabbed
+   * @param cameraId   optional camera ID for per-camera mute filtering
    */
-  motionStarted(cameraName: string, at: Date, photo: Buffer | null): Promise<void>;
+  motionStarted(
+    cameraName: string,
+    at: Date,
+    photo: Buffer | null,
+    cameraId?: string,
+  ): Promise<void>;
 }

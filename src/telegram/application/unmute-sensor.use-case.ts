@@ -1,4 +1,8 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
+import {
+  MEDIA_REPOSITORY,
+  MediaRepositoryPort,
+} from '../../camera/domain/ports/media-repository.port';
 import {
   SENSOR_QUERY,
   SensorQueryPort,
@@ -17,16 +21,32 @@ export class UnmuteSensorUseCase {
     @Inject(SENSOR_QUERY) private readonly sensors: SensorQueryPort,
     @Inject(USER_SENSOR_MUTE_REPOSITORY)
     private readonly mutes: UserSensorMuteRepositoryPort,
+    @Optional()
+    @Inject(MEDIA_REPOSITORY)
+    private readonly media?: MediaRepositoryPort,
   ) {}
 
   async execute(userId: number, sensorName: string): Promise<void> {
     const lookup = await this.sensors.findByName(sensorName);
-    if (lookup?.kind !== 'active') {
-      throw new SensorNotFoundError(sensorName);
+    if (lookup?.kind === 'active') {
+      if (!(await this.mutes.isMuted(userId, lookup.sensor.id))) {
+        throw new SensorNotMutedError(lookup.sensor.name);
+      }
+      await this.mutes.unmute(userId, lookup.sensor.id);
+      return;
     }
-    if (!(await this.mutes.isMuted(userId, lookup.sensor.id))) {
-      throw new SensorNotMutedError(lookup.sensor.name);
+
+    if (this.media) {
+      const camera = await this.media.findCameraByName(sensorName);
+      if (camera?.enabled) {
+        if (!(await this.mutes.isMuted(userId, camera.id))) {
+          throw new SensorNotMutedError(camera.name);
+        }
+        await this.mutes.unmute(userId, camera.id);
+        return;
+      }
     }
-    await this.mutes.unmute(userId, lookup.sensor.id);
+
+    throw new SensorNotFoundError(sensorName);
   }
 }

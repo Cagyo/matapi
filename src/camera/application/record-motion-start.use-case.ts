@@ -49,7 +49,7 @@ export class RecordMotionStartUseCase {
       );
     }
 
-    await this.alert.motionStarted(camera.name, startedAt, photo);
+    await this.alert.motionStarted(camera.name, startedAt, photo, camera.id);
   }
 
   private async resolveCamera(cameraRef?: string): Promise<Camera | null> {

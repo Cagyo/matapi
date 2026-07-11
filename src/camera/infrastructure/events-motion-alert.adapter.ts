@@ -15,7 +15,8 @@ export class EventsMotionAlertAdapter implements MotionAlertPort {
     cameraName: string,
     at: Date,
     photo: Buffer | null,
+    cameraId?: string,
   ): Promise<void> {
-    await this.notifications.notifyMotion(cameraName, at, photo);
+    await this.notifications.notifyMotion(cameraName, at, photo, cameraId);
   }
 }

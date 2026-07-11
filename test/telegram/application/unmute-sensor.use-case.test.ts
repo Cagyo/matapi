@@ -70,4 +70,32 @@ describe('UnmuteSensorUseCase', () => {
       SensorNotMutedError,
     );
   });
+
+  it('unmutes a camera when sensor lookup does not find an active sensor', async () => {
+    const query = makeQuery(new Map());
+    const mutes = new InMemoryUserSensorMuteRepository();
+    await mutes.mute(42, 'cam-1');
+    const media = {
+      listCameras: async () => [],
+      findCameraByName: async (name: string) =>
+        name === 'front_door_cam'
+          ? { id: 'cam-1', name: 'front_door_cam', enabled: true }
+          : null,
+      saveCamera: async () => {},
+      listSnapshots: async () => [],
+      saveSnapshot: async () => ({
+        id: '1',
+        cameraId: 'cam-1',
+        filePath: '',
+        fileSize: 0,
+        createdAt: new Date(),
+      }),
+      pruneSnapshotsBefore: async () => 0,
+    };
+    const useCase = new UnmuteSensorUseCase(query, mutes, media as any);
+
+    await useCase.execute(42, 'front_door_cam');
+
+    expect(await mutes.isMuted(42, 'cam-1')).toBe(false);
+  });
 });

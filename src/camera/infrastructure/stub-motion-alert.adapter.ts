@@ -10,11 +10,12 @@ export class StubMotionAlertAdapter implements MotionAlertPort {
     cameraName: string,
     at: Date,
     photo: Buffer | null,
+    cameraId?: string,
   ): Promise<void> {
     this.logger.warn(
-      `StubMotionAlert: motion on ${cameraName} at ${at.toISOString()} (photo: ${
-        photo ? `${photo.length}B` : 'none'
-      })`,
+      `StubMotionAlert: motion on ${cameraName}${
+        cameraId ? ` (${cameraId})` : ''
+      } at ${at.toISOString()} (photo: ${photo ? `${photo.length}B` : 'none'})`,
     );
   }
 }

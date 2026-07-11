@@ -48,4 +48,25 @@ describe('MuteHandler', () => {
     await handler.handleMuteAll(ctx);
     expect(reply).toHaveBeenCalledWith(en.mute.mutedAll(1));
   });
+
+  it('handleMuteAll mutes cameras when media repository is provided', async () => {
+    const sensors = {
+      listEnabled: vi.fn().mockResolvedValue([]),
+    } as any;
+    const mute = { execute: vi.fn().mockResolvedValue(undefined) } as any;
+    const guard = { registered: vi.fn() } as any;
+    const media = {
+      listCameras: vi.fn().mockResolvedValue([
+        { id: 'cam-1', name: 'front_door_cam', enabled: true },
+      ]),
+    } as any;
+
+    const handler = new MuteHandler(sensors, mute, guard, media);
+    const reply = vi.fn().mockResolvedValue(true);
+    const ctx = { from: { id: 123 }, reply } as any;
+
+    await handler.handleMuteAll(ctx);
+    expect(mute.execute).toHaveBeenCalledWith(123, 'front_door_cam');
+    expect(reply).toHaveBeenCalledWith(en.mute.mutedAll(1));
+  });
 });

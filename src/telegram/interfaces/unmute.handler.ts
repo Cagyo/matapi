@@ -1,5 +1,9 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { Composer, Context, InlineKeyboard } from 'grammy';
+import {
+  MEDIA_REPOSITORY,
+  MediaRepositoryPort,
+} from '../../camera/domain/ports/media-repository.port';
 import { en, TYPE_ICONS } from '../../locales/en';
 import { UnmuteSensorUseCase } from '../application/unmute-sensor.use-case';
 import { SensorNotFoundError } from '../domain/errors/sensor-not-found.error';
@@ -19,11 +23,17 @@ export class UnmuteHandler implements TelegramHandler {
     @Inject(SENSOR_QUERY) private readonly sensors: SensorQueryPort,
     private readonly unmute: UnmuteSensorUseCase,
     private readonly guard: RoleMiddleware,
+    @Optional()
+    @Inject(MEDIA_REPOSITORY)
+    private readonly media?: MediaRepositoryPort,
   ) {}
 
   async handleEmpty(ctx: Context): Promise<void> {
     const sensors = await this.sensors.listEnabled();
-    if (sensors.length === 0) {
+    const cameras = this.media
+      ? (await this.media.listCameras()).filter((c) => c.enabled)
+      : [];
+    if (sensors.length === 0 && cameras.length === 0) {
       await ctx.reply(en.status.none);
       return;
     }
@@ -32,6 +42,10 @@ export class UnmuteHandler implements TelegramHandler {
       const icon = TYPE_ICONS[s.type] ?? '•';
       kb.text(`${icon} ${s.name}`, `unmute:${s.name}`).row();
     }
+    for (const c of cameras) {
+      const icon = TYPE_ICONS.camera ?? '📷';
+      kb.text(`${icon} ${c.name}`, `unmute:${c.name}`).row();
+    }
     await ctx.reply(en.mute.selectUnmute, { reply_markup: kb });
   }
 
@@ -39,7 +53,10 @@ export class UnmuteHandler implements TelegramHandler {
     const userId = ctx.from?.id;
     if (!userId) return;
     const sensors = await this.sensors.listEnabled();
-    if (sensors.length === 0) {
+    const cameras = this.media
+      ? (await this.media.listCameras()).filter((c) => c.enabled)
+      : [];
+    if (sensors.length === 0 && cameras.length === 0) {
       await ctx.reply(en.mute.noSensorsToUnmute);
       return;
     }
@@ -51,6 +68,16 @@ export class UnmuteHandler implements TelegramHandler {
       } catch (err) {
         if (!(err instanceof SensorNotMutedError)) {
           this.logger.error(`Failed to unmute ${s.name}: ${(err as Error).message}`);
+        }
+      }
+    }
+    for (const c of cameras) {
+      try {
+        await this.unmute.execute(userId, c.name);
+        unmutedCount++;
+      } catch (err) {
+        if (!(err instanceof SensorNotMutedError)) {
+          this.logger.error(`Failed to unmute ${c.name}: ${(err as Error).message}`);
         }
       }
     }
