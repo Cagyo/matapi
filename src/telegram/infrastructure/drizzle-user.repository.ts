@@ -66,7 +66,7 @@ export class DrizzleUserRepository implements UserRepositoryPort {
       .from(users)
       .where(sql`LOWER(${users.name}) = ${needle}`)
       .all()
-      .map(this.toUser);
+      .map((row) => this.toUser(row));
   }
 
   async createAdmin(user: NewUser): Promise<User> {
