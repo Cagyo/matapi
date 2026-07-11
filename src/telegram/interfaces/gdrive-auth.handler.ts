@@ -79,6 +79,8 @@ export class GdriveAuthHandler implements TelegramHandler {
     composer.on('message:text', async (ctx, next) => {
       const userId = ctx.from?.id;
       if (!userId || !this.states.has(userId)) return next();
+      if (!(await this.requireCurrentAdmin(ctx, userId))) return;
+
       const text = ctx.message?.text?.trim() ?? '';
       if (text.startsWith('/')) return next();
 
@@ -93,6 +95,7 @@ export class GdriveAuthHandler implements TelegramHandler {
     composer.on('message:document', async (ctx, next) => {
       const userId = ctx.from?.id;
       if (!userId || !this.states.has(userId)) return next();
+      if (!(await this.requireCurrentAdmin(ctx, userId))) return;
 
       const doc = ctx.message?.document;
       if (!doc) return;
@@ -150,6 +153,10 @@ export class GdriveAuthHandler implements TelegramHandler {
   }
 
   private async processSnippet(ctx: Context, userId: number, snippet: string): Promise<void> {
+    if (!(await this.requireCurrentAdmin(ctx, userId))) return;
+
+    // Role lookup and the filesystem writer remain separate async boundaries; making
+    // role revocation and the write atomic requires a cross-context authorization redesign.
     try {
       const quota = await this.updateGdriveAuth.execute(snippet);
       this.states.delete(userId);
@@ -171,5 +178,12 @@ export class GdriveAuthHandler implements TelegramHandler {
       );
       await ctx.reply(en.common.error('/gdrive_auth', (err as Error).message));
     }
+  }
+
+  private async requireCurrentAdmin(ctx: Context, userId: number): Promise<boolean> {
+    if ((await this.guard.resolveRole(userId)) === 'admin') return true;
+    this.states.delete(userId);
+    await ctx.reply(en.common.adminRequired);
+    return false;
   }
 }

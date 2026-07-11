@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { UpdateGdriveAuthUseCase } from '../../../src/camera/application/update-gdrive-auth.use-case';
+import { en } from '../../../src/locales/en';
 import { GdriveAuthHandler } from '../../../src/telegram/interfaces/gdrive-auth.handler';
 import { RoleMiddleware } from '../../../src/telegram/interfaces/role.middleware';
 
@@ -14,6 +15,7 @@ function createTestSetup() {
 
   const guard = {
     adminOnly: vi.fn(),
+    resolveRole: vi.fn().mockResolvedValue('admin'),
   } as unknown as RoleMiddleware;
 
   const handler = new GdriveAuthHandler(updateUseCase, guard);
@@ -112,5 +114,42 @@ describe('GdriveAuthHandler', () => {
 
     expect(updateUseCase.execute).toHaveBeenCalledWith('[gdrive]\ntype = drive\nscope = drive');
     expect(reply.mock.calls[1][0]).toContain('Google Drive connected!');
+  });
+
+  it('clears a demoted sender state before processing a text snippet', async () => {
+    const { commandCallbacks, onCallbacks, updateUseCase, guard } = createTestSetup();
+    vi.mocked(guard.resolveRole).mockResolvedValue('user');
+    const reply = vi.fn().mockResolvedValue(undefined);
+    const ctx = {
+      from: { id: 12345 },
+      reply,
+      message: { text: '[gdrive]\ntype = drive' },
+    };
+
+    await commandCallbacks.gdrive_auth(ctx);
+    await onCallbacks['message:text'](ctx, vi.fn());
+
+    expect(updateUseCase.execute).not.toHaveBeenCalled();
+    expect(reply).toHaveBeenLastCalledWith(en.common.adminRequired);
+  });
+
+  it('clears a demoted sender state before downloading a document snippet', async () => {
+    const { commandCallbacks, onCallbacks, updateUseCase, guard } = createTestSetup();
+    vi.mocked(guard.resolveRole).mockResolvedValue('user');
+    const reply = vi.fn().mockResolvedValue(undefined);
+    const getFile = vi.fn();
+    const ctx = {
+      from: { id: 12345 },
+      reply,
+      getFile,
+      message: { document: { file_name: 'rclone.conf' } },
+    };
+
+    await commandCallbacks.gdrive_auth(ctx);
+    await onCallbacks['message:document'](ctx, vi.fn());
+
+    expect(getFile).not.toHaveBeenCalled();
+    expect(updateUseCase.execute).not.toHaveBeenCalled();
+    expect(reply).toHaveBeenLastCalledWith(en.common.adminRequired);
   });
 });
