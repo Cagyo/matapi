@@ -1,7 +1,27 @@
 import { describe, expect, it } from 'vitest';
 import * as pages from '../../scripts/setup-wizard/pages';
 
-const { renderDone } = pages;
+const { renderDone, renderStep1, renderStep2 } = pages;
+
+describe('pairing forms', () => {
+  it('collects the terminal pairing secret in Step 1 and includes it in token validation', () => {
+    const html = renderStep1();
+
+    expect(html).toContain('name="pairingSecret"');
+    expect(html).toContain('required');
+    expect(html).toContain("pairingSecret=' + encodeURIComponent(pairingSecret)");
+    expect(html).not.toContain('action="/step-2?pairingSecret=');
+  });
+
+  it('escapes the pairing secret in the Step 2 hidden input instead of an action URL', () => {
+    const pairingSecret = '<pairing&secret>';
+    const html = renderStep2('bot-token', 'home_bot', [], pairingSecret);
+
+    expect(html).toContain('name="pairingSecret" value="&lt;pairing&amp;secret&gt;"');
+    expect(html).not.toContain('action="/finish?pairingSecret=');
+    expect(html).not.toContain(pairingSecret);
+  });
+});
 
 describe('renderDone', () => {
   it('escapes the claim token in the complete claim command', () => {

@@ -123,12 +123,16 @@ function renderStep1(errorMessage = null) {
 
   const content = `
     <h1>Connect Telegram Bot</h1>
-    <p class="subtitle">Step 1 of 2 — Enter the Bot Token from @BotFather</p>
+    <p class="subtitle">Step 1 of 2 — Enter the pairing secret shown in the Pi terminal, then your Bot Token from @BotFather</p>
     ${errorHtml}
     <div id="success-box" class="alert alert-success" style="display: none;"></div>
     <form id="token-form" action="/step-2" method="POST">
       <input type="hidden" id="hidden-token" name="token" value="">
       <input type="hidden" id="hidden-username" name="botUsername" value="">
+      <div class="form-group">
+        <label for="pairing-secret-input">Terminal Pairing Secret</label>
+        <input type="text" id="pairing-secret-input" name="pairingSecret" autocomplete="off" required>
+      </div>
       <div class="form-group">
         <label for="token-input">Bot Token</label>
         <input type="text" id="token-input" placeholder="123456789:ABCdefGHIjklMNOpqrsTUVwxyz" autocomplete="off" required>
@@ -138,6 +142,7 @@ function renderStep1(errorMessage = null) {
     <script>
       const form = document.getElementById('token-form');
       const input = document.getElementById('token-input');
+      const pairingSecretInput = document.getElementById('pairing-secret-input');
       const btn = document.getElementById('submit-btn');
       const errBox = document.getElementById('error-box');
       const succBox = document.getElementById('success-box');
@@ -152,11 +157,12 @@ function renderStep1(errorMessage = null) {
         btn.textContent = 'Validating...';
 
         const token = input.value.trim();
+        const pairingSecret = pairingSecretInput.value;
         try {
           const res = await fetch('/api/validate-token', {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: 'token=' + encodeURIComponent(token)
+            body: 'token=' + encodeURIComponent(token) + '&pairingSecret=' + encodeURIComponent(pairingSecret)
           });
           const data = await res.json();
           if (!data.ok) {
@@ -183,9 +189,10 @@ function renderStep1(errorMessage = null) {
   return renderLayout('Connect Telegram Bot', content);
 }
 
-function renderStep2(token, botUsername, catalog = []) {
+function renderStep2(token, botUsername, catalog = [], pairingSecret = '') {
   const safeToken = escapeHtml(token);
   const safeUser = escapeHtml(botUsername);
+  const safePairingSecret = escapeHtml(pairingSecret);
 
   const featuresHtml = catalog.map(f => `
     <label class="feature-item">
@@ -203,6 +210,7 @@ function renderStep2(token, botUsername, catalog = []) {
     <form id="step2-form" action="/finish" method="POST">
       <input type="hidden" name="token" value="${safeToken}">
       <input type="hidden" name="botUsername" value="${safeUser}">
+      <input type="hidden" name="pairingSecret" value="${safePairingSecret}">
       <div class="feature-list">
         ${featuresHtml}
       </div>

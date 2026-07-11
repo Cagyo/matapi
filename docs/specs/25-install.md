@@ -260,12 +260,27 @@ Install script should set up this hook automatically.
 Standalone lightweight HTTP server (not NestJS):
 
 1. Install script runs unattended (no prompts)
-2. Starts `scripts/setup-wizard/index.ts` on `:3000`
+2. Starts `scripts/setup-wizard/index.js` on loopback-only `127.0.0.1:3000`
 3. Wizard: bot token → feature selection → feature config
 4. Generates `CLAIM_ADMIN_TOKEN`, writes it only to the mode-`0600` `.env`, and writes `features.json`
 5. Triggers feature dep installation per selection
 6. Starts NestJS worker, shuts itself down
 7. Final page shows `/claim_admin <claim-token>` once; the installer never reads or prints the token
+
+### Remote setup over SSH
+
+The wizard is intentionally reachable only from the Raspberry Pi itself. From
+your workstation, create a loopback tunnel before opening the setup page:
+
+```bash
+ssh -L 3000:127.0.0.1:3000 <pi-user>@<pi-host>
+```
+
+Run the installer from that interactive SSH terminal. The wizard prints a
+one-time pairing secret only to that terminal; enter the secret into the first
+field at `http://127.0.0.1:3000`, then enter the Telegram bot token. Keep the
+SSH session open until setup completes. The pairing secret is never included in
+the setup URL or logged by the wizard.
 
 ### Feature Installation at Install Time
 
