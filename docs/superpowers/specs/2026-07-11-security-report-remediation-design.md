@@ -17,8 +17,8 @@ changes; this work must not modify or stage them.
   accepted only when it resolves to exactly one user.
 - A Drive-auth continuation checks the sender's current role immediately
   before it invokes the persistent configuration update.
-- The durable queue is globally bounded. The default policy retains newer
-  state, with a protected critical-event reserve and observable dropping.
+- The durable queue has a focused global row bound. On overflow it retains
+  newer state by evicting the oldest unsent event and logs the loss.
 
 ## 1. Telegram identity and stale authorization
 
@@ -51,8 +51,10 @@ At startup, the wizard creates a cryptographically random, one-time pairing
 secret and prints it only to the terminal. The server stores only a digest and
 uses a length-safe, timing-safe comparison. The browser supplies the secret in
 the request body (never a URL) for every state-changing route, including token
-validation, step two, and finalization. Missing or invalid secrets return 403
-without mutating configuration or revealing the generated claim credential.
+validation, step two, and finalization. The secret expires with the existing
+30-minute wizard timeout and becomes unusable after successful finalization.
+Missing or invalid secrets return 403 without mutating configuration or
+revealing the generated claim credential.
 
 `/finish` independently calls `validateToken` immediately before `writeConfig`.
 An invalid token or unavailable Telegram API returns a retryable error and
@@ -65,39 +67,25 @@ entrypoint remains responsible for one-shot checks, secret generation, terminal
 output, timeout, and process exit. This permits real loopback HTTP tests
 without starting a production listener during test import.
 
-## 3. Durable queue budget and delivery ownership
+## 3. Durable queue bound
 
-The durable event queue moves from unbounded retention to an explicit policy:
+The durable event queue receives the smallest complete bound for the reported
+unbounded-allocation finding:
 
-- `EVENT_MAX_UNSENT=500` limits all unsent rows.
-- `EVENT_MAX_UNSENT_BYTES=8388608` limits serialized unsent payload storage to
-  8 MiB.
-- `EVENT_CRITICAL_RESERVE=100` prevents normal events from consuming the last
-  100 slots reserved for critical alerts.
+- `EVENT_MAX_UNSENT=500` limits all unsent rows and is configurable through
+  the existing event queue options.
+- In one SQLite transaction, an enqueue at capacity deletes the oldest row
+  with `sent_at IS NULL`, ordered by creation time and then ID, before it
+  inserts the new event.
+- The in-memory repository implements the same newest-first behavior so
+  use-case tests preserve production semantics.
 
-The event record carries a persisted priority derived from sensor severity and
-the repository makes admission decisions in one SQLite transaction. A normal
-event evicts the oldest eligible normal event when capacity permits; it is
-rejected, with a rate-limited warning, when only protected or in-flight events
-remain. A critical event may evict an eligible normal event. If the critical
-budget itself is exhausted, the oldest eligible critical event is explicitly
-evicted so the newest critical state is retained. A single event larger than
-the byte cap is rejected rather than violating the bound.
-
-To avoid silently deleting a batch that is currently being delivered, draining
-claims events with an expiring delivery lease before notifying. Eviction never
-selects a live lease. A successful send marks the matching claim sent; a failed
-send releases it; an expired lease becomes eligible for retry after a process
-failure. Immediate notifications use the same claim path. The original
-at-least-once guarantee therefore remains true below the configured budget;
-events discarded by the explicitly documented overflow policy are the sole
-exception.
-
-Capacity, byte usage, priority, and lease state are schema-level data. The
-schema will be edited first and its Drizzle migration generated, never written
-by hand. Queue configuration validates positive values and reserves no more
-than the total row cap. The force-aggregation threshold must not exceed the
-maximum unsent rows.
+Eviction is deliberately observable: the repository writes rate-limited
+warnings at the first drop and cumulative powers of two, containing only the
+drop count and configured bound. The normal at-least-once guarantee remains
+unchanged until the configured capacity is exhausted; an evicted event is an
+explicitly recorded overflow loss. The force-aggregation threshold is
+validated not to exceed this maximum.
 
 ## Error handling and observability
 
@@ -117,9 +105,9 @@ Focused tests will prove:
    document continuations, while a current admin still can;
 3. setup rejects unpaired and invalid-token finalization without creating
    configuration, and accepts paired valid finalization over loopback;
-4. queue admission is atomic under concurrent writers, stays within row and
-   byte budgets, preserves critical reserve behavior, never evicts a live
-   delivery lease, and retries expired leases; and
+4. queue admission is atomic under concurrent writers, retains only the newest
+   500 unsent rows, preserves sent rows, and records rate-limited overflow
+   warnings; and
 5. existing legitimate promotion, Drive auth, setup, notification, and drain
    behavior continues to pass its owning test suites.
 
@@ -127,6 +115,6 @@ Focused tests will prove:
 
 This change does not introduce a general authorization framework, a Telegram
 admin UI, a complete security review of deferred scan surfaces, or a full
-disk-budget system. The queue's explicit event budget limits the reported
-unbounded durable allocation; whole-database disk-pressure management remains
-an operational hardening concern.
+disk-budget system. Byte quotas, critical-event reservation, delivery leases,
+and whole-database disk-pressure management are follow-up hardening work after
+measuring deployed MQTT rates and Pi storage behavior.
