@@ -90,4 +90,39 @@ describe('PromoteUserUseCase', () => {
     expect((await users.findByTelegramId(1001))?.role).toBe('user');
     expect((await users.findByTelegramId(1002))?.role).toBe('user');
   });
+
+  it('retains only safe candidate fields for an ambiguous target', async () => {
+    const users = new InMemoryUserRepository([
+      {
+        telegramId: 1001,
+        name: 'Alex',
+        role: 'user',
+        muted: true,
+        quietStart: '22:00',
+        quietEnd: '07:00',
+        createdAt: new Date('2030-01-01T00:00:00.000Z'),
+      },
+      {
+        telegramId: 1002,
+        name: 'alex',
+        role: 'admin',
+        muted: false,
+        quietStart: null,
+        quietEnd: null,
+        createdAt: new Date('2030-01-02T00:00:00.000Z'),
+      },
+    ]);
+    const targets = new ResolveUserTargetUseCase(users);
+
+    const error = await targets.execute('@ALEX').catch((error: unknown) => {
+      if (error instanceof AmbiguousUserTargetError) return error;
+      throw error;
+    });
+
+    expect(error).toBeInstanceOf(AmbiguousUserTargetError);
+    expect((error as AmbiguousUserTargetError).matches).toEqual([
+      { telegramId: 1001, name: 'Alex' },
+      { telegramId: 1002, name: 'alex' },
+    ]);
+  });
 });

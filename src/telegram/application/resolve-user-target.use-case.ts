@@ -27,7 +27,10 @@ export class ResolveUserTargetUseCase {
     const matches = await this.users.findByName(target);
     if (matches.length === 0) throw new UserNotFoundError(target);
     if (matches.length > 1) {
-      throw new AmbiguousUserTargetError(target, matches);
+      throw new AmbiguousUserTargetError(
+        target,
+        matches.map(({ telegramId, name }) => ({ telegramId, name })),
+      );
     }
     return matches[0];
   }
