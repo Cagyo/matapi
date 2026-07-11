@@ -69,6 +69,22 @@ check_dependencies() {
 
 check_dependencies
 
+normalize_staging_permissions() {
+  echo "Normalizing permissions for remotely staged non-secret source files..."
+  sshpass -p "$REMOTE_PASS" ssh "${SSH_OPTS[@]}" "$REMOTE_USER@$REMOTE_HOST" '
+    staging="$HOME/matapi/worker"
+    find "$staging" -type d \
+      ! -path "$staging/data" ! -path "$staging/data/*" \
+      ! -path "$staging/.yarn" ! -path "$staging/.yarn/*" \
+      ! -path "$staging/.git" ! -path "$staging/.git/*" \
+      -exec chmod a+rx {} +
+    find "$staging" -type f \
+      ! -path "$staging/data/*" ! -path "$staging/.yarn/*" ! -path "$staging/.git/*" \
+      ! -name ".env" ! -name ".env.*" ! -name "features.json" \
+      -exec chmod a+r {} +
+  '
+}
+
 RESET="${RESET:-false}"
 for arg in "$@"; do
   if [[ "$arg" == "--reset" || "$arg" == "-r" ]]; then
@@ -90,7 +106,8 @@ corepack yarn build
 
 # Sync worker codebase to development Raspberry Pi
 echo "Uploading files to $REMOTE_USER@$REMOTE_HOST:~/matapi..."
-sshpass -p "$REMOTE_PASS" rsync -avz --delete --exclude 'data' --exclude 'node_modules' --exclude '.git' --exclude '.yarn' --exclude '.env' --exclude '.env.*' --exclude 'features.json' -e "sshpass -p '$REMOTE_PASS' ssh ${SSH_OPTS[*]}" "$PROJECT_ROOT" "$REMOTE_USER@$REMOTE_HOST:~/matapi"
+sshpass -p "$REMOTE_PASS" rsync -avz --delete --chmod=ugo=rwX --exclude 'data' --exclude 'node_modules' --exclude '.git' --exclude '.yarn' --exclude '.env' --exclude '.env.*' --exclude 'features.json' -e "sshpass -p '$REMOTE_PASS' ssh ${SSH_OPTS[*]}" "$PROJECT_ROOT" "$REMOTE_USER@$REMOTE_HOST:~/matapi"
+normalize_staging_permissions
 
 # Ensure scripts are executable after upload
 echo "Setting executable permissions on scripts..."

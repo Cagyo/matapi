@@ -13,7 +13,24 @@ INSTALL_DIR="${HOME_WORKER_INSTALL_DIR:-/opt/home-worker}"
 LOCKFILE="${HOME_WORKER_UPDATE_LOCK:-/tmp/home-worker-updating.lock}"
 APP_NAME="${PM2_APP_NAME:-worker}"
 HEALTH_CHECK_SEC="${UPDATE_HEALTH_CHECK_SEC:-30}"
-DB_PATH="${DATABASE_PATH:-$INSTALL_DIR/data/worker.db}"
+
+configured_database_path() {
+  if [[ -n "${DATABASE_PATH:-}" ]]; then
+    printf '%s\n' "$DATABASE_PATH"
+    return
+  fi
+
+  local configured_path
+  configured_path="$(
+    sed -n -E 's/^[[:space:]]*DATABASE_PATH[[:space:]]*=[[:space:]]*//p' "$INSTALL_DIR/.env" 2>/dev/null |
+      tail -n 1 |
+      sed -E 's/[[:space:]]*$//' || true
+  )"
+
+  printf '%s\n' "${configured_path:-$INSTALL_DIR/data/worker.db}"
+}
+
+DB_PATH="$(configured_database_path)"
 
 if [[ -e "$LOCKFILE" ]]; then
   echo "Update already in progress (lockfile $LOCKFILE exists)" >&2
@@ -136,7 +153,7 @@ fi
 
 RELEASE_URL="${HOME_WORKER_RELEASE_URL:-}"
 if [[ -z "$RELEASE_URL" ]] && [[ -n "$REPO_URL" ]]; then
-  CLEAN_URL="$(echo "$REPO_URL" | sed -E 's|^(git@github\.com:|https://github\.com/)|https://github.com/|; s|\.git$||')"
+  CLEAN_URL="$(echo "$REPO_URL" | sed -E 's#^git@github\.com:#https://github.com/#; s#\.git$##')"
   if [[ "$CLEAN_URL" != "https://github.com/CHANGE_ME/home-worker" ]]; then
     RELEASE_URL="${CLEAN_URL}/releases/latest/download/home-worker-release.tar.gz"
   fi
@@ -231,7 +248,7 @@ pm2 restart "$APP_NAME"
 # Post-restart health check. pm2 restart returns immediately; give the
 # worker HEALTH_CHECK_SEC seconds to come back online.
 sleep "$HEALTH_CHECK_SEC"
-STATUS="$(APP_NAME="$APP_NAME" pm2 jlist 2>/dev/null | node -e "let s='';process.stdin.on('data',c=>s+=c);process.stdin.on('end',()=>{try{const apps=JSON.parse(s);const app=apps.find(a=>a.name===process.env.APP_NAME);process.stdout.write(app?app.pm2_env.status:'missing');}catch(_){process.stdout.write('unknown');}});" || echo unknown)"
+STATUS="$(pm2 jlist 2>/dev/null | APP_NAME="$APP_NAME" node -e "let s='';process.stdin.on('data',c=>s+=c);process.stdin.on('end',()=>{try{const apps=JSON.parse(s);const app=apps.find(a=>a.name===process.env.APP_NAME);process.stdout.write(app?app.pm2_env.status:'missing');}catch(_){process.stdout.write('unknown');}});" || echo unknown)"
 
 if [[ "$STATUS" != "online" ]]; then
   echo "Health check failed (pm2 status=$STATUS), rolling back" >&2
