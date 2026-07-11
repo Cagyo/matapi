@@ -58,15 +58,15 @@ export class DrizzleUserRepository implements UserRepositoryPort {
     return row ? this.toUser(row) : null;
   }
 
-  async findByName(name: string): Promise<User | null> {
+  async findByName(name: string): Promise<User[]> {
     const needle = name.replace(/^@/, '').toLowerCase();
-    if (!needle) return null;
-    const row = this.db
+    if (!needle) return [];
+    return this.db
       .select()
       .from(users)
       .where(sql`LOWER(${users.name}) = ${needle}`)
-      .get();
-    return row ? this.toUser(row) : null;
+      .all()
+      .map(this.toUser);
   }
 
   async createAdmin(user: NewUser): Promise<User> {

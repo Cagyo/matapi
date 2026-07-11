@@ -3,6 +3,7 @@ import { Composer, Context } from 'grammy';
 import { en } from '../../locales/en';
 import { PromoteUserUseCase } from '../application/promote-user.use-case';
 import { AlreadyAdminError } from '../domain/errors/already-admin.error';
+import { AmbiguousUserTargetError } from '../domain/errors/ambiguous-user-target.error';
 import { UserNotFoundError } from '../domain/errors/user-not-found.error';
 import {
   DIRECT_MESSENGER,
@@ -44,6 +45,10 @@ export class PromoteHandler implements TelegramHandler {
       } catch (err) {
         if (err instanceof UserNotFoundError) {
           await ctx.reply(en.users.userNotFound);
+          return;
+        }
+        if (err instanceof AmbiguousUserTargetError) {
+          await ctx.reply(en.users.ambiguousTarget('promote', err.matches));
           return;
         }
         if (err instanceof AlreadyAdminError) {

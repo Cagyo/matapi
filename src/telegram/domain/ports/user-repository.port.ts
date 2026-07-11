@@ -12,8 +12,8 @@ export interface UserRepositoryPort {
    */
   claimFirstAdmin(user: NewUser): Promise<User | null>;
   findByTelegramId(telegramId: number): Promise<User | null>;
-  /** Case-insensitive name lookup; returns first match. Strips leading `@`. */
-  findByName(name: string): Promise<User | null>;
+  /** Case-insensitive name lookup. Strips leading `@`. */
+  findByName(name: string): Promise<User[]>;
   createAdmin(user: NewUser): Promise<User>;
   createUser(user: NewUser): Promise<User>;
   /**

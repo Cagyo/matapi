@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { PromoteUserUseCase } from '../../../src/telegram/application/promote-user.use-case';
+import { ResolveUserTargetUseCase } from '../../../src/telegram/application/resolve-user-target.use-case';
 import { AlreadyAdminError } from '../../../src/telegram/domain/errors/already-admin.error';
+import { AmbiguousUserTargetError } from '../../../src/telegram/domain/errors/ambiguous-user-target.error';
 import { UserNotFoundError } from '../../../src/telegram/domain/errors/user-not-found.error';
 import { InMemoryUserRepository } from '../../../src/telegram/infrastructure/in-memory-user.repository';
 
@@ -14,7 +16,10 @@ describe('PromoteUserUseCase', () => {
         createdAt: new Date('2030-01-01T00:00:00.000Z'),
       },
     ]);
-    const useCase = new PromoteUserUseCase(users);
+    const useCase = new PromoteUserUseCase(
+      users,
+      new ResolveUserTargetUseCase(users),
+    );
 
     const promoted = await useCase.execute('Alex');
 
@@ -31,14 +36,21 @@ describe('PromoteUserUseCase', () => {
         createdAt: null,
       },
     ]);
-    const useCase = new PromoteUserUseCase(users);
+    const useCase = new PromoteUserUseCase(
+      users,
+      new ResolveUserTargetUseCase(users),
+    );
 
     const promoted = await useCase.execute('@alex');
     expect(promoted.role).toBe('admin');
   });
 
   it('throws UserNotFoundError when the target is unknown', async () => {
-    const useCase = new PromoteUserUseCase(new InMemoryUserRepository());
+    const users = new InMemoryUserRepository();
+    const useCase = new PromoteUserUseCase(
+      users,
+      new ResolveUserTargetUseCase(users),
+    );
     await expect(useCase.execute('ghost')).rejects.toBeInstanceOf(
       UserNotFoundError,
     );
@@ -53,9 +65,29 @@ describe('PromoteUserUseCase', () => {
         createdAt: null,
       },
     ]);
-    const useCase = new PromoteUserUseCase(users);
+    const useCase = new PromoteUserUseCase(
+      users,
+      new ResolveUserTargetUseCase(users),
+    );
     await expect(useCase.execute('Ada')).rejects.toBeInstanceOf(
       AlreadyAdminError,
     );
+  });
+
+  it('rejects an ambiguous name without changing either role', async () => {
+    const users = new InMemoryUserRepository([
+      { telegramId: 1001, name: 'Alex', role: 'user', createdAt: null },
+      { telegramId: 1002, name: 'alex', role: 'user', createdAt: null },
+    ]);
+    const useCase = new PromoteUserUseCase(
+      users,
+      new ResolveUserTargetUseCase(users),
+    );
+
+    await expect(useCase.execute('@ALEX')).rejects.toBeInstanceOf(
+      AmbiguousUserTargetError,
+    );
+    expect((await users.findByTelegramId(1001))?.role).toBe('user');
+    expect((await users.findByTelegramId(1002))?.role).toBe('user');
   });
 });

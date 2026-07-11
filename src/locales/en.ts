@@ -4,6 +4,7 @@ import { SensorSeverity, SensorType } from '../sensors/domain/sensor';
 import { ImportSummary } from '../sensors/application/import-sensors.use-case';
 import { FeatureStatus } from '../features/domain/feature-status';
 import { DepUpdate } from '../system/domain/ports/system-deps.port';
+import { User } from '../telegram/domain/user.entity';
 
 const DATE_FNS_FMT = 'dd.MM.yyyy HH:mm';
 const DATE_FNS_FMT_SECONDS = 'dd.MM.yyyy HH:mm:ss';
@@ -432,7 +433,15 @@ export const en = {
     promoteFailed: '❌ Failed to promote user',
     demoteFailed: '❌ Failed to demote user',
     registerFailed: '❌ Failed to register',
-    missingTarget: (cmd: string) => `❌ Usage: /${cmd} <username_or_name>`,
+    missingTarget: (cmd: string) =>
+      `❌ Usage: /${cmd} <name|id:telegram_id>`,
+    ambiguousTarget: (
+      cmd: string,
+      matches: readonly Pick<User, 'telegramId' | 'name'>[],
+    ) =>
+      `❌ Multiple users match. Retry /${cmd} with id:<telegram_id>: ${matches
+        .map((match) => `${match.name} (id:${match.telegramId})`)
+        .join(', ')}`,
   },
   feature: {
     usage: '❌ Usage: /feature enable|disable|list [feature_name]',

@@ -2,6 +2,7 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Composer, Context } from 'grammy';
 import { en } from '../../locales/en';
 import { DemoteUserUseCase } from '../application/demote-user.use-case';
+import { AmbiguousUserTargetError } from '../domain/errors/ambiguous-user-target.error';
 import { LastAdminDemotionError } from '../domain/errors/last-admin-demotion.error';
 import { NotAdminError } from '../domain/errors/not-admin.error';
 import { UserNotFoundError } from '../domain/errors/user-not-found.error';
@@ -45,6 +46,10 @@ export class DemoteHandler implements TelegramHandler {
       } catch (err) {
         if (err instanceof UserNotFoundError) {
           await ctx.reply(en.users.userNotFound);
+          return;
+        }
+        if (err instanceof AmbiguousUserTargetError) {
+          await ctx.reply(en.users.ambiguousTarget('demote', err.matches));
           return;
         }
         if (err instanceof NotAdminError) {

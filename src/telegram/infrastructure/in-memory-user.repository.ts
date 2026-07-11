@@ -35,13 +35,12 @@ export class InMemoryUserRepository implements UserRepositoryPort {
     return this.store.get(telegramId) ?? null;
   }
 
-  async findByName(name: string): Promise<User | null> {
+  async findByName(name: string): Promise<User[]> {
     const needle = name.replace(/^@/, '').toLowerCase();
-    if (!needle) return null;
-    for (const user of this.store.values()) {
-      if (user.name.toLowerCase() === needle) return user;
-    }
-    return null;
+    if (!needle) return [];
+    return [...this.store.values()].filter(
+      (user) => user.name.toLowerCase() === needle,
+    );
   }
 
   async createAdmin(user: NewUser): Promise<User> {

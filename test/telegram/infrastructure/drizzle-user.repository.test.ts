@@ -61,17 +61,25 @@ describe('DrizzleUserRepository', () => {
     expect(await repo.countAdmins()).toBe(1);
   });
 
-  it('creates a regular user via createUser and finds by case-insensitive name', async () => {
+  it('finds all case-insensitive name matches after stripping a leading @', async () => {
     await repo.createUser({
       telegramId: 2002,
       name: 'Alex',
       role: 'user',
       createdAt: new Date('2030-01-01T00:00:00.000Z'),
     });
+    await repo.createUser({
+      telegramId: 2003,
+      name: 'alex',
+      role: 'user',
+      createdAt: new Date('2030-01-01T00:00:00.000Z'),
+    });
 
-    expect(await repo.findByName('alex')).toMatchObject({ telegramId: 2002 });
-    expect(await repo.findByName('@ALEX')).toMatchObject({ telegramId: 2002 });
-    expect(await repo.findByName('ghost')).toBeNull();
+    expect(await repo.findByName('@ALEX')).toMatchObject([
+      { telegramId: 2002 },
+      { telegramId: 2003 },
+    ]);
+    expect(await repo.findByName('ghost')).toEqual([]);
   });
 
   it('updates role via updateRole', async () => {

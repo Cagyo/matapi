@@ -14,6 +14,7 @@ import {
 } from './application/invite.use-case';
 import { MuteSensorUseCase } from './application/mute-sensor.use-case';
 import { PromoteUserUseCase } from './application/promote-user.use-case';
+import { ResolveUserTargetUseCase } from './application/resolve-user-target.use-case';
 import { RegisterUserUseCase } from './application/register-user.use-case';
 import { RestartConfirmationService } from './application/restart-confirmation.service';
 import { SystemOnlineNotifier } from './application/system-online-notifier.service';
@@ -135,6 +136,7 @@ const mode = resolveBotMode();
     ClaimAdminUseCase,
     InviteUseCase,
     RegisterUserUseCase,
+    ResolveUserTargetUseCase,
     PromoteUserUseCase,
     DemoteUserUseCase,
     MuteSensorUseCase,
