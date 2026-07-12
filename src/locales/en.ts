@@ -5,19 +5,47 @@ import { ImportSummary } from '../sensors/application/import-sensors.use-case';
 import { FeatureStatus } from '../features/domain/feature-status';
 import { DepUpdate } from '../system/domain/ports/system-deps.port';
 import { User } from '../telegram/domain/user.entity';
+import { deepFreeze } from './freeze';
 
-const DATE_FNS_FMT = 'dd.MM.yyyy HH:mm';
-const DATE_FNS_FMT_SECONDS = 'dd.MM.yyyy HH:mm:ss';
-const TIME_FMT = 'HH:mm';
+const presentation = {
+  date: {
+    format: 'dd.MM.yyyy HH:mm',
+    formatWithSeconds: 'dd.MM.yyyy HH:mm:ss',
+    timeFormat: 'HH:mm',
+    never: 'never',
+    unavailableTime: '—',
+    age: {
+      underMinute: ' (<1m ago)',
+      minutes: (minutes: number) => ` (${minutes}m ago)`,
+      hours: (hours: number) => ` (${hours}h ago)`,
+      days: (days: number) => ` (${days}d ago)`,
+    },
+  },
+  fallback: {
+    unavailable: 'N/A',
+    unknown: 'unknown',
+    digitalOpen: 'OPEN',
+    digitalOpened: 'OPENED',
+    digitalClosed: 'CLOSED',
+  },
+  units: {
+    gigabytes: 'GB',
+    megabytes: 'MB',
+    ppm: 'ppm',
+    uptime: (days: number, hours: number, minutes: number) => `${days}d ${hours}h ${minutes}m`,
+    durationSeconds: (seconds: number) => `${seconds}s`,
+    eventDurationSeconds: (seconds: number) => ` (${seconds}s)`,
+  },
+};
 
 function fmtDate(date: Date | null | undefined, withSeconds = false): string {
-  if (!date) return 'never';
-  return format(date, withSeconds ? DATE_FNS_FMT_SECONDS : DATE_FNS_FMT);
+  if (!date) return presentation.date.never;
+  return format(date, withSeconds ? presentation.date.formatWithSeconds : presentation.date.format);
 }
 
 function fmtTime(date: Date | null | undefined): string {
-  if (!date) return '—';
-  return format(date, TIME_FMT);
+  if (!date) return presentation.date.unavailableTime;
+  return format(date, presentation.date.timeFormat);
 }
 
 function truncateCamera(camera: string): string {
@@ -28,10 +56,10 @@ function fmtAgo(date: Date | null | undefined): string {
   if (!date) return '';
   const diffSec = Math.floor((Date.now() - date.getTime()) / 1000);
   if (diffSec < 0) return '';
-  if (diffSec < 60) return ' (<1m ago)';
-  if (diffSec < 3600) return ` (${Math.floor(diffSec / 60)}m ago)`;
-  if (diffSec < 86400) return ` (${Math.floor(diffSec / 3600)}h ago)`;
-  return ` (${Math.floor(diffSec / 86400)}d ago)`;
+  if (diffSec < 60) return presentation.date.age.underMinute;
+  if (diffSec < 3600) return presentation.date.age.minutes(Math.floor(diffSec / 60));
+  if (diffSec < 86400) return presentation.date.age.hours(Math.floor(diffSec / 3600));
+  return presentation.date.age.days(Math.floor(diffSec / 86400));
 }
 
 export const TYPE_ICONS: Record<SensorType, string> = {
@@ -127,17 +155,17 @@ export interface SystemOnlineView {
 }
 
 export function gb(bytes: number | null): string {
-  if (bytes === null) return 'N/A';
-  return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+  if (bytes === null) return presentation.fallback.unavailable;
+  return `${(bytes / 1024 ** 3).toFixed(1)} ${presentation.units.gigabytes}`;
 }
 
 function mb(bytes: number | null): string {
-  if (bytes === null) return 'N/A';
-  return `${Math.round(bytes / 1024 ** 2)} MB`;
+  if (bytes === null) return presentation.fallback.unavailable;
+  return `${Math.round(bytes / 1024 ** 2)} ${presentation.units.megabytes}`;
 }
 
 function percent(used: number | null, total: number | null): string {
-  if (used === null || total === null || total <= 0) return 'N/A';
+  if (used === null || total === null || total <= 0) return presentation.fallback.unavailable;
   return `${Math.round((used / total) * 100)}%`;
 }
 
@@ -145,26 +173,26 @@ function fmtUptime(sec: number): string {
   const days = Math.floor(sec / 86400);
   const hours = Math.floor((sec % 86400) / 3600);
   const minutes = Math.floor((sec % 3600) / 60);
-  return `${days}d ${hours}h ${minutes}m`;
+  return presentation.units.uptime(days, hours, minutes);
 }
 
 function fmtDigital(value: string | null, stepType?: string, online = true): string {
-  if (!online || value === null) return 'unknown';
+  if (!online || value === null) return presentation.fallback.unknown;
   const steps = (en.sensors?.steps as Record<string, Record<string, string>>)?.[stepType ?? 'contact'];
   if (steps) {
-    if (value === 'true' || value === '1') return steps.true ?? 'OPENED';
-    if (value === 'false' || value === '0') return steps.false ?? 'CLOSED';
+    if (value === 'true' || value === '1') return steps.true ?? presentation.fallback.digitalOpened;
+    if (value === 'false' || value === '0') return steps.false ?? presentation.fallback.digitalClosed;
   }
-  if (value === 'true' || value === '1') return 'OPEN';
-  if (value === 'false' || value === '0') return 'CLOSED';
+  if (value === 'true' || value === '1') return presentation.fallback.digitalOpen;
+  if (value === 'false' || value === '0') return presentation.fallback.digitalClosed;
   return value.toUpperCase();
 }
 
 function fmtUart(value: string | null, level?: StatusRow['thresholdLevel']): string {
-  if (value === null) return 'unknown';
+  if (value === null) return presentation.fallback.unknown;
   const marker =
     level === 'critical' ? ' ❌' : level === 'warning' ? ' ⚠️' : level ? ' ✅' : '';
-  return `${value} ppm${marker}`;
+  return `${value} ${presentation.units.ppm}${marker}`;
 }
 
 function fmtRowValue(row: StatusRow): string {
@@ -174,7 +202,7 @@ function fmtRowValue(row: StatusRow): string {
     case 'uart':
       return fmtUart(row.lastValue, row.thresholdLevel);
     default:
-      return row.lastValue ?? 'unknown';
+      return row.lastValue ?? presentation.fallback.unknown;
   }
 }
 
@@ -374,7 +402,8 @@ const PINOUT_SCHEMA = `<pre>📌 Raspberry Pi GPIO Pinout (BCM)
          26 [37] [38] 20 MOSI
         GND [39] [40] 21 SCLK</pre>`;
 
-export const en = {
+const enCatalog = {
+  presentation,
   commands,
   sensors: {
     steps: {
@@ -916,7 +945,9 @@ export const en = {
       ) => {
         if (!startedAt) return 'unknown';
         if (!endedAt) return 'recording';
-        return durationSec === null ? 'unknown' : `${durationSec}s`;
+        return durationSec === null
+          ? presentation.fallback.unknown
+          : presentation.units.durationSeconds(durationSec);
       },
       media: (media: BrowseEventMediaView): string => {
         if (media.hasLocalVideo && media.hasPhoto) return 'Video + Photo';
@@ -946,7 +977,7 @@ export const en = {
     eventsHeader: (day: Date) => `📹 Motion events for ${format(day, 'dd.MM.yyyy')}:`,
     eventLine: (e: MotionEventView): string => {
       const time = e.startedAt ? format(e.startedAt, 'HH:mm:ss') : '--:--:--';
-      const dur = e.durationSec !== null ? ` (${e.durationSec}s)` : '';
+      const dur = e.durationSec !== null ? presentation.units.eventDurationSeconds(e.durationSec) : '';
       const snap = e.hasSnapshot ? ' 📷' : '';
       return `#${e.id} — ${time}${dur}${snap}`;
     },
@@ -1129,6 +1160,8 @@ export const en = {
     goingOffline: '🔴 System going offline.',
   },
 };
+
+export const en = deepFreeze(enCatalog);
 
 function prettyType(type: SensorType): string {
   switch (type) {

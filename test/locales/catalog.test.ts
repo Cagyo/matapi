@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { catalogFor } from '../../src/locales/catalog';
+import { catalogs, catalogFor } from '../../src/locales/catalog';
 import { en } from '../../src/locales/en';
 
 describe('catalogFor', () => {
@@ -13,5 +13,12 @@ describe('catalogFor', () => {
       .not.toBe(en.commands.find((c) => c.command === 'settings')?.description);
     expect(catalogFor('uk').status.footer(false, 2, new Date('2030-01-01T12:00:00Z')))
       .not.toContain('sensors offline');
+  });
+
+  it('deeply freezes catalogs and their registry', () => {
+    expect(Object.isFrozen(catalogs)).toBe(true);
+    expect(Object.isFrozen(en)).toBe(true);
+    expect(Object.isFrozen(en.commands)).toBe(true);
+    expect(Object.isFrozen(en.sensors.steps.contact)).toBe(true);
   });
 });

@@ -6,19 +6,47 @@ import { FeatureStatus } from '../features/domain/feature-status';
 import { DepUpdate } from '../system/domain/ports/system-deps.port';
 import { User } from '../telegram/domain/user.entity';
 import type { LocaleCatalog } from './catalog';
+import { deepFreeze } from './freeze';
 
-const DATE_FNS_FMT = 'dd.MM.yyyy HH:mm';
-const DATE_FNS_FMT_SECONDS = 'dd.MM.yyyy HH:mm:ss';
-const TIME_FMT = 'HH:mm';
+const presentation = {
+  date: {
+    format: 'dd.MM.yyyy HH:mm',
+    formatWithSeconds: 'dd.MM.yyyy HH:mm:ss',
+    timeFormat: 'HH:mm',
+    never: 'ніколи',
+    unavailableTime: '—',
+    age: {
+      underMinute: ' (менше хвилини тому)',
+      minutes: (minutes: number) => ` (${minutes} хв тому)`,
+      hours: (hours: number) => ` (${hours} год тому)`,
+      days: (days: number) => ` (${days} дн тому)`,
+    },
+  },
+  fallback: {
+    unavailable: 'н/д',
+    unknown: 'невідомо',
+    digitalOpen: 'ВІДЧИНЕНО',
+    digitalOpened: 'ВІДЧИНЕНО',
+    digitalClosed: 'ЗАЧИНЕНО',
+  },
+  units: {
+    gigabytes: 'GB',
+    megabytes: 'MB',
+    ppm: 'ppm',
+    uptime: (days: number, hours: number, minutes: number) => `${days} д ${hours} год ${minutes} хв`,
+    durationSeconds: (seconds: number) => `${seconds} с`,
+    eventDurationSeconds: (seconds: number) => ` (${seconds} с)`,
+  },
+};
 
 function fmtDate(date: Date | null | undefined, withSeconds = false): string {
-  if (!date) return 'ніколи';
-  return format(date, withSeconds ? DATE_FNS_FMT_SECONDS : DATE_FNS_FMT);
+  if (!date) return presentation.date.never;
+  return format(date, withSeconds ? presentation.date.formatWithSeconds : presentation.date.format);
 }
 
 function fmtTime(date: Date | null | undefined): string {
-  if (!date) return '—';
-  return format(date, TIME_FMT);
+  if (!date) return presentation.date.unavailableTime;
+  return format(date, presentation.date.timeFormat);
 }
 
 function truncateCamera(camera: string): string {
@@ -29,10 +57,10 @@ function fmtAgo(date: Date | null | undefined): string {
   if (!date) return '';
   const diffSec = Math.floor((Date.now() - date.getTime()) / 1000);
   if (diffSec < 0) return '';
-  if (diffSec < 60) return ' (менше хвилини тому)';
-  if (diffSec < 3600) return ` (${Math.floor(diffSec / 60)} хв тому)`;
-  if (diffSec < 86400) return ` (${Math.floor(diffSec / 3600)} год тому)`;
-  return ` (${Math.floor(diffSec / 86400)} дн тому)`;
+  if (diffSec < 60) return presentation.date.age.underMinute;
+  if (diffSec < 3600) return presentation.date.age.minutes(Math.floor(diffSec / 60));
+  if (diffSec < 86400) return presentation.date.age.hours(Math.floor(diffSec / 3600));
+  return presentation.date.age.days(Math.floor(diffSec / 86400));
 }
 
 function plural(count: number, one: string, few: string, many: string): string {
@@ -138,17 +166,17 @@ export interface SystemOnlineView {
 }
 
 export function gb(bytes: number | null): string {
-  if (bytes === null) return 'н/д';
-  return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+  if (bytes === null) return presentation.fallback.unavailable;
+  return `${(bytes / 1024 ** 3).toFixed(1)} ${presentation.units.gigabytes}`;
 }
 
 function mb(bytes: number | null): string {
-  if (bytes === null) return 'н/д';
-  return `${Math.round(bytes / 1024 ** 2)} MB`;
+  if (bytes === null) return presentation.fallback.unavailable;
+  return `${Math.round(bytes / 1024 ** 2)} ${presentation.units.megabytes}`;
 }
 
 function percent(used: number | null, total: number | null): string {
-  if (used === null || total === null || total <= 0) return 'н/д';
+  if (used === null || total === null || total <= 0) return presentation.fallback.unavailable;
   return `${Math.round((used / total) * 100)}%`;
 }
 
@@ -156,26 +184,26 @@ function fmtUptime(sec: number): string {
   const days = Math.floor(sec / 86400);
   const hours = Math.floor((sec % 86400) / 3600);
   const minutes = Math.floor((sec % 3600) / 60);
-  return `${days} д ${hours} год ${minutes} хв`;
+  return presentation.units.uptime(days, hours, minutes);
 }
 
 function fmtDigital(value: string | null, stepType?: string, online = true): string {
-  if (!online || value === null) return 'невідомо';
+  if (!online || value === null) return presentation.fallback.unknown;
   const steps = (uk.sensors?.steps as Record<string, Record<string, string>>)?.[stepType ?? 'contact'];
   if (steps) {
-    if (value === 'true' || value === '1') return steps.true ?? 'ВІДЧИНЕНО';
-    if (value === 'false' || value === '0') return steps.false ?? 'ЗАЧИНЕНО';
+    if (value === 'true' || value === '1') return steps.true ?? presentation.fallback.digitalOpened;
+    if (value === 'false' || value === '0') return steps.false ?? presentation.fallback.digitalClosed;
   }
-  if (value === 'true' || value === '1') return 'ВІДЧИНЕНО';
-  if (value === 'false' || value === '0') return 'ЗАЧИНЕНО';
+  if (value === 'true' || value === '1') return presentation.fallback.digitalOpen;
+  if (value === 'false' || value === '0') return presentation.fallback.digitalClosed;
   return value.toUpperCase();
 }
 
 function fmtUart(value: string | null, level?: StatusRow['thresholdLevel']): string {
-  if (value === null) return 'невідомо';
+  if (value === null) return presentation.fallback.unknown;
   const marker =
     level === 'critical' ? ' ❌' : level === 'warning' ? ' ⚠️' : level ? ' ✅' : '';
-  return `${value} ppm${marker}`;
+  return `${value} ${presentation.units.ppm}${marker}`;
 }
 
 function fmtRowValue(row: StatusRow): string {
@@ -185,7 +213,7 @@ function fmtRowValue(row: StatusRow): string {
     case 'uart':
       return fmtUart(row.lastValue, row.thresholdLevel);
     default:
-      return row.lastValue ?? 'невідомо';
+      return row.lastValue ?? presentation.fallback.unknown;
   }
 }
 
@@ -385,7 +413,8 @@ const PINOUT_SCHEMA = `<pre>📌 Розводка GPIO Raspberry Pi (BCM)
          26 [37] [38] 20 MOSI
         GND [39] [40] 21 SCLK</pre>`;
 
-export const uk = {
+const ukCatalog = {
+  presentation,
   commands,
   sensors: {
     steps: {
@@ -921,9 +950,11 @@ export const uk = {
         endedAt: Date | null,
         durationSec: number | null,
       ) => {
-        if (!startedAt) return 'невідомо';
+        if (!startedAt) return presentation.fallback.unknown;
         if (!endedAt) return 'запис';
-        return durationSec === null ? 'невідомо' : `${durationSec} с`;
+        return durationSec === null
+          ? presentation.fallback.unknown
+          : presentation.units.durationSeconds(durationSec);
       },
       media: (media: BrowseEventMediaView): string => {
         if (media.hasLocalVideo && media.hasPhoto) return 'Відео + фото';
@@ -953,7 +984,7 @@ export const uk = {
     eventsHeader: (day: Date) => `📹 Події руху за ${format(day, 'dd.MM.yyyy')}:`,
     eventLine: (e: MotionEventView): string => {
       const time = e.startedAt ? format(e.startedAt, 'HH:mm:ss') : '--:--:--';
-      const dur = e.durationSec !== null ? ` (${e.durationSec} с)` : '';
+      const dur = e.durationSec !== null ? presentation.units.eventDurationSeconds(e.durationSec) : '';
       const snap = e.hasSnapshot ? ' 📷' : '';
       return `#${e.id} — ${time}${dur}${snap}`;
     },
@@ -1136,6 +1167,8 @@ export const uk = {
     goingOffline: '🔴 Система вимикається.',
   },
 } satisfies LocaleCatalog;
+
+export const uk = deepFreeze(ukCatalog);
 
 function prettyType(type: SensorType): string {
   switch (type) {
