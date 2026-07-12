@@ -35,7 +35,9 @@
 - Modify: src/telegram/application/claim-admin.use-case.ts
 - Test: test/telegram/domain/locale.test.ts
 - Test: test/telegram/infrastructure/drizzle-user.repository.test.ts
+- Modify: test/telegram/infrastructure/drizzle-invite-code.repository.test.ts
 - Test: test/telegram/application/register-user.use-case.test.ts
+- Modify: test/telegram/application/restart-confirmation.service.test.ts
 
 **Interfaces:**
 - Produces Locale, DEFAULT_LOCALE, isLocale(value), and normalizeLocale(value).
@@ -75,7 +77,11 @@ export function normalizeLocale(value: unknown): Locale {
 
 - [ ] **Step 4: Add failing repository and registration assertions**
 
-Assert that createUser, createAdmin, and claimFirstAdmin return locale en; setLocale changes only the target user; and createAdmin upsert preserves an existing user locale while changing their role/name.
+Assert that createUser, createAdmin, and claimFirstAdmin return locale en; setLocale changes only the target user; and createAdmin upsert preserves an existing user locale while changing their role/name. Update every direct NewUser call and full User test fixture found by this command before running the suite:
+
+~~~bash
+rg -l "createUser\(|createAdmin\(|claimFirstAdmin\(|muted: false" test src --glob '*.ts'
+~~~
 
 - [ ] **Step 5: Implement schema and repository mapping**
 
@@ -98,7 +104,7 @@ Expected: PASS.
 - [ ] **Step 8: Commit**
 
 ~~~bash
-git add src/database/schema.ts migrations src/telegram/domain/locale.ts src/telegram/domain/user.entity.ts src/telegram/domain/ports/user-repository.port.ts src/telegram/infrastructure/drizzle-user.repository.ts src/telegram/infrastructure/in-memory-user.repository.ts src/telegram/application/register-user.use-case.ts src/telegram/application/claim-admin.use-case.ts test/telegram/domain/locale.test.ts test/telegram/infrastructure/drizzle-user.repository.test.ts test/telegram/application/register-user.use-case.test.ts
+git add src/database/schema.ts migrations src/telegram/domain/locale.ts src/telegram/domain/user.entity.ts src/telegram/domain/ports/user-repository.port.ts src/telegram/infrastructure/drizzle-user.repository.ts src/telegram/infrastructure/in-memory-user.repository.ts src/telegram/application/register-user.use-case.ts src/telegram/application/claim-admin.use-case.ts test/telegram/domain/locale.test.ts test/telegram/infrastructure/drizzle-user.repository.test.ts test/telegram/infrastructure/drizzle-invite-code.repository.test.ts test/telegram/application/register-user.use-case.test.ts test/telegram/application/restart-confirmation.service.test.ts
 git commit -m "feat: persist Telegram user locales"
 ~~~
 
@@ -372,24 +378,38 @@ git commit -m "feat: localize Telegram command interactions"
 - Modify: src/events/domain/ports/recipient.port.ts
 - Modify: src/events/application/notification.service.ts
 - Modify: src/events/application/event-queue.service.ts
+- Modify: src/events/application/drain-event-queue.use-case.ts
 - Modify: src/events/domain/sensor-notification.ts
 - Modify: src/events/domain/motion-notification.ts
+- Modify: src/events/domain/event-summary.ts
+- Modify: src/database/schema.ts
+- Modify: src/sensors/domain/ports/sensor-log-repository.port.ts
+- Modify: src/sensors/infrastructure/drizzle-sensor-log.repository.ts
+- Modify: src/sensors/infrastructure/in-memory-sensor-log.repository.ts
 - Modify: src/sensors/infrastructure/mqtt-sensor.adapter.ts
 - Modify: src/sensors/infrastructure/digital-gpio.adapter.ts
 - Modify: src/sensors/infrastructure/mock-gpio.adapter.ts
+- Modify: src/sensors/infrastructure/base-uart-co2.adapter.ts
 - Modify: src/events/event.module.ts
 - Create: src/telegram/infrastructure/telegram-notification-renderer.adapter.ts
 - Modify: src/telegram/infrastructure/telegram-recipient-directory.adapter.ts
 - Modify: src/telegram/infrastructure/grammy-bot.gateway.ts
 - Modify: src/telegram/telegram.module.ts
+- Modify: src/telegram/interfaces/logs.handler.ts
 - Test: test/events/application/notification.service.test.ts
+- Test: test/events/application/drain-event-queue.use-case.test.ts
+- Test: test/events/domain/event-summary.test.ts
 - Test: test/events/application/notification-renderer.service.test.ts
 - Test: test/telegram/infrastructure/telegram-notification-renderer.adapter.test.ts
+- Test: test/sensors/infrastructure/drizzle-sensor-log.repository.test.ts
+- Test: test/telegram/interfaces/logs.handler.test.ts
+- Create: test/telegram/infrastructure/grammy-bot.gateway.test.ts
 
 **Interfaces:**
 - NotificationRecipient adds locale: NotificationLocale.
 - NotificationRendererPort exposes renderSensor(input, locale), renderMotion(input, locale), renderSystemOnline(input, locale), renderRestart(input, locale), and renderAdminAlert(input, locale).
 - NotificationRendererService mirrors RecipientDirectoryService with register, clear, and delegate methods.
+- SensorLogEntry stores either legacy message text or a messageCode plus messagePayload, and LogsHandler renders code/payload with the requesting catalog.
 
 - [ ] **Step 1: Write failing multilingual fan-out tests**
 
@@ -423,30 +443,38 @@ export interface RestartNotice {
   commit: string | null;
 }
 export interface AdminAlertNotice {
-  kind: CameraAdminAlert;
+  kind: 'motion-daemon-down' | 'motion-daemon-recovered' | 'gdrive-sync-failing' | 'disk-warning' | 'emergency-disk-cleanup';
   detail: string | null;
 }
 export const NOTIFICATION_RENDERER = Symbol('NOTIFICATION_RENDERER');
 ~~~
 
-Make events/domain notification files contain only language-neutral input types. Add stable codes for MQTT availability and generated system states; preserve raw values for normal sensor readings.
+Make events/domain notification files contain only language-neutral input types. Add stable codes for MQTT availability, generated system states, and aggregate event summaries; preserve raw values for normal sensor readings. The event-owned AdminAlertNotice union deliberately does not import the camera context type.
 
 - [ ] **Step 4: Implement adapter and runtime seam**
 
-TelegramNotificationRendererAdapter calls catalogFor(locale) and returns text/actions without importing a concrete catalog. NotificationRendererService is registered/cleared by GrammyBotGateway like RecipientDirectoryService. Bind the events-owned port to that delegate in EventModule.
+TelegramNotificationRendererAdapter calls catalogFor(locale) and returns text/actions without importing a concrete catalog. NotificationRendererService is registered/cleared by GrammyBotGateway like RecipientDirectoryService. Register the renderer before the gateway's mock-mode early return so development drains use the English catalog. Bind the events-owned port to that delegate in EventModule.
 
 - [ ] **Step 5: Render in recipient loops and handle legacy records**
 
-In NotificationService.process and notifyMotion, apply suppression first, render second, and send third for each recipient. Project user.locale in TelegramRecipientDirectoryAdapter. Normalize known old MQTT English values while draining; render unknown historic values through the active catalog historical wrapper without rewriting rows.
+In NotificationService.process and notifyMotion, apply suppression first, render second, and send third for each recipient. Replace the sensor-less broadcast branch with the same per-recipient loop. Project user.locale in TelegramRecipientDirectoryAdapter. Normalize known old MQTT English values while draining; render unknown historic values through the active catalog historical wrapper without rewriting rows.
+
+Add nullable sensor_logs.message_code and sensor_logs.message_payload JSON columns through schema.ts and a generated migration. New driver entries set messageCode/messagePayload and message null; old rows retain message text. Update both log repositories and LogsHandler so a code is rendered with the requester's catalog and a legacy message is shown through the historical wrapper. Convert DigitalGpioAdapter, MockGpioAdapter, BaseUartCo2Adapter, and MQTT availability writes to stable codes.
+
+Run: yarn db:generate
+
+Expected: Drizzle creates the sensor-log structured-data migration; do not edit its SQL or metadata.
+
+Replace DrainEventQueueUseCase one-text notify aggregation with per-recipient rendering of normalized queued-event summaries. Preserve its force-file behavior by creating a localized file body per recipient and marking an entire batch sent only after the existing delivery policy succeeds.
 
 - [ ] **Step 6: Verify and commit**
 
-Run: yarn test test/events/application/notification.service.test.ts test/events/application/notification-renderer.service.test.ts test/telegram/infrastructure/telegram-notification-renderer.adapter.test.ts
+Run: yarn test test/events/application/notification.service.test.ts test/events/application/drain-event-queue.use-case.test.ts test/events/domain/event-summary.test.ts test/events/application/notification-renderer.service.test.ts test/sensors/infrastructure/drizzle-sensor-log.repository.test.ts test/telegram/interfaces/logs.handler.test.ts test/telegram/infrastructure/telegram-notification-renderer.adapter.test.ts test/telegram/infrastructure/grammy-bot.gateway.test.ts
 
 Expected: PASS with independent recipient text and unchanged queue semantics.
 
 ~~~bash
-git add src/events src/sensors/infrastructure/mqtt-sensor.adapter.ts src/sensors/infrastructure/digital-gpio.adapter.ts src/sensors/infrastructure/mock-gpio.adapter.ts src/telegram/infrastructure/telegram-notification-renderer.adapter.ts src/telegram/infrastructure/telegram-recipient-directory.adapter.ts src/telegram/infrastructure/grammy-bot.gateway.ts src/telegram/telegram.module.ts test/events test/telegram/infrastructure/telegram-notification-renderer.adapter.test.ts
+git add src/events src/database/schema.ts migrations src/sensors/domain/ports/sensor-log-repository.port.ts src/sensors/infrastructure/drizzle-sensor-log.repository.ts src/sensors/infrastructure/in-memory-sensor-log.repository.ts src/sensors/infrastructure/mqtt-sensor.adapter.ts src/sensors/infrastructure/digital-gpio.adapter.ts src/sensors/infrastructure/mock-gpio.adapter.ts src/sensors/infrastructure/base-uart-co2.adapter.ts src/telegram/interfaces/logs.handler.ts src/telegram/infrastructure/telegram-notification-renderer.adapter.ts src/telegram/infrastructure/telegram-recipient-directory.adapter.ts src/telegram/infrastructure/grammy-bot.gateway.ts src/telegram/telegram.module.ts test/events test/sensors/infrastructure/drizzle-sensor-log.repository.test.ts test/telegram/interfaces/logs.handler.test.ts test/telegram/infrastructure/grammy-bot.gateway.test.ts
 git commit -m "feat: localize per-recipient notifications"
 ~~~
 
@@ -456,12 +484,14 @@ git commit -m "feat: localize per-recipient notifications"
 - Modify: src/telegram/application/restart-confirmation.service.ts
 - Modify: src/telegram/application/system-online-notifier.service.ts
 - Modify: src/telegram/infrastructure/telegram-admin-alert.adapter.ts
+- Modify: src/system/application/graceful-shutdown.service.ts
 - Modify: src/telegram/interfaces/start.handler.ts
 - Modify: src/telegram/interfaces/promote.handler.ts
 - Modify: src/telegram/interfaces/demote.handler.ts
 - Test: test/telegram/application/restart-confirmation.service.test.ts
 - Test: test/telegram/application/system-online-notifier.service.test.ts
 - Test: test/telegram/infrastructure/telegram-admin-alert.adapter.test.ts
+- Test: test/system/application/graceful-shutdown.service.test.ts
 
 **Interfaces:**
 - Background services resolve a catalog/renderer for every recipient before calling existing DirectMessengerPort.send or EventNotifierService.notifyUser.
@@ -469,26 +499,26 @@ git commit -m "feat: localize per-recipient notifications"
 
 - [ ] **Step 1: Write failing mixed-locale tests**
 
-Seed English, Russian, and Ukrainian admins. Assert restart confirmations and camera alerts produce different target text. Assert SystemOnlineNotifier uses notifyUser once per registered recipient instead of one notify broadcast.
+Seed English, Russian, and Ukrainian admins. Assert restart confirmations and camera alerts produce different target text. Assert SystemOnlineNotifier and GracefulShutdownService use notifyUser once per registered recipient instead of one notify broadcast.
 
 - [ ] **Step 2: Verify failure**
 
-Run: yarn test test/telegram/application/restart-confirmation.service.test.ts test/telegram/application/system-online-notifier.service.test.ts test/telegram/infrastructure/telegram-admin-alert.adapter.test.ts
+Run: yarn test test/telegram/application/restart-confirmation.service.test.ts test/telegram/application/system-online-notifier.service.test.ts test/telegram/infrastructure/telegram-admin-alert.adapter.test.ts test/system/application/graceful-shutdown.service.test.ts
 
 Expected: FAIL because each service constructs one English message before its loop.
 
 - [ ] **Step 3: Render before every target send**
 
-For every target, derive catalogFor(user.locale) or call NotificationRendererPort with normalized facts, then call existing transport. Keep one recipient failure isolated and logged; do not move locale lookup into TelegramDirectMessenger.
+For every target, derive catalogFor(user.locale) or call NotificationRendererPort with normalized facts, then call existing transport. GracefulShutdownService resolves recipients through the events-owned recipient directory instead of adding a Telegram repository dependency to the system context. Keep one recipient failure isolated and logged; do not move locale lookup into TelegramDirectMessenger.
 
 - [ ] **Step 4: Verify and commit**
 
-Run: yarn test test/telegram/application/restart-confirmation.service.test.ts test/telegram/application/system-online-notifier.service.test.ts test/telegram/infrastructure/telegram-admin-alert.adapter.test.ts
+Run: yarn test test/telegram/application/restart-confirmation.service.test.ts test/telegram/application/system-online-notifier.service.test.ts test/telegram/infrastructure/telegram-admin-alert.adapter.test.ts test/system/application/graceful-shutdown.service.test.ts
 
 Expected: PASS.
 
 ~~~bash
-git add src/telegram/application/restart-confirmation.service.ts src/telegram/application/system-online-notifier.service.ts src/telegram/infrastructure/telegram-admin-alert.adapter.ts src/telegram/interfaces/start.handler.ts src/telegram/interfaces/promote.handler.ts src/telegram/interfaces/demote.handler.ts test/telegram/application/restart-confirmation.service.test.ts test/telegram/application/system-online-notifier.service.test.ts test/telegram/infrastructure/telegram-admin-alert.adapter.test.ts
+git add src/telegram/application/restart-confirmation.service.ts src/telegram/application/system-online-notifier.service.ts src/telegram/infrastructure/telegram-admin-alert.adapter.ts src/system/application/graceful-shutdown.service.ts src/telegram/interfaces/start.handler.ts src/telegram/interfaces/promote.handler.ts src/telegram/interfaces/demote.handler.ts test/telegram/application/restart-confirmation.service.test.ts test/telegram/application/system-online-notifier.service.test.ts test/telegram/infrastructure/telegram-admin-alert.adapter.test.ts test/system/application/graceful-shutdown.service.test.ts
 git commit -m "feat: localize Telegram background messages"
 ~~~
 
@@ -498,6 +528,8 @@ git commit -m "feat: localize Telegram background messages"
 - Modify: docs/specs/01-database.md
 - Modify: docs/specs/06-bot-core.md
 - Modify: docs/ports-and-adapters.md
+- Create: test/fixtures/migrations-before-user-locale/
+- Create: test/database/user-locale-migration.test.ts
 - Test: all locale, database, Telegram, events, and sensor tests above
 
 **Interfaces:**
@@ -505,7 +537,7 @@ git commit -m "feat: localize Telegram background messages"
 
 - [ ] **Step 1: Prove migration compatibility in an isolated database**
 
-Create a temporary SQLite file at the old migration level under test/.tmp, run DATABASE_PATH=test/.tmp/pre-locale.db yarn db:migrate against it, load the existing user with DrizzleUserRepository, and assert locale === 'en'. Never operate on data/*.db*.
+Create test/fixtures/migrations-before-user-locale/ by copying the committed migration SQL and journal that precede the locale migration. In a migration integration test, migrate a new test/.tmp/pre-locale.db with that fixture, insert a users row through the old schema, then migrate the same file with ./migrations. Load it with DrizzleUserRepository and assert locale === 'en'. Never operate on data/*.db* or manually edit files under migrations/.
 
 - [ ] **Step 2: Update project documentation**
 
@@ -516,6 +548,10 @@ Document users.locale and Drizzle generation in specs/01-database.md. Document p
 Run: rg -n "from ['\"](?:\\.\\.?/)*.*locales/en['\"]|\\.text\\(['\"][^']|ctx\\.reply\\(['\"][^']" src --glob '*.ts'
 
 Expected: inspect every result; accept only catalog definitions, tests, Logger-only text, callback data, approved compatibility paths, or historic raw values.
+
+Run: rg -n "\\ben\\.|ctx\\.(reply|editMessageText|answerCallbackQuery|replyWithPhoto|replyWithVideo|replyWithDocument)|notifier\\.notify(User|UserPhoto)?\\(|\\.text\\(" src --glob '*.ts'
+
+Expected: inspect every result and trace text variables passed into a Telegram send. Apply the same acceptance criteria to this broader delivery-path inventory.
 
 - [ ] **Step 4: Run focused and complete verification**
 
