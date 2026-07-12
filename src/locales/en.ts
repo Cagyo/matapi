@@ -1,10 +1,10 @@
 import { format } from 'date-fns';
-import { DbRecovery } from '../database/integrity';
-import { SensorSeverity, SensorType } from '../sensors/domain/sensor';
-import { ImportSummary } from '../sensors/application/import-sensors.use-case';
-import { FeatureStatus } from '../features/domain/feature-status';
-import { DepUpdate } from '../system/domain/ports/system-deps.port';
-import { User } from '../telegram/domain/user.entity';
+import type { DbRecovery } from '../database/integrity';
+import type { SensorSeverity, SensorType } from '../sensors/domain/sensor';
+import type { ImportSummary } from '../sensors/application/import-sensors.use-case';
+import type { FeatureStatus } from '../features/domain/feature-status';
+import type { DepUpdate } from '../system/domain/ports/system-deps.port';
+import type { User } from '../telegram/domain/user.entity';
 import { deepFreeze } from './freeze';
 
 const presentation = {
