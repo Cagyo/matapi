@@ -4,6 +4,7 @@ import { Composer, Context, InlineKeyboard, InputFile } from 'grammy';
 import { en, TYPE_ICONS } from '../../locales/en';
 import { ListSensorHistoryTargetsUseCase } from '../../sensors/application/list-sensor-history-targets.use-case';
 import { MalformedSensorLogTimestampError } from '../../sensors/domain/errors/malformed-sensor-log-timestamp.error';
+import { SensorLogHistoryEmptyError } from '../../sensors/domain/errors/sensor-log-history-empty.error';
 import { SensorLogExportRowTooLargeError } from '../../sensors/domain/errors/sensor-log-export-row-too-large.error';
 import { SensorNotFoundError } from '../../sensors/domain/errors/sensor-not-found.error';
 import { SensorHistoryPage, SensorHistoryTarget } from '../../sensors/domain/ports/sensor-query.port';
@@ -253,7 +254,7 @@ export class CsvHandler implements TelegramHandler {
     if (error instanceof SensorLogExportRowTooLargeError) return en.csv.rowTooLarge;
     if (error instanceof CsvDocumentTooLargeError) return en.csv.fileTooLarge;
     if (error instanceof MalformedSensorLogTimestampError) return en.csv.malformedTimestamp;
-    if (hasCode(error, 'SENSOR_LOG_HISTORY_EMPTY')) return en.csv.noRows;
+    if (error instanceof SensorLogHistoryEmptyError) return en.csv.noRows;
     return en.csv.failed;
   }
 
@@ -319,13 +320,4 @@ function pickerLockKey(ctx: Context): string | null {
   const messageId = ctx.callbackQuery?.message?.message_id;
   if (chatId === undefined || messageId === undefined) return null;
   return `${chatId}:${messageId}`;
-}
-
-function hasCode(error: unknown, code: string): boolean {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    'code' in error &&
-    (error as { code?: unknown }).code === code
-  );
 }

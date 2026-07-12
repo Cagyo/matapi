@@ -7,6 +7,7 @@ import { RoleMiddleware } from '../../../src/telegram/interfaces/role.middleware
 import { SensorNotFoundError } from '../../../src/sensors/domain/errors/sensor-not-found.error';
 import { SensorLogExportRowTooLargeError } from '../../../src/sensors/domain/errors/sensor-log-export-row-too-large.error';
 import { MalformedSensorLogTimestampError } from '../../../src/sensors/domain/errors/malformed-sensor-log-timestamp.error';
+import { SensorLogHistoryEmptyError } from '../../../src/sensors/domain/errors/sensor-log-history-empty.error';
 import { en } from '../../../src/locales/en';
 
 const target = {
@@ -190,7 +191,7 @@ describe('CsvHandler', () => {
     [new SensorLogExportRowTooLargeError(2, 1), en.csv.rowTooLarge],
     [new CsvDocumentTooLargeError(2, 1), en.csv.fileTooLarge],
     [new MalformedSensorLogTimestampError('s1'), en.csv.malformedTimestamp],
-    [{ code: 'SENSOR_LOG_HISTORY_EMPTY' }, en.csv.noRows],
+    [new SensorLogHistoryEmptyError('current-id'), en.csv.noRows],
   ])('maps export failures to the matching CSV copy', async (error, expected) => {
     const { callback, stage } = createSetup();
     stage.execute.mockRejectedValueOnce(error);

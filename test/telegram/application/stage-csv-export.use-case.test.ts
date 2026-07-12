@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { TimezoneOptions } from "../../../src/config/application/ports/timezone-options.port";
 import { ReadSensorLogHistoryUseCase } from "../../../src/sensors/application/read-sensor-log-history.use-case";
+import { SensorLogHistoryEmptyError } from "../../../src/sensors/domain/errors/sensor-log-history-empty.error";
 import { Sensor } from "../../../src/sensors/domain/sensor";
 import {
   CsvTempFile,
@@ -70,5 +71,24 @@ describe("StageCsvExportUseCase", () => {
     }
 
     expect(files.stage).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects an empty synchronous history snapshot without staging a header-only document", async () => {
+    const files: CsvTempFilePort = {
+      stage: vi.fn(),
+      cleanupStale: vi.fn(),
+    };
+    const history = {
+      execute: vi.fn(async (input) => {
+        input.consume(sensor, []);
+      }),
+    } as unknown as ReadSensorLogHistoryUseCase;
+    const useCase = new StageCsvExportUseCase(history, files, { timezone: "Europe/Kyiv" });
+
+    await expect(
+      useCase.execute({ target: { kind: "id", id: sensor.id }, limit: 5000 }),
+    ).rejects.toBeInstanceOf(SensorLogHistoryEmptyError);
+
+    expect(files.stage).not.toHaveBeenCalled();
   });
 });

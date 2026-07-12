@@ -7,6 +7,8 @@ import {
   ReadSensorLogHistoryUseCase,
   SensorLogHistoryTarget,
 } from "../../sensors/application/read-sensor-log-history.use-case";
+import { SensorLogHistoryEmptyError } from "../../sensors/domain/errors/sensor-log-history-empty.error";
+import { SensorLogExportRow } from "../../sensors/domain/ports/sensor-log-export-reader.port";
 import { csvExportFilename, formatCsvRows } from "./csv-export.formatter";
 import {
   CSV_TEMP_FILE,
@@ -35,9 +37,15 @@ export class StageCsvExportUseCase {
       limit: input.limit,
       maxMessageBytes: 256 * 1024,
       consume: (sensor, rows) => {
+        const iterator = rows[Symbol.iterator]();
+        const first = iterator.next();
+        if (first.done) {
+          throw new SensorLogHistoryEmptyError(sensor.id);
+        }
+
         staged = this.files.stage(
           csvExportFilename(sensor, new Date()),
-          formatCsvRows(sensor, rows, this.timezone.timezone),
+          formatCsvRows(sensor, prependRow(first.value, iterator), this.timezone.timezone),
         );
       },
     });
@@ -46,5 +54,15 @@ export class StageCsvExportUseCase {
       throw new Error("Sensor log history did not provide a CSV snapshot");
     }
     return staged;
+  }
+}
+
+function* prependRow(
+  first: SensorLogExportRow,
+  remaining: Iterator<SensorLogExportRow>,
+): Iterable<SensorLogExportRow> {
+  yield first;
+  for (let current = remaining.next(); !current.done; current = remaining.next()) {
+    yield current.value;
   }
 }
