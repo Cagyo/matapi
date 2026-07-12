@@ -36,6 +36,7 @@ Status legend: ✅ canonical · 🚧 in transition · 📝 planned
 | `SensorDriverPort` (`SENSOR_DRIVER_FACTORY`) | `DigitalGpioAdapter`, `UartCo2Adapter`, `MqttSensorAdapter`, `CameraSensorAdapter`, `MockGpioAdapter` (dev), `MockUartCo2Adapter` (dev) | ✅ canonical — env-driven factory in [sensor-driver.factory.ts](../src/sensors/infrastructure/sensor-driver.factory.ts) selects mocks for `NODE_ENV=development`. Lifecycle teardown passes `SensorDriverShutdownContext` (cancellation signal + absolute deadline); adapters become inert before using it to bound transport cleanup. | [sensor-driver.port.ts](../src/sensors/domain/ports/sensor-driver.port.ts) |
 | `SensorRepositoryPort` (`SENSOR_REPOSITORY`) | `DrizzleSensorRepository`, `InMemorySensorRepository` (tests) | ✅ canonical | [sensor-repository.port.ts](../src/sensors/domain/ports/sensor-repository.port.ts) |
 | `SensorLogRepositoryPort` (`SENSOR_LOG_REPOSITORY`) | `DrizzleSensorLogRepository`, `InMemorySensorLogRepository` (tests) | ✅ canonical — drives buffered UART log flushing, digital GPIO event logging, **and** `/logs` recent-entry queries (`findRecent(sensorId, { limit, since })`). | [sensor-log-repository.port.ts](../src/sensors/domain/ports/sensor-log-repository.port.ts) |
+| `SensorLogExportReaderPort` (`SENSOR_LOG_EXPORT_READER`) | `DrizzleSensorLogExportReader`, `InMemorySensorLogExportReader` (tests/dev) | ✅ canonical — bounded synchronous snapshot reader for chronological CSV history export. | [sensor-log-export-reader.port.ts](../src/sensors/domain/ports/sensor-log-export-reader.port.ts) |
 | `SensorQueryPort` (`SENSOR_QUERY`) read model for other contexts | `DrizzleSensorQuery`, `InMemorySensorQuery` (tests) | ✅ canonical — `listEnabled`, `findById`, `findByIdIncludingArchived`, and `findByName` (both archive-aware variants support historical `/logs` links). | [sensor-query.port.ts](../src/sensors/domain/ports/sensor-query.port.ts) |
 | `SensorHealthPort` (`SENSOR_HEALTH`) | `SensorRegistryService` (live `healthCheck()` per active driver; failures coerced to `false`) | ✅ canonical — powers `/status` and `/health` online counts. | [sensor-health.port.ts](../src/sensors/application/ports/sensor-health.port.ts) |
 | `PigpioGateway` | (internal — single implementation, intentional infrastructure-only utility) | ✅ keep as gateway, do not promote to port | [pigpio.gateway.ts](../src/sensors/infrastructure/pigpio.gateway.ts) |
@@ -61,6 +62,7 @@ Status legend: ✅ canonical · 🚧 in transition · 📝 planned
 | `AdminClaimCredentialPort` (`ADMIN_CLAIM_CREDENTIAL`) | `EnvAdminClaimCredentialAdapter` | ✅ canonical — verifies the setup-generated `CLAIM_ADMIN_TOKEN` without exposing its value. | [admin-claim-credential.port.ts](../src/telegram/domain/ports/admin-claim-credential.port.ts) |
 | `InviteCodeRepositoryPort` (`INVITE_CODE_REPOSITORY`) | `DrizzleInviteCodeRepository`, `InMemoryInviteCodeRepository` (mock/tests) | ✅ canonical | [invite-code-repository.port.ts](../src/telegram/domain/ports/invite-code-repository.port.ts) |
 | `DirectMessengerPort` (`DIRECT_MESSENGER`) | `TelegramDirectMessenger` (logs in mock mode when no bot is bound) | ✅ canonical — used by `/start`, `/promote`, `/demote` for one-off notifications. | [direct-messenger.port.ts](../src/telegram/domain/ports/direct-messenger.port.ts) |
+| `CsvTempFilePort` (`CSV_TEMP_FILE`) | `NodeCsvTempFileAdapter` | ✅ canonical — bounded, worker-owned CSV staging files with explicit disposal and stale-file cleanup. | [csv-temp-file.port.ts](../src/telegram/application/ports/csv-temp-file.port.ts) |
 | `RolePort` | `DrizzleRoleRepository` | 📝 | [role.guard.ts](../src/telegram/guards/role.guard.ts) |
 
 ### Camera context
@@ -99,6 +101,7 @@ Status legend: ✅ canonical · 🚧 in transition · 📝 planned
 | Port | Adapters | Status | Source |
 |---|---|---|---|
 | `ClockPort` (`CLOCK`) | `SystemClockAdapter`, fixed objects in tests | 🚧 — introduced for events; still planned for the rest of the repo. | [clock.port.ts](../src/events/domain/ports/clock.port.ts) |
+| `TimezoneOptions` (`TIMEZONE_OPTIONS`) | `ConfigModule` (binds `timezoneOptionsFromEnv`) | ✅ canonical — shared resolved IANA timezone for event scheduling and CSV timestamps. | [timezone-options.port.ts](../src/config/application/ports/timezone-options.port.ts) |
 | `ConfigPort` | `YamlConfigLoader` | 🚧 | [config.loader.ts](../src/config/config.loader.ts) |
 | `LoggerPort` | (use Nest `Logger` for now) | ✅ — Nest's `Logger` is the contract; do not invent a wrapper. |
 

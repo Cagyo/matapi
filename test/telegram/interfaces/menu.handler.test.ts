@@ -25,6 +25,8 @@ describe('MenuHandler', () => {
     const quietHoursHandler = { handlePreset: vi.fn() } as any;
     const settingsHandler = { handleCommand: vi.fn() } as any;
     const cleanHandler = { handleCommand: vi.fn() } as any;
+    const gdriveAuthHandler = { handleCommand: vi.fn() } as any;
+    const csvHandler = { handleEmpty: vi.fn() } as any;
 
     const handler = new MenuHandler(
       guard,
@@ -44,6 +46,8 @@ describe('MenuHandler', () => {
       quietHoursHandler,
       settingsHandler,
       cleanHandler,
+      gdriveAuthHandler,
+      csvHandler,
     );
 
     const commandCallbacks: Record<string, (...args: any[]) => any> = {};
@@ -82,6 +86,8 @@ describe('MenuHandler', () => {
       quietHoursHandler,
       settingsHandler,
       cleanHandler,
+      gdriveAuthHandler,
+      csvHandler,
     };
   }
 
@@ -113,6 +119,43 @@ describe('MenuHandler', () => {
     expect(reply).toHaveBeenCalledTimes(1);
     expect(reply.mock.calls[0][0]).toContain('Interactive Command Dashboard');
     expect(reply.mock.calls[0][1]).toHaveProperty('reply_markup');
+  });
+
+  it('shows Export CSV in the dashboard and Sensors submenu', async () => {
+    const { commandCallbacks, callbackQueryCallbacks } = createTestSetup();
+    const reply = vi.fn().mockResolvedValue(true);
+    const editMessageText = vi.fn().mockResolvedValue(true);
+    const menuContext = { from: { id: 999 }, reply };
+    const sensorSubmenuContext = {
+      from: { id: 999 },
+      match: ['menu:sub:sensors', 'sub:sensors'],
+      answerCallbackQuery: vi.fn().mockResolvedValue(true),
+      reply,
+      editMessageText,
+    };
+
+    await commandCallbacks.menu(menuContext);
+    expect(JSON.stringify(reply.mock.calls[0][1].reply_markup)).toContain('menu:sub:csv');
+
+    await callbackQueryCallbacks[0].fn(sensorSubmenuContext);
+    expect(JSON.stringify(editMessageText.mock.calls.at(-1)?.[1].reply_markup)).toContain(
+      'menu:sub:csv',
+    );
+  });
+
+  it('delegates the CSV submenu with menu origin', async () => {
+    const { callbackQueryCallbacks, csvHandler } = createTestSetup();
+    const csvSubmenuContext = {
+      from: { id: 100 },
+      match: ['menu:sub:csv', 'sub:csv'],
+      answerCallbackQuery: vi.fn().mockResolvedValue(true),
+      reply: vi.fn().mockResolvedValue(true),
+      editMessageText: vi.fn().mockResolvedValue(true),
+    };
+
+    await callbackQueryCallbacks[0].fn(csvSubmenuContext);
+
+    expect(csvHandler.handleEmpty).toHaveBeenCalledWith(csvSubmenuContext, 'menu');
   });
 
   it('delegates action callbacks and renders interactive submenus', async () => {
