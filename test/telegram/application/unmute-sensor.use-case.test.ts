@@ -27,7 +27,9 @@ function makeQuery(map: Map<string, SensorLookup>): SensorQueryPort {
   return {
     listEnabled: async () => [],
     findById: async () => null,
+    findByIdIncludingArchived: async () => null,
     findByName: async (name) => map.get(name.toLowerCase()) ?? null,
+    listHistoryTargets: async (input) => ({ targets: [], page: input.page, pageCount: 0 }),
   };
 }
 
