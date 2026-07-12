@@ -4,6 +4,7 @@ import { SystemClockAdapter } from '../events/infrastructure/system-clock.adapte
 import { AddSensorUseCase } from './application/add-sensor.use-case';
 import { DevSeederService } from './application/dev-seeder.service';
 import { ImportSensorsUseCase } from './application/import-sensors.use-case';
+import { ListSensorHistoryTargetsUseCase } from './application/list-sensor-history-targets.use-case';
 import { ModifySensorUseCase } from './application/modify-sensor.use-case';
 import { ReloadSensorsUseCase } from './application/reload-sensors.use-case';
 import { RemoveSensorUseCase } from './application/remove-sensor.use-case';
@@ -44,6 +45,7 @@ const devControllers =
     ModifySensorUseCase,
     RemoveSensorUseCase,
     ImportSensorsUseCase,
+    ListSensorHistoryTargetsUseCase,
     SimulateSensorUseCase,
     PigpioGateway,
     MqttConnectionPool,
@@ -72,6 +74,7 @@ const devControllers =
     ModifySensorUseCase,
     RemoveSensorUseCase,
     ImportSensorsUseCase,
+    ListSensorHistoryTargetsUseCase,
     SimulateSensorUseCase,
     PigpioGateway,
     MqttConnectionPool,

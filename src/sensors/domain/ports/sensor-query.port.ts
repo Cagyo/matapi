@@ -1,4 +1,4 @@
-import { Sensor } from '../sensor';
+import { Sensor, SensorType } from '../sensor';
 
 export const SENSOR_QUERY = Symbol('SENSOR_QUERY');
 
@@ -6,12 +6,28 @@ export const SENSOR_QUERY = Symbol('SENSOR_QUERY');
 export interface ArchivedSensor {
   id: string;
   name: string;
+  type: SensorType;
   archivedAt: Date | null;
 }
 
 export type SensorLookup =
   | { kind: 'active'; sensor: Sensor }
   | { kind: 'archived'; sensor: ArchivedSensor };
+
+export interface SensorHistoryTarget {
+  readonly id: string;
+  readonly name: string;
+  readonly type: SensorType;
+  readonly enabled: boolean;
+  readonly state: 'current' | 'archived';
+  readonly archivedAt: Date | null;
+}
+
+export interface SensorHistoryPage {
+  readonly targets: readonly SensorHistoryTarget[];
+  readonly page: number;
+  readonly pageCount: number;
+}
 
 /**
  * Read-only projection of sensor state for cross-context consumers
@@ -31,4 +47,6 @@ export interface SensorQueryPort {
    * neither contains the name.
    */
   findByName(name: string): Promise<SensorLookup | null>;
+  /** Current and archived sensors available as history-export targets. */
+  listHistoryTargets(input: { page: number; pageSize: number }): Promise<SensorHistoryPage>;
 }
