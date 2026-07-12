@@ -1,8 +1,10 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../database/database.module';
 import { sensors, sensorsArchive } from '../../database/schema';
 import {
+  SensorHistoryPage,
+  SensorHistoryTarget,
   SensorLookup,
   SensorQueryPort,
 } from '../domain/ports/sensor-query.port';
@@ -11,6 +13,15 @@ import { defaultDebounceMs } from '../domain/default-debounce';
 
 type SensorRow = typeof sensors.$inferSelect;
 type ArchivedRow = typeof sensorsArchive.$inferSelect;
+
+interface SensorHistoryTargetRow {
+  id: string;
+  name: string;
+  type: string;
+  enabled: number;
+  state: 'current' | 'archived';
+  archivedAt: number | null;
+}
 
 @Injectable()
 export class DrizzleSensorQuery implements SensorQueryPort {
@@ -63,6 +74,60 @@ export class DrizzleSensorQuery implements SensorQueryPort {
     return null;
   }
 
+  async listHistoryTargets(input: { page: number; pageSize: number }): Promise<SensorHistoryPage> {
+    const countRow = this.db
+      .all<{ count: number }>(
+        sql`
+        SELECT count(*) AS count
+        FROM (
+          SELECT ${sensors.id} AS id FROM ${sensors}
+          UNION ALL
+          SELECT ${sensorsArchive.id} AS id FROM ${sensorsArchive}
+        )
+      `,
+      )
+      .at(0);
+    const total = countRow?.count ?? 0;
+    const pageCount = Math.ceil(total / input.pageSize);
+
+    if (pageCount === 0) return { targets: [], page: 0, pageCount: 0 };
+
+    const page = Math.min(input.page, pageCount - 1);
+    const offset = page * input.pageSize;
+    const rows = this.db.all<SensorHistoryTargetRow>(sql`
+      SELECT id, name, type, enabled, state, archived_at AS archivedAt
+      FROM (
+        SELECT
+          ${sensors.id} AS id,
+          ${sensors.name} AS name,
+          ${sensors.type} AS type,
+          ${sensors.enabled} AS enabled,
+          'current' AS state,
+          NULL AS archived_at,
+          0 AS state_rank
+        FROM ${sensors}
+        UNION ALL
+        SELECT
+          ${sensorsArchive.id} AS id,
+          ${sensorsArchive.name} AS name,
+          ${sensorsArchive.type} AS type,
+          0 AS enabled,
+          'archived' AS state,
+          ${sensorsArchive.archivedAt} AS archived_at,
+          1 AS state_rank
+        FROM ${sensorsArchive}
+      )
+      ORDER BY state_rank, name COLLATE NOCASE, id
+      LIMIT ${input.pageSize} OFFSET ${offset}
+    `);
+
+    return {
+      targets: rows.map((row) => this.toHistoryTarget(row)),
+      page,
+      pageCount,
+    };
+  }
+
   private toSensor(row: SensorRow): Sensor {
     const type = row.type as SensorType;
     return {
@@ -82,7 +147,19 @@ export class DrizzleSensorQuery implements SensorQueryPort {
     return {
       id: row.id,
       name: row.name,
+      type: row.type as SensorType,
       archivedAt: row.archivedAt ?? null,
+    };
+  }
+
+  private toHistoryTarget(row: SensorHistoryTargetRow): SensorHistoryTarget {
+    return {
+      id: row.id,
+      name: row.name,
+      type: row.type as SensorType,
+      enabled: Boolean(row.enabled),
+      state: row.state,
+      archivedAt: row.archivedAt === null ? null : new Date(row.archivedAt * 1000),
     };
   }
 }

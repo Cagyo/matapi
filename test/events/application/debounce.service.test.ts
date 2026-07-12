@@ -36,6 +36,9 @@ class StubSensorQuery implements SensorQueryPort {
   async findByName(): Promise<SensorLookup | null> {
     return this.sensor ? { kind: 'active', sensor: this.sensor } : null;
   }
+  async listHistoryTargets(input: { page: number; pageSize: number }) {
+    return { targets: [], page: input.page, pageCount: 0 };
+  }
 }
 
 function makeClock(start = 0): ClockPort & { advance(ms: number): void } {

@@ -21,6 +21,7 @@ import { QuietHoursHandler } from './quiet-hours.handler';
 import { SettingsHandler } from './settings.handler';
 import { CleanHandler } from './clean.handler';
 import { GdriveAuthHandler } from './gdrive-auth.handler';
+import { CsvHandler } from './csv.handler';
 
 @Injectable()
 export class MenuHandler implements TelegramHandler {
@@ -56,6 +57,8 @@ export class MenuHandler implements TelegramHandler {
     private readonly cleanHandler: CleanHandler,
     @Inject(forwardRef(() => GdriveAuthHandler))
     private readonly gdriveAuthHandler: GdriveAuthHandler,
+    @Inject(forwardRef(() => CsvHandler))
+    private readonly csvHandler: CsvHandler,
   ) {}
 
   register(composer: Composer<TelegramContext>): void {
@@ -94,12 +97,17 @@ export class MenuHandler implements TelegramHandler {
               .text(en.menu.submenus.sensorsMuteAll, 'menu:act:mute_all')
               .text(en.menu.submenus.sensorsUnmuteAll, 'menu:act:unmute_all')
               .row()
+              .text(en.menu.submenus.sensorsExportCsv, 'menu:sub:csv')
+              .row()
               .text(en.menu.submenus.backToMenu, 'menu:top');
             await this.renderSubmenu(ctx, en.menu.submenus.sensorsTitle, kb);
             break;
           }
           case 'sub:logs':
             await this.logsHandler.handleEmpty(ctx);
+            break;
+          case 'sub:csv':
+            await this.csvHandler.handleEmpty(ctx, 'menu');
             break;
           case 'sub:camera':
             await this.cameraHandler.handleDashboard(ctx);
@@ -296,7 +304,8 @@ export class MenuHandler implements TelegramHandler {
       .text('📋 Logs', 'menu:sub:logs')
       .row()
       .text('📷 Camera', 'menu:sub:camera')
-      .text('🌙 Quiet Mode', 'menu:sub:quiet');
+      .text('🌙 Quiet Mode', 'menu:sub:quiet')
+      .text(en.menu.buttons.exportCsv, 'menu:sub:csv');
 
     if (isAdmin) {
       keyboard

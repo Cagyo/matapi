@@ -19,14 +19,22 @@ function makeSensor(id: string): Sensor {
   };
 }
 
+function sensorQuery(sensors: Sensor[]): SensorQueryPort {
+  return {
+    listEnabled: async () => sensors,
+    findById: async () => null,
+    findByIdIncludingArchived: async () => null,
+    findByName: async () => null,
+    listHistoryTargets: async (input) => ({ targets: [], page: input.page, pageCount: 0 }),
+  };
+}
+
 describe('SystemOnlineNotifier', () => {
   it('broadcasts a system-online notice with the online sensor count', async () => {
     const bootRecovery = {
       run: vi.fn(async () => ({ dbRecovery: null, clockSynchronized: true })),
     } as unknown as BootRecoveryService;
-    const sensors = {
-      listEnabled: async () => [makeSensor('a'), makeSensor('b')],
-    } as unknown as SensorQueryPort;
+    const sensors = sensorQuery([makeSensor('a'), makeSensor('b')]);
     const health = {
       probe: async () => new Map([['a', true], ['b', false]]),
     };
@@ -49,7 +57,7 @@ describe('SystemOnlineNotifier', () => {
         clockSynchronized: false,
       })),
     } as unknown as BootRecoveryService;
-    const sensors = { listEnabled: async () => [] } as unknown as SensorQueryPort;
+    const sensors = sensorQuery([]);
     const health = { probe: async () => new Map() };
     const notify = vi.fn().mockResolvedValue(undefined);
     const notifier = { isReady: () => true, notify } as unknown as EventNotifierService;
@@ -65,7 +73,7 @@ describe('SystemOnlineNotifier', () => {
   it('still runs boot recovery but skips the broadcast when notifier not ready', async () => {
     const run = vi.fn(async () => ({ dbRecovery: null, clockSynchronized: true }));
     const bootRecovery = { run } as unknown as BootRecoveryService;
-    const sensors = { listEnabled: async () => [] } as unknown as SensorQueryPort;
+    const sensors = sensorQuery([]);
     const health = { probe: async () => new Map() };
     const notify = vi.fn();
     const notifier = { isReady: () => false, notify } as unknown as EventNotifierService;

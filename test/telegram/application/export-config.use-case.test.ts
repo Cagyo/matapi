@@ -27,7 +27,9 @@ describe('ExportConfigUseCase', () => {
     const sensors: SensorQueryPort = {
       listEnabled: vi.fn().mockResolvedValue([sensor]),
       findById: vi.fn(),
+      findByIdIncludingArchived: vi.fn(),
       findByName: vi.fn(),
+      listHistoryTargets: vi.fn().mockResolvedValue({ targets: [], page: 0, pageCount: 0 }),
     };
     const cameras = {
       execute: vi.fn().mockResolvedValue([

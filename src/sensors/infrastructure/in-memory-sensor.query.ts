@@ -1,5 +1,7 @@
 import {
   ArchivedSensor,
+  SensorHistoryPage,
+  SensorHistoryTarget,
   SensorLookup,
   SensorQueryPort,
 } from '../domain/ports/sensor-query.port';
@@ -36,6 +38,42 @@ export class InMemorySensorQuery implements SensorQueryPort {
     return null;
   }
 
+  async listHistoryTargets(input: { page: number; pageSize: number }): Promise<SensorHistoryPage> {
+    const targets = [
+      ...this.sensors.map(
+        (sensor): SensorHistoryTarget => ({
+          id: sensor.id,
+          name: sensor.name,
+          type: sensor.type,
+          enabled: sensor.enabled,
+          state: 'current',
+          archivedAt: null,
+        }),
+      ),
+      ...this.archived.map(
+        (sensor): SensorHistoryTarget => ({
+          id: sensor.id,
+          name: sensor.name,
+          type: sensor.type,
+          enabled: false,
+          state: 'archived',
+          archivedAt: sensor.archivedAt,
+        }),
+      ),
+    ].sort(compareHistoryTargets);
+    const pageCount = Math.ceil(targets.length / input.pageSize);
+
+    if (pageCount === 0) return { targets: [], page: 0, pageCount: 0 };
+
+    const page = Math.min(input.page, pageCount - 1);
+    const start = page * input.pageSize;
+    return {
+      targets: targets.slice(start, start + input.pageSize),
+      page,
+      pageCount,
+    };
+  }
+
   setSensors(next: Sensor[]): void {
     this.sensors = next;
   }
@@ -43,4 +81,16 @@ export class InMemorySensorQuery implements SensorQueryPort {
   setArchived(next: ArchivedSensor[]): void {
     this.archived = next;
   }
+}
+
+function compareHistoryTargets(left: SensorHistoryTarget, right: SensorHistoryTarget): number {
+  if (left.state !== right.state) return left.state === 'current' ? -1 : 1;
+
+  const leftName = left.name.toLowerCase();
+  const rightName = right.name.toLowerCase();
+  if (leftName < rightName) return -1;
+  if (leftName > rightName) return 1;
+  if (left.id < right.id) return -1;
+  if (left.id > right.id) return 1;
+  return 0;
 }

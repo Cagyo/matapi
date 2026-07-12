@@ -98,4 +98,91 @@ describe('DrizzleSensorQuery', () => {
       sensor: { id: 'removed', name: 'Removed sensor' },
     });
   });
+
+  it('lists current targets before archived targets by case-insensitive name and id', async () => {
+    context.db.delete(sensors).run();
+    context.db
+      .insert(sensors)
+      .values([
+        {
+          id: 'z-current',
+          name: 'Bravo',
+          type: 'digital',
+          config: {},
+          enabled: true,
+        },
+        {
+          id: 'a-disabled',
+          name: 'alpha',
+          type: 'digital',
+          config: {},
+          enabled: false,
+        },
+        {
+          id: 'a-current',
+          name: 'bravo',
+          type: 'digital',
+          config: {},
+          enabled: true,
+        },
+      ])
+      .run();
+    context.db
+      .insert(sensorsArchive)
+      .values({
+        id: 'a-archive',
+        name: 'Aaron',
+        type: 'uart',
+        config: {},
+        archivedAt: new Date('2026-07-11T08:00:00Z'),
+      })
+      .run();
+
+    await expect(query.listHistoryTargets({ page: 0, pageSize: 20 })).resolves.toEqual({
+      page: 0,
+      pageCount: 1,
+      targets: [
+        {
+          id: 'a-disabled',
+          name: 'alpha',
+          type: 'digital',
+          enabled: false,
+          state: 'current',
+          archivedAt: null,
+        },
+        {
+          id: 'a-current',
+          name: 'bravo',
+          type: 'digital',
+          enabled: true,
+          state: 'current',
+          archivedAt: null,
+        },
+        {
+          id: 'z-current',
+          name: 'Bravo',
+          type: 'digital',
+          enabled: true,
+          state: 'current',
+          archivedAt: null,
+        },
+        {
+          id: 'a-archive',
+          name: 'Aaron',
+          type: 'uart',
+          enabled: false,
+          state: 'archived',
+          archivedAt: new Date('2026-07-11T08:00:00Z'),
+        },
+      ],
+    });
+  });
+
+  it('returns the requested target page and page count', async () => {
+    await expect(query.listHistoryTargets({ page: 1, pageSize: 2 })).resolves.toMatchObject({
+      page: 1,
+      pageCount: 2,
+      targets: [{ id: 'legacy_digital' }],
+    });
+  });
 });

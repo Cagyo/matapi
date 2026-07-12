@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { CameraModule } from '../camera/camera.module';
+import { ConfigModule } from '../config/config.module';
 import { EventModule } from '../events/event.module';
 import { FeatureModule } from '../features/feature.module';
 import { NetworkModule } from '../network/network.module';
@@ -25,6 +26,8 @@ import { SystemUpdateUseCase } from './application/system-update.use-case';
 import { UnmuteSensorUseCase } from './application/unmute-sensor.use-case';
 import { UpdateSystemUseCase } from './application/update-system.use-case';
 import { ExportConfigUseCase } from './application/export-config.use-case';
+import { StageCsvExportUseCase } from './application/stage-csv-export.use-case';
+import { CSV_TEMP_FILE } from './application/ports/csv-temp-file.port';
 import { ADMIN_CLAIM_CREDENTIAL } from './domain/ports/admin-claim-credential.port';
 import { DIRECT_MESSENGER } from './domain/ports/direct-messenger.port';
 import { CONFIG_CODEC } from './domain/ports/config-codec.port';
@@ -45,8 +48,10 @@ import { TelegramDirectMessenger } from './infrastructure/telegram-direct-messen
 import { TelegramNotifierAdapter } from './infrastructure/telegram-notifier.adapter';
 import { TelegramRecipientDirectoryAdapter } from './infrastructure/telegram-recipient-directory.adapter';
 import { YamlConfigCodec } from './infrastructure/yaml-config-codec.adapter';
+import { NodeCsvTempFileAdapter } from './infrastructure/node-csv-temp-file.adapter';
 import { ClaimAdminHandler } from './interfaces/claim-admin.handler';
 import { CameraHandler } from './interfaces/camera.handler';
+import { CsvHandler } from './interfaces/csv.handler';
 import { ConfigHandler } from './interfaces/config.handler';
 import { DemoteHandler } from './interfaces/demote.handler';
 import { ExportConfigHandler } from './interfaces/export-config.handler';
@@ -100,6 +105,7 @@ const mode = resolveBotMode();
  */
 @Module({
   imports: [
+    ConfigModule,
     EventModule,
     SensorModule,
     SystemModule,
@@ -151,8 +157,10 @@ const mode = resolveBotMode();
     SystemOnlineNotifier,
     BotCommandsMenuService,
     ExportConfigUseCase,
+    StageCsvExportUseCase,
     { provide: CONFIG_CODEC, useClass: YamlConfigCodec },
     LocaleMiddleware,
+    { provide: CSV_TEMP_FILE, useClass: NodeCsvTempFileAdapter },
     RoleMiddleware,
     ClaimAdminHandler,
     StatusHandler,
@@ -178,6 +186,7 @@ const mode = resolveBotMode();
     ExportConfigHandler,
     ImportConfigHandler,
     FeatureHandler,
+    CsvHandler,
     MenuHandler,
     SettingsHandler,
     CleanHandler,

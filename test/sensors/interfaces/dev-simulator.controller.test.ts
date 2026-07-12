@@ -26,7 +26,9 @@ function queryStub(sensors: Sensor[]): SensorQueryPort {
   return {
     listEnabled: async () => sensors,
     findById: async () => null,
+    findByIdIncludingArchived: async () => null,
     findByName: async () => null,
+    listHistoryTargets: async (input) => ({ targets: [], page: input.page, pageCount: 0 }),
   };
 }
 

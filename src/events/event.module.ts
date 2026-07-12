@@ -1,5 +1,10 @@
 import { Module } from '@nestjs/common';
+import { ConfigModule } from '../config/config.module';
 import { loadDefaults } from '../config/config.loader';
+import {
+  TIMEZONE_OPTIONS,
+  TimezoneOptions,
+} from '../config/application/ports/timezone-options.port';
 import { SensorRegistryService } from '../sensors/application/sensor-registry.service';
 import { SensorModule } from '../sensors/sensor.module';
 import { DebounceService } from './application/debounce.service';
@@ -37,7 +42,7 @@ function boolFromEnv(value: string | undefined, fallback: boolean): boolean {
 }
 
 @Module({
-  imports: [SensorModule],
+  imports: [ConfigModule, SensorModule],
   providers: [
     DebounceService,
     DrainEventQueueUseCase,
@@ -61,16 +66,17 @@ function boolFromEnv(value: string | undefined, fallback: boolean): boolean {
     },
     {
       provide: NOTIFICATION_OPTIONS,
-      useFactory: (): NotificationOptions => {
+      useFactory: (timezoneOptions: TimezoneOptions): NotificationOptions => {
         const defaults = loadDefaults().notifications;
         return {
-          timezone: process.env.TIMEZONE || 'Europe/Kyiv',
+          timezone: timezoneOptions.timezone,
           criticalIgnoresQuietHours: boolFromEnv(
             process.env.CRITICAL_IGNORES_QUIET_HOURS,
             defaults.critical_ignores_quiet_hours,
           ),
         };
       },
+      inject: [TIMEZONE_OPTIONS],
     },
   ],
   exports: [

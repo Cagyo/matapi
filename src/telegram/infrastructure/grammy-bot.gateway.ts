@@ -20,6 +20,7 @@ import { RestartConfirmationService } from '../application/restart-confirmation.
 import { SystemOnlineNotifier } from '../application/system-online-notifier.service';
 import { ClaimAdminHandler } from '../interfaces/claim-admin.handler';
 import { CameraHandler } from '../interfaces/camera.handler';
+import { CsvHandler } from '../interfaces/csv.handler';
 import { ConfigHandler } from '../interfaces/config.handler';
 import { DemoteHandler } from '../interfaces/demote.handler';
 import { ExportConfigHandler } from '../interfaces/export-config.handler';
@@ -151,6 +152,8 @@ export class GrammyBotGateway
     private readonly feature: FeatureHandler,
     @Inject(forwardRef(() => GdriveAuthHandler))
     private readonly gdriveAuth: GdriveAuthHandler,
+    @Inject(forwardRef(() => CsvHandler))
+    private readonly csv: CsvHandler,
     @Inject(forwardRef(() => MenuHandler))
     private readonly menu: MenuHandler,
     @Inject(forwardRef(() => SettingsHandler))
@@ -315,6 +318,7 @@ export class GrammyBotGateway
       this.importConfig,
       this.feature,
       this.gdriveAuth,
+      this.csv,
       this.menu,
       this.settings,
       this.clean,
