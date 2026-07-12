@@ -1,6 +1,7 @@
 import { Readable } from "node:stream";
 
 export const CSV_TEMP_FILE = Symbol("CSV_TEMP_FILE");
+export const CSV_TEMP_DIRECTORY = Symbol("CSV_TEMP_DIRECTORY");
 export const MAX_CSV_BYTES = 8 * 1024 * 1024;
 
 export class CsvDocumentTooLargeError extends Error {

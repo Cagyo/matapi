@@ -1,4 +1,6 @@
 import { Module } from '@nestjs/common';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { CameraModule } from '../camera/camera.module';
 import { ConfigModule } from '../config/config.module';
 import { EventModule } from '../events/event.module';
@@ -27,7 +29,10 @@ import { UnmuteSensorUseCase } from './application/unmute-sensor.use-case';
 import { UpdateSystemUseCase } from './application/update-system.use-case';
 import { ExportConfigUseCase } from './application/export-config.use-case';
 import { StageCsvExportUseCase } from './application/stage-csv-export.use-case';
-import { CSV_TEMP_FILE } from './application/ports/csv-temp-file.port';
+import {
+  CSV_TEMP_DIRECTORY,
+  CSV_TEMP_FILE,
+} from './application/ports/csv-temp-file.port';
 import { ADMIN_CLAIM_CREDENTIAL } from './domain/ports/admin-claim-credential.port';
 import { DIRECT_MESSENGER } from './domain/ports/direct-messenger.port';
 import { CONFIG_CODEC } from './domain/ports/config-codec.port';
@@ -159,6 +164,7 @@ const mode = resolveBotMode();
     ExportConfigUseCase,
     StageCsvExportUseCase,
     { provide: CONFIG_CODEC, useClass: YamlConfigCodec },
+    { provide: CSV_TEMP_DIRECTORY, useValue: join(tmpdir(), 'home-worker-csv') },
     LocaleMiddleware,
     { provide: CSV_TEMP_FILE, useClass: NodeCsvTempFileAdapter },
     RoleMiddleware,

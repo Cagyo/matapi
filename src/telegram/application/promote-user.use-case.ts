@@ -12,7 +12,7 @@ import { ResolveUserTargetUseCase } from './resolve-user-target.use-case';
 export class PromoteUserUseCase {
   constructor(
     @Inject(USER_REPOSITORY) private readonly users: UserRepositoryPort,
-    private readonly targets = new ResolveUserTargetUseCase(users),
+    private readonly targets: ResolveUserTargetUseCase,
   ) {}
 
   async execute(target: string): Promise<User> {

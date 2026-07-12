@@ -1,4 +1,4 @@
-import { Injectable, OnModuleInit } from "@nestjs/common";
+import { Inject, Injectable, OnModuleInit } from "@nestjs/common";
 import {
   chmodSync,
   closeSync,
@@ -18,6 +18,7 @@ import {
   CsvDocumentTooLargeError,
   CsvTempFile,
   CsvTempFilePort,
+  CSV_TEMP_DIRECTORY,
   MAX_CSV_BYTES,
 } from "../application/ports/csv-temp-file.port";
 
@@ -26,7 +27,9 @@ const FEATURE_FILENAME_PREFIX = "csv_";
 
 @Injectable()
 export class NodeCsvTempFileAdapter implements CsvTempFilePort, OnModuleInit {
-  constructor(private readonly directory = join(tmpdir(), "home-worker-csv")) {}
+  constructor(
+    @Inject(CSV_TEMP_DIRECTORY) private readonly directory: string,
+  ) {}
 
   async onModuleInit(): Promise<void> {
     await this.cleanupStale(new Date());
