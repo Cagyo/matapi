@@ -60,6 +60,13 @@ interface PendingOpen {
   };
 }
 
+interface CleanupBlocker {
+  active: ActiveSession;
+  teardownInFlight: boolean;
+}
+
+class GatewayOperationTimeoutError extends Error {}
+
 /**
  * Owns the one global live-stream state machine. A short queue serializes
  * transitions; gateway startup itself stays outside it so a stop can cancel a
@@ -69,7 +76,8 @@ interface PendingOpen {
 export class LiveStreamSessionService implements OnModuleInit {
   private queue: Promise<void> = Promise.resolve();
   private active?: ActiveSession;
-  private cleanupBlocked?: ActiveSession;
+  private cleanupBlocked?: CleanupBlocker;
+  private pendingStartCleanup?: PendingOpen;
   private pending?: PendingOpen;
   private expiryTimer?: ReturnType<typeof setTimeout>;
 
@@ -79,6 +87,7 @@ export class LiveStreamSessionService implements OnModuleInit {
     @Inject(MONOTONIC_CLOCK) private readonly clock: MonotonicClockPort,
     @Inject(ADMIN_ALERT) private readonly alerts: AdminAlertPort,
     private readonly durationMs = 300_000,
+    private readonly operationTimeoutMs = 30_000,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -117,6 +126,11 @@ export class LiveStreamSessionService implements OnModuleInit {
     const deferred = createDeferred<OpenLiveStreamResult>();
     const queued = this.enqueue(async () => {
       try {
+        if (this.pendingStartCleanup) {
+          deferred.reject(new LiveStreamUnavailableError());
+          return;
+        }
+
         if (this.cleanupBlocked && !(await this.retryBlockedCleanup())) {
           deferred.reject(new LiveStreamUnavailableError());
           return;
@@ -134,6 +148,10 @@ export class LiveStreamSessionService implements OnModuleInit {
         }
 
         if (this.pending) {
+          if (this.pending.cancelled) {
+            deferred.reject(new LiveStreamUnavailableError());
+            return;
+          }
           if (this.pending.session.cameraId === source.cameraId) {
             this.pending.requests.push({ telegramId, deferred });
             return;
@@ -195,6 +213,8 @@ export class LiveStreamSessionService implements OnModuleInit {
         await this.gateway.revokeViewer(tokenHash);
       }
       this.active.viewerTokenHashes.delete(telegramId);
+    }).catch(() => {
+      throw new LiveStreamUnavailableError();
     });
   }
 
@@ -214,7 +234,14 @@ export class LiveStreamSessionService implements OnModuleInit {
       }
 
       this.active.messageReferences.push(reference);
-      await this.writeLease(this.active);
+      try {
+        await this.writeLease(this.active);
+      } catch {
+        this.active.messageReferences.pop();
+        throw new LiveStreamUnavailableError();
+      }
+    }).catch(() => {
+      throw new LiveStreamUnavailableError();
     });
   }
 
@@ -238,26 +265,34 @@ export class LiveStreamSessionService implements OnModuleInit {
     };
     this.pending = pending;
 
-    let start: ReturnType<LiveStreamGatewayPort['start']>;
-    try {
-      start = this.gateway.start({ session: pending.session, source });
-    } catch {
-      void this.failStart(pending).catch(() => {
-        // Failure handling is deliberately self-contained so a synchronous
-        // adapter throw cannot strand state or create an unhandled rejection.
-      });
-      return;
-    }
+    const start = Promise.resolve().then(() =>
+      this.gateway.start({ session: pending.session, source }),
+    );
 
-    void start.then(
+    void this.withOperationTimeout(start).then(
       (started) => {
         void this.enqueue(() => this.completeStart(pending, started)).catch(() => {
           // completeStart handles expected provisioning failures; this consumes
           // any unexpected callback failure from the fire-and-forget boundary.
         });
       },
-      () => {
-        void this.enqueue(() => this.failStart(pending)).catch(() => {
+      (error: unknown) => {
+        const waitingForLateStart = error instanceof GatewayOperationTimeoutError;
+        if (waitingForLateStart) {
+          void start.then(
+            (started) => {
+              void this.enqueue(() => this.cleanupLateStart(pending, started)).catch(() => {
+                // The blocker remains in place if late cleanup cannot finish.
+              });
+            },
+            () => {
+              void this.enqueue(() => this.discardPendingStartCleanup(pending)).catch(() => {
+                // Queue failures are contained at this detached callback boundary.
+              });
+            },
+          );
+        }
+        void this.enqueue(() => this.failStart(pending, waitingForLateStart)).catch(() => {
           // failStart settles all deferreds and guards its replacement start.
         });
       },
@@ -280,7 +315,7 @@ export class LiveStreamSessionService implements OnModuleInit {
     };
 
     if (pending.cancelled || !isQuickTunnelHostname(started.publicHostname)) {
-      await this.abortStartedPending(pending, active);
+      this.abortStartedPending(pending, active);
       return;
     }
 
@@ -299,15 +334,25 @@ export class LiveStreamSessionService implements OnModuleInit {
         request.deferred.resolve(results[index]);
       }
     } catch {
-      await this.abortStartedPending(pending, active);
+      this.abortStartedPending(pending, active);
     }
   }
 
-  private async failStart(pending: PendingOpen): Promise<void> {
+  private async failStart(
+    pending: PendingOpen,
+    waitingForLateStart = false,
+  ): Promise<void> {
     if (this.pending !== pending) return;
     this.pending = undefined;
+    if (waitingForLateStart) {
+      this.pendingStartCleanup = pending;
+    }
     this.rejectPending(pending);
-    this.beginReplacement(pending);
+    if (waitingForLateStart) {
+      this.rejectReplacement(pending);
+    } else {
+      this.beginReplacement(pending);
+    }
   }
 
   private async openViewer(
@@ -364,52 +409,37 @@ export class LiveStreamSessionService implements OnModuleInit {
   private async stopActive(): Promise<string | null> {
     if (!this.active) return null;
     const cameraName = this.active.session.cameraName;
-    await this.gateway.stop();
+    await this.stopGateway(this.active);
     this.active = undefined;
     this.clearExpiryTimer();
     await this.lease.clear();
     return cameraName;
   }
 
-  private async abortStartedPending(
+  private abortStartedPending(
     pending: PendingOpen,
     started: ActiveSession,
-  ): Promise<void> {
+  ): void {
     this.pending = undefined;
     this.clearExpiryTimer();
-
-    let stopped = false;
-    try {
-      await this.gateway.stop();
-      stopped = true;
-    } catch {
-      this.cleanupBlocked = started;
-    }
-
-    try {
-      await this.lease.clear();
-    } catch {
-      // Cleanup is best effort; the in-memory blocker still prevents a duplicate tunnel.
-    }
-
     this.rejectPending(pending);
-    if (stopped) {
-      this.beginReplacement(pending);
-    } else {
-      this.rejectReplacement(pending);
-    }
+    this.startBlockedTeardown(started, pending);
   }
 
   private async retryBlockedCleanup(): Promise<boolean> {
     if (!this.cleanupBlocked) return true;
+    if (this.cleanupBlocked.teardownInFlight) return false;
+
+    const active = this.cleanupBlocked.active;
 
     try {
-      await this.gateway.stop();
+      await this.stopGateway(active);
     } catch {
       return false;
     }
 
     this.cleanupBlocked = undefined;
+    if (this.active === active) this.active = undefined;
     this.clearExpiryTimer();
     try {
       await this.lease.clear();
@@ -417,6 +447,128 @@ export class LiveStreamSessionService implements OnModuleInit {
       // The tunnel is confirmed stopped, so a stale lease cannot create a duplicate tunnel.
     }
     return true;
+  }
+
+  private async cleanupLateStart(
+    pending: PendingOpen,
+    started: Awaited<ReturnType<LiveStreamGatewayPort['start']>>,
+  ): Promise<void> {
+    if (this.pendingStartCleanup !== pending) return;
+    this.pendingStartCleanup = undefined;
+    this.startBlockedTeardown({
+      session: pending.session,
+      publicHostname: started.publicHostname,
+      pid: started.pid,
+      processIdentity: started.processIdentity,
+      viewerTokenHashes: new Map(),
+      messageReferences: [],
+    });
+  }
+
+  private async discardPendingStartCleanup(pending: PendingOpen): Promise<void> {
+    if (this.pendingStartCleanup === pending) {
+      this.pendingStartCleanup = undefined;
+    }
+  }
+
+  private startBlockedTeardown(active: ActiveSession, pending?: PendingOpen): void {
+    const teardown = Promise.resolve().then(() => this.gateway.stop());
+    this.cleanupBlocked = { active, teardownInFlight: true };
+
+    void this.withOperationTimeout(teardown).then(
+      () => {
+        void this.enqueue(() => this.finishBlockedTeardown(active, pending)).catch(() => {
+          // A cleanup blocker must not create an unhandled rejection.
+        });
+      },
+      (error: unknown) => {
+        if (error instanceof GatewayOperationTimeoutError) {
+          void teardown.then(
+            () => {
+              void this.enqueue(() => this.finishBlockedTeardown(active, pending)).catch(() => {
+                // A cleanup blocker must not create an unhandled rejection.
+              });
+            },
+            () => {
+              void this.enqueue(() => this.failBlockedTeardown(active, pending)).catch(() => {
+                // A cleanup blocker must not create an unhandled rejection.
+              });
+            },
+          );
+          return;
+        }
+        void this.enqueue(() => this.failBlockedTeardown(active, pending)).catch(() => {
+          // A cleanup blocker must not create an unhandled rejection.
+        });
+      },
+    );
+  }
+
+  private async finishBlockedTeardown(
+    active: ActiveSession,
+    pending?: PendingOpen,
+  ): Promise<void> {
+    if (this.cleanupBlocked?.active !== active) return;
+    this.cleanupBlocked = undefined;
+    if (this.active === active) this.active = undefined;
+    this.clearExpiryTimer();
+    try {
+      await this.lease.clear();
+    } catch {
+      // The tunnel is confirmed stopped, so a stale lease cannot create a duplicate tunnel.
+    }
+    if (pending) this.beginReplacement(pending);
+  }
+
+  private async failBlockedTeardown(
+    active: ActiveSession,
+    pending?: PendingOpen,
+  ): Promise<void> {
+    if (this.cleanupBlocked?.active !== active) return;
+    this.cleanupBlocked.teardownInFlight = false;
+    if (pending) this.rejectReplacement(pending);
+  }
+
+  private async stopGateway(active: ActiveSession): Promise<void> {
+    const stop = Promise.resolve().then(() => this.gateway.stop());
+    try {
+      await this.withOperationTimeout(stop);
+    } catch (error) {
+      if (error instanceof GatewayOperationTimeoutError) {
+        this.cleanupBlocked = { active, teardownInFlight: true };
+        void stop.then(
+          () => {
+            void this.enqueue(() => this.finishBlockedTeardown(active)).catch(() => {
+              // A cleanup blocker must not create an unhandled rejection.
+            });
+          },
+          () => {
+            void this.enqueue(() => this.failBlockedTeardown(active)).catch(() => {
+              // A cleanup blocker must not create an unhandled rejection.
+            });
+          },
+        );
+      }
+      throw error;
+    }
+  }
+
+  private withOperationTimeout<T>(operation: Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new GatewayOperationTimeoutError());
+      }, this.operationTimeoutMs);
+      void operation.then(
+        (value) => {
+          clearTimeout(timeout);
+          resolve(value);
+        },
+        (error: unknown) => {
+          clearTimeout(timeout);
+          reject(error);
+        },
+      );
+    });
   }
 
   private clearExpiryTimer(): void {

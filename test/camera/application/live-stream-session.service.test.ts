@@ -222,7 +222,7 @@ describe('LiveStreamSessionService', () => {
       }),
     ]);
     expect(gateway.stopCalls).toBe(1);
-    expect(lease.clearCalls).toBe(1);
+    await vi.waitFor(() => expect(lease.clearCalls).toBe(1));
   });
 
   it('cleans up and rejects every pending caller when adding a viewer fails', async () => {
@@ -249,7 +249,7 @@ describe('LiveStreamSessionService', () => {
       }),
     ]);
     expect(gateway.stopCalls).toBe(1);
-    expect(lease.clearCalls).toBe(1);
+    await vi.waitFor(() => expect(lease.clearCalls).toBe(1));
   });
 
   it('revokes every viewer token issued to a user', async () => {
@@ -263,6 +263,18 @@ describe('LiveStreamSessionService', () => {
     expect(gateway.revoked).toHaveLength(2);
   });
 
+  it('maps a gateway revoke failure to a domain error', async () => {
+    const gateway = new FakeGateway();
+    gateway.revokeError = new Error('revoke failed');
+    const service = createService({ gateway });
+
+    await service.open(source('front_door'), 1);
+
+    await expect(service.revokeUser(1)).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+  });
+
   it('persists a watch-message reference after the handler reply', async () => {
     const lease = new FakeLease();
     const service = createService({ lease });
@@ -273,6 +285,89 @@ describe('LiveStreamSessionService', () => {
     expect(lease.writes.at(-1)?.messageReferences).toEqual([
       { chatId: 42, messageId: 9 },
     ]);
+  });
+
+  it('maps a message-reference lease write failure to a domain error', async () => {
+    const lease = new FakeLease();
+    const service = createService({ lease });
+    const opened = await service.open(source('front_door'), 1);
+    lease.writeError = new Error('lease write failed');
+
+    await expect(
+      opened.registerMessageReference({ chatId: 42, messageId: 9 }),
+    ).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+  });
+
+  it('rejects a hung gateway start at the operation timeout and blocks duplicates', async () => {
+    vi.useFakeTimers();
+    const gateway = new DeferredGateway();
+    const service = createService({ gateway, operationTimeoutMs: 100 });
+    const opening = service.open(source('front_door'), 1);
+    const openingRejected = expect(opening).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+
+    await vi.advanceTimersByTimeAsync(100);
+
+    await openingRejected;
+    await expect(service.open(source('front_door'), 2)).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    expect(gateway.startCalls).toHaveLength(1);
+  });
+
+  it('rejects a hung gateway stop at the operation timeout and blocks replacements', async () => {
+    vi.useFakeTimers();
+    const gateway = new FakeGateway();
+    const service = createService({ gateway, operationTimeoutMs: 100 });
+    await service.open(source('front_door'), 1);
+    gateway.hangStop = true;
+    const stopping = service.stop(2);
+    const stoppingRejected = expect(stopping).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+
+    await vi.advanceTimersByTimeAsync(100);
+
+    await stoppingRejected;
+    await expect(service.open(source('garden'), 3)).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    expect(gateway.startCalls).toHaveLength(1);
+  });
+
+  it('rejects a same-camera open after stop cancels a pending hung start', async () => {
+    const gateway = new DeferredGateway();
+    const service = createService({ gateway });
+    const opening = service.open(source('front_door'), 1);
+    await vi.waitFor(() => expect(gateway.startCalls).toHaveLength(1));
+
+    await expect(service.stop(2)).resolves.toBeNull();
+
+    await expect(opening).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    await expect(service.open(source('front_door'), 3)).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    expect(gateway.startCalls).toHaveLength(1);
+  });
+
+  it('rejects provisioning callers without waiting for a hung teardown', async () => {
+    const gateway = new FakeGateway();
+    gateway.addViewerError = new Error('viewer add failed');
+    gateway.hangStop = true;
+    const service = createService({ gateway, operationTimeoutMs: 100 });
+
+    await expect(service.open(source('front_door'), 1)).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    await expect(service.open(source('garden'), 2)).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    expect(gateway.startCalls).toHaveLength(1);
   });
 
   it('stops and clears an expired session through the transition queue', async () => {
@@ -413,6 +508,7 @@ function createService(input: {
   lease?: FakeLease;
   alerts?: FakeAdminAlert;
   durationMs?: number;
+  operationTimeoutMs?: number;
 } = {}): LiveStreamSessionService {
   return new LiveStreamSessionService(
     input.gateway ?? new FakeGateway(),
@@ -420,6 +516,7 @@ function createService(input: {
     input.clock ?? new FakeMonotonicClock(1_000),
     input.alerts ?? new FakeAdminAlert(),
     input.durationMs ?? 300_000,
+    input.operationTimeoutMs ?? 30_000,
   );
 }
 
@@ -443,6 +540,8 @@ class FakeGateway implements LiveStreamGatewayPort {
   recoveryResult: 'stopped' | 'not-owned' = 'stopped';
   stopError?: Error;
   addViewerError?: Error;
+  revokeError?: Error;
+  hangStop = false;
   throwStartSynchronously = false;
 
   start(input: { source: LiveStreamSource }): Promise<{
@@ -464,12 +563,14 @@ class FakeGateway implements LiveStreamGatewayPort {
   }
 
   async revokeViewer(tokenHash: string): Promise<void> {
+    if (this.revokeError) throw this.revokeError;
     this.revoked.push(tokenHash);
   }
 
   async stop(): Promise<void> {
     this.stopCalls += 1;
     if (this.stopError) throw this.stopError;
+    if (this.hangStop) await new Promise<never>(() => undefined);
   }
 
   async recoverOwnedProcess(input: {
