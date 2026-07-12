@@ -72,6 +72,18 @@ export class TelegramNotifierAdapter implements NotifierPort {
     }
     await this.bot.api.sendPhoto(telegramId, new InputFile(photo.buffer), {
       caption: photo.caption,
+      ...(photo.actions?.length
+        ? {
+            reply_markup: {
+              inline_keyboard: photo.actions.map((row) =>
+                row.map((action) => ({
+                  text: action.text,
+                  callback_data: action.callbackData,
+                })),
+              ),
+            },
+          }
+        : {}),
     });
   }
 

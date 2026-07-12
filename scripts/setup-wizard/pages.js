@@ -196,7 +196,7 @@ function renderStep2(token, botUsername, catalog = [], pairingSecret = '') {
 
   const featuresHtml = catalog.map(f => `
     <label class="feature-item">
-      <input type="checkbox" name="features" value="${escapeHtml(f.name)}" checked>
+      <input type="checkbox" name="features" value="${escapeHtml(f.name)}"${f.defaultEnabled === false ? '' : ' checked'}>
       <span class="feature-info">
         <span class="feature-title">${escapeHtml(f.name)}</span>
         <span class="feature-desc">${escapeHtml(f.description)}</span>

@@ -23,47 +23,49 @@ export class FeatureSeederService implements OnModuleInit {
   async onModuleInit(): Promise<void> {
     try {
       const existing = await this.featureQuery.listAll();
-      // Fix 5a: If all catalog features already exist in DB, skip seeding to preserve runtime state.
-      if (existing.length >= FEATURE_CATALOG.length) {
-        return;
-      }
-
-      const featuresFile = resolve(process.cwd(), 'features.json');
-      if (!existsSync(featuresFile)) {
+      const existingNames = new Set(existing.map((feature) => feature.name));
+      const missingCatalogEntries = FEATURE_CATALOG.filter(
+        (entry) => !existingNames.has(entry.name),
+      );
+      if (missingCatalogEntries.length === 0) {
         return;
       }
 
       let enabledList: string[] = [];
-      try {
-        // Fix 5b: Try/catch around JSON.parse to prevent corrupt features.json from crashing NestJS boot
-        const raw = readFileSync(featuresFile, 'utf-8');
-        const parsed: unknown = JSON.parse(raw);
-        if (typeof parsed === 'object' && parsed !== null && 'enabled' in parsed) {
-          const { enabled } = parsed as { enabled?: unknown };
-          if (Array.isArray(enabled)) {
-            enabledList = enabled.filter((item: unknown): item is string => typeof item === 'string');
-          }
+      if (existing.length === 0) {
+        const featuresFile = resolve(process.cwd(), 'features.json');
+        if (!existsSync(featuresFile)) {
+          return;
         }
-      } catch (err) {
-        this.logger.warn(`Invalid features.json — skipping feature seeding: ${(err as Error).message}`);
-        return;
+
+        try {
+          // Fix 5b: Try/catch around JSON.parse to prevent corrupt features.json from crashing NestJS boot
+          const raw = readFileSync(featuresFile, 'utf-8');
+          const parsed: unknown = JSON.parse(raw);
+          if (typeof parsed === 'object' && parsed !== null && 'enabled' in parsed) {
+            const { enabled } = parsed as { enabled?: unknown };
+            if (Array.isArray(enabled)) {
+              enabledList = enabled.filter((item: unknown): item is string => typeof item === 'string');
+            }
+          }
+        } catch (err) {
+          this.logger.warn(`Invalid features.json — skipping feature seeding: ${(err as Error).message}`);
+          return;
+        }
       }
 
-      // Fix 5a: Transaction wrapper so partial seeds do not permanently break feature state
+      // Insert only missing catalogue entries so upgrades never reset saved state.
       this.db.transaction((tx) => {
-        // If partial state existed, clear it inside transaction before re-seeding
-        if (existing.length > 0) {
-          tx.delete(features).run();
-        }
-        for (const entry of FEATURE_CATALOG) {
+        for (const entry of missingCatalogEntries) {
+          const selectedOnFirstInstall = existing.length === 0 && enabledList.includes(entry.name);
           tx.insert(features).values({
             name: entry.name,
-            enabled: enabledList.includes(entry.name),
-            installed: enabledList.includes(entry.name),
+            enabled: selectedOnFirstInstall,
+            installed: selectedOnFirstInstall,
           }).run();
         }
       });
-      this.logger.log(`Successfully seeded ${FEATURE_CATALOG.length} features from features.json`);
+      this.logger.log(`Successfully seeded ${missingCatalogEntries.length} missing features`);
     } catch (err) {
       this.logger.error(`Feature seeding failed: ${(err as Error).message}`, (err as Error).stack);
     }

@@ -8,6 +8,7 @@ type FakeBot = Bot & {
   api: {
     sendMessage: ReturnType<typeof vi.fn>;
     sendDocument: ReturnType<typeof vi.fn>;
+    sendPhoto: ReturnType<typeof vi.fn>;
   };
 };
 
@@ -16,6 +17,7 @@ function makeBot(): FakeBot {
     api: {
       sendMessage: vi.fn().mockResolvedValue(undefined),
       sendDocument: vi.fn().mockResolvedValue(undefined),
+      sendPhoto: vi.fn().mockResolvedValue(undefined),
     },
   } as unknown as FakeBot;
 }
@@ -132,5 +134,25 @@ describe('TelegramNotifierAdapter', () => {
     await expect(
       adapter.notify({ text: 'front_door opened', asFile: false }),
     ).rejects.toThrow('telegram down');
+  });
+
+  it('adds a Watch live callback without exposing a URL or token', async () => {
+    const bot = makeBot();
+    adapter.setBot(bot);
+
+    await adapter.notifyUserPhoto(1001, {
+      buffer: Buffer.from('jpeg'),
+      caption: 'Motion detected',
+      actions: [[{ text: '📺 Watch live', callbackData: 'cam:live:front_door_cam' }]],
+    });
+
+    expect(bot.api.sendPhoto).toHaveBeenCalledWith(
+      1001,
+      expect.anything(),
+      expect.objectContaining({ reply_markup: expect.anything() }),
+    );
+    const options = bot.api.sendPhoto.mock.calls[0][2];
+    expect(JSON.stringify(options)).toContain('cam:live:front_door_cam');
+    expect(JSON.stringify(options)).not.toContain('trycloudflare.com');
   });
 });

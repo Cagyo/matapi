@@ -155,11 +155,16 @@ export class NotificationService {
     if (!this.notifier.isReady()) return;
 
     const caption = formatMotionCaption(cameraName, at, this.options.timezone);
+    const liveStreamCallback = cameraId ? `cam:live:${cameraId}` : null;
+    const actions =
+      liveStreamCallback && Buffer.byteLength(liveStreamCallback, 'utf8') <= 64
+        ? [[{ text: en.sensors.notifications.watchLive, callbackData: liveStreamCallback }]]
+        : undefined;
     const recipients = await this.recipients.listRecipients();
 
     if (recipients.length === 0) {
       try {
-        await this.notifier.notify({ text: caption, asFile: false });
+        await this.notifier.notify({ text: caption, asFile: false, actions });
       } catch (error) {
         this.logger.warn(`Motion broadcast failed: ${(error as Error).message}`);
       }
@@ -171,9 +176,9 @@ export class NotificationService {
       if (await this.isMotionSuppressed(recipient, cameraName, now, cameraId)) return;
       try {
         if (photo) {
-          await this.notifier.notifyUserPhoto(recipient.telegramId, { buffer: photo, caption });
+          await this.notifier.notifyUserPhoto(recipient.telegramId, { buffer: photo, caption, actions });
         } else {
-          await this.notifier.notifyUser(recipient.telegramId, { text: caption, asFile: false });
+          await this.notifier.notifyUser(recipient.telegramId, { text: caption, asFile: false, actions });
         }
       } catch (error) {
         this.logger.warn(

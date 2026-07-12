@@ -17,6 +17,8 @@ export interface NotificationMessage {
 export interface NotificationPhoto {
   buffer: Buffer;
   caption: string;
+  /** Rows of compact actions shown below a Telegram photo notification. */
+  actions?: NotificationAction[][];
 }
 
 export interface NotifierPort {

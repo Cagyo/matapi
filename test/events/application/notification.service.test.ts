@@ -367,11 +367,14 @@ describe('NotificationService.notifyMotion', () => {
       recipients: [recipient({ telegramId: 1 }), recipient({ telegramId: 2 })],
     });
 
-    await service.notifyMotion('front_door', MOTION_AT, Buffer.from('jpeg'));
+    await service.notifyMotion('front_door', MOTION_AT, Buffer.from('jpeg'), 'front_door_cam');
 
     expect(notifier.photoSends.map((s) => s.telegramId).sort((a, b) => a - b)).toEqual([1, 2]);
     expect(notifier.photoSends[0].photo.caption).toBe(EXPECTED_CAPTION);
     expect(notifier.photoSends[0].photo.buffer.toString()).toBe('jpeg');
+    expect(notifier.photoSends[0].photo.actions).toEqual([
+      [{ text: '📺 Watch live', callbackData: 'cam:live:front_door_cam' }],
+    ]);
   });
 
   it('falls back to a text caption when no snapshot is available', async () => {

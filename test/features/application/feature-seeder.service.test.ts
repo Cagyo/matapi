@@ -32,7 +32,7 @@ describe('FeatureSeederService', () => {
   };
 
   it('skips seeding if database already has all catalog items (Fix 5a guard)', async () => {
-    mockQuery.listAll.mockResolvedValue(new Array(FEATURE_CATALOG.length).fill({ name: 'test' }));
+    mockQuery.listAll.mockResolvedValue(FEATURE_CATALOG.map(({ name }) => ({ name })));
 
     await seeder.onModuleInit();
 
@@ -58,5 +58,25 @@ describe('FeatureSeederService', () => {
 
     expect(mockDb.transaction).toHaveBeenCalled();
     expect(mockTx.insert).toHaveBeenCalledTimes(FEATURE_CATALOG.length);
+  });
+
+  it('adds a newly catalogued feature without resetting existing feature state', async () => {
+    mockQuery.listAll.mockResolvedValue([
+      { name: 'motion', installed: true, enabled: true },
+      { name: 'uart', installed: true, enabled: false },
+    ]);
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ enabled: ['motion'] }));
+
+    await seeder.onModuleInit();
+
+    expect(mockTx.delete).not.toHaveBeenCalled();
+    const insertValues = mockTx.insert.mock.results[0]?.value.values;
+    expect(insertValues).toHaveBeenCalledWith({
+      name: 'rtsp',
+      installed: false,
+      enabled: false,
+    });
+    expect(insertValues).toHaveBeenCalledTimes(FEATURE_CATALOG.length - 2);
   });
 });

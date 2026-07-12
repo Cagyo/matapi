@@ -3,6 +3,11 @@
   { "name": "uart", "description": "CO2 serial sensor" },
   { "name": "zigbee", "description": "Zigbee2MQTT gateway" },
   { "name": "motion", "description": "Motion camera" },
+  {
+    "name": "rtsp",
+    "description": "Experimental Motion MJPEG live stream",
+    "defaultEnabled": false
+  },
   { "name": "neobox", "description": "Neobox intercom" },
   { "name": "4g", "description": "4G failover" }
 ]

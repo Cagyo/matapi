@@ -453,6 +453,7 @@ const ukCatalog = {
       infoChange:     (name: string, state: string, oldState: string) => `ℹ️ *${name}:* ${state} (було ${oldState})`,
       flappingFault:  (name: string) => `⚠️ *НЕСПРАВНІСТЬ:* датчик *${name}* переведено на опитування через нестабільні спрацювання!`,
       viewLogs: '📋 Переглянути журнал',
+      watchLive: '📺 Дивитися наживо',
       mqttOffline: '🔴 MQTT-брокер не в мережі',
       mqttRecovered: '🟢 MQTT-брокер знову підключено',
     },

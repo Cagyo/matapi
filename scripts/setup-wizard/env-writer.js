@@ -54,9 +54,11 @@ function writeConfig(
     claimAdminToken
   );
 
+  const selectedFeatures = Array.isArray(enabledFeatures) ? enabledFeatures : [];
   const featuresData = JSON.stringify(
     {
-      enabled: Array.isArray(enabledFeatures) ? enabledFeatures : [],
+      enabled: selectedFeatures,
+      liveStream: selectedFeatures.includes('rtsp'),
       timestamp: new Date().toISOString(),
     },
     null,

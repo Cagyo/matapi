@@ -448,6 +448,7 @@ const enCatalog = {
       infoChange:     (name: string, state: string, oldState: string) => `ℹ️ *${name}:* ${state} (was ${oldState})`,
       flappingFault:  (name: string) => `⚠️ *FAULT:* Sensor *${name}* switched to polled sampling due to flapping!`,
       viewLogs: '📋 View Logs',
+      watchLive: '📺 Watch live',
       mqttOffline: '🔴 MQTT broker offline',
       mqttRecovered: '🟢 MQTT broker reconnected',
     },

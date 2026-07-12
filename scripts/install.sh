@@ -503,7 +503,7 @@ install_selected_features() {
 
   local failed=""
   local features
-  features=$(node -e "try { const f = require('$features_file'); (f.enabled || []).forEach(n => console.log(n)); } catch {}")
+  features=$(node -e "try { const f = require('$features_file'); (f.enabled || []).filter(n => n !== 'rtsp').forEach(n => console.log(n)); } catch {}")
 
   while IFS= read -r feature; do
     if [ -z "$feature" ]; then continue; fi
@@ -513,6 +513,17 @@ install_selected_features() {
       failed="$failed $feature"
     fi
   done <<< "$features"
+
+  # The live stream is experimental and must only dispatch its installer when
+  # the wizard recorded an explicit rtsp selection. Task 4 provides the
+  # cloudflared capability behind this dispatch.
+  if node -e "try { const f = require('$features_file'); process.exit((f.enabled || []).includes('rtsp') ? 0 : 1); } catch { process.exit(1); }"; then
+    echo "Installing dependencies for feature: rtsp"
+    if ! "$INSTALL_DIR/scripts/install-feature.sh" rtsp; then
+      echo "WARNING: Failed to install dependencies for rtsp"
+      failed="$failed rtsp"
+    fi
+  fi
 
   if [ -n "$failed" ]; then
     echo "⚠️ Failed feature installations:$failed (worker will start without these dependencies)"

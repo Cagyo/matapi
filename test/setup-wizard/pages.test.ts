@@ -21,6 +21,19 @@ describe('pairing forms', () => {
     expect(html).not.toContain('action="/finish?pairingSecret=');
     expect(html).not.toContain(pairingSecret);
   });
+
+  it('leaves the experimental live-stream feature opt-in', () => {
+    const html = renderStep2('bot-token', 'home_bot', [
+      {
+        name: 'rtsp',
+        description: 'Experimental Motion MJPEG live stream',
+        defaultEnabled: false,
+      },
+    ]);
+
+    expect(html).toContain('value="rtsp"');
+    expect(html).not.toContain('value="rtsp" checked');
+  });
 });
 
 describe('renderDone', () => {

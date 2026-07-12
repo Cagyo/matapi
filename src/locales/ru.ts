@@ -453,6 +453,7 @@ const ruCatalog = {
       infoChange:     (name: string, state: string, oldState: string) => `ℹ️ *${name}:* ${state} (было ${oldState})`,
       flappingFault:  (name: string) => `⚠️ *НЕИСПРАВНОСТЬ:* Датчик *${name}* переведён на опрос из-за частых переключений!`,
       viewLogs: '📋 Открыть журнал',
+      watchLive: '📺 Смотреть вживую',
       mqttOffline: '🔴 Брокер MQTT не в сети',
       mqttRecovered: '🟢 Соединение с брокером MQTT восстановлено',
     },

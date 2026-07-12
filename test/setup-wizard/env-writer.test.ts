@@ -55,4 +55,15 @@ describe('writeConfig', () => {
     expect(result.claimAdminToken).toMatch(/^[A-Za-z0-9_-]{32}$/);
     expect(envContent).toContain(`CLAIM_ADMIN_TOKEN=${result.claimAdminToken}`);
   });
+
+  it('records the experimental live-stream selection explicitly in features.json', () => {
+    const installDir = createInstallDir();
+
+    writeConfig(installDir, '123456:telegram-token', ['motion', 'rtsp']);
+
+    expect(JSON.parse(readFileSync(join(installDir, 'features.json'), 'utf8'))).toMatchObject({
+      enabled: ['motion', 'rtsp'],
+      liveStream: true,
+    });
+  });
 });
