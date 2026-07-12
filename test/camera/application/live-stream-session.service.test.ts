@@ -39,6 +39,23 @@ describe('LiveStreamSessionService', () => {
     expect(gateway.stopCalls).toBe(1);
   });
 
+  it('rejects a stalled pending open promptly when stop wins', async () => {
+    const gateway = new DeferredGateway();
+    const service = createService({ gateway });
+
+    const opening = service.open(source('front_door'), 1);
+    await vi.waitFor(() => expect(gateway.startCalls).toHaveLength(1));
+
+    await expect(service.stop(2)).resolves.toBeNull();
+    await expect(opening).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    expect(gateway.stopCalls).toBe(0);
+
+    gateway.resolveStart();
+    await vi.waitFor(() => expect(gateway.stopCalls).toBe(1));
+  });
+
   it('settles pending and replacement opens when cancellation teardown fails', async () => {
     const gateway = new DeferredGateway();
     gateway.stopError = new Error('stop failed');
@@ -62,7 +79,7 @@ describe('LiveStreamSessionService', () => {
         reason: expect.objectContaining({ code: 'LIVE_STREAM_UNAVAILABLE' }),
       }),
     ]);
-    expect(gateway.stopCalls).toBe(1);
+    await vi.waitFor(() => expect(gateway.stopCalls).toBe(1));
     expect(gateway.startCalls).toHaveLength(1);
   });
 
@@ -155,6 +172,30 @@ describe('LiveStreamSessionService', () => {
     });
     expect(gateway.startCalls).toHaveLength(2);
     expect(gateway.stopCalls).toBe(1);
+  });
+
+  it('maps a gateway stop failure to a domain error', async () => {
+    const gateway = new FakeGateway();
+    const service = createService({ gateway });
+
+    await service.open(source('front_door'), 1);
+    gateway.stopError = new Error('stop failed');
+
+    await expect(service.stop(2)).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+  });
+
+  it('maps a lease-clear stop failure to a domain error', async () => {
+    const lease = new FakeLease();
+    const service = createService({ lease });
+
+    await service.open(source('front_door'), 1);
+    lease.clearError = new Error('lease clear failed');
+
+    await expect(service.stop(2)).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
   });
 
   it('cleans up and rejects every pending caller when writing the lease fails', async () => {
@@ -313,6 +354,48 @@ describe('LiveStreamSessionService', () => {
     expect(alerts.alerts).toEqual([['live-stream-recovery-failed', undefined]]);
     expect(lease.clearCalls).toBe(1);
   });
+
+  it('contains a recovery lease-clear failure behind a sanitized alert', async () => {
+    const lease = new FakeLease({
+      sessionNonce: 'stale',
+      pid: createLiveStreamProcessId(123),
+      processIdentity: 'owned-process',
+      cameraId: 'front_door',
+      diagnosticExpiresAtUnixMs: 0,
+      messageReferences: [],
+    });
+    lease.clearError = new Error('lease clear failed');
+    const alerts = new FakeAdminAlert();
+    const service = createService({ lease, alerts });
+
+    await expect(service.onModuleInit()).resolves.toBeUndefined();
+    expect(alerts.alerts).toEqual([['live-stream-recovery-failed', undefined]]);
+  });
+
+  it('settles a synchronous gateway start failure and preserves queue usability', async () => {
+    const gateway = new FakeGateway();
+    gateway.throwStartSynchronously = true;
+    const service = createService({ gateway });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (error: unknown) => unhandled.push(error);
+    process.on('unhandledRejection', onUnhandled);
+
+    try {
+      await expect(service.open(source('front_door'), 1)).rejects.toMatchObject({
+        code: 'LIVE_STREAM_UNAVAILABLE',
+      });
+
+      gateway.throwStartSynchronously = false;
+
+      await expect(service.open(source('garden'), 2)).resolves.toMatchObject({
+        cameraName: 'garden',
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
 });
 
 function source(cameraName: string): LiveStreamSource {
@@ -360,18 +443,20 @@ class FakeGateway implements LiveStreamGatewayPort {
   recoveryResult: 'stopped' | 'not-owned' = 'stopped';
   stopError?: Error;
   addViewerError?: Error;
+  throwStartSynchronously = false;
 
-  async start(input: { source: LiveStreamSource }): Promise<{
+  start(input: { source: LiveStreamSource }): Promise<{
     publicHostname: string;
     pid: ReturnType<typeof createLiveStreamProcessId>;
     processIdentity: string;
   }> {
     this.startCalls.push({ source: input.source });
-    return {
+    if (this.throwStartSynchronously) throw new Error('start failed synchronously');
+    return Promise.resolve({
       publicHostname: 'clear-moon.trycloudflare.com',
       pid: createLiveStreamProcessId(123),
       processIdentity: 'owned-process',
-    };
+    });
   }
 
   async addViewer(): Promise<void> {

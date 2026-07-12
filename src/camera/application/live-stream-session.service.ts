@@ -87,7 +87,7 @@ export class LiveStreamSessionService implements OnModuleInit {
       try {
         staleLease = await this.lease.read();
       } catch {
-        await this.alerts.alert('live-stream-recovery-failed');
+        await this.alertRecoveryFailure();
         return;
       }
 
@@ -99,12 +99,16 @@ export class LiveStreamSessionService implements OnModuleInit {
           processIdentity: staleLease.processIdentity,
         });
         if (result === 'not-owned') {
-          await this.alerts.alert('live-stream-recovery-failed');
+          await this.alertRecoveryFailure();
         }
       } catch {
-        await this.alerts.alert('live-stream-recovery-failed');
+        await this.alertRecoveryFailure();
       } finally {
-        await this.lease.clear();
+        try {
+          await this.lease.clear();
+        } catch {
+          await this.alertRecoveryFailure();
+        }
       }
     });
   }
@@ -163,6 +167,7 @@ export class LiveStreamSessionService implements OnModuleInit {
     return this.enqueue(async () => {
       if (this.pending) {
         this.pending.cancelled = true;
+        this.rejectPending(this.pending);
         if (this.pending.replacement) {
           this.rejectRequests(this.pending.replacement.requests);
           this.pending.replacement = undefined;
@@ -170,10 +175,14 @@ export class LiveStreamSessionService implements OnModuleInit {
         return null;
       }
       if (this.cleanupBlocked) {
-        await this.retryBlockedCleanup();
+        if (!(await this.retryBlockedCleanup())) {
+          throw new LiveStreamUnavailableError();
+        }
         return null;
       }
       return this.stopActive();
+    }).catch(() => {
+      throw new LiveStreamUnavailableError();
     });
   }
 
@@ -229,12 +238,28 @@ export class LiveStreamSessionService implements OnModuleInit {
     };
     this.pending = pending;
 
-    void this.gateway.start({ session: pending.session, source }).then(
+    let start: ReturnType<LiveStreamGatewayPort['start']>;
+    try {
+      start = this.gateway.start({ session: pending.session, source });
+    } catch {
+      void this.failStart(pending).catch(() => {
+        // Failure handling is deliberately self-contained so a synchronous
+        // adapter throw cannot strand state or create an unhandled rejection.
+      });
+      return;
+    }
+
+    void start.then(
       (started) => {
-        void this.enqueue(() => this.completeStart(pending, started));
+        void this.enqueue(() => this.completeStart(pending, started)).catch(() => {
+          // completeStart handles expected provisioning failures; this consumes
+          // any unexpected callback failure from the fire-and-forget boundary.
+        });
       },
       () => {
-        void this.enqueue(() => this.failStart(pending));
+        void this.enqueue(() => this.failStart(pending)).catch(() => {
+          // failStart settles all deferreds and guards its replacement start.
+        });
       },
     );
   }
@@ -425,6 +450,14 @@ export class LiveStreamSessionService implements OnModuleInit {
       ),
       messageReferences: [...active.messageReferences],
     });
+  }
+
+  private async alertRecoveryFailure(): Promise<void> {
+    try {
+      await this.alerts.alert('live-stream-recovery-failed');
+    } catch {
+      // Recovery is best effort. Do not expose adapter diagnostics during boot.
+    }
   }
 
   private rejectPending(pending: PendingOpen): void {
