@@ -5,7 +5,7 @@
   { "name": "motion", "description": "Motion camera" },
   {
     "name": "rtsp",
-    "description": "Experimental Motion MJPEG live stream",
+    "descriptionKey": "rtsp",
     "defaultEnabled": false
   },
   { "name": "neobox", "description": "Neobox intercom" },

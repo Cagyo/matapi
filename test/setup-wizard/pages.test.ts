@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import * as pages from '../../scripts/setup-wizard/pages';
+import { en } from '../../src/locales/en';
 
 const { renderDone, renderStep1, renderStep2 } = pages;
 
@@ -26,13 +27,26 @@ describe('pairing forms', () => {
     const html = renderStep2('bot-token', 'home_bot', [
       {
         name: 'rtsp',
-        description: 'Experimental Motion MJPEG live stream',
+        description: en.setupWizard.featureDescriptions.rtsp,
         defaultEnabled: false,
       },
     ]);
 
     expect(html).toContain('value="rtsp"');
     expect(html).not.toContain('value="rtsp" checked');
+  });
+
+  it('renders the live-stream description from the supplied locale catalog', () => {
+    const liveStreamDescription = en.setupWizard.featureDescriptions.rtsp;
+    const html = renderStep2(
+      'bot-token',
+      'home_bot',
+      [{ name: 'rtsp', descriptionKey: 'rtsp', defaultEnabled: false }],
+      '',
+      { setupWizard: { featureDescriptions: { rtsp: liveStreamDescription } } },
+    );
+
+    expect(html).toContain(liveStreamDescription);
   });
 });
 

@@ -189,7 +189,15 @@ function renderStep1(errorMessage = null) {
   return renderLayout('Connect Telegram Bot', content);
 }
 
-function renderStep2(token, botUsername, catalog = [], pairingSecret = '') {
+function featureDescription(feature, localeCatalog) {
+  if (feature.descriptionKey) {
+    const localized = localeCatalog?.setupWizard?.featureDescriptions?.[feature.descriptionKey];
+    if (typeof localized === 'string') return localized;
+  }
+  return feature.description ?? '';
+}
+
+function renderStep2(token, botUsername, catalog = [], pairingSecret = '', localeCatalog) {
   const safeToken = escapeHtml(token);
   const safeUser = escapeHtml(botUsername);
   const safePairingSecret = escapeHtml(pairingSecret);
@@ -199,7 +207,7 @@ function renderStep2(token, botUsername, catalog = [], pairingSecret = '') {
       <input type="checkbox" name="features" value="${escapeHtml(f.name)}"${f.defaultEnabled === false ? '' : ' checked'}>
       <span class="feature-info">
         <span class="feature-title">${escapeHtml(f.name)}</span>
-        <span class="feature-desc">${escapeHtml(f.description)}</span>
+        <span class="feature-desc">${escapeHtml(featureDescription(f, localeCatalog))}</span>
       </span>
     </label>
   `).join('');

@@ -29,6 +29,13 @@ try {
   console.warn('WARNING: Could not load config/feature-catalog.json. Proceeding with empty catalog.');
 }
 
+let localeCatalog = {};
+try {
+  ({ en: localeCatalog } = require('../../dist/locales/en'));
+} catch {
+  console.warn('WARNING: Could not load the setup-wizard locale catalog.');
+}
+
 const pairingSecret = randomBytes(32).toString('base64url');
 try {
   const tty = fs.openSync('/dev/tty', 'w');
@@ -47,6 +54,7 @@ let timer;
 const server = createSetupServer({
   installDir: INSTALL_DIR,
   catalog,
+  localeCatalog,
   pairingSecret,
   validateToken,
   writeConfig,

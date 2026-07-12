@@ -542,6 +542,11 @@ const ukCatalog = {
     disableFailed: '❌ Не вдалося вимкнути можливість',
     listFailed: '❌ Не вдалося отримати перелік можливостей',
   },
+  setupWizard: {
+    featureDescriptions: {
+      rtsp: 'Експериментальна пряма MJPEG-трансляція Motion',
+    },
+  },
   status: {
     header: '📊 Стан системи',
     none: 'Датчики не налаштовано. Додайте їх командою /config.',

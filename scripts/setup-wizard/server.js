@@ -64,6 +64,7 @@ async function defaultCheckInternet() {
 function createSetupServer({
   installDir,
   catalog,
+  localeCatalog,
   pairingSecret,
   validateToken,
   writeConfig,
@@ -126,7 +127,7 @@ function createSetupServer({
           return;
         }
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(renderStep2(body.token, body.botUsername || '', catalog, body.pairingSecret));
+        res.end(renderStep2(body.token, body.botUsername || '', catalog, body.pairingSecret, localeCatalog));
       } catch {
         res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(renderErrorPage('Server Error', 'Failed to load Step 2.'));

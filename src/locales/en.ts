@@ -537,6 +537,11 @@ const enCatalog = {
     disableFailed: '❌ Failed to disable feature',
     listFailed: '❌ Failed to list features',
   },
+  setupWizard: {
+    featureDescriptions: {
+      rtsp: 'Experimental Motion MJPEG live stream',
+    },
+  },
   status: {
     header: '📊 System Status',
     none: 'No sensors configured. Use /config to add sensors.',

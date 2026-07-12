@@ -542,6 +542,11 @@ const ruCatalog = {
     disableFailed: '❌ Не удалось выключить функцию',
     listFailed: '❌ Не удалось получить список функций',
   },
+  setupWizard: {
+    featureDescriptions: {
+      rtsp: 'Экспериментальная прямая MJPEG-трансляция Motion',
+    },
+  },
   status: {
     header: '📊 Состояние системы',
     none: 'Нет настроенных датчиков. Используйте /config для их добавления.',
