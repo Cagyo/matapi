@@ -31,7 +31,7 @@ export class ClaimAdminHandler implements TelegramHandler {
           token,
         });
         await ctx.reply(en.claim.success);
-        await this.botCommandsMenu.updateUserMenu(from.id, 'admin');
+        await this.botCommandsMenu.updateUserMenu(from.id);
       } catch (err) {
         if (err instanceof InvalidAdminClaimTokenError) {
           await ctx.reply(en.claim.invalidToken);

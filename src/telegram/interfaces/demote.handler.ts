@@ -38,7 +38,7 @@ export class DemoteHandler implements TelegramHandler {
       try {
         const demoted = await this.demote.execute(target);
         await ctx.reply(en.users.demoted(demoted.name));
-        await this.botCommandsMenu.updateUserMenu(demoted.telegramId, 'user');
+        await this.botCommandsMenu.updateUserMenu(demoted.telegramId);
         const adminName = from.first_name || from.username || `user-${from.id}`;
         await this.dm.send(
           demoted.telegramId,

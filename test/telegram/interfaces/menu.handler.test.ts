@@ -3,20 +3,20 @@ import { catalogFor } from '../../../src/locales';
 import { MenuHandler } from '../../../src/telegram/interfaces/menu.handler';
 import { RoleMiddleware } from '../../../src/telegram/interfaces/role.middleware';
 
-function localeState(role: 'admin' | 'user') {
+function localeState(role: 'admin' | 'user', locale: 'en' | 'ru' | 'uk' = 'en') {
   return {
     user: {
       telegramId: 100,
       name: 'Alex',
       role,
-      locale: 'en' as const,
+      locale,
       muted: false,
       quietStart: null,
       quietEnd: null,
       createdAt: null,
     },
-    locale: 'en' as const,
-    catalog: catalogFor('en'),
+    locale,
+    catalog: catalogFor(locale),
   };
 }
 
@@ -136,6 +136,30 @@ describe('MenuHandler', () => {
     expect(reply).toHaveBeenCalledTimes(1);
     expect(reply.mock.calls[0][0]).toContain('Interactive Command Dashboard');
     expect(reply.mock.calls[0][1]).toHaveProperty('reply_markup');
+  });
+
+  it('uses the current user catalog and exposes settings to ordinary users', async () => {
+    const { commandCallbacks, callbackQueryCallbacks, settingsHandler } = createTestSetup();
+    const reply = vi.fn().mockResolvedValue(true);
+    const userCtx = { from: { id: 100 }, localeState: localeState('user', 'uk'), reply };
+
+    await commandCallbacks.menu(userCtx);
+    expect(reply).toHaveBeenCalledWith(
+      expect.stringContaining('Інтерактивна панель команд'),
+      expect.objectContaining({ reply_markup: expect.anything() }),
+    );
+    expect(JSON.stringify(reply.mock.calls[0][1].reply_markup)).toContain('menu:settings');
+
+    const settingsCtx = {
+      from: { id: 100 },
+      localeState: localeState('user', 'uk'),
+      match: ['menu:settings', 'settings'],
+      answerCallbackQuery: vi.fn().mockResolvedValue(true),
+      reply,
+      editMessageText: vi.fn().mockResolvedValue(true),
+    };
+    await callbackQueryCallbacks[0].fn(settingsCtx);
+    expect(settingsHandler.handleCommand).toHaveBeenCalledWith(settingsCtx);
   });
 
   it('shows Export CSV in the dashboard and Sensors submenu', async () => {
@@ -264,7 +288,8 @@ describe('MenuHandler', () => {
     await cbFn(unmuteAllCtx);
     expect(unmuteHandler.handleUnmuteAll).toHaveBeenCalledWith(unmuteAllCtx);
 
-    // Test settings delegation
+    // Settings is a user-level language entry; the settings handler keeps
+    // threshold controls admin-only internally.
     const settingsCtx = {
       from: { id: 100 },
       match: ['menu:settings', 'settings'],
@@ -273,7 +298,7 @@ describe('MenuHandler', () => {
       editMessageText,
     };
     await cbFn(settingsCtx);
-    expect(settingsCtx.reply).toHaveBeenCalledWith(expect.stringContaining('Admin access required'));
+    expect(settingsHandler.handleCommand).toHaveBeenCalledWith(settingsCtx);
 
     // Admin settings delegation
     const adminSettingsCtx = { ...settingsCtx, localeState: localeState('admin') };

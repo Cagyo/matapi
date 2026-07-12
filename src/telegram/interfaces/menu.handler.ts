@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger, forwardRef } from '@nestjs/common';
 import { Composer, InlineKeyboard } from 'grammy';
-import { en } from '../../locales/en';
+import { catalogFor, type LocaleCatalog } from '../../locales';
 import { RoleMiddleware } from './role.middleware';
 import { TelegramHandler } from './telegram-handler';
 import { TelegramContext } from './telegram-context';
@@ -64,8 +64,9 @@ export class MenuHandler implements TelegramHandler {
   register(composer: Composer<TelegramContext>): void {
     composer.command('menu', this.guard.registered, async (ctx) => {
       const role = ctx.localeState?.user.role;
-      const keyboard = this.buildKeyboard(role === 'admin');
-      await ctx.reply(en.menu.title, { reply_markup: keyboard });
+      const catalog = this.catalog(ctx);
+      const keyboard = this.buildKeyboard(catalog, role === 'admin');
+      await ctx.reply(catalog.menu.title, { reply_markup: keyboard });
     });
 
     composer.callbackQuery(
@@ -75,6 +76,7 @@ export class MenuHandler implements TelegramHandler {
         await ctx.answerCallbackQuery().catch(() => {});
         const action = ctx.match?.[1];
         const role = ctx.localeState?.user.role;
+        const catalog = this.catalog(ctx);
 
         if (!action) return;
 
@@ -82,8 +84,8 @@ export class MenuHandler implements TelegramHandler {
           case 'top':
             await this.renderSubmenu(
               ctx,
-              en.menu.title,
-              this.buildKeyboard(role === 'admin'),
+              catalog.menu.title,
+              this.buildKeyboard(catalog, role === 'admin'),
             );
             break;
           case 'status':
@@ -91,16 +93,16 @@ export class MenuHandler implements TelegramHandler {
             break;
           case 'sub:sensors': {
             const kb = new InlineKeyboard()
-              .text(en.menu.submenus.sensorsMute, 'menu:act:mute')
-              .text(en.menu.submenus.sensorsUnmute, 'menu:act:unmute')
+              .text(catalog.menu.submenus.sensorsMute, 'menu:act:mute')
+              .text(catalog.menu.submenus.sensorsUnmute, 'menu:act:unmute')
               .row()
-              .text(en.menu.submenus.sensorsMuteAll, 'menu:act:mute_all')
-              .text(en.menu.submenus.sensorsUnmuteAll, 'menu:act:unmute_all')
+              .text(catalog.menu.submenus.sensorsMuteAll, 'menu:act:mute_all')
+              .text(catalog.menu.submenus.sensorsUnmuteAll, 'menu:act:unmute_all')
               .row()
-              .text(en.menu.submenus.sensorsExportCsv, 'menu:sub:csv')
+              .text(catalog.menu.submenus.sensorsExportCsv, 'menu:sub:csv')
               .row()
-              .text(en.menu.submenus.backToMenu, 'menu:top');
-            await this.renderSubmenu(ctx, en.menu.submenus.sensorsTitle, kb);
+              .text(catalog.menu.submenus.backToMenu, 'menu:top');
+            await this.renderSubmenu(ctx, catalog.menu.submenus.sensorsTitle, kb);
             break;
           }
           case 'sub:logs':
@@ -114,102 +116,98 @@ export class MenuHandler implements TelegramHandler {
             break;
           case 'sub:quiet': {
             const kb = new InlineKeyboard()
-              .text(en.menu.submenus.quiet22_07, 'menu:act:quiet:22:00-07:00')
-              .text(en.menu.submenus.quiet23_06, 'menu:act:quiet:23:00-06:00')
+              .text(catalog.menu.submenus.quiet22_07, 'menu:act:quiet:22:00-07:00')
+              .text(catalog.menu.submenus.quiet23_06, 'menu:act:quiet:23:00-06:00')
               .row()
-              .text(en.menu.submenus.quiet00_08, 'menu:act:quiet:00:00-08:00')
-              .text(en.menu.submenus.quietDisable, 'menu:act:quiet:off')
+              .text(catalog.menu.submenus.quiet00_08, 'menu:act:quiet:00:00-08:00')
+              .text(catalog.menu.submenus.quietDisable, 'menu:act:quiet:off')
               .row()
-              .text(en.menu.submenus.backToMenu, 'menu:top');
-            await this.renderSubmenu(ctx, en.menu.submenus.quietTitle, kb);
+              .text(catalog.menu.submenus.backToMenu, 'menu:top');
+            await this.renderSubmenu(ctx, catalog.menu.submenus.quietTitle, kb);
             break;
           }
           case 'sub:system': {
             if (role !== 'admin') {
-              await ctx.reply(en.common.adminRequired);
+              await ctx.reply(catalog.common.adminRequired);
               break;
             }
             const kb = new InlineKeyboard()
-              .text(en.menu.submenus.systemHealth, 'menu:health')
-              .text(en.menu.submenus.systemDrive, 'menu:gdrive')
+              .text(catalog.menu.submenus.systemHealth, 'menu:health')
+              .text(catalog.menu.submenus.systemDrive, 'menu:gdrive')
               .row()
-              .text(en.menu.submenus.systemSettings, 'menu:settings')
-              .text(en.menu.submenus.systemClean, 'menu:clean')
+              .text(catalog.menu.submenus.systemSettings, 'menu:settings')
+              .text(catalog.menu.submenus.systemClean, 'menu:clean')
               .row()
-              .text(en.menu.submenus.systemUpdate, 'menu:act:sys_update')
-              .text(en.menu.submenus.systemRestart, 'menu:act:sys_restart')
+              .text(catalog.menu.submenus.systemUpdate, 'menu:act:sys_update')
+              .text(catalog.menu.submenus.systemRestart, 'menu:act:sys_restart')
               .row()
-              .text(en.menu.submenus.systemInvite, 'menu:invite')
+              .text(catalog.menu.submenus.systemInvite, 'menu:invite')
               .row()
-              .text(en.gdriveAuth.button, 'menu:gdrive_auth')
+              .text(catalog.gdriveAuth.button, 'menu:gdrive_auth')
               .row()
-              .text(en.menu.submenus.backToMenu, 'menu:top');
-            await this.renderSubmenu(ctx, en.menu.submenus.systemTitle, kb);
+              .text(catalog.menu.submenus.backToMenu, 'menu:top');
+            await this.renderSubmenu(ctx, catalog.menu.submenus.systemTitle, kb);
             break;
           }
           case 'sub:config': {
             if (role !== 'admin') {
-              await ctx.reply(en.common.adminRequired);
+              await ctx.reply(catalog.common.adminRequired);
               break;
             }
             const kb = new InlineKeyboard()
-              .text(en.menu.submenus.configAdd, 'menu:act:cfg_add')
-              .text(en.menu.submenus.configModify, 'menu:act:cfg_mod')
+              .text(catalog.menu.submenus.configAdd, 'menu:act:cfg_add')
+              .text(catalog.menu.submenus.configModify, 'menu:act:cfg_mod')
               .row()
-              .text(en.menu.submenus.configRemove, 'menu:act:cfg_rem')
-              .text(en.menu.buttons.exportConfig, 'menu:export_config')
+              .text(catalog.menu.submenus.configRemove, 'menu:act:cfg_rem')
+              .text(catalog.menu.buttons.exportConfig, 'menu:export_config')
               .row()
-              .text('📥 Import Config', 'menu:act:cfg_imp')
+              .text(catalog.importConfig.prompt, 'menu:act:cfg_imp')
               .row()
-              .text(en.menu.submenus.backToMenu, 'menu:top');
-            await this.renderSubmenu(ctx, en.menu.submenus.configTitle, kb);
+              .text(catalog.menu.submenus.backToMenu, 'menu:top');
+            await this.renderSubmenu(ctx, catalog.menu.submenus.configTitle, kb);
             break;
           }
           case 'health':
             if (role !== 'admin') {
-              await ctx.reply(en.common.adminRequired);
+              await ctx.reply(catalog.common.adminRequired);
               break;
             }
             await this.healthHandler.handleCommand(ctx);
             break;
           case 'gdrive':
             if (role !== 'admin') {
-              await ctx.reply(en.common.adminRequired);
+              await ctx.reply(catalog.common.adminRequired);
               break;
             }
             await this.gdriveHandler.handleStatus(ctx);
             break;
           case 'gdrive_auth':
             if (role !== 'admin') {
-              await ctx.reply(en.common.adminRequired);
+              await ctx.reply(catalog.common.adminRequired);
               break;
             }
             await this.gdriveAuthHandler.handleCommand(ctx);
             break;
           case 'settings':
-            if (role !== 'admin') {
-              await ctx.reply(en.common.adminRequired);
-              break;
-            }
             await this.settingsHandler.handleCommand(ctx);
             break;
           case 'clean':
             if (role !== 'admin') {
-              await ctx.reply(en.common.adminRequired);
+              await ctx.reply(catalog.common.adminRequired);
               break;
             }
             await this.cleanHandler.handleCommand(ctx);
             break;
           case 'invite':
             if (role !== 'admin') {
-              await ctx.reply(en.common.adminRequired);
+              await ctx.reply(catalog.common.adminRequired);
               break;
             }
             await this.inviteHandler.handleCommand(ctx);
             break;
           case 'export_config':
             if (role !== 'admin') {
-              await ctx.reply(en.common.adminRequired);
+              await ctx.reply(catalog.common.adminRequired);
               break;
             }
             await this.exportConfigHandler.handleCommand(ctx);
@@ -228,42 +226,42 @@ export class MenuHandler implements TelegramHandler {
             break;
           case 'act:cfg_add':
             if (role !== 'admin') {
-              await ctx.reply(en.common.adminRequired);
+              await ctx.reply(catalog.common.adminRequired);
               break;
             }
             await this.configHandler.handleSubcommand(ctx, 'add');
             break;
           case 'act:cfg_mod':
             if (role !== 'admin') {
-              await ctx.reply(en.common.adminRequired);
+              await ctx.reply(catalog.common.adminRequired);
               break;
             }
             await this.configHandler.handleSubcommand(ctx, 'modify');
             break;
           case 'act:cfg_rem':
             if (role !== 'admin') {
-              await ctx.reply(en.common.adminRequired);
+              await ctx.reply(catalog.common.adminRequired);
               break;
             }
             await this.configHandler.handleSubcommand(ctx, 'remove');
             break;
           case 'act:cfg_imp':
             if (role !== 'admin') {
-              await ctx.reply(en.common.adminRequired);
+              await ctx.reply(catalog.common.adminRequired);
               break;
             }
             await this.importConfigHandler.handleCommand(ctx);
             break;
           case 'act:sys_update':
             if (role !== 'admin') {
-              await ctx.reply(en.common.adminRequired);
+              await ctx.reply(catalog.common.adminRequired);
               break;
             }
             await this.systemUpdateHandler.handleCommand(ctx);
             break;
           case 'act:sys_restart':
             if (role !== 'admin') {
-              await ctx.reply(en.common.adminRequired);
+              await ctx.reply(catalog.common.adminRequired);
               break;
             }
             await this.restartHandler.handleCommand(ctx);
@@ -297,23 +295,29 @@ export class MenuHandler implements TelegramHandler {
     }
   }
 
-  private buildKeyboard(isAdmin: boolean): InlineKeyboard {
+  private buildKeyboard(catalog: LocaleCatalog, isAdmin: boolean): InlineKeyboard {
     const keyboard = new InlineKeyboard()
-      .text('📊 Status', 'menu:status')
-      .text('🎛️ Sensors', 'menu:sub:sensors')
-      .text('📋 Logs', 'menu:sub:logs')
+      .text(catalog.menu.buttons.status, 'menu:status')
+      .text(catalog.menu.categories.sensors, 'menu:sub:sensors')
+      .text(catalog.menu.buttons.logs, 'menu:sub:logs')
       .row()
-      .text('📷 Camera', 'menu:sub:camera')
-      .text('🌙 Quiet Mode', 'menu:sub:quiet')
-      .text(en.menu.buttons.exportCsv, 'menu:sub:csv');
+      .text(catalog.menu.categories.media, 'menu:sub:camera')
+      .text(catalog.common.quietModeButton, 'menu:sub:quiet')
+      .text(catalog.menu.buttons.exportCsv, 'menu:sub:csv')
+      .row()
+      .text(catalog.menu.buttons.settings, 'menu:settings');
 
     if (isAdmin) {
       keyboard
         .row()
-        .text('⚙️ Config', 'menu:sub:config')
-        .text('🔄 System', 'menu:sub:system');
+        .text(catalog.menu.buttons.config, 'menu:sub:config')
+        .text(catalog.menu.categories.lifecycle, 'menu:sub:system');
     }
 
     return keyboard;
+  }
+
+  private catalog(ctx: TelegramContext): LocaleCatalog {
+    return ctx.localeState?.catalog ?? catalogFor('en');
   }
 }

@@ -51,7 +51,7 @@ describe('ClaimAdminHandler', () => {
       token: 'owner-token',
     });
     expect(reply).toHaveBeenCalledWith(en.claim.success);
-    expect(updateUserMenu).toHaveBeenCalledWith(123, 'admin');
+    expect(updateUserMenu).toHaveBeenCalledWith(123);
   });
 
   it.each([

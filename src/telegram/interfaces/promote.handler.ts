@@ -37,7 +37,7 @@ export class PromoteHandler implements TelegramHandler {
       try {
         const promoted = await this.promote.execute(target);
         await ctx.reply(en.users.promoted(promoted.name));
-        await this.botCommandsMenu.updateUserMenu(promoted.telegramId, 'admin');
+        await this.botCommandsMenu.updateUserMenu(promoted.telegramId);
         const adminName = from.first_name || from.username || `user-${from.id}`;
         await this.dm.send(
           promoted.telegramId,

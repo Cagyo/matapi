@@ -41,7 +41,7 @@ export class StartHandler implements TelegramHandler {
           code,
         });
         await ctx.reply(en.users.welcomed(result.user.name));
-        await this.botCommandsMenu.updateUserMenu(from.id, result.user.role);
+        await this.botCommandsMenu.updateUserMenu(from.id);
 
         if (result.invitedBy !== null) {
           await this.dm.send(
