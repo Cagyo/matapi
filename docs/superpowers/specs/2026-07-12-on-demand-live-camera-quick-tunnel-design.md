@@ -31,7 +31,9 @@ The RTSP installer additionally installs FFmpeg. The rtsp feature is independent
 1. Motion is installed and enabled with a configured local stream route.
 2. RTSP is installed, enabled, and has a configured live source.
 
-The installer performs a Quick Tunnel preflight. If an existing cloudflared configuration prevents Quick Tunnels from starting, it marks experimental live streaming unavailable rather than editing or deleting a user-owned Cloudflare configuration. Package upgrades use the same package-management path as the initial installation.
+The installer performs a Quick Tunnel preflight. In addition to validating the binary, it runs cloudflared's tunnel connectivity diagnostic from the Pi and records whether DNS plus outbound TCP or UDP port 7844 are available. If an existing cloudflared configuration prevents Quick Tunnels from starting, or connectivity is unavailable, it marks experimental live streaming unavailable rather than editing or deleting a user-owned Cloudflare configuration. Package upgrades use the same package-management path as the initial installation.
+
+Feature state is asymmetric by design. Enabling RTSP takes effect after the normal worker restart; disabling RTSP immediately cancels an active RTSP session, rejects new RTSP starts, and then completes the normal restart-based module unload. A composition-root lifecycle hook owns this exception so the generic features context does not import camera infrastructure.
 
 ## Architecture
 
@@ -45,9 +47,10 @@ All feature code lives in the camera bounded context. Telegram remains an interf
 - A camera-owned live-source port resolves a Motion source or the decrypted RTSP source. It returns typed, sanitized metadata to callers.
 - A camera-owned tunnel port starts and stops a Quick Tunnel, returning only a validated trycloudflare.com hostname.
 - A camera-owned stream-gateway port runs the loopback proxy and, for RTSP, owns the single FFmpeg converter.
+- A camera-owned stream-sandbox port starts the FFmpeg converter as a restricted system service and exposes only its lifecycle and sanitized health state to the worker.
 - A credential port owns encrypted RTSP credential persistence and recovery.
 
-The production adapters are a loopback HTTP stream gateway, CloudflaredQuickTunnelAdapter, an FFmpeg RTSP adapter, and a Drizzle-backed credential adapter. Stub adapters make session and handler tests deterministic without a camera, cloudflared, or FFmpeg.
+The production adapters are a loopback HTTP stream gateway, CloudflaredQuickTunnelAdapter, a sandboxed FFmpeg RTSP adapter, and a Drizzle-backed credential adapter. Stub adapters make session and handler tests deterministic without a camera, cloudflared, or FFmpeg.
 
 ### State machine
 
@@ -61,13 +64,13 @@ The session starts a loopback-only proxy on a random port. cloudflared points on
 
 /camera live [camera] and a Motion-alert Watch live callback are available to registered users. The callback contains no stream token; the handler checks the caller's current registration before it invokes the same use case as the command.
 
-When cloudflared reports a validated public hostname, the strict five-minute lease begins. It cannot be renewed. A later authorized request for the same camera receives a separate, opaque viewer token only for the remaining time. The worker has a short, separate startup timeout; a tunnel that does not obtain a hostname in time is stopped without sending a link.
+When cloudflared reports a validated public hostname, the strict five-minute lease begins. It cannot be renewed. The running process uses a monotonic deadline; boot recovery never reconstructs or extends a live session from wall-clock time and instead fails closed by stopping the recorded group. A later authorized request for the same camera receives a separate, opaque viewer token only for the remaining time. The worker has a short, separate startup timeout; a tunnel that does not obtain a hostname in time is stopped without sending a link.
 
 The ordinary Telegram URL button opens a tokenized watch path. The proxy may exchange the token for a short-lived Secure, HttpOnly cookie and redirect to a clean minimal page, but the original link remains usable until expiry so a prefetch or browser restart cannot consume it. The page contains only the live image plus an expiry fallback, no third-party assets. It sends no-store, no-referrer, and restrictive content-security headers.
 
-A viewer token is associated with a Telegram user and is rechecked when a new browser connection opens. This enables revocation and auditing but does not turn the link into proof of browser identity: anyone holding the complete link can watch until it expires. User demotion or removal immediately revokes that user's tokens and closes their active responses.
+A viewer token contains at least 256 bits from a cryptographic random source. The session retains only a token hash and uses constant-time verification. A token is associated with a Telegram user and is rechecked when a new browser connection opens. This enables revocation and auditing but does not turn the link into proof of browser identity: anyone holding the complete link can watch until it expires. User demotion or removal immediately revokes that user's tokens and closes their active responses.
 
-At most two stream responses are active globally and only one is active for a given token. Slow clients are disconnected rather than buffered. At expiry the proxy renders the simple Stream ended state, invalidates all tokens and cookies, removes outstanding watch-link messages where Telegram permits, terminates the tunnel/proxy/converter process group, and clears the runtime lease.
+At most two stream responses are active globally and only one is active for a given token. Slow clients are disconnected rather than buffered. The session lease persists the chat/message references needed to delete issued watch-link messages. At expiry the proxy renders the simple Stream ended state, invalidates all tokens and cookies, removes those messages where Telegram permits, terminates the tunnel/proxy/converter process group, and clears the runtime lease. If a restart prevents message cleanup, the invalidated link remains visible but cannot reopen the stream.
 
 Every registered user can run /camera stop_stream. The action is audited, rate-limited per user, ends the session immediately, and sends a sanitized admin notification. A camera-source add, edit, or removal also stops an active session for that source before any configuration mutation.
 
@@ -75,7 +78,7 @@ Every registered user can run /camera stop_stream. The action is audited, rate-l
 
 The in-memory timer is not the sole cleanup mechanism. The session writes a runtime lease containing a random session nonce, process-group identity, and process-start identity. Normal shutdown cleans up the whole owned process group. On boot, the worker verifies every recorded identity before reaping a stale group; uncertainty causes an admin alert rather than a broad pkill or a potentially unrelated process termination.
 
-Resource limits are measured across the Node worker, cloudflared, and FFmpeg process tree, not solely through PM2's Node-process memory threshold. Exceeding configured CPU, memory, startup, or frame-delivery limits stops the session safely. Process stdout/stderr is bounded and parsed only into sanitized error categories; neither raw source URLs nor tokens may reach logs or exception chains.
+Resource limits are measured across the Node worker, cloudflared, and FFmpeg process tree, not solely through PM2's Node-process memory threshold. Exceeding configured CPU, memory, startup, or frame-delivery limits stops the session safely. cloudflared's loopback metrics listener is treated as an owned child resource and checked during cleanup. Process stdout/stderr is bounded and parsed only into sanitized error categories; neither raw source URLs nor tokens may reach logs or exception chains.
 
 ## Sources
 
@@ -88,13 +91,19 @@ Motion sources are derived from installer-owned loopback configuration, never en
 RTSP supports rtsp:// and rtsps://, hostnames or IPs, H.264/H.265, TCP or UDP, and cameras with self-signed certificates. Each source exposes these admin-visible settings:
 
 - transport: auto, tcp, or udp;
-- TLS verification: strict or allow self-signed;
+- TLS verification: strict or self-signed with a confirmed certificate fingerprint;
 - output profile: eco, balanced, or quality;
 - optional low-resolution substream URL.
 
-The default is TCP, strict certificate verification, eco, one converter, and two viewer responses. Setup probes the exact runtime configuration, detects codec/resolution/transport, and saves only after a successful bounded sample stream. The same protocol allowlist, FFmpeg arguments, network timeouts, video-only selection, and resource limits are used by the probe and live converter. An admin can relax compatibility settings only after seeing an explicit warning.
+The default is TCP, strict certificate verification, eco, one converter, and two viewer responses. Self-signed mode requires the administrator to confirm the observed certificate fingerprint; it never means trust any certificate. Setup probes the exact runtime configuration, detects codec/resolution/transport, and saves only after a successful bounded sample stream. The same protocol allowlist, FFmpeg arguments, network timeouts, video-only selection, and resource limits are used by the probe and live converter. An admin can relax compatibility settings only after seeing an explicit warning.
 
-Hostnames are permitted only if all resolved addresses are within installer-configured ranges; a runtime resolution mismatch rejects the stream. This reduces but does not eliminate the risk that a compromised admin account uses FFmpeg to reach another internal service. H.265 and high-resolution streams are best-effort: the session stops if measured resource or delivery limits are exceeded. The compatibility matrix labels combinations as tested, best-effort, or unsupported.
+Hostnames are permitted only if all resolved addresses are within installer-configured ranges. Before each session, the worker resolves the selected source and installs an ephemeral UID-scoped egress rule that allows the stream service to reach only the resolved addresses, configured camera ports, and required TCP/UDP transport. A runtime resolution mismatch rejects the stream. This contains time-of-check/time-of-use resolution changes; a legitimate camera address change requires a new probe. H.265 and high-resolution streams are best-effort: the session stops if measured resource or delivery limits are exceeded. The compatibility matrix labels combinations as tested, best-effort, or unsupported.
+
+### FFmpeg sandbox
+
+The FFmpeg converter is not a child with the worker's authority. The installer creates a dedicated stream-service account and an installer-owned systemd service template that starts one instance per session with a five-minute runtime maximum, CPU and memory limits, no new privileges, a private temporary directory, protected home and system paths, and an address-family restriction. The installer also configures protected process visibility. The stream account cannot read the worker environment, Telegram token, database, or RTSP encryption key.
+
+The stream service receives only the selected source for the current session and has egress limited to the ephemeral camera-address rule above. A root-owned installer helper accepts only a session ID plus previously validated resolved addresses and updates that rule; it never accepts a raw RTSP URL. Its local interface authenticates the worker service identity, accepts addresses only inside installer-configured camera ranges, applies a bounded rule count and lease, and has no general command-execution operation. cloudflared runs outside this sandbox and retains only outbound Cloudflare connectivity on port 7844. The design does not claim the RTSP URL is absent from the FFmpeg argv: root and the stream-service account remain able to inspect it. The security boundary instead prevents ordinary local accounts and the worker account from inspecting the service process, requires a read-only camera account, and forbids process arguments or raw stderr from logs.
 
 Administrators configure RTSP sources through the admin-only /camera sources conversation: add, edit, test, list, and remove. The bot deletes a credential-bearing incoming message immediately after processing and reports a deletion failure without echoing the value. This reduces chat-history exposure but is not confidential credential transport; bots cannot use Telegram Secret Chats.
 
@@ -102,9 +111,9 @@ RTSP source metadata is typed and stored separately from camera enablement. An i
 
 ### Credential handling
 
-Non-secret source metadata is stored with the camera. The credential-bearing RTSP URL is stored separately as an authenticated-encrypted payload with a key version. Its installation-generated key is stored in a mode-0600 environment file, outside SQLite backups. The installer creates a separate user-controlled key-recovery artifact. Restoring an encrypted source without its key reports that credentials must be re-entered; normal config export never contains the key or plaintext credential.
+Non-secret source metadata is stored with the camera. The credential-bearing RTSP URL is stored separately as an authenticated-encrypted payload with a fresh nonce and key version. Its installation-generated key is stored in a mode-0600 environment file, outside SQLite backups. The key has no automatic export or recovery artifact: a restore without the original key requires RTSP credentials to be re-entered. Key rotation decrypts and re-encrypts every stored credential before retiring the old version; a failed rotation leaves the old version active. Normal config export never contains the key or plaintext credential.
 
-Status, alerts, exports, imports, and logs reveal only source type and a redacted host. The source's dedicated camera account must be read-only. FFmpeg requires a source URL while it runs, so encryption at rest does not eliminate runtime process-argument exposure; the deployment must protect local process visibility and never log FFmpeg command lines or raw stderr.
+Status, alerts, exports, imports, and logs reveal only source type and a redacted host. A dedicated camera-source export/import schema carries only non-secret source metadata; it does not reuse the existing generic camera config snapshot. Import marks a source not-ready when its credential is absent, without disabling unrelated camera behavior. The source's dedicated camera account must be read-only. FFmpeg requires a source URL while it runs, so encryption at rest does not eliminate runtime process-argument exposure; the deployment must protect local process visibility and never log FFmpeg command lines or raw stderr.
 
 ## Errors and user experience
 
@@ -116,14 +125,15 @@ The dashboard and alert action label the feature Experimental live view — expi
 
 Unit tests cover the session state machine, non-renewable expiry, concurrent start/stop/switch races, cancellation during startup, token issuance, revocation, viewer limits, role checks, stop auditing, and source-edit teardown.
 
-Integration tests use fake cloudflared and FFmpeg processes plus local MJPEG and RTSP fixtures. They verify token/cookie access, clean redirects, expiry fallback, bounded client buffering, process-group cleanup, stale-lease identity checks, source validation, feature gating, encrypted credential persistence, redacted configuration export/import, backup/restore behavior, and negative secret-leakage cases across child argv handling, stderr, exception chains, logs, and Telegram message-deletion failures.
+Integration tests use fake cloudflared and FFmpeg processes plus local MJPEG and RTSP fixtures. They verify token/cookie access, clean redirects, expiry fallback, bounded client buffering, process-group cleanup, stale-lease identity checks, source validation, feature gating, encrypted credential persistence, dedicated source export/import, backup/restore behavior, and negative secret-leakage cases across stderr, exception chains, logs, and Telegram message-deletion failures. Sandbox tests prove the stream service cannot read worker secrets or the database and that ordinary local users cannot inspect its arguments; they document root and stream-account argv visibility as residual risk.
 
-Manual target-Pi acceptance verifies the published compatibility matrix on Telegram's iOS and Android browsers. It records whole-process-tree CPU and memory behavior for representative H.264/H.265, TCP/UDP, certificate, and resolution combinations. Unsupported or resource-exceeding combinations are reported rather than retried indefinitely.
+Manual target-Pi acceptance verifies the published compatibility matrix on Telegram's iOS and Android browsers. It records whole-process-tree CPU and memory behavior for representative H.264/H.265, TCP/UDP, certificate, and resolution combinations. It also runs a real Quick Tunnel MJPEG session, rather than relying only on a mock tunnel, to validate external stream behavior. Unsupported or resource-exceeding combinations are reported rather than retried indefinitely.
 
 ## External constraints
 
 - [Cloudflare Quick Tunnels](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/): development/testing-only, no SLA, anonymous random hostname, and a documented concurrent-request limit.
 - [Cloudflare local configuration](https://developers.cloudflare.com/tunnel/advanced/local-management/configuration-file/): cloudflared can discover configuration from default locations; Quick Tunnel availability must be preflighted.
+- [Cloudflare connectivity checks](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/troubleshoot-tunnels/connectivity-prechecks/): tunnel operation needs outbound TCP or UDP connectivity on port 7844 and should be diagnosed from the Pi.
 - [Motion stream configuration](https://motion-project.github.io/4.2.2/motion_config.html): multi-camera streams can use camera-specific paths or ports and must remain localhost-bound.
 - [FFmpeg protocols](https://ffmpeg.org/ffmpeg-protocols.html): protocols are broadly enabled by default, so the runtime must use explicit allowlists and I/O limits.
 - [Telegram Bot API](https://core.telegram.org/bots/api): bots can delete incoming private-chat messages within the API's constraints; deletion does not provide end-to-end secret transport.
@@ -131,5 +141,5 @@ Manual target-Pi acceptance verifies the published compatibility matrix on Teleg
 ## Implementation slices
 
 1. Add the experimental Quick Tunnel capability, camera session state machine, loopback MJPEG proxy, per-user viewer tokens, strict lease, cleanup/recovery, Telegram live/stop actions, and Motion-source mapping.
-2. Add the separate RTSP feature, typed live-source schema, encrypted credential storage/recovery, admin configuration flow, compatibility modes, FFmpeg converter, source probe, and export/import redaction.
+2. Add the separate RTSP feature, typed live-source schema, encrypted credential storage and key rotation, dedicated camera-source export/import, admin configuration flow, compatibility modes, sandboxed FFmpeg converter, UID-scoped egress helper, and source probe.
 3. Run the target-Pi compatibility matrix and publish the supported source combinations before enabling RTSP for ordinary users.
