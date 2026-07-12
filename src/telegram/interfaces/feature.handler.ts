@@ -7,6 +7,7 @@ import { FeatureAlreadyDisabledError } from '../../features/domain/errors/featur
 import { FeatureAlreadyEnabledError } from '../../features/domain/errors/feature-already-enabled.error';
 import { FeatureNotInstalledError } from '../../features/domain/errors/feature-not-installed.error';
 import { UnknownFeatureError } from '../../features/domain/errors/unknown-feature.error';
+import { catalogFor } from '../../locales';
 import { en } from '../../locales/en';
 import { RoleMiddleware } from './role.middleware';
 import { TelegramHandler } from './telegram-handler';
@@ -49,7 +50,9 @@ export class FeatureHandler implements TelegramHandler {
 
   private async handleList(ctx: TelegramContext): Promise<void> {
     try {
-      const features = await this.list.execute();
+      const descriptions = (ctx.localeState?.catalog ?? catalogFor('en'))
+        .setupWizard.featureDescriptions as Record<string, string>;
+      const features = await this.list.execute((key) => descriptions[key]);
       const body = features.map((f) => en.feature.listLine(f)).join('\n');
       await ctx.reply(`${en.feature.listHeader}\n\n${body}`);
     } catch (err) {

@@ -6,7 +6,23 @@
  */
 import catalog from '../../../config/feature-catalog.json';
 
-export const FEATURE_CATALOG = catalog as readonly { name: string; description: string }[];
+export type FeatureCatalogEntry =
+  | {
+      name: string;
+      description: string;
+      descriptionKey?: never;
+      defaultEnabled?: boolean;
+    }
+  | {
+      name: string;
+      description?: never;
+      descriptionKey: string;
+      defaultEnabled?: boolean;
+    };
+
+export type FeatureDescriptionResolver = (key: string) => string;
+
+export const FEATURE_CATALOG = catalog as readonly FeatureCatalogEntry[];
 
 export type FeatureName = (typeof FEATURE_CATALOG)[number]['name'];
 
@@ -15,7 +31,11 @@ export function isKnownFeature(name: string): name is FeatureName {
   return FEATURE_CATALOG.some((entry) => entry.name === name);
 }
 
-/** Look up the catalogue description for a known feature name. */
-export function featureDescription(name: FeatureName): string {
-  return FEATURE_CATALOG.find((entry) => entry.name === name)!.description;
+/** Resolve the catalogue description for a known feature name. */
+export function featureDescription(
+  name: FeatureName,
+  resolveDescription: FeatureDescriptionResolver,
+): string {
+  const entry = FEATURE_CATALOG.find((feature) => feature.name === name)!;
+  return entry.description ?? resolveDescription(entry.descriptionKey);
 }
