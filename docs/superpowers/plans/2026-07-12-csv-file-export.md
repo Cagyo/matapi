@@ -29,7 +29,7 @@
 | src/config/application/ports/timezone-options.port.ts | Shared TIMEZONE_OPTIONS token and type. |
 | src/config/infrastructure/env-timezone-options.adapter.ts | Resolve TIMEZONE with Europe/Kyiv fallback. |
 | src/config/config.module.ts | Explicitly export the shared timezone provider. |
-| src/sensors/domain/ports/sensor-query.port.ts | History-target read model. |
+| src/sensors/domain/ports/sensor-query.port.ts | SQL-paged history-target read model. |
 | src/sensors/domain/ports/sensor-log-export-reader.port.ts | Snapshot callback contract and export row type. |
 | src/sensors/application/list-sensor-history-targets.use-case.ts | Validated 20-item target pages. |
 | src/sensors/application/read-sensor-log-history.use-case.ts | Active-first target resolution and reader delegation. |
@@ -175,13 +175,14 @@ export interface SensorHistoryTarget {
   readonly id: string;
   readonly name: string;
   readonly type: SensorType;
+  readonly enabled: boolean;
   readonly state: 'current' | 'archived';
   readonly archivedAt: Date | null;
 }
 
 export interface SensorQueryPort {
   // preserve existing methods
-  listHistoryTargets(): Promise<SensorHistoryTarget[]>;
+  listHistoryTargets(input: { page: number; pageSize: number }): Promise<SensorHistoryPage>;
 }
 
 export interface SensorHistoryPage {
@@ -191,7 +192,7 @@ export interface SensorHistoryPage {
 }
 ~~~
 
-Implement listHistoryTargets in Drizzle with separate current and archive selects, each ordered name then id; include disabled current rows and archived type. Implement the same order with copied arrays in memory. The use case rejects negative/non-integer pages and non-positive page sizes; for an empty list it returns page 0 and pageCount 0, otherwise clamps to the final page.
+Implement listHistoryTargets with one SQL-paged UNION ALL query and a total-count query. Order by state rank, name COLLATE NOCASE, and id; apply LIMIT/OFFSET in SQL instead of loading all archives to slice. Include disabled current rows and archived type. The in-memory adapter copies, case-insensitively sorts, and then slices. The use case rejects negative/non-integer pages and non-positive page sizes; for an empty list it returns page 0 and pageCount 0, otherwise it uses the returned page metadata.
 
 - [ ] **Step 4: Verify focused behavior**
 
@@ -259,17 +260,17 @@ export interface SensorLogExportRow {
 }
 
 export interface SensorLogExportReaderPort {
-  withRows<T>(
+  withRows(
     sensorId: string,
     options: { limit: number; maxMessageBytes: number },
-    consume: (rows: Iterable<SensorLogExportRow>) => T,
-  ): T;
+    consume: (rows: Iterable<SensorLogExportRow>) => void,
+  ): void;
 }
 ~~~
 
 Inject SQLITE, not DB, into the Drizzle adapter. Use sqlite.transaction with no async work inside its callback. Both statements use the same CTE: select the newest limit rows by timestamp DESC, id DESC. First query max(length(CAST(message AS BLOB))) and count null timestamps; throw SensorLogExportRowTooLargeError or MalformedSensorLogTimestampError before consuming. Then use preparedStatement.iterate(sensorId, limit) over that CTE ordered timestamp ASC, id ASC. Convert raw Unix-second timestamps with new Date(seconds * 1000). Call consume synchronously before the transaction returns.
 
-ReadSensorLogHistoryUseCase resolves a name active-first through findByName or an ID through findByIdIncludingArchived, then calls withRows. Export the use case and reader token from SensorModule. The in-memory reader follows the same newest-limit then ascending-output semantics.
+ReadSensorLogHistoryUseCase resolves a name active-first through findByName or an ID through findByIdIncludingArchived, then calls the void-returning withRows callback. Reject a consumer result with a then function before the transaction exits. Export the use case and reader token from SensorModule. The in-memory reader follows the same newest-limit then ascending-output semantics. Add an integration assertion that a Date inserted through Drizzle returns at the identical millisecond from the raw reader.
 
 - [ ] **Step 4: Verify reader and existing logs**
 
@@ -315,6 +316,14 @@ it('removes an incomplete file when output exceeds 8 MiB', async () => {
     .toThrow(CsvDocumentTooLargeError);
   await expect(readdir(tempDirectory)).resolves.toEqual([]);
 });
+
+it('creates private files and opens independent retry streams', async () => {
+  const file = port.stage('x.csv', ['ok']);
+  expect((await stat(tempDirectory)).mode & 0o777).toBe(0o700);
+  expect((await stat(join(tempDirectory, file.filename)).mode & 0o777).toBe(0o600);
+  expect(await readAll(file.open())).toEqual(await readAll(file.open()));
+  await file.dispose();
+});
 ~~~
 
 - [ ] **Step 2: Run tests to verify failure**
@@ -343,7 +352,7 @@ export interface CsvTempFilePort {
 
 NodeCsvTempFileAdapter creates an owned directory with mode 0700. Stage creates a unique regular file with openSync(..., 'wx', 0o600), counts Buffer.byteLength(chunk, 'utf8'), writes with writeSync, and closes/unlinks before throwing on size or write failure. open returns createReadStream(path); dispose unlinks idempotently. OnModuleInit calls cleanupStale(new Date()), which only unlinks non-symlink regular files bearing the feature filename prefix and older than one hour.
 
-formatCsvRows yields BOM/header first and then CRLF rows. Quote every text field by doubling quotes. Prefix one apostrophe when /^[ \t\r\n]*[=+\-@]/ matches. Parse ppm=<number> before state changes. Map CLOSED, DRY, NORMAL, GRID OK, CLEAR, RELEASED to 0 and OPEN, OPENED, LEAK DETECTED, ALARM, OUTAGE, MOTION, PRESSED to 1; output blank for every other message. Use formatInTimeZone(timestamp, timezone, 'yyyy-MM-dd HH:mm:ss XXX').
+formatCsvRows yields BOM/header first and then CRLF rows. Quote every text field by doubling quotes. Prefix one apostrophe when /^[ \t\r\n]*[=+\-@]/ matches. Parse ppm=<number> before state changes. Only parse a binary state when the complete message matches case-insensitive State changed: <old> → <destination>; map CLOSED, DRY, NORMAL, GRID OK, CLEAR, RELEASED to 0 and OPEN, OPENED, LEAK DETECTED, ALARM, OUTAGE, MOTION, PRESSED to 1. Output blank for every other message. Use formatInTimeZone(timestamp, timezone, 'yyyy-MM-dd HH:mm:ss XXX').
 
 StageCsvExportUseCase calls ReadSensorLogHistoryUseCase with maxMessageBytes 256 * 1024 and stages formatter chunks inside its synchronous row consumer. Its filename is csv_<sensor-name>_<id-first-8>_<YYYYMMDDTHHmmssZ>.csv.
 
@@ -383,8 +392,8 @@ it('registers both commands and CSV callbacks behind registered-user guard', () 
   expect(composer.callbackQuery).toHaveBeenCalledWith(expect.any(RegExp), guard.registered, expect.anything());
 });
 
-it('selects by id, clears markup, uploads a fresh stream, and disposes the file', async () => {
-  await callback('csv:select:current-id');
+it('resolves a verified short selector, clears markup, uploads, and disposes the file', async () => {
+  await callback('csv:select:command:0:0:targetHash');
   expect(ctx.editMessageReplyMarkup).toHaveBeenCalledWith({ reply_markup: undefined });
   expect(stage.execute).toHaveBeenCalledWith({ target: { kind: 'id', id: 'current-id' }, count: 1000 });
   expect(file.dispose).toHaveBeenCalledOnce();
@@ -417,9 +426,9 @@ function parseCsvArgs(raw: string): { name: string; count: number } | null {
 }
 ~~~
 
-handleEmpty invokes the target-list use case with pageSize 20 and replies with the picker. Callback data is only csv:select:<id> or csv:page:<command|menu>:<non-negative-integer>. Rebuild target pages on every page callback; the use case clamps stale pages and the handler returns the empty-picker copy when pageCount is zero.
+handleEmpty invokes the target-list use case with pageSize 20 and replies with the picker. Page callback data is csv:page:<command|menu>:<non-negative-integer>. Selection callback data is csv:select:<origin>:<page>:<index>:<hash>, where hash is the first 12 SHA-256 base64url characters of the target ID. Reload the requested SQL page, validate origin/index/hash, then pass the server-side immutable ID to staging. Assert every generated callback payload is at most 64 UTF-8 bytes. The handler returns the empty-picker copy when pageCount is zero.
 
-On selection, key a Map lock by chat and picker message ID, answer the callback, clear markup, send upload_document chat action, await StageCsvExportUseCase.execute, and call replyWithDocument(new InputFile(() => file.open(), file.filename), { caption }). Always dispose in finally, release in finally, and install a two-minute timeout that releases a hung lock. Map invalid count, not found, no rows, oversized row/file, malformed timestamp, in-progress, and generic failure to distinct en.csv keys. After a read/stage/upload failure, reply with the error and render a new picker with the original origin.
+On selection, key a Map lock by chat and picker message ID, answer the callback, clear markup, send upload_document chat action, await StageCsvExportUseCase.execute, and call replyWithDocument(new InputFile(() => file.open(), file.filename), { caption }). Always dispose and release the lock in finally; never expire an active lock because a fresh /csv picker remains available if an upload hangs. Map invalid count, not found, no rows, oversized row/file, malformed timestamp, in-progress, and generic failure to distinct en.csv keys. After a read/stage/upload failure, reply with the error and render a new picker with the original origin. Label disabled targets as ⏸️ <name> (disabled).
 
 Add one user command descriptor named csv; the alias is callable but not advertised. Add en.csv keys and the two menu labels. Inject CsvHandler into GrammyBotGateway and include it in handlers before MenuHandler.
 
@@ -516,7 +525,11 @@ Run: git diff --check && git status --short
 
 Expected: no whitespace errors; only CSV feature files plus pre-existing unrelated changes.
 
-- [ ] **Step 4: Commit only a regression correction, if one was required**
+- [ ] **Step 4: Perform the Raspberry Pi staging smoke test**
+
+On a Raspberry Pi target, export a generated 8 MiB CSV fixture while a 100 ms interval records event-loop delay. Record maximum delay and total staging time in the implementation handoff. Do not increase MAX_CSV_BYTES if this materially delays sensor processing.
+
+- [ ] **Step 5: Commit only a regression correction, if one was required**
 
 If a regression command exposed and the engineer fixed a defect within this feature, stage exactly those correction files and commit with:
 
@@ -528,7 +541,6 @@ Do not create an empty verification-only commit.
 
 ## Plan Self-Review
 
-- **Spec coverage:** Tasks 1–6 implement shared timezone injection; current/disabled/archived targets; active-first duplicate names; paging; ID-only callbacks; 5000-row, 256 KiB source-row, and 8 MiB output limits; chronological output; BOM/RFC 4180/formula protection/value mapping; private-file lifecycle; lock expiry; menu integration; locale copy; gateway/module wiring; and catalogue updates. Task 7 verifies the full slice.
+- **Spec coverage:** Tasks 1–6 implement shared timezone injection; SQL-paged current/disabled/archived targets; active-first duplicate names; verified short callbacks; 5000-row, 256 KiB source-row, and 8 MiB output limits; chronological output; BOM/RFC 4180/formula protection/value mapping; private-file lifecycle; non-expiring consumed-picker locks; menu integration; locale copy; gateway/module wiring; and catalogue updates. Task 7 verifies the full slice.
 - **Placeholder scan:** Every limit, port, path, callback grammar, error condition, and verification command is explicit.
 - **Type consistency:** SensorLogExportReaderPort.withRows is synchronous throughout Tasks 3–4; CsvTempFilePort.stage consumes Iterable<string>; CsvHandler receives CsvTempFile only after snapshot staging is complete.
-

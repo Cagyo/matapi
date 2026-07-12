@@ -35,9 +35,9 @@ Add two focused use cases under `src/sensors/application/`:
 
 Both depend on sensor-domain ports, not Drizzle. The Telegram context consumes these use cases instead of directly injecting a sensor repository.
 
-Extend `SensorQueryPort` with a history-target projection that contains the immutable sensor ID, name, type, state (`current` or `archived`), and archived timestamp when applicable. It includes enabled and disabled current sensors, followed by archives. The Drizzle and in-memory adapters return targets in deterministic order: current first, then archived; alphabetical by name within each group; ID as the final tie-breaker. `ArchivedSensor` must retain `type` so its picker entry has the normal sensor icon.
+Extend `SensorQueryPort` with a paged history-target projection containing the immutable sensor ID, name, type, enabled state, state (`current` or `archived`), and archived timestamp when applicable. It includes enabled and disabled current sensors, followed by archives. The port accepts `{ page, pageSize }` and returns `{ targets, page, pageCount }`; Drizzle applies limit/offset in SQL rather than loading the archive into memory. Ordering is current first, then archived; within each group SQLite uses `name COLLATE NOCASE, id`. `ArchivedSensor` must retain `type` so its picker entry has the normal sensor icon.
 
-`ReadSensorLogHistoryUseCase` accepts either a typed name or an immutable ID. Typed-name resolution follows the established active-first behavior. When a current and archived sensor share a name, the command exports the current sensor; the archive is selected through the keyboard. The use case consumes `SensorLogExportReaderPort`, a streaming read port owned by the sensors application. Its synchronous `withRows(sensorId, { limit, maxMessageBytes }, consume)` method invokes `consume(rows: Iterable<SensorLogExportRow>)` while the read snapshot is open. `SensorLogExportRow` has `{ id, level, message, timestamp: Date | null }` and no Drizzle type leaks across the boundary.
+`ReadSensorLogHistoryUseCase` accepts either a typed name or an immutable ID. Typed-name resolution follows the established active-first behavior. When a current and archived sensor share a name, the command exports the current sensor; the archive is selected through the keyboard. The use case consumes `SensorLogExportReaderPort`, a streaming read port owned by the sensors application. Its synchronous `withRows(sensorId, { limit, maxMessageBytes }, consume)` method invokes a `void`-returning consumer while the read snapshot is open; promise-returning consumers are rejected. `SensorLogExportRow` has `{ id, level, message, timestamp: Date | null }` and no Drizzle type leaks across the boundary.
 
 The Drizzle adapter opens one synchronous read transaction, selects the newest matching `limit` rows by `timestamp DESC, id DESC`, validates that selected set's maximum UTF-8 message byte length, and then supplies an iterator over that same set by `timestamp ASC, id ASC` to `consume`. The consumer writes synchronously while the callback runs, then uploads only after the transaction closes. This avoids loading all 5,000 messages into application memory, avoids a preflight/stream race, and emits CSV rows in stable oldest-to-newest order without a reverse copy. The in-memory adapter implements the same cap and ordering semantics.
 
@@ -71,18 +71,18 @@ Register `csv` in the Bot API command descriptor. The alias remains callable but
 
 ### Picker and callbacks
 
-Picker entries use immutable IDs:
+Picker entries use short, verified selection references:
 
 ```text
-csv:select:<sensor-id>
+csv:select:<origin>:<page>:<index>:<id-hash>
 csv:page:<origin>:<page>
 ```
 
-`origin` is `command` or `menu`. Each page contains at most 20 targets. Archived labels have the form `🗄️ <name> (archived)`; current labels use the existing type icon. Menu-originated pages append `« Back to Dashboard` on a dedicated final row using the existing `menu:top` callback. Command-originated pages do not show that button.
+`origin` is `command` or `menu`. Each page contains at most 20 targets. The handler reloads the requested page, validates `index`, and compares `id-hash` to the first 12 base64url characters of SHA-256 over the server-side target ID before passing that immutable ID to the export use case. This stays within Telegram's 64-byte callback limit even for legacy IDs. Archived labels have the form `🗄️ <name> (archived)` and disabled current labels have the form `⏸️ <name> (disabled)`; other current labels use the existing type icon. Menu-originated pages append `« Back to Dashboard` on a dedicated final row using the existing `menu:top` callback. Command-originated pages do not show that button.
 
 Page numbers are zero-based. A page callback is valid only when its origin is known and its page is a non-negative integer. The handler rebuilds target metadata on every page request, clamps a now-out-of-range page to the final available page, and shows the empty-picker response when no targets remain. A target that disappears after rendering produces the normal not-found response.
 
-On a selection callback, the handler answers the callback and acquires an in-flight lock keyed by chat and picker message. It then removes the inline markup before starting the export. A concurrent selection from the same message gets a harmless in-progress response instead of a duplicate document. The lock releases in `finally` and has a two-minute expiry as a failsafe for a hung transport. Page navigation only edits the keyboard; it does not clear it.
+On a selection callback, the handler answers the callback and acquires an in-flight lock keyed by chat and picker message. It then removes the inline markup before starting the export. A concurrent selection from the same message gets a harmless in-progress response instead of a duplicate document. The lock releases only in `finally`; a hung consumed picker remains unavailable, while the user can start a fresh picker with `/csv`. Page navigation only edits the keyboard; it does not clear it.
 
 Every callback validates its complete data shape before querying. A deleted sensor, a stale page, or an invalid callback receives a localized not-found/error reply rather than trusting callback text.
 
@@ -114,7 +114,7 @@ Every text field is RFC 4180 escaped. If a text field begins, after spaces, tabs
 `value` is intentionally migration-free and conservative:
 
 - `ppm=<number>` produces that numeric value.
-- Known digital `State changed: … → …` destination labels map to their boolean value after uppercase normalization: `CLOSED → 0`, `OPEN`/`OPENED → 1`, `DRY → 0`, `LEAK DETECTED → 1`, `NORMAL → 0`, `ALARM → 1`, `GRID OK → 0`, `OUTAGE → 1`, `CLEAR → 0`, `MOTION → 1`, `RELEASED → 0`, and `PRESSED → 1`.
+- Only messages matching the complete case-insensitive grammar `State changed: <old> → <destination>` are eligible for digital parsing. Their normalized destination labels map as follows: `CLOSED → 0`, `OPEN`/`OPENED → 1`, `DRY → 0`, `LEAK DETECTED → 1`, `NORMAL → 0`, `ALARM → 1`, `GRID OK → 0`, `OUTAGE → 1`, `CLEAR → 0`, `MOTION → 1`, `RELEASED → 0`, and `PRESSED → 1`.
 - Any other log message produces an empty `value` field.
 
 This parser is tied to the currently persisted English log vocabulary. Tests enumerate every supported label pair; changing that vocabulary requires intentionally updating the parser. A future schema migration to store structured readings may replace the parser.
@@ -128,18 +128,18 @@ Add `en.csv` keys for picker title, caption, empty result, file name, not-found,
 ### Unit and use-case tests
 
 - Count parsing: defaults, boundary values, alias, extra arguments, and invalid input.
-- Current, disabled, archived, and duplicate-name target ordering; active-first direct resolution and ID-based archive selection.
-- Stable equal-timestamp ordering and corrupt/missing timestamp failure.
+- Current, disabled, archived, and duplicate-name target ordering; case-insensitive sort; active-first direct resolution; target-page SQL bounds; and verified short selection references.
+- Stable equal-timestamp ordering, raw timestamp unit conversion, and corrupt/missing timestamp failure.
 - Six-column chronological output, BOM, CRLF, RFC 4180 quoting, non-ASCII text, formula prefixes, and all supported numeric/binary value forms.
 - DST fall-back output includes distinct offsets.
 - Streaming reader cap rejects a 256 KiB-plus message before yielding it; 8 MiB output accounting includes header, BOM, escaping, formula-prefix expansion, and multibyte input; overflow never leaves a file.
-- Picker pagination, invalid/negative/out-of-range page callbacks, target disappearance, menu context propagation, callback markup cleanup, concurrent-selection lock, lock expiry, and release in `finally`.
+- Picker pagination, invalid/negative/out-of-range page callbacks, target disappearance, menu context propagation, callback markup cleanup, concurrent-selection lock, and release in `finally`.
 - No-log, unknown sensor, malformed history, read failure, staging failure, and upload failure each produce the correct locale reply and a fresh retry picker when applicable.
 
 ### Infrastructure and regression tests
 
 - Drizzle export reader uses one synchronous snapshot callback, selects the newest capped result set by `timestamp DESC, id DESC`, enforces the row-size cap before iterating it `timestamp ASC, id ASC`.
-- The temp-file adapter enforces directory/file modes, rejects symlinks, and cleans success, failure, overflow, and stale-file paths; its upload source factory opens a fresh stream on each call.
+- The temp-file adapter enforces directory/file modes, rejects symlinks, and cleans success, failure, overflow, and stale-file paths; its upload source factory opens a fresh stream on each call. A Pi smoke test exports an 8 MiB fixture and records event-loop delay before accepting the synchronous staging budget.
 - `MenuHandler` delegates both CSV entry points without duplicating behavior.
 - Run the focused test suites, then `yarn test` and `yarn build`.
 
