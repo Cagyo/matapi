@@ -398,12 +398,24 @@ export const en = {
   common: {
     adminRequired: '❌ Admin access required',
     error: (action: string, reason: string) => `❌ Failed to ${action}: ${reason}`,
+    failure: (reason: string) => `❌ Failed: ${reason}`,
+    historical: (value: string) => `Historical value: ${value}`,
     interrupted: 'Previous operation was interrupted. Please start again.',
     cancelButton: '❌ Cancel',
     backButton: '« Back',
     closeButton: '❌ Close',
     quietModeButton: '🌙 Quiet Mode',
     noActiveWizard: 'ℹ️ No active configuration wizard to cancel.',
+  },
+  language: {
+    prompt: 'Choose your language:',
+    current: (language: string) => `Current language: ${language}`,
+    updated: (language: string) => `✅ Language changed to ${language}.`,
+    buttons: {
+      en: 'English',
+      ru: 'Русский',
+      uk: 'Українська',
+    },
   },
   claim: {
     success: '✅ You are now the admin of this Home Worker.',
@@ -906,7 +918,7 @@ export const en = {
         if (!endedAt) return 'recording';
         return durationSec === null ? 'unknown' : `${durationSec}s`;
       },
-      media: (media: BrowseEventMediaView) => {
+      media: (media: BrowseEventMediaView): string => {
         if (media.hasLocalVideo && media.hasPhoto) return 'Video + Photo';
         if (media.hasLocalVideo) return 'Video';
         if (media.hasDriveVideo) {
