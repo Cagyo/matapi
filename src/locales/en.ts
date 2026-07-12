@@ -12,6 +12,9 @@ const presentation = {
     format: 'dd.MM.yyyy HH:mm',
     formatWithSeconds: 'dd.MM.yyyy HH:mm:ss',
     timeFormat: 'HH:mm',
+    eventDayFormat: 'dd.MM.yyyy',
+    eventTimeFormat: 'HH:mm:ss',
+    eventUnavailableTime: '--:--:--',
     never: 'never',
     unavailableTime: '—',
     age: {
@@ -27,6 +30,25 @@ const presentation = {
     digitalOpen: 'OPEN',
     digitalOpened: 'OPENED',
     digitalClosed: 'CLOSED',
+  },
+  config: {
+    sensorTypes: {
+      digital: 'Digital',
+      uart: 'UART',
+      mqtt: 'MQTT',
+      camera: 'Camera',
+    },
+    severities: {
+      info: 'Info',
+      warning: 'Warning',
+      critical: 'Critical',
+    },
+    pulls: {
+      up: 'Up',
+      down: 'Down',
+      none: 'None',
+      default: 'Up',
+    },
   },
   units: {
     gigabytes: 'GB',
@@ -751,7 +773,7 @@ const enCatalog = {
     modifyHeader: (sensor: ConfigDisplay) => {
       const lines = [
         `Current config for "${sensor.name}":`,
-        `Type: ${prettyType(sensor.type)}`,
+        `Type: ${presentation.config.sensorTypes[sensor.type]}`,
       ];
       if (sensor.type === 'digital') {
         const inv = sensor.config.invert ?? sensor.config.activeLow ?? true;
@@ -760,7 +782,7 @@ const enCatalog = {
           `GPIO: ${(sensor.config.pin as number | undefined) ?? '?'}`,
           `Step Type: ${(sensor.config.stepType as string | undefined) ?? 'contact'}`,
           `Active Low: ${inv === false ? 'No' : 'Yes'} — triggered when the signal is ${inv === false ? 'high' : 'low'}`,
-          `Pull: ${prettyPull(pull)} — ${pull === 'none' ? 'no internal resistor; use external wiring to keep the input stable' : 'keeps the input stable when unconnected'}`,
+          `Pull: ${presentation.config.pulls[pull as keyof typeof presentation.config.pulls] ?? presentation.config.pulls.default} — ${pull === 'none' ? 'no internal resistor; use external wiring to keep the input stable' : 'keeps the input stable when unconnected'}`,
         );
       } else if (sensor.type === 'uart') {
         lines.push(
@@ -974,16 +996,18 @@ const enCatalog = {
     },
     closed: '📹 Camera dashboard closed.',
     snapshotCaption: (name: string, at: Date) => `📸 ${name} | ${fmtDate(at)}`,
-    eventsHeader: (day: Date) => `📹 Motion events for ${format(day, 'dd.MM.yyyy')}:`,
+    eventsHeader: (day: Date) => `📹 Motion events for ${format(day, presentation.date.eventDayFormat)}:`,
     eventLine: (e: MotionEventView): string => {
-      const time = e.startedAt ? format(e.startedAt, 'HH:mm:ss') : '--:--:--';
+      const time = e.startedAt
+        ? format(e.startedAt, presentation.date.eventTimeFormat)
+        : presentation.date.eventUnavailableTime;
       const dur = e.durationSec !== null ? presentation.units.eventDurationSeconds(e.durationSec) : '';
       const snap = e.hasSnapshot ? ' 📷' : '';
       return `#${e.id} — ${time}${dur}${snap}`;
     },
     eventsFooter: (count: number) =>
       `${count} event${count === 1 ? '' : 's'}. Use /camera video <id> or /camera photo <id>`,
-    eventsNone: (day: Date) => `No motion events on ${format(day, 'dd.MM.yyyy')}`,
+    eventsNone: (day: Date) => `No motion events on ${format(day, presentation.date.eventDayFormat)}`,
     videoCaption: (id: number, at: Date | null, cam: string) =>
       `📹 Event #${id} | ${fmtDate(at, true)} | ${cam}`,
     photoCaption: (id: number, at: Date | null, cam: string) =>
@@ -1162,32 +1186,6 @@ const enCatalog = {
 };
 
 export const en = deepFreeze(enCatalog);
-
-function prettyType(type: SensorType): string {
-  switch (type) {
-    case 'digital':
-      return 'Digital';
-    case 'uart':
-      return 'UART';
-    case 'mqtt':
-      return 'MQTT';
-    case 'camera':
-      return 'Camera';
-  }
-}
-
-function prettyPull(pull: string | undefined): string {
-  switch (pull) {
-    case 'up':
-      return 'Up';
-    case 'down':
-      return 'Down';
-    case 'none':
-      return 'None';
-    default:
-      return 'Up';
-  }
-}
 
 export interface ConfigDisplay {
   name: string;

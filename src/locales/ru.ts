@@ -1,10 +1,10 @@
 import { format } from 'date-fns';
-import { DbRecovery } from '../database/integrity';
-import { SensorSeverity, SensorType } from '../sensors/domain/sensor';
-import { ImportSummary } from '../sensors/application/import-sensors.use-case';
-import { FeatureStatus } from '../features/domain/feature-status';
-import { DepUpdate } from '../system/domain/ports/system-deps.port';
-import { User } from '../telegram/domain/user.entity';
+import type { DbRecovery } from '../database/integrity';
+import type { SensorSeverity, SensorType } from '../sensors/domain/sensor';
+import type { ImportSummary } from '../sensors/application/import-sensors.use-case';
+import type { FeatureStatus } from '../features/domain/feature-status';
+import type { DepUpdate } from '../system/domain/ports/system-deps.port';
+import type { User } from '../telegram/domain/user.entity';
 import type { LocaleCatalog } from './catalog';
 import { deepFreeze } from './freeze';
 
@@ -13,6 +13,9 @@ const presentation = {
     format: 'dd.MM.yyyy HH:mm',
     formatWithSeconds: 'dd.MM.yyyy HH:mm:ss',
     timeFormat: 'HH:mm',
+    eventDayFormat: 'dd.MM.yyyy',
+    eventTimeFormat: 'HH:mm:ss',
+    eventUnavailableTime: '--:--:--',
     never: 'никогда',
     unavailableTime: '—',
     age: {
@@ -28,6 +31,25 @@ const presentation = {
     digitalOpen: 'ОТКРЫТ',
     digitalOpened: 'ОТКРЫТ',
     digitalClosed: 'ЗАКРЫТ',
+  },
+  config: {
+    sensorTypes: {
+      digital: 'Цифровой',
+      uart: 'UART',
+      mqtt: 'MQTT',
+      camera: 'Камера',
+    },
+    severities: {
+      info: 'Информация',
+      warning: 'Предупреждение',
+      critical: 'Критический',
+    },
+    pulls: {
+      up: 'Вверх',
+      down: 'Вниз',
+      none: 'Нет',
+      default: 'Вверх',
+    },
   },
   units: {
     gigabytes: 'GB',
@@ -750,7 +772,7 @@ const ruCatalog = {
       stepType: string,
       severity: SensorSeverity,
     ) =>
-      `✅ Датчик «${name}» добавлен (GPIO ${pin}, ${stepType}, ${prettySeverity(severity)})`,
+      `✅ Датчик «${name}» добавлен (GPIO ${pin}, ${stepType}, ${presentation.config.severities[severity]})`,
     addedUart: (
       name: string,
       port: string,
@@ -762,7 +784,7 @@ const ruCatalog = {
     modifyHeader: (sensor: ConfigDisplay) => {
       const lines = [
         `Текущая конфигурация «${sensor.name}»:`,
-        `Тип: ${prettyType(sensor.type)}`,
+        `Тип: ${presentation.config.sensorTypes[sensor.type]}`,
       ];
       if (sensor.type === 'digital') {
         const inv = sensor.config.invert ?? sensor.config.activeLow ?? true;
@@ -771,7 +793,7 @@ const ruCatalog = {
           `GPIO: ${(sensor.config.pin as number | undefined) ?? '?'}`,
           `Тип контакта: ${(sensor.config.stepType as string | undefined) ?? 'contact'}`,
           `Активный низкий уровень: ${inv === false ? 'Нет' : 'Да'} — срабатывает при ${inv === false ? 'высоком' : 'низком'} уровне сигнала`,
-          `Подтяжка: ${prettyPull(pull)} — ${pull === 'none' ? 'нет внутреннего резистора; используйте внешнюю обвязку для стабильности входа' : 'поддерживает стабильность входа при отсутствии подключения'}`,
+          `Подтяжка: ${presentation.config.pulls[pull as keyof typeof presentation.config.pulls] ?? presentation.config.pulls.default} — ${pull === 'none' ? 'нет внутреннего резистора; используйте внешнюю обвязку для стабильности входа' : 'поддерживает стабильность входа при отсутствии подключения'}`,
         );
       } else if (sensor.type === 'uart') {
         lines.push(
@@ -783,7 +805,7 @@ const ruCatalog = {
       }
       lines.push(
         `Защита от дребезга: ${sensor.debounceMs} мс — кратко игнорирует повторные сигналы`,
-        `Уровень важности: ${prettySeverity(sensor.severity)}`,
+        `Уровень важности: ${presentation.config.severities[sensor.severity]}`,
         '',
         'Что изменить?',
       );
@@ -985,16 +1007,18 @@ const ruCatalog = {
     },
     closed: '📹 Панель камеры закрыта.',
     snapshotCaption: (name: string, at: Date) => `📸 ${name} | ${fmtDate(at)}`,
-    eventsHeader: (day: Date) => `📹 События движения за ${format(day, 'dd.MM.yyyy')}:`,
+    eventsHeader: (day: Date) => `📹 События движения за ${format(day, presentation.date.eventDayFormat)}:`,
     eventLine: (e: MotionEventView): string => {
-      const time = e.startedAt ? format(e.startedAt, 'HH:mm:ss') : '--:--:--';
+      const time = e.startedAt
+        ? format(e.startedAt, presentation.date.eventTimeFormat)
+        : presentation.date.eventUnavailableTime;
       const dur = e.durationSec !== null ? presentation.units.eventDurationSeconds(e.durationSec) : '';
       const snap = e.hasSnapshot ? ' 📷' : '';
       return `#${e.id} — ${time}${dur}${snap}`;
     },
     eventsFooter: (count: number) =>
       `${count} ${plural(count, 'событие', 'события', 'событий')}. Используйте /camera video <id> или /camera photo <id>`,
-    eventsNone: (day: Date) => `Нет событий движения за ${format(day, 'dd.MM.yyyy')}`,
+    eventsNone: (day: Date) => `Нет событий движения за ${format(day, presentation.date.eventDayFormat)}`,
     videoCaption: (id: number, at: Date | null, cam: string) =>
       `📹 Событие #${id} | ${fmtDate(at, true)} | ${cam}`,
     photoCaption: (id: number, at: Date | null, cam: string) =>
@@ -1173,43 +1197,6 @@ const ruCatalog = {
 } satisfies LocaleCatalog;
 
 export const ru = deepFreeze(ruCatalog);
-
-function prettyType(type: SensorType): string {
-  switch (type) {
-    case 'digital':
-      return 'Цифровой';
-    case 'uart':
-      return 'UART';
-    case 'mqtt':
-      return 'MQTT';
-    case 'camera':
-      return 'Камера';
-  }
-}
-
-function prettySeverity(severity: SensorSeverity): string {
-  switch (severity) {
-    case 'info':
-      return 'Информация';
-    case 'warning':
-      return 'Предупреждение';
-    case 'critical':
-      return 'Критический';
-  }
-}
-
-function prettyPull(pull: string | undefined): string {
-  switch (pull) {
-    case 'up':
-      return 'Вверх';
-    case 'down':
-      return 'Вниз';
-    case 'none':
-      return 'Нет';
-    default:
-      return 'Вверх';
-  }
-}
 
 export interface ConfigDisplay {
   name: string;

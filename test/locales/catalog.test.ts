@@ -21,4 +21,16 @@ describe('catalogFor', () => {
     expect(Object.isFrozen(en.commands)).toBe(true);
     expect(Object.isFrozen(en.sensors.steps.contact)).toBe(true);
   });
+
+  it('keeps config state labels and event time formatting in frozen presentation data', () => {
+    for (const catalog of [catalogs.en, catalogs.ru, catalogs.uk]) {
+      expect(catalog.presentation.config.sensorTypes.digital).toBeTruthy();
+      expect(catalog.presentation.config.severities.critical).toBeTruthy();
+      expect(catalog.presentation.config.pulls.default).toBeTruthy();
+      expect(catalog.presentation.date.eventDayFormat).toBe('dd.MM.yyyy');
+      expect(catalog.presentation.date.eventTimeFormat).toBe('HH:mm:ss');
+      expect(catalog.presentation.date.eventUnavailableTime).toBe('--:--:--');
+      expect(Object.isFrozen(catalog.presentation.config)).toBe(true);
+    }
+  });
 });

@@ -1,10 +1,10 @@
 import { format } from 'date-fns';
-import { DbRecovery } from '../database/integrity';
-import { SensorSeverity, SensorType } from '../sensors/domain/sensor';
-import { ImportSummary } from '../sensors/application/import-sensors.use-case';
-import { FeatureStatus } from '../features/domain/feature-status';
-import { DepUpdate } from '../system/domain/ports/system-deps.port';
-import { User } from '../telegram/domain/user.entity';
+import type { DbRecovery } from '../database/integrity';
+import type { SensorSeverity, SensorType } from '../sensors/domain/sensor';
+import type { ImportSummary } from '../sensors/application/import-sensors.use-case';
+import type { FeatureStatus } from '../features/domain/feature-status';
+import type { DepUpdate } from '../system/domain/ports/system-deps.port';
+import type { User } from '../telegram/domain/user.entity';
 import type { LocaleCatalog } from './catalog';
 import { deepFreeze } from './freeze';
 
@@ -13,6 +13,9 @@ const presentation = {
     format: 'dd.MM.yyyy HH:mm',
     formatWithSeconds: 'dd.MM.yyyy HH:mm:ss',
     timeFormat: 'HH:mm',
+    eventDayFormat: 'dd.MM.yyyy',
+    eventTimeFormat: 'HH:mm:ss',
+    eventUnavailableTime: '--:--:--',
     never: 'ніколи',
     unavailableTime: '—',
     age: {
@@ -28,6 +31,25 @@ const presentation = {
     digitalOpen: 'ВІДЧИНЕНО',
     digitalOpened: 'ВІДЧИНЕНО',
     digitalClosed: 'ЗАЧИНЕНО',
+  },
+  config: {
+    sensorTypes: {
+      digital: 'Цифровий',
+      uart: 'UART',
+      mqtt: 'MQTT',
+      camera: 'Камера',
+    },
+    severities: {
+      info: 'Інформація',
+      warning: 'Попередження',
+      critical: 'Критичний',
+    },
+    pulls: {
+      up: 'Вгору',
+      down: 'Вниз',
+      none: 'Немає',
+      default: 'Вгору',
+    },
   },
   units: {
     gigabytes: 'GB',
@@ -746,7 +768,7 @@ const ukCatalog = {
       stepType: string,
       severity: SensorSeverity,
     ) =>
-      `✅ Датчик "${name}" додано (GPIO ${pin}, ${stepType}, ${prettySeverity(severity)})`,
+      `✅ Датчик "${name}" додано (GPIO ${pin}, ${stepType}, ${presentation.config.severities[severity]})`,
     addedUart: (
       name: string,
       port: string,
@@ -758,7 +780,7 @@ const ukCatalog = {
     modifyHeader: (sensor: ConfigDisplay) => {
       const lines = [
         `Поточна конфігурація "${sensor.name}":`,
-        `Тип: ${prettyType(sensor.type)}`,
+        `Тип: ${presentation.config.sensorTypes[sensor.type]}`,
       ];
       if (sensor.type === 'digital') {
         const inv = sensor.config.invert ?? sensor.config.activeLow ?? true;
@@ -767,7 +789,7 @@ const ukCatalog = {
           `GPIO: ${(sensor.config.pin as number | undefined) ?? '?'}`,
           `Тип стану: ${(sensor.config.stepType as string | undefined) ?? 'contact'}`,
           `Активний низький рівень: ${inv === false ? 'Ні' : 'Так'} — спрацьовує, коли сигнал ${inv === false ? 'високий' : 'низький'}`,
-          `Підтягування: ${prettyPull(pull)} — ${pull === 'none' ? 'немає внутрішнього резистора; використайте зовнішнє підключення для стабілізації входу' : 'забезпечує стабільність входу, коли його не підключено'}`,
+          `Підтягування: ${presentation.config.pulls[pull as keyof typeof presentation.config.pulls] ?? presentation.config.pulls.default} — ${pull === 'none' ? 'немає внутрішнього резистора; використайте зовнішнє підключення для стабілізації входу' : 'забезпечує стабільність входу, коли його не підключено'}`,
         );
       } else if (sensor.type === 'uart') {
         lines.push(
@@ -779,7 +801,7 @@ const ukCatalog = {
       }
       lines.push(
         `Антидребезг: ${sensor.debounceMs}ms — короткочасно ігнорує повторні сигнали`,
-        `Важливість: ${prettySeverity(sensor.severity)}`,
+        `Важливість: ${presentation.config.severities[sensor.severity]}`,
         '',
         'Що змінити?',
       );
@@ -981,16 +1003,18 @@ const ukCatalog = {
     },
     closed: '📹 Панель камери закрито.',
     snapshotCaption: (name: string, at: Date) => `📸 ${name} | ${fmtDate(at)}`,
-    eventsHeader: (day: Date) => `📹 Події руху за ${format(day, 'dd.MM.yyyy')}:`,
+    eventsHeader: (day: Date) => `📹 Події руху за ${format(day, presentation.date.eventDayFormat)}:`,
     eventLine: (e: MotionEventView): string => {
-      const time = e.startedAt ? format(e.startedAt, 'HH:mm:ss') : '--:--:--';
+      const time = e.startedAt
+        ? format(e.startedAt, presentation.date.eventTimeFormat)
+        : presentation.date.eventUnavailableTime;
       const dur = e.durationSec !== null ? presentation.units.eventDurationSeconds(e.durationSec) : '';
       const snap = e.hasSnapshot ? ' 📷' : '';
       return `#${e.id} — ${time}${dur}${snap}`;
     },
     eventsFooter: (count: number) =>
       `${count} ${plural(count, 'подія', 'події', 'подій')}. Використовуйте /camera video <id> або /camera photo <id>`,
-    eventsNone: (day: Date) => `За ${format(day, 'dd.MM.yyyy')} подій руху немає`,
+    eventsNone: (day: Date) => `За ${format(day, presentation.date.eventDayFormat)} подій руху немає`,
     videoCaption: (id: number, at: Date | null, cam: string) =>
       `📹 Подія №${id} | ${fmtDate(at, true)} | ${cam}`,
     photoCaption: (id: number, at: Date | null, cam: string) =>
@@ -1169,43 +1193,6 @@ const ukCatalog = {
 } satisfies LocaleCatalog;
 
 export const uk = deepFreeze(ukCatalog);
-
-function prettyType(type: SensorType): string {
-  switch (type) {
-    case 'digital':
-      return 'Цифровий';
-    case 'uart':
-      return 'UART';
-    case 'mqtt':
-      return 'MQTT';
-    case 'camera':
-      return 'Камера';
-  }
-}
-
-function prettySeverity(severity: SensorSeverity): string {
-  switch (severity) {
-    case 'info':
-      return 'Інформація';
-    case 'warning':
-      return 'Попередження';
-    case 'critical':
-      return 'Критичний';
-  }
-}
-
-function prettyPull(pull: string | undefined): string {
-  switch (pull) {
-    case 'up':
-      return 'Вгору';
-    case 'down':
-      return 'Вниз';
-    case 'none':
-      return 'Немає';
-    default:
-      return 'Вгору';
-  }
-}
 
 export interface ConfigDisplay {
   name: string;
