@@ -107,6 +107,21 @@ describe('CsvHandler', () => {
     expect(callbackData.every((data) => Buffer.byteLength(data, 'utf8') <= 64)).toBe(true);
   });
 
+  it('renders archived targets with the archived label', async () => {
+    const { commandCallbacks, list } = createSetup();
+    list.execute.mockResolvedValueOnce({
+      targets: [{ ...target, enabled: false, state: 'archived', archivedAt: 123 }],
+      page: 0,
+      pageCount: 1,
+    });
+    const ctx = { match: '', reply: vi.fn().mockResolvedValue(true) };
+
+    await commandCallbacks.get('csv')?.(ctx);
+
+    const keyboard = ctx.reply.mock.calls[0][1].reply_markup;
+    expect(JSON.stringify(keyboard)).toContain('🗄️ Kitchen temperature (archived)');
+  });
+
   it('exports a named target with the requested bounded count', async () => {
     const { commandCallbacks, stage } = createSetup();
     const ctx = {

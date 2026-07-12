@@ -310,8 +310,8 @@ function assertCallbackBytes(data: string): string {
 }
 
 function targetLabel(target: SensorHistoryTarget): string {
-  if (!target.enabled) return en.csv.disabledTarget(target.name);
   if (target.state === 'archived') return en.csv.archivedTarget(target.name);
+  if (!target.enabled) return en.csv.disabledTarget(target.name);
   return `${TYPE_ICONS[target.type]} ${target.name}`;
 }
 
