@@ -69,6 +69,7 @@ interface PendingOpen {
 export class LiveStreamSessionService implements OnModuleInit {
   private queue: Promise<void> = Promise.resolve();
   private active?: ActiveSession;
+  private cleanupBlocked?: ActiveSession;
   private pending?: PendingOpen;
   private expiryTimer?: ReturnType<typeof setTimeout>;
 
@@ -111,6 +112,11 @@ export class LiveStreamSessionService implements OnModuleInit {
   open(source: LiveStreamSource, telegramId: number): Promise<OpenLiveStreamResult> {
     const deferred = createDeferred<OpenLiveStreamResult>();
     const queued = this.enqueue(async () => {
+      if (this.cleanupBlocked && !(await this.retryBlockedCleanup())) {
+        deferred.reject(new LiveStreamUnavailableError());
+        return;
+      }
+
       await this.expireIfDue();
 
       if (this.active?.session.cameraId === source.cameraId) {
@@ -157,6 +163,10 @@ export class LiveStreamSessionService implements OnModuleInit {
           this.rejectRequests(this.pending.replacement.requests);
           this.pending.replacement = undefined;
         }
+        return null;
+      }
+      if (this.cleanupBlocked) {
+        await this.retryBlockedCleanup();
         return null;
       }
       return this.stopActive();
@@ -230,14 +240,6 @@ export class LiveStreamSessionService implements OnModuleInit {
     started: Awaited<ReturnType<LiveStreamGatewayPort['start']>>,
   ): Promise<void> {
     if (this.pending !== pending) return;
-    this.pending = undefined;
-
-    if (pending.cancelled || !isQuickTunnelHostname(started.publicHostname)) {
-      await this.gateway.stop();
-      this.rejectPending(pending);
-      this.beginReplacement(pending);
-      return;
-    }
 
     const active: ActiveSession = {
       session: pending.session,
@@ -247,12 +249,28 @@ export class LiveStreamSessionService implements OnModuleInit {
       viewerTokenHashes: new Map(),
       messageReferences: [],
     };
-    this.active = active;
-    await this.writeLease(active);
-    this.scheduleExpiry(active);
 
-    for (const request of pending.requests) {
-      await this.openViewer(active, request.telegramId, request.deferred);
+    if (pending.cancelled || !isQuickTunnelHostname(started.publicHostname)) {
+      await this.abortStartedPending(pending, active);
+      return;
+    }
+
+    try {
+      await this.writeLease(active);
+      this.scheduleExpiry(active);
+
+      const results: OpenLiveStreamResult[] = [];
+      for (const request of pending.requests) {
+        results.push(await this.createViewerResult(active, request.telegramId));
+      }
+
+      this.pending = undefined;
+      this.active = active;
+      for (const [index, request] of pending.requests.entries()) {
+        request.deferred.resolve(results[index]);
+      }
+    } catch {
+      await this.abortStartedPending(pending, active);
     }
   }
 
@@ -268,11 +286,21 @@ export class LiveStreamSessionService implements OnModuleInit {
     telegramId: number,
     deferred: Deferred<OpenLiveStreamResult>,
   ): Promise<void> {
+    try {
+      deferred.resolve(await this.createViewerResult(active, telegramId));
+    } catch {
+      deferred.reject(new LiveStreamUnavailableError());
+    }
+  }
+
+  private async createViewerResult(
+    active: ActiveSession,
+    telegramId: number,
+  ): Promise<OpenLiveStreamResult> {
     const remainingMs = active.session.expiresMonotonicMs - this.clock.now();
     if (remainingMs <= 0) {
       await this.stopActive();
-      deferred.reject(new LiveStreamUnavailableError());
-      return;
+      throw new LiveStreamUnavailableError();
     }
 
     const token = createViewerToken(randomBytes(32));
@@ -285,14 +313,14 @@ export class LiveStreamSessionService implements OnModuleInit {
     const hashes = active.viewerTokenHashes.get(telegramId) ?? [];
     hashes.push(tokenHash);
     active.viewerTokenHashes.set(telegramId, hashes);
-    deferred.resolve({
+    return {
       watchUrl: `https://${active.publicHostname}/watch/${token}`,
       remainingMs,
       expiresMonotonicMs: active.session.expiresMonotonicMs,
       cameraName: active.session.cameraName,
       registerMessageReference: (reference) =>
         this.registerMessageReference(active.session.id, reference),
-    });
+    };
   }
 
   private async expireIfDue(): Promise<void> {
@@ -307,14 +335,65 @@ export class LiveStreamSessionService implements OnModuleInit {
   private async stopActive(): Promise<string | null> {
     if (!this.active) return null;
     const cameraName = this.active.session.cameraName;
-    this.active = undefined;
-    if (this.expiryTimer) {
-      clearTimeout(this.expiryTimer);
-      this.expiryTimer = undefined;
-    }
     await this.gateway.stop();
+    this.active = undefined;
+    this.clearExpiryTimer();
     await this.lease.clear();
     return cameraName;
+  }
+
+  private async abortStartedPending(
+    pending: PendingOpen,
+    started: ActiveSession,
+  ): Promise<void> {
+    this.pending = undefined;
+    this.clearExpiryTimer();
+
+    let stopped = false;
+    try {
+      await this.gateway.stop();
+      stopped = true;
+    } catch {
+      this.cleanupBlocked = started;
+    }
+
+    try {
+      await this.lease.clear();
+    } catch {
+      // Cleanup is best effort; the in-memory blocker still prevents a duplicate tunnel.
+    }
+
+    this.rejectPending(pending);
+    if (stopped) {
+      this.beginReplacement(pending);
+    } else {
+      this.rejectReplacement(pending);
+    }
+  }
+
+  private async retryBlockedCleanup(): Promise<boolean> {
+    if (!this.cleanupBlocked) return true;
+
+    try {
+      await this.gateway.stop();
+    } catch {
+      return false;
+    }
+
+    this.cleanupBlocked = undefined;
+    this.clearExpiryTimer();
+    try {
+      await this.lease.clear();
+    } catch {
+      // The tunnel is confirmed stopped, so a stale lease cannot create a duplicate tunnel.
+    }
+    return true;
+  }
+
+  private clearExpiryTimer(): void {
+    if (!this.expiryTimer) return;
+    clearTimeout(this.expiryTimer);
+    this.expiryTimer = undefined;
   }
 
   private scheduleExpiry(active: ActiveSession): void {
@@ -351,6 +430,12 @@ export class LiveStreamSessionService implements OnModuleInit {
     for (const request of requests) {
       request.deferred.reject(new LiveStreamUnavailableError());
     }
+  }
+
+  private rejectReplacement(pending: PendingOpen): void {
+    if (!pending.replacement) return;
+    this.rejectRequests(pending.replacement.requests);
+    pending.replacement = undefined;
   }
 
   private beginReplacement(pending: PendingOpen): void {

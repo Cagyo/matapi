@@ -39,6 +39,33 @@ describe('LiveStreamSessionService', () => {
     expect(gateway.stopCalls).toBe(1);
   });
 
+  it('settles pending and replacement opens when cancellation teardown fails', async () => {
+    const gateway = new DeferredGateway();
+    gateway.stopError = new Error('stop failed');
+    const service = createService({ gateway });
+
+    const first = service.open(source('front_door'), 1);
+    await vi.waitFor(() => expect(gateway.startCalls).toHaveLength(1));
+    const replacement = service.open(source('garden'), 2);
+    await service.stop(3);
+    gateway.resolveStart();
+
+    const outcomes = await Promise.allSettled([first, replacement]);
+
+    expect(outcomes).toEqual([
+      expect.objectContaining({
+        status: 'rejected',
+        reason: expect.objectContaining({ code: 'LIVE_STREAM_UNAVAILABLE' }),
+      }),
+      expect.objectContaining({
+        status: 'rejected',
+        reason: expect.objectContaining({ code: 'LIVE_STREAM_UNAVAILABLE' }),
+      }),
+    ]);
+    expect(gateway.stopCalls).toBe(1);
+    expect(gateway.startCalls).toHaveLength(1);
+  });
+
   it('joins a pending start for the same camera', async () => {
     const gateway = new DeferredGateway();
     const service = createService({ gateway });
@@ -81,6 +108,74 @@ describe('LiveStreamSessionService', () => {
     expect(gateway.stopCalls).toBe(1);
     expect(gateway.startCalls).toHaveLength(2);
     expect(switched.cameraName).toBe('garden');
+  });
+
+  it('retains an active session when stopping the gateway fails', async () => {
+    const gateway = new FakeGateway();
+    gateway.stopError = new Error('stop failed');
+    const service = createService({ gateway });
+
+    await service.open(source('front_door'), 1);
+
+    await expect(service.stop(1)).rejects.toThrow('stop failed');
+    await expect(service.open(source('garden'), 2)).rejects.toThrow('stop failed');
+
+    expect(gateway.startCalls).toHaveLength(1);
+    expect(gateway.stopCalls).toBe(2);
+  });
+
+  it('cleans up and rejects every pending caller when writing the lease fails', async () => {
+    const gateway = new DeferredGateway();
+    const lease = new FakeLease();
+    lease.writeError = new Error('lease write failed');
+    const service = createService({ gateway, lease });
+
+    const first = service.open(source('front_door'), 1);
+    const second = service.open(source('front_door'), 2);
+    await vi.waitFor(() => expect(gateway.startCalls).toHaveLength(1));
+    gateway.resolveStart();
+
+    const outcomes = await Promise.allSettled([first, second]);
+
+    expect(outcomes).toEqual([
+      expect.objectContaining({
+        status: 'rejected',
+        reason: expect.objectContaining({ code: 'LIVE_STREAM_UNAVAILABLE' }),
+      }),
+      expect.objectContaining({
+        status: 'rejected',
+        reason: expect.objectContaining({ code: 'LIVE_STREAM_UNAVAILABLE' }),
+      }),
+    ]);
+    expect(gateway.stopCalls).toBe(1);
+    expect(lease.clearCalls).toBe(1);
+  });
+
+  it('cleans up and rejects every pending caller when adding a viewer fails', async () => {
+    const gateway = new DeferredGateway();
+    gateway.addViewerError = new Error('viewer add failed');
+    const lease = new FakeLease();
+    const service = createService({ gateway, lease });
+
+    const first = service.open(source('front_door'), 1);
+    const second = service.open(source('front_door'), 2);
+    await vi.waitFor(() => expect(gateway.startCalls).toHaveLength(1));
+    gateway.resolveStart();
+
+    const outcomes = await Promise.allSettled([first, second]);
+
+    expect(outcomes).toEqual([
+      expect.objectContaining({
+        status: 'rejected',
+        reason: expect.objectContaining({ code: 'LIVE_STREAM_UNAVAILABLE' }),
+      }),
+      expect.objectContaining({
+        status: 'rejected',
+        reason: expect.objectContaining({ code: 'LIVE_STREAM_UNAVAILABLE' }),
+      }),
+    ]);
+    expect(gateway.stopCalls).toBe(1);
+    expect(lease.clearCalls).toBe(1);
   });
 
   it('revokes every viewer token issued to a user', async () => {
@@ -206,6 +301,8 @@ class FakeGateway implements LiveStreamGatewayPort {
   recoveryCalls: Array<{ pid: ReturnType<typeof createLiveStreamProcessId>; processIdentity: string }> = [];
   stopCalls = 0;
   recoveryResult: 'stopped' | 'not-owned' = 'stopped';
+  stopError?: Error;
+  addViewerError?: Error;
 
   async start(input: { source: LiveStreamSource }): Promise<{
     publicHostname: string;
@@ -220,7 +317,9 @@ class FakeGateway implements LiveStreamGatewayPort {
     };
   }
 
-  async addViewer(): Promise<void> {}
+  async addViewer(): Promise<void> {
+    if (this.addViewerError) throw this.addViewerError;
+  }
 
   async revokeViewer(tokenHash: string): Promise<void> {
     this.revoked.push(tokenHash);
@@ -228,6 +327,7 @@ class FakeGateway implements LiveStreamGatewayPort {
 
   async stop(): Promise<void> {
     this.stopCalls += 1;
+    if (this.stopError) throw this.stopError;
   }
 
   async recoverOwnedProcess(input: {
@@ -266,6 +366,7 @@ class DeferredGateway extends FakeGateway {
 class FakeLease implements LiveStreamLeasePort {
   writes: LiveStreamLease[] = [];
   clearCalls = 0;
+  writeError?: Error;
 
   constructor(private lease: LiveStreamLease | null = null) {}
 
@@ -274,6 +375,7 @@ class FakeLease implements LiveStreamLeasePort {
   }
 
   async write(lease: LiveStreamLease): Promise<void> {
+    if (this.writeError) throw this.writeError;
     this.lease = lease;
     this.writes.push(lease);
   }
