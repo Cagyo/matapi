@@ -10,6 +10,7 @@ import { ReloadSensorsUseCase } from './application/reload-sensors.use-case';
 import { RemoveSensorUseCase } from './application/remove-sensor.use-case';
 import { SensorRegistryService } from './application/sensor-registry.service';
 import { SimulateSensorUseCase } from './application/simulate-sensor.use-case';
+import { ReadSensorLogHistoryUseCase } from './application/read-sensor-log-history.use-case';
 import { SENSOR_HEALTH } from './application/ports/sensor-health.port';
 import {
   SENSOR_DRIVER_FACTORY,
@@ -20,8 +21,10 @@ import {
   SensorLogRepositoryPort,
 } from './domain/ports/sensor-log-repository.port';
 import { SENSOR_QUERY } from './domain/ports/sensor-query.port';
+import { SENSOR_LOG_EXPORT_READER } from './domain/ports/sensor-log-export-reader.port';
 import { SENSOR_REPOSITORY } from './domain/ports/sensor-repository.port';
 import { DrizzleSensorLogRepository } from './infrastructure/drizzle-sensor-log.repository';
+import { DrizzleSensorLogExportReader } from './infrastructure/drizzle-sensor-log-export.reader';
 import { DrizzleSensorQuery } from './infrastructure/drizzle-sensor.query';
 import { DrizzleSensorRepository } from './infrastructure/drizzle-sensor.repository';
 import { PigpioGateway } from './infrastructure/pigpio.gateway';
@@ -47,12 +50,14 @@ const devControllers =
     ImportSensorsUseCase,
     ListSensorHistoryTargetsUseCase,
     SimulateSensorUseCase,
+    ReadSensorLogHistoryUseCase,
     PigpioGateway,
     MqttConnectionPool,
     SensorResourcesLifecycleAdapter,
     { provide: CLOCK, useClass: SystemClockAdapter },
     { provide: SENSOR_REPOSITORY, useClass: DrizzleSensorRepository },
     { provide: SENSOR_LOG_REPOSITORY, useClass: DrizzleSensorLogRepository },
+    { provide: SENSOR_LOG_EXPORT_READER, useClass: DrizzleSensorLogExportReader },
     { provide: SENSOR_QUERY, useClass: DrizzleSensorQuery },
     { provide: SENSOR_HEALTH, useExisting: SensorRegistryService },
     {
@@ -76,10 +81,12 @@ const devControllers =
     ImportSensorsUseCase,
     ListSensorHistoryTargetsUseCase,
     SimulateSensorUseCase,
+    ReadSensorLogHistoryUseCase,
     PigpioGateway,
     MqttConnectionPool,
     SENSOR_REPOSITORY,
     SENSOR_LOG_REPOSITORY,
+    SENSOR_LOG_EXPORT_READER,
     SENSOR_QUERY,
     SENSOR_HEALTH,
     SENSOR_DRIVER_FACTORY,
