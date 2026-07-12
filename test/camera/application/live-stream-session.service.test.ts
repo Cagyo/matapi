@@ -110,18 +110,51 @@ describe('LiveStreamSessionService', () => {
     expect(switched.cameraName).toBe('garden');
   });
 
-  it('retains an active session when stopping the gateway fails', async () => {
+  it('rejects a camera switch with a domain error and retries cleanup after gateway stop fails', async () => {
     const gateway = new FakeGateway();
     gateway.stopError = new Error('stop failed');
     const service = createService({ gateway });
 
     await service.open(source('front_door'), 1);
 
-    await expect(service.stop(1)).rejects.toThrow('stop failed');
-    await expect(service.open(source('garden'), 2)).rejects.toThrow('stop failed');
+    await expect(service.open(source('garden'), 2)).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
 
     expect(gateway.startCalls).toHaveLength(1);
+    expect(gateway.stopCalls).toBe(1);
+
+    gateway.stopError = undefined;
+
+    await expect(service.open(source('garden'), 2)).resolves.toMatchObject({
+      cameraName: 'garden',
+    });
+    expect(gateway.startCalls).toHaveLength(2);
     expect(gateway.stopCalls).toBe(2);
+  });
+
+  it('rejects a camera switch with a domain error when lease clear fails', async () => {
+    const gateway = new FakeGateway();
+    const lease = new FakeLease();
+    const service = createService({ gateway, lease });
+
+    await service.open(source('front_door'), 1);
+    lease.clearError = new Error('lease clear failed');
+
+    await expect(service.open(source('garden'), 2)).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+
+    expect(gateway.startCalls).toHaveLength(1);
+    expect(gateway.stopCalls).toBe(1);
+
+    lease.clearError = undefined;
+
+    await expect(service.open(source('garden'), 2)).resolves.toMatchObject({
+      cameraName: 'garden',
+    });
+    expect(gateway.startCalls).toHaveLength(2);
+    expect(gateway.stopCalls).toBe(1);
   });
 
   it('cleans up and rejects every pending caller when writing the lease fails', async () => {
@@ -213,6 +246,30 @@ describe('LiveStreamSessionService', () => {
     await vi.advanceTimersByTimeAsync(100);
 
     expect(gateway.stopCalls).toBe(1);
+    expect(lease.clearCalls).toBe(1);
+  });
+
+  it('keeps an expired session safely retained and retries cleanup after timer teardown fails', async () => {
+    vi.useFakeTimers();
+    const clock = new FakeMonotonicClock(1_000);
+    const gateway = new FakeGateway();
+    const lease = new FakeLease();
+    const service = createService({ clock, gateway, lease, durationMs: 100 });
+
+    await service.open(source('front_door'), 1);
+    gateway.stopError = new Error('stop failed');
+    clock.advance(100);
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(gateway.stopCalls).toBe(1);
+    expect(lease.clearCalls).toBe(0);
+
+    gateway.stopError = undefined;
+
+    await expect(service.open(source('garden'), 2)).resolves.toMatchObject({
+      cameraName: 'garden',
+    });
+    expect(gateway.stopCalls).toBe(2);
     expect(lease.clearCalls).toBe(1);
   });
 
@@ -367,6 +424,7 @@ class FakeLease implements LiveStreamLeasePort {
   writes: LiveStreamLease[] = [];
   clearCalls = 0;
   writeError?: Error;
+  clearError?: Error;
 
   constructor(private lease: LiveStreamLease | null = null) {}
 
@@ -381,6 +439,7 @@ class FakeLease implements LiveStreamLeasePort {
   }
 
   async clear(): Promise<void> {
+    if (this.clearError) throw this.clearError;
     this.lease = null;
     this.clearCalls += 1;
   }

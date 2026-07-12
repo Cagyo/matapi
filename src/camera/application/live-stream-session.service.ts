@@ -112,44 +112,48 @@ export class LiveStreamSessionService implements OnModuleInit {
   open(source: LiveStreamSource, telegramId: number): Promise<OpenLiveStreamResult> {
     const deferred = createDeferred<OpenLiveStreamResult>();
     const queued = this.enqueue(async () => {
-      if (this.cleanupBlocked && !(await this.retryBlockedCleanup())) {
-        deferred.reject(new LiveStreamUnavailableError());
-        return;
-      }
-
-      await this.expireIfDue();
-
-      if (this.active?.session.cameraId === source.cameraId) {
-        await this.openViewer(this.active, telegramId, deferred);
-        return;
-      }
-
-      if (this.active) {
-        await this.stopActive();
-      }
-
-      if (this.pending) {
-        if (this.pending.session.cameraId === source.cameraId) {
-          this.pending.requests.push({ telegramId, deferred });
+      try {
+        if (this.cleanupBlocked && !(await this.retryBlockedCleanup())) {
+          deferred.reject(new LiveStreamUnavailableError());
           return;
         }
 
-        this.pending.cancelled = true;
-        if (this.pending.replacement?.source.cameraId === source.cameraId) {
-          this.pending.replacement.requests.push({ telegramId, deferred });
-        } else {
-          if (this.pending.replacement) {
-            this.rejectRequests(this.pending.replacement.requests);
-          }
-          this.pending.replacement = {
-            source,
-            requests: [{ telegramId, deferred }],
-          };
-        }
-        return;
-      }
+        await this.expireIfDue();
 
-      this.beginStart(source, telegramId, deferred);
+        if (this.active?.session.cameraId === source.cameraId) {
+          await this.openViewer(this.active, telegramId, deferred);
+          return;
+        }
+
+        if (this.active) {
+          await this.stopActive();
+        }
+
+        if (this.pending) {
+          if (this.pending.session.cameraId === source.cameraId) {
+            this.pending.requests.push({ telegramId, deferred });
+            return;
+          }
+
+          this.pending.cancelled = true;
+          if (this.pending.replacement?.source.cameraId === source.cameraId) {
+            this.pending.replacement.requests.push({ telegramId, deferred });
+          } else {
+            if (this.pending.replacement) {
+              this.rejectRequests(this.pending.replacement.requests);
+            }
+            this.pending.replacement = {
+              source,
+              requests: [{ telegramId, deferred }],
+            };
+          }
+          return;
+        }
+
+        this.beginStart(source, telegramId, deferred);
+      } catch {
+        deferred.reject(new LiveStreamUnavailableError());
+      }
     });
 
     return queued.then(() => deferred.promise);
@@ -402,7 +406,10 @@ export class LiveStreamSessionService implements OnModuleInit {
       active.session.expiresMonotonicMs - this.clock.now(),
     );
     this.expiryTimer = setTimeout(() => {
-      void this.enqueue(() => this.expireIfDue());
+      void this.enqueue(() => this.expireIfDue()).catch(() => {
+        // stopActive retains the active session when cleanup fails; a later
+        // open or stop retries it without leaking an unhandled rejection.
+      });
     }, remainingMs);
   }
 
