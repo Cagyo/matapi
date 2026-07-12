@@ -33,4 +33,13 @@ describe('catalogFor', () => {
       expect(Object.isFrozen(catalog.presentation.config)).toBe(true);
     }
   });
+
+  it('provides CSV export copy and menu actions for every locale', () => {
+    for (const catalog of [catalogs.en, catalogs.ru, catalogs.uk]) {
+      expect(catalog.csv.selectTarget).toBeTruthy();
+      expect(catalog.csv.caption).toBeTruthy();
+      expect(catalog.menu.buttons.exportCsv).toBeTruthy();
+      expect(catalog.menu.submenus.sensorsExportCsv).toBeTruthy();
+    }
+  });
 });
