@@ -6,7 +6,8 @@ export type CameraAdminAlert =
   | 'motion-daemon-recovered'
   | 'gdrive-sync-failing'
   | 'disk-warning'
-  | 'emergency-disk-cleanup';
+  | 'emergency-disk-cleanup'
+  | 'live-stream-recovery-failed';
 
 /**
  * Sends an alert to administrators only (spec 19 → admins-only events,

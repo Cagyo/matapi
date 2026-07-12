@@ -1081,6 +1081,8 @@ const enCatalog = {
         '⚠️ Disk usage is high and approaching the critical threshold. Uploaded media will be cleaned up automatically if it keeps climbing.',
       emergencyDiskCleanup:
         '🚨 Emergency disk cleanup ran: old events/logs were pruned and the motion daemon was stopped to free space.',
+      liveStreamRecoveryFailed:
+        '⚠️ A stale live-stream process could not be verified and was not stopped.',
     },
   },
 

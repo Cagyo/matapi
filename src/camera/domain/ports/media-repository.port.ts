@@ -22,7 +22,10 @@ export interface BrowseMotionEvent extends MotionEvent {
  */
 export interface MediaRepositoryPort {
   listCameras(): Promise<Camera[]>;
-  /** Case-insensitive name lookup; `null` when absent. */
+  /**
+   * Case-insensitive name lookup; `null` when absent. Results may be disabled,
+   * so callers that expose a camera externally must check `camera.enabled`.
+   */
   findCameraByName(name: string): Promise<Camera | null>;
   findEventById(id: number): Promise<MotionEvent | null>;
   /** Events whose `startedAt` falls within the local-time day of `day`. */

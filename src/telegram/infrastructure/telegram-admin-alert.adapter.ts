@@ -54,6 +54,8 @@ export class TelegramAdminAlertAdapter implements AdminAlertPort {
         return en.camera.adminAlert.diskWarning;
       case 'emergency-disk-cleanup':
         return en.camera.adminAlert.emergencyDiskCleanup;
+      case 'live-stream-recovery-failed':
+        return en.camera.adminAlert.liveStreamRecoveryFailed;
     }
   }
 }
