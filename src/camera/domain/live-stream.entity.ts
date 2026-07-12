@@ -1,5 +1,15 @@
 const VIEWER_TOKEN_MINIMUM_BYTES = 32;
 
+declare const liveStreamProcessIdBrand: unique symbol;
+
+/**
+ * Opaque identifier of the worker-owned streaming process. This is a numeric
+ * recovery handle only; it does not expose or depend on a process API.
+ */
+export type LiveStreamProcessId = number & {
+  readonly [liveStreamProcessIdBrand]: 'LiveStreamProcessId';
+};
+
 export interface LiveStreamSource {
   kind: 'motion-mjpeg';
   cameraId: string;
@@ -41,7 +51,7 @@ export interface LiveStreamMessageReference {
  */
 export interface LiveStreamLease {
   sessionNonce: string;
-  pid: number;
+  pid: LiveStreamProcessId;
   processIdentity: string;
   cameraId: string;
   diagnosticExpiresAtUnixMs: number;
@@ -55,6 +65,18 @@ export function createLiveStreamSession(
     ...input,
     expiresMonotonicMs: input.startedMonotonicMs + input.durationMs,
   };
+}
+
+export function createLiveStreamProcessId(
+  pid: number,
+): LiveStreamProcessId {
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    throw new RangeError(
+      'Live stream recovery process identifier must be a positive safe integer',
+    );
+  }
+
+  return pid as LiveStreamProcessId;
 }
 
 /**
