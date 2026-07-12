@@ -37,9 +37,9 @@ Both depend on sensor-domain ports, not Drizzle. The Telegram context consumes t
 
 Extend `SensorQueryPort` with a history-target projection that contains the immutable sensor ID, name, type, state (`current` or `archived`), and archived timestamp when applicable. It includes enabled and disabled current sensors, followed by archives. The Drizzle and in-memory adapters return targets in deterministic order: current first, then archived; alphabetical by name within each group; ID as the final tie-breaker. `ArchivedSensor` must retain `type` so its picker entry has the normal sensor icon.
 
-`ReadSensorLogHistoryUseCase` accepts either a typed name or an immutable ID. Typed-name resolution follows the established active-first behavior. When a current and archived sensor share a name, the command exports the current sensor; the archive is selected through the keyboard. The use case consumes `SensorLogExportReaderPort`, a streaming read port owned by the sensors application. Its `read(sensorId, { limit, maxMessageBytes })` method returns an `AsyncIterable<SensorLogExportRow>`. `SensorLogExportRow` has `{ id, level, message, timestamp: Date | null }` and no Drizzle type leaks across the boundary.
+`ReadSensorLogHistoryUseCase` accepts either a typed name or an immutable ID. Typed-name resolution follows the established active-first behavior. When a current and archived sensor share a name, the command exports the current sensor; the archive is selected through the keyboard. The use case consumes `SensorLogExportReaderPort`, a streaming read port owned by the sensors application. Its synchronous `withRows(sensorId, { limit, maxMessageBytes }, consume)` method invokes `consume(rows: Iterable<SensorLogExportRow>)` while the read snapshot is open. `SensorLogExportRow` has `{ id, level, message, timestamp: Date | null }` and no Drizzle type leaks across the boundary.
 
-The Drizzle adapter opens one read snapshot, selects the newest matching `limit` rows by `timestamp DESC, id DESC`, validates that selected set's maximum UTF-8 message byte length, and then iterates that same set by `timestamp ASC, id ASC`. This avoids loading all 5,000 messages into application memory, avoids a preflight/stream race, and emits CSV rows in stable oldest-to-newest order without a reverse copy. The in-memory adapter implements the same cap and ordering semantics.
+The Drizzle adapter opens one synchronous read transaction, selects the newest matching `limit` rows by `timestamp DESC, id DESC`, validates that selected set's maximum UTF-8 message byte length, and then supplies an iterator over that same set by `timestamp ASC, id ASC` to `consume`. The consumer writes synchronously while the callback runs, then uploads only after the transaction closes. This avoids loading all 5,000 messages into application memory, avoids a preflight/stream race, and emits CSV rows in stable oldest-to-newest order without a reverse copy. The in-memory adapter implements the same cap and ordering semantics.
 
 Malformed historical timestamps are not converted to the epoch. If an export row has no valid timestamp, the use case fails with a typed error that the Telegram handler maps to a safe localized export failure.
 
@@ -138,7 +138,7 @@ Add `en.csv` keys for picker title, caption, empty result, file name, not-found,
 
 ### Infrastructure and regression tests
 
-- Drizzle export reader uses one snapshot, selects the newest capped result set by `timestamp DESC, id DESC`, enforces the row-size cap before streaming, then emits it `timestamp ASC, id ASC`.
+- Drizzle export reader uses one synchronous snapshot callback, selects the newest capped result set by `timestamp DESC, id DESC`, enforces the row-size cap before iterating it `timestamp ASC, id ASC`.
 - The temp-file adapter enforces directory/file modes, rejects symlinks, and cleans success, failure, overflow, and stale-file paths; its upload source factory opens a fresh stream on each call.
 - `MenuHandler` delegates both CSV entry points without duplicating behavior.
 - Run the focused test suites, then `yarn test` and `yarn build`.
