@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { CameraModule } from '../camera/camera.module';
+import { ConfigModule } from '../config/config.module';
 import { EventModule } from '../events/event.module';
 import { FeatureModule } from '../features/feature.module';
 import { NetworkModule } from '../network/network.module';
@@ -99,6 +100,7 @@ const mode = resolveBotMode();
  */
 @Module({
   imports: [
+    ConfigModule,
     EventModule,
     SensorModule,
     SystemModule,
