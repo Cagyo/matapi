@@ -10,6 +10,7 @@ import {
   unlinkSync,
   writeSync,
 } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { Readable } from "node:stream";
@@ -37,12 +38,14 @@ export class NodeCsvTempFileAdapter implements CsvTempFilePort, OnModuleInit {
     }
 
     this.ensureDirectory();
-    const path = join(this.directory, filename);
+    let path: string | undefined;
     let descriptor: number | undefined;
     let writtenBytes = 0;
 
     try {
-      descriptor = openSync(path, "wx", 0o600);
+      const created = this.createTempFile(filename);
+      path = created.path;
+      descriptor = created.descriptor;
       for (const chunk of chunks) {
         const chunkBytes = Buffer.byteLength(chunk, "utf8");
         writtenBytes += chunkBytes;
@@ -61,11 +64,13 @@ export class NodeCsvTempFileAdapter implements CsvTempFilePort, OnModuleInit {
           // The incomplete path is still removed below.
         }
       }
-      try {
-        unlinkSync(path);
-      } catch (unlinkError) {
-        if (!isMissing(unlinkError) && !(error instanceof Error)) {
-          throw unlinkError;
+      if (path !== undefined) {
+        try {
+          unlinkSync(path);
+        } catch (unlinkError) {
+          if (!isMissing(unlinkError) && !(error instanceof Error)) {
+            throw unlinkError;
+          }
         }
       }
       throw error;
@@ -102,6 +107,18 @@ export class NodeCsvTempFileAdapter implements CsvTempFilePort, OnModuleInit {
   private ensureDirectory(): void {
     mkdirSync(this.directory, { recursive: true, mode: 0o700 });
     chmodSync(this.directory, 0o700);
+  }
+
+  private createTempFile(filename: string): { descriptor: number; path: string } {
+    for (;;) {
+      const path = join(this.directory, `${filename}.${randomUUID()}`);
+      try {
+        return { path, descriptor: openSync(path, "wx", 0o600) };
+      } catch (error) {
+        if (isAlreadyExists(error)) continue;
+        throw error;
+      }
+    }
   }
 }
 
@@ -144,5 +161,14 @@ function isMissing(error: unknown): error is NodeJS.ErrnoException {
     error !== null &&
     "code" in error &&
     error.code === "ENOENT"
+  );
+}
+
+function isAlreadyExists(error: unknown): error is NodeJS.ErrnoException {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "EEXIST"
   );
 }

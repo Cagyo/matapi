@@ -69,17 +69,34 @@ describe("NodeCsvTempFileAdapter", () => {
   it("creates private files and opens independent retry streams", async () => {
     const port = new NodeCsvTempFileAdapter(tempDirectory);
     const file = port.stage("x.csv", ["ok"]);
+    const [stagedPath] = await readdir(tempDirectory);
 
     expect((await stat(tempDirectory)).mode & 0o777).toBe(0o700);
-    expect((await stat(join(tempDirectory, file.filename))).mode & 0o777).toBe(
+    expect((await stat(join(tempDirectory, stagedPath))).mode & 0o777).toBe(
       0o600,
     );
     expect(await readAll(file.open())).toEqual(await readAll(file.open()));
     await file.dispose();
     await expect(
-      lstat(join(tempDirectory, file.filename)),
+      lstat(join(tempDirectory, stagedPath)),
     ).rejects.toMatchObject({ code: "ENOENT" });
     await expect(file.dispose()).resolves.toBeUndefined();
+  });
+
+  it("preserves independent readable exports with the same download filename", async () => {
+    const port = new NodeCsvTempFileAdapter(tempDirectory);
+
+    const [first, second] = await Promise.all([
+      Promise.resolve().then(() => port.stage("same-name.csv", ["first"])),
+      Promise.resolve().then(() => port.stage("same-name.csv", ["second"])),
+    ]);
+
+    expect(first.filename).toBe("same-name.csv");
+    expect(second.filename).toBe("same-name.csv");
+    await expect(readAll(first.open())).resolves.toBe("first");
+    await expect(readAll(second.open())).resolves.toBe("second");
+
+    await Promise.all([first.dispose(), second.dispose()]);
   });
 
   it("only removes stale regular feature files and leaves symlinks untouched", async () => {
