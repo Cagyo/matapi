@@ -1,9 +1,11 @@
+import { Locale } from './locale';
 import { Role } from './role';
 
 export interface User {
   telegramId: number;
   name: string;
   role: Role;
+  locale: Locale;
   muted: boolean;
   /** Quiet-hours start (`HH:MM`, 24h, local TZ) or `null` when disabled. */
   quietStart: string | null;
@@ -16,5 +18,6 @@ export interface NewUser {
   telegramId: number;
   name: string;
   role: Role;
+  locale: Locale;
   createdAt: Date;
 }

@@ -41,6 +41,7 @@ describe('ClaimAdminUseCase', () => {
       telegramId: 1001,
       name: 'Ada',
       role: 'admin',
+      locale: 'en',
       muted: false,
       quietStart: null,
       quietEnd: null,
@@ -55,6 +56,7 @@ describe('ClaimAdminUseCase', () => {
         telegramId: 1001,
         name: 'Ada',
         role: 'admin',
+        locale: 'en',
         createdAt: new Date('2029-01-01T00:00:00.000Z'),
       },
     ]);
@@ -81,6 +83,7 @@ describe('ClaimAdminUseCase', () => {
         telegramId: 1001,
         name: 'Ada',
         role: 'admin',
+        locale: 'en',
         createdAt: new Date('2029-01-01T00:00:00.000Z'),
       },
     ]);
@@ -109,6 +112,7 @@ describe('ClaimAdminUseCase', () => {
         telegramId: 1001,
         name: 'Ada',
         role: 'admin',
+        locale: 'en',
         createdAt: new Date('2029-01-01T00:00:00.000Z'),
       },
     ]);

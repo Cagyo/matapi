@@ -11,6 +11,7 @@ import {
   USER_REPOSITORY,
   UserRepositoryPort,
 } from '../domain/ports/user-repository.port';
+import { DEFAULT_LOCALE } from '../domain/locale';
 import { User } from '../domain/user.entity';
 
 export interface RegisterUserInput {
@@ -54,6 +55,7 @@ export class RegisterUserUseCase {
       telegramId: input.telegramId,
       name: input.name,
       role: invite.role,
+      locale: DEFAULT_LOCALE,
       createdAt: now,
     });
 

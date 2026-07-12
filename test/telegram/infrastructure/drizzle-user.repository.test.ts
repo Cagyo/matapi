@@ -26,6 +26,7 @@ describe('DrizzleUserRepository', () => {
       telegramId: 1001,
       name: 'Ada',
       role: 'admin',
+      locale: 'en',
       createdAt: new Date('2030-01-01T00:00:00.000Z'),
     });
 
@@ -33,31 +34,37 @@ describe('DrizzleUserRepository', () => {
       telegramId: 1001,
       name: 'Ada',
       role: 'admin',
+      locale: 'en',
     });
     expect(await repo.countAdmins()).toBe(1);
     expect(await repo.findByTelegramId(1001)).toMatchObject({
       telegramId: 1001,
       name: 'Ada',
       role: 'admin',
+      locale: 'en',
     });
     expect(await repo.listRecipients()).toHaveLength(1);
   });
 
   it('upgrades an existing user to admin via onConflict', async () => {
-    await repo.createAdmin({
+    await repo.createUser({
       telegramId: 1001,
       name: 'Ada',
-      role: 'admin',
+      role: 'user',
+      locale: 'uk',
       createdAt: new Date('2030-01-01T00:00:00.000Z'),
     });
     const upserted = await repo.createAdmin({
       telegramId: 1001,
       name: 'Ada Lovelace',
       role: 'admin',
+      locale: 'en',
       createdAt: new Date('2030-01-02T00:00:00.000Z'),
     });
 
     expect(upserted.name).toBe('Ada Lovelace');
+    expect(upserted.role).toBe('admin');
+    expect(upserted.locale).toBe('uk');
     expect(await repo.countAdmins()).toBe(1);
   });
 
@@ -66,12 +73,14 @@ describe('DrizzleUserRepository', () => {
       telegramId: 2002,
       name: 'Alex',
       role: 'user',
+      locale: 'en',
       createdAt: new Date('2030-01-01T00:00:00.000Z'),
     });
     await repo.createUser({
       telegramId: 2003,
       name: 'alex',
       role: 'user',
+      locale: 'en',
       createdAt: new Date('2030-01-01T00:00:00.000Z'),
     });
 
@@ -87,6 +96,7 @@ describe('DrizzleUserRepository', () => {
       telegramId: 2002,
       name: 'Alex',
       role: 'user',
+      locale: 'en',
       createdAt: new Date('2030-01-01T00:00:00.000Z'),
     });
 
@@ -103,16 +113,18 @@ describe('DrizzleUserRepository', () => {
       telegramId: 1,
       name: 'A',
       role: 'admin',
+      locale: 'en',
       createdAt: new Date(),
     });
     const second = await repo.claimFirstAdmin({
       telegramId: 2,
       name: 'B',
       role: 'admin',
+      locale: 'en',
       createdAt: new Date(),
     });
 
-    expect(first?.role).toBe('admin');
+    expect(first).toMatchObject({ role: 'admin', locale: 'en' });
     expect(second).toBeNull();
     expect(await repo.countAdmins()).toBe(1);
     ctx.close();
@@ -123,9 +135,33 @@ describe('DrizzleUserRepository', () => {
       telegramId: 1001,
       name: 'Ada',
       role: 'admin',
+      locale: 'en',
       createdAt: new Date('2030-01-01T00:00:00.000Z'),
     });
     await expect(repo.demoteAdminIfNotLast(1001)).resolves.toBeNull();
     expect(await repo.countAdmins()).toBe(1);
+  });
+
+  it('persists user locale and updates only the targeted user locale', async () => {
+    const first = await repo.createUser({
+      telegramId: 2001,
+      name: 'Ada',
+      role: 'user',
+      locale: 'en',
+      createdAt: new Date('2030-01-01T00:00:00.000Z'),
+    });
+    await repo.createUser({
+      telegramId: 2002,
+      name: 'Linus',
+      role: 'user',
+      locale: 'en',
+      createdAt: new Date('2030-01-01T00:00:00.000Z'),
+    });
+
+    const updated = await repo.setLocale(2001, 'uk');
+
+    expect(first.locale).toBe('en');
+    expect(updated.locale).toBe('uk');
+    expect((await repo.findByTelegramId(2002))?.locale).toBe('en');
   });
 });

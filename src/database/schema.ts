@@ -1,4 +1,5 @@
 import { sqliteTable, text, integer, index, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import { DEFAULT_LOCALE } from '../telegram/domain/locale';
 
 // ─── Sensors ───
 export const sensors = sqliteTable('sensors', {
@@ -64,6 +65,7 @@ export const users = sqliteTable('users', {
   telegramId: integer('telegram_id').primaryKey(),
   name: text('name').notNull(),
   role: text('role').notNull().default('user'),
+  locale: text('locale').notNull().default(DEFAULT_LOCALE),
   muted: integer('muted', { mode: 'boolean' }).default(false),
   quietStart: text('quiet_start'),
   quietEnd: text('quiet_end'),

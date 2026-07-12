@@ -25,6 +25,7 @@ function makeUser(overrides: Partial<User> = {}): User {
     telegramId: 1001,
     name: 'Ada',
     role: 'admin',
+    locale: 'en',
     createdAt: new Date('2030-01-01T00:00:00.000Z'),
     ...overrides,
   };

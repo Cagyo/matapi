@@ -11,6 +11,7 @@ import {
   USER_REPOSITORY,
   UserRepositoryPort,
 } from '../domain/ports/user-repository.port';
+import { DEFAULT_LOCALE } from '../domain/locale';
 import { User } from '../domain/user.entity';
 
 export interface ClaimAdminInput {
@@ -47,6 +48,7 @@ export class ClaimAdminUseCase {
       telegramId: input.telegramId,
       name: input.name,
       role: 'admin',
+      locale: DEFAULT_LOCALE,
       createdAt: this.clock.now(),
     });
     if (!admin) throw new AdminAlreadyClaimedError();

@@ -41,6 +41,7 @@ describe('RegisterUserUseCase', () => {
       telegramId: 2002,
       name: 'Alex',
       role: 'user',
+      locale: 'en',
     });
     expect(result.invitedBy).toBe(1001);
     expect(await users.findByTelegramId(2002)).not.toBeNull();
@@ -70,6 +71,7 @@ describe('RegisterUserUseCase', () => {
       telegramId: 2002,
       name: 'Alex',
       role: 'user',
+      locale: 'en',
       createdAt: new Date(),
     });
     await expect(

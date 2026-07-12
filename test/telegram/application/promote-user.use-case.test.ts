@@ -13,6 +13,7 @@ describe('PromoteUserUseCase', () => {
         telegramId: 2002,
         name: 'Alex',
         role: 'user',
+        locale: 'en',
         createdAt: new Date('2030-01-01T00:00:00.000Z'),
       },
     ]);
@@ -33,6 +34,7 @@ describe('PromoteUserUseCase', () => {
         telegramId: 2002,
         name: 'Alex',
         role: 'user',
+        locale: 'en',
         createdAt: null,
       },
     ]);
@@ -62,6 +64,7 @@ describe('PromoteUserUseCase', () => {
         telegramId: 1001,
         name: 'Ada',
         role: 'admin',
+        locale: 'en',
         createdAt: null,
       },
     ]);
@@ -76,8 +79,8 @@ describe('PromoteUserUseCase', () => {
 
   it('rejects an ambiguous name without changing either role', async () => {
     const users = new InMemoryUserRepository([
-      { telegramId: 1001, name: 'Alex', role: 'user', createdAt: null },
-      { telegramId: 1002, name: 'alex', role: 'user', createdAt: null },
+      { telegramId: 1001, name: 'Alex', role: 'user', locale: 'en', createdAt: null },
+      { telegramId: 1002, name: 'alex', role: 'user', locale: 'en', createdAt: null },
     ]);
     const useCase = new PromoteUserUseCase(
       users,
@@ -97,6 +100,7 @@ describe('PromoteUserUseCase', () => {
         telegramId: 1001,
         name: 'Alex',
         role: 'user',
+        locale: 'en',
         muted: true,
         quietStart: '22:00',
         quietEnd: '07:00',
@@ -106,6 +110,7 @@ describe('PromoteUserUseCase', () => {
         telegramId: 1002,
         name: 'alex',
         role: 'admin',
+        locale: 'en',
         muted: false,
         quietStart: null,
         quietEnd: null,

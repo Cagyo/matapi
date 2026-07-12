@@ -10,6 +10,7 @@ async function seedCreatorAdmin(ctx: ReturnType<typeof createTestDatabase>) {
     telegramId: 1,
     name: 'Admin',
     role: 'admin',
+    locale: 'en',
     createdAt: new Date(),
   });
 }

@@ -9,6 +9,7 @@ function seededRepo() {
       telegramId: 42,
       name: 'Ada',
       role: 'admin',
+      locale: 'en',
       muted: false,
       quietStart: null,
       quietEnd: null,

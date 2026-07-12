@@ -13,12 +13,14 @@ describe('DemoteUserUseCase', () => {
         telegramId: 1001,
         name: 'Ada',
         role: 'admin',
+        locale: 'en',
         createdAt: null,
       },
       {
         telegramId: 1002,
         name: 'Linus',
         role: 'admin',
+        locale: 'en',
         createdAt: null,
       },
     ]);
@@ -39,6 +41,7 @@ describe('DemoteUserUseCase', () => {
         telegramId: 1001,
         name: 'Ada',
         role: 'admin',
+        locale: 'en',
         createdAt: null,
       },
     ]);
@@ -70,6 +73,7 @@ describe('DemoteUserUseCase', () => {
         telegramId: 2002,
         name: 'Alex',
         role: 'user',
+        locale: 'en',
         createdAt: null,
       },
     ]);
@@ -82,9 +86,9 @@ describe('DemoteUserUseCase', () => {
 
   it('demotes only the immutable id selected by id: syntax', async () => {
     const users = new InMemoryUserRepository([
-      { telegramId: 1, name: 'Admin', role: 'admin', createdAt: null },
-      { telegramId: 1001, name: 'Alex', role: 'admin', createdAt: null },
-      { telegramId: 1002, name: 'alex', role: 'admin', createdAt: null },
+      { telegramId: 1, name: 'Admin', role: 'admin', locale: 'en', createdAt: null },
+      { telegramId: 1001, name: 'Alex', role: 'admin', locale: 'en', createdAt: null },
+      { telegramId: 1002, name: 'alex', role: 'admin', locale: 'en', createdAt: null },
     ]);
     const useCase = new DemoteUserUseCase(
       users,

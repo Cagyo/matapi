@@ -1,3 +1,4 @@
+import { Locale } from '../locale';
 import { Role } from '../role';
 import { NewUser, User } from '../user.entity';
 
@@ -24,6 +25,7 @@ export interface UserRepositoryPort {
   updateRole(telegramId: number, role: Role): Promise<User>;
   /** Toggle the user-level global mute (spec 12 — `/mute`, `/unmute`). */
   setMuted(telegramId: number, muted: boolean): Promise<User>;
+  setLocale(telegramId: number, locale: Locale): Promise<User>;
   /**
    * Set or clear quiet-hours window (spec 12 — `/quiet_hours`). Pass `null`
    * for both fields to disable.

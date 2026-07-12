@@ -1,4 +1,5 @@
 import { UserNotFoundError } from '../domain/errors/user-not-found.error';
+import { DEFAULT_LOCALE, Locale } from '../domain/locale';
 import { UserRepositoryPort } from '../domain/ports/user-repository.port';
 import { Role } from '../domain/role';
 import { NewUser, User } from '../domain/user.entity';
@@ -12,7 +13,10 @@ export class InMemoryUserRepository implements UserRepositoryPort {
 
   constructor(seed: User[] = []) {
     for (const user of seed) {
-      this.store.set(user.telegramId, user);
+      this.store.set(user.telegramId, {
+        ...user,
+        locale: user.locale ?? DEFAULT_LOCALE,
+      });
     }
   }
 
@@ -44,10 +48,12 @@ export class InMemoryUserRepository implements UserRepositoryPort {
   }
 
   async createAdmin(user: NewUser): Promise<User> {
+    const existing = this.store.get(user.telegramId);
     const persisted: User = {
       telegramId: user.telegramId,
       name: user.name,
       role: user.role,
+      locale: existing?.locale ?? user.locale ?? DEFAULT_LOCALE,
       muted: false,
       quietStart: null,
       quietEnd: null,
@@ -62,6 +68,7 @@ export class InMemoryUserRepository implements UserRepositoryPort {
       telegramId: user.telegramId,
       name: user.name,
       role: user.role,
+      locale: user.locale ?? DEFAULT_LOCALE,
       muted: false,
       quietStart: null,
       quietEnd: null,
@@ -98,6 +105,14 @@ export class InMemoryUserRepository implements UserRepositoryPort {
     const existing = this.store.get(telegramId);
     if (!existing) throw new UserNotFoundError(String(telegramId));
     const updated: User = { ...existing, muted };
+    this.store.set(telegramId, updated);
+    return updated;
+  }
+
+  async setLocale(telegramId: number, locale: Locale): Promise<User> {
+    const existing = this.store.get(telegramId);
+    if (!existing) throw new UserNotFoundError(String(telegramId));
+    const updated: User = { ...existing, locale };
     this.store.set(telegramId, updated);
     return updated;
   }

@@ -3,6 +3,7 @@ import { count, eq, sql } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../database/database.module';
 import { users } from '../../database/schema';
 import { UserNotFoundError } from '../domain/errors/user-not-found.error';
+import { normalizeLocale, Locale } from '../domain/locale';
 import { UserRepositoryPort } from '../domain/ports/user-repository.port';
 import { Role } from '../domain/role';
 import { NewUser, User } from '../domain/user.entity';
@@ -37,6 +38,7 @@ export class DrizzleUserRepository implements UserRepositoryPort {
           telegramId: user.telegramId,
           name: user.name,
           role: user.role,
+          locale: user.locale,
           createdAt: user.createdAt,
         })
         .onConflictDoUpdate({
@@ -76,6 +78,7 @@ export class DrizzleUserRepository implements UserRepositoryPort {
         telegramId: user.telegramId,
         name: user.name,
         role: user.role,
+        locale: user.locale,
         createdAt: user.createdAt,
       })
       .onConflictDoUpdate({
@@ -94,6 +97,7 @@ export class DrizzleUserRepository implements UserRepositoryPort {
         telegramId: user.telegramId,
         name: user.name,
         role: user.role,
+        locale: user.locale,
         createdAt: user.createdAt,
       })
       .returning()
@@ -142,6 +146,17 @@ export class DrizzleUserRepository implements UserRepositoryPort {
     return this.toUser(row);
   }
 
+  async setLocale(telegramId: number, locale: Locale): Promise<User> {
+    const [row] = this.db
+      .update(users)
+      .set({ locale })
+      .where(eq(users.telegramId, telegramId))
+      .returning()
+      .all();
+    if (!row) throw new UserNotFoundError(String(telegramId));
+    return this.toUser(row);
+  }
+
   async setQuietHours(
     telegramId: number,
     start: string | null,
@@ -170,6 +185,7 @@ export class DrizzleUserRepository implements UserRepositoryPort {
       telegramId: row.telegramId,
       name: row.name,
       role: (row.role as Role) ?? 'user',
+      locale: normalizeLocale(row.locale),
       muted: row.muted ?? false,
       quietStart: row.quietStart ?? null,
       quietEnd: row.quietEnd ?? null,
