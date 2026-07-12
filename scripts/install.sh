@@ -5,10 +5,15 @@ REPO="${HOME_WORKER_REPO:-https://github.com/CHANGE_ME/home-worker.git}"
 INSTALL_DIR="${HOME_WORKER_INSTALL_DIR:-/opt/home-worker}"
 NODE_VERSION="${HOME_WORKER_NODE_VERSION:-20}"
 USER="${HOME_WORKER_USER:-homeworker}"
+APT_LOCK_TIMEOUT_SECONDS=300
 
 export DEBIAN_FRONTEND=noninteractive
 export APT_LISTCHANGES_FRONTEND=none
 export NEEDRESTART_MODE=a
+
+apt_get() {
+  sudo apt-get -o "DPkg::Lock::Timeout=${APT_LOCK_TIMEOUT_SECONDS}" "$@"
+}
 
 main() {
   check_raspberry_pi
@@ -43,8 +48,9 @@ setup_hardware_resources() {
 
   # 1. Non-interactive filesystem expansion
   if command -v raspi-config >/dev/null 2>&1 || [ -f /etc/rpi-issue ]; then
-    sudo apt-get update -qq || true
-    sudo apt-get install -y cloud-guest-utils 2>/dev/null || true
+    if ! apt_get update -qq || ! apt_get install -y cloud-guest-utils; then
+      echo "WARNING: Could not install optional cloud-guest-utils; skipping live filesystem expansion support." >&2
+    fi
 
     local root_dev disk part
     root_dev=$(findmnt / -o source -n 2>/dev/null || true)
@@ -111,8 +117,8 @@ create_user() {
 
 install_system_deps() {
   echo "Installing system dependencies..."
-  sudo apt-get update
-  sudo apt-get install -y \
+  apt_get update
+  apt_get install -y \
     git sqlite3 libsqlite3-dev build-essential python3 python3-setuptools \
     ffmpeg \
     usb-modeswitch
@@ -128,7 +134,7 @@ install_pigpio() {
 
   if apt-cache show pigpio &>/dev/null 2>&1; then
     echo "Installing pigpio from apt repository..."
-    if sudo apt-get install -y pigpio python3-pigpio; then
+    if apt_get install -y pigpio python3-pigpio; then
       return 0
     fi
   fi
@@ -156,7 +162,7 @@ install_node() {
     fi
   fi
   curl -fsSL "https://deb.nodesource.com/setup_${NODE_VERSION}.x" | sudo -E bash -
-  sudo apt-get install -y nodejs
+  apt_get install -y nodejs
   echo "Node.js installed: $(node -v)"
   sudo corepack enable
 }
@@ -319,8 +325,8 @@ setup_system_update_sudoers() {
   local tmp
   tmp="$(mktemp)"
   cat > "$tmp" <<EOF
-$USER ALL=(ALL) NOPASSWD: /usr/bin/apt-get update, /bin/apt-get update
-$USER ALL=(ALL) NOPASSWD: /usr/bin/apt-get install -y --only-upgrade motion ffmpeg mosquitto, /bin/apt-get install -y --only-upgrade motion ffmpeg mosquitto
+$USER ALL=(ALL) NOPASSWD: /usr/bin/apt-get -o DPkg::Lock::Timeout=300 update, /bin/apt-get -o DPkg::Lock::Timeout=300 update
+$USER ALL=(ALL) NOPASSWD: /usr/bin/apt-get -o DPkg::Lock::Timeout=300 install -y --only-upgrade motion ffmpeg mosquitto, /bin/apt-get -o DPkg::Lock::Timeout=300 install -y --only-upgrade motion ffmpeg mosquitto
 $USER ALL=(ALL) NOPASSWD: /usr/bin/rclone selfupdate, /bin/rclone selfupdate
 EOF
   if sudo visudo -c -f "$tmp" >/dev/null; then
@@ -440,10 +446,21 @@ patch_legacy_feature_serial_calls() {
 
   echo "Checking feature installers for legacy raspi-config serial commands..."
 
-  sudo grep -RIlE \
+  local legacy_files
+  local scan_status
+  if legacy_files=$(sudo grep -RIlE \
     --exclude='*.bak.serial.*' \
     '^[[:space:]]*(sudo[[:space:]]+)?raspi-config[[:space:]]+nonint[[:space:]]+do_serial[[:space:]]+' \
-    "$INSTALL_DIR/scripts" 2>/dev/null |
+    "$INSTALL_DIR/scripts" 2>/dev/null); then
+    :
+  else
+    scan_status=$?
+    if [ "$scan_status" -eq 1 ]; then
+      return 0
+    fi
+    return "$scan_status"
+  fi
+
   while IFS= read -r file; do
     echo "Patching legacy serial command in: $file"
     sudo cp "$file" "${file}.bak.serial.$(date +%s)" || true
@@ -475,7 +492,7 @@ replacement = (
 text = pattern.sub(replacement, text)
 path.write_text(text)
 PY
-  done
+  done <<< "$legacy_files"
 }
 
 install_selected_features() {

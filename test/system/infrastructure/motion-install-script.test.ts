@@ -184,4 +184,43 @@ describe('motion install scripts', () => {
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
+
+  it('continues when no legacy serial commands need patching', () => {
+    const script = readFileSync(resolve('scripts/install.sh'), 'utf8');
+    const tempDir = mkdtempSync(join(tmpdir(), 'home-worker-serial-noop-'));
+
+    try {
+      const fakeBin = join(tempDir, 'bin');
+      const installDir = join(tempDir, 'install');
+      const scriptsDir = join(installDir, 'scripts');
+      const installer = join(scriptsDir, 'install.sh');
+
+      execFileSync('mkdir', ['-p', fakeBin, scriptsDir]);
+      writeFileSync(
+        join(fakeBin, 'sudo'),
+        '#!/bin/sh\nif [ "$1" = "-u" ]; then shift 2; fi\nexec "$@"\n',
+      );
+      chmodSync(join(fakeBin, 'sudo'), 0o755);
+      writeFileSync(installer, script.replace(/\nmain "\$@"\s*$/, '\n'));
+
+      const harness = join(tempDir, 'patch-legacy-serial-noop.sh');
+      writeFileSync(
+        harness,
+        [
+          '#!/bin/bash',
+          'set -euo pipefail',
+          `export PATH=${shQuote(fakeBin)}:"$PATH"`,
+          `export HOME_WORKER_INSTALL_DIR=${shQuote(installDir)}`,
+          `. ${shQuote(installer)}`,
+          'patch_legacy_feature_serial_calls',
+          '',
+        ].join('\n'),
+      );
+      chmodSync(harness, 0o755);
+
+      expect(() => execFileSync('bash', [harness], { encoding: 'utf8' })).not.toThrow();
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
 });

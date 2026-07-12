@@ -11,6 +11,11 @@ set -euo pipefail
 INSTALL_DIR="${HOME_WORKER_INSTALL_DIR:-/opt/home-worker}"
 DEPS_FILE="${INSTALL_DIR}/config/system-deps.yml"
 SNAPSHOT="${INSTALL_DIR}/data/system-snapshot.txt"
+APT_LOCK_TIMEOUT_SECONDS=300
+
+apt_get() {
+  sudo apt-get -o "DPkg::Lock::Timeout=${APT_LOCK_TIMEOUT_SECONDS}" "$@"
+}
 
 snapshot_current() {
   {
@@ -23,8 +28,8 @@ snapshot_current() {
 update_apt() {
   # NOTE: every sudo command below must exactly match an entry in
   # /etc/sudoers.d/homeworker-sysupdate (written by install.sh) — args included.
-  sudo apt-get update
-  sudo apt-get install -y --only-upgrade motion ffmpeg mosquitto
+  apt_get update
+  apt_get install -y --only-upgrade motion ffmpeg mosquitto
 }
 
 update_rclone() {
