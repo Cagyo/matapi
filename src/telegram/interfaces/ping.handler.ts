@@ -1,14 +1,15 @@
 import { Injectable } from '@nestjs/common';
-import { Composer, Context } from 'grammy';
+import { Composer } from 'grammy';
 import { en } from '../../locales/en';
 import { RoleMiddleware } from './role.middleware';
 import { TelegramHandler } from './telegram-handler';
+import { TelegramContext } from './telegram-context';
 
 @Injectable()
 export class PingHandler implements TelegramHandler {
   constructor(private readonly guard: RoleMiddleware) {}
 
-  register(composer: Composer<Context>): void {
+  register(composer: Composer<TelegramContext>): void {
     composer.command('ping', this.guard.registered, async (ctx) => {
       // `message.date` is Unix seconds at the Telegram server. Falling
       // back to handler entry keeps the round-trip non-zero in tests.

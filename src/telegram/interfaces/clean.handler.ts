@@ -1,9 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Composer, Context } from 'grammy';
+import { Composer } from 'grammy';
 import { TriggerCleanUseCase } from '../../camera/application/trigger-clean.use-case';
 import { en } from '../../locales/en';
 import { RoleMiddleware } from './role.middleware';
 import { TelegramHandler } from './telegram-handler';
+import { TelegramContext } from './telegram-context';
 
 /**
  * `/clean` & callback triggers — spec 15. Admin-only. Manually triggers a
@@ -19,7 +20,7 @@ export class CleanHandler implements TelegramHandler {
     private readonly guard: RoleMiddleware,
   ) {}
 
-  register(composer: Composer<Context>): void {
+  register(composer: Composer<TelegramContext>): void {
     composer.command('clean', this.guard.adminOnly, async (ctx) => {
       await this.handleCommand(ctx);
     });
@@ -34,7 +35,7 @@ export class CleanHandler implements TelegramHandler {
     );
   }
 
-  async handleCommand(ctx: Context): Promise<void> {
+  async handleCommand(ctx: TelegramContext): Promise<void> {
     const arg = (ctx.match ?? '').toString().trim();
     let customThreshold: number | undefined;
 
@@ -50,7 +51,7 @@ export class CleanHandler implements TelegramHandler {
     await this.executeCleanup(ctx, customThreshold);
   }
 
-  private async executeCleanup(ctx: Context, customThreshold?: number): Promise<void> {
+  private async executeCleanup(ctx: TelegramContext, customThreshold?: number): Promise<void> {
     try {
       const res = await this.triggerClean.execute(customThreshold);
       if (!res.executed) {

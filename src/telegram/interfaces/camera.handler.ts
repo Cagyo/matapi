@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { parse } from 'date-fns';
-import { Composer, Context, InlineKeyboard, InputFile } from 'grammy';
+import { Composer, InlineKeyboard, InputFile } from 'grammy';
 import { BrowseMotionEventsUseCase } from '../../camera/application/browse-motion-events.use-case';
 import { CameraStatusUseCase } from '../../camera/application/camera-status.use-case';
 import { DisableMotionUseCase } from '../../camera/application/disable-motion.use-case';
@@ -27,6 +27,7 @@ import { SnapshotFailedError } from '../../camera/domain/errors/snapshot-failed.
 import { eventDurationSec, MotionEvent } from '../../camera/domain/motion-event.entity';
 import { en } from '../../locales/en';
 import { RoleMiddleware } from './role.middleware';
+import { TelegramContext } from './telegram-context';
 import { TelegramHandler } from './telegram-handler';
 
 type Subcommand =
@@ -84,7 +85,7 @@ export class CameraHandler implements TelegramHandler {
     private readonly guard: RoleMiddleware,
   ) {}
 
-  register(composer: Composer<Context>): void {
+  register(composer: Composer<TelegramContext>): void {
     composer.command('camera', this.guard.registered, async (ctx) => {
       const tokens = (ctx.match ?? '').toString().trim().split(/\s+/).filter(Boolean);
       const sub = (tokens.shift() ?? '').toLowerCase() as Subcommand | '';
@@ -126,7 +127,7 @@ export class CameraHandler implements TelegramHandler {
       }
     });
 
-    composer.callbackQuery(/^cam:/, this.guard.registered, async (ctx: Context) => {
+    composer.callbackQuery(/^cam:/, this.guard.registered, async (ctx: TelegramContext) => {
       const userId = ctx.from?.id;
       if (!userId) return;
       await ctx.answerCallbackQuery().catch(() => undefined);
@@ -212,7 +213,7 @@ export class CameraHandler implements TelegramHandler {
     });
   }
 
-  async handleDashboard(ctx: Context): Promise<void> {
+  async handleDashboard(ctx: TelegramContext): Promise<void> {
     const userId = ctx.from?.id;
     if (userId) this.pendingBrowseInputs.delete(userId);
 
@@ -227,7 +228,7 @@ export class CameraHandler implements TelegramHandler {
     await ctx.reply(en.camera.dashboardTitle, { reply_markup: kb });
   }
 
-  private async handleBrowseMenu(ctx: Context): Promise<void> {
+  private async handleBrowseMenu(ctx: TelegramContext): Promise<void> {
     this.clearBrowseInput(ctx);
     this.clearBrowseResults(ctx);
 
@@ -243,7 +244,7 @@ export class CameraHandler implements TelegramHandler {
     await ctx.reply(en.camera.browse.menuTitle, { reply_markup: kb });
   }
 
-  private async handleBrowsePickDate(ctx: Context): Promise<void> {
+  private async handleBrowsePickDate(ctx: TelegramContext): Promise<void> {
     const userId = ctx.from?.id;
     if (!userId) return;
     this.pendingBrowseInputs.set(userId, {
@@ -256,7 +257,7 @@ export class CameraHandler implements TelegramHandler {
   }
 
   private async handleBrowseRelativeDate(
-    ctx: Context,
+    ctx: TelegramContext,
     mode: 'today' | 'yesterday',
   ): Promise<void> {
     const userId = ctx.from?.id;
@@ -279,7 +280,7 @@ export class CameraHandler implements TelegramHandler {
   }
 
   private async handleBrowseText(
-    ctx: Context,
+    ctx: TelegramContext,
     userId: number,
     text: string,
   ): Promise<void> {
@@ -332,7 +333,7 @@ export class CameraHandler implements TelegramHandler {
     });
   }
 
-  private async handleBrowseLatest(ctx: Context): Promise<void> {
+  private async handleBrowseLatest(ctx: TelegramContext): Promise<void> {
     const result = await this.browseEvents.latest();
     await this.replyBrowseResults(ctx, {
       kind: 'latest',
@@ -342,7 +343,7 @@ export class CameraHandler implements TelegramHandler {
   }
 
   private async replyBrowseResults(
-    ctx: Context,
+    ctx: TelegramContext,
     result:
       | {
           kind: 'latest';
@@ -432,7 +433,7 @@ export class CameraHandler implements TelegramHandler {
     };
   }
 
-  private async handleBrowseBack(ctx: Context): Promise<void> {
+  private async handleBrowseBack(ctx: TelegramContext): Promise<void> {
     const userId = ctx.from?.id;
     const hadPending = userId ? this.pendingBrowseInputs.has(userId) : false;
     const hadResults = userId ? this.browseLastResults.has(userId) : false;
@@ -450,24 +451,24 @@ export class CameraHandler implements TelegramHandler {
     await this.handleDashboard(ctx);
   }
 
-  private clearBrowseInput(ctx: Context): void {
+  private clearBrowseInput(ctx: TelegramContext): void {
     const userId = ctx.from?.id;
     if (!userId) return;
     this.pendingBrowseInputs.delete(userId);
   }
 
-  private clearBrowseResults(ctx: Context): void {
+  private clearBrowseResults(ctx: TelegramContext): void {
     const userId = ctx.from?.id;
     if (!userId) return;
     this.browseLastResults.delete(userId);
   }
 
-  private clearAllBrowseState(ctx: Context): void {
+  private clearAllBrowseState(ctx: TelegramContext): void {
     this.clearBrowseInput(ctx);
     this.clearBrowseResults(ctx);
   }
 
-  private async handleSnapshot(ctx: Context, name?: string): Promise<void> {
+  private async handleSnapshot(ctx: TelegramContext, name?: string): Promise<void> {
     await ctx.replyWithChatAction('upload_photo');
     const result = await this.snapshot.execute(name);
     await ctx.replyWithPhoto(new InputFile(result.buffer, 'snapshot.jpg'), {
@@ -475,7 +476,7 @@ export class CameraHandler implements TelegramHandler {
     });
   }
 
-  private async handleEvents(ctx: Context, dateArg?: string): Promise<void> {
+  private async handleEvents(ctx: TelegramContext, dateArg?: string): Promise<void> {
     let day: Date;
     if (dateArg) {
       day = parse(dateArg, 'dd.MM.yyyy', new Date());
@@ -520,7 +521,7 @@ export class CameraHandler implements TelegramHandler {
     await ctx.reply(message, { reply_markup: kb });
   }
 
-  private async handleVideo(ctx: Context, arg: string): Promise<void> {
+  private async handleVideo(ctx: TelegramContext, arg: string): Promise<void> {
     const id = parseEventId(arg);
     if (id === null) {
       await ctx.reply(en.camera.usage);
@@ -540,7 +541,7 @@ export class CameraHandler implements TelegramHandler {
     });
   }
 
-  private async handlePhoto(ctx: Context, arg: string): Promise<void> {
+  private async handlePhoto(ctx: TelegramContext, arg: string): Promise<void> {
     const id = parseEventId(arg);
     if (id === null) {
       await ctx.reply(en.camera.usage);
@@ -558,35 +559,33 @@ export class CameraHandler implements TelegramHandler {
     });
   }
 
-  private async handleEnable(ctx: Context): Promise<void> {
+  private async handleEnable(ctx: TelegramContext): Promise<void> {
     if (!(await this.requireAdmin(ctx))) return;
     await this.enable.execute();
     await ctx.reply(en.camera.motionStarted);
   }
 
-  private async handleDisable(ctx: Context): Promise<void> {
+  private async handleDisable(ctx: TelegramContext): Promise<void> {
     if (!(await this.requireAdmin(ctx))) return;
     await this.disable.execute();
     await ctx.reply(en.camera.motionStopped);
   }
 
-  async handleStatus(ctx: Context): Promise<void> {
+  async handleStatus(ctx: TelegramContext): Promise<void> {
     const result = await this.status.execute();
     const message = `${en.camera.statusHeader}\n\n${en.camera.statusBody(result)}`;
     await ctx.reply(message);
   }
 
-  private async requireAdmin(ctx: Context): Promise<boolean> {
-    const id = ctx.from?.id;
-    const role = id ? await this.guard.resolveRole(id) : null;
-    if (role !== 'admin') {
+  private async requireAdmin(ctx: TelegramContext): Promise<boolean> {
+    if (ctx.localeState?.user.role !== 'admin') {
       await ctx.reply(en.common.adminRequired);
       return false;
     }
     return true;
   }
 
-  private async handleError(ctx: Context, err: unknown, action: string): Promise<void> {
+  private async handleError(ctx: TelegramContext, err: unknown, action: string): Promise<void> {
     if (err instanceof CameraNotFoundError) {
       await ctx.reply(en.camera.cameraNotFound(err.cameraName));
       return;

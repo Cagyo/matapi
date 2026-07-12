@@ -11,6 +11,7 @@ import {
 } from '../domain/ports/direct-messenger.port';
 import { BotCommandsMenuService } from '../application/bot-commands-menu.service';
 import { TelegramHandler } from './telegram-handler';
+import { TelegramContext } from './telegram-context';
 
 @Injectable()
 export class StartHandler implements TelegramHandler {
@@ -22,7 +23,7 @@ export class StartHandler implements TelegramHandler {
     private readonly botCommandsMenu: BotCommandsMenuService,
   ) {}
 
-  register(composer: Composer<Context>): void {
+  register(composer: Composer<TelegramContext>): void {
     composer.command('start', async (ctx: Context) => {
       const from = ctx.from;
       if (!from) return;

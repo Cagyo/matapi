@@ -1,11 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { CallbackQueryContext, Composer, Context, InlineKeyboard } from 'grammy';
+import { CallbackQueryContext, Composer, InlineKeyboard } from 'grammy';
 import { en } from '../../locales/en';
 import { SystemDepsCheckFailedError } from '../../system/domain/errors/system-deps-check-failed.error';
 import { SystemDepsCheck } from '../../system/domain/ports/system-deps.port';
 import { SystemUpdateUseCase } from '../application/system-update.use-case';
 import { RoleMiddleware } from './role.middleware';
 import { TelegramHandler } from './telegram-handler';
+import { TelegramContext } from './telegram-context';
 
 /**
  * `/system_update` — spec 18. Admin-only, two-step flow mirroring
@@ -28,7 +29,7 @@ export class SystemUpdateHandler implements TelegramHandler {
     private readonly guard: RoleMiddleware,
   ) {}
 
-  register(composer: Composer<Context>): void {
+  register(composer: Composer<TelegramContext>): void {
     composer.command('system_update', this.guard.adminOnly, (ctx) =>
       this.handleCommand(ctx),
     );
@@ -37,7 +38,7 @@ export class SystemUpdateHandler implements TelegramHandler {
     );
   }
 
-  async handleCommand(ctx: Context): Promise<void> {
+  async handleCommand(ctx: TelegramContext): Promise<void> {
     const userId = ctx.from?.id;
     if (!userId) return;
 
@@ -82,7 +83,7 @@ export class SystemUpdateHandler implements TelegramHandler {
     await ctx.reply(lines.join('\n'), { reply_markup: keyboard });
   }
 
-  private async onCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
+  private async onCallback(ctx: CallbackQueryContext<TelegramContext>): Promise<void> {
     const userId = ctx.from?.id;
     const data = ctx.callbackQuery.data;
     await ctx.answerCallbackQuery().catch(() => undefined);

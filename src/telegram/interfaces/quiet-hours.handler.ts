@@ -1,10 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Composer, Context, InlineKeyboard } from 'grammy';
+import { Composer, InlineKeyboard } from 'grammy';
 import { en } from '../../locales/en';
 import { SetQuietHoursUseCase } from '../application/set-quiet-hours.use-case';
 import { InvalidQuietHoursError } from '../domain/errors/invalid-quiet-hours.error';
 import { RoleMiddleware } from './role.middleware';
 import { TelegramHandler } from './telegram-handler';
+import { TelegramContext } from './telegram-context';
 
 @Injectable()
 export class QuietHoursHandler implements TelegramHandler {
@@ -15,7 +16,7 @@ export class QuietHoursHandler implements TelegramHandler {
     private readonly guard: RoleMiddleware,
   ) {}
 
-  async handlePreset(ctx: Context, raw: string): Promise<void> {
+  async handlePreset(ctx: TelegramContext, raw: string): Promise<void> {
     const userId = ctx.from?.id;
     if (!userId) return;
     try {
@@ -42,11 +43,11 @@ export class QuietHoursHandler implements TelegramHandler {
     }
   }
 
-  register(composer: Composer<Context>): void {
+  register(composer: Composer<TelegramContext>): void {
     composer.command(
       'quiet_hours',
       this.guard.registered,
-      async (ctx: Context) => {
+      async (ctx: TelegramContext) => {
         const userId = ctx.from?.id;
         if (!userId) return;
         const raw = (ctx.match ?? '').toString().trim();

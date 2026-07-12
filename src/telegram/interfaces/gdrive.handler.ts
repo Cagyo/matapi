@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Composer, Context, InlineKeyboard } from 'grammy';
+import { Composer, InlineKeyboard } from 'grammy';
 import { GdriveStatusUseCase } from '../../camera/application/gdrive-status.use-case';
 import { GdriveNotConfiguredError } from '../../camera/domain/errors/gdrive-not-configured.error';
 import { GdriveNotInstalledError } from '../../camera/domain/errors/gdrive-not-installed.error';
@@ -7,6 +7,7 @@ import { GdriveStatusFailedError } from '../../camera/domain/errors/gdrive-statu
 import { en } from '../../locales/en';
 import { RoleMiddleware } from './role.middleware';
 import { TelegramHandler } from './telegram-handler';
+import { TelegramContext } from './telegram-context';
 
 /**
  * `/gdrive status` — spec 15. Admin-only. Reports Drive quota, pending and
@@ -21,7 +22,7 @@ export class GdriveHandler implements TelegramHandler {
     private readonly guard: RoleMiddleware,
   ) {}
 
-  register(composer: Composer<Context>): void {
+  register(composer: Composer<TelegramContext>): void {
     composer.command('gdrive', this.guard.adminOnly, async (ctx) => {
       const sub = (ctx.match ?? '').toString().trim().toLowerCase();
       if (sub && sub !== 'status') {
@@ -32,7 +33,7 @@ export class GdriveHandler implements TelegramHandler {
     });
   }
 
-  async handleStatus(ctx: Context): Promise<void> {
+  async handleStatus(ctx: TelegramContext): Promise<void> {
     try {
       const result = await this.status.execute();
       const body = en.gdrive.body({
@@ -53,7 +54,7 @@ export class GdriveHandler implements TelegramHandler {
     }
   }
 
-  private async handleError(ctx: Context, err: unknown): Promise<void> {
+  private async handleError(ctx: TelegramContext, err: unknown): Promise<void> {
     if (err instanceof GdriveNotInstalledError) {
       await ctx.reply(en.gdrive.notInstalled);
       return;

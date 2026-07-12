@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { CallbackQueryContext, Composer, Context, InlineKeyboard } from 'grammy';
+import { CallbackQueryContext, Composer, InlineKeyboard } from 'grammy';
 import { en } from '../../locales/en';
 import {
   ImportPlan,
@@ -12,6 +12,7 @@ import {
 } from '../domain/ports/config-codec.port';
 import { RoleMiddleware } from './role.middleware';
 import { TelegramHandler } from './telegram-handler';
+import { TelegramContext } from './telegram-context';
 
 /** Max accepted upload size (spec 16 — guard against huge documents). */
 const MAX_FILE_BYTES = 1_000_000;
@@ -44,7 +45,7 @@ export class ImportConfigHandler implements TelegramHandler {
     private readonly guard: RoleMiddleware,
   ) {}
 
-  register(composer: Composer<Context>): void {
+  register(composer: Composer<TelegramContext>): void {
     composer.command('import_config', this.guard.adminOnly, (ctx) =>
       this.handleCommand(ctx),
     );
@@ -71,14 +72,14 @@ export class ImportConfigHandler implements TelegramHandler {
     });
   }
 
-  async handleCommand(ctx: Context): Promise<void> {
+  async handleCommand(ctx: TelegramContext): Promise<void> {
     const userId = ctx.from?.id;
     if (!userId) return;
     this.states.set(userId, { kind: 'awaitingFile' });
     await ctx.reply(en.importConfig.prompt);
   }
 
-  private async onDocument(ctx: Context, userId: number): Promise<void> {
+  private async onDocument(ctx: TelegramContext, userId: number): Promise<void> {
     const doc = ctx.message?.document;
     if (!doc) return;
 
@@ -149,7 +150,7 @@ export class ImportConfigHandler implements TelegramHandler {
     });
   }
 
-  private async onCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
+  private async onCallback(ctx: CallbackQueryContext<TelegramContext>): Promise<void> {
     const userId = ctx.from?.id;
     const data = ctx.callbackQuery.data;
     await ctx.answerCallbackQuery().catch(() => undefined);

@@ -1,8 +1,9 @@
 import { Inject, Injectable, Logger, forwardRef } from '@nestjs/common';
-import { Composer, Context, InlineKeyboard } from 'grammy';
+import { Composer, InlineKeyboard } from 'grammy';
 import { en } from '../../locales/en';
 import { RoleMiddleware } from './role.middleware';
 import { TelegramHandler } from './telegram-handler';
+import { TelegramContext } from './telegram-context';
 import { StatusHandler } from './status.handler';
 import { HealthHandler } from './health.handler';
 import { CameraHandler } from './camera.handler';
@@ -57,10 +58,9 @@ export class MenuHandler implements TelegramHandler {
     private readonly gdriveAuthHandler: GdriveAuthHandler,
   ) {}
 
-  register(composer: Composer<Context>): void {
+  register(composer: Composer<TelegramContext>): void {
     composer.command('menu', this.guard.registered, async (ctx) => {
-      const id = ctx.from?.id;
-      const role = id ? await this.guard.resolveRole(id) : null;
+      const role = ctx.localeState?.user.role;
       const keyboard = this.buildKeyboard(role === 'admin');
       await ctx.reply(en.menu.title, { reply_markup: keyboard });
     });
@@ -71,8 +71,7 @@ export class MenuHandler implements TelegramHandler {
       async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
         const action = ctx.match?.[1];
-        const id = ctx.from?.id;
-        const role = id ? await this.guard.resolveRole(id) : null;
+        const role = ctx.localeState?.user.role;
 
         if (!action) return;
 
@@ -273,7 +272,7 @@ export class MenuHandler implements TelegramHandler {
   }
 
   private async renderSubmenu(
-    ctx: Context,
+    ctx: TelegramContext,
     text: string,
     kb: InlineKeyboard,
   ): Promise<void> {

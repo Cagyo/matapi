@@ -46,6 +46,8 @@ import { MenuHandler } from '../interfaces/menu.handler';
 import { SettingsHandler } from '../interfaces/settings.handler';
 import { CleanHandler } from '../interfaces/clean.handler';
 import { GdriveAuthHandler } from '../interfaces/gdrive-auth.handler';
+import { LocaleMiddleware } from '../interfaces/locale.middleware';
+import { TelegramContext } from '../interfaces/telegram-context';
 import { BotCommandsMenuService } from '../application/bot-commands-menu.service';
 import { ConsoleNotifierAdapter } from './console-notifier.adapter';
 import { TelegramAdminAlertAdapter } from './telegram-admin-alert.adapter';
@@ -71,7 +73,7 @@ export class GrammyBotGateway
   implements OnApplicationBootstrap, OnModuleDestroy, BotRunnerPort
 {
   private readonly logger = new Logger(GrammyBotGateway.name);
-  private bot?: Bot;
+  private bot?: Bot<TelegramContext>;
   private runner?: RunnerHandle;
   private lastUpdateAt: Date | null = null;
 
@@ -157,6 +159,7 @@ export class GrammyBotGateway
     private readonly clean: CleanHandler,
     @Inject(forwardRef(() => BotCommandsMenuService))
     private readonly botCommandsMenu: BotCommandsMenuService,
+    private readonly localeMiddleware: LocaleMiddleware,
     @Optional() private readonly token: string | undefined = process.env.TELEGRAM_BOT_TOKEN,
   ) {}
 
@@ -195,7 +198,7 @@ export class GrammyBotGateway
       return;
     }
 
-    const bot = new Bot(this.token);
+    const bot = new Bot<TelegramContext>(this.token);
 
     // 30s timeout on polling (spec 06 → Polling Health) — prevents
     // half-open TCP sockets on network drops.
@@ -216,6 +219,10 @@ export class GrammyBotGateway
       this.lastUpdateAt = new Date();
       return next();
     });
+
+    // Must run before guards and handlers: registered paths receive their
+    // persisted locale, while `/start` and `/claim_admin` continue in English.
+    bot.use(this.localeMiddleware.resolveOptional);
 
     for (const handler of this.handlers()) {
       handler.register(bot);

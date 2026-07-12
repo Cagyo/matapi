@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Composer, Context } from 'grammy';
+import { Composer } from 'grammy';
 import { networkInterfaces, NetworkInterfaceInfo } from 'node:os';
 import { UpdateGdriveAuthUseCase } from '../../camera/application/update-gdrive-auth.use-case';
 import { GdriveAuthFailedError } from '../../camera/domain/errors/gdrive-auth-failed.error';
@@ -7,6 +7,7 @@ import { GdriveNotInstalledError } from '../../camera/domain/errors/gdrive-not-i
 import { en, gb } from '../../locales/en';
 import { RoleMiddleware } from './role.middleware';
 import { TelegramHandler } from './telegram-handler';
+import { TelegramContext } from './telegram-context';
 
 const FALLBACK_SSH_HOST = '<pi-host>';
 const SSH_HOST_ENV = 'HOME_WORKER_SSH_HOST';
@@ -56,7 +57,7 @@ export class GdriveAuthHandler implements TelegramHandler {
     private readonly guard: RoleMiddleware,
   ) {}
 
-  register(composer: Composer<Context>): void {
+  register(composer: Composer<TelegramContext>): void {
     composer.command('gdrive_auth', this.guard.adminOnly, (ctx) =>
       this.startWizard(ctx),
     );
@@ -135,11 +136,11 @@ export class GdriveAuthHandler implements TelegramHandler {
     });
   }
 
-  async handleCommand(ctx: Context): Promise<void> {
+  async handleCommand(ctx: TelegramContext): Promise<void> {
     await this.startWizard(ctx);
   }
 
-  private async startWizard(ctx: Context): Promise<void> {
+  private async startWizard(ctx: TelegramContext): Promise<void> {
     const userId = ctx.from?.id;
     if (!userId) return;
     if (this.states.has(userId)) {
@@ -152,7 +153,7 @@ export class GdriveAuthHandler implements TelegramHandler {
     });
   }
 
-  private async processSnippet(ctx: Context, userId: number, snippet: string): Promise<void> {
+  private async processSnippet(ctx: TelegramContext, userId: number, snippet: string): Promise<void> {
     if (!(await this.requireCurrentAdmin(ctx, userId))) return;
 
     // Role lookup and the filesystem writer remain separate async boundaries; making
@@ -180,8 +181,8 @@ export class GdriveAuthHandler implements TelegramHandler {
     }
   }
 
-  private async requireCurrentAdmin(ctx: Context, userId: number): Promise<boolean> {
-    if ((await this.guard.resolveRole(userId)) === 'admin') return true;
+  private async requireCurrentAdmin(ctx: TelegramContext, userId: number): Promise<boolean> {
+    if (ctx.localeState?.user.role === 'admin') return true;
     this.states.delete(userId);
     await ctx.reply(en.common.adminRequired);
     return false;

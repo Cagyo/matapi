@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
-import { Composer, Context, InlineKeyboard } from 'grammy';
+import { Composer, InlineKeyboard } from 'grammy';
 import {
   MEDIA_REPOSITORY,
   MediaRepositoryPort,
@@ -13,6 +13,7 @@ import {
   SensorQueryPort,
 } from '../../sensors/domain/ports/sensor-query.port';
 import { RoleMiddleware } from './role.middleware';
+import { TelegramContext } from './telegram-context';
 import { TelegramHandler } from './telegram-handler';
 
 @Injectable()
@@ -28,7 +29,7 @@ export class UnmuteHandler implements TelegramHandler {
     private readonly media?: MediaRepositoryPort,
   ) {}
 
-  async handleEmpty(ctx: Context): Promise<void> {
+  async handleEmpty(ctx: TelegramContext): Promise<void> {
     const sensors = await this.sensors.listEnabled();
     const cameras = this.media
       ? (await this.media.listCameras()).filter((c) => c.enabled)
@@ -49,7 +50,7 @@ export class UnmuteHandler implements TelegramHandler {
     await ctx.reply(en.mute.selectUnmute, { reply_markup: kb });
   }
 
-  async handleUnmuteAll(ctx: Context): Promise<void> {
+  async handleUnmuteAll(ctx: TelegramContext): Promise<void> {
     const userId = ctx.from?.id;
     if (!userId) return;
     const sensors = await this.sensors.listEnabled();
@@ -88,8 +89,8 @@ export class UnmuteHandler implements TelegramHandler {
     }
   }
 
-  register(composer: Composer<Context>): void {
-    composer.command('unmute', this.guard.registered, async (ctx: Context) => {
+  register(composer: Composer<TelegramContext>): void {
+    composer.command('unmute', this.guard.registered, async (ctx: TelegramContext) => {
       const userId = ctx.from?.id;
       if (!userId) return;
       const target = (ctx.match ?? '').toString().trim();
@@ -121,7 +122,7 @@ export class UnmuteHandler implements TelegramHandler {
       }
     });
 
-    composer.callbackQuery(/^unmute:/, this.guard.registered, async (ctx: Context) => {
+    composer.callbackQuery(/^unmute:/, this.guard.registered, async (ctx: TelegramContext) => {
       const userId = ctx.from?.id;
       if (!userId) return;
       await ctx.answerCallbackQuery().catch(() => undefined);

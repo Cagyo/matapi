@@ -1,4 +1,5 @@
-import { Composer, Context } from 'grammy';
+import { Composer } from 'grammy';
+import { TelegramContext } from './telegram-context';
 
 /**
  * Convention for every telegram interface handler: self-registers its
@@ -7,5 +8,5 @@ import { Composer, Context } from 'grammy';
  * calls `register`.
  */
 export interface TelegramHandler {
-  register(composer: Composer<Context>): void;
+  register(composer: Composer<TelegramContext>): void;
 }

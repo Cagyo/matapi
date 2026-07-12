@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { Composer, Context } from 'grammy';
+import { Composer } from 'grammy';
 import { en } from '../../locales/en';
 import { DemoteUserUseCase } from '../application/demote-user.use-case';
 import { AmbiguousUserTargetError } from '../domain/errors/ambiguous-user-target.error';
@@ -13,6 +13,7 @@ import {
 import { RoleMiddleware } from './role.middleware';
 import { BotCommandsMenuService } from '../application/bot-commands-menu.service';
 import { TelegramHandler } from './telegram-handler';
+import { TelegramContext } from './telegram-context';
 
 @Injectable()
 export class DemoteHandler implements TelegramHandler {
@@ -25,8 +26,8 @@ export class DemoteHandler implements TelegramHandler {
     private readonly botCommandsMenu: BotCommandsMenuService,
   ) {}
 
-  register(composer: Composer<Context>): void {
-    composer.command('demote', this.guard.adminOnly, async (ctx: Context) => {
+  register(composer: Composer<TelegramContext>): void {
+    composer.command('demote', this.guard.adminOnly, async (ctx: TelegramContext) => {
       const from = ctx.from;
       if (!from) return;
       const target = (ctx.match ?? '').toString().trim();

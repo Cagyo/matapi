@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger, forwardRef } from '@nestjs/common';
-import { Composer, Context } from 'grammy';
+import { Composer } from 'grammy';
 import { en } from '../../locales/en';
 import {
   SENSOR_HEALTH,
@@ -16,6 +16,7 @@ import {
 import { GrammyBotGateway } from '../infrastructure/grammy-bot.gateway';
 import { RoleMiddleware } from './role.middleware';
 import { TelegramHandler } from './telegram-handler';
+import { TelegramContext } from './telegram-context';
 
 /**
  * `/health` — admin-only system snapshot (spec 08).
@@ -38,13 +39,13 @@ export class HealthHandler implements TelegramHandler {
     private readonly guard: RoleMiddleware,
   ) {}
 
-  register(composer: Composer<Context>): void {
+  register(composer: Composer<TelegramContext>): void {
     composer.command('health', this.guard.adminOnly, (ctx) =>
       this.handleCommand(ctx),
     );
   }
 
-  async handleCommand(ctx: Context): Promise<void> {
+  async handleCommand(ctx: TelegramContext): Promise<void> {
     try {
       const [snap, enabled, probe] = await Promise.all([
         this.system.collect(),

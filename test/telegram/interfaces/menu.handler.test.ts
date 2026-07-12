@@ -1,12 +1,29 @@
 import { describe, expect, it, vi } from 'vitest';
+import { catalogFor } from '../../../src/locales';
 import { MenuHandler } from '../../../src/telegram/interfaces/menu.handler';
 import { RoleMiddleware } from '../../../src/telegram/interfaces/role.middleware';
+
+function localeState(role: 'admin' | 'user') {
+  return {
+    user: {
+      telegramId: 100,
+      name: 'Alex',
+      role,
+      locale: 'en' as const,
+      muted: false,
+      quietStart: null,
+      quietEnd: null,
+      createdAt: null,
+    },
+    locale: 'en' as const,
+    catalog: catalogFor('en'),
+  };
+}
 
 describe('MenuHandler', () => {
   function createTestSetup() {
     const guard = {
       registered: vi.fn(),
-      resolveRole: vi.fn().mockResolvedValue('user'),
     } as unknown as RoleMiddleware;
 
     const statusHandler = { handleCommand: vi.fn() } as any;
@@ -100,12 +117,12 @@ describe('MenuHandler', () => {
   });
 
   it('responds with title and interactive keyboard on /menu command', async () => {
-    const { commandCallbacks, guard } = createTestSetup();
-    (guard.resolveRole as any).mockResolvedValue('admin');
+    const { commandCallbacks } = createTestSetup();
 
     const reply = vi.fn().mockResolvedValue(true);
     const ctx = {
       from: { id: 999 },
+      localeState: localeState('admin'),
       reply,
     };
 
@@ -116,7 +133,7 @@ describe('MenuHandler', () => {
   });
 
   it('delegates action callbacks and renders interactive submenus', async () => {
-    const { callbackQueryCallbacks, statusHandler, healthHandler, logsHandler, muteHandler, unmuteHandler, guard, settingsHandler, cleanHandler } =
+    const { callbackQueryCallbacks, statusHandler, healthHandler, logsHandler, muteHandler, unmuteHandler, settingsHandler, cleanHandler } =
       createTestSetup();
     const cbFn = callbackQueryCallbacks[0].fn;
 
@@ -127,6 +144,7 @@ describe('MenuHandler', () => {
     // Test status delegation
     const statusCtx = {
       from: { id: 100 },
+      localeState: localeState('user'),
       match: ['menu:status', 'status'],
       answerCallbackQuery,
       reply,
@@ -139,6 +157,7 @@ describe('MenuHandler', () => {
     // Test non-admin access to health
     const healthCtx = {
       from: { id: 100 },
+      localeState: localeState('user'),
       match: ['menu:health', 'health'],
       answerCallbackQuery,
       reply,
@@ -153,6 +172,7 @@ describe('MenuHandler', () => {
     // Test submenu navigation (sub:sensors)
     const sensorsCtx = {
       from: { id: 100 },
+      localeState: localeState('user'),
       match: ['menu:sub:sensors', 'sub:sensors'],
       answerCallbackQuery,
       reply,
@@ -168,6 +188,7 @@ describe('MenuHandler', () => {
     // Test logs delegation
     const logsCtx = {
       from: { id: 100 },
+      localeState: localeState('user'),
       match: ['menu:sub:logs', 'sub:logs'],
       answerCallbackQuery,
       reply,
@@ -179,6 +200,7 @@ describe('MenuHandler', () => {
     // Test mute all delegation
     const muteAllCtx = {
       from: { id: 100 },
+      localeState: localeState('user'),
       match: ['menu:act:mute_all', 'act:mute_all'],
       answerCallbackQuery,
       reply,
@@ -190,6 +212,7 @@ describe('MenuHandler', () => {
     // Test unmute all delegation
     const unmuteAllCtx = {
       from: { id: 100 },
+      localeState: localeState('user'),
       match: ['menu:act:unmute_all', 'act:unmute_all'],
       answerCallbackQuery,
       reply,
@@ -210,13 +233,14 @@ describe('MenuHandler', () => {
     expect(settingsCtx.reply).toHaveBeenCalledWith(expect.stringContaining('Admin access required'));
 
     // Admin settings delegation
-    (guard.resolveRole as any).mockResolvedValue('admin');
-    await cbFn(settingsCtx);
-    expect(settingsHandler.handleCommand).toHaveBeenCalledWith(settingsCtx);
+    const adminSettingsCtx = { ...settingsCtx, localeState: localeState('admin') };
+    await cbFn(adminSettingsCtx);
+    expect(settingsHandler.handleCommand).toHaveBeenCalledWith(adminSettingsCtx);
 
     // Admin clean delegation
     const cleanCtx = {
       from: { id: 100 },
+      localeState: localeState('admin'),
       match: ['menu:clean', 'clean'],
       answerCallbackQuery,
       reply,

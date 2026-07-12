@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { Composer, Context } from 'grammy';
+import { Composer } from 'grammy';
 import { en, StatusRow } from '../../locales/en';
 import {
   SENSOR_HEALTH,
@@ -13,6 +13,7 @@ import {
 import { Sensor } from '../../sensors/domain/sensor';
 import { RoleMiddleware } from './role.middleware';
 import { TelegramHandler } from './telegram-handler';
+import { TelegramContext } from './telegram-context';
 
 /**
  * `/status` — spec 07.
@@ -31,13 +32,13 @@ export class StatusHandler implements TelegramHandler {
     private readonly guard: RoleMiddleware,
   ) {}
 
-  register(composer: Composer<Context>): void {
+  register(composer: Composer<TelegramContext>): void {
     composer.command('status', this.guard.registered, (ctx) =>
       this.handleCommand(ctx),
     );
   }
 
-  async handleCommand(ctx: Context): Promise<void> {
+  async handleCommand(ctx: TelegramContext): Promise<void> {
     try {
       const sensors = await this.sensors.listEnabled();
       if (sensors.length === 0) {

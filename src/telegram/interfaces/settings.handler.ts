@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { Composer, Context, InlineKeyboard } from 'grammy';
+import { Composer, InlineKeyboard } from 'grammy';
 import { en } from '../../locales/en';
 import {
   SYSTEM_META_REPOSITORY,
@@ -7,6 +7,7 @@ import {
 } from '../../system/domain/ports/system-meta-repository.port';
 import { RoleMiddleware } from './role.middleware';
 import { TelegramHandler } from './telegram-handler';
+import { TelegramContext } from './telegram-context';
 
 const DEFAULT_THRESHOLD = 80;
 
@@ -24,7 +25,7 @@ export class SettingsHandler implements TelegramHandler {
     private readonly guard: RoleMiddleware,
   ) {}
 
-  register(composer: Composer<Context>): void {
+  register(composer: Composer<TelegramContext>): void {
     composer.command('settings', this.guard.adminOnly, async (ctx) => {
       await this.handleCommand(ctx);
     });
@@ -53,11 +54,11 @@ export class SettingsHandler implements TelegramHandler {
     );
   }
 
-  async handleCommand(ctx: Context): Promise<void> {
+  async handleCommand(ctx: TelegramContext): Promise<void> {
     await this.renderDashboard(ctx, false);
   }
 
-  private async renderDashboard(ctx: Context, isEdit: boolean): Promise<void> {
+  private async renderDashboard(ctx: TelegramContext, isEdit: boolean): Promise<void> {
     try {
       const threshold = await this.getThreshold();
       const text = en.settings.title(threshold);

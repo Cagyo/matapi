@@ -64,6 +64,7 @@ import { PromoteHandler } from './interfaces/promote.handler';
 import { QuietHoursHandler } from './interfaces/quiet-hours.handler';
 import { RestartHandler } from './interfaces/restart.handler';
 import { RoleMiddleware } from './interfaces/role.middleware';
+import { LocaleMiddleware } from './interfaces/locale.middleware';
 import { RollbackHandler } from './interfaces/rollback.handler';
 import { StartHandler } from './interfaces/start.handler';
 import { StatusHandler } from './interfaces/status.handler';
@@ -151,6 +152,7 @@ const mode = resolveBotMode();
     BotCommandsMenuService,
     ExportConfigUseCase,
     { provide: CONFIG_CODEC, useClass: YamlConfigCodec },
+    LocaleMiddleware,
     RoleMiddleware,
     ClaimAdminHandler,
     StatusHandler,

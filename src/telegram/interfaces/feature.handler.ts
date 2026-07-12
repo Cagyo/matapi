@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Composer, Context } from 'grammy';
+import { Composer } from 'grammy';
 import { DisableFeatureUseCase } from '../../features/application/disable-feature.use-case';
 import { EnableFeatureUseCase } from '../../features/application/enable-feature.use-case';
 import { ListFeaturesUseCase } from '../../features/application/list-features.use-case';
@@ -10,6 +10,7 @@ import { UnknownFeatureError } from '../../features/domain/errors/unknown-featur
 import { en } from '../../locales/en';
 import { RoleMiddleware } from './role.middleware';
 import { TelegramHandler } from './telegram-handler';
+import { TelegramContext } from './telegram-context';
 
 /** Spec 17 — `/feature enable|disable|list` (admin only). */
 @Injectable()
@@ -23,8 +24,8 @@ export class FeatureHandler implements TelegramHandler {
     private readonly guard: RoleMiddleware,
   ) {}
 
-  register(composer: Composer<Context>): void {
-    composer.command('feature', this.guard.adminOnly, async (ctx: Context) => {
+  register(composer: Composer<TelegramContext>): void {
+    composer.command('feature', this.guard.adminOnly, async (ctx: TelegramContext) => {
       const args = (ctx.match ?? '')
         .toString()
         .trim()
@@ -46,7 +47,7 @@ export class FeatureHandler implements TelegramHandler {
     });
   }
 
-  private async handleList(ctx: Context): Promise<void> {
+  private async handleList(ctx: TelegramContext): Promise<void> {
     try {
       const features = await this.list.execute();
       const body = features.map((f) => en.feature.listLine(f)).join('\n');
@@ -61,7 +62,7 @@ export class FeatureHandler implements TelegramHandler {
   }
 
   private async handleToggle(
-    ctx: Context,
+    ctx: TelegramContext,
     name: string | undefined,
     enabled: boolean,
   ): Promise<void> {

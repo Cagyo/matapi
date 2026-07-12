@@ -1,8 +1,25 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { UpdateGdriveAuthUseCase } from '../../../src/camera/application/update-gdrive-auth.use-case';
-import { en } from '../../../src/locales/en';
+import { catalogFor } from '../../../src/locales';
 import { GdriveAuthHandler } from '../../../src/telegram/interfaces/gdrive-auth.handler';
 import { RoleMiddleware } from '../../../src/telegram/interfaces/role.middleware';
+
+function localeState(role: 'admin' | 'user') {
+  return {
+    user: {
+      telegramId: 12345,
+      name: 'Admin',
+      role,
+      locale: 'en' as const,
+      muted: false,
+      quietStart: null,
+      quietEnd: null,
+      createdAt: null,
+    },
+    locale: 'en' as const,
+    catalog: catalogFor('en'),
+  };
+}
 
 function createTestSetup() {
   const updateUseCase = {
@@ -15,7 +32,6 @@ function createTestSetup() {
 
   const guard = {
     adminOnly: vi.fn(),
-    resolveRole: vi.fn().mockResolvedValue('admin'),
   } as unknown as RoleMiddleware;
 
   const handler = new GdriveAuthHandler(updateUseCase, guard);
@@ -88,6 +104,7 @@ describe('GdriveAuthHandler', () => {
     const ctx = {
       reply,
       from: { id: 12345 },
+      localeState: localeState('admin'),
       message: { text: 'some invalid config without header' },
     };
 
@@ -106,6 +123,7 @@ describe('GdriveAuthHandler', () => {
     const ctx = {
       reply,
       from: { id: 12345 },
+      localeState: localeState('admin'),
       message: { text: '[gdrive]\ntype = drive\nscope = drive' },
     };
 
@@ -117,11 +135,11 @@ describe('GdriveAuthHandler', () => {
   });
 
   it('clears a demoted sender state before processing a text snippet', async () => {
-    const { commandCallbacks, onCallbacks, updateUseCase, guard } = createTestSetup();
-    vi.mocked(guard.resolveRole).mockResolvedValue('user');
+    const { commandCallbacks, onCallbacks, updateUseCase } = createTestSetup();
     const reply = vi.fn().mockResolvedValue(undefined);
     const ctx = {
       from: { id: 12345 },
+      localeState: localeState('user'),
       reply,
       message: { text: '[gdrive]\ntype = drive' },
     };
@@ -130,16 +148,16 @@ describe('GdriveAuthHandler', () => {
     await onCallbacks['message:text'](ctx, vi.fn());
 
     expect(updateUseCase.execute).not.toHaveBeenCalled();
-    expect(reply).toHaveBeenLastCalledWith(en.common.adminRequired);
+    expect(reply).toHaveBeenLastCalledWith(catalogFor('en').common.adminRequired);
   });
 
   it('clears a demoted sender state before downloading a document snippet', async () => {
-    const { commandCallbacks, onCallbacks, updateUseCase, guard } = createTestSetup();
-    vi.mocked(guard.resolveRole).mockResolvedValue('user');
+    const { commandCallbacks, onCallbacks, updateUseCase } = createTestSetup();
     const reply = vi.fn().mockResolvedValue(undefined);
     const getFile = vi.fn();
     const ctx = {
       from: { id: 12345 },
+      localeState: localeState('user'),
       reply,
       getFile,
       message: { document: { file_name: 'rclone.conf' } },
@@ -150,6 +168,6 @@ describe('GdriveAuthHandler', () => {
 
     expect(getFile).not.toHaveBeenCalled();
     expect(updateUseCase.execute).not.toHaveBeenCalled();
-    expect(reply).toHaveBeenLastCalledWith(en.common.adminRequired);
+    expect(reply).toHaveBeenLastCalledWith(catalogFor('en').common.adminRequired);
   });
 });

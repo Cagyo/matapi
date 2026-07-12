@@ -1,9 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Composer, Context } from 'grammy';
+import { Composer } from 'grammy';
 import { en } from '../../locales/en';
 import { RestartSystemUseCase } from '../application/restart-system.use-case';
 import { RoleMiddleware } from './role.middleware';
 import { TelegramHandler } from './telegram-handler';
+import { TelegramContext } from './telegram-context';
 
 @Injectable()
 export class RestartHandler implements TelegramHandler {
@@ -14,7 +15,7 @@ export class RestartHandler implements TelegramHandler {
     private readonly guard: RoleMiddleware,
   ) {}
 
-  async handleCommand(ctx: Context): Promise<void> {
+  async handleCommand(ctx: TelegramContext): Promise<void> {
     try {
       await ctx.reply(en.ota.restarting);
       await this.restart.execute();
@@ -27,8 +28,8 @@ export class RestartHandler implements TelegramHandler {
     }
   }
 
-  register(composer: Composer<Context>): void {
-    composer.command('restart', this.guard.adminOnly, async (ctx: Context) => {
+  register(composer: Composer<TelegramContext>): void {
+    composer.command('restart', this.guard.adminOnly, async (ctx: TelegramContext) => {
       await this.handleCommand(ctx);
     });
   }

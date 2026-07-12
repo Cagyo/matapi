@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { Composer, Context } from 'grammy';
+import { Composer } from 'grammy';
 import { en } from '../../locales/en';
 import { PromoteUserUseCase } from '../application/promote-user.use-case';
 import { AlreadyAdminError } from '../domain/errors/already-admin.error';
@@ -12,6 +12,7 @@ import {
 import { RoleMiddleware } from './role.middleware';
 import { BotCommandsMenuService } from '../application/bot-commands-menu.service';
 import { TelegramHandler } from './telegram-handler';
+import { TelegramContext } from './telegram-context';
 
 @Injectable()
 export class PromoteHandler implements TelegramHandler {
@@ -24,8 +25,8 @@ export class PromoteHandler implements TelegramHandler {
     private readonly botCommandsMenu: BotCommandsMenuService,
   ) {}
 
-  register(composer: Composer<Context>): void {
-    composer.command('promote', this.guard.adminOnly, async (ctx: Context) => {
+  register(composer: Composer<TelegramContext>): void {
+    composer.command('promote', this.guard.adminOnly, async (ctx: TelegramContext) => {
       const from = ctx.from;
       if (!from) return;
       const target = (ctx.match ?? '').toString().trim();

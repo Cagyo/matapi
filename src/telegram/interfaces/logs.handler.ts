@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { Composer, Context, InlineKeyboard, InputFile } from 'grammy';
+import { Composer, InlineKeyboard, InputFile } from 'grammy';
 import { en, TYPE_ICONS } from '../../locales/en';
 import {
   SENSOR_LOG_REPOSITORY,
@@ -12,6 +12,7 @@ import {
 } from '../../sensors/domain/ports/sensor-query.port';
 import { RoleMiddleware } from './role.middleware';
 import { TelegramHandler } from './telegram-handler';
+import { TelegramContext } from './telegram-context';
 
 const TELEGRAM_MAX_MESSAGE = 4096;
 const DEFAULT_COUNT = 20;
@@ -41,7 +42,7 @@ export class LogsHandler implements TelegramHandler {
     private readonly guard: RoleMiddleware,
   ) {}
 
-  async handleEmpty(ctx: Context): Promise<void> {
+  async handleEmpty(ctx: TelegramContext): Promise<void> {
     const sensors = await this.sensors.listEnabled();
     if (sensors.length === 0) {
       await ctx.reply(en.status.none);
@@ -55,7 +56,7 @@ export class LogsHandler implements TelegramHandler {
     await ctx.reply(en.logs.selectSensor, { reply_markup: kb });
   }
 
-  register(composer: Composer<Context>): void {
+  register(composer: Composer<TelegramContext>): void {
     composer.command('logs', this.guard.registered, async (ctx) => {
       const raw = (ctx.match ?? '').toString().trim();
       if (!raw) {
@@ -135,7 +136,7 @@ export class LogsHandler implements TelegramHandler {
   }
 
   private async deliver(
-    ctx: Context,
+    ctx: TelegramContext,
     name: string,
     entries: SensorLogEntry[],
   ): Promise<void> {

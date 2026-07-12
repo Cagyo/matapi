@@ -1,9 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Composer, Context } from 'grammy';
+import { Composer } from 'grammy';
 import { en } from '../../locales/en';
 import { InviteUseCase } from '../application/invite.use-case';
 import { RoleMiddleware } from './role.middleware';
 import { TelegramHandler } from './telegram-handler';
+import { TelegramContext } from './telegram-context';
 
 @Injectable()
 export class InviteHandler implements TelegramHandler {
@@ -14,13 +15,13 @@ export class InviteHandler implements TelegramHandler {
     private readonly guard: RoleMiddleware,
   ) {}
 
-  register(composer: Composer<Context>): void {
-    composer.command('invite', this.guard.adminOnly, (ctx: Context) =>
+  register(composer: Composer<TelegramContext>): void {
+    composer.command('invite', this.guard.adminOnly, (ctx: TelegramContext) =>
       this.handleCommand(ctx),
     );
   }
 
-  async handleCommand(ctx: Context): Promise<void> {
+  async handleCommand(ctx: TelegramContext): Promise<void> {
     const from = ctx.from;
     if (!from) return;
     try {

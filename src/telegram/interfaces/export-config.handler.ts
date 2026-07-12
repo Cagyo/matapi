@@ -1,9 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Composer, Context, InputFile } from 'grammy';
+import { Composer, InputFile } from 'grammy';
 import { en } from '../../locales/en';
 import { ExportConfigUseCase } from '../application/export-config.use-case';
 import { RoleMiddleware } from './role.middleware';
 import { TelegramHandler } from './telegram-handler';
+import { TelegramContext } from './telegram-context';
 
 /**
  * `/export_config` — spec 16. Admin-only. Snapshots the current sensors,
@@ -19,13 +20,13 @@ export class ExportConfigHandler implements TelegramHandler {
     private readonly guard: RoleMiddleware,
   ) {}
 
-  register(composer: Composer<Context>): void {
+  register(composer: Composer<TelegramContext>): void {
     composer.command('export_config', this.guard.adminOnly, (ctx) =>
       this.handleCommand(ctx),
     );
   }
 
-  async handleCommand(ctx: Context): Promise<void> {
+  async handleCommand(ctx: TelegramContext): Promise<void> {
     try {
       const { yaml, filename } = await this.exportConfig.execute();
       const file = new InputFile(Buffer.from(yaml, 'utf8'), filename);

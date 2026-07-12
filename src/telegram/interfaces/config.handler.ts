@@ -3,7 +3,6 @@ import {
   CallbackQueryContext,
   CommandContext,
   Composer,
-  Context,
   InlineKeyboard,
 } from 'grammy';
 import { en } from '../../locales/en';
@@ -27,6 +26,7 @@ import {
 import { Inject } from '@nestjs/common';
 import { RoleMiddleware } from './role.middleware';
 import { TelegramHandler } from './telegram-handler';
+import { TelegramContext } from './telegram-context';
 
 type AddType = 'digital' | 'uart';
 type Pull = 'up' | 'down' | 'none';
@@ -121,7 +121,7 @@ export class ConfigHandler implements TelegramHandler {
     };
   }
 
-  register(composer: Composer<Context>): void {
+  register(composer: Composer<TelegramContext>): void {
     composer.command('config', this.guard.adminOnly, (ctx) => this.onCommand(ctx));
     composer.command('cancel', this.guard.adminOnly, async (ctx, next) => {
       const userId = ctx.from?.id;
@@ -151,7 +151,7 @@ export class ConfigHandler implements TelegramHandler {
 
   // ───────── entry point ─────────
 
-  async handleSubcommand(ctx: Context, sub: string): Promise<void> {
+  async handleSubcommand(ctx: TelegramContext, sub: string): Promise<void> {
     const userId = ctx.from?.id;
     if (!userId) return;
     if (sub === 'add') {
@@ -191,7 +191,7 @@ export class ConfigHandler implements TelegramHandler {
     }
   }
 
-  private async onCommand(ctx: CommandContext<Context>): Promise<void> {
+  private async onCommand(ctx: CommandContext<TelegramContext>): Promise<void> {
     const userId = ctx.from?.id;
     if (!userId) return;
     const raw = (ctx.match ?? '').toString().trim();
@@ -251,7 +251,7 @@ export class ConfigHandler implements TelegramHandler {
 
   // ───────── callback queries ─────────
 
-  private async onCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
+  private async onCallback(ctx: CallbackQueryContext<TelegramContext>): Promise<void> {
     const userId = ctx.from?.id;
     if (!userId) return;
     const data = ctx.callbackQuery.data ?? '';
@@ -271,7 +271,7 @@ export class ConfigHandler implements TelegramHandler {
   }
 
   private async routeCallback(
-    ctx: Context,
+    ctx: TelegramContext,
     userId: number,
     state: ConfigState,
     data: string,
@@ -488,7 +488,7 @@ export class ConfigHandler implements TelegramHandler {
 
   // ───────── text inputs ─────────
 
-  private async onText(ctx: Context, text: string): Promise<void> {
+  private async onText(ctx: TelegramContext, text: string): Promise<void> {
     const userId = ctx.from!.id;
     const state = this.states.get(userId)!;
 
@@ -614,7 +614,7 @@ export class ConfigHandler implements TelegramHandler {
   // ───────── modify helpers ─────────
 
   private async modifyFieldPrompt(
-    ctx: Context,
+    ctx: TelegramContext,
     userId: number,
     state: Extract<ConfigState, { kind: 'modifyMenu' }>,
     field: string,
@@ -714,7 +714,7 @@ export class ConfigHandler implements TelegramHandler {
     return owner?.name ?? null;
   }
 
-  private async showDigitalPinPicker(ctx: Context, name: string): Promise<void> {
+  private async showDigitalPinPicker(ctx: TelegramContext, name: string): Promise<void> {
     const sensors = await this.sensors.listEnabled();
     const usedPins = new Set(
       sensors
@@ -735,7 +735,7 @@ export class ConfigHandler implements TelegramHandler {
   }
 
   private async handleBack(
-    ctx: Context,
+    ctx: TelegramContext,
     userId: number,
     state: ConfigState,
     target: string,
@@ -846,7 +846,7 @@ export class ConfigHandler implements TelegramHandler {
 
   // ───────── errors ─────────
 
-  private async replyError(ctx: Context, err: unknown): Promise<void> {
+  private async replyError(ctx: TelegramContext, err: unknown): Promise<void> {
     if (err instanceof SensorNameExistsError) {
       await ctx.reply(en.config.nameTaken(err.sensorName));
       return;

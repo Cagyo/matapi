@@ -7,6 +7,7 @@ import { AdminAlreadyClaimedError } from '../domain/errors/admin-already-claimed
 import { AdminClaimNotConfiguredError } from '../domain/errors/admin-claim-not-configured.error';
 import { InvalidAdminClaimTokenError } from '../domain/errors/invalid-admin-claim-token.error';
 import { TelegramHandler } from './telegram-handler';
+import { TelegramContext } from './telegram-context';
 
 @Injectable()
 export class ClaimAdminHandler implements TelegramHandler {
@@ -17,7 +18,7 @@ export class ClaimAdminHandler implements TelegramHandler {
     private readonly botCommandsMenu: BotCommandsMenuService,
   ) {}
 
-  register(composer: Composer<Context>): void {
+  register(composer: Composer<TelegramContext>): void {
     composer.command('claim_admin', async (ctx: Context) => {
       const from = ctx.from;
       if (!from) return;
