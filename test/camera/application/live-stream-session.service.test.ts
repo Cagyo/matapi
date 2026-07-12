@@ -318,6 +318,30 @@ describe('LiveStreamSessionService', () => {
     expect(gateway.startCalls).toHaveLength(1);
   });
 
+  it('times out initial viewer provisioning and retains the cleanup blocker', async () => {
+    vi.useFakeTimers();
+    const gateway = new FakeGateway();
+    gateway.hangAddViewer = true;
+    gateway.hangStop = true;
+    const service = createService({ gateway, operationTimeoutMs: 100 });
+    const opening = service.open(source('front_door'), 1);
+    const openingRejected = expect(opening).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+
+    await vi.advanceTimersByTimeAsync(100);
+
+    await openingRejected;
+    expect(gateway.stopCalls).toBe(1);
+    await expect(service.stop(2)).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    await expect(service.open(source('garden'), 3)).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    expect(gateway.startCalls).toHaveLength(1);
+  });
+
   it('rejects a hung gateway stop at the operation timeout and blocks replacements', async () => {
     vi.useFakeTimers();
     const gateway = new FakeGateway();
@@ -541,6 +565,7 @@ class FakeGateway implements LiveStreamGatewayPort {
   stopError?: Error;
   addViewerError?: Error;
   revokeError?: Error;
+  hangAddViewer = false;
   hangStop = false;
   throwStartSynchronously = false;
 
@@ -560,6 +585,7 @@ class FakeGateway implements LiveStreamGatewayPort {
 
   async addViewer(): Promise<void> {
     if (this.addViewerError) throw this.addViewerError;
+    if (this.hangAddViewer) await new Promise<never>(() => undefined);
   }
 
   async revokeViewer(tokenHash: string): Promise<void> {

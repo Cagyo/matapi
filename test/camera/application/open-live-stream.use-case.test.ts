@@ -38,6 +38,22 @@ describe('OpenLiveStreamUseCase', () => {
     await expect(createUseCase(media).execute({ telegramId: 7, cameraName: 'Front door' }))
       .rejects.toBeInstanceOf(LiveStreamSourceUnavailableError);
   });
+
+  it('maps named-camera repository failures to an unavailable stream source', async () => {
+    const media = new FakeMediaRepository([camera('Front door')]);
+    media.findCameraError = new Error('database unavailable');
+
+    await expect(new MotionLiveSourceService(media).resolve('Front door'))
+      .rejects.toBeInstanceOf(LiveStreamSourceUnavailableError);
+  });
+
+  it('maps default-camera repository failures to an unavailable stream source', async () => {
+    const media = new FakeMediaRepository([camera('Front door')]);
+    media.listCamerasError = new Error('database unavailable');
+
+    await expect(new MotionLiveSourceService(media).resolve())
+      .rejects.toBeInstanceOf(LiveStreamSourceUnavailableError);
+  });
 });
 
 function createUseCase(media: FakeMediaRepository): OpenLiveStreamUseCase {
@@ -68,15 +84,21 @@ function camera(name: string): Camera {
 
 class FakeMediaRepository implements MediaRepositoryPort {
   requestedNames: string[] = [];
+  findCameraError?: Error;
+  listCamerasError?: Error;
 
   constructor(private readonly cameras: Camera[]) {}
 
   async findCameraByName(name: string): Promise<Camera | null> {
+    if (this.findCameraError) throw this.findCameraError;
     this.requestedNames.push(name);
     return this.cameras.find((camera) => camera.name.toLowerCase() === name.toLowerCase()) ?? null;
   }
 
-  async listCameras(): Promise<Camera[]> { return this.cameras.filter((camera) => camera.enabled); }
+  async listCameras(): Promise<Camera[]> {
+    if (this.listCamerasError) throw this.listCamerasError;
+    return this.cameras.filter((camera) => camera.enabled);
+  }
   async findEventById() { return null; }
   async listEventsOnDay() { return []; }
   async listLatestEvents() { return []; }

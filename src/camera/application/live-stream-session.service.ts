@@ -379,11 +379,15 @@ export class LiveStreamSessionService implements OnModuleInit {
 
     const token = createViewerToken(randomBytes(32));
     const tokenHash = createHash('sha256').update(token).digest('hex');
-    await this.gateway.addViewer({
-      tokenHash,
-      telegramId,
-      expiresMonotonicMs: active.session.expiresMonotonicMs,
-    });
+    await this.withOperationTimeout(
+      Promise.resolve().then(() =>
+        this.gateway.addViewer({
+          tokenHash,
+          telegramId,
+          expiresMonotonicMs: active.session.expiresMonotonicMs,
+        }),
+      ),
+    );
     const hashes = active.viewerTokenHashes.get(telegramId) ?? [];
     hashes.push(tokenHash);
     active.viewerTokenHashes.set(telegramId, hashes);
