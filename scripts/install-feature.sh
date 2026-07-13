@@ -39,13 +39,21 @@ install_rtsp_runtime() {
   fi
   # Generate the key only when absent/blank. Existing non-empty keys are never
   # printed or replaced; malformed non-empty values fail closed.
-  sudo python3 - "$env_file" <<'PY'
-import os, re, secrets, sys, tempfile
-path = sys.argv[1]
-st = os.stat(path, follow_symlinks=False)
-if not os.path.isfile(path) or os.path.islink(path):
+  sudo python3 - "$env_file" "$(id -u "$USER")" <<'PY'
+import os, re, secrets, stat, sys, tempfile
+path, expected_uid_text = sys.argv[1:]
+if not re.fullmatch(r"\d+", expected_uid_text):
+    raise SystemExit("unsafe worker uid")
+expected_uid = int(expected_uid_text)
+try:
+    source_fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0))
+except OSError:
     raise SystemExit("unsafe env file")
-with open(path, encoding="utf-8") as stream:
+st = os.fstat(source_fd)
+if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_uid != expected_uid or stat.S_IMODE(st.st_mode) != 0o600:
+    os.close(source_fd)
+    raise SystemExit("unsafe env file")
+with os.fdopen(source_fd, encoding="utf-8") as stream:
     lines = stream.read().splitlines()
 indexes = [i for i, line in enumerate(lines) if line.startswith("RTSP_CREDENTIALS_KEY=")]
 if len(indexes) > 1:
@@ -62,11 +70,14 @@ else:
 directory = os.path.dirname(path)
 fd, temporary = tempfile.mkstemp(prefix=".env.rtsp.", dir=directory)
 try:
-    os.fchmod(fd, st.st_mode & 0o777)
-    os.fchown(fd, st.st_uid, st.st_gid)
+    os.fchmod(fd, 0o600)
+    os.fchown(fd, expected_uid, st.st_gid)
     with os.fdopen(fd, "w", encoding="utf-8") as stream:
         stream.write("\n".join(lines) + "\n")
         stream.flush(); os.fsync(stream.fileno())
+    current = os.lstat(path)
+    if current.st_dev != st.st_dev or current.st_ino != st.st_ino:
+        raise SystemExit("env file changed during update")
     os.replace(temporary, path)
 finally:
     try: os.unlink(temporary)
@@ -76,10 +87,20 @@ PY
   local policy_tmp
   policy_tmp="$(mktemp)"
   if ! sudo python3 - "$env_file" "$policy_tmp" "$(id -u "$USER")" "$(id -u "$stream_user")" <<'PY'
-import ipaddress, json, os, re, sys
+import ipaddress, json, os, re, stat, sys
 env_path, output, worker_uid, stream_uid = sys.argv[1:]
+if not re.fullmatch(r"\d+", worker_uid) or not re.fullmatch(r"\d+", stream_uid) or worker_uid == stream_uid:
+    raise SystemExit("unsafe runtime uid policy")
 values = {}
-with open(env_path, encoding="utf-8") as stream:
+try:
+    env_fd = os.open(env_path, os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0))
+except OSError:
+    raise SystemExit("unsafe env file")
+env_stat = os.fstat(env_fd)
+if not stat.S_ISREG(env_stat.st_mode) or env_stat.st_nlink != 1 or env_stat.st_uid != int(worker_uid) or stat.S_IMODE(env_stat.st_mode) != 0o600:
+    os.close(env_fd)
+    raise SystemExit("unsafe env file")
+with os.fdopen(env_fd, encoding="utf-8") as stream:
     for raw in stream:
         line = raw.rstrip("\r\n")
         if not line or line.startswith("#") or "=" not in line: continue

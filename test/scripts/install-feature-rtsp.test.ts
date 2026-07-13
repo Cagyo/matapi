@@ -1,5 +1,7 @@
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { resolve } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import { describe, expect, it } from 'vitest';
@@ -8,6 +10,25 @@ describe('restricted RTSP runtime installation', () => {
   const installFeature = readFileSync(resolve('scripts/install-feature.sh'), 'utf8');
   const install = readFileSync(resolve('scripts/install.sh'), 'utf8');
   const deps = readFileSync(resolve('config/system-deps.yml'), 'utf8');
+  const envKeyProgram = (() => {
+    const marker = 'sudo python3 - "$env_file" "$(id -u "$USER")" <<\'PY\'\n';
+    const start = installFeature.indexOf(marker);
+    if (start < 0) throw new Error('RTSP env-key program not found');
+    const body = start + marker.length;
+    const end = installFeature.indexOf('\nPY', body);
+    return installFeature.slice(body, end);
+  })();
+
+  const runEnvKeyProgram = (path: string, expectedUid = process.getuid?.() ?? 0) => {
+    const root = mkdtempSync(join(tmpdir(), 'rtsp-env-program-'));
+    const program = join(root, 'program.py');
+    writeFileSync(program, envKeyProgram);
+    try {
+      return execFileSync('python3', [program, path, String(expectedUid)], { encoding: 'utf8' });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
 
   it('installs the restricted runtime dependencies and root-owned assets without broad sudoers', () => {
     expect(deps).toMatch(/rtsp:[\s\S]*- ffmpeg[\s\S]*- nftables[\s\S]*- cloudflared/);
@@ -37,6 +58,37 @@ describe('restricted RTSP runtime installation', () => {
     expect(install).toContain('RTSP_GROUP_REFRESH_REQUIRED=1');
     expect(install).toContain('pm2 kill');
     expect(install.indexOf('pm2 kill')).toBeLessThan(install.indexOf('pm2 jlist'));
+  });
+
+  it('preserves a safe existing credential key without changing the private env file', () => {
+    const root = mkdtempSync(join(tmpdir(), 'rtsp-env-safe-'));
+    const path = join(root, '.env');
+    const content = `RTSP_ALLOWED_CIDRS=192.168.0.0/16\nRTSP_CREDENTIALS_KEY=${'ab'.repeat(32)}\n`;
+    try {
+      writeFileSync(path, content, { mode: 0o600 });
+      chmodSync(path, 0o600);
+      runEnvKeyProgram(path);
+      expect(readFileSync(path, 'utf8')).toBe(content);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed for symlinked, wrong-owner, or world-readable env files', () => {
+    const root = mkdtempSync(join(tmpdir(), 'rtsp-env-unsafe-'));
+    const real = join(root, 'real.env');
+    const link = join(root, 'link.env');
+    try {
+      writeFileSync(real, `RTSP_CREDENTIALS_KEY=${'ab'.repeat(32)}\n`, { mode: 0o600 });
+      chmodSync(real, 0o600);
+      symlinkSync(real, link);
+      expect(() => runEnvKeyProgram(link)).toThrow();
+      expect(() => runEnvKeyProgram(real, (process.getuid?.() ?? 0) + 1)).toThrow();
+      chmodSync(real, 0o644);
+      expect(() => runEnvKeyProgram(real)).toThrow();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('ships a hardened bounded stream unit with no worker env, database, home, or second output transport', () => {

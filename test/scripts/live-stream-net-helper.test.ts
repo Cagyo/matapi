@@ -38,10 +38,38 @@ describe('live-stream net helper security behavior', () => {
 
   it('renders a UID-scoped allowlist followed by default deny', () => {
     const result = scenario('nft-policy') as { text: string };
-    expect(result.text).toContain('meta skuid 997 oifname "lo" accept');
+    expect(result.text).not.toContain('oifname "lo" accept');
     expect(result.text).toContain('meta skuid 997 reject');
     expect(result.text).toContain('timeout 30s');
     expect(result.text.indexOf(' accept')).toBeLessThan(result.text.lastIndexOf(' reject'));
+  });
+
+  it('rejects a policy that collapses worker and stream trust identities', () => {
+    expect(scenario('same-uid-policy')).toEqual({ ok: false, reason: 'policy' });
+  });
+
+  it('never rounds an nft timeout beyond lease expiry', () => {
+    expect(scenario('subsecond-timeout')).toEqual({ subsecondAllowed: false, oneSecond: true });
+  });
+
+  it('allows loopback only through an exact grant-derived address and port', () => {
+    expect(scenario('loopback-exact')).toEqual({ exact: true, blanket: false });
+  });
+
+  it('uses collision-free set names for leases sharing the old prefix', () => {
+    expect(scenario('set-name-collision')).toEqual({ first: true, second: true });
+  });
+
+  it('drops persisted access excluded by a narrowed policy', () => {
+    expect(scenario('policy-narrowing')).toEqual({ leases: 0, staleRule: false });
+  });
+
+  it('refuses startup when malformed live nonce state destroys replay evidence', () => {
+    expect(scenario('corrupt-recovery')).toEqual({ ok: false, reason: 'state', nftApplied: false });
+  });
+
+  it('discards malformed persisted leases without crashes or stale rules', () => {
+    expect(scenario('corrupt-lease-recovery')).toEqual({ leases: ['77777777777777777777777777777777'], corruptRule: false });
   });
 
   it('never resurrects an expired lease when a later grant rebuilds nft state', () => {

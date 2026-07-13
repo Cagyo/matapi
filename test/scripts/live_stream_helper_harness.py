@@ -104,6 +104,53 @@ def run(helper, name):
         if name == "nft-policy":
             engine.handle(request())
             return {"text": nft.scripts[-1]}
+        if name == "same-uid-policy":
+            try:
+                helper.Policy({"version": 1, "workerUid": 501, "streamUid": 501, "allowedCidrs": ["192.168.0.0/16"], "udpPortFirst": 24000, "udpPortLast": 24001})
+            except helper.Reject as error:
+                return {"ok": False, "reason": error.reason}
+            raise AssertionError("same uid policy accepted")
+        if name == "subsecond-timeout":
+            leases = {"aa" * 16: {"sessionId": request()["sessionId"], "addresses": ["192.168.1.20"], "rtspControlPorts": [554], "transport": "tcp", "udpMediaPorts": None, "expiresAtUnixMs": now + 999}}
+            at_999 = helper.render_nft(997, leases, now)
+            leases["aa" * 16]["expiresAtUnixMs"] = now + 1000
+            at_1000 = helper.render_nft(997, leases, now)
+            return {"subsecondAllowed": "192.168.1.20" in at_999, "oneSecond": "timeout 1s" in at_1000}
+        if name == "loopback-exact":
+            loopback_policy = helper.Policy({"version": 1, "workerUid": 501, "streamUid": 997, "allowedCidrs": ["127.0.0.0/8"], "udpPortFirst": 24000, "udpPortLast": 24001})
+            loopback_nft = FakeNft(); loopback = helper.Engine(loopback_policy, store, loopback_nft, now_ms=lambda: now, lease_id=lambda: "99" * 16)
+            loopback.handle(request(addresses=["127.0.0.1"], rtspControlPorts=[8554]))
+            text = loopback_nft.scripts[-1]
+            return {"exact": "127.0.0.1 . 8554" in text, "blanket": 'oifname "lo" accept' in text}
+        if name == "set-name-collision":
+            first_id = "abcdefabcdef" + "1" * 20
+            second_id = "abcdefabcdef" + "2" * 20
+            collision_engine = helper.Engine(policy(helper), store, nft, now_ms=lambda: now, lease_id=iter([first_id, second_id]).__next__)
+            collision_engine.handle(request())
+            collision_engine.handle(request(nonceHash="cd" * 32, addresses=["192.168.1.21"]))
+            text = nft.scripts[-1]
+            return {"first": "l_{}_4_tcp".format(first_id) in text, "second": "l_{}_4_tcp".format(second_id) in text}
+        if name == "policy-narrowing":
+            store.save({"version": 1, "leases": {"66" * 16: {"sessionId": request()["sessionId"], "addresses": ["192.168.1.20"], "rtspControlPorts": [554], "transport": "tcp", "udpMediaPorts": None, "expiresAtUnixMs": now + 30_000}}, "usedNonces": {"ab" * 32: now + 30_000}})
+            narrowed = helper.Policy({"version": 1, "workerUid": 501, "streamUid": 997, "allowedCidrs": ["10.0.0.0/8"], "udpPortFirst": 24000, "udpPortLast": 24001})
+            recovered_nft = FakeNft(); recovered = helper.Engine(narrowed, store, recovered_nft, now_ms=lambda: now)
+            return {"leases": len(recovered.state["leases"]), "staleRule": "192.168.1.20" in recovered_nft.scripts[-1]}
+        if name == "corrupt-recovery":
+            valid = {"sessionId": request()["sessionId"], "addresses": ["192.168.1.21"], "rtspControlPorts": [554], "transport": "tcp", "udpMediaPorts": None, "expiresAtUnixMs": now + 30_000}
+            corrupt = {"sessionId": request()["sessionId"], "addresses": "192.168.1.99", "rtspControlPorts": [554], "transport": "tcp", "udpMediaPorts": None, "expiresAtUnixMs": now + 30_000}
+            store.save({"version": 1, "leases": {"77" * 16: valid, "88" * 16: corrupt, "not-a-lease": valid}, "usedNonces": {"bad": now + 30_000, "ef" * 32: True}})
+            recovered_nft = FakeNft()
+            try:
+                helper.Engine(policy(helper), store, recovered_nft, now_ms=lambda: now)
+            except helper.Reject as error:
+                return {"ok": False, "reason": error.reason, "nftApplied": bool(recovered_nft.scripts)}
+            raise AssertionError("corrupt nonce state accepted")
+        if name == "corrupt-lease-recovery":
+            valid = {"sessionId": request()["sessionId"], "addresses": ["192.168.1.21"], "rtspControlPorts": [554], "transport": "tcp", "udpMediaPorts": None, "expiresAtUnixMs": now + 30_000}
+            corrupt = {"sessionId": request()["sessionId"], "addresses": "192.168.1.99", "rtspControlPorts": [554], "transport": "tcp", "udpMediaPorts": None, "expiresAtUnixMs": now + 30_000}
+            store.save({"version": 1, "leases": {"77" * 16: valid, "88" * 16: corrupt, "not-a-lease": valid}, "usedNonces": {}})
+            recovered_nft = FakeNft(); recovered = helper.Engine(policy(helper), store, recovered_nft, now_ms=lambda: now)
+            return {"leases": list(recovered.state["leases"]), "corruptRule": "192.168.1.99" in recovered_nft.scripts[-1]}
         if name == "expired-next-grant":
             store.save({"version": 1, "leases": {"44" * 16: {"sessionId": request()["sessionId"], "addresses": ["192.168.1.99"], "rtspControlPorts": [554], "transport": "tcp", "udpMediaPorts": None, "expiresAtUnixMs": now - 1}}, "usedNonces": {}})
             next_nft = FakeNft()
