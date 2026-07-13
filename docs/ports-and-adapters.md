@@ -71,7 +71,7 @@ Status legend: ✅ canonical · 🚧 in transition · 📝 planned
 |---|---|---|---|
 | `LiveSourceRepositoryPort` (`LIVE_SOURCE_REPOSITORY`) | `DrizzleLiveSourceRepository` (Task 2) | 📝 contract added; encrypted persistence adapter planned | [live-source-repository.port.ts](../src/camera/domain/ports/live-source-repository.port.ts) |
 | `StreamSandboxPort` (`STREAM_SANDBOX`) | `SystemdFfmpegStreamAdapter` (Task 3) | 📝 contract added; fixed Unix-socket/two-frame output | [stream-sandbox.port.ts](../src/camera/domain/ports/stream-sandbox.port.ts) |
-| `StreamEgressPort` (`STREAM_EGRESS`) | `NftStreamEgressAdapter` (Task 3) | 📝 contract added; lease-scoped RTSP/RTP egress | [stream-egress.port.ts](../src/camera/domain/ports/stream-egress.port.ts) |
+| `StreamEgressPort` (`STREAM_EGRESS`) | `NftStreamEgressAdapter` (Task 3) | 📝 contract added; accepts only a runtime-validated, lease-scoped RTSP/RTP egress grant | [stream-egress.port.ts](../src/camera/domain/ports/stream-egress.port.ts) |
 | `MotionControlPort` (`MOTION_CONTROL`) | `MotionDaemonAdapter` (systemctl, incl. `restart()`), `StubMotionControlAdapter` (dev) | ✅ | [motion-daemon.adapter.ts](../src/camera/infrastructure/motion-daemon.adapter.ts) |
 | `DriveStatusPort` (`DRIVE_STATUS`) | `RcloneDriveStatusAdapter` (rclone `about`), `StubDriveStatusAdapter` (dev) | ✅ read side for `/gdrive` (spec 21) | [drive-status.port.ts](../src/camera/domain/ports/drive-status.port.ts) |
 | `DriveSyncPort` (`DRIVE_SYNC`) | `RcloneDriveSyncAdapter` (`ionice -c3 rclone copy/delete/copyto`, additive), `StubDriveSyncAdapter` (dev) | ✅ upload + Drive prune + backup upload (spec 21) | [drive-sync.port.ts](../src/camera/domain/ports/drive-sync.port.ts) |

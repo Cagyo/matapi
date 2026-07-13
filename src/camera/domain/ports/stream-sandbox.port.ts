@@ -1,4 +1,3 @@
-import type { LiveSourceProfileSettings } from '../live-source.entity';
 import type { LiveSourceForStream } from './live-source-repository.port';
 
 export const STREAM_SANDBOX = Symbol('STREAM_SANDBOX');
@@ -19,7 +18,6 @@ export interface StreamSandboxPort {
   start(input: {
     sessionId: string;
     source: LiveSourceForStream;
-    profile: LiveSourceProfileSettings['profile'];
     expiresAtUnixMs: number;
   }): Promise<StreamSandboxStartResult>;
   stop(sessionId: string): Promise<void>;

@@ -35,6 +35,26 @@ describe('LiveSource', () => {
     expect(source.ready).toBe(false);
   });
 
+  it('keeps complete primary and substream URLs only in one encryption payload', () => {
+    const source = LiveSource.create({
+      cameraId: 'front_door',
+      url: 'rtsp://user:pass@CAM.local:554/private/main?token=secret#main',
+      substream:
+        'rtsp://sub-user:sub-pass@CAM.local:8554/private/sub?key=hidden#sub',
+    });
+
+    expect(source.settings.substream).toBe('rtsp://cam.local:8554');
+    expect(source.credentialPayload()).toEqual({
+      primaryUrl:
+        'rtsp://user:pass@CAM.local:554/private/main?token=secret#main',
+      substreamUrl:
+        'rtsp://sub-user:sub-pass@CAM.local:8554/private/sub?key=hidden#sub',
+    });
+    expect(JSON.stringify(source)).not.toMatch(
+      /user|pass|private|token|secret|hidden|#main|#sub/i,
+    );
+  });
+
   it('uses strict CA and hostname verification for RTSPS', () => {
     const source = LiveSource.create({
       cameraId: 'front_door',
@@ -55,6 +75,43 @@ describe('LiveSource', () => {
         url: 'rtsps://cam.local/live',
         tlsMode: 'self-signed' as never,
       }),
+    ).toThrow(InvalidLiveSourceError);
+  });
+
+  it.each([
+    'http://user:pass@cam.local/private/sub?token=secret',
+    'file:///private/substream',
+  ])('rejects an unsupported substream scheme in %s', (substream) => {
+    expect(() =>
+      LiveSource.create({
+        cameraId: 'front_door',
+        url: 'rtsp://cam.local/main',
+        substream,
+      }),
+    ).toThrow(InvalidLiveSourceError);
+  });
+
+  it('rejects a substream whose TLS scheme differs from the primary source', () => {
+    expect(() =>
+      LiveSource.create({
+        cameraId: 'front_door',
+        url: 'rtsps://cam.local/main',
+        substream: 'rtsp://cam.local/sub',
+      }),
+    ).toThrow(InvalidLiveSourceError);
+  });
+
+  it.each([
+    {
+      url: 'rtsp://cam.local\\@evil.example:8554/live',
+    },
+    {
+      url: 'rtsp://cam.local/main',
+      substream: 'rtsp://cam.local\\@evil.example:8554/sub',
+    },
+  ])('rejects ambiguous primary or substream authority parsing: %s', (input) => {
+    expect(() =>
+      LiveSource.create({ cameraId: 'front_door', ...input }),
     ).toThrow(InvalidLiveSourceError);
   });
 
@@ -100,15 +157,73 @@ describe('LiveSource', () => {
       url: 'rtsp://cam.local/main',
       transport: 'udp',
       profile: 'quality',
-      substream: 'low-bandwidth',
+      substream: 'rtsp://cam.local:8554/low-bandwidth',
       ready: true,
     });
 
     expect(source.settings).toMatchObject({
       transport: 'udp',
       profile: 'quality',
-      substream: 'low-bandwidth',
+      substream: 'rtsp://cam.local:8554',
     });
     expect(source.ready).toBe(true);
+  });
+
+  it.each([
+    [null as never, 'whole input'],
+    [{ cameraId: null as never }, 'cameraId'],
+    [{ cameraId: 42 as never }, 'cameraId'],
+    [{ url: null as never }, 'url'],
+    [{ url: {} as never }, 'url'],
+    [{ transport: 'sctp' as never }, 'transport'],
+    [{ tlsMode: 1 as never }, 'tlsMode'],
+    [{ profile: 'huge' as never }, 'profile'],
+    [{ substream: 123 as never }, 'substream'],
+    [{ ready: 'yes' as never }, 'ready'],
+  ])('maps malformed runtime %s to InvalidLiveSourceError (%s)', (override) => {
+    expect(() =>
+      LiveSource.create(
+        override === null
+          ? override
+          : {
+              cameraId: 'front_door',
+              url: 'rtsp://cam.local/main',
+              ...override,
+            },
+      ),
+    ).toThrow(InvalidLiveSourceError);
+  });
+
+  it('rejects an empty substream endpoint instead of treating it as absent', () => {
+    expect(() =>
+      LiveSource.create({
+        cameraId: 'front_door',
+        url: 'rtsp://cam.local/main',
+        substream: '',
+      }),
+    ).toThrow(InvalidLiveSourceError);
+  });
+
+  it.each([
+    ['rtsp://BÜCHER.example/live', 'rtsp://xn--bcher-kva.example'],
+    ['rtsp://CAM.LOCAL./live', 'rtsp://cam.local'],
+    ['rtsp://[2001:DB8::1]:8554/live', 'rtsp://[2001:db8::1]:8554'],
+    ['rtsp://cam.local/live', 'rtsp://cam.local'],
+    ['rtsp://cam.local:554/live', 'rtsp://cam.local:554'],
+  ])('canonicalizes endpoint %s as %s', (url, normalizedUrl) => {
+    const source = LiveSource.create({ cameraId: 'front_door', url });
+
+    expect(source.normalizedUrl).toBe(normalizedUrl);
+    expect(source.summary().host).toBe(new URL(normalizedUrl).host);
+  });
+
+  it.each([
+    'rtsp://cam.local:0/live',
+    'rtsp://./live',
+    'rtsp://-invalid.local/live',
+  ])('rejects the unusable endpoint %s', (url) => {
+    expect(() => LiveSource.create({ cameraId: 'front_door', url })).toThrow(
+      InvalidLiveSourceError,
+    );
   });
 });

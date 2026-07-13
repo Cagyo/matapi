@@ -6,7 +6,7 @@ import { getTableConfig } from 'drizzle-orm/sqlite-core';
 import {
   cameraLiveCredentials,
   cameraLiveSources,
-} from '../../src/database/schema';
+} from '../../../src/database/schema';
 
 describe('live source schema contract', () => {
   it('defines one metadata row per camera with cascade deletion', () => {

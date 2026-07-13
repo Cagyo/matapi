@@ -1,3 +1,5 @@
+import { isIP } from 'node:net';
+import { domainToASCII } from 'node:url';
 import { InvalidLiveSourceError } from './errors/invalid-live-source.error';
 
 const START_TIMEOUT_MS = 30_000;
@@ -30,6 +32,11 @@ export type LiveSourceSettings = Readonly<
     }
 >;
 
+export interface LiveSourceCredentialPayload {
+  primaryUrl: string;
+  substreamUrl: string | null;
+}
+
 export interface CreateLiveSourceInput {
   cameraId: string;
   url: string;
@@ -47,22 +54,30 @@ export interface LiveSourceSummary {
   ready: boolean;
 }
 
+interface ParsedEndpoint {
+  scheme: LiveSourceSecuritySettings['scheme'];
+  normalizedUrl: string;
+}
+
 export class LiveSource {
   readonly cameraId: string;
   readonly normalizedUrl: string;
   readonly settings: LiveSourceSettings;
   readonly ready: boolean;
+  readonly #credentialPayload: Readonly<LiveSourceCredentialPayload>;
 
   private constructor(input: {
     cameraId: string;
     normalizedUrl: string;
     settings: LiveSourceSettings;
     ready: boolean;
+    credentialPayload: LiveSourceCredentialPayload;
   }) {
     this.cameraId = input.cameraId;
     this.normalizedUrl = input.normalizedUrl;
     this.settings = Object.freeze(input.settings);
     this.ready = input.ready;
+    this.#credentialPayload = Object.freeze(input.credentialPayload);
   }
 
   get transport(): LiveSourceTransportSettings['transport'] {
@@ -82,38 +97,47 @@ export class LiveSource {
   }
 
   static create(input: CreateLiveSourceInput): LiveSource {
-    if (!input.cameraId.trim() || containsControlCharacter(input.cameraId)) {
+    if (typeof input !== 'object' || input === null) {
+      throw new InvalidLiveSourceError('input is malformed');
+    }
+    if (
+      typeof input.cameraId !== 'string' ||
+      !input.cameraId.trim() ||
+      containsControlCharacter(input.cameraId)
+    ) {
       throw new InvalidLiveSourceError('camera identifier is malformed');
     }
-    if (containsControlCharacter(input.url)) {
-      throw new InvalidLiveSourceError('URL contains a control character');
-    }
-
-    let parsed: URL;
-    try {
-      parsed = new URL(input.url);
-    } catch {
+    if (typeof input.url !== 'string') {
       throw new InvalidLiveSourceError('URL is malformed');
     }
-
-    const scheme = parseScheme(parsed.protocol);
-    if (!parsed.hostname) {
-      throw new InvalidLiveSourceError('URL host is required');
+    if (
+      input.substream !== undefined &&
+      input.substream !== null &&
+      typeof input.substream !== 'string'
+    ) {
+      throw new InvalidLiveSourceError('substream URL is malformed');
+    }
+    if (input.ready !== undefined && typeof input.ready !== 'boolean') {
+      throw new InvalidLiveSourceError('readiness is malformed');
     }
 
-    const security = parseSecurity(scheme, input.tlsMode);
+    const primary = parseEndpoint(input.url);
+    const security = parseSecurity(primary.scheme, input.tlsMode);
+    const substream =
+      input.substream !== undefined && input.substream !== null
+        ? parseEndpoint(input.substream)
+        : null;
+    if (substream !== null && substream.scheme !== primary.scheme) {
+      throw new InvalidLiveSourceError(
+        'primary and substream TLS schemes must match',
+      );
+    }
     const transport = parseTransport(input.transport ?? 'tcp');
     const profile = parseProfile(input.profile ?? 'eco');
-    const substream = input.substream ?? null;
-    if (substream !== null && containsControlCharacter(substream)) {
-      throw new InvalidLiveSourceError('substream contains a control character');
-    }
 
     return new LiveSource({
-      cameraId: input.cameraId,
-      normalizedUrl: `${scheme}://${parsed.hostname.toLowerCase()}${
-        parsed.port ? `:${parsed.port}` : ''
-      }`,
+      cameraId: input.cameraId.trim(),
+      normalizedUrl: primary.normalizedUrl,
       settings: {
         ...security,
         transport,
@@ -123,10 +147,18 @@ export class LiveSource {
         maxViewers: 2,
         startTimeoutMs: START_TIMEOUT_MS,
         stopTimeoutMs: STOP_TIMEOUT_MS,
-        substream,
+        substream: substream?.normalizedUrl ?? null,
       },
       ready: input.ready ?? false,
+      credentialPayload: {
+        primaryUrl: input.url,
+        substreamUrl: input.substream ?? null,
+      },
     });
+  }
+
+  credentialPayload(): LiveSourceCredentialPayload {
+    return { ...this.#credentialPayload };
   }
 
   summary(): LiveSourceSummary {
@@ -138,6 +170,84 @@ export class LiveSource {
       ready: this.ready,
     };
   }
+}
+
+function parseEndpoint(rawUrl: string): ParsedEndpoint {
+  if (containsControlCharacter(rawUrl) || rawUrl.includes('\\')) {
+    throw new InvalidLiveSourceError('URL contains an ambiguous character');
+  }
+  const authorityMatch = /^([a-z][a-z0-9+.-]*):\/\/([^/?#]*)/iu.exec(rawUrl);
+  if (authorityMatch === null) {
+    throw new InvalidLiveSourceError('URL is malformed');
+  }
+  const scheme = parseScheme(`${authorityMatch[1].toLowerCase()}:`);
+
+  let authorityUrl: URL;
+  try {
+    new URL(rawUrl);
+    authorityUrl = new URL(`http://${authorityMatch[2]}/`);
+  } catch {
+    throw new InvalidLiveSourceError('URL is malformed');
+  }
+
+  const hostname = canonicalizeHostname(authorityUrl.hostname);
+  const port = parseAuthorityPort(authorityMatch[2]);
+  return {
+    scheme,
+    normalizedUrl: `${scheme}://${hostname}${port ? `:${port}` : ''}`,
+  };
+}
+
+function parseAuthorityPort(authority: string): string {
+  const hostAndPort = authority.slice(authority.lastIndexOf('@') + 1);
+  let rawPort: string | null = null;
+  if (hostAndPort.startsWith('[')) {
+    const closingBracket = hostAndPort.indexOf(']');
+    const suffix = hostAndPort.slice(closingBracket + 1);
+    if (suffix) rawPort = suffix.startsWith(':') ? suffix.slice(1) : '';
+  } else {
+    const separator = hostAndPort.lastIndexOf(':');
+    if (separator >= 0) rawPort = hostAndPort.slice(separator + 1);
+  }
+  if (rawPort === null) return '';
+  if (!/^\d+$/u.test(rawPort)) {
+    throw new InvalidLiveSourceError('URL port is unusable');
+  }
+  const port = Number(rawPort);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new InvalidLiveSourceError('URL port is unusable');
+  }
+  return String(port);
+}
+
+function canonicalizeHostname(rawHostname: string): string {
+  if (rawHostname.startsWith('[') && rawHostname.endsWith(']')) {
+    const literal = rawHostname.slice(1, -1).toLowerCase();
+    if (isIP(literal) !== 6) {
+      throw new InvalidLiveSourceError('URL host is unusable');
+    }
+    return `[${literal}]`;
+  }
+
+  const withoutTrailingDot = rawHostname.replace(/\.+$/u, '').toLowerCase();
+  const hostname = domainToASCII(withoutTrailingDot);
+  if (!hostname || hostname.length > 253) {
+    throw new InvalidLiveSourceError('URL host is unusable');
+  }
+  if (isIP(hostname) === 4) return hostname;
+
+  const labels = hostname.split('.');
+  if (
+    labels.some(
+      (label) =>
+        !label ||
+        label.length > 63 ||
+        !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(label),
+    )
+  ) {
+    throw new InvalidLiveSourceError('URL host is unusable');
+  }
+  return hostname;
 }
 
 function containsControlCharacter(value: string): boolean {
@@ -164,7 +274,6 @@ function parseSecurity(
     }
     return { scheme, tlsMode: 'none' };
   }
-
   if (requestedMode !== undefined && requestedMode !== 'strict') {
     throw new InvalidLiveSourceError(
       'RTSPS supports strict CA and hostname verification only',

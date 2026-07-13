@@ -1,5 +1,6 @@
 import type {
   LiveSource,
+  LiveSourceCredentialPayload,
   LiveSourceSummary,
 } from '../live-source.entity';
 
@@ -8,7 +9,14 @@ export const LIVE_SOURCE_REPOSITORY = Symbol('LIVE_SOURCE_REPOSITORY');
 /** Plaintext exists only across this narrow startup boundary. */
 export interface LiveSourceForStream {
   source: LiveSource;
-  sourceUrl: string;
+  credential: LiveSourceCredentialPayload;
+}
+
+export interface EncryptedLiveSourceCredential {
+  ciphertext: string;
+  nonce: string;
+  authTag: string;
+  keyVersion: number;
 }
 
 export interface RedactedLiveSource {
@@ -17,8 +25,11 @@ export interface RedactedLiveSource {
 }
 
 export interface LiveSourceRepositoryPort {
-  /** A null URL persists not-ready import metadata without a credential row. */
-  save(source: LiveSource, sourceUrl: string | null): Promise<void>;
+  /** Null persists not-ready import metadata without a credential row. */
+  save(
+    source: LiveSource,
+    credential: EncryptedLiveSourceCredential | null,
+  ): Promise<void>;
   loadForStream(cameraId: string): Promise<LiveSourceForStream | null>;
   listRedacted(): Promise<RedactedLiveSource[]>;
   remove(cameraId: string): Promise<void>;
