@@ -22,6 +22,10 @@ import {
   type LiveStreamLeasePort,
 } from '../domain/ports/live-stream-lease.port';
 import {
+  LIVE_STREAM_MESSAGE_CLEANUP,
+  type LiveStreamMessageCleanupPort,
+} from '../domain/ports/live-stream-message-cleanup.port';
+import {
   MONOTONIC_CLOCK,
   type MonotonicClockPort,
 } from '../domain/ports/monotonic-clock.port';
@@ -65,7 +69,7 @@ interface CleanupBlocker {
   teardownInFlight: boolean;
 }
 
-class GatewayOperationTimeoutError extends Error {}
+class OperationTimeoutError extends Error {}
 
 /**
  * Owns the one global live-stream state machine. A short queue serializes
@@ -80,12 +84,16 @@ export class LiveStreamSessionService implements OnModuleInit {
   private pendingStartCleanup?: PendingOpen;
   private pending?: PendingOpen;
   private expiryTimer?: ReturnType<typeof setTimeout>;
+  private leaseMutationTail: Promise<void> = Promise.resolve();
+  private leaseMutationsPending = 0;
 
   constructor(
     @Inject(LIVE_STREAM_GATEWAY) private readonly gateway: LiveStreamGatewayPort,
     @Inject(LIVE_STREAM_LEASE) private readonly lease: LiveStreamLeasePort,
     @Inject(MONOTONIC_CLOCK) private readonly clock: MonotonicClockPort,
     @Inject(ADMIN_ALERT) private readonly alerts: AdminAlertPort,
+    @Inject(LIVE_STREAM_MESSAGE_CLEANUP)
+    private readonly messageCleanup: LiveStreamMessageCleanupPort,
     private readonly durationMs = 300_000,
     private readonly operationTimeoutMs = 30_000,
   ) {}
@@ -130,6 +138,11 @@ export class LiveStreamSessionService implements OnModuleInit {
     const deferred = createDeferred<OpenLiveStreamResult>();
     const queued = this.enqueue(async () => {
       try {
+        if (this.leaseMutationsPending > 0) {
+          deferred.reject(new LiveStreamUnavailableError());
+          return;
+        }
+
         if (this.pendingStartCleanup) {
           deferred.reject(new LiveStreamUnavailableError());
           return;
@@ -153,6 +166,10 @@ export class LiveStreamSessionService implements OnModuleInit {
 
         if (this.pending) {
           if (this.pending.cancelled) {
+            if (this.pending.replacement?.source.cameraId === source.cameraId) {
+              this.pending.replacement.requests.push({ telegramId, deferred });
+              return;
+            }
             deferred.reject(new LiveStreamUnavailableError());
             return;
           }
@@ -283,7 +300,7 @@ export class LiveStreamSessionService implements OnModuleInit {
         });
       },
       (error: unknown) => {
-        const waitingForLateStart = error instanceof GatewayOperationTimeoutError;
+        const waitingForLateStart = error instanceof OperationTimeoutError;
         if (waitingForLateStart) {
           void start.then(
             (started) => {
@@ -420,6 +437,7 @@ export class LiveStreamSessionService implements OnModuleInit {
     if (!this.active) return null;
     const cameraName = this.active.session.cameraName;
     await this.stopGateway(this.active);
+    await this.deleteMessageReferences(this.active.messageReferences);
     this.active = undefined;
     this.clearExpiryTimer();
     await this.clearLease();
@@ -454,7 +472,8 @@ export class LiveStreamSessionService implements OnModuleInit {
     try {
       await this.clearLease();
     } catch {
-      // The tunnel is confirmed stopped, so a stale lease cannot create a duplicate tunnel.
+      // A timed-out clear remains fenced until its underlying mutation settles.
+      if (this.leaseMutationsPending > 0) return false;
     }
     return true;
   }
@@ -492,7 +511,7 @@ export class LiveStreamSessionService implements OnModuleInit {
         });
       },
       (error: unknown) => {
-        if (error instanceof GatewayOperationTimeoutError) {
+        if (error instanceof OperationTimeoutError) {
           void this.enqueue(async () => {
             if (pending) this.rejectReplacement(pending);
           }).catch(() => {
@@ -530,7 +549,8 @@ export class LiveStreamSessionService implements OnModuleInit {
     try {
       await this.clearLease();
     } catch {
-      // The tunnel is confirmed stopped, so a stale lease cannot create a duplicate tunnel.
+      if (pending) this.rejectReplacement(pending);
+      return;
     }
     if (pending) this.beginReplacement(pending);
   }
@@ -549,7 +569,7 @@ export class LiveStreamSessionService implements OnModuleInit {
     try {
       await this.withOperationTimeout(stop);
     } catch (error) {
-      if (error instanceof GatewayOperationTimeoutError) {
+      if (error instanceof OperationTimeoutError) {
         this.cleanupBlocked = { active, teardownInFlight: true };
         void stop.then(
           () => {
@@ -571,7 +591,7 @@ export class LiveStreamSessionService implements OnModuleInit {
   private withOperationTimeout<T>(operation: Promise<T>): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const timeout = setTimeout(() => {
-        reject(new GatewayOperationTimeoutError());
+        reject(new OperationTimeoutError());
       }, this.operationTimeoutMs);
       void operation.then(
         (value) => {
@@ -606,20 +626,18 @@ export class LiveStreamSessionService implements OnModuleInit {
   }
 
   private async writeLease(active: ActiveSession): Promise<void> {
-    await this.withOperationTimeout(
-      Promise.resolve().then(() =>
-        this.lease.write({
-          sessionNonce: active.session.id,
-          pid: active.pid,
-          processIdentity: active.processIdentity,
-          cameraId: active.session.cameraId,
-          diagnosticExpiresAtUnixMs: Date.now() + Math.max(
-            0,
-            active.session.expiresMonotonicMs - this.clock.now(),
-          ),
-          messageReferences: [...active.messageReferences],
-        }),
-      ),
+    await this.runLeaseMutation(() =>
+      this.lease.write({
+        sessionNonce: active.session.id,
+        pid: active.pid,
+        processIdentity: active.processIdentity,
+        cameraId: active.session.cameraId,
+        diagnosticExpiresAtUnixMs: Date.now() + Math.max(
+          0,
+          active.session.expiresMonotonicMs - this.clock.now(),
+        ),
+        messageReferences: [...active.messageReferences],
+      }),
     );
   }
 
@@ -628,7 +646,38 @@ export class LiveStreamSessionService implements OnModuleInit {
   }
 
   private async clearLease(): Promise<void> {
-    await this.withOperationTimeout(Promise.resolve().then(() => this.lease.clear()));
+    await this.runLeaseMutation(() => this.lease.clear());
+  }
+
+  private async runLeaseMutation(operation: () => Promise<void>): Promise<void> {
+    this.leaseMutationsPending += 1;
+    const mutation = this.leaseMutationTail.then(operation);
+    const settled = mutation.then(
+      () => {
+        this.leaseMutationsPending -= 1;
+      },
+      () => {
+        this.leaseMutationsPending -= 1;
+      },
+    );
+    this.leaseMutationTail = settled;
+    await this.withOperationTimeout(mutation);
+  }
+
+  private async deleteMessageReferences(
+    references: LiveStreamMessageReference[],
+  ): Promise<void> {
+    await Promise.all(
+      references.map(async (reference) => {
+        try {
+          await this.withOperationTimeout(
+            Promise.resolve().then(() => this.messageCleanup.delete(reference)),
+          );
+        } catch {
+          // Watch-message cleanup is best effort and never compromises teardown.
+        }
+      }),
+    );
   }
 
   private async alertRecoveryFailure(): Promise<void> {

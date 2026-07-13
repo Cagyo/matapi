@@ -54,6 +54,18 @@ describe('OpenLiveStreamUseCase', () => {
     await expect(new MotionLiveSourceService(media).resolve())
       .rejects.toBeInstanceOf(LiveStreamSourceUnavailableError);
   });
+
+  it('selects the first enabled Motion camera when another camera type is listed first', async () => {
+    const media = new FakeMediaRepository([
+      { ...camera('Doorbell'), id: 'doorbell', type: 'rtsp' },
+      { ...camera('Front door'), id: 'front-door' },
+    ]);
+
+    await expect(new MotionLiveSourceService(media).resolve()).resolves.toMatchObject({
+      cameraId: 'front-door',
+      cameraName: 'Front door',
+    });
+  });
 });
 
 function createUseCase(media: FakeMediaRepository): OpenLiveStreamUseCase {
@@ -74,7 +86,14 @@ function createUseCase(media: FakeMediaRepository): OpenLiveStreamUseCase {
     clear: async () => undefined,
   };
   const clock: MonotonicClockPort = { now: () => 1_000 };
-  const session = new LiveStreamSessionService(gateway, lease, clock, { alert: async () => undefined }, 300_000);
+  const session = new LiveStreamSessionService(
+    gateway,
+    lease,
+    clock,
+    { alert: async () => undefined },
+    { delete: async () => undefined },
+    300_000,
+  );
   return new OpenLiveStreamUseCase(new MotionLiveSourceService(media), session);
 }
 

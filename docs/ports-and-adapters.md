@@ -80,6 +80,7 @@ Status legend: ✅ canonical · 🚧 in transition · 📝 planned
 | `SnapshotPort` (`SNAPSHOT`) | `FfmpegSnapshotAdapter` (caches via TTL), `StubSnapshotAdapter` (dev) | ✅ | [snapshot.port.ts](../src/camera/domain/ports/snapshot.port.ts) |
 | `MotionAlertPort` (`MOTION_ALERT`) | `EventsMotionAlertAdapter` (delegates to events `NotificationService`), `StubMotionAlertAdapter` (dev) | ✅ motion notification (spec 19, 20) | [motion-alert.port.ts](../src/camera/domain/ports/motion-alert.port.ts) |
 | `AdminAlertPort` (`ADMIN_ALERT`) | `AdminAlertService` (register/clear seam) ← `TelegramAdminAlertAdapter` registered at bot bootstrap | ✅ daemon up/down + Drive-sync / emergency-disk alerts (specs 20, 21) | [admin-alert.port.ts](../src/camera/domain/ports/admin-alert.port.ts) |
+| `LiveStreamMessageCleanupPort` (`LIVE_STREAM_MESSAGE_CLEANUP`) | Telegram adapter pending Task 4/5 | 🚧 application-owned seam for best-effort expiry/stop cleanup of stored watch-message references | [live-stream-message-cleanup.port.ts](../src/camera/domain/ports/live-stream-message-cleanup.port.ts) |
 
 ### System context
 

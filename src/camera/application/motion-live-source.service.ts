@@ -20,7 +20,9 @@ export class MotionLiveSourceService {
     try {
       camera = cameraName
         ? await this.media.findCameraByName(cameraName)
-        : (await this.media.listCameras())[0] ?? null;
+        : (await this.media.listCameras()).find(
+            (candidate) => candidate.enabled && candidate.type === 'motion',
+          ) ?? null;
     } catch {
       throw new LiveStreamSourceUnavailableError();
     }
