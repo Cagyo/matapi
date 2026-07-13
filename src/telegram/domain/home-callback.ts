@@ -34,6 +34,10 @@ function assertSafeInteger(value: number, minimum: number, name: string): void {
 }
 
 function actionParts(action: HomeAction): string[] {
+  if (typeof action !== 'object' || action === null) {
+    throw new RangeError('Home callback action is invalid');
+  }
+
   switch (action.kind) {
     case 'home':
       return ['h'];

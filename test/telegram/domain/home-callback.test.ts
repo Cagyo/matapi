@@ -69,4 +69,8 @@ describe('Home callback codec', () => {
   ] as const)('rejects invalid callback components', (invalidToken, revision, action) => {
     expect(() => encodeHomeCallback(invalidToken, revision, action)).toThrow(RangeError);
   });
+
+  it.each([null, undefined, 42, 'home'])('rejects non-object action %s with RangeError', (action) => {
+    expect(() => encodeHomeCallback(token, 1, action as unknown as HomeAction)).toThrow(RangeError);
+  });
 });
