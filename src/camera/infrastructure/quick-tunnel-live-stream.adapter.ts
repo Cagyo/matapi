@@ -59,6 +59,8 @@ export interface QuickTunnelLiveStreamDependencies {
   inspectRtspSocket?: (path: string) => Promise<void>;
   chmodRtspSocket?: (path: string, mode: number) => Promise<void>;
   unlinkRtspSocket?: (path: string) => Promise<void>;
+  wallNow?: () => number;
+  monotonicNow?: () => number;
 }
 
 interface ActiveViewer {
@@ -100,11 +102,15 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
   private readonly inspectRtspSocket: (path: string) => Promise<void>;
   private readonly chmodRtspSocket: (path: string, mode: number) => Promise<void>;
   private readonly unlinkRtspSocket: (path: string) => Promise<void>;
+  private readonly wallNow: () => number;
+  private readonly monotonicNow: () => number;
   private rtspHandle?: RtspStreamRuntimeHandle;
   private rtspSessionId?: string;
   private rtspStartAttempted = false;
   private producerServer?: NetServer;
   private producerServerClose?: Promise<void>;
+  private producerListen?: Promise<void>;
+  private producerListenSettled = false;
   private producerSocket?: Socket;
   private producerAccepted = false;
   private producerPath?: string;
@@ -130,6 +136,8 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
     this.inspectRtspSocket = dependencies.inspectRtspSocket ?? inspectGatewayOwnedSocket;
     this.chmodRtspSocket = dependencies.chmodRtspSocket ?? chmod;
     this.unlinkRtspSocket = dependencies.unlinkRtspSocket ?? unlink;
+    this.wallNow = dependencies.wallNow ?? Date.now;
+    this.monotonicNow = dependencies.monotonicNow ?? (() => performance.now());
   }
 
   get localOrigin(): string | null {
@@ -154,20 +162,51 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
 
   private async startExclusive(input: Parameters<LiveStreamGatewayPort['start']>[0]): ReturnType<LiveStreamGatewayPort['start']> {
     if (this.server || this.child) throw new Error('Live stream gateway is already running');
+    let rtspStartedAtUnixMs: number | undefined;
+    let rtspDeadlineMonotonicMs: number | undefined;
     this.source = input.source;
     try {
       if (input.source.kind === 'rtsp') {
         if (!this.rtspRuntime) throw new Error('RTSP runtime unavailable');
-        await this.openRtspProducer(input.session.id);
+        const rtspStartedAtMonotonicMs = this.monotonicNow();
+        rtspStartedAtUnixMs = this.wallNow();
+        rtspDeadlineMonotonicMs = rtspStartedAtMonotonicMs + Math.min(
+          this.startupTimeoutMs,
+          input.session.durationMs,
+        );
+        await this.openRtspProducer(input.session.id, rtspDeadlineMonotonicMs);
         this.rtspSessionId = input.session.id;
         this.rtspStartAttempted = true;
-        this.rtspHandle = await this.rtspRuntime.start({
+        const runtimeStart = this.rtspRuntime.start({
           cameraId: input.source.cameraId,
           sessionId: input.session.id,
           socketPath: this.producerPath!,
-          expiresAtUnixMs: Date.now() + Math.min(input.session.durationMs, 300_000),
+          expiresAtUnixMs: rtspStartedAtUnixMs + Math.min(input.session.durationMs, 300_000),
+          deadlineMonotonicMs: rtspDeadlineMonotonicMs,
         });
-        await withTimeout(this.frameReady!, this.startupTimeoutMs, 'RTSP frame readiness timed out');
+        try {
+          this.rtspHandle = await withMonotonicDeadline(
+            runtimeStart,
+            rtspDeadlineMonotonicMs,
+            this.monotonicNow,
+            'RTSP runtime startup timed out',
+          );
+        } catch (error) {
+          if (error instanceof MonotonicDeadlineError) {
+            await this.fenceLateRuntimeStart(
+              runtimeStart,
+              input.session.id,
+              rtspDeadlineMonotonicMs,
+            );
+          }
+          throw error;
+        }
+        await withMonotonicDeadline(
+          this.frameReady!,
+          rtspDeadlineMonotonicMs,
+          this.monotonicNow,
+          'RTSP frame readiness timed out',
+        );
         this.rtspReady = true;
       }
       await this.openLoopbackServer();
@@ -222,7 +261,11 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
         processIdentity,
       };
     } catch (error) {
-      await this.cleanupExclusive();
+      try {
+        await this.cleanupExclusive(rtspDeadlineMonotonicMs);
+      } catch {
+        await this.retryStartupCleanupUntilComplete();
+      }
       throw error;
     }
   }
@@ -245,12 +288,21 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
     return this.enqueueLifecycle(() => this.cleanupExclusive());
   }
 
-  private async cleanupExclusive(): Promise<void> {
+  private async cleanupExclusive(deadlineMonotonicMs?: number): Promise<void> {
     let cleanupError: unknown;
     if (this.rtspHandle || (this.rtspStartAttempted && this.rtspSessionId && this.rtspRuntime)) {
       try {
-        if (this.rtspHandle) await this.rtspHandle.stop();
-        else await this.rtspRuntime!.recover(this.rtspSessionId!);
+        if (this.rtspHandle) {
+          await withOptionalMonotonicDeadline(
+            this.rtspHandle.stop(deadlineMonotonicMs), deadlineMonotonicMs,
+            this.monotonicNow, 'RTSP runtime cleanup timed out',
+          );
+        } else {
+          await withOptionalMonotonicDeadline(
+            this.rtspRuntime!.recover(this.rtspSessionId!, deadlineMonotonicMs),
+            deadlineMonotonicMs, this.monotonicNow, 'RTSP recovery timed out',
+          );
+        }
         this.rtspHandle = undefined;
         this.rtspStartAttempted = false;
         this.rtspSessionId = undefined;
@@ -261,7 +313,10 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
     const producerSocket = this.producerSocket;
     if (producerSocket) {
       try {
-        await closeProducerSocket(producerSocket, Math.max(1, this.stopGraceMs));
+        await withOptionalMonotonicDeadline(
+          closeProducerSocket(producerSocket), deadlineMonotonicMs, this.monotonicNow,
+          'RTSP producer close timed out', this.stopGraceMs,
+        );
         if (this.producerSocket === producerSocket) this.producerSocket = undefined;
       } catch (error) {
         cleanupError ??= error;
@@ -270,20 +325,27 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
     const producerServer = this.producerServer;
     if (producerServer) {
       try {
+        if (this.producerListen && !this.producerListenSettled) {
+          await withOptionalMonotonicDeadline(
+            this.producerListen, deadlineMonotonicMs, this.monotonicNow,
+            'RTSP listener startup cleanup timed out', this.stopGraceMs,
+          );
+        }
         this.producerServerClose ??= closeProducerServer(producerServer);
-        await withTimeout(
-          this.producerServerClose,
-          Math.max(1, this.stopGraceMs),
-          'RTSP listener close timed out',
+        await withOptionalMonotonicDeadline(
+          this.producerServerClose, deadlineMonotonicMs, this.monotonicNow,
+          'RTSP listener close timed out', this.stopGraceMs,
         );
         if (this.producerServer === producerServer) this.producerServer = undefined;
         this.producerServerClose = undefined;
+        this.producerListen = undefined;
+        this.producerListenSettled = false;
       } catch (error) {
         cleanupError ??= error;
       }
     }
     const producerPath = this.producerPath;
-    if (producerPath) {
+    if (producerPath && !this.producerServer) {
       try {
         await this.unlinkRtspSocket(producerPath);
         this.producerPath = undefined;
@@ -412,11 +474,16 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
     });
   }
 
-  private async openRtspProducer(sessionId: string): Promise<void> {
+  private async openRtspProducer(sessionId: string, deadlineMonotonicMs: number): Promise<void> {
     if (!SESSION_UUID.test(sessionId)) {
       throw new Error('Invalid RTSP session identity');
     }
-    await this.inspectRtspDirectory(this.rtspSocketDirectory);
+    await withMonotonicDeadline(
+      this.inspectRtspDirectory(this.rtspSocketDirectory),
+      deadlineMonotonicMs,
+      this.monotonicNow,
+      'RTSP output directory inspection timed out',
+    );
     const path = `${this.rtspSocketDirectory}/${sessionId.toLowerCase()}.sock`;
     this.producerPath = path;
     this.frameReady = new Promise<void>((resolve, reject) => {
@@ -425,15 +492,30 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
     });
     void this.frameReady.catch(() => undefined);
     this.producerServer = createUnixServer((socket) => this.acceptProducer(socket));
-    await new Promise<void>((resolve, reject) => {
+    this.producerListenSettled = false;
+    this.producerListen = new Promise<void>((resolve, reject) => {
       this.producerServer!.once('error', reject);
       this.producerServer!.listen(path, () => {
         this.producerServer!.off('error', reject);
         resolve();
       });
     });
-    await this.chmodRtspSocket(path, 0o660);
-    await this.inspectRtspSocket(path);
+    void this.producerListen.then(
+      () => { this.producerListenSettled = true; },
+      () => { this.producerListenSettled = true; },
+    );
+    await withMonotonicDeadline(
+      this.producerListen, deadlineMonotonicMs, this.monotonicNow,
+      'RTSP listener startup timed out',
+    );
+    await withMonotonicDeadline(
+      this.chmodRtspSocket(path, 0o660), deadlineMonotonicMs, this.monotonicNow,
+      'RTSP socket permission update timed out',
+    );
+    await withMonotonicDeadline(
+      this.inspectRtspSocket(path), deadlineMonotonicMs, this.monotonicNow,
+      'RTSP socket inspection timed out',
+    );
   }
 
   private acceptProducer(socket: Socket): void {
@@ -657,6 +739,43 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
       .finally(() => this.failureHandler?.())
       .catch(() => undefined);
   }
+
+  private async retryStartupCleanupUntilComplete(): Promise<void> {
+    while (true) {
+      try {
+        await this.cleanupExclusive();
+        return;
+      } catch {
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, Math.max(10, this.stopGraceMs));
+          timer.unref();
+        });
+      }
+    }
+  }
+
+  private async fenceLateRuntimeStart(
+    runtimeStart: Promise<RtspStreamRuntimeHandle>,
+    sessionId: string,
+    expiredDeadlineMonotonicMs: number,
+  ): Promise<void> {
+    try {
+      await this.cleanupExclusive(expiredDeadlineMonotonicMs);
+    } catch {
+      await this.retryStartupCleanupUntilComplete();
+    }
+
+    let lateHandle: RtspStreamRuntimeHandle;
+    try {
+      lateHandle = await runtimeStart;
+    } catch {
+      return;
+    }
+    this.rtspSessionId = sessionId;
+    this.rtspStartAttempted = true;
+    this.rtspHandle = lateHandle;
+    await this.retryStartupCleanupUntilComplete();
+  }
 }
 
 class CloudflaredOutputMonitor {
@@ -830,12 +949,54 @@ async function withTimeout<T>(promise: Promise<T>, milliseconds: number, message
   }
 }
 
-async function closeProducerSocket(socket: Socket, timeoutMs: number): Promise<void> {
+async function withMonotonicDeadline<T>(
+  promise: Promise<T>,
+  deadlineMonotonicMs: number,
+  monotonicNow: () => number,
+  message: string,
+): Promise<T> {
+  const remainingMs = deadlineMonotonicMs - monotonicNow();
+  if (remainingMs <= 0) {
+    void promise.catch(() => undefined);
+    throw new MonotonicDeadlineError(message);
+  }
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new MonotonicDeadlineError(message)), remainingMs);
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+class MonotonicDeadlineError extends Error {}
+
+function withOptionalMonotonicDeadline<T>(
+  promise: Promise<T>,
+  deadlineMonotonicMs: number | undefined,
+  monotonicNow: () => number,
+  message: string,
+  fallbackTimeoutMs?: number,
+): Promise<T> {
+  if (deadlineMonotonicMs !== undefined) {
+    return withMonotonicDeadline(promise, deadlineMonotonicMs, monotonicNow, message);
+  }
+  return fallbackTimeoutMs === undefined
+    ? promise
+    : withTimeout(promise, Math.max(1, fallbackTimeoutMs), message);
+}
+
+async function closeProducerSocket(socket: Socket): Promise<void> {
   if (socket.closed) return;
-  await withTimeout(new Promise<void>((resolve) => {
+  await new Promise<void>((resolve) => {
     socket.once('close', resolve);
     socket.destroy();
-  }), timeoutMs, 'RTSP producer close timed out');
+  });
 }
 
 async function closeProducerServer(server: NetServer): Promise<void> {

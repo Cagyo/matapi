@@ -77,6 +77,152 @@ function connectAndWrite(path: string, chunks: Buffer[]): Promise<Socket> {
 }
 
 describe('QuickTunnelLiveStreamAdapter RTSP data plane', () => {
+  it('uses one entry budget and fixed expiry across delayed UDS, runtime, frame, and cleanup', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    vi.setSystemTime(0);
+    try {
+      const entryWall = 1_800_000_000_000;
+      let resolveCleanup!: () => void;
+      const cleanup = new Promise<void>((resolve) => { resolveCleanup = resolve; });
+      const stop = vi.fn(() => cleanup);
+      let runtimeInput: Parameters<RtspStreamRuntimePort['start']>[0] | undefined;
+      let runtimeStarts = 0;
+      const { adapter, runtime, session } = await fixture(async (input) => {
+        runtimeStarts += 1;
+        if (runtimeStarts > 1) throw new Error('second start rejected');
+        runtimeInput = input;
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        return { processIdentity: 'pid:4:start:5', stop };
+      }, 1_000, {
+        wallNow: () => entryWall + Date.now(),
+        monotonicNow: () => Date.now(),
+        inspectRtspDirectory: vi.fn(() => new Promise<void>((resolve) => setTimeout(resolve, 200))),
+      });
+      let outcome = 'pending';
+      void adapter.start({
+        session,
+        source: { kind: 'rtsp', cameraId: 'cam-1', cameraName: 'Door' },
+      }).then(
+        () => { outcome = 'resolved'; },
+        () => { outcome = 'rejected'; },
+      );
+
+      await vi.advanceTimersByTimeAsync(200);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await vi.advanceTimersByTimeAsync(300);
+      await vi.advanceTimersByTimeAsync(499);
+      expect(outcome).toBe('pending');
+      expect(runtimeInput).toMatchObject({
+        expiresAtUnixMs: entryWall + 30_000,
+        deadlineMonotonicMs: 1_000,
+      });
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(outcome).toBe('pending');
+      expect(stop).toHaveBeenCalledWith(1_000);
+      const nextStart = adapter.start({
+        session,
+        source: { kind: 'rtsp', cameraId: 'cam-1', cameraName: 'Door' },
+      }).catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(runtime.start).toHaveBeenCalledTimes(1);
+
+      resolveCleanup();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await vi.advanceTimersByTimeAsync(10);
+      await vi.advanceTimersByTimeAsync(200);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await vi.advanceTimersByTimeAsync(10);
+      await nextStart;
+      expect(outcome).toBe('rejected');
+      expect(runtime.start).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('closes the listener but fences lifecycle while runtime startup never settles', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    vi.setSystemTime(0);
+    try {
+      const { adapter, runtime, output, session } = await fixture(
+        () => new Promise(() => undefined),
+        1_000,
+        { wallNow: () => 1_800_000_000_000 + Date.now(), monotonicNow: () => Date.now() },
+      );
+      let outcome = 'pending';
+      void adapter.start({
+        session, source: { kind: 'rtsp', cameraId: 'cam-1', cameraName: 'Door' },
+      }).then(
+        () => { outcome = 'resolved'; },
+        () => { outcome = 'rejected'; },
+      );
+      for (let attempt = 0; attempt < 5 && vi.mocked(runtime.start).mock.calls.length === 0; attempt += 1) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      expect(runtime.start).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(outcome).toBe('pending');
+      await expect(access(join(output, `${SESSION}.sock`))).rejects.toMatchObject({ code: 'ENOENT' });
+      void adapter.start({
+        session, source: { kind: 'rtsp', cameraId: 'cam-1', cameraName: 'Door' },
+      }).catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(runtime.start).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cleans a late runtime handle retryably before releasing the lifecycle fence', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    vi.setSystemTime(0);
+    try {
+      const stop = vi.fn()
+        .mockRejectedValueOnce(new Error('late stop failed'))
+        .mockResolvedValue(undefined);
+      let starts = 0;
+      const { adapter, runtime, session } = await fixture(async () => {
+        starts += 1;
+        if (starts > 1) throw new Error('next start rejected');
+        await new Promise((resolve) => setTimeout(resolve, 1_100));
+        return { processIdentity: 'pid:4:start:5', stop };
+      }, 1_000, {
+        wallNow: () => 1_800_000_000_000 + Date.now(), monotonicNow: () => Date.now(),
+      });
+      let outcome = 'pending';
+      void adapter.start({
+        session, source: { kind: 'rtsp', cameraId: 'cam-1', cameraName: 'Door' },
+      }).then(
+        () => { outcome = 'resolved'; },
+        () => { outcome = 'rejected'; },
+      );
+      for (let attempt = 0; attempt < 5 && vi.mocked(runtime.start).mock.calls.length === 0; attempt += 1) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      expect(runtime.start).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1_000);
+      void adapter.start({
+        session, source: { kind: 'rtsp', cameraId: 'cam-1', cameraName: 'Door' },
+      }).catch(() => undefined);
+      expect(runtime.start).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(100);
+      await vi.advanceTimersByTimeAsync(10);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(stop).toHaveBeenCalledTimes(2);
+      expect(outcome).toBe('rejected');
+      expect(runtime.start).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('creates the exact socket before runtime start and requires a split JPEG before tunnel readiness', async () => {
     const stop = vi.fn().mockResolvedValue(undefined);
     let observedPath = '';

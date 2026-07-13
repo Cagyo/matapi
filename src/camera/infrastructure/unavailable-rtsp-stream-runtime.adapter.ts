@@ -5,7 +5,7 @@ export class UnavailableRtspStreamRuntimeAdapter implements RtspStreamRuntimePor
   async start(_input: Parameters<RtspStreamRuntimePort['start']>[0]): Promise<never> {
     throw new StreamRuntimeUnavailableError();
   }
-  recover(_sessionId: string): Promise<void> {
+  recover(_sessionId: string, _deadlineMonotonicMs?: number): Promise<void> {
     return Promise.resolve();
   }
 }

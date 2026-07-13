@@ -20,7 +20,7 @@ export interface OpenLiveStreamByIdInput {
   cameraId: string;
 }
 
-/** Opens (or joins) the one shared Motion live-stream session. */
+/** Opens or joins the one shared Motion/RTSP live-stream session. */
 @Injectable()
 export class OpenLiveStreamUseCase {
   constructor(

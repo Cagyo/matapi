@@ -448,9 +448,9 @@ export class FfmpegLiveSourceProbeAdapter implements LiveSourceProbePort, RtspRu
       let stopped = false;
       return {
         processIdentity: started.processIdentity,
-        stop: async () => {
+        stop: async (deadlineMonotonicMs?: number) => {
           if (stopped) return;
-          await this.recoverRestrictedRuntime(input.sessionId);
+          await this.recoverRestrictedRuntime(input.sessionId, deadlineMonotonicMs);
           stopped = true;
         },
       };

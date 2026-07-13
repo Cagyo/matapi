@@ -52,4 +52,37 @@ describe('RestrictedRtspStreamRuntimeAdapter', () => {
     await expect(adapter.start({ cameraId: 'cam', sessionId: SESSION, socketPath: '/secret', expiresAtUnixMs: Date.now() + 1_000 }))
       .rejects.toMatchObject({ message: 'Live source probe failed' });
   });
+
+  it('bounds credential loading by the gateway deadline and never starts late', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    try {
+      const source = LiveSource.create({ cameraId: 'cam-1', url: 'rtsp://camera.local/live' });
+      const loadForStream = vi.fn(() => new Promise<{ source: LiveSource; credential: ReturnType<LiveSource['credentialPayload']> }>((resolve) => {
+        setTimeout(() => resolve({ source, credential: source.credentialPayload() }), 1_001);
+      }));
+      const startRestrictedRuntime = vi.fn();
+      const adapter = new RestrictedRtspStreamRuntimeAdapter(
+        { loadForStream } as unknown as LiveSourceRepositoryPort,
+        { startRestrictedRuntime, recoverRestrictedRuntime: vi.fn() },
+        () => Date.now(),
+      );
+      let outcome = 'pending';
+      void adapter.start({
+        cameraId: 'cam-1', sessionId: SESSION, socketPath: '/run/output.sock',
+        expiresAtUnixMs: 30_000, deadlineMonotonicMs: 1_000,
+      }).then(
+        () => { outcome = 'resolved'; },
+        () => { outcome = 'rejected'; },
+      );
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(outcome).toBe('rejected');
+      expect(startRestrictedRuntime).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(startRestrictedRuntime).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

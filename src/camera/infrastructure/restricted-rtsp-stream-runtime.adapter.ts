@@ -11,11 +11,19 @@ export class RestrictedRtspStreamRuntimeAdapter implements RtspStreamRuntimePort
   constructor(
     private readonly sources: LiveSourceRepositoryPort,
     private readonly coordinator: RtspRuntimeCoordinatorPort,
+    private readonly monotonicNow: () => number = () => performance.now(),
   ) {}
 
   async start(input: Parameters<RtspStreamRuntimePort['start']>[0]): Promise<RtspStreamRuntimeHandle> {
     try {
-      const loaded = await this.sources.loadForStream(input.cameraId);
+      const loading = this.sources.loadForStream(input.cameraId);
+      const loaded = input.deadlineMonotonicMs === undefined
+        ? await loading
+        : await beforeMonotonicDeadline(
+            loading,
+            input.deadlineMonotonicMs,
+            this.monotonicNow,
+          );
       if (!loaded) throw new Error('unavailable');
       return await this.coordinator.startRestrictedRuntime(loaded.source, input);
     } catch {
@@ -23,7 +31,35 @@ export class RestrictedRtspStreamRuntimeAdapter implements RtspStreamRuntimePort
     }
   }
 
-  async recover(sessionId: string): Promise<void> {
-    await this.coordinator.recoverRestrictedRuntime(sessionId);
+  async recover(sessionId: string, deadlineMonotonicMs?: number): Promise<void> {
+    if (deadlineMonotonicMs === undefined) {
+      await this.coordinator.recoverRestrictedRuntime(sessionId);
+    } else {
+      await this.coordinator.recoverRestrictedRuntime(sessionId, deadlineMonotonicMs);
+    }
+  }
+}
+
+async function beforeMonotonicDeadline<T>(
+  operation: Promise<T>,
+  deadlineMonotonicMs: number,
+  monotonicNow: () => number,
+): Promise<T> {
+  const remainingMs = deadlineMonotonicMs - monotonicNow();
+  if (remainingMs <= 0) {
+    void operation.catch(() => undefined);
+    throw new Error('deadline');
+  }
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('deadline')), remainingMs);
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
