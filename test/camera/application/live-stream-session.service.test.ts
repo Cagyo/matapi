@@ -442,6 +442,57 @@ describe('LiveStreamSessionService', () => {
     expect(lease.clearCalls).toBe(1);
   });
 
+  it('deletes stored watch messages once when a timed-out stop eventually completes', async () => {
+    vi.useFakeTimers();
+    const gateway = new FakeGateway();
+    gateway.deferStop = true;
+    const messages = new FakeMessageCleanup();
+    const service = createService({ gateway, messages, operationTimeoutMs: 100 });
+    const opened = await service.open(source('front_door'), 1);
+    await opened.registerMessageReference({ chatId: 42, messageId: 9 });
+    const stopping = service.stop(1);
+    const stoppingRejected = expect(stopping).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+
+    await vi.advanceTimersByTimeAsync(100);
+    await stoppingRejected;
+    expect(messages.deleted).toEqual([]);
+
+    gateway.resolveStop();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(messages.deleted).toEqual([{ chatId: 42, messageId: 9 }]);
+    await expect(service.stop(1)).resolves.toBeNull();
+    expect(messages.deleted).toHaveLength(1);
+  });
+
+  it('deletes stored watch messages once when blocked stop cleanup is retried', async () => {
+    vi.useFakeTimers();
+    const gateway = new FakeGateway();
+    gateway.deferStop = true;
+    const messages = new FakeMessageCleanup();
+    const service = createService({ gateway, messages, operationTimeoutMs: 100 });
+    const opened = await service.open(source('front_door'), 1);
+    await opened.registerMessageReference({ chatId: 42, messageId: 9 });
+    const stopping = service.stop(1);
+    const stoppingRejected = expect(stopping).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+
+    await vi.advanceTimersByTimeAsync(100);
+    await stoppingRejected;
+    gateway.rejectStop(new Error('late stop failure'));
+    await vi.advanceTimersByTimeAsync(0);
+    gateway.deferStop = false;
+
+    await expect(service.open(source('garden'), 2)).resolves.toMatchObject({
+      cameraName: 'garden',
+    });
+
+    expect(messages.deleted).toEqual([{ chatId: 42, messageId: 9 }]);
+  });
+
   it('deletes stored watch messages when the session expires', async () => {
     vi.useFakeTimers();
     const clock = new FakeMonotonicClock(1_000);
@@ -839,6 +890,7 @@ class FakeGateway implements LiveStreamGatewayPort {
   deferStop = false;
   throwStartSynchronously = false;
   private readonly stopResolvers: Array<() => void> = [];
+  private readonly stopRejectors: Array<(error: Error) => void> = [];
 
   start(input: { source: LiveStreamSource }): Promise<{
     publicHostname: string;
@@ -870,14 +922,21 @@ class FakeGateway implements LiveStreamGatewayPort {
     if (this.stopError) throw this.stopError;
     if (this.hangStop) await new Promise<never>(() => undefined);
     if (this.deferStop) {
-      await new Promise<void>((resolve) => {
+      await new Promise<void>((resolve, reject) => {
         this.stopResolvers.push(resolve);
+        this.stopRejectors.push(reject);
       });
     }
   }
 
   resolveStop(): void {
     this.stopResolvers.shift()?.();
+    this.stopRejectors.shift();
+  }
+
+  rejectStop(error: Error): void {
+    this.stopResolvers.shift();
+    this.stopRejectors.shift()?.(error);
   }
 
   async recoverOwnedProcess(input: {

@@ -467,7 +467,10 @@ export class LiveStreamSessionService implements OnModuleInit {
     }
 
     this.cleanupBlocked = undefined;
-    if (this.active === active) this.active = undefined;
+    if (this.active === active) {
+      await this.deleteMessageReferences(active.messageReferences);
+      this.active = undefined;
+    }
     this.clearExpiryTimer();
     try {
       await this.clearLease();
@@ -544,7 +547,10 @@ export class LiveStreamSessionService implements OnModuleInit {
   ): Promise<void> {
     if (this.cleanupBlocked?.active !== active) return;
     this.cleanupBlocked = undefined;
-    if (this.active === active) this.active = undefined;
+    if (this.active === active) {
+      await this.deleteMessageReferences(active.messageReferences);
+      this.active = undefined;
+    }
     this.clearExpiryTimer();
     try {
       await this.clearLease();
