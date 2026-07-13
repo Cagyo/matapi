@@ -128,6 +128,7 @@ export interface UnixSinkSetupDependencies {
 
 export interface UnixSinkServer {
   readonly listening: boolean;
+  on(event: 'error', listener: (error: Error) => void): void;
   once(event: 'error', listener: (error: Error) => void): void;
   off(event: 'error', listener: (error: Error) => void): void;
   listen(path: string, listener: () => void): void;
@@ -189,7 +190,9 @@ export class FfmpegLiveSourceProbeAdapter implements LiveSourceProbePort {
   async run(source: LiveSource): Promise<void> {
     const monotonicNow = () => this.#dependencies.monotonicNow();
     const startedAt = monotonicNow();
+    const entryWallNow = this.#dependencies.wallNow();
     const finalDeadline = startedAt + this.options.timeoutMs;
+    const leaseExpiresAtUnixMs = entryWallNow + this.options.timeoutMs;
     const cleanupReserveMs = Math.min(
       MAX_CLEANUP_RESERVE_MS,
       Math.floor(this.options.timeoutMs / 4),
@@ -221,7 +224,8 @@ export class FfmpegLiveSourceProbeAdapter implements LiveSourceProbePort {
       if (!selected) throw new LiveSourceProbeFailedError();
       const effectiveTransport =
         source.transport === 'auto' ? 'tcp' : source.transport;
-      const wallNow = this.#dependencies.wallNow();
+      const grantWallNow = this.#dependencies.wallNow();
+      if (grantWallNow < entryWallNow) throw new LiveSourceProbeFailedError();
       const sessionId = this.#dependencies.randomUUID();
       const nonceHash = createHash('sha256')
         .update(this.#dependencies.randomBytes())
@@ -231,7 +235,7 @@ export class FfmpegLiveSourceProbeAdapter implements LiveSourceProbePort {
           nonceHash,
           addresses: selected.addresses,
           rtspControlPorts: [selected.port],
-          expiresAtUnixMs: wallNow + this.options.timeoutMs,
+          expiresAtUnixMs: leaseExpiresAtUnixMs,
         };
       const grant = StreamEgressGrant.create(
         effectiveTransport === 'tcp'
@@ -244,7 +248,7 @@ export class FfmpegLiveSourceProbeAdapter implements LiveSourceProbePort {
                 last: this.options.udpPortLast,
               },
             },
-        wallNow,
+        grantWallNow,
       );
       lease = await awaitBeforeDeadline(
         this.egress.grant(grant),
@@ -608,11 +612,17 @@ export async function openFfmpegProbeUnixSink(
     }
     await unlinkSink(path).catch(() => undefined);
   };
+  const onServerError = (): void => {
+    sinkFailed = true;
+    tracker.finish();
+    safeLateCleanup(close);
+  };
   try {
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject);
       server.listen(path, () => {
         server.off('error', reject);
+        server.on('error', onServerError);
         resolve();
       });
     });

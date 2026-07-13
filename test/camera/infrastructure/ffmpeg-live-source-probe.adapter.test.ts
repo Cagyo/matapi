@@ -1,4 +1,5 @@
 import { access, mkdtemp, rm } from 'node:fs/promises';
+import { EventEmitter } from 'node:events';
 import type { Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -37,6 +38,10 @@ async function waitForPath(path: string): Promise<void> {
 function fixture(
   addresses = [{ address: '192.168.1.20', family: 4 as const }],
   timeoutMs = 30_000,
+  clocks: {
+    monotonicNow?: () => number;
+    wallNow?: () => number;
+  } = {},
 ) {
   const egress: StreamEgressPort = {
     grant: vi.fn().mockResolvedValue(lease),
@@ -66,8 +71,8 @@ function fixture(
       startProcess,
       openUnixSink,
       now: () => 1_800_000_000_000,
-      wallNow: () => 1_800_000_000_000,
-      monotonicNow: () => Date.now(),
+      wallNow: clocks.wallNow ?? (() => 1_800_000_000_000),
+      monotonicNow: clocks.monotonicNow ?? (() => Date.now()),
       randomUUID: () => lease.sessionId,
       randomBytes: () => Buffer.alloc(32, 7),
     } as never,
@@ -244,6 +249,60 @@ describe('FfmpegLiveSourceProbeAdapter', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('anchors lease expiry to probe entry after DNS consumes monotonic budget', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    try {
+      const entryWall = 1_800_000_000_000;
+      const { adapter, egress, lookup } = fixture(undefined, 1_000, {
+        monotonicNow: () => Date.now(),
+        wallNow: () => entryWall + Date.now(),
+      });
+      lookup.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            setTimeout(
+              () => resolve([{ address: '192.168.1.20', family: 4 }]),
+              400,
+            );
+          }),
+      );
+
+      const probe = adapter.run(
+        LiveSource.create({ cameraId: 'c1', url: 'rtsp://cam.local/live' }),
+      );
+      await vi.advanceTimersByTimeAsync(400);
+      await probe;
+
+      const grant = vi.mocked(egress.grant).mock.calls[0][0];
+      expect(grant.expiresAtUnixMs).toBe(entryWall + 1_000);
+      expect(grant.expiresAtUnixMs).toBeLessThan(
+        entryWall + Date.now() + 1_000,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('fails closed when wall time moves backward before grant validation', async () => {
+    const entryWall = 1_800_000_000_000;
+    const wallNow = vi
+      .fn<() => number>()
+      .mockReturnValueOnce(entryWall)
+      .mockReturnValueOnce(entryWall - 1);
+    const { adapter, egress } = fixture(undefined, 1_000, { wallNow });
+
+    await expect(
+      adapter.run(
+        LiveSource.create({ cameraId: 'c1', url: 'rtsp://cam.local/live' }),
+      ),
+    ).rejects.toMatchObject({
+      code: 'LIVE_SOURCE_PROBE_FAILED',
+      message: 'Live source probe failed',
+    });
+    expect(egress.grant).not.toHaveBeenCalled();
   });
 
   it('terminates and reaps an uncooperative child inside the total deadline', async () => {
@@ -491,6 +550,7 @@ describe('openFfmpegProbeUnixSink', () => {
           get listening() {
             return listening;
           },
+          on: vi.fn(),
           once: vi.fn(),
           off: vi.fn(),
           listen: (_path, listener) => {
@@ -510,5 +570,54 @@ describe('openFfmpegProbeUnixSink', () => {
     expect(close).toHaveBeenCalledOnce();
     expect(unlink).toHaveBeenCalledTimes(2);
     expect(unlink).toHaveBeenLastCalledWith(socketPath);
+  });
+
+  it('sanitizes post-listen server errors and performs idempotent cleanup', async () => {
+    const socketPath = '/tmp/rtsp-probe-server-error.sock';
+    const events = new EventEmitter();
+    const unlink = vi.fn().mockResolvedValue(undefined);
+    const close = vi.fn((listener: () => void) => listener());
+    let listening = false;
+    const sink = await openFfmpegProbeUnixSink(socketPath, {
+      mkdir: vi.fn().mockResolvedValue(undefined),
+      unlink,
+      chmod: vi.fn().mockResolvedValue(undefined),
+      createServer: () => ({
+        get listening() {
+          return listening;
+        },
+        on: (event, listener) => {
+          events.on(event, listener);
+        },
+        once: (event, listener) => {
+          events.once(event, listener);
+        },
+        off: (event, listener) => {
+          events.off(event, listener);
+        },
+        listen: (_path, listener) => {
+          listening = true;
+          listener();
+        },
+        close: (listener) => {
+          listening = false;
+          close(listener);
+        },
+      }),
+    });
+
+    expect(() =>
+      events.emit('error', new Error('raw server failure')),
+    ).not.toThrow();
+    await expect(sink.confirmFrame(1)).rejects.toMatchObject({
+      code: 'LIVE_SOURCE_PROBE_FAILED',
+      message: 'Live source probe failed',
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    await sink.close();
+
+    expect(close).toHaveBeenCalledOnce();
+    expect(unlink).toHaveBeenCalledTimes(2);
   });
 });
