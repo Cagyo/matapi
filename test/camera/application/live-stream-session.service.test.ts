@@ -411,6 +411,98 @@ describe('LiveStreamSessionService', () => {
     expect(gateway.revoked).toEqual([firstHash]);
   });
 
+  it('keeps the current generation when same-user replies register out of order', async () => {
+    const lease = new FakeLease();
+    const messages = new FakeMessageCleanup();
+    const service = createService({ lease, messages });
+
+    const stale = await service.open(source('front_door'), 1);
+    const current = await service.open(source('front_door'), 1);
+    expect(current.grantId).not.toBe(stale.grantId);
+
+    await current.registerMessageReference({ chatId: 42, messageId: 20 });
+    await stale.registerMessageReference({ chatId: 42, messageId: 10 });
+
+    expect(lease.current()?.messageReferences).toEqual([
+      { telegramId: 1, chatId: 42, messageId: 20 },
+    ]);
+    expect(messages.deleted).toContainEqual({
+      telegramId: 1,
+      chatId: 42,
+      messageId: 10,
+    });
+  });
+
+  it('contains stale-reply deletion failure without revoking the current grant', async () => {
+    const lease = new FakeLease();
+    const messages = new FakeMessageCleanup();
+    const service = createService({ lease, messages });
+    const stale = await service.open(source('front_door'), 1);
+    await service.open(source('front_door'), 1);
+    messages.deleteError = new Error('telegram unavailable');
+
+    await expect(
+      stale.registerMessageReference({ chatId: 42, messageId: 10 }),
+    ).resolves.toBeUndefined();
+    expect(lease.current()?.messageReferences).toEqual([]);
+    await expect(service.open(source('front_door'), 2)).resolves.toBeDefined();
+    await expect(service.open(source('front_door'), 3)).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+  });
+
+  it('removes the old reference when replacement add fails after revocation', async () => {
+    const gateway = new FakeGateway();
+    const lease = new FakeLease();
+    const messages = new FakeMessageCleanup();
+    const service = createService({ gateway, lease, messages });
+    const first = await service.open(source('front_door'), 1);
+    await first.registerMessageReference({ chatId: 42, messageId: 1 });
+    gateway.addViewerError = new Error('replacement add failed');
+
+    await expect(service.open(source('front_door'), 1)).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+
+    expect(lease.current()?.messageReferences).toEqual([]);
+    expect(messages.deleted).toContainEqual({
+      telegramId: 1,
+      chatId: 42,
+      messageId: 1,
+    });
+
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      await expect(service.open(source('front_door'), 1)).rejects.toMatchObject({
+        code: 'LIVE_STREAM_UNAVAILABLE',
+      });
+    }
+    gateway.addViewerError = undefined;
+    const second = await service.open(source('front_door'), 2);
+    await second.registerMessageReference({ chatId: 42, messageId: 2 });
+    const third = await service.open(source('front_door'), 3);
+    await third.registerMessageReference({ chatId: 42, messageId: 3 });
+    expect(lease.current()?.messageReferences).toHaveLength(2);
+    await expect(service.open(source('front_door'), 1)).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+  });
+
+  it('tears down the session when revoked-reference persistence fails', async () => {
+    const gateway = new FakeGateway();
+    const lease = new FakeLease();
+    const service = createService({ gateway, lease });
+    const first = await service.open(source('front_door'), 1);
+    await first.registerMessageReference({ chatId: 42, messageId: 1 });
+    lease.writeError = new Error('replacement cleanup write failed');
+
+    await expect(service.open(source('front_door'), 1)).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+
+    expect(gateway.stopCalls).toBe(1);
+    expect(lease.current()).toBeNull();
+  });
+
   it('rejects a third distinct user without evicting existing grants', async () => {
     const gateway = new FakeGateway();
     const service = createService({ gateway });
@@ -617,7 +709,7 @@ describe('LiveStreamSessionService', () => {
     });
   });
 
-  it('retains the previous bounded reference when replacement registration fails', async () => {
+  it('leaves no stale reference when replacement registration fails', async () => {
     const gateway = new FakeGateway();
     const lease = new FakeLease();
     const messages = new FakeMessageCleanup();
@@ -631,13 +723,11 @@ describe('LiveStreamSessionService', () => {
       replacement.registerMessageReference({ chatId: 42, messageId: 10 }),
     ).rejects.toMatchObject({ code: 'LIVE_STREAM_UNAVAILABLE' });
 
-    expect(lease.current()?.messageReferences).toEqual([
+    expect(lease.current()?.messageReferences).toEqual([]);
+    expect(messages.deleted).toEqual([
       { telegramId: 1, chatId: 42, messageId: 9 },
     ]);
-    expect(messages.deleted).toEqual([]);
-    await expect(service.revokeUser(1)).rejects.toMatchObject({
-      code: 'LIVE_STREAM_UNAVAILABLE',
-    });
+    await expect(service.revokeUser(1)).resolves.toBeUndefined();
     expect(gateway.revoked).toHaveLength(2);
   });
 
@@ -979,7 +1069,6 @@ describe('LiveStreamSessionService', () => {
     const opened = await service.open(source('front_door'), 1);
     await opened.registerMessageReference({ chatId: 42, messageId: 9 });
     gateway.stopError = new Error('stop failed');
-    lease.clearError = new Error('clear failed');
     messages.deleteError = new Error('delete failed');
 
     await expect(service.shutdown()).resolves.toBeUndefined();
@@ -988,6 +1077,7 @@ describe('LiveStreamSessionService', () => {
     });
     expect(gateway.stopCalls).toBe(1);
     expect(lease.clearCalls).toBe(0);
+    expect(lease.current()?.cameraId).toBe('front_door');
   });
 
   it('bounds a stalled shutdown and keeps the module fallback exactly once', async () => {
@@ -1004,7 +1094,8 @@ describe('LiveStreamSessionService', () => {
     await expect(shuttingDown).resolves.toBeUndefined();
     await expect(service.onModuleDestroy()).resolves.toBeUndefined();
     expect(gateway.stopCalls).toBe(1);
-    expect(lease.clearCalls).toBe(1);
+    expect(lease.clearCalls).toBe(0);
+    expect(lease.current()?.cameraId).toBe('front_door');
   });
 });
 

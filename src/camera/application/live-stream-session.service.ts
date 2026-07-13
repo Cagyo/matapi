@@ -33,6 +33,7 @@ import {
 
 export interface OpenLiveStreamResult {
   watchUrl: string;
+  grantId: string;
   remainingMs: number;
   expiresMonotonicMs: number;
   cameraName: string;
@@ -44,8 +45,17 @@ interface ActiveSession {
   publicHostname: string;
   pid: LiveStreamLease['pid'];
   processIdentity: string;
-  viewerTokenHashes: Map<number, string>;
-  messageReferences: LiveStreamMessageReference[];
+  viewerGrants: Map<number, ViewerGrant>;
+  messageReferences: RuntimeMessageReference[];
+}
+
+interface ViewerGrant {
+  grantId: string;
+  tokenHash: string;
+}
+
+interface RuntimeMessageReference extends LiveStreamMessageReference {
+  grantId: string;
 }
 
 interface Deferred<T> {
@@ -250,15 +260,18 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
       this.cleanupBlocked = undefined;
       this.clearExpiryTimer();
 
+      let gatewayStopped = false;
       try {
         await this.withOperationTimeout(
           Promise.resolve().then(() => this.gateway.stop()),
         );
+        gatewayStopped = true;
       } catch {
         // Process shutdown is best effort; gateway.stop owns its late cleanup.
       }
 
       if (active) await this.deleteMessageReferences(active.messageReferences);
+      if (!gatewayStopped) return;
       try {
         await this.clearLease();
       } catch {
@@ -276,24 +289,14 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
     return this.enqueue(async () => {
       if (!this.active) return;
 
-      const tokenHash = this.active.viewerTokenHashes.get(telegramId);
-      if (tokenHash) {
+      const grant = this.active.viewerGrants.get(telegramId);
+      if (grant) {
         await this.withOperationTimeout(
-          Promise.resolve().then(() => this.gateway.revokeViewer(tokenHash)),
+          Promise.resolve().then(() => this.gateway.revokeViewer(grant.tokenHash)),
         );
       }
-      this.active.viewerTokenHashes.delete(telegramId);
-      const referenceIndex = this.active.messageReferences.findIndex(
-        (reference) => reference.telegramId === telegramId,
-      );
-      if (referenceIndex >= 0) {
-        const [reference] = this.active.messageReferences.splice(referenceIndex, 1);
-        try {
-          await this.writeLease(this.active);
-        } finally {
-          await this.deleteMessageReferences([reference]);
-        }
-      }
+      this.active.viewerGrants.delete(telegramId);
+      await this.removeMessageReference(this.active, telegramId);
     }).catch(() => {
       throw new LiveStreamUnavailableError();
     });
@@ -302,18 +305,27 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
   registerMessageReference(
     sessionId: string,
     telegramId: number,
+    grantId: string,
     reference: NewLiveStreamMessageReference,
   ): Promise<void> {
     return this.enqueue(async () => {
       if (this.active?.session.id !== sessionId) return;
-      if (!this.active.viewerTokenHashes.has(telegramId)) return;
+      const currentGrant = this.active.viewerGrants.get(telegramId);
+      if (currentGrant?.grantId !== grantId) {
+        await this.deleteMessageReferences([{ telegramId, ...reference }]);
+        return;
+      }
       const previousIndex = this.active.messageReferences.findIndex(
         (current) => current.telegramId === telegramId,
       );
       const previous = this.active.messageReferences[previousIndex];
-      if (previous?.chatId === reference.chatId && previous.messageId === reference.messageId) return;
+      if (
+        previous?.grantId === grantId &&
+        previous.chatId === reference.chatId &&
+        previous.messageId === reference.messageId
+      ) return;
 
-      const replacement = { telegramId, ...reference };
+      const replacement = { telegramId, grantId, ...reference };
       const priorReferences = [...this.active.messageReferences];
       if (previousIndex >= 0) {
         this.active.messageReferences[previousIndex] = replacement;
@@ -404,7 +416,7 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
       publicHostname: started.publicHostname,
       pid: started.pid,
       processIdentity: started.processIdentity,
-      viewerTokenHashes: new Map(),
+      viewerGrants: new Map(),
       messageReferences: [],
     };
 
@@ -478,17 +490,28 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
       throw new LiveStreamUnavailableError();
     }
 
-    const previousTokenHash = active.viewerTokenHashes.get(telegramId);
-    if (!previousTokenHash && active.viewerTokenHashes.size >= this.maxViewers) {
+    const previousGrant = active.viewerGrants.get(telegramId);
+    if (!previousGrant && active.viewerGrants.size >= this.maxViewers) {
       throw new ViewerCapacityError();
     }
-    if (previousTokenHash) {
+    if (previousGrant) {
       await this.withOperationTimeout(
-        Promise.resolve().then(() => this.gateway.revokeViewer(previousTokenHash)),
+        Promise.resolve().then(() => this.gateway.revokeViewer(previousGrant.tokenHash)),
       );
-      active.viewerTokenHashes.delete(telegramId);
+      active.viewerGrants.delete(telegramId);
+      try {
+        await this.removeMessageReference(active, telegramId);
+      } catch (error) {
+        try {
+          await this.stopActive();
+        } catch {
+          // stopActive fences failed gateway cleanup before another open proceeds.
+        }
+        throw error;
+      }
     }
 
+    const grantId = randomUUID();
     const token = createViewerToken(randomBytes(32));
     const tokenHash = createHash('sha256').update(token).digest('hex');
     await this.withOperationTimeout(
@@ -500,14 +523,15 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
         }),
       ),
     );
-    active.viewerTokenHashes.set(telegramId, tokenHash);
+    active.viewerGrants.set(telegramId, { grantId, tokenHash });
     return {
       watchUrl: `https://${active.publicHostname}/watch/${token}`,
+      grantId,
       remainingMs,
       expiresMonotonicMs: active.session.expiresMonotonicMs,
       cameraName: active.session.cameraName,
       registerMessageReference: (reference) =>
-        this.registerMessageReference(active.session.id, telegramId, reference),
+        this.registerMessageReference(active.session.id, telegramId, grantId, reference),
     };
   }
 
@@ -579,7 +603,7 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
       publicHostname: started.publicHostname,
       pid: started.pid,
       processIdentity: started.processIdentity,
-      viewerTokenHashes: new Map(),
+      viewerGrants: new Map(),
       messageReferences: [],
     });
   }
@@ -729,9 +753,27 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
           0,
           active.session.expiresMonotonicMs - this.clock.now(),
         ),
-        messageReferences: [...active.messageReferences],
+        messageReferences: active.messageReferences.map(
+          ({ telegramId, chatId, messageId }) => ({ telegramId, chatId, messageId }),
+        ),
       }),
     );
+  }
+
+  private async removeMessageReference(
+    active: ActiveSession,
+    telegramId: number,
+  ): Promise<void> {
+    const referenceIndex = active.messageReferences.findIndex(
+      (reference) => reference.telegramId === telegramId,
+    );
+    if (referenceIndex < 0) return;
+    const [reference] = active.messageReferences.splice(referenceIndex, 1);
+    try {
+      await this.writeLease(active);
+    } finally {
+      await this.deleteMessageReferences([reference]);
+    }
   }
 
   private readLease(): Promise<LiveStreamLease | null> {
@@ -763,8 +805,13 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
     await Promise.all(
       references.map(async (reference) => {
         try {
+          const cleanupReference: LiveStreamMessageReference = {
+            telegramId: reference.telegramId,
+            chatId: reference.chatId,
+            messageId: reference.messageId,
+          };
           await this.withOperationTimeout(
-            Promise.resolve().then(() => this.messageCleanup.delete(reference)),
+            Promise.resolve().then(() => this.messageCleanup.delete(cleanupReference)),
           );
         } catch {
           // Watch-message cleanup is best effort and never compromises teardown.

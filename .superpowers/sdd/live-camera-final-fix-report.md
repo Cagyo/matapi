@@ -92,3 +92,44 @@ Implemented the five final-review fixes as one consolidated wave:
 
 - Command: `git commit -m "fix(camera): close live stream production gaps"`
 - Scope: only the final-fix implementation, tests, compatibility automated counts, and this report.
+
+## Full-range review follow-up
+
+The post-commit full-range review identified two important recovery/concurrency gaps and one missing integration seam. This follow-up closes all three:
+
+1. Shutdown preserves the durable recovery lease when gateway stop fails or exceeds the bounded operation timeout. It clears the lease only after confirmed gateway stop success, while Telegram message deletion remains best effort.
+2. Viewer grants now carry opaque generation IDs. A delayed reply from an older same-user grant can only best-effort delete its own stale Telegram message; it cannot replace the current reference or revoke the current grant. Same-user replacement removes the revoked grant's reference from the lease and deletes it before issuing the new grant. If that durable removal fails, the session is fenced through teardown so a partially revoked state cannot accept another open.
+3. The setup server now has real HTTP `/finish` coverage using the production env writer and temporary install directories. Both selected `rtsp` and deselected `rtsp` paths inspect the resulting `.env` and `features.json` files.
+
+### Follow-up RED / GREEN evidence
+
+- Shutdown lease RED: `yarn test test/camera/application/live-stream-session.service.test.ts -t "tears down an active session once|contains teardown errors|bounds a stalled shutdown"`
+  - Result: 2 failures; failed and timed-out gateway stops cleared the only recovery lease.
+- Shutdown lease GREEN: same command.
+  - Result: 3 tests passed; successful stop clears once, while failure and timeout preserve the lease.
+- Generation/replacement RED: `yarn test test/camera/application/live-stream-session.service.test.ts -t "current generation|stale-reply|replacement add fails"`
+  - Result: 2 failures; no opaque grant generation existed and failed replacement retained the revoked reference. The stale-delete test was tightened with a lease assertion after its initial formulation passed without exercising the overwrite risk.
+- Generation/replacement GREEN: same command.
+  - Result: 3 tests passed.
+- Transaction self-review RED: `yarn test test/camera/application/live-stream-session.service.test.ts -t "revoked-reference persistence"`
+  - Result: 1 failure; a lease-write failure did not fence the partially revoked session.
+- Transaction self-review GREEN: same command.
+  - Result: 1 test passed; the failed transaction tears the session down.
+- Focused session/handler GREEN: `yarn test test/camera/application/live-stream-session.service.test.ts test/telegram/interfaces/camera.handler.test.ts`
+  - Result: 2 files passed / 78 tests passed.
+- HTTP setup E2E GREEN: `yarn test test/setup-wizard/server.test.ts`
+  - Result: 1 file passed / 7 tests passed with scoped loopback permission.
+
+### Follow-up final verification
+
+- Combined scope command from the initial wave: 41 files passed / 298 tests passed with scoped loopback permission.
+- Targeted ESLint: `yarn eslint src/camera/application/live-stream-session.service.ts test/camera/application/live-stream-session.service.test.ts test/setup-wizard/server.test.ts`
+  - Result: exit 0, no findings.
+- Shell syntax: `bash -n scripts/install-feature.sh scripts/install.sh`
+  - Result: exit 0.
+- Build: `yarn build`
+  - Result: exit 0.
+- Full regression with scoped loopback permission: `yarn test`
+  - Result: 167 files passed / 1010 tests passed.
+- Manual Raspberry Pi, Motion, real-tunnel, Telegram client, reboot, and resource acceptance remains **PENDING**.
+- Intended commit: `git commit -m "fix(camera): preserve live stream recovery invariants"`.

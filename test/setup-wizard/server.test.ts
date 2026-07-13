@@ -1,22 +1,23 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as setupServer from '../../scripts/setup-wizard/server';
+import * as envWriter from '../../scripts/setup-wizard/env-writer';
 
 const { createSetupServer } = setupServer;
 const TEST_SECRET = 'test-pairing-secret';
 
-type ServerDependencies = {
+interface ServerDependencies {
   installDir: string;
-  catalog: Array<{ name: string; description: string }>;
+  catalog: { name: string; description: string }[];
   pairingSecret: string;
   validateToken: (token: string) => Promise<Record<string, unknown>> | Record<string, unknown>;
   writeConfig: (installDir: string, token: string, features: string[]) => { claimAdminToken: string };
   onComplete: () => void;
-};
+}
 
 const installDirs: string[] = [];
 
@@ -27,18 +28,21 @@ function createInstallDir(): string {
 }
 
 async function startTestServer(overrides: Partial<ServerDependencies> = {}) {
+  const installDir = overrides.installDir ?? createInstallDir();
   const writeConfig = overrides.writeConfig ?? vi.fn(() => ({ claimAdminToken: 'claim-token' }));
   const server = createSetupServer({
-    installDir: createInstallDir(),
+    installDir,
     catalog: [],
     pairingSecret: TEST_SECRET,
     validateToken: overrides.validateToken ?? vi.fn(),
     writeConfig,
     onComplete: overrides.onComplete ?? vi.fn(),
   });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  await new Promise<void>((resolve) => {
+    server.listen(0, '127.0.0.1', resolve);
+  });
   const address = server.address() as AddressInfo;
-  return { server, url: `http://127.0.0.1:${address.port}`, writeConfig };
+  return { server, url: `http://127.0.0.1:${address.port}`, writeConfig, installDir };
 }
 
 async function post(url: string, route: string, body: Record<string, string>) {
@@ -128,6 +132,72 @@ describe('createSetupServer', () => {
     expect(await response.text()).toContain('/claim_admin claim-token');
     expect(writeConfig).toHaveBeenCalledWith(expect.any(String), 'cleaned-bot-token', ['motion']);
     await vi.waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
+    await close(server);
+  });
+
+  it('writes selected rtsp state through HTTP to both env and features files', async () => {
+    const installDir = createInstallDir();
+    writeFileSync(
+      join(installDir, '.env.example'),
+      'TELEGRAM_BOT_TOKEN=\nCLAIM_ADMIN_TOKEN=\nLIVE_STREAM_ENABLED=false\n',
+    );
+    const { server, url } = await startTestServer({
+      installDir,
+      validateToken: vi.fn().mockResolvedValue({
+        ok: true,
+        cleanedToken: '123456:telegram-token',
+        username: 'home_bot',
+      }),
+      writeConfig: envWriter.writeConfig,
+    });
+
+    const response = await post(url, '/finish', {
+      pairingSecret: TEST_SECRET,
+      token: '123456:telegram-token',
+      features: 'rtsp',
+    });
+
+    expect(response.status).toBe(200);
+    expect(readFileSync(join(installDir, '.env'), 'utf8')).toContain(
+      'LIVE_STREAM_ENABLED=true',
+    );
+    expect(JSON.parse(readFileSync(join(installDir, 'features.json'), 'utf8'))).toMatchObject({
+      enabled: ['rtsp'],
+      liveStream: true,
+    });
+    await close(server);
+  });
+
+  it('writes deselected rtsp state through HTTP to both env and features files', async () => {
+    const installDir = createInstallDir();
+    writeFileSync(
+      join(installDir, '.env.example'),
+      'TELEGRAM_BOT_TOKEN=\nCLAIM_ADMIN_TOKEN=\nLIVE_STREAM_ENABLED=true\n',
+    );
+    const { server, url } = await startTestServer({
+      installDir,
+      validateToken: vi.fn().mockResolvedValue({
+        ok: true,
+        cleanedToken: '123456:telegram-token',
+        username: 'home_bot',
+      }),
+      writeConfig: envWriter.writeConfig,
+    });
+
+    const response = await post(url, '/finish', {
+      pairingSecret: TEST_SECRET,
+      token: '123456:telegram-token',
+      features: 'motion',
+    });
+
+    expect(response.status).toBe(200);
+    expect(readFileSync(join(installDir, '.env'), 'utf8')).toContain(
+      'LIVE_STREAM_ENABLED=false',
+    );
+    expect(JSON.parse(readFileSync(join(installDir, 'features.json'), 'utf8'))).toMatchObject({
+      enabled: ['motion'],
+      liveStream: false,
+    });
     await close(server);
   });
 });
