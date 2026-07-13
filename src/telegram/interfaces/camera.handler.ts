@@ -12,6 +12,8 @@ import {
 } from '../../camera/application/get-motion-video.use-case';
 import { GetSnapshotUseCase } from '../../camera/application/get-snapshot.use-case';
 import { ListMotionEventsUseCase } from '../../camera/application/list-motion-events.use-case';
+import { OpenLiveStreamUseCase } from '../../camera/application/open-live-stream.use-case';
+import { StopLiveStreamUseCase } from '../../camera/application/stop-live-stream.use-case';
 import { CameraNotFoundError } from '../../camera/domain/errors/camera-not-found.error';
 import { EventNotFoundError } from '../../camera/domain/errors/event-not-found.error';
 import { MediaFileUnavailableError } from '../../camera/domain/errors/media-file-unavailable.error';
@@ -22,9 +24,13 @@ import { MotionStartFailedError } from '../../camera/domain/errors/motion-start-
 import { MotionStopFailedError } from '../../camera/domain/errors/motion-stop-failed.error';
 import { NoCamerasConfiguredError } from '../../camera/domain/errors/no-cameras-configured.error';
 import { NoSnapshotForEventError } from '../../camera/domain/errors/no-snapshot-for-event.error';
+import { LiveStreamExpiredError } from '../../camera/domain/errors/live-stream-expired.error';
+import { LiveStreamSourceUnavailableError } from '../../camera/domain/errors/live-stream-source-unavailable.error';
+import { LiveStreamUnavailableError } from '../../camera/domain/errors/live-stream-unavailable.error';
 import { BrowseMotionEvent } from '../../camera/domain/ports/media-repository.port';
 import { SnapshotFailedError } from '../../camera/domain/errors/snapshot-failed.error';
 import { eventDurationSec, MotionEvent } from '../../camera/domain/motion-event.entity';
+import { catalogFor, type LocaleCatalog } from '../../locales';
 import { en } from '../../locales/en';
 import { RoleMiddleware } from './role.middleware';
 import { TelegramContext } from './telegram-context';
@@ -38,6 +44,8 @@ type Subcommand =
   | 'enable'
   | 'disable'
   | 'status'
+  | 'live'
+  | 'stop_stream'
   | 'menu'
   | 'dashboard';
 
@@ -82,6 +90,8 @@ export class CameraHandler implements TelegramHandler {
     private readonly enable: EnableMotionUseCase,
     private readonly disable: DisableMotionUseCase,
     private readonly status: CameraStatusUseCase,
+    private readonly openLiveStream: OpenLiveStreamUseCase,
+    private readonly stopLiveStream: StopLiveStreamUseCase,
     private readonly guard: RoleMiddleware,
   ) {}
 
@@ -119,6 +129,12 @@ export class CameraHandler implements TelegramHandler {
           case 'status':
             await this.handleStatus(ctx);
             return;
+          case 'live':
+            await this.handleLive(ctx, arg || undefined);
+            return;
+          case 'stop_stream':
+            await this.handleStopLive(ctx);
+            return;
           default:
             await ctx.reply(en.camera.usage);
         }
@@ -144,6 +160,15 @@ export class CameraHandler implements TelegramHandler {
         }
         if (data === 'status') {
           await this.handleStatus(ctx);
+          return;
+        }
+        if (data === 'live') {
+          await this.handleLive(ctx);
+          return;
+        }
+        if (data.startsWith('live:')) {
+          const cameraId = data.slice('live:'.length).trim();
+          if (cameraId) await this.handleLive(ctx, cameraId);
           return;
         }
         if (data === 'close') {
@@ -218,6 +243,8 @@ export class CameraHandler implements TelegramHandler {
     if (userId) this.pendingBrowseInputs.delete(userId);
 
     const kb = new InlineKeyboard()
+      .text(this.catalog(ctx).camera.dashboardButtons.live, 'cam:live')
+      .row()
       .text(en.camera.dashboardButtons.snapshot, 'cam:snapshot')
       .text(en.camera.dashboardButtons.browseEvents, 'cam:browse')
       .row()
@@ -575,6 +602,76 @@ export class CameraHandler implements TelegramHandler {
     const result = await this.status.execute();
     const message = `${en.camera.statusHeader}\n\n${en.camera.statusBody(result)}`;
     await ctx.reply(message);
+  }
+
+  private async handleLive(ctx: TelegramContext, cameraName?: string): Promise<void> {
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+    const catalog = this.catalog(ctx);
+
+    await ctx.reply(catalog.camera.live.opening);
+    try {
+      const opened = await this.openLiveStream.execute({ telegramId, cameraName });
+      const keyboard = new InlineKeyboard().url(
+        catalog.camera.live.watchButton,
+        opened.watchUrl,
+      );
+      const sent = await ctx.reply(
+        catalog.camera.live.opened(
+          Math.max(1, Math.ceil(opened.remainingMs / 60_000)),
+        ),
+        { reply_markup: keyboard },
+      );
+      const chatId = ctx.chat?.id;
+      if (chatId !== undefined) {
+        await opened.registerMessageReference({
+          chatId,
+          messageId: sent.message_id,
+        });
+      }
+    } catch (error) {
+      await this.handleLiveError(ctx, error, 'open live stream');
+    }
+  }
+
+  private async handleStopLive(ctx: TelegramContext): Promise<void> {
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+    const catalog = this.catalog(ctx);
+    try {
+      const cameraName = await this.stopLiveStream.execute(telegramId);
+      await ctx.reply(
+        cameraName ? catalog.camera.live.stopped : catalog.camera.live.noActive,
+      );
+    } catch (error) {
+      await this.handleLiveError(ctx, error, 'stop live stream');
+    }
+  }
+
+  private async handleLiveError(
+    ctx: TelegramContext,
+    error: unknown,
+    action: string,
+  ): Promise<void> {
+    const live = this.catalog(ctx).camera.live;
+    if (error instanceof LiveStreamSourceUnavailableError) {
+      await ctx.reply(live.sourceUnavailable);
+      return;
+    }
+    if (error instanceof LiveStreamExpiredError) {
+      await ctx.reply(live.expired);
+      return;
+    }
+    if (error instanceof LiveStreamUnavailableError) {
+      await ctx.reply(live.unavailable);
+      return;
+    }
+    this.logger.error(`${action} failed`);
+    await ctx.reply(live.unavailable);
+  }
+
+  private catalog(ctx: TelegramContext): LocaleCatalog {
+    return ctx.localeState?.catalog ?? catalogFor('en');
   }
 
   private async requireAdmin(ctx: TelegramContext): Promise<boolean> {

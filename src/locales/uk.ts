@@ -286,7 +286,7 @@ export const commands: CommandDescriptor[] = [
   {
     command: 'camera',
     description: 'Камера та рух',
-    usage: '/camera <snapshot|events|video|photo|status> — камера та рух',
+    usage: '/camera <snapshot|events|video|photo|status|live|stop_stream> — камера та рух',
     scope: 'user',
   },
   {
@@ -936,9 +936,10 @@ const ukCatalog = {
 
   camera: {
     usage:
-      'Використання: /camera <snapshot|events [DD.MM.YYYY]|video <id>|photo <id>|enable|disable|status>',
+      'Використання: /camera <snapshot|events [DD.MM.YYYY]|video <id>|photo <id>|enable|disable|status|live [камера]|stop_stream>',
     dashboardTitle: '📹 Панель камери\nВиберіть дію:',
     dashboardButtons: {
+      live: '🔴 Наживо',
       snapshot: '📸 Зробити знімок',
       browseEvents: '📹 Переглянути події',
       eventsToday: '📹 Сьогоднішні події',
@@ -1075,10 +1076,13 @@ const ukCatalog = {
     live: {
       experimentalLabel: 'Експериментальний перегляд наживо',
       opening: '⏳ Відкриваємо експериментальний перегляд наживо…',
+      opened: (minutes: number) =>
+        `🧪 Експериментальний перегляд наживо доступний приблизно ${minutes} хв.`,
       watchButton: 'Дивитися наживо',
       unavailable: '❌ Експериментальний перегляд наживо зараз недоступний.',
       sourceUnavailable: '❌ Потік наживо з камери недоступний.',
       stopped: '✅ Перегляд наживо зупинено.',
+      noActive: 'ℹ️ Активного перегляду наживо немає.',
       expired: 'ℹ️ Термін дії посилання на перегляд наживо минув.',
       adminFailure: '⚠️ Помилка експериментального перегляду наживо. Перевірте worker і діагностику тунелю.',
     },

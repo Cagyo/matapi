@@ -18,11 +18,16 @@ export class MotionLiveSourceService {
   async resolve(cameraName?: string): Promise<LiveStreamSource> {
     let camera;
     try {
-      camera = cameraName
-        ? await this.media.findCameraByName(cameraName)
-        : (await this.media.listCameras()).find(
+      if (cameraName) {
+        camera = await this.media.findCameraByName(cameraName);
+        camera ??= (await this.media.listCameras()).find(
+          (candidate) => candidate.id === cameraName,
+        ) ?? null;
+      } else {
+        camera = (await this.media.listCameras()).find(
             (candidate) => candidate.enabled && candidate.type === 'motion',
           ) ?? null;
+      }
     } catch {
       throw new LiveStreamSourceUnavailableError();
     }

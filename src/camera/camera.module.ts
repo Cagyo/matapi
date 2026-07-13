@@ -22,6 +22,7 @@ import { GetMotionVideoUseCase } from './application/get-motion-video.use-case';
 import { GetSnapshotUseCase } from './application/get-snapshot.use-case';
 import { ListCamerasUseCase } from './application/list-cameras.use-case';
 import { ListMotionEventsUseCase } from './application/list-motion-events.use-case';
+import { LiveStreamMessageCleanupService } from './application/live-stream-message-cleanup.service';
 import { LiveStreamSessionService } from './application/live-stream-session.service';
 import { MotionLiveSourceService } from './application/motion-live-source.service';
 import { MotionWatcherService } from './application/motion-watcher.service';
@@ -89,7 +90,6 @@ import { InMemoryMediaRepository } from './infrastructure/in-memory-media.reposi
 import { InMemoryMonotonicClockAdapter } from './infrastructure/in-memory-monotonic-clock.adapter';
 import { MetaGdriveSyncHealth } from './infrastructure/meta-gdrive-sync-health';
 import { MotionDaemonAdapter } from './infrastructure/motion-daemon.adapter';
-import { NoopLiveStreamMessageCleanupAdapter } from './infrastructure/noop-live-stream-message-cleanup.adapter';
 import { QuickTunnelLiveStreamAdapter } from './infrastructure/quick-tunnel-live-stream.adapter';
 import { RcloneDriveAuthAdapter } from './infrastructure/rclone-drive-auth.adapter';
 import { RcloneDriveStatusAdapter } from './infrastructure/rclone-drive-status.adapter';
@@ -235,9 +235,10 @@ const liveStreamOptions = liveStreamOptionsFromEnv(process.env);
         ? InMemoryMonotonicClockAdapter
         : SystemMonotonicClockAdapter,
     },
+    LiveStreamMessageCleanupService,
     {
       provide: LIVE_STREAM_MESSAGE_CLEANUP,
-      useClass: NoopLiveStreamMessageCleanupAdapter,
+      useExisting: LiveStreamMessageCleanupService,
     },
     MotionLiveSourceService,
     {
@@ -313,6 +314,7 @@ const liveStreamOptions = liveStreamOptionsFromEnv(process.env);
     OpenLiveStreamUseCase,
     StopLiveStreamUseCase,
     LiveStreamSessionService,
+    LiveStreamMessageCleanupService,
   ],
 })
 export class CameraModule {}

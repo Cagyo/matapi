@@ -286,7 +286,7 @@ export const commands: CommandDescriptor[] = [
   {
     command: 'camera',
     description: 'Камера и движение',
-    usage: '/camera <snapshot|events|video|photo|status> — камера и движение',
+    usage: '/camera <snapshot|events|video|photo|status|live|stop_stream> — камера и движение',
     scope: 'user',
   },
   {
@@ -940,9 +940,10 @@ const ruCatalog = {
 
   camera: {
     usage:
-      'Использование: /camera <snapshot|events [DD.MM.YYYY]|video <id>|photo <id>|enable|disable|status>',
+      'Использование: /camera <snapshot|events [DD.MM.YYYY]|video <id>|photo <id>|enable|disable|status|live [камера]|stop_stream>',
     dashboardTitle: '📹 Панель камеры\nВыберите действие:',
     dashboardButtons: {
+      live: '🔴 Прямой эфир',
       snapshot: '📸 Сделать снимок',
       browseEvents: '📹 Просмотреть события',
       eventsToday: '📹 События за сегодня',
@@ -1079,10 +1080,13 @@ const ruCatalog = {
     live: {
       experimentalLabel: 'Экспериментальный прямой просмотр',
       opening: '⏳ Открываем экспериментальный прямой просмотр…',
+      opened: (minutes: number) =>
+        `🧪 Экспериментальный прямой просмотр доступен примерно ${minutes} мин.`,
       watchButton: 'Смотреть в реальном времени',
       unavailable: '❌ Экспериментальный прямой просмотр сейчас недоступен.',
       sourceUnavailable: '❌ Прямая трансляция с камеры недоступна.',
       stopped: '✅ Прямой просмотр остановлен.',
+      noActive: 'ℹ️ Активного прямого просмотра нет.',
       expired: 'ℹ️ Срок действия ссылки на прямой просмотр истёк.',
       adminFailure: '⚠️ Сбой экспериментального прямого просмотра. Проверьте worker и диагностику туннеля.',
     },

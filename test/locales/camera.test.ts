@@ -13,9 +13,11 @@ describe('en.camera', () => {
         unavailable: expect.any(String),
         sourceUnavailable: expect.any(String),
         stopped: expect.any(String),
+        noActive: expect.any(String),
         expired: expect.any(String),
         adminFailure: expect.any(String),
       });
+      expect(catalog.camera.live.opened(5)).toContain('5');
     }
   });
 

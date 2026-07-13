@@ -11,6 +11,7 @@ import { autoRetry } from '@grammyjs/auto-retry';
 import { run, RunnerHandle } from '@grammyjs/runner';
 import { Bot, GrammyError, HttpError } from 'grammy';
 import { AdminAlertService } from '../../camera/application/admin-alert.service';
+import { LiveStreamMessageCleanupService } from '../../camera/application/live-stream-message-cleanup.service';
 import { EventNotifierService } from '../../events/application/event-notifier.service';
 import { EventProcessorService } from '../../events/application/event-processor.service';
 import { RecipientDirectoryService } from '../../events/application/recipient-directory.service';
@@ -52,6 +53,7 @@ import { TelegramContext } from '../interfaces/telegram-context';
 import { BotCommandsMenuService } from '../application/bot-commands-menu.service';
 import { ConsoleNotifierAdapter } from './console-notifier.adapter';
 import { TelegramAdminAlertAdapter } from './telegram-admin-alert.adapter';
+import { TelegramLiveStreamMessageCleanupAdapter } from './telegram-live-stream-message-cleanup.adapter';
 import { TelegramDirectMessenger } from './telegram-direct-messenger.adapter';
 import { TelegramNotifierAdapter } from './telegram-notifier.adapter';
 import { TelegramRecipientDirectoryAdapter } from './telegram-recipient-directory.adapter';
@@ -100,6 +102,10 @@ export class GrammyBotGateway
     private readonly adminAlertService: AdminAlertService,
     @Inject(forwardRef(() => TelegramAdminAlertAdapter))
     private readonly telegramAdminAlert: TelegramAdminAlertAdapter,
+    @Inject(forwardRef(() => LiveStreamMessageCleanupService))
+    private readonly liveStreamMessageCleanup: LiveStreamMessageCleanupService,
+    @Inject(forwardRef(() => TelegramLiveStreamMessageCleanupAdapter))
+    private readonly telegramLiveStreamMessageCleanup: TelegramLiveStreamMessageCleanupAdapter,
     @Inject(forwardRef(() => RestartConfirmationService))
     private readonly restartConfirmation: RestartConfirmationService,
     @Inject(forwardRef(() => SystemOnlineNotifier))
@@ -188,6 +194,7 @@ export class GrammyBotGateway
   }
 
   async onApplicationBootstrap(): Promise<void> {
+    this.liveStreamMessageCleanup.register(this.telegramLiveStreamMessageCleanup);
     if (this.mode === 'mock' || !this.token) {
       this.logger.warn(
         this.mode === 'mock'
@@ -245,6 +252,7 @@ export class GrammyBotGateway
     this.telegramNotifier.setBot(bot);
     this.directMessenger.setBot(bot);
     this.botCommandsMenu.setBot(bot);
+    this.telegramLiveStreamMessageCleanup.setBot(bot);
     this.eventNotifier.register(this.telegramNotifier);
     this.recipientDirectory.register(this.telegramRecipients);
     this.adminAlertService.register(this.telegramAdminAlert);
@@ -285,9 +293,11 @@ export class GrammyBotGateway
     this.telegramNotifier.clearBot();
     this.directMessenger.clearBot();
     this.botCommandsMenu.clearBot();
+    this.telegramLiveStreamMessageCleanup.clearBot();
     this.eventNotifier.clear();
     this.recipientDirectory.clear();
     this.adminAlertService.clear();
+    this.liveStreamMessageCleanup.clear();
     this.bot = undefined;
     this.runner = undefined;
   }

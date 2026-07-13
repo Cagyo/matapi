@@ -42,6 +42,7 @@ import { USER_SENSOR_MUTE_REPOSITORY } from './domain/ports/user-sensor-mute-rep
 import { ConsoleNotifierAdapter } from './infrastructure/console-notifier.adapter';
 import { EnvAdminClaimCredentialAdapter } from './infrastructure/env-admin-claim-credential.adapter';
 import { TelegramAdminAlertAdapter } from './infrastructure/telegram-admin-alert.adapter';
+import { TelegramLiveStreamMessageCleanupAdapter } from './infrastructure/telegram-live-stream-message-cleanup.adapter';
 import { DrizzleInviteCodeRepository } from './infrastructure/drizzle-invite-code.repository';
 import { DrizzleUserRepository } from './infrastructure/drizzle-user.repository';
 import { DrizzleUserSensorMuteRepository } from './infrastructure/drizzle-user-sensor-mute.repository';
@@ -199,6 +200,7 @@ const mode = resolveBotMode();
     TelegramNotifierAdapter,
     ConsoleNotifierAdapter,
     TelegramAdminAlertAdapter,
+    TelegramLiveStreamMessageCleanupAdapter,
     TelegramRecipientDirectoryAdapter,
     GrammyBotGateway,
   ],

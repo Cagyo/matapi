@@ -32,6 +32,22 @@ describe('OpenLiveStreamUseCase', () => {
     expect(source.upstreamUrl).toBe('http://127.0.0.1:8081/?action=stream');
   });
 
+  it('re-resolves a motion-alert camera id from repository data', async () => {
+    const media = new FakeMediaRepository([
+      { ...camera('Front door'), id: 'front_door_camera' },
+    ]);
+
+    const source = await new MotionLiveSourceService(media).resolve(
+      'front_door_camera',
+    );
+
+    expect(source).toMatchObject({
+      cameraId: 'front_door_camera',
+      cameraName: 'Front door',
+      upstreamUrl: 'http://127.0.0.1:8081/?action=stream',
+    });
+  });
+
   it('rejects disabled cameras as unavailable stream sources', async () => {
     const media = new FakeMediaRepository([{ ...camera('Front door'), enabled: false }]);
 

@@ -281,7 +281,7 @@ export const commands: CommandDescriptor[] = [
   {
     command: 'camera',
     description: 'Camera & motion',
-    usage: '/camera <snapshot|events|video|photo|status> — camera & motion',
+    usage: '/camera <snapshot|events|video|photo|status|live|stop_stream> — camera & motion',
     scope: 'user',
   },
   {
@@ -935,9 +935,10 @@ const enCatalog = {
 
   camera: {
     usage:
-      'Usage: /camera <snapshot|events [DD.MM.YYYY]|video <id>|photo <id>|enable|disable|status>',
+      'Usage: /camera <snapshot|events [DD.MM.YYYY]|video <id>|photo <id>|enable|disable|status|live [camera]|stop_stream>',
     dashboardTitle: '📹 Camera Dashboard\nSelect an action:',
     dashboardButtons: {
+      live: '🔴 Live',
       snapshot: '📸 Take Snapshot',
       browseEvents: '📹 Browse Events',
       eventsToday: '📹 Today\'s Events',
@@ -1074,10 +1075,13 @@ const enCatalog = {
     live: {
       experimentalLabel: 'Experimental live view',
       opening: '⏳ Opening an experimental live view…',
+      opened: (minutes: number) =>
+        `🧪 Experimental live view is ready for about ${minutes} minute${minutes === 1 ? '' : 's'}.`,
       watchButton: 'Watch live',
       unavailable: '❌ Experimental live view is unavailable right now.',
       sourceUnavailable: '❌ The camera live source is unavailable.',
       stopped: '✅ Live view stopped.',
+      noActive: 'ℹ️ No live view is active.',
       expired: 'ℹ️ This live-view link has expired.',
       adminFailure: '⚠️ Experimental live view failed. Check the worker and tunnel diagnostics.',
     },

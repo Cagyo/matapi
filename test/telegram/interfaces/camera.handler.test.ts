@@ -7,7 +7,14 @@ import { GetMotionPhotoUseCase } from '../../../src/camera/application/get-motio
 import { GetMotionVideoUseCase } from '../../../src/camera/application/get-motion-video.use-case';
 import { GetSnapshotUseCase } from '../../../src/camera/application/get-snapshot.use-case';
 import { ListMotionEventsUseCase } from '../../../src/camera/application/list-motion-events.use-case';
+import { OpenLiveStreamUseCase } from '../../../src/camera/application/open-live-stream.use-case';
+import { StopLiveStreamUseCase } from '../../../src/camera/application/stop-live-stream.use-case';
+import { LiveStreamExpiredError } from '../../../src/camera/domain/errors/live-stream-expired.error';
+import { LiveStreamSourceUnavailableError } from '../../../src/camera/domain/errors/live-stream-source-unavailable.error';
+import { LiveStreamUnavailableError } from '../../../src/camera/domain/errors/live-stream-unavailable.error';
 import { MotionEvent } from '../../../src/camera/domain/motion-event.entity';
+import { en } from '../../../src/locales/en';
+import { ru } from '../../../src/locales/ru';
 import {
   buildBrowseRange,
   CameraHandler,
@@ -95,6 +102,19 @@ function createTestSetup() {
   const enable = { execute: vi.fn() } as unknown as EnableMotionUseCase;
   const disable = { execute: vi.fn() } as unknown as DisableMotionUseCase;
   const status = { execute: vi.fn() } as unknown as CameraStatusUseCase;
+  const registerMessageReference = vi.fn().mockResolvedValue(undefined);
+  const open = {
+    execute: vi.fn().mockResolvedValue({
+      watchUrl: 'https://clear-moon.trycloudflare.com/watch/secret-token',
+      remainingMs: 300_000,
+      expiresMonotonicMs: 300_000,
+      cameraName: 'front_door',
+      registerMessageReference,
+    }),
+  } as unknown as OpenLiveStreamUseCase;
+  const stop = {
+    execute: vi.fn().mockResolvedValue('front_door'),
+  } as unknown as StopLiveStreamUseCase;
   const guard = {
     registered: vi.fn(),
     resolveRole: vi.fn().mockResolvedValue('user'),
@@ -109,6 +129,8 @@ function createTestSetup() {
     enable,
     disable,
     status,
+    open,
+    stop,
     guard,
   );
 
@@ -132,6 +154,9 @@ function createTestSetup() {
   return {
     handler,
     browse,
+    open,
+    stop,
+    registerMessageReference,
     composer,
     commandCallbacks,
     callbackQueryCallbacks,
@@ -142,15 +167,141 @@ function createTestSetup() {
 function ctx(data?: string) {
   return {
     from: { id: 100 },
+    chat: { id: 42, type: 'private' },
     callbackQuery: data ? { data } : undefined,
     message: undefined as { text: string } | undefined,
     match: '',
-    reply: vi.fn().mockResolvedValue(true),
+    reply: vi.fn().mockResolvedValue({ message_id: 9 }),
     answerCallbackQuery: vi.fn().mockResolvedValue(true),
     editMessageReplyMarkup: vi.fn().mockResolvedValue(true),
     replyWithChatAction: vi.fn().mockResolvedValue(true),
   };
 }
+
+describe('CameraHandler experimental live stream', () => {
+  it('opens a registered command request with a normal URL button and registers the sent message', async () => {
+    const { commandCallbacks, open, registerMessageReference } = createTestSetup();
+    const context = ctx();
+    context.match = 'live front_door';
+
+    await commandCallbacks.camera(context);
+
+    expect(open.execute).toHaveBeenCalledWith({
+      telegramId: 100,
+      cameraName: 'front_door',
+    });
+    expect(context.reply).toHaveBeenNthCalledWith(1, en.camera.live.opening);
+    expect(context.reply).toHaveBeenNthCalledWith(
+      2,
+      en.camera.live.opened(5),
+      expect.objectContaining({ reply_markup: expect.anything() }),
+    );
+    expect(JSON.stringify(context.reply.mock.calls[1][1].reply_markup)).toContain(
+      'https://clear-moon.trycloudflare.com/watch/secret-token',
+    );
+    expect(registerMessageReference).toHaveBeenCalledWith({ chatId: 42, messageId: 9 });
+  });
+
+  it('resolves a motion-alert callback camera id through the open use case and answers the query', async () => {
+    const { callbackQueryCallbacks, open } = createTestSetup();
+    const context = ctx('cam:live:front_door');
+
+    await callbackQueryCallbacks[0].fn(context);
+
+    expect(context.answerCallbackQuery).toHaveBeenCalledTimes(1);
+    expect(open.execute).toHaveBeenCalledWith({
+      telegramId: 100,
+      cameraName: 'front_door',
+    });
+  });
+
+  it('continues safely when Telegram cannot acknowledge the callback query', async () => {
+    const { callbackQueryCallbacks, open } = createTestSetup();
+    const context = ctx('cam:live:front_door');
+    context.answerCallbackQuery.mockRejectedValueOnce(new Error('query expired'));
+
+    await callbackQueryCallbacks[0].fn(context);
+
+    expect(open.execute).toHaveBeenCalledWith({
+      telegramId: 100,
+      cameraName: 'front_door',
+    });
+  });
+
+  it('opens the default camera from the dashboard without placing a source in callback data', async () => {
+    const { commandCallbacks, callbackQueryCallbacks, open } = createTestSetup();
+    const dashboard = ctx();
+
+    await commandCallbacks.camera(dashboard);
+
+    const keyboard = JSON.stringify(dashboard.reply.mock.calls[0][1].reply_markup);
+    expect(keyboard).toContain('cam:live');
+    expect(keyboard).not.toContain('trycloudflare.com');
+
+    await callbackQueryCallbacks[0].fn(ctx('cam:live'));
+    expect(open.execute).toHaveBeenCalledWith({ telegramId: 100, cameraName: undefined });
+  });
+
+  it('stops the shared stream and distinguishes no active session', async () => {
+    const { commandCallbacks, stop } = createTestSetup();
+    const stopped = ctx();
+    stopped.match = 'stop_stream';
+
+    await commandCallbacks.camera(stopped);
+
+    expect(stop.execute).toHaveBeenCalledWith(100);
+    expect(stopped.reply).toHaveBeenCalledWith(en.camera.live.stopped);
+
+    (stop.execute as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+    const inactive = ctx();
+    inactive.match = 'stop_stream';
+    await commandCallbacks.camera(inactive);
+    expect(inactive.reply).toHaveBeenCalledWith(en.camera.live.noActive);
+  });
+
+  it('maps live failures through the registered user locale without exposing diagnostics', async () => {
+    const { commandCallbacks, open } = createTestSetup();
+    const context = ctx() as ReturnType<typeof ctx> & { localeState: unknown };
+    context.match = 'live';
+    context.localeState = {
+      user: { telegramId: 100, name: 'User', role: 'user', locale: 'ru' },
+      locale: 'ru',
+      catalog: ru,
+    };
+    (open.execute as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new LiveStreamSourceUnavailableError(),
+    );
+
+    await commandCallbacks.camera(context);
+
+    expect(context.reply).toHaveBeenLastCalledWith(ru.camera.live.sourceUnavailable);
+    expect(JSON.stringify(context.reply.mock.calls)).not.toContain('secret-token');
+  });
+
+  it('maps message registration failure to a safe localized response', async () => {
+    const { commandCallbacks, registerMessageReference } = createTestSetup();
+    registerMessageReference.mockRejectedValueOnce(new LiveStreamUnavailableError());
+    const context = ctx();
+    context.match = 'live';
+
+    await commandCallbacks.camera(context);
+
+    expect(context.reply).toHaveBeenLastCalledWith(en.camera.live.unavailable);
+  });
+
+  it('maps an expired live request to the synchronized locale key', async () => {
+    const { commandCallbacks, open } = createTestSetup();
+    (open.execute as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new LiveStreamExpiredError(),
+    );
+    const context = ctx();
+    context.match = 'live';
+
+    await commandCallbacks.camera(context);
+
+    expect(context.reply).toHaveBeenLastCalledWith(en.camera.live.expired);
+  });
+});
 
 describe('CameraHandler browse menu and input flow', () => {
   it('adds Browse Events to the dashboard keyboard', async () => {
