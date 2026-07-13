@@ -2,11 +2,27 @@
 set -euo pipefail
 FEATURE="${1:-}"
 USER="${HOME_WORKER_USER:-homeworker}"
+INSTALL_DIR="${HOME_WORKER_INSTALL_DIR:-/opt/home-worker}"
+APT_LOCK_TIMEOUT_SECONDS=300
+
+apt_get() {
+  sudo apt-get -o "DPkg::Lock::Timeout=${APT_LOCK_TIMEOUT_SECONDS}" "$@"
+}
+
+enable_live_stream_runtime() {
+  local env_file="$INSTALL_DIR/.env"
+  [ -f "$env_file" ] || return 0
+  if sudo grep -q '^LIVE_STREAM_ENABLED=' "$env_file"; then
+    sudo sed -i 's/^LIVE_STREAM_ENABLED=.*/LIVE_STREAM_ENABLED=true/' "$env_file"
+  else
+    printf '\nLIVE_STREAM_ENABLED=true\n' | sudo tee -a "$env_file" >/dev/null
+  fi
+}
 
 case "$FEATURE" in
   motion)
     echo "Installing motion & ffmpeg dependencies..."
-    sudo apt-get install -y motion ffmpeg
+    apt_get install -y motion ffmpeg
 
     # Add user to motion and video groups for shared access
     sudo usermod -aG motion,video "$USER" 2>/dev/null || true
@@ -120,7 +136,7 @@ EOF
     ;;
   zigbee)
     echo "Installing zigbee dependencies (mosquitto)..."
-    sudo apt-get install -y mosquitto mosquitto-clients
+    apt_get install -y mosquitto mosquitto-clients
     ;;
   uart)
     echo "Configuring UART serial..."
@@ -131,7 +147,31 @@ EOF
     ;;
   4g)
     echo "Installing 4G failover dependencies..."
-    sudo apt-get install -y usb-modeswitch
+    apt_get install -y usb-modeswitch
+    ;;
+  rtsp)
+    echo "Installing experimental cloudflared live-stream capability..."
+    if ! command -v cloudflared >/dev/null 2>&1; then
+      apt_get install -y cloudflared
+    fi
+    if ! cloudflared version >/dev/null 2>&1; then
+      echo "ERROR: cloudflared was installed but its version check failed." >&2
+      exit 1
+    fi
+
+    # Diagnostics may create an archive. Isolate it from the worker user's
+    # discovered ~/.cloudflared configuration and remove it after inspection.
+    DIAG_DIR="$(mktemp -d)"
+    sudo chown "$USER:$USER" "$DIAG_DIR"
+    if ! (
+      cd "$DIAG_DIR"
+      sudo -H -u "$USER" cloudflared tunnel diag >diagnostic.log 2>&1
+    ); then
+      echo "WARNING: cloudflared diagnostics failed. Check DNS resolution and outbound port 7844 (QUIC/HTTP2) before using live view." >&2
+    fi
+    rm -rf "$DIAG_DIR"
+    enable_live_stream_runtime
+    echo "Experimental cloudflared live-stream capability installed."
     ;;
   digital|neobox)
     echo "No additional system dependencies required for feature: $FEATURE"

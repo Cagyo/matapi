@@ -24,6 +24,11 @@ motion:
   scripts:
     - "curl https://rclone.org/install.sh | sudo bash"
 
+# Explicit opt-in for the experimental Motion MJPEG Quick Tunnel view.
+rtsp:
+  apt:
+    - cloudflared
+
 uart:
   raspi-config:
     - "do_serial_cons 1"

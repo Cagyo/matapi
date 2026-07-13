@@ -49,6 +49,7 @@ export interface QuickTunnelLiveStreamDependencies {
   workerProcessGroupId?: number;
   startupTimeoutMs?: number;
   stopGraceMs?: number;
+  maxViewers?: number;
 }
 
 interface ActiveViewer {
@@ -68,6 +69,7 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
   private readonly workerProcessGroupId: number;
   private readonly startupTimeoutMs: number;
   private readonly stopGraceMs: number;
+  private readonly maxViewers: number;
   private readonly viewers = new Map<string, LiveStreamViewer>();
   private readonly activeViewers = new Set<ActiveViewer>();
   private server?: Server;
@@ -93,6 +95,7 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
     this.workerProcessGroupId = dependencies.workerProcessGroupId ?? readOwnProcessGroupId();
     this.startupTimeoutMs = dependencies.startupTimeoutMs ?? 30_000;
     this.stopGraceMs = dependencies.stopGraceMs ?? 2_000;
+    this.maxViewers = dependencies.maxViewers ?? 2;
   }
 
   get localOrigin(): string | null {
@@ -292,7 +295,9 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
   }
 
   private openViewer(tokenHash: string, response: ServerResponse): void {
-    if (this.upstreamUnavailable || this.activeViewers.size >= 2) return notFound(response);
+    if (this.upstreamUnavailable || this.activeViewers.size >= this.maxViewers) {
+      return notFound(response);
+    }
     for (const viewer of this.activeViewers) {
       if (safeHashEqual(viewer.tokenHash, tokenHash)) return notFound(response);
     }

@@ -94,7 +94,11 @@ function createUseCase(media: FakeMediaRepository): OpenLiveStreamUseCase {
     { delete: async () => undefined },
     300_000,
   );
-  return new OpenLiveStreamUseCase(new MotionLiveSourceService(media), session);
+  return new OpenLiveStreamUseCase(
+    new MotionLiveSourceService(media),
+    session,
+    { isAvailable: async () => true },
+  );
 }
 
 function camera(name: string): Camera {

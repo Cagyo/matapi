@@ -1,7 +1,24 @@
 import { describe, expect, it } from 'vitest';
 import { en } from '../../src/locales/en';
+import { ru } from '../../src/locales/ru';
+import { uk } from '../../src/locales/uk';
 
 describe('en.camera', () => {
+  it('provides synchronized experimental live-stream copy', () => {
+    for (const catalog of [en, ru, uk]) {
+      expect(catalog.camera.live).toMatchObject({
+        experimentalLabel: expect.any(String),
+        opening: expect.any(String),
+        watchButton: expect.any(String),
+        unavailable: expect.any(String),
+        sourceUnavailable: expect.any(String),
+        stopped: expect.any(String),
+        expired: expect.any(String),
+        adminFailure: expect.any(String),
+      });
+    }
+  });
+
   it('renders the snapshot caption', () => {
     const at = new Date('2026-04-08T14:35:00');
     expect(en.camera.snapshotCaption('front_door', at)).toBe(

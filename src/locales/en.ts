@@ -1071,6 +1071,16 @@ const enCatalog = {
     startFailed: (reason: string) => `❌ Failed to start motion daemon: ${reason}`,
     stopFailed: (reason: string) => `❌ Failed to stop motion daemon: ${reason}`,
     notInstalled: '❌ Motion is not installed. Re-run install with the camera feature.',
+    live: {
+      experimentalLabel: 'Experimental live view',
+      opening: '⏳ Opening an experimental live view…',
+      watchButton: 'Watch live',
+      unavailable: '❌ Experimental live view is unavailable right now.',
+      sourceUnavailable: '❌ The camera live source is unavailable.',
+      stopped: '✅ Live view stopped.',
+      expired: 'ℹ️ This live-view link has expired.',
+      adminFailure: '⚠️ Experimental live view failed. Check the worker and tunnel diagnostics.',
+    },
     adminAlert: {
       daemonDown:
         '🚨 Motion daemon is down and could not be restarted automatically. Camera recording is offline.',
