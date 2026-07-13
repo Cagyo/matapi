@@ -27,6 +27,9 @@ describe('ExportConfigUseCase', () => {
   it('serializes sensors, cameras and features into a dated YAML document', async () => {
     const sensors: SensorQueryPort = {
       listEnabled: vi.fn().mockResolvedValue([sensor]),
+      listDashboardPage: vi.fn().mockResolvedValue({
+        sensors: [], requestedPage: 0, page: 0, pageCount: 0, total: 0, clamped: false,
+      }),
       findById: vi.fn(),
       findByIdIncludingArchived: vi.fn(),
       findByName: vi.fn(),

@@ -1,4 +1,5 @@
 import { Sensor, SensorType } from '../sensor';
+import { SensorDashboardPage } from '../sensor-dashboard-page';
 
 export const SENSOR_QUERY = Symbol('SENSOR_QUERY');
 
@@ -37,6 +38,8 @@ export interface SensorHistoryPage {
 export interface SensorQueryPort {
   /** All sensors with `enabled = true`. */
   listEnabled(): Promise<Sensor[]>;
+  /** Deterministically ordered, fixed-size dashboard page of enabled sensors. */
+  listDashboardPage(input: { page: number; pageSize: 8 }): Promise<SensorDashboardPage>;
   /** Single sensor by id, or `null` if missing/disabled. */
   findById(id: string): Promise<Sensor | null>;
   /** Active, disabled, or archived sensor by ID; used for historical log links. */

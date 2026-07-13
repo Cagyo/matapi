@@ -16,9 +16,10 @@ import {
   SENSOR_REPOSITORY,
   SensorRepositoryPort,
 } from '../domain/ports/sensor-repository.port';
-import { Sensor } from '../domain/sensor';
+import { Sensor, SensorType } from '../domain/sensor';
 import { SensorEvent } from '../domain/sensor-event';
 import { DriverUnavailableError } from '../domain/errors/driver-unavailable.error';
+import { isValidPpm } from '../domain/co2';
 
 const DRIVER_SHUTDOWN_TIMEOUT_MS = 5_000;
 
@@ -37,6 +38,7 @@ export class SensorRegistryService
 {
   private readonly logger = new Logger(SensorRegistryService.name);
   private readonly active = new Map<string, SensorDriverPort>();
+  private readonly activeTypes = new Map<string, SensorType>();
   private readonly activeConfigKeys = new Map<string, string>();
   private readonly listeners: ((event: SensorEvent) => void)[] = [];
   private reloadChain: Promise<void> = Promise.resolve();
@@ -83,6 +85,7 @@ export class SensorRegistryService
       }
     }
     this.active.clear();
+    this.activeTypes.clear();
   }
 
   /**
@@ -122,6 +125,7 @@ export class SensorRegistryService
       if (!wantedIds.has(id)) {
         await this.active.get(id)?.destroy().catch(() => undefined);
         this.active.delete(id);
+        this.activeTypes.delete(id);
         this.activeConfigKeys.delete(id);
       }
     }
@@ -136,6 +140,7 @@ export class SensorRegistryService
       ) {
         await this.active.get(sensor.id)?.destroy().catch(() => undefined);
         this.active.delete(sensor.id);
+        this.activeTypes.delete(sensor.id);
         this.activeConfigKeys.delete(sensor.id);
       }
     }
@@ -175,11 +180,13 @@ export class SensorRegistryService
         });
         driver.onEvent((event) => this.fanOut(event));
         this.active.set(sensor.id, driver);
+        this.activeTypes.set(sensor.id, sensor.type);
         this.activeConfigKeys.set(sensor.id, driverConfigKey(sensor));
       } catch (err) {
         if (err instanceof DriverUnavailableError) {
           driver.onEvent((event) => this.fanOut(event));
           this.active.set(sensor.id, driver);
+          this.activeTypes.set(sensor.id, sensor.type);
           this.activeConfigKeys.set(sensor.id, driverConfigKey(sensor));
           this.logger.warn(
             `Driver for "${sensor.name}" is offline and will recover when available`,
@@ -229,14 +236,23 @@ export class SensorRegistryService
     if (this.shuttingDown) return;
     if (event.type === 'error') return;
     try {
+      const value = this.persistedStateValue(event);
+      if (value === null) return;
       await this.repository.updateState(
         event.sensorId,
-        String(event.newValue),
+        value,
         event.timestamp,
       );
     } catch {
       this.logger.warn(`persistState failed for ${event.sensorId}`);
     }
+  }
+
+  private persistedStateValue(event: SensorEvent): string | null {
+    if (this.activeTypes.get(event.sensorId) !== 'uart') return String(event.newValue);
+
+    const ppm = this.active.get(event.sensorId)?.getState().value;
+    return typeof ppm === 'number' && isValidPpm(ppm) ? String(ppm) : null;
   }
 }
 

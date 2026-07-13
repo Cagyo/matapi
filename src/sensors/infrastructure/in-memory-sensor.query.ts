@@ -5,6 +5,7 @@ import {
   SensorLookup,
   SensorQueryPort,
 } from '../domain/ports/sensor-query.port';
+import { buildSensorDashboardPage, SensorDashboardPage } from '../domain/sensor-dashboard-page';
 import { Sensor } from '../domain/sensor';
 
 /** In-memory `SensorQueryPort` for dev mode and use-case tests. */
@@ -16,6 +17,10 @@ export class InMemorySensorQuery implements SensorQueryPort {
 
   async listEnabled(): Promise<Sensor[]> {
     return this.sensors.filter((s) => s.enabled);
+  }
+
+  async listDashboardPage(input: { page: number; pageSize: 8 }): Promise<SensorDashboardPage> {
+    return buildSensorDashboardPage(await this.listEnabled(), input);
   }
 
   async findById(id: string): Promise<Sensor | null> {

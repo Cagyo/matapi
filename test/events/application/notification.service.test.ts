@@ -39,6 +39,9 @@ class StubSensorQuery implements SensorQueryPort {
   async listEnabled(): Promise<Sensor[]> {
     return this.sensor ? [this.sensor] : [];
   }
+  async listDashboardPage(input: { page: number; pageSize: 8 }) {
+    return { sensors: [], requestedPage: input.page, page: input.page, pageCount: 0, total: 0, clamped: false };
+  }
   async findById(): Promise<Sensor | null> {
     return this.sensor;
   }

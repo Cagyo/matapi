@@ -58,6 +58,41 @@ describe('SensorRegistryService', () => {
     expect(repo.lastValueFor('front_door')).toEqual({ lastValue: '1', lastValueAt: now });
   });
 
+  it('persists the current UART ppm rather than a threshold event level', async () => {
+    const co2 = digitalSensor({
+      id: 'co2',
+      name: 'CO2',
+      type: 'uart',
+      config: { port: '/dev/serial0', thresholds: { warning: 800, critical: 1200 } },
+    });
+    const repo = new InMemorySensorRepository([co2]);
+    let eventListener: ((event: SensorEvent) => void) | undefined;
+    const driver: SensorDriverPort = {
+      init: vi.fn().mockResolvedValue(undefined),
+      destroy: vi.fn().mockResolvedValue(undefined),
+      getState: vi.fn(() => ({ value: 1250.5, timestamp: new Date('2030-01-01T00:00:00.000Z') })),
+      onEvent: vi.fn((listener: (event: SensorEvent) => void) => {
+        eventListener = listener;
+      }),
+      healthCheck: vi.fn().mockResolvedValue(true),
+    };
+    const registry = makeRegistry(repo, () => driver);
+    await registry.reload();
+
+    const timestamp = new Date('2030-01-01T00:00:00.000Z');
+    eventListener?.({
+      sensorId: 'co2',
+      type: 'threshold',
+      oldValue: 'normal',
+      newValue: 'critical',
+      timestamp,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(repo.lastValueFor('co2')).toEqual({ lastValue: '1250.5', lastValueAt: timestamp });
+  });
+
   it('destroys drivers whose sensors are no longer enabled', async () => {
     const sensor = digitalSensor();
     const repo = new InMemorySensorRepository([sensor]);

@@ -26,6 +26,9 @@ function activeSensor(id: string, name: string): Sensor {
 function makeQuery(map: Map<string, SensorLookup>): SensorQueryPort {
   return {
     listEnabled: async () => [],
+    listDashboardPage: async (input) => ({
+      sensors: [], requestedPage: input.page, page: input.page, pageCount: 0, total: 0, clamped: false,
+    }),
     findById: async () => null,
     findByIdIncludingArchived: async () => null,
     findByName: async (name) => map.get(name.toLowerCase()) ?? null,

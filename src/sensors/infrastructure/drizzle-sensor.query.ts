@@ -8,6 +8,7 @@ import {
   SensorLookup,
   SensorQueryPort,
 } from '../domain/ports/sensor-query.port';
+import { buildSensorDashboardPage, SensorDashboardPage } from '../domain/sensor-dashboard-page';
 import { Sensor, SensorSeverity, SensorType } from '../domain/sensor';
 import { defaultDebounceMs } from '../domain/default-debounce';
 
@@ -34,6 +35,10 @@ export class DrizzleSensorQuery implements SensorQueryPort {
       .where(eq(sensors.enabled, true))
       .all()
       .map((row) => this.toSensor(row));
+  }
+
+  async listDashboardPage(input: { page: number; pageSize: 8 }): Promise<SensorDashboardPage> {
+    return buildSensorDashboardPage(await this.listEnabled(), input);
   }
 
   async findById(id: string): Promise<Sensor | null> {

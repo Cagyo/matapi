@@ -5,12 +5,14 @@ import {
   SENSOR_HEALTH,
   SensorHealthPort,
 } from '../../sensors/application/ports/sensor-health.port';
-import { classifyCo2, Co2Thresholds } from '../../sensors/domain/co2';
+import {
+  classifySensorState,
+  hasValidUartThresholds,
+} from '../../sensors/domain/sensor-state-classifier';
 import {
   SENSOR_QUERY,
   SensorQueryPort,
 } from '../../sensors/domain/ports/sensor-query.port';
-import { Sensor } from '../../sensors/domain/sensor';
 import { RoleMiddleware } from './role.middleware';
 import { TelegramHandler } from './telegram-handler';
 import { TelegramContext } from './telegram-context';
@@ -47,15 +49,23 @@ export class StatusHandler implements TelegramHandler {
       }
 
       const health = await this.health.probe();
-      const rows: StatusRow[] = sensors.map((sensor) => ({
-        name: sensor.name,
-        type: sensor.type,
-        lastValue: sensor.lastValue,
-        lastValueAt: sensor.lastValueAt,
-        online: health.get(sensor.id) ?? false,
-        thresholdLevel: thresholdLevelFor(sensor),
-        stepType: typeof sensor.config?.stepType === 'string' ? sensor.config.stepType : undefined,
-      }));
+      const rows: StatusRow[] = sensors.map((sensor) => {
+        const { level } = classifySensorState(sensor);
+        return {
+          name: sensor.name,
+          type: sensor.type,
+          lastValue: sensor.lastValue,
+          lastValueAt: sensor.lastValueAt,
+          online: health.get(sensor.id) ?? false,
+          thresholdLevel:
+            level === 'warning' || level === 'critical'
+              ? level
+              : level === 'normal' && hasValidUartThresholds(sensor)
+                ? level
+                : undefined,
+          stepType: typeof sensor.config?.stepType === 'string' ? sensor.config.stepType : undefined,
+        };
+      });
 
       const offlineCount = rows.filter((r) => !r.online).length;
       const body = rows.map((r) => en.status.line(r)).join('\n');
@@ -70,21 +80,4 @@ export class StatusHandler implements TelegramHandler {
       await ctx.reply(en.status.readFailed);
     }
   }
-}
-
-function thresholdLevelFor(sensor: Sensor): StatusRow['thresholdLevel'] {
-  if (sensor.type !== 'uart' || sensor.lastValue === null) return undefined;
-  const ppm = Number(sensor.lastValue);
-  if (!Number.isFinite(ppm)) return undefined;
-  const thresholds = extractThresholds(sensor.config);
-  if (!thresholds) return undefined;
-  return classifyCo2(ppm, thresholds);
-}
-
-function extractThresholds(
-  raw: Record<string, unknown> | null | undefined,
-): Co2Thresholds | null {
-  const t = raw?.thresholds as Partial<Co2Thresholds> | undefined;
-  if (!t || typeof t.warning !== 'number' || typeof t.critical !== 'number') return null;
-  return { warning: t.warning, critical: t.critical };
 }

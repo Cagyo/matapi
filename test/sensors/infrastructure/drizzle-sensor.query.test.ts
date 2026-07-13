@@ -61,6 +61,38 @@ describe('DrizzleSensorQuery', () => {
     });
   });
 
+  it('builds dashboard pages from enabled rows only', async () => {
+    context.db.delete(sensors).run();
+    context.db
+      .insert(sensors)
+      .values([
+        ...Array.from({ length: 9 }, (_, index) => ({
+          id: `sensor-${index}`,
+          name: `Sensor ${index}`,
+          type: 'digital' as const,
+          config: {},
+          enabled: true,
+          severity: 'info' as const,
+        })),
+        {
+          id: 'disabled',
+          name: 'A disabled sensor',
+          type: 'digital' as const,
+          config: {},
+          enabled: false,
+          severity: 'info' as const,
+        },
+      ])
+      .run();
+
+    await expect(query.listDashboardPage({ page: 1, pageSize: 8 })).resolves.toMatchObject({
+      total: 9,
+      page: 1,
+      pageCount: 2,
+      sensors: [{ id: 'sensor-8' }],
+    });
+  });
+
   it('returns the sensor by id when enabled', async () => {
     const sensor = await query.findById('front_door');
     expect(sensor).toMatchObject({ id: 'front_door', name: 'Front door' });

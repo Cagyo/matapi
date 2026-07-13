@@ -25,6 +25,9 @@ function digitalSensor(): Sensor {
 function queryStub(sensors: Sensor[]): SensorQueryPort {
   return {
     listEnabled: async () => sensors,
+    listDashboardPage: async (input) => ({
+      sensors: [], requestedPage: input.page, page: input.page, pageCount: 0, total: 0, clamped: false,
+    }),
     findById: async () => null,
     findByIdIncludingArchived: async () => null,
     findByName: async () => null,
