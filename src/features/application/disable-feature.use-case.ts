@@ -7,6 +7,10 @@ import {
   FEATURE_REPOSITORY,
   FeatureRepositoryPort,
 } from '../domain/ports/feature-repository.port';
+import {
+  FEATURE_DISABLE_LIFECYCLE,
+  type FeatureDisableLifecyclePort,
+} from '../domain/ports/feature-disable-lifecycle.port';
 
 /**
  * Spec 17 — `/feature disable <name>` (admin only).
@@ -19,6 +23,8 @@ import {
 export class DisableFeatureUseCase {
   constructor(
     @Inject(FEATURE_REPOSITORY) private readonly features: FeatureRepositoryPort,
+    @Inject(FEATURE_DISABLE_LIFECYCLE)
+    private readonly lifecycle: FeatureDisableLifecyclePort,
   ) {}
 
   async execute(name: string): Promise<Feature> {
@@ -27,6 +33,7 @@ export class DisableFeatureUseCase {
     if (!feature?.enabled) {
       throw new FeatureAlreadyDisabledError(name);
     }
+    await this.lifecycle.beforeDisable(name);
     return this.features.setEnabled(name, false);
   }
 }

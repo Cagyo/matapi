@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import type { FeatureQueryPort } from '../../features/domain/ports/feature-query.port';
 import type { LiveStreamCapabilityPort } from '../domain/ports/live-stream-capability.port';
+import type { LiveStreamSource } from '../domain/live-stream.entity';
 
 type CloudflaredProbe = () => Promise<boolean>;
 
@@ -12,11 +13,13 @@ export class FeatureLiveStreamCapabilityAdapter implements LiveStreamCapabilityP
     private readonly probe: CloudflaredProbe = probeCloudflared,
   ) {}
 
-  async isAvailable(): Promise<boolean> {
+  async isAvailable(sourceKind: LiveStreamSource['kind']): Promise<boolean> {
     if (!this.enabled) return false;
     try {
+      if (!(await this.probe())) return false;
+      if (sourceKind === 'motion-mjpeg') return true;
       const feature = (await this.features.listAll()).find(({ name }) => name === 'rtsp');
-      return Boolean(feature?.installed && feature.enabled && await this.probe());
+      return Boolean(feature?.installed && feature.enabled);
     } catch {
       return false;
     }

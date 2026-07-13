@@ -10,6 +10,7 @@ import {
   type LiveStreamLease,
   type LiveStreamSource,
 } from '../../../src/camera/domain/live-stream.entity';
+import { RtspSourceStartGate } from '../../../src/camera/application/rtsp-source-start-gate.service';
 
 describe('LiveStreamSessionService', () => {
   afterEach(() => {
@@ -66,6 +67,51 @@ describe('LiveStreamSessionService', () => {
     expect(gateway.stopCalls).toBe(1);
   });
 
+  it('rejects new RTSP starts after the source gate closes while Motion remains available', async () => {
+    const gate = new RtspSourceStartGate();
+    const service = createService({ sourceStartGate: gate });
+    gate.close();
+
+    await expect(service.open(rtspSource('rtsp'), 1)).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    await expect(service.open(source('motion'), 2)).resolves.toMatchObject({
+      cameraName: 'motion',
+    });
+  });
+
+  it('stops only an active RTSP session when RTSP is disabled', async () => {
+    const gateway = new FakeGateway();
+    const service = createService({ gateway });
+    await service.open(source('motion'), 1);
+
+    await service.stopSourceKind('rtsp');
+
+    expect(gateway.stopCalls).toBe(0);
+    await expect(service.open(source('motion'), 2)).resolves.toBeDefined();
+  });
+
+  it('preserves an active Motion session when the RTSP gate closes before replacement teardown', async () => {
+    const gate = new RtspSourceStartGate();
+    const gateway = new FakeGateway();
+    const service = createService({ gateway, sourceStartGate: gate });
+    await service.open(source('motion'), 1);
+    let rtspGateChecks = 0;
+    const originalAssert = gate.assertCanStart.bind(gate);
+    vi.spyOn(gate, 'assertCanStart').mockImplementation((kind) => {
+      originalAssert(kind);
+      if (kind === 'rtsp' && ++rtspGateChecks === 2) gate.close();
+    });
+
+    await expect(service.open(rtspSource('rtsp'), 2)).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+
+    expect(gateway.stopCalls).toBe(0);
+    await expect(service.open(source('motion'), 3)).resolves.toBeDefined();
+    expect(gateway.startCalls).toHaveLength(1);
+  });
+
   it('clears the active lease when the gateway reports terminal data-plane failure', async () => {
     const gateway = new FakeGateway();
     const lease = new FakeLease();
@@ -93,6 +139,30 @@ describe('LiveStreamSessionService', () => {
 
     gateway.resolveStart();
     await vi.waitFor(() => expect(gateway.stopCalls).toBe(1));
+  });
+
+  it('waits for pending RTSP start teardown before reporting the source kind stopped', async () => {
+    const gateway = new DeferredGateway();
+    gateway.deferStop = true;
+    const service = createService({ gateway });
+
+    const opening = service.open(rtspSource('front_door'), 1);
+    await vi.waitFor(() => expect(gateway.startCalls).toHaveLength(1));
+
+    let stopSettled = false;
+    const stopping = service.stopSourceKind('rtsp').finally(() => {
+      stopSettled = true;
+    });
+    await expect(opening).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+
+    gateway.resolveStart();
+    await vi.waitFor(() => expect(gateway.stopCalls).toBe(1));
+    expect(stopSettled).toBe(false);
+
+    gateway.resolveStop();
+    await expect(stopping).resolves.toBeUndefined();
   });
 
   it('settles pending and replacement opens when cancellation teardown fails', async () => {
@@ -1150,6 +1220,7 @@ function createService(input: {
   messages?: FakeMessageCleanup;
   durationMs?: number;
   operationTimeoutMs?: number;
+  sourceStartGate?: RtspSourceStartGate;
 } = {}): LiveStreamSessionService {
   return new LiveStreamSessionService(
     input.gateway ?? new FakeGateway(),
@@ -1159,6 +1230,8 @@ function createService(input: {
     input.messages ?? new FakeMessageCleanup(),
     input.durationMs ?? 300_000,
     input.operationTimeoutMs ?? 30_000,
+    2,
+    input.sourceStartGate,
   );
 }
 

@@ -36,6 +36,7 @@ import { en } from '../../locales/en';
 import { RoleMiddleware } from './role.middleware';
 import { TelegramContext } from './telegram-context';
 import { TelegramHandler } from './telegram-handler';
+import { CameraSourcesHandler } from './camera-sources.handler';
 
 type Subcommand =
   | 'snapshot'
@@ -48,7 +49,8 @@ type Subcommand =
   | 'live'
   | 'stop_stream'
   | 'menu'
-  | 'dashboard';
+  | 'dashboard'
+  | 'sources';
 
 const CAMERA_BROWSE_TTL_MS = 10 * 60_000;
 
@@ -95,6 +97,7 @@ export class CameraHandler implements TelegramHandler {
     private readonly stopLiveStream: StopLiveStreamUseCase,
     private readonly liveStreamSessions: LiveStreamSessionService,
     private readonly guard: RoleMiddleware,
+    private readonly sources: CameraSourcesHandler,
   ) {}
 
   register(composer: Composer<TelegramContext>): void {
@@ -138,6 +141,9 @@ export class CameraHandler implements TelegramHandler {
           case 'stop_stream':
             await this.handleStopLive(ctx);
             return;
+          case 'sources':
+            await this.sources.handleEntry(ctx);
+            return;
           default:
             await ctx.reply(en.camera.usage);
         }
@@ -154,6 +160,14 @@ export class CameraHandler implements TelegramHandler {
       const data = (ctx.callbackQuery?.data ?? '').slice('cam:'.length).trim();
       if (!data) return;
       try {
+        if (data === 'sources') {
+          await this.sources.handleEntry(ctx);
+          return;
+        }
+        if (data.startsWith('sources:')) {
+          await this.sources.handleCallback(ctx, data.slice('sources:'.length));
+          return;
+        }
         if (data === 'snapshot') {
           await this.handleSnapshot(ctx);
           return;
@@ -232,9 +246,11 @@ export class CameraHandler implements TelegramHandler {
 
     composer.on('message:text', this.guard.registered, async (ctx, next) => {
       const userId = ctx.from?.id;
-      if (!userId || !this.pendingBrowseInputs.has(userId)) return next();
+      if (!userId) return next();
       if (ctx.message?.text?.startsWith('/')) return next();
       try {
+        if (await this.sources.handleText(ctx)) return;
+        if (!this.pendingBrowseInputs.has(userId)) return next();
         await this.handleBrowseText(ctx, userId, ctx.message.text.trim());
       } catch (err) {
         await this.handleError(ctx, err, '/camera browse text');

@@ -1085,6 +1085,48 @@ const enCatalog = {
       expired: 'ℹ️ This live-view link has expired.',
       adminFailure: '⚠️ Experimental live view failed. Check the worker and tunnel diagnostics.',
     },
+    sources: {
+      menuTitle: '📡 RTSP camera sources\nChoose an action:',
+      buttons: {
+        add: '➕ Add',
+        edit: '✏️ Edit',
+        test: '🧪 Test & update',
+        list: '📋 List',
+        remove: '🗑 Remove',
+        cancel: '❌ Cancel',
+      },
+      cameraPrompt: 'Send the configured camera name.',
+      credentialPrompt: 'Send the RTSP or RTSPS source URL. This message will be deleted.',
+      chooseSource: (action: string) => `Choose a source to ${action}:`,
+      empty: 'No RTSP camera sources are configured.',
+      listHeader: '📡 RTSP camera sources',
+      sourceLine: (input: {
+        cameraName: string;
+        cameraId: string;
+        scheme: string;
+        host: string;
+        transport: string;
+        tlsMode: string;
+        profile: string;
+        ready: boolean;
+      }) => [
+        `${input.cameraName} (${input.cameraId})`,
+        `${input.scheme} · ${input.host}`,
+        `${input.transport} · TLS ${input.tlsMode} · ${input.profile}`,
+        input.ready ? 'ready · compatible' : 'not ready · compatibility unknown',
+      ].join('\n'),
+      configured: (cameraName: string) => `✅ RTSP source configured and tested for ${cameraName}.`,
+      tested: (cameraName: string) => `✅ RTSP source tested and updated for ${cameraName}.`,
+      removed: (cameraName: string) => `✅ RTSP source removed for ${cameraName}.`,
+      configureFailed: '❌ The RTSP source could not be configured or tested.',
+      listFailed: '❌ RTSP sources are unavailable right now.',
+      removeFailed: '❌ The RTSP source could not be removed.',
+      deletionFailed: '⚠️ Telegram could not delete the credential message. Delete it manually.',
+      staleSelection: 'That source selection is stale. Open Camera Sources again.',
+      invalidCamera: 'Send a valid camera name.',
+      expired: 'This camera source operation expired. Start again.',
+      cancelled: 'Camera source operation cancelled.',
+    },
     adminAlert: {
       daemonDown:
         '🚨 Motion daemon is down and could not be restarted automatically. Camera recording is offline.',

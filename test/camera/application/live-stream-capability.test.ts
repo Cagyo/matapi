@@ -3,13 +3,18 @@ import { OpenLiveStreamUseCase } from '../../../src/camera/application/open-live
 import { FeatureLiveStreamCapabilityAdapter } from '../../../src/camera/infrastructure/feature-live-stream-capability.adapter';
 
 describe('live-stream capability', () => {
-  it('refuses a live request when the Quick Tunnel capability is unavailable', async () => {
+  it('refuses a resolved live request when the Quick Tunnel capability is unavailable', async () => {
     let sourceResolutions = 0;
     const useCase = new OpenLiveStreamUseCase(
       {
         resolve: async () => {
           sourceResolutions += 1;
-          throw new Error('source must not be resolved');
+          return {
+            kind: 'motion-mjpeg',
+            cameraId: 'front',
+            cameraName: 'Front',
+            upstreamUrl: 'http://127.0.0.1:8081/?action=stream',
+          };
         },
       } as never,
       { open: async () => { throw new Error('gateway must not start'); } } as never,
@@ -19,7 +24,7 @@ describe('live-stream capability', () => {
     await expect(useCase.execute({ telegramId: 1 })).rejects.toMatchObject({
       code: 'LIVE_STREAM_UNAVAILABLE',
     });
-    expect(sourceResolutions).toBe(0);
+    expect(sourceResolutions).toBe(1);
   });
 
   it('requires enabled config plus installed and enabled feature state', async () => {
@@ -31,12 +36,12 @@ describe('live-stream capability', () => {
       features,
       false,
       async () => true,
-    ).isAvailable()).resolves.toBe(false);
+    ).isAvailable('rtsp')).resolves.toBe(false);
     await expect(new FeatureLiveStreamCapabilityAdapter(
       { listAll: async () => [{ name: 'rtsp', enabled: true, installed: false, config: null }] },
       true,
       async () => true,
-    ).isAvailable()).resolves.toBe(false);
+    ).isAvailable('rtsp')).resolves.toBe(false);
   });
 
   it('requires the installed cloudflared executable probe', async () => {
@@ -48,6 +53,17 @@ describe('live-stream capability', () => {
       features,
       true,
       async () => false,
-    ).isAvailable()).resolves.toBe(false);
+    ).isAvailable('rtsp')).resolves.toBe(false);
+  });
+
+  it('keeps Motion/MJPEG available when only the RTSP feature is disabled', async () => {
+    const capability = new FeatureLiveStreamCapabilityAdapter(
+      { listAll: async () => [{ name: 'rtsp', enabled: false, installed: true, config: null }] },
+      true,
+      async () => true,
+    );
+
+    await expect(capability.isAvailable('motion-mjpeg')).resolves.toBe(true);
+    await expect(capability.isAvailable('rtsp')).resolves.toBe(false);
   });
 });

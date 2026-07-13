@@ -9,6 +9,8 @@ import {
   type OpenLiveStreamResult,
 } from './live-stream-session.service';
 import { LiveStreamSourceResolverService } from './live-stream-source-resolver.service';
+import { RtspSourceStartGate } from './rtsp-source-start-gate.service';
+import type { LiveStreamSource } from '../domain/live-stream.entity';
 
 export interface OpenLiveStreamInput {
   telegramId: number;
@@ -28,20 +30,24 @@ export class OpenLiveStreamUseCase {
     private readonly sessions: LiveStreamSessionService,
     @Inject(LIVE_STREAM_CAPABILITY)
     private readonly capability: LiveStreamCapabilityPort,
+    private readonly sourceStartGate = new RtspSourceStartGate(),
   ) {}
 
   async execute(input: OpenLiveStreamInput): Promise<OpenLiveStreamResult> {
-    await this.ensureAvailable();
-    return this.sessions.open(await this.source.resolve(input.cameraName), input.telegramId);
+    const source = await this.source.resolve(input.cameraName);
+    await this.ensureAvailable(source);
+    return this.sessions.open(source, input.telegramId);
   }
 
   async executeById(input: OpenLiveStreamByIdInput): Promise<OpenLiveStreamResult> {
-    await this.ensureAvailable();
-    return this.sessions.open(await this.source.resolveById(input.cameraId), input.telegramId);
+    const source = await this.source.resolveById(input.cameraId);
+    await this.ensureAvailable(source);
+    return this.sessions.open(source, input.telegramId);
   }
 
-  private async ensureAvailable(): Promise<void> {
-    if (!(await this.capability.isAvailable())) {
+  private async ensureAvailable(source: LiveStreamSource): Promise<void> {
+    this.sourceStartGate.assertCanStart(source.kind);
+    if (!(await this.capability.isAvailable(source.kind))) {
       throw new LiveStreamUnavailableError();
     }
   }

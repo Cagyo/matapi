@@ -58,6 +58,7 @@ import { YamlConfigCodec } from './infrastructure/yaml-config-codec.adapter';
 import { NodeCsvTempFileAdapter } from './infrastructure/node-csv-temp-file.adapter';
 import { ClaimAdminHandler } from './interfaces/claim-admin.handler';
 import { CameraHandler } from './interfaces/camera.handler';
+import { CameraSourcesHandler } from './interfaces/camera-sources.handler';
 import { CsvHandler } from './interfaces/csv.handler';
 import { ConfigHandler } from './interfaces/config.handler';
 import { DemoteHandler } from './interfaces/demote.handler';
@@ -190,6 +191,7 @@ const mode = resolveBotMode();
     RollbackHandler,
     RestartHandler,
     CameraHandler,
+    CameraSourcesHandler,
     GdriveHandler,
     GdriveAuthHandler,
     ExportConfigHandler,

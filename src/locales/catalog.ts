@@ -4,7 +4,14 @@ import { ru } from './ru';
 import { uk } from './uk';
 import { deepFreeze, type DeepReadonly } from './freeze';
 
-export type LocaleCatalog = typeof en;
+type EnglishCatalog = typeof en;
+
+/** New locale sections may fall back to English until translations land. */
+export type LocaleCatalog = Omit<EnglishCatalog, 'camera'> & {
+  camera: Omit<EnglishCatalog['camera'], 'sources'> & {
+    sources?: EnglishCatalog['camera']['sources'];
+  };
+};
 
 export const catalogs: DeepReadonly<Record<Locale, LocaleCatalog>> = deepFreeze({
   en,
@@ -12,6 +19,6 @@ export const catalogs: DeepReadonly<Record<Locale, LocaleCatalog>> = deepFreeze(
   uk,
 });
 
-export function catalogFor(locale: Locale | unknown): LocaleCatalog {
+export function catalogFor(locale: unknown): LocaleCatalog {
   return catalogs[normalizeLocale(locale)];
 }

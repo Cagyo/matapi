@@ -30,6 +30,7 @@ import {
   MONOTONIC_CLOCK,
   type MonotonicClockPort,
 } from '../domain/ports/monotonic-clock.port';
+import { RtspSourceStartGate } from './rtsp-source-start-gate.service';
 
 export interface OpenLiveStreamResult {
   watchUrl: string;
@@ -82,6 +83,11 @@ interface CleanupBlocker {
   teardownInFlight: boolean;
 }
 
+interface SourceKindStopWaiter {
+  kind: LiveStreamSource['kind'];
+  resolve(): void;
+}
+
 class OperationTimeoutError extends Error {}
 class ViewerCapacityError extends Error {}
 
@@ -102,6 +108,7 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
   private leaseMutationsPending = 0;
   private shuttingDown = false;
   private shutdownPromise?: Promise<void>;
+  private readonly sourceKindStopWaiters = new Set<SourceKindStopWaiter>();
 
   constructor(
     @Inject(LIVE_STREAM_GATEWAY) private readonly gateway: LiveStreamGatewayPort,
@@ -113,6 +120,7 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
     private readonly durationMs = 300_000,
     private readonly operationTimeoutMs = 30_000,
     private readonly maxViewers = 2,
+    private readonly sourceStartGate = new RtspSourceStartGate(),
   ) {
     this.gateway.onFailure?.(() => {
       void this.stop(0).catch(() => undefined);
@@ -159,9 +167,15 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
 
   open(source: LiveStreamSource, telegramId: number): Promise<OpenLiveStreamResult> {
     if (this.shuttingDown) return Promise.reject(new LiveStreamUnavailableError());
+    try {
+      this.sourceStartGate.assertCanStart(source.kind);
+    } catch {
+      return Promise.reject(new LiveStreamUnavailableError());
+    }
     const deferred = createDeferred<OpenLiveStreamResult>();
     const queued = this.enqueue(async () => {
       try {
+        this.sourceStartGate.assertCanStart(source.kind);
         if (this.leaseMutationsPending > 0) {
           deferred.reject(new LiveStreamUnavailableError());
           return;
@@ -185,7 +199,7 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
         }
 
         if (this.active) {
-          await this.stopActive();
+          await this.stopActive(() => this.sourceStartGate.assertCanStart(source.kind));
         }
 
         if (this.pending) {
@@ -224,6 +238,38 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
     });
 
     return queued.then(() => deferred.promise);
+  }
+
+  /** Cancels/stops only work for one source kind; other live sources continue. */
+  async stopSourceKind(kind: LiveStreamSource['kind']): Promise<void> {
+    try {
+      await this.enqueue(async () => {
+        const pending = this.pending;
+        if (pending) {
+          if (pending.replacement?.source.kind === kind) {
+            this.rejectRequests(pending.replacement.requests);
+            pending.replacement = undefined;
+          }
+          if (pending.source.kind === kind) {
+            pending.cancelled = true;
+            this.rejectPending(pending);
+          }
+        }
+
+        if (this.cleanupBlocked?.active.sourceKind === kind) {
+          if (!(await this.retryBlockedCleanup())) {
+            throw new LiveStreamUnavailableError();
+          }
+        }
+
+        if (this.active?.sourceKind === kind) {
+          await this.stopActive();
+        }
+      });
+      await this.waitForSourceKindToStop(kind);
+    } catch {
+      throw new LiveStreamUnavailableError();
+    }
   }
 
   stop(_telegramId: number): Promise<string | null> {
@@ -356,6 +402,12 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
     telegramId: number,
     deferred: Deferred<OpenLiveStreamResult>,
   ): void {
+    try {
+      this.sourceStartGate.assertCanStart(source.kind);
+    } catch {
+      deferred.reject(new LiveStreamUnavailableError());
+      return;
+    }
     const startedMonotonicMs = this.clock.now();
     const pending: PendingOpen = {
       source,
@@ -567,10 +619,10 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async stopActive(): Promise<string | null> {
+  private async stopActive(beforeStop?: () => void): Promise<string | null> {
     if (!this.active) return null;
     const cameraName = this.active.session.cameraName;
-    await this.stopGateway(this.active);
+    await this.stopGateway(this.active, beforeStop);
     await this.deleteMessageReferences(this.active.messageReferences);
     this.active = undefined;
     this.clearExpiryTimer();
@@ -705,8 +757,14 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
     if (pending) this.rejectReplacement(pending);
   }
 
-  private async stopGateway(active: ActiveSession): Promise<void> {
-    const stop = Promise.resolve().then(() => this.gateway.stop());
+  private async stopGateway(
+    active: ActiveSession,
+    beforeStop?: () => void,
+  ): Promise<void> {
+    const stop = Promise.resolve().then(() => {
+      beforeStop?.();
+      return this.gateway.stop();
+    });
     try {
       await this.withOperationTimeout(stop);
     } catch (error) {
@@ -881,12 +939,56 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
   }
 
   private enqueue<T>(transition: () => Promise<T>): Promise<T> {
-    const run = this.queue.then(transition, transition);
+    const guarded = async (): Promise<T> => {
+      try {
+        return await transition();
+      } finally {
+        this.resolveSourceKindStopWaiters();
+      }
+    };
+    const run = this.queue.then(guarded, guarded);
     this.queue = run.then(
       () => undefined,
       () => undefined,
     );
     return run;
+  }
+
+  private async waitForSourceKindToStop(
+    kind: LiveStreamSource['kind'],
+  ): Promise<void> {
+    const waiter: SourceKindStopWaiter = {
+      kind,
+      resolve: () => undefined,
+    };
+    const stopped = new Promise<void>((resolve) => {
+      waiter.resolve = resolve;
+    });
+    await this.enqueue(async () => {
+      if (this.hasSourceKindWork(kind)) this.sourceKindStopWaiters.add(waiter);
+      else waiter.resolve();
+    });
+    try {
+      await this.withOperationTimeout(stopped);
+    } finally {
+      this.sourceKindStopWaiters.delete(waiter);
+    }
+  }
+
+  private resolveSourceKindStopWaiters(): void {
+    for (const waiter of this.sourceKindStopWaiters) {
+      if (this.hasSourceKindWork(waiter.kind)) continue;
+      this.sourceKindStopWaiters.delete(waiter);
+      waiter.resolve();
+    }
+  }
+
+  private hasSourceKindWork(kind: LiveStreamSource['kind']): boolean {
+    return this.active?.sourceKind === kind ||
+      this.cleanupBlocked?.active.sourceKind === kind ||
+      this.pending?.source.kind === kind ||
+      this.pending?.replacement?.source.kind === kind ||
+      this.pendingStartCleanup?.source.kind === kind;
   }
 }
 

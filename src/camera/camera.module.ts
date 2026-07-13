@@ -2,6 +2,10 @@ import { Module } from '@nestjs/common';
 import { EventModule } from '../events/event.module';
 import { FeatureModule } from '../features/feature.module';
 import {
+  FEATURE_DISABLE_LIFECYCLE,
+  type FeatureDisableLifecycleRegistryPort,
+} from '../features/domain/ports/feature-disable-lifecycle.port';
+import {
   FEATURE_QUERY,
   type FeatureQueryPort,
 } from '../features/domain/ports/feature-query.port';
@@ -14,6 +18,7 @@ import { CleanupCoordinatorService } from './application/cleanup-coordinator.ser
 import { CleanupDriveUseCase } from './application/cleanup-drive.use-case';
 import { CleanupLocalStorageUseCase } from './application/cleanup-local-storage.use-case';
 import { DisableMotionUseCase } from './application/disable-motion.use-case';
+import { DisableRtspFeatureUseCase } from './application/disable-rtsp-feature.use-case';
 import { DriveSyncScheduler } from './application/drive-sync.scheduler';
 import { EnableMotionUseCase } from './application/enable-motion.use-case';
 import { GdriveStatusUseCase } from './application/gdrive-status.use-case';
@@ -31,6 +36,7 @@ import { LiveSourceCredentialRotationCoordinator } from './application/live-sour
 import { LiveStreamSourceResolverService } from './application/live-stream-source-resolver.service';
 import { MotionWatcherService } from './application/motion-watcher.service';
 import { OpenLiveStreamUseCase } from './application/open-live-stream.use-case';
+import { RtspSourceStartGate } from './application/rtsp-source-start-gate.service';
 import { RecordMotionEndUseCase } from './application/record-motion-end.use-case';
 import { RecordMotionStartUseCase } from './application/record-motion-start.use-case';
 import { RecordSnapshotUseCase } from './application/record-snapshot.use-case';
@@ -348,6 +354,7 @@ const liveStreamOptions = liveStreamOptionsFromEnv(process.env);
       useExisting: LiveStreamMessageCleanupService,
     },
     LiveStreamSourceResolverService,
+    RtspSourceStartGate,
     {
       provide: LiveStreamSessionService,
       useFactory: (
@@ -357,6 +364,7 @@ const liveStreamOptions = liveStreamOptionsFromEnv(process.env);
         alerts: AdminAlertService,
         messageCleanup: LiveStreamMessageCleanupPort,
         options: LiveStreamOptions,
+        sourceStartGate: RtspSourceStartGate,
       ) => new LiveStreamSessionService(
         gateway,
         lease,
@@ -366,6 +374,7 @@ const liveStreamOptions = liveStreamOptionsFromEnv(process.env);
         options.durationMs,
         options.startTimeoutMs,
         options.maxViewers,
+        sourceStartGate,
       ),
       inject: [
         LIVE_STREAM_GATEWAY,
@@ -374,6 +383,24 @@ const liveStreamOptions = liveStreamOptionsFromEnv(process.env);
         ADMIN_ALERT,
         LIVE_STREAM_MESSAGE_CLEANUP,
         LIVE_STREAM_OPTIONS,
+        RtspSourceStartGate,
+      ],
+    },
+    {
+      provide: DisableRtspFeatureUseCase,
+      useFactory: (
+        gate: RtspSourceStartGate,
+        sessions: LiveStreamSessionService,
+        lifecycle: FeatureDisableLifecycleRegistryPort,
+      ) => {
+        const disableRtsp = new DisableRtspFeatureUseCase(gate, sessions);
+        lifecycle.register(disableRtsp);
+        return disableRtsp;
+      },
+      inject: [
+        RtspSourceStartGate,
+        LiveStreamSessionService,
+        FEATURE_DISABLE_LIFECYCLE,
       ],
     },
     {
@@ -414,7 +441,9 @@ const liveStreamOptions = liveStreamOptionsFromEnv(process.env);
   exports: [
     MEDIA_REPOSITORY,
     LIVE_SOURCE_REPOSITORY,
+    ConfigureLiveSourceUseCase,
     ListLiveSourcesUseCase,
+    RemoveLiveSourceUseCase,
     GetSnapshotUseCase,
     BrowseMotionEventsUseCase,
     ListMotionEventsUseCase,

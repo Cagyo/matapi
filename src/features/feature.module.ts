@@ -7,6 +7,8 @@ import { FEATURE_REPOSITORY } from './domain/ports/feature-repository.port';
 import { DrizzleFeatureQuery } from './infrastructure/drizzle-feature.query';
 import { DrizzleFeatureRepository } from './infrastructure/drizzle-feature.repository';
 import { FeatureSeederService } from './application/feature-seeder.service';
+import { FeatureDisableLifecycleRegistry } from './application/feature-disable-lifecycle-registry.service';
+import { FEATURE_DISABLE_LIFECYCLE } from './domain/ports/feature-disable-lifecycle.port';
 
 /**
  * Features composition root. Exposes a read projection of the `features` table
@@ -18,6 +20,11 @@ import { FeatureSeederService } from './application/feature-seeder.service';
   providers: [
     { provide: FEATURE_QUERY, useClass: DrizzleFeatureQuery },
     { provide: FEATURE_REPOSITORY, useClass: DrizzleFeatureRepository },
+    FeatureDisableLifecycleRegistry,
+    {
+      provide: FEATURE_DISABLE_LIFECYCLE,
+      useExisting: FeatureDisableLifecycleRegistry,
+    },
     EnableFeatureUseCase,
     DisableFeatureUseCase,
     ListFeaturesUseCase,
@@ -25,6 +32,7 @@ import { FeatureSeederService } from './application/feature-seeder.service';
   ],
   exports: [
     FEATURE_QUERY,
+    FEATURE_DISABLE_LIFECYCLE,
     EnableFeatureUseCase,
     DisableFeatureUseCase,
     ListFeaturesUseCase,

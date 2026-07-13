@@ -24,6 +24,7 @@ import {
   parseTimeRangeInput,
 } from '../../../src/telegram/interfaces/camera.handler';
 import { RoleMiddleware } from '../../../src/telegram/interfaces/role.middleware';
+import type { CameraSourcesHandler } from '../../../src/telegram/interfaces/camera-sources.handler';
 
 describe('camera browse input parsers', () => {
   it('parses DD.MM.YYYY dates and rejects impossible dates', () => {
@@ -130,6 +131,11 @@ function createTestSetup() {
     registered: vi.fn(),
     resolveRole: vi.fn().mockResolvedValue('user'),
   } as unknown as RoleMiddleware;
+  const sources = {
+    handleEntry: vi.fn().mockResolvedValue(undefined),
+    handleCallback: vi.fn().mockResolvedValue(undefined),
+    handleText: vi.fn().mockResolvedValue(false),
+  } as unknown as CameraSourcesHandler;
 
   const handler = new CameraHandler(
     snapshot,
@@ -144,6 +150,7 @@ function createTestSetup() {
     stop,
     sessions,
     guard,
+    sources,
   );
 
   const commandCallbacks: Record<string, (...args: any[]) => any> = {};
@@ -170,6 +177,7 @@ function createTestSetup() {
     stop,
     sessions,
     guard,
+    sources,
     registerMessageReference,
     composer,
     commandCallbacks,
@@ -177,6 +185,34 @@ function createTestSetup() {
     messageCallbacks,
   };
 }
+
+describe('CameraHandler source delegation', () => {
+  it('keeps one camera command owner and delegates the sources subcommand', async () => {
+    const { composer, commandCallbacks, sources } = createTestSetup();
+    const request = ctx();
+    request.match = 'sources';
+
+    await commandCallbacks.camera(request);
+
+    expect(composer.command).toHaveBeenCalledTimes(1);
+    expect(sources.handleEntry).toHaveBeenCalledWith(request);
+  });
+
+  it('delegates source callbacks and pending text through CameraHandler', async () => {
+    const { callbackQueryCallbacks, messageCallbacks, sources } = createTestSetup();
+    const callback = ctx('cam:sources:list');
+    await callbackQueryCallbacks[0].fn(callback);
+    expect(sources.handleCallback).toHaveBeenCalledWith(callback, 'list');
+
+    vi.mocked(sources.handleText).mockResolvedValueOnce(true);
+    const text = ctx();
+    text.message = { text: 'Front door' };
+    const next = vi.fn();
+    await messageCallbacks['message:text'](text, next);
+    expect(sources.handleText).toHaveBeenCalledWith(text);
+    expect(next).not.toHaveBeenCalled();
+  });
+});
 
 function ctx(data?: string) {
   return {
