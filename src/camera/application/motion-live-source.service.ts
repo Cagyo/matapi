@@ -1,6 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { LiveStreamSourceUnavailableError } from '../domain/errors/live-stream-source-unavailable.error';
 import type { LiveStreamSource } from '../domain/live-stream.entity';
+import type { Camera } from '../domain/camera.entity';
 import {
   MEDIA_REPOSITORY,
   type MediaRepositoryPort,
@@ -16,13 +17,10 @@ export class MotionLiveSourceService {
   ) {}
 
   async resolve(cameraName?: string): Promise<LiveStreamSource> {
-    let camera;
+    let camera: Camera | null;
     try {
       if (cameraName) {
         camera = await this.media.findCameraByName(cameraName);
-        camera ??= (await this.media.listCameras()).find(
-          (candidate) => candidate.id === cameraName,
-        ) ?? null;
       } else {
         camera = (await this.media.listCameras()).find(
             (candidate) => candidate.enabled && candidate.type === 'motion',
@@ -32,6 +30,23 @@ export class MotionLiveSourceService {
       throw new LiveStreamSourceUnavailableError();
     }
 
+    return this.toSource(camera);
+  }
+
+  async resolveById(cameraId: string): Promise<LiveStreamSource> {
+    let camera: Camera | null;
+    try {
+      camera = (await this.media.listCameras()).find(
+        (candidate) => candidate.id === cameraId,
+      ) ?? null;
+    } catch {
+      throw new LiveStreamSourceUnavailableError();
+    }
+
+    return this.toSource(camera);
+  }
+
+  private toSource(camera: Camera | null): LiveStreamSource {
     if (!camera || !camera.enabled || camera.type !== 'motion') {
       throw new LiveStreamSourceUnavailableError();
     }

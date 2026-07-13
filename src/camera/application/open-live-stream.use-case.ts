@@ -15,6 +15,11 @@ export interface OpenLiveStreamInput {
   cameraName?: string;
 }
 
+export interface OpenLiveStreamByIdInput {
+  telegramId: number;
+  cameraId: string;
+}
+
 /** Opens (or joins) the one shared Motion live-stream session. */
 @Injectable()
 export class OpenLiveStreamUseCase {
@@ -26,9 +31,18 @@ export class OpenLiveStreamUseCase {
   ) {}
 
   async execute(input: OpenLiveStreamInput): Promise<OpenLiveStreamResult> {
+    await this.ensureAvailable();
+    return this.sessions.open(await this.source.resolve(input.cameraName), input.telegramId);
+  }
+
+  async executeById(input: OpenLiveStreamByIdInput): Promise<OpenLiveStreamResult> {
+    await this.ensureAvailable();
+    return this.sessions.open(await this.source.resolveById(input.cameraId), input.telegramId);
+  }
+
+  private async ensureAvailable(): Promise<void> {
     if (!(await this.capability.isAvailable())) {
       throw new LiveStreamUnavailableError();
     }
-    return this.sessions.open(await this.source.resolve(input.cameraName), input.telegramId);
   }
 }

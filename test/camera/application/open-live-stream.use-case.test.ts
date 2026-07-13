@@ -32,20 +32,47 @@ describe('OpenLiveStreamUseCase', () => {
     expect(source.upstreamUrl).toBe('http://127.0.0.1:8081/?action=stream');
   });
 
-  it('re-resolves a motion-alert camera id from repository data', async () => {
+  it('resolves a motion-alert camera strictly by repository id', async () => {
     const media = new FakeMediaRepository([
       { ...camera('Front door'), id: 'front_door_camera' },
     ]);
 
-    const source = await new MotionLiveSourceService(media).resolve(
-      'front_door_camera',
-    );
+    const source = await new MotionLiveSourceService(media).resolveById('front_door_camera');
 
     expect(source).toMatchObject({
       cameraId: 'front_door_camera',
       cameraName: 'Front door',
       upstreamUrl: 'http://127.0.0.1:8081/?action=stream',
     });
+  });
+
+  it('rejects a forged callback value that matches only a camera name', async () => {
+    const media = new FakeMediaRepository([
+      { ...camera('Front door'), id: 'front_door_camera' },
+    ]);
+
+    await expect(createUseCase(media).executeById({
+      telegramId: 7,
+      cameraId: 'Front door',
+    })).rejects.toBeInstanceOf(LiveStreamSourceUnavailableError);
+  });
+
+  it('chooses the id target for callbacks and the name target for commands on collision', async () => {
+    const media = new FakeMediaRepository([
+      { ...camera('ID target'), id: 'collision' },
+      { ...camera('collision'), id: 'named-target' },
+    ]);
+    const callbackUseCase = createUseCase(media);
+    const commandUseCase = createUseCase(media);
+
+    await expect(callbackUseCase.executeById({
+      telegramId: 7,
+      cameraId: 'collision',
+    })).resolves.toMatchObject({ cameraName: 'ID target' });
+    await expect(commandUseCase.execute({
+      telegramId: 7,
+      cameraName: 'collision',
+    })).resolves.toMatchObject({ cameraName: 'collision' });
   });
 
   it('rejects disabled cameras as unavailable stream sources', async () => {

@@ -13,6 +13,7 @@ import {
 import { GetSnapshotUseCase } from '../../camera/application/get-snapshot.use-case';
 import { ListMotionEventsUseCase } from '../../camera/application/list-motion-events.use-case';
 import { OpenLiveStreamUseCase } from '../../camera/application/open-live-stream.use-case';
+import { LiveStreamSessionService } from '../../camera/application/live-stream-session.service';
 import { StopLiveStreamUseCase } from '../../camera/application/stop-live-stream.use-case';
 import { CameraNotFoundError } from '../../camera/domain/errors/camera-not-found.error';
 import { EventNotFoundError } from '../../camera/domain/errors/event-not-found.error';
@@ -92,11 +93,13 @@ export class CameraHandler implements TelegramHandler {
     private readonly status: CameraStatusUseCase,
     private readonly openLiveStream: OpenLiveStreamUseCase,
     private readonly stopLiveStream: StopLiveStreamUseCase,
+    private readonly liveStreamSessions: LiveStreamSessionService,
     private readonly guard: RoleMiddleware,
   ) {}
 
   register(composer: Composer<TelegramContext>): void {
     composer.command('camera', this.guard.registered, async (ctx) => {
+      if (!ctx.from || !ctx.message || ctx.chat?.type !== 'private') return;
       const tokens = (ctx.match ?? '').toString().trim().split(/\s+/).filter(Boolean);
       const sub = (tokens.shift() ?? '').toLowerCase() as Subcommand | '';
       const arg = tokens.join(' ').trim();
@@ -147,6 +150,7 @@ export class CameraHandler implements TelegramHandler {
       const userId = ctx.from?.id;
       if (!userId) return;
       await ctx.answerCallbackQuery().catch(() => undefined);
+      if (ctx.chat?.type !== 'private') return;
       const data = (ctx.callbackQuery?.data ?? '').slice('cam:'.length).trim();
       if (!data) return;
       try {
@@ -168,7 +172,7 @@ export class CameraHandler implements TelegramHandler {
         }
         if (data.startsWith('live:')) {
           const cameraId = data.slice('live:'.length).trim();
-          if (cameraId) await this.handleLive(ctx, cameraId);
+          if (cameraId) await this.handleLive(ctx, cameraId, 'id');
           return;
         }
         if (data === 'close') {
@@ -604,14 +608,27 @@ export class CameraHandler implements TelegramHandler {
     await ctx.reply(message);
   }
 
-  private async handleLive(ctx: TelegramContext, cameraName?: string): Promise<void> {
+  private async handleLive(
+    ctx: TelegramContext,
+    cameraReference?: string,
+    resolution: 'name' | 'id' = 'name',
+  ): Promise<void> {
     const telegramId = ctx.from?.id;
-    if (!telegramId) return;
+    const chatId = ctx.chat?.id;
+    if (!telegramId || chatId === undefined || ctx.chat?.type !== 'private') return;
     const catalog = this.catalog(ctx);
 
     await ctx.reply(catalog.camera.live.opening);
     try {
-      const opened = await this.openLiveStream.execute({ telegramId, cameraName });
+      const opened = resolution === 'id'
+        ? await this.openLiveStream.executeById({
+            telegramId,
+            cameraId: cameraReference ?? '',
+          })
+        : await this.openLiveStream.execute({
+            telegramId,
+            cameraName: cameraReference,
+          });
       const keyboard = new InlineKeyboard().url(
         catalog.camera.live.watchButton,
         opened.watchUrl,
@@ -622,15 +639,31 @@ export class CameraHandler implements TelegramHandler {
         ),
         { reply_markup: keyboard },
       );
-      const chatId = ctx.chat?.id;
-      if (chatId !== undefined) {
+      try {
         await opened.registerMessageReference({
           chatId,
           messageId: sent.message_id,
         });
+      } catch (error) {
+        await this.compensateFailedLiveMessage(ctx, telegramId, chatId, sent.message_id);
+        throw error;
       }
     } catch (error) {
       await this.handleLiveError(ctx, error, 'open live stream');
+    }
+  }
+
+  private async compensateFailedLiveMessage(
+    ctx: TelegramContext,
+    telegramId: number,
+    chatId: number,
+    messageId: number,
+  ): Promise<void> {
+    await ctx.api.deleteMessage(chatId, messageId).catch(() => undefined);
+    try {
+      await this.liveStreamSessions.revokeUser(telegramId);
+    } catch {
+      await this.stopLiveStream.execute(telegramId);
     }
   }
 

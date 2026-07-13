@@ -46,6 +46,8 @@ Run every item on the target Pi and record dated, sanitized evidence in the tabl
 | Check                                                                           | Environment / client              | Result                     | Evidence                                                    |
 | ------------------------------------------------------------------------------- | --------------------------------- | -------------------------- | ----------------------------------------------------------- |
 | Focused automated handler, cleanup, registration, live-stream, and locale tests | Local CI-compatible environment   | PASS                       | 39 files / 272 tests passed with scoped loopback permission. |
+| Strict callback-ID, compensation, and private-context regression tests          | Local CI-compatible environment   | PASS                       | 8 files / 99 tests passed.                                  |
+| Full automated regression suite                                                 | Local CI-compatible environment   | PASS                       | 166 files / 989 tests passed with scoped loopback permission. |
 | TypeScript production build                                                     | Local CI-compatible environment   | PASS                       | `yarn build` exited 0.                                      |
 | Motion localhost MJPEG frames                                                   | Raspberry Pi / Motion             | PENDING                    | No target device available.                                 |
 | `/camera live` and named-camera flow                                            | Raspberry Pi / Telegram           | PENDING                    | No real bot or tunnel exercised.                            |

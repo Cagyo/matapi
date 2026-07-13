@@ -9,6 +9,7 @@ import { GetSnapshotUseCase } from '../../../src/camera/application/get-snapshot
 import { ListMotionEventsUseCase } from '../../../src/camera/application/list-motion-events.use-case';
 import { OpenLiveStreamUseCase } from '../../../src/camera/application/open-live-stream.use-case';
 import { StopLiveStreamUseCase } from '../../../src/camera/application/stop-live-stream.use-case';
+import { LiveStreamSessionService } from '../../../src/camera/application/live-stream-session.service';
 import { LiveStreamExpiredError } from '../../../src/camera/domain/errors/live-stream-expired.error';
 import { LiveStreamSourceUnavailableError } from '../../../src/camera/domain/errors/live-stream-source-unavailable.error';
 import { LiveStreamUnavailableError } from '../../../src/camera/domain/errors/live-stream-unavailable.error';
@@ -111,10 +112,20 @@ function createTestSetup() {
       cameraName: 'front_door',
       registerMessageReference,
     }),
+    executeById: vi.fn().mockResolvedValue({
+      watchUrl: 'https://clear-moon.trycloudflare.com/watch/secret-token',
+      remainingMs: 300_000,
+      expiresMonotonicMs: 300_000,
+      cameraName: 'front_door',
+      registerMessageReference,
+    }),
   } as unknown as OpenLiveStreamUseCase;
   const stop = {
     execute: vi.fn().mockResolvedValue('front_door'),
   } as unknown as StopLiveStreamUseCase;
+  const sessions = {
+    revokeUser: vi.fn().mockResolvedValue(undefined),
+  } as unknown as LiveStreamSessionService;
   const guard = {
     registered: vi.fn(),
     resolveRole: vi.fn().mockResolvedValue('user'),
@@ -131,6 +142,7 @@ function createTestSetup() {
     status,
     open,
     stop,
+    sessions,
     guard,
   );
 
@@ -156,6 +168,8 @@ function createTestSetup() {
     browse,
     open,
     stop,
+    sessions,
+    guard,
     registerMessageReference,
     composer,
     commandCallbacks,
@@ -169,9 +183,10 @@ function ctx(data?: string) {
     from: { id: 100 },
     chat: { id: 42, type: 'private' },
     callbackQuery: data ? { data } : undefined,
-    message: undefined as { text: string } | undefined,
+    message: data ? undefined : { text: '/camera' },
     match: '',
     reply: vi.fn().mockResolvedValue({ message_id: 9 }),
+    api: { deleteMessage: vi.fn().mockResolvedValue(true) },
     answerCallbackQuery: vi.fn().mockResolvedValue(true),
     editMessageReplyMarkup: vi.fn().mockResolvedValue(true),
     replyWithChatAction: vi.fn().mockResolvedValue(true),
@@ -180,7 +195,7 @@ function ctx(data?: string) {
 
 describe('CameraHandler experimental live stream', () => {
   it('opens a registered command request with a normal URL button and registers the sent message', async () => {
-    const { commandCallbacks, open, registerMessageReference } = createTestSetup();
+    const { commandCallbacks, open, stop, sessions, registerMessageReference } = createTestSetup();
     const context = ctx();
     context.match = 'live front_door';
 
@@ -200,6 +215,9 @@ describe('CameraHandler experimental live stream', () => {
       'https://clear-moon.trycloudflare.com/watch/secret-token',
     );
     expect(registerMessageReference).toHaveBeenCalledWith({ chatId: 42, messageId: 9 });
+    expect(context.api.deleteMessage).not.toHaveBeenCalled();
+    expect(sessions.revokeUser).not.toHaveBeenCalled();
+    expect(stop.execute).not.toHaveBeenCalled();
   });
 
   it('resolves a motion-alert callback camera id through the open use case and answers the query', async () => {
@@ -209,9 +227,9 @@ describe('CameraHandler experimental live stream', () => {
     await callbackQueryCallbacks[0].fn(context);
 
     expect(context.answerCallbackQuery).toHaveBeenCalledTimes(1);
-    expect(open.execute).toHaveBeenCalledWith({
+    expect(open.executeById).toHaveBeenCalledWith({
       telegramId: 100,
-      cameraName: 'front_door',
+      cameraId: 'front_door',
     });
   });
 
@@ -222,9 +240,9 @@ describe('CameraHandler experimental live stream', () => {
 
     await callbackQueryCallbacks[0].fn(context);
 
-    expect(open.execute).toHaveBeenCalledWith({
+    expect(open.executeById).toHaveBeenCalledWith({
       telegramId: 100,
-      cameraName: 'front_door',
+      cameraId: 'front_door',
     });
   });
 
@@ -278,15 +296,95 @@ describe('CameraHandler experimental live stream', () => {
     expect(JSON.stringify(context.reply.mock.calls)).not.toContain('secret-token');
   });
 
-  it('maps message registration failure to a safe localized response', async () => {
-    const { commandCallbacks, registerMessageReference } = createTestSetup();
+  it('deletes the sent URL and revokes the viewer when message registration fails', async () => {
+    const { commandCallbacks, stop, sessions, registerMessageReference } = createTestSetup();
     registerMessageReference.mockRejectedValueOnce(new LiveStreamUnavailableError());
     const context = ctx();
     context.match = 'live';
 
     await commandCallbacks.camera(context);
 
+    expect(context.api.deleteMessage).toHaveBeenCalledWith(42, 9);
+    expect(sessions.revokeUser).toHaveBeenCalledWith(100);
+    expect(context.api.deleteMessage.mock.invocationCallOrder[0]).toBeLessThan(
+      (sessions.revokeUser as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0],
+    );
+    expect(stop.execute).not.toHaveBeenCalled();
     expect(context.reply).toHaveBeenLastCalledWith(en.camera.live.unavailable);
+  });
+
+  it('contains watch-message deletion failure and still revokes the viewer', async () => {
+    const { commandCallbacks, sessions, registerMessageReference } = createTestSetup();
+    registerMessageReference.mockRejectedValueOnce(new LiveStreamUnavailableError());
+    const context = ctx();
+    context.match = 'live';
+    context.api.deleteMessage.mockRejectedValueOnce(new Error('message missing'));
+
+    await commandCallbacks.camera(context);
+
+    expect(sessions.revokeUser).toHaveBeenCalledWith(100);
+    expect(context.reply).toHaveBeenLastCalledWith(en.camera.live.unavailable);
+  });
+
+  it('stops the shared stream when viewer revocation fails', async () => {
+    const { commandCallbacks, stop, sessions, registerMessageReference } = createTestSetup();
+    registerMessageReference.mockRejectedValueOnce(new LiveStreamUnavailableError());
+    (sessions.revokeUser as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new LiveStreamUnavailableError(),
+    );
+    const context = ctx();
+    context.match = 'live';
+
+    await commandCallbacks.camera(context);
+
+    expect(context.api.deleteMessage).toHaveBeenCalledWith(42, 9);
+    expect(stop.execute).toHaveBeenCalledWith(100);
+    expect((sessions.revokeUser as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0])
+      .toBeLessThan((stop.execute as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]);
+    expect(context.reply).toHaveBeenLastCalledWith(en.camera.live.unavailable);
+  });
+
+  it('does not open live view without complete private message context', async () => {
+    const cases = [
+      { from: undefined },
+      { chat: undefined },
+      { message: undefined },
+      { chat: { id: -42, type: 'group' } },
+    ];
+
+    for (const missing of cases) {
+      const { commandCallbacks, open } = createTestSetup();
+      const context = Object.assign(ctx(), missing);
+      context.match = 'live';
+      await commandCallbacks.camera(context);
+      expect(open.execute).not.toHaveBeenCalled();
+    }
+  });
+
+  it('answers but does not open an inline or non-private callback without chat context', async () => {
+    for (const chat of [undefined, { id: -42, type: 'group' }]) {
+      const { callbackQueryCallbacks, open } = createTestSetup();
+      const context = ctx('cam:live:front_door');
+      context.chat = chat as never;
+      await callbackQueryCallbacks[0].fn(context);
+      expect(context.answerCallbackQuery).toHaveBeenCalledTimes(1);
+      expect(open.executeById).not.toHaveBeenCalled();
+    }
+  });
+
+  it('registers command and callback paths behind the registered-user guard', () => {
+    const { composer, guard } = createTestSetup();
+
+    expect(composer.command).toHaveBeenCalledWith(
+      'camera',
+      guard.registered,
+      expect.any(Function),
+    );
+    expect(composer.callbackQuery).toHaveBeenCalledWith(
+      /^cam:/,
+      guard.registered,
+      expect.any(Function),
+    );
   });
 
   it('maps an expired live request to the synchronized locale key', async () => {
