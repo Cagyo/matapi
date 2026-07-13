@@ -202,20 +202,27 @@ export class ImportConfigHandler implements TelegramHandler {
   private async onCallback(ctx: CallbackQueryContext<TelegramContext>): Promise<void> {
     const userId = ctx.from?.id;
     const data = ctx.callbackQuery.data;
+    const state = userId ? this.states.get(userId) : undefined;
+    const claimedState =
+      data === 'imp:apply' && state?.kind === 'awaitingConfirm'
+        ? state
+        : undefined;
+    if (userId && (claimedState || data === 'imp:cancel')) {
+      this.states.delete(userId);
+    }
+
     await ctx.answerCallbackQuery().catch(() => undefined);
     await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => undefined);
 
     if (!userId) return;
-    const state = this.states.get(userId);
 
     if (data === 'imp:cancel') {
-      this.states.delete(userId);
       await ctx.reply(en.importConfig.cancelled);
       return;
     }
 
     if (data === 'imp:apply') {
-      if (state?.kind !== 'awaitingConfirm') {
+      if (!claimedState) {
         await ctx.reply(en.common.interrupted);
         return;
       }
@@ -228,8 +235,8 @@ export class ImportConfigHandler implements TelegramHandler {
         if (!(await this.isCurrentAdmin(userId))) {
           replyText = catalog.common.adminRequired;
         } else {
-          if (state.cameraPlan.configured.length > 0) {
-            await this.importCameraSources.commit(state.cameraPlan);
+          if (claimedState.cameraPlan.configured.length > 0) {
+            await this.importCameraSources.commit(claimedState.cameraPlan);
             cameraApplied = true;
           }
 
@@ -239,7 +246,7 @@ export class ImportConfigHandler implements TelegramHandler {
               : catalog.common.adminRequired;
           } else {
             phase = 'sensor';
-            summary = await this.importSensors.commit(state.sensorPlan);
+            summary = await this.importSensors.commit(claimedState.sensorPlan);
           }
         }
       } catch (_error) {
@@ -251,11 +258,10 @@ export class ImportConfigHandler implements TelegramHandler {
               : catalog.importConfig.sensorOutcomeUncertain
             : catalog.importConfig.applyFailed;
       }
-      this.states.delete(userId);
       if (!replyText && summary) {
         replyText = catalog.importConfig.applied({
           ...summary,
-          liveSources: [...state.cameraPlan.configured],
+          liveSources: [...claimedState.cameraPlan.configured],
         });
       }
       replyText ??= catalog.importConfig.applyFailed;

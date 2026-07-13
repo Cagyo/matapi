@@ -25,6 +25,7 @@ export function liveSourceCredentialFromEnvironment(
   if (!currentKey) return new UnavailableLiveSourceCredentialAdapter();
   const version = Number(env.RTSP_CREDENTIALS_KEY_VERSION ?? '1');
   const previousKeys: Record<number, string> = {};
+  const previousVersions = new Set<number>();
   const previous = env.RTSP_CREDENTIALS_PREVIOUS_KEYS;
   if (previous) {
     for (const item of previous.split(',')) {
@@ -32,9 +33,14 @@ export function liveSourceCredentialFromEnvironment(
       if (separator < 1) throw new LiveSourceCredentialConfigurationError();
       const keyVersion = Number(item.slice(0, separator));
       const key = item.slice(separator + 1);
-      if (!isKeyVersion(keyVersion) || !isHexKey(key)) {
+      if (
+        !isKeyVersion(keyVersion) ||
+        !isHexKey(key) ||
+        previousVersions.has(keyVersion)
+      ) {
         throw new LiveSourceCredentialConfigurationError();
       }
+      previousVersions.add(keyVersion);
       previousKeys[keyVersion] = key;
     }
   }

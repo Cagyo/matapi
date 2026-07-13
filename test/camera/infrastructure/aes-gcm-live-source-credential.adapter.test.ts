@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { AesGcmLiveSourceCredentialAdapter } from '../../../src/camera/infrastructure/aes-gcm-live-source-credential.adapter';
+import {
+  AesGcmLiveSourceCredentialAdapter,
+  liveSourceCredentialFromEnvironment,
+} from '../../../src/camera/infrastructure/aes-gcm-live-source-credential.adapter';
 
 const KEY_1 = '11'.repeat(32);
 const KEY_2 = '22'.repeat(32);
@@ -9,6 +12,16 @@ const payload = {
 };
 
 describe('AesGcmLiveSourceCredentialAdapter', () => {
+  it('rejects duplicate previous-key versions from environment configuration', () => {
+    expect(() =>
+      liveSourceCredentialFromEnvironment({
+        RTSP_CREDENTIALS_KEY: KEY_2,
+        RTSP_CREDENTIALS_KEY_VERSION: '3',
+        RTSP_CREDENTIALS_PREVIOUS_KEYS: `1:${KEY_1},1:${KEY_2}`,
+      }),
+    ).toThrowError(/credential configuration is invalid/i);
+  });
+
   it('uses a fresh 12-byte nonce and a 16-byte authentication tag', () => {
     const adapter = new AesGcmLiveSourceCredentialAdapter({
       currentKey: KEY_1,

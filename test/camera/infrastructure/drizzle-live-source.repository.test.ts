@@ -7,6 +7,7 @@ import type { AppDatabase } from '../../../src/database/database.module';
 import { LiveSource } from '../../../src/camera/domain/live-source.entity';
 import { AesGcmLiveSourceCredentialAdapter } from '../../../src/camera/infrastructure/aes-gcm-live-source-credential.adapter';
 import { DrizzleLiveSourceRepository } from '../../../src/camera/infrastructure/drizzle-live-source.repository';
+import { UnavailableLiveSourceCredentialAdapter } from '../../../src/camera/infrastructure/unavailable-live-source-credential.adapter';
 
 describe('DrizzleLiveSourceRepository', () => {
   let sqlite: Database.Database;
@@ -30,9 +31,33 @@ describe('DrizzleLiveSourceRepository', () => {
 
   afterEach(() => sqlite.close());
 
+  it('rejects normal credential writes until startup rotation succeeds', async () => {
+    const credentials = new AesGcmLiveSourceCredentialAdapter({
+      currentKey: oldKey,
+      currentVersion: 1,
+    });
+    const repository = new DrizzleLiveSourceRepository(db, credentials);
+    const source = LiveSource.create({
+      cameraId: 'camera-1',
+      url: 'rtsp://cam.local/live',
+      ready: true,
+    });
+
+    await expect(
+      repository.save(
+        source,
+        credentials.encrypt(source.cameraId, source.credentialPayload()),
+      ),
+    ).rejects.toMatchObject({
+      code: 'LIVE_SOURCE_CREDENTIAL_UNAVAILABLE',
+      message: 'Live source credential is unavailable',
+    });
+  });
+
   it('saves encrypted material, loads authenticated plaintext, lists metadata only, and cascades remove', async () => {
     const credentials = new AesGcmLiveSourceCredentialAdapter({ currentKey: oldKey, currentVersion: 1 });
     const repository = new DrizzleLiveSourceRepository(db, credentials);
+    await repository.rotate();
     const source = LiveSource.create({
       cameraId: 'camera-1',
       url: 'rtsp://user:pass@cam.local/private?token=secret',
@@ -71,6 +96,7 @@ describe('DrizzleLiveSourceRepository', () => {
   it('rotates every old row atomically and rolls all rows back when one cannot authenticate', async () => {
     const oldCredentials = new AesGcmLiveSourceCredentialAdapter({ currentKey: oldKey, currentVersion: 1 });
     const seedRepository = new DrizzleLiveSourceRepository(db, oldCredentials);
+    await seedRepository.rotate();
     const source = LiveSource.create({ cameraId: 'camera-1', url: 'rtsp://cam.local/live', ready: true });
     await seedRepository.save(source, oldCredentials.encrypt(source.cameraId, source.credentialPayload()));
 
@@ -92,11 +118,64 @@ describe('DrizzleLiveSourceRepository', () => {
       { camera_id: 'camera-1', key_version: 1 },
       { camera_id: 'camera-2', key_version: 1 },
     ]);
+    await expect(
+      repository.save(
+        source,
+        rotating.encrypt(source.cameraId, source.credentialPayload()),
+      ),
+    ).rejects.toMatchObject({
+      code: 'LIVE_SOURCE_CREDENTIAL_UNAVAILABLE',
+      message: 'Live source credential is unavailable',
+    });
   });
+
+  it.each([
+    new AesGcmLiveSourceCredentialAdapter({
+      currentKey: newKey,
+      currentVersion: 1,
+    }),
+    new UnavailableLiveSourceCredentialAdapter(),
+  ])(
+    'fails startup when a matching-version row cannot authenticate',
+    async (candidateCredentials) => {
+      const oldCredentials = new AesGcmLiveSourceCredentialAdapter({
+        currentKey: oldKey,
+        currentVersion: 1,
+      });
+      const seedRepository = new DrizzleLiveSourceRepository(db, oldCredentials);
+      await seedRepository.rotate();
+      const source = LiveSource.create({
+        cameraId: 'camera-1',
+        url: 'rtsp://cam.local/live',
+        ready: true,
+      });
+      await seedRepository.save(
+        source,
+        oldCredentials.encrypt(source.cameraId, source.credentialPayload()),
+      );
+
+      const repository = new DrizzleLiveSourceRepository(
+        db,
+        candidateCredentials,
+      );
+      await expect(repository.rotate()).rejects.toMatchObject({
+        code: 'LIVE_SOURCE_CREDENTIAL_UNAVAILABLE',
+      });
+      await expect(
+        repository.save(
+          source,
+          oldCredentials.encrypt(source.cameraId, source.credentialPayload()),
+        ),
+      ).rejects.toMatchObject({
+        code: 'LIVE_SOURCE_CREDENTIAL_UNAVAILABLE',
+      });
+    },
+  );
 
   it('rotates every old row to fresh current-version material that still decrypts', async () => {
     const oldCredentials = new AesGcmLiveSourceCredentialAdapter({ currentKey: oldKey, currentVersion: 1 });
     const seedRepository = new DrizzleLiveSourceRepository(db, oldCredentials);
+    await seedRepository.rotate();
     const first = LiveSource.create({ cameraId: 'camera-1', url: 'rtsp://cam.local/live', ready: true });
     await seedRepository.save(first, oldCredentials.encrypt(first.cameraId, first.credentialPayload()));
     db.insert(schema.cameras).values({ id: 'camera-2', name: 'back_door', type: 'motion', config: null, enabled: true }).run();

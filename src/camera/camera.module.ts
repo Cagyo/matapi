@@ -27,6 +27,7 @@ import { RemoveLiveSourceUseCase } from './application/remove-live-source.use-ca
 import { ListMotionEventsUseCase } from './application/list-motion-events.use-case';
 import { LiveStreamMessageCleanupService } from './application/live-stream-message-cleanup.service';
 import { LiveStreamSessionService } from './application/live-stream-session.service';
+import { LiveSourceCredentialRotationCoordinator } from './application/live-source-credential-rotation-coordinator.service';
 import { MotionLiveSourceService } from './application/motion-live-source.service';
 import { MotionWatcherService } from './application/motion-watcher.service';
 import { OpenLiveStreamUseCase } from './application/open-live-stream.use-case';
@@ -341,6 +342,7 @@ const liveStreamOptions = liveStreamOptionsFromEnv(process.env);
       inject: [LiveStreamSessionService],
     },
     ConfigureLiveSourceUseCase,
+    LiveSourceCredentialRotationCoordinator,
     ListLiveSourcesUseCase,
     RemoveLiveSourceUseCase,
     OpenLiveStreamUseCase,

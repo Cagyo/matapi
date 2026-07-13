@@ -13,12 +13,13 @@ const camera = {
   enabled: true,
 };
 
-function fixture() {
+async function fixture() {
   const credentials = new AesGcmLiveSourceCredentialAdapter({
     currentKey: '11'.repeat(32),
     currentVersion: 1,
   });
   const repository = new InMemoryLiveSourceRepository(credentials);
+  await repository.rotate();
   const probe: LiveSourceProbePort = { run: vi.fn().mockResolvedValue(undefined) };
   const media = {
     findCameraByName: vi.fn().mockResolvedValue(camera),
@@ -32,7 +33,7 @@ function fixture() {
 
 describe('ConfigureLiveSourceUseCase', () => {
   it('probes, encrypts and saves the same validated source settings', async () => {
-    const { useCase, probe, repository } = fixture();
+    const { useCase, probe, repository } = await fixture();
 
     const result = await useCase.execute({
       cameraName: 'front_door',
@@ -52,7 +53,7 @@ describe('ConfigureLiveSourceUseCase', () => {
   });
 
   it('never saves when probing fails and rejects compatibility fingerprints', async () => {
-    const { useCase, probe, repository } = fixture();
+    const { useCase, probe, repository } = await fixture();
     vi.mocked(probe.run).mockRejectedValueOnce(new Error('probe failed'));
 
     await expect(

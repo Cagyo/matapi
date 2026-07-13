@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { asc, eq, ne } from 'drizzle-orm';
+import { asc, eq } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../database/database.module';
 import {
   cameraLiveCredentials,
@@ -8,6 +8,7 @@ import {
 } from '../../database/schema';
 import { LiveSource } from '../domain/live-source.entity';
 import { InvalidLiveSourceError } from '../domain/errors/invalid-live-source.error';
+import { LiveSourceCredentialUnavailableError } from '../domain/errors/live-source-credential-unavailable.error';
 import {
   LIVE_SOURCE_CREDENTIAL,
   type LiveSourceCredentialPort,
@@ -21,6 +22,8 @@ import type {
 
 @Injectable()
 export class DrizzleLiveSourceRepository implements LiveSourceRepositoryPort {
+  #credentialWritesEnabled = false;
+
   constructor(
     @Inject(DB) private readonly db: AppDatabase,
     @Inject(LIVE_SOURCE_CREDENTIAL)
@@ -31,6 +34,9 @@ export class DrizzleLiveSourceRepository implements LiveSourceRepositoryPort {
     source: LiveSource,
     credential: EncryptedLiveSourceCredential | null,
   ): Promise<void> {
+    if (credential && !this.#credentialWritesEnabled) {
+      throw new LiveSourceCredentialUnavailableError();
+    }
     const now = Date.now();
     this.db.transaction((tx) => {
       tx.insert(cameraLiveSources)
@@ -178,15 +184,16 @@ export class DrizzleLiveSourceRepository implements LiveSourceRepositoryPort {
   }
 
   async rotate(): Promise<void> {
+    this.#credentialWritesEnabled = false;
     this.db.transaction((tx) => {
       const rows = tx
         .select()
         .from(cameraLiveCredentials)
-        .where(ne(cameraLiveCredentials.keyVersion, this.credentials.currentVersion()))
         .orderBy(asc(cameraLiveCredentials.cameraId))
         .all();
       for (const row of rows) {
         const plaintext = this.credentials.decrypt(row.cameraId, row);
+        if (row.keyVersion === this.credentials.currentVersion()) continue;
         const rotated = this.credentials.encrypt(row.cameraId, plaintext);
         tx.update(cameraLiveCredentials)
           .set(rotated)
@@ -194,5 +201,6 @@ export class DrizzleLiveSourceRepository implements LiveSourceRepositoryPort {
           .run();
       }
     });
+    this.#credentialWritesEnabled = true;
   }
 }

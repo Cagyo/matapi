@@ -5,6 +5,7 @@ import { chmod, mkdir, unlink } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import { createServer, type Socket } from 'node:net';
 import { dirname, join } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { LiveSourceNetworkPolicyInvalidError } from '../domain/errors/live-source-network-policy-invalid.error';
 import { LiveSourceProbeFailedError } from '../domain/errors/live-source-probe-failed.error';
 import type { LiveSource } from '../domain/live-source.entity';
@@ -18,6 +19,7 @@ import { StreamEgressGrant } from '../domain/stream-egress-grant.value-object';
 const PROTOCOL_WHITELIST = 'rtp,rtsp,tcp,tls,udp,unix';
 const MAX_DIAGNOSTIC_BYTES = 65_536;
 const MAX_PROBE_FRAME_BYTES = 2 * 1024 * 1024;
+const MAX_CLEANUP_RESERVE_MS = 500;
 
 export class BoundedJpegFrameTracker {
   #previousByte = -1;
@@ -107,22 +109,48 @@ export function liveSourceProbeOptionsFromEnvironment(
   };
 }
 
-interface UnixSink {
+export interface UnixSink {
   confirmFrame(timeoutMs: number): Promise<void>;
   close(): Promise<void>;
 }
 
+export interface UnixSinkSetupDependencies {
+  mkdir(
+    path: string,
+    options: { recursive: true; mode: number },
+  ): Promise<unknown>;
+  unlink(path: string): Promise<void>;
+  chmod(path: string, mode: number): Promise<void>;
+  createServer(
+    onConnection: (socket: Socket) => void,
+  ): UnixSinkServer;
+}
+
+export interface UnixSinkServer {
+  readonly listening: boolean;
+  once(event: 'error', listener: (error: Error) => void): void;
+  off(event: 'error', listener: (error: Error) => void): void;
+  listen(path: string, listener: () => void): void;
+  close(listener: () => void): void;
+}
+
 export interface FfmpegLiveSourceProbeDependencies {
   lookup(hostname: string): Promise<readonly { address: string; family: number }[]>;
-  execute(
+  startProcess(
     file: string,
     args: readonly string[],
-    options: { timeout: number; maxBuffer: number; shell: false },
-  ): Promise<void>;
+    options: { maxBuffer: number; shell: false },
+  ): ProbeProcessHandle;
   openUnixSink(path: string): Promise<UnixSink>;
-  now(): number;
+  monotonicNow(): number;
+  wallNow(): number;
   randomUUID(): string;
   randomBytes(): Buffer;
+}
+
+export interface ProbeProcessHandle {
+  readonly completion: Promise<void>;
+  kill(signal: NodeJS.Signals): void;
 }
 
 export class FfmpegLiveSourceProbeAdapter implements LiveSourceProbePort {
@@ -149,17 +177,29 @@ export class FfmpegLiveSourceProbeAdapter implements LiveSourceProbePort {
     }
     this.#dependencies = {
       lookup: dependencies.lookup ?? defaultLookup,
-      execute: dependencies.execute ?? defaultExecute,
-      openUnixSink: dependencies.openUnixSink ?? defaultOpenUnixSink,
-      now: dependencies.now ?? Date.now,
+      startProcess: dependencies.startProcess ?? startFfmpegProbeProcess,
+      openUnixSink: dependencies.openUnixSink ?? openFfmpegProbeUnixSink,
+      monotonicNow: dependencies.monotonicNow ?? (() => performance.now()),
+      wallNow: dependencies.wallNow ?? Date.now,
       randomUUID: dependencies.randomUUID ?? randomUUID,
       randomBytes: dependencies.randomBytes ?? (() => randomBytes(32)),
     };
   }
 
   async run(source: LiveSource): Promise<void> {
+    const monotonicNow = () => this.#dependencies.monotonicNow();
+    const startedAt = monotonicNow();
+    const finalDeadline = startedAt + this.options.timeoutMs;
+    const cleanupReserveMs = Math.min(
+      MAX_CLEANUP_RESERVE_MS,
+      Math.floor(this.options.timeoutMs / 4),
+    );
+    const workDeadline = finalDeadline - cleanupReserveMs;
     let lease: StreamEgressLease | undefined;
     let sink: UnixSink | undefined;
+    let process: ProbeProcessHandle | undefined;
+    let processCompletion: Promise<void> | undefined;
+    let processSettled = false;
     let failed = false;
     try {
       const payload = source.credentialPayload();
@@ -170,8 +210,10 @@ export class FfmpegLiveSourceProbeAdapter implements LiveSourceProbePort {
         source.profile === 'eco' && payload.substreamUrl
           ? payload.substreamUrl
           : payload.primaryUrl;
-      const validatedEndpoints = await Promise.all(
-        endpoints.map((endpoint) => this.validateEndpoint(endpoint)),
+      const validatedEndpoints = await awaitBeforeDeadline(
+        Promise.all(endpoints.map((endpoint) => this.validateEndpoint(endpoint))),
+        workDeadline,
+        monotonicNow,
       );
       const selected = validatedEndpoints.find(
         (endpoint) => endpoint.raw === selectedUrl,
@@ -179,8 +221,7 @@ export class FfmpegLiveSourceProbeAdapter implements LiveSourceProbePort {
       if (!selected) throw new LiveSourceProbeFailedError();
       const effectiveTransport =
         source.transport === 'auto' ? 'tcp' : source.transport;
-      const now = this.#dependencies.now();
-      const deadline = now + this.options.timeoutMs;
+      const wallNow = this.#dependencies.wallNow();
       const sessionId = this.#dependencies.randomUUID();
       const nonceHash = createHash('sha256')
         .update(this.#dependencies.randomBytes())
@@ -190,7 +231,7 @@ export class FfmpegLiveSourceProbeAdapter implements LiveSourceProbePort {
           nonceHash,
           addresses: selected.addresses,
           rtspControlPorts: [selected.port],
-          expiresAtUnixMs: now + this.options.timeoutMs,
+          expiresAtUnixMs: wallNow + this.options.timeoutMs,
         };
       const grant = StreamEgressGrant.create(
         effectiveTransport === 'tcp'
@@ -203,42 +244,91 @@ export class FfmpegLiveSourceProbeAdapter implements LiveSourceProbePort {
                 last: this.options.udpPortLast,
               },
             },
-        now,
+        wallNow,
       );
-      lease = await this.egress.grant(grant);
+      lease = await awaitBeforeDeadline(
+        this.egress.grant(grant),
+        workDeadline,
+        monotonicNow,
+        (lateLease) => this.egress.revoke(lateLease),
+      );
       const socketPath = join(
         this.options.runtimeDirectory,
         `probe-${sessionId}.sock`,
       );
-      sink = await this.#dependencies.openUnixSink(socketPath);
-      await this.#dependencies.execute(
+      sink = await awaitBeforeDeadline(
+        this.#dependencies.openUnixSink(socketPath),
+        workDeadline,
+        monotonicNow,
+        (lateSink) => lateSink.close(),
+      );
+      process = this.#dependencies.startProcess(
         'ffmpeg',
         buildArguments(source, selectedUrl, socketPath, this.options),
         {
-          timeout: this.options.timeoutMs,
           maxBuffer: MAX_DIAGNOSTIC_BYTES,
           shell: false,
         },
       );
-      const remainingMs = Math.max(1, deadline - this.#dependencies.now());
-      await sink.confirmFrame(remainingMs);
+      processCompletion = process.completion.then(
+        () => {
+          processSettled = true;
+        },
+        (error: unknown) => {
+          processSettled = true;
+          throw error;
+        },
+      );
+      await awaitBeforeDeadline(
+        processCompletion,
+        workDeadline,
+        monotonicNow,
+      );
+      const remainingMs = Math.max(
+        1,
+        workDeadline - monotonicNow(),
+      );
+      await awaitBeforeDeadline(
+        sink.confirmFrame(remainingMs),
+        workDeadline,
+        monotonicNow,
+      );
     } catch {
       failed = true;
     } finally {
-      if (sink) {
-        try {
-          await sink.close();
-        } catch {
-          failed = true;
-        }
+      const cleanupOperations: Promise<boolean>[] = [];
+      if (process && processCompletion && !processSettled) {
+        cleanupOperations.push(
+          terminateAndReap(
+            process,
+            processCompletion,
+            finalDeadline,
+            Math.max(1, Math.floor(cleanupReserveMs / 2)),
+            monotonicNow,
+          ),
+        );
       }
-      if (lease) {
-        try {
-          await this.egress.revoke(lease);
-        } catch {
-          failed = true;
-        }
+      const sinkToClose = sink;
+      if (sinkToClose) {
+        cleanupOperations.push(
+          cleanupBeforeDeadline(
+            () => sinkToClose.close(),
+            finalDeadline,
+            monotonicNow,
+          ),
+        );
       }
+      const leaseToRevoke = lease;
+      if (leaseToRevoke) {
+        cleanupOperations.push(
+          cleanupBeforeDeadline(
+            () => this.egress.revoke(leaseToRevoke),
+            finalDeadline,
+            monotonicNow,
+          ),
+        );
+      }
+      if ((await Promise.all(cleanupOperations)).some((ok) => !ok)) failed = true;
     }
     if (failed) throw new LiveSourceProbeFailedError();
   }
@@ -341,26 +431,159 @@ async function defaultLookup(hostname: string) {
   return lookup(hostname, { all: true, verbatim: true });
 }
 
-function defaultExecute(
+export function startFfmpegProbeProcess(
   file: string,
   args: readonly string[],
-  options: { timeout: number; maxBuffer: number; shell: false },
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    execFile(file, [...args], options, (error) => {
-      if (error) reject(new LiveSourceProbeFailedError());
-      else resolve();
-    });
+  options: { maxBuffer: number; shell: false },
+): ProbeProcessHandle {
+  let resolveCompletion!: () => void;
+  let rejectCompletion!: (error: LiveSourceProbeFailedError) => void;
+  const completion = new Promise<void>((resolve, reject) => {
+    resolveCompletion = resolve;
+    rejectCompletion = reject;
   });
+  const child = execFile(file, [...args], options, (error) => {
+    if (error) rejectCompletion(new LiveSourceProbeFailedError());
+    else resolveCompletion();
+  });
+  return {
+    completion,
+    kill: (signal) => {
+      child.kill(signal);
+    },
+  };
 }
 
-async function defaultOpenUnixSink(path: string): Promise<UnixSink> {
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  await unlink(path).catch(() => undefined);
+async function awaitBeforeDeadline<T>(
+  operation: Promise<T>,
+  deadline: number,
+  monotonicNow: () => number,
+  onLateResolution?: (value: T) => void | Promise<void>,
+): Promise<T> {
+  const remainingMs = deadline - monotonicNow();
+  if (remainingMs <= 0) {
+    observeLateResolution(operation, onLateResolution);
+    throw new LiveSourceProbeFailedError();
+  }
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      reject(new LiveSourceProbeFailedError());
+    }, remainingMs);
+  });
+  operation.then(
+    (value) => {
+      if (timedOut && onLateResolution) {
+        safeLateCleanup(() => onLateResolution(value));
+      }
+    },
+    () => undefined,
+  );
+  try {
+    return await Promise.race([operation, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function observeLateResolution<T>(
+  operation: Promise<T>,
+  onLateResolution?: (value: T) => void | Promise<void>,
+): void {
+  void operation.then(
+    (value) => {
+      if (onLateResolution) safeLateCleanup(() => onLateResolution(value));
+    },
+    () => undefined,
+  );
+}
+
+function safeLateCleanup(operation: () => void | Promise<void>): void {
+  void Promise.resolve()
+    .then(operation)
+    .catch(() => undefined);
+}
+
+async function cleanupBeforeDeadline(
+  operation: () => Promise<void>,
+  deadline: number,
+  monotonicNow: () => number,
+): Promise<boolean> {
+  try {
+    await awaitBeforeDeadline(
+      Promise.resolve().then(operation),
+      deadline,
+      monotonicNow,
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function terminateAndReap(
+  process: ProbeProcessHandle,
+  completion: Promise<void>,
+  finalDeadline: number,
+  termGraceMs: number,
+  monotonicNow: () => number,
+): Promise<boolean> {
+  try {
+    process.kill('SIGTERM');
+  } catch {
+    // Continue to the non-catchable signal attempt below.
+  }
+  const termDeadline = Math.min(
+    finalDeadline,
+    monotonicNow() + termGraceMs,
+  );
+  if (await settlesBefore(completion, termDeadline, monotonicNow)) return true;
+  try {
+    process.kill('SIGKILL');
+  } catch {
+    // The final bounded reap below still observes a concurrent exit.
+  }
+  return settlesBefore(completion, finalDeadline, monotonicNow);
+}
+
+async function settlesBefore(
+  completion: Promise<void>,
+  deadline: number,
+  monotonicNow: () => number,
+): Promise<boolean> {
+  try {
+    await awaitBeforeDeadline(
+      completion.then(
+        () => undefined,
+        () => undefined,
+      ),
+      deadline,
+      monotonicNow,
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function openFfmpegProbeUnixSink(
+  path: string,
+  dependencies: Partial<UnixSinkSetupDependencies> = {},
+): Promise<UnixSink> {
+  const mkdirSink = dependencies.mkdir ?? mkdir;
+  const unlinkSink = dependencies.unlink ?? unlink;
+  const createSinkServer =
+    dependencies.createServer ??
+    ((onConnection: (socket: Socket) => void) => createServer(onConnection));
+  await mkdirSink(dirname(path), { recursive: true, mode: 0o700 });
+  await unlinkSink(path).catch(() => undefined);
   const sockets = new Set<Socket>();
   const tracker = new BoundedJpegFrameTracker();
   let sinkFailed = false;
-  const server = createServer((socket) => {
+  let closed = false;
+  const server = createSinkServer((socket) => {
     sockets.add(socket);
     socket.on('data', (chunk: Buffer) => {
       try {
@@ -376,24 +599,34 @@ async function defaultOpenUnixSink(path: string): Promise<UnixSink> {
       tracker.finish();
     });
   });
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(path, () => {
-      server.off('error', reject);
-      resolve();
+  const close = async (): Promise<void> => {
+    if (closed) return;
+    closed = true;
+    for (const socket of sockets) socket.destroy();
+    if (server.listening) {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+    await unlinkSink(path).catch(() => undefined);
+  };
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(path, () => {
+        server.off('error', reject);
+        resolve();
+      });
     });
-  });
-  await chmod(path, 0o600);
+    await (dependencies.chmod ?? chmod)(path, 0o600);
+  } catch (error) {
+    await close().catch(() => undefined);
+    throw error;
+  }
   return {
     confirmFrame: async (timeoutMs) => {
       if (sinkFailed) throw new LiveSourceProbeFailedError();
       await tracker.waitForFrame(timeoutMs);
     },
-    close: async () => {
-      for (const socket of sockets) socket.destroy();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-      await unlink(path).catch(() => undefined);
-    },
+    close,
   };
 }
 

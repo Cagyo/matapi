@@ -58,7 +58,15 @@ function fixture(roles: ('admin' | 'user')[] = ['admin', 'admin']) {
       user: { role: 'admin' },
     },
   } as unknown as TelegramContext;
-  return { handler, importSensors, importCameraSources, ctx, order };
+  return { handler, importSensors, importCameraSources, users, ctx, order };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
 }
 
 async function apply(handler: ImportConfigHandler, ctx: TelegramContext) {
@@ -68,6 +76,33 @@ async function apply(handler: ImportConfigHandler, ctx: TelegramContext) {
 }
 
 describe('ImportConfigHandler live-source confirmation', () => {
+  it('claims confirmation before a deferred role lookup so concurrent Apply commits once', async () => {
+    const {
+      handler,
+      ctx,
+      users,
+      importSensors,
+      importCameraSources,
+    } = fixture();
+    const firstRole = deferred<{ role: 'admin' }>();
+    vi.mocked(users.findByTelegramId)
+      .mockImplementationOnce(() => firstRole.promise as never)
+      .mockResolvedValue({ role: 'admin' } as never);
+
+    const firstApply = apply(handler, ctx);
+    await vi.waitFor(() =>
+      expect(users.findByTelegramId).toHaveBeenCalledOnce(),
+    );
+    const replayedApply = apply(handler, ctx);
+    await replayedApply;
+    expect(ctx.reply).toHaveBeenCalledWith(en.common.interrupted);
+    firstRole.resolve({ role: 'admin' });
+    await firstApply;
+
+    expect(importCameraSources.commit).toHaveBeenCalledOnce();
+    expect(importSensors.commit).toHaveBeenCalledOnce();
+  });
+
   it('uses one confirmation, rechecks admin before each camera-first write phase', async () => {
     const { handler, ctx, order } = fixture();
     await apply(handler, ctx);
