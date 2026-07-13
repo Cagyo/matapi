@@ -4,7 +4,8 @@ import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { Worker } from 'node:worker_threads';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AppDatabase } from '../../../src/database/database.tokens';
 import * as schema from '../../../src/database/schema';
 import type { HomeIdentity, HomeReservation, HomeView } from '../../../src/telegram/domain/home-session';
@@ -36,6 +37,35 @@ async function openActive(store: DrizzleHomeSessionStore, overrides: Partial<Pic
   return result.active;
 }
 
+async function holdImmediateLock(databasePath: string): Promise<Worker> {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(`
+      const Database = require('better-sqlite3');
+      const { parentPort, workerData } = require('node:worker_threads');
+      const sqlite = new Database(workerData);
+      sqlite.pragma('journal_mode = WAL');
+      sqlite.pragma('busy_timeout = 5000');
+      sqlite.exec('BEGIN IMMEDIATE');
+      parentPort.postMessage('locked');
+      setTimeout(() => {
+        sqlite.exec('COMMIT');
+        sqlite.close();
+        parentPort.postMessage('released');
+      }, 50);
+    `, { eval: true, workerData: databasePath });
+    worker.once('message', (message) => {
+      if (message === 'locked') resolve(worker);
+    });
+    worker.once('error', reject);
+  });
+}
+
+function configureContentionConnection(sqlite: Database.Database): void {
+  sqlite.pragma('journal_mode = WAL');
+  sqlite.pragma('busy_timeout = 5000');
+  sqlite.pragma('foreign_keys = ON');
+}
+
 describe('DrizzleHomeSessionStore', () => {
   let sqlite: Database.Database;
   let db: AppDatabase;
@@ -47,7 +77,7 @@ describe('DrizzleHomeSessionStore', () => {
     databaseDirectory = mkdtempSync(join(tmpdir(), 'home-session-store-'));
     databasePath = join(databaseDirectory, 'home.db');
     sqlite = new Database(databasePath);
-    sqlite.pragma('foreign_keys = ON');
+    configureContentionConnection(sqlite);
     db = drizzle(sqlite, { schema }) as AppDatabase;
     migrate(db, { migrationsFolder: './migrations' });
     sqlite.prepare(`INSERT INTO users (telegram_id, name, role, locale) VALUES (?, ?, ?, ?)`).run(100, 'User', 'user', 'en');
@@ -64,6 +94,23 @@ describe('DrizzleHomeSessionStore', () => {
     expect(reservation).toEqual({ kind: 'new', userId: 100, chatId: 200, messageId: null, token: 'token-a', revision: 1, view: HOME, expiresAt: later() });
     await expect(store.promoteNew(reservation, 300, NOW)).resolves.toEqual({ kind: 'promoted', active: identity(), previous: null });
     await expect(store.validate({ ...identity(), now: NOW })).resolves.toEqual({ kind: 'accepted', active: identity(), view: HOME });
+  });
+
+  it('uses immediate transactions for every read-decide-write session transition', async () => {
+    const transaction = vi.spyOn(db, 'transaction');
+    const reservation = await store.reserveNew({ userId: 100, chatId: 200, token: 'token-a', view: HOME, now: NOW, expiresAt: later() });
+    const promoted = await store.promoteNew(reservation, 300, NOW);
+    if (promoted.kind !== 'promoted') throw new Error('expected active Home');
+    const edit = await store.reserveEdit({ active: promoted.active, view: SENSORS, now: NOW, expiresAt: later() });
+    if (edit.kind !== 'reserved') throw new Error('expected edit reservation');
+    await store.validate({ ...promoted.active, now: NOW });
+    await store.abandon(edit.reservation);
+    await store.close({ ...promoted.active, now: NOW });
+
+    expect(transaction.mock.calls).not.toHaveLength(0);
+    for (const [, options] of transaction.mock.calls) {
+      expect(options).toEqual({ behavior: 'immediate' });
+    }
   });
 
   it('retains active authority through replacement and abandoned new-message reservations', async () => {
@@ -141,6 +188,20 @@ describe('DrizzleHomeSessionStore', () => {
     await expect(store.validate({ ...active, now: expiresAt })).resolves.toMatchObject({ kind: 'accepted', active });
   });
 
+  it('deletes an expired pending-new row with no active Home authority', async () => {
+    const reservation = await store.reserveNew({
+      userId: 100,
+      chatId: 200,
+      token: 'token-a',
+      view: HOME,
+      now: NOW,
+      expiresAt: NOW,
+    });
+
+    await expect(store.validate({ ...identity({ token: reservation.token }), now: NOW })).resolves.toEqual({ kind: 'closed' });
+    expect(sqlite.prepare('SELECT COUNT(*) AS count FROM home_sessions').get()).toEqual({ count: 0 });
+  });
+
   it('rejects malformed callback identities without changing authority and closes exact identities atomically', async () => {
     const active = await openActive(store);
     for (const candidate of [{ ...active, messageId: 301 }, { ...active, token: 'wrong-token' }, { ...active, revision: 2 }]) {
@@ -174,23 +235,29 @@ describe('DrizzleHomeSessionStore', () => {
     await expect(store.validate({ ...active, now: NOW })).resolves.toEqual({ kind: 'updating' });
   });
 
-  it('allows only one repository instance to win race-like reservation and promotion CAS operations', async () => {
+  it('returns lost when a guarded promotion write changes no row', async () => {
+    const active = await openActive(store);
+    const reserved = await store.reserveEdit({ active, view: SENSORS, now: NOW, expiresAt: later() });
+    if (reserved.kind !== 'reserved') throw new Error('expected reservation');
+    sqlite.exec(`CREATE TRIGGER remove_home_before_promotion
+      BEFORE UPDATE OF active_revision ON home_sessions
+      BEGIN DELETE FROM home_sessions WHERE user_id = OLD.user_id AND chat_id = OLD.chat_id; END;`);
+
+    await expect(store.promoteEdit(reserved.reservation, NOW)).resolves.toEqual({ kind: 'lost' });
+    expect(sqlite.prepare('SELECT COUNT(*) AS count FROM home_sessions').get()).toEqual({ count: 0 });
+  });
+
+  it('waits through deterministic two-connection immediate-lock contention without SQLITE_BUSY', async () => {
     const secondSqlite = new Database(databasePath);
-    secondSqlite.pragma('foreign_keys = ON');
+    configureContentionConnection(secondSqlite);
     try {
       const second = new DrizzleHomeSessionStore(drizzle(secondSqlite, { schema }) as AppDatabase);
-      const [firstReservation, secondReservation] = await Promise.all([
-        store.reserveNew({ userId: 100, chatId: 200, token: 'token-a', view: HOME, now: NOW, expiresAt: later() }),
-        second.reserveNew({ userId: 100, chatId: 200, token: 'token-b', view: SENSORS, now: NOW, expiresAt: later() }),
-      ]);
-      const results = await Promise.all([
-        store.promoteNew(firstReservation, 300, NOW),
-        second.promoteNew(secondReservation, 301, NOW),
-      ]);
-      expect(results.filter((result) => result.kind === 'promoted')).toHaveLength(1);
-      const promoted = results.find((result): result is Extract<typeof result, { kind: 'promoted' }> => result.kind === 'promoted');
-      if (!promoted) throw new Error('expected a winner');
-      await expect(store.validate({ ...promoted.active, now: NOW })).resolves.toMatchObject({ kind: 'accepted', active: promoted.active });
+      const lockHolder = await holdImmediateLock(databasePath);
+      try {
+        await expect(second.reserveNew({ userId: 100, chatId: 200, token: 'token-b', view: SENSORS, now: NOW, expiresAt: later() })).resolves.toMatchObject({ kind: 'new', token: 'token-b' });
+      } finally {
+        await lockHolder.terminate();
+      }
     } finally {
       secondSqlite.close();
     }
