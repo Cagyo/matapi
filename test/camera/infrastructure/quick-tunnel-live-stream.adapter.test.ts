@@ -21,6 +21,7 @@ describe('QuickTunnelLiveStreamAdapter', () => {
     const response = await fetch(`${fixture.localOrigin}/watch/not-valid`);
 
     expect(response.status).toBe(404);
+    expect(await response.text()).toBe('');
     expect(fixture.motionRequests()).toBe(0);
   });
 
@@ -37,6 +38,12 @@ describe('QuickTunnelLiveStreamAdapter', () => {
     expect(response.headers.get('referrer-policy')).toBe('no-referrer');
     expect(response.headers.get('content-security-policy')).toContain("default-src 'self'");
     expect(rejected.status).toBe(404);
+    expect(await rejected.text()).toBe('');
+    const html = await response.text();
+    expect(html).toContain('src="/mjpeg/valid"');
+    expect(html).toContain('<title></title>');
+    expect(html).toContain('alt=""');
+    expect(html).not.toContain('Live camera');
   });
 
   it('parses one Quick Tunnel hostname and terminates its owned process group', async () => {

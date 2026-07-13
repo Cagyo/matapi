@@ -278,7 +278,7 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
     if (match[1] === 'mjpeg') return this.openViewer(tokenHash, response);
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     response.end(
-      `<!doctype html><meta name="referrer" content="no-referrer"><title>Live camera</title><style>html,body{margin:0;background:#000}img{width:100%;height:100vh;object-fit:contain}</style><img src="/mjpeg/${encodeURIComponent(token)}" alt="Live camera">`,
+      `<!doctype html><meta name="referrer" content="no-referrer"><title></title><style>html,body{margin:0;background:#000}img{width:100%;height:100vh;object-fit:contain}</style><img src="/mjpeg/${encodeURIComponent(token)}" alt="">`,
     );
   }
 
@@ -573,8 +573,8 @@ function isSha256Hex(value: string): boolean {
 }
 
 function notFound(response: ServerResponse): void {
-  response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
-  response.end('Not found');
+  response.writeHead(404);
+  response.end();
 }
 
 async function withTimeout<T>(promise: Promise<T>, milliseconds: number, message: string): Promise<T> {
