@@ -95,8 +95,13 @@ function parseLease(value: unknown): LiveStreamLease | null {
 
 function parseMessageReference(value: unknown): LiveStreamMessageReference | null {
   if (!isRecord(value)) return null;
+  if (!positiveSafeInteger(value.telegramId)) return null;
   if (!Number.isSafeInteger(value.chatId) || !positiveSafeInteger(value.messageId)) return null;
-  return { chatId: value.chatId as number, messageId: value.messageId as number };
+  return {
+    telegramId: value.telegramId,
+    chatId: value.chatId as number,
+    messageId: value.messageId,
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

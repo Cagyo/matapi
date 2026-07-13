@@ -1,11 +1,12 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { Inject, Injectable, type OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import { LiveStreamUnavailableError } from '../domain/errors/live-stream-unavailable.error';
 import {
   createLiveStreamSession,
   createViewerToken,
   type LiveStreamLease,
   type LiveStreamMessageReference,
+  type NewLiveStreamMessageReference,
   type LiveStreamSession,
   type LiveStreamSource,
 } from '../domain/live-stream.entity';
@@ -35,7 +36,7 @@ export interface OpenLiveStreamResult {
   remainingMs: number;
   expiresMonotonicMs: number;
   cameraName: string;
-  registerMessageReference(reference: LiveStreamMessageReference): Promise<void>;
+  registerMessageReference(reference: NewLiveStreamMessageReference): Promise<void>;
 }
 
 interface ActiveSession {
@@ -43,7 +44,7 @@ interface ActiveSession {
   publicHostname: string;
   pid: LiveStreamLease['pid'];
   processIdentity: string;
-  viewerTokenHashes: Map<number, string[]>;
+  viewerTokenHashes: Map<number, string>;
   messageReferences: LiveStreamMessageReference[];
 }
 
@@ -54,13 +55,14 @@ interface Deferred<T> {
 }
 
 interface PendingOpen {
-  session: LiveStreamSession;
+  /** Gateway-start input only; its provisional deadline is never exposed or persisted. */
+  provisionalSession: LiveStreamSession;
   source: LiveStreamSource;
-  requests: Array<{ telegramId: number; deferred: Deferred<OpenLiveStreamResult> }>;
+  requests: { telegramId: number; deferred: Deferred<OpenLiveStreamResult> }[];
   cancelled: boolean;
   replacement?: {
     source: LiveStreamSource;
-    requests: Array<{ telegramId: number; deferred: Deferred<OpenLiveStreamResult> }>;
+    requests: { telegramId: number; deferred: Deferred<OpenLiveStreamResult> }[];
   };
 }
 
@@ -70,6 +72,7 @@ interface CleanupBlocker {
 }
 
 class OperationTimeoutError extends Error {}
+class ViewerCapacityError extends Error {}
 
 /**
  * Owns the one global live-stream state machine. A short queue serializes
@@ -77,7 +80,7 @@ class OperationTimeoutError extends Error {}
  * still-pending cloud tunnel startup.
  */
 @Injectable()
-export class LiveStreamSessionService implements OnModuleInit {
+export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
   private queue: Promise<void> = Promise.resolve();
   private active?: ActiveSession;
   private cleanupBlocked?: CleanupBlocker;
@@ -86,6 +89,8 @@ export class LiveStreamSessionService implements OnModuleInit {
   private expiryTimer?: ReturnType<typeof setTimeout>;
   private leaseMutationTail: Promise<void> = Promise.resolve();
   private leaseMutationsPending = 0;
+  private shuttingDown = false;
+  private shutdownPromise?: Promise<void>;
 
   constructor(
     @Inject(LIVE_STREAM_GATEWAY) private readonly gateway: LiveStreamGatewayPort,
@@ -96,6 +101,7 @@ export class LiveStreamSessionService implements OnModuleInit {
     private readonly messageCleanup: LiveStreamMessageCleanupPort,
     private readonly durationMs = 300_000,
     private readonly operationTimeoutMs = 30_000,
+    private readonly maxViewers = 2,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -135,6 +141,7 @@ export class LiveStreamSessionService implements OnModuleInit {
   }
 
   open(source: LiveStreamSource, telegramId: number): Promise<OpenLiveStreamResult> {
+    if (this.shuttingDown) return Promise.reject(new LiveStreamUnavailableError());
     const deferred = createDeferred<OpenLiveStreamResult>();
     const queued = this.enqueue(async () => {
       try {
@@ -173,7 +180,7 @@ export class LiveStreamSessionService implements OnModuleInit {
             deferred.reject(new LiveStreamUnavailableError());
             return;
           }
-          if (this.pending.session.cameraId === source.cameraId) {
+          if (this.pending.provisionalSession.cameraId === source.cameraId) {
             this.pending.requests.push({ telegramId, deferred });
             return;
           }
@@ -225,17 +232,68 @@ export class LiveStreamSessionService implements OnModuleInit {
     });
   }
 
+  /** Ordered process-shutdown entry point; module teardown reuses it defensively. */
+  shutdown(): Promise<void> {
+    this.shuttingDown = true;
+    this.shutdownPromise ??= this.enqueue(async () => {
+      const pending = this.pending;
+      if (pending) {
+        pending.cancelled = true;
+        this.rejectPending(pending);
+        this.rejectReplacement(pending);
+      }
+      this.pending = undefined;
+      this.pendingStartCleanup = undefined;
+
+      const active = this.active ?? this.cleanupBlocked?.active;
+      this.active = undefined;
+      this.cleanupBlocked = undefined;
+      this.clearExpiryTimer();
+
+      try {
+        await this.withOperationTimeout(
+          Promise.resolve().then(() => this.gateway.stop()),
+        );
+      } catch {
+        // Process shutdown is best effort; gateway.stop owns its late cleanup.
+      }
+
+      if (active) await this.deleteMessageReferences(active.messageReferences);
+      try {
+        await this.clearLease();
+      } catch {
+        // A stale lease is handled safely by boot recovery on the next start.
+      }
+    });
+    return this.shutdownPromise;
+  }
+
+  onModuleDestroy(): Promise<void> {
+    return this.shutdown();
+  }
+
   revokeUser(telegramId: number): Promise<void> {
     return this.enqueue(async () => {
       if (!this.active) return;
 
-      const hashes = this.active.viewerTokenHashes.get(telegramId) ?? [];
-      for (const tokenHash of hashes) {
+      const tokenHash = this.active.viewerTokenHashes.get(telegramId);
+      if (tokenHash) {
         await this.withOperationTimeout(
           Promise.resolve().then(() => this.gateway.revokeViewer(tokenHash)),
         );
       }
       this.active.viewerTokenHashes.delete(telegramId);
+      const referenceIndex = this.active.messageReferences.findIndex(
+        (reference) => reference.telegramId === telegramId,
+      );
+      if (referenceIndex >= 0) {
+        const [reference] = this.active.messageReferences.splice(referenceIndex, 1);
+        try {
+          await this.writeLease(this.active);
+        } finally {
+          await this.deleteMessageReferences([reference]);
+        }
+      }
     }).catch(() => {
       throw new LiveStreamUnavailableError();
     });
@@ -243,26 +301,32 @@ export class LiveStreamSessionService implements OnModuleInit {
 
   registerMessageReference(
     sessionId: string,
-    reference: LiveStreamMessageReference,
+    telegramId: number,
+    reference: NewLiveStreamMessageReference,
   ): Promise<void> {
     return this.enqueue(async () => {
-      if (!this.active || this.active.session.id !== sessionId) return;
-      if (
-        this.active.messageReferences.some(
-          (current) =>
-            current.chatId === reference.chatId && current.messageId === reference.messageId,
-        )
-      ) {
-        return;
-      }
+      if (this.active?.session.id !== sessionId) return;
+      if (!this.active.viewerTokenHashes.has(telegramId)) return;
+      const previousIndex = this.active.messageReferences.findIndex(
+        (current) => current.telegramId === telegramId,
+      );
+      const previous = this.active.messageReferences[previousIndex];
+      if (previous?.chatId === reference.chatId && previous.messageId === reference.messageId) return;
 
-      this.active.messageReferences.push(reference);
+      const replacement = { telegramId, ...reference };
+      const priorReferences = [...this.active.messageReferences];
+      if (previousIndex >= 0) {
+        this.active.messageReferences[previousIndex] = replacement;
+      } else {
+        this.active.messageReferences.push(replacement);
+      }
       try {
         await this.writeLease(this.active);
       } catch {
-        this.active.messageReferences.pop();
+        this.active.messageReferences = priorReferences;
         throw new LiveStreamUnavailableError();
       }
+      if (previous) await this.deleteMessageReferences([previous]);
     }).catch(() => {
       throw new LiveStreamUnavailableError();
     });
@@ -276,7 +340,7 @@ export class LiveStreamSessionService implements OnModuleInit {
     const startedMonotonicMs = this.clock.now();
     const pending: PendingOpen = {
       source,
-      session: createLiveStreamSession({
+      provisionalSession: createLiveStreamSession({
         id: randomUUID(),
         cameraId: source.cameraId,
         cameraName: source.cameraName,
@@ -289,7 +353,7 @@ export class LiveStreamSessionService implements OnModuleInit {
     this.pending = pending;
 
     const start = Promise.resolve().then(() =>
-      this.gateway.start({ session: pending.session, source }),
+      this.gateway.start({ session: pending.provisionalSession, source }),
     );
 
     void this.withOperationTimeout(start).then(
@@ -328,8 +392,15 @@ export class LiveStreamSessionService implements OnModuleInit {
   ): Promise<void> {
     if (this.pending !== pending) return;
 
+    const readyMonotonicMs = this.clock.now();
     const active: ActiveSession = {
-      session: pending.session,
+      session: createLiveStreamSession({
+        id: pending.provisionalSession.id,
+        cameraId: pending.provisionalSession.cameraId,
+        cameraName: pending.provisionalSession.cameraName,
+        startedMonotonicMs: readyMonotonicMs,
+        durationMs: this.durationMs,
+      }),
       publicHostname: started.publicHostname,
       pid: started.pid,
       processIdentity: started.processIdentity,
@@ -346,15 +417,22 @@ export class LiveStreamSessionService implements OnModuleInit {
       await this.writeLease(active);
       this.scheduleExpiry(active);
 
-      const results: OpenLiveStreamResult[] = [];
+      const results: (OpenLiveStreamResult | undefined)[] = [];
       for (const request of pending.requests) {
-        results.push(await this.createViewerResult(active, request.telegramId));
+        try {
+          results.push(await this.createViewerResult(active, request.telegramId));
+        } catch (error) {
+          if (!(error instanceof ViewerCapacityError)) throw error;
+          results.push(undefined);
+        }
       }
 
       this.pending = undefined;
       this.active = active;
       for (const [index, request] of pending.requests.entries()) {
-        request.deferred.resolve(results[index]);
+        const result = results[index];
+        if (result) request.deferred.resolve(result);
+        else request.deferred.reject(new LiveStreamUnavailableError());
       }
     } catch {
       this.abortStartedPending(pending, active);
@@ -400,6 +478,17 @@ export class LiveStreamSessionService implements OnModuleInit {
       throw new LiveStreamUnavailableError();
     }
 
+    const previousTokenHash = active.viewerTokenHashes.get(telegramId);
+    if (!previousTokenHash && active.viewerTokenHashes.size >= this.maxViewers) {
+      throw new ViewerCapacityError();
+    }
+    if (previousTokenHash) {
+      await this.withOperationTimeout(
+        Promise.resolve().then(() => this.gateway.revokeViewer(previousTokenHash)),
+      );
+      active.viewerTokenHashes.delete(telegramId);
+    }
+
     const token = createViewerToken(randomBytes(32));
     const tokenHash = createHash('sha256').update(token).digest('hex');
     await this.withOperationTimeout(
@@ -411,16 +500,14 @@ export class LiveStreamSessionService implements OnModuleInit {
         }),
       ),
     );
-    const hashes = active.viewerTokenHashes.get(telegramId) ?? [];
-    hashes.push(tokenHash);
-    active.viewerTokenHashes.set(telegramId, hashes);
+    active.viewerTokenHashes.set(telegramId, tokenHash);
     return {
       watchUrl: `https://${active.publicHostname}/watch/${token}`,
       remainingMs,
       expiresMonotonicMs: active.session.expiresMonotonicMs,
       cameraName: active.session.cameraName,
       registerMessageReference: (reference) =>
-        this.registerMessageReference(active.session.id, reference),
+        this.registerMessageReference(active.session.id, telegramId, reference),
     };
   }
 
@@ -488,7 +575,7 @@ export class LiveStreamSessionService implements OnModuleInit {
     if (this.pendingStartCleanup !== pending) return;
     this.pendingStartCleanup = undefined;
     this.startBlockedTeardown({
-      session: pending.session,
+      session: pending.provisionalSession,
       publicHostname: started.publicHostname,
       pid: started.pid,
       processIdentity: started.processIdentity,
@@ -606,7 +693,7 @@ export class LiveStreamSessionService implements OnModuleInit {
         },
         (error: unknown) => {
           clearTimeout(timeout);
-          reject(error);
+          reject(error instanceof Error ? error : new Error('Operation failed'));
         },
       );
     });
@@ -699,7 +786,7 @@ export class LiveStreamSessionService implements OnModuleInit {
   }
 
   private rejectRequests(
-    requests: Array<{ telegramId: number; deferred: Deferred<OpenLiveStreamResult> }>,
+    requests: { telegramId: number; deferred: Deferred<OpenLiveStreamResult> }[],
   ): void {
     for (const request of requests) {
       request.deferred.reject(new LiveStreamUnavailableError());

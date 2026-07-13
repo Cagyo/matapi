@@ -258,6 +258,7 @@ const liveStreamOptions = liveStreamOptionsFromEnv(process.env);
         messageCleanup,
         options.durationMs,
         options.startTimeoutMs,
+        options.maxViewers,
       ),
       inject: [
         LIVE_STREAM_GATEWAY,

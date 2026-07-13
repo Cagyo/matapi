@@ -43,18 +43,23 @@ function writeConfig(
   const normalizedExample = rawExample.replace(/\r\n/g, '\n');
 
   const cleanedToken = cleanToken(token);
+  const selectedFeatures = Array.isArray(enabledFeatures) ? enabledFeatures : [];
   const envWithBotToken = replaceOrAppendEnvLine(
     normalizedExample,
     'TELEGRAM_BOT_TOKEN',
     cleanedToken
   );
-  const envContent = replaceOrAppendEnvLine(
+  const envWithClaimToken = replaceOrAppendEnvLine(
     envWithBotToken,
     'CLAIM_ADMIN_TOKEN',
     claimAdminToken
   );
+  const envContent = replaceOrAppendEnvLine(
+    envWithClaimToken,
+    'LIVE_STREAM_ENABLED',
+    selectedFeatures.includes('rtsp') ? 'true' : 'false'
+  );
 
-  const selectedFeatures = Array.isArray(enabledFeatures) ? enabledFeatures : [];
   const featuresData = JSON.stringify(
     {
       enabled: selectedFeatures,

@@ -140,7 +140,43 @@ EOF
     ;;
   rtsp)
     echo "Installing experimental cloudflared live-stream capability..."
+    CLOUDFLARED_ARCH="${HOME_WORKER_DEBIAN_ARCH:-$(dpkg --print-architecture)}"
+    case "$CLOUDFLARED_ARCH" in
+      amd64|i386|armhf|arm64) ;;
+      *)
+        echo "ERROR: cloudflared is not supported on Debian architecture: $CLOUDFLARED_ARCH" >&2
+        exit 1
+        ;;
+    esac
+
     if ! command -v cloudflared >/dev/null 2>&1; then
+      CLOUDFLARE_KEYRING_DIR="${CLOUDFLARE_KEYRING_DIR:-/usr/share/keyrings}"
+      CLOUDFLARE_SOURCE_LIST_DIR="${CLOUDFLARE_SOURCE_LIST_DIR:-/etc/apt/sources.list.d}"
+      CLOUDFLARE_KEYRING="$CLOUDFLARE_KEYRING_DIR/cloudflare-main.gpg"
+      CLOUDFLARE_SOURCE_LIST="$CLOUDFLARE_SOURCE_LIST_DIR/cloudflared.list"
+      CLOUDFLARE_REPOSITORY="deb [signed-by=$CLOUDFLARE_KEYRING] https://pkg.cloudflare.com/cloudflared any main"
+
+      sudo mkdir -p "$CLOUDFLARE_KEYRING_DIR" "$CLOUDFLARE_SOURCE_LIST_DIR"
+      sudo chmod 0755 "$CLOUDFLARE_KEYRING_DIR" "$CLOUDFLARE_SOURCE_LIST_DIR"
+      if ! sudo test -s "$CLOUDFLARE_KEYRING"; then
+        CLOUDFLARE_KEY_TMP="$(mktemp)"
+        if ! curl -fsSL -o "$CLOUDFLARE_KEY_TMP" https://pkg.cloudflare.com/cloudflare-main.gpg; then
+          rm -f "$CLOUDFLARE_KEY_TMP"
+          echo "ERROR: failed to download the Cloudflare apt signing key." >&2
+          exit 1
+        fi
+        sudo install -m 0644 "$CLOUDFLARE_KEY_TMP" "$CLOUDFLARE_KEYRING"
+        rm -f "$CLOUDFLARE_KEY_TMP"
+      fi
+
+      CLOUDFLARE_SOURCE_TMP="$(mktemp)"
+      printf '%s\n' "$CLOUDFLARE_REPOSITORY" > "$CLOUDFLARE_SOURCE_TMP"
+      if ! sudo cmp -s "$CLOUDFLARE_SOURCE_TMP" "$CLOUDFLARE_SOURCE_LIST"; then
+        sudo install -m 0644 "$CLOUDFLARE_SOURCE_TMP" "$CLOUDFLARE_SOURCE_LIST"
+      fi
+      rm -f "$CLOUDFLARE_SOURCE_TMP"
+
+      apt_get update
       apt_get install -y cloudflared
     fi
 

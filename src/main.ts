@@ -4,9 +4,9 @@ import { NestFactory } from '@nestjs/core';
 import { Logger } from '@nestjs/common';
 import { resolve } from 'node:path';
 import { AppModule } from './app.module';
-import { GracefulShutdownService } from './system/application/graceful-shutdown.service';
 import { PidLockGateway } from './system/infrastructure/pid-lock.gateway';
 import { ProcessShutdownGateway } from './system/infrastructure/process-shutdown.gateway';
+import { prepareApplicationShutdown } from './prepare-application-shutdown';
 
 const lock = new PidLockGateway(resolve(process.env.PID_LOCK_PATH || './data/worker.pid'));
 
@@ -17,7 +17,7 @@ async function bootstrap(): Promise<void> {
     logger: ['log', 'warn', 'error', 'debug'],
   });
   const shutdown = new ProcessShutdownGateway({
-    prepare: (signal) => app.get(GracefulShutdownService).run(signal),
+    prepare: (signal) => prepareApplicationShutdown(app, signal),
     closeApplication: () => app.close(),
     releaseLock: () => lock.release(),
     setExitCode: (code) => {

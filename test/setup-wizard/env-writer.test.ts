@@ -13,7 +13,7 @@ function createInstallDir(): string {
   installDirs.push(installDir);
   writeFileSync(
     join(installDir, '.env.example'),
-    'TELEGRAM_BOT_TOKEN=old-token\nCLAIM_ADMIN_TOKEN=old-claim-token\n',
+    'TELEGRAM_BOT_TOKEN=old-token\nCLAIM_ADMIN_TOKEN=old-claim-token\nLIVE_STREAM_ENABLED=false\n',
   );
   return installDir;
 }
@@ -56,14 +56,31 @@ describe('writeConfig', () => {
     expect(envContent).toContain(`CLAIM_ADMIN_TOKEN=${result.claimAdminToken}`);
   });
 
-  it('records the experimental live-stream selection explicitly in features.json', () => {
+  it('enables the runtime gate and feature state for an explicit live-stream selection', () => {
     const installDir = createInstallDir();
 
     writeConfig(installDir, '123456:telegram-token', ['motion', 'rtsp']);
 
+    expect(readFileSync(join(installDir, '.env'), 'utf8')).toContain(
+      'LIVE_STREAM_ENABLED=true',
+    );
     expect(JSON.parse(readFileSync(join(installDir, 'features.json'), 'utf8'))).toMatchObject({
       enabled: ['motion', 'rtsp'],
       liveStream: true,
+    });
+  });
+
+  it('disables the runtime gate and feature state when live streaming is deselected', () => {
+    const installDir = createInstallDir();
+
+    writeConfig(installDir, '123456:telegram-token', ['motion']);
+
+    expect(readFileSync(join(installDir, '.env'), 'utf8')).toContain(
+      'LIVE_STREAM_ENABLED=false',
+    );
+    expect(JSON.parse(readFileSync(join(installDir, 'features.json'), 'utf8'))).toMatchObject({
+      enabled: ['motion'],
+      liveStream: false,
     });
   });
 });

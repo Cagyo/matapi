@@ -41,9 +41,15 @@ export interface CreateLiveStreamSessionInput {
 }
 
 export interface LiveStreamMessageReference {
+  telegramId: number;
   chatId: number;
   messageId: number;
 }
+
+export type NewLiveStreamMessageReference = Omit<
+  LiveStreamMessageReference,
+  'telegramId'
+>;
 
 /**
  * Runtime-only recovery data. Its wall-clock expiry is diagnostic only: a

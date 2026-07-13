@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 import { LiveStreamSessionService } from '../../../src/camera/application/live-stream-session.service';
 import type { AdminAlertPort } from '../../../src/camera/domain/ports/admin-alert.port';
 import type { LiveStreamGatewayPort } from '../../../src/camera/domain/ports/live-stream-gateway.port';
@@ -25,6 +26,32 @@ describe('LiveStreamSessionService', () => {
 
     expect(second.remainingMs).toBe(180_000);
     expect(second.expiresMonotonicMs).toBe(first.expiresMonotonicMs);
+  });
+
+  it('starts the full session deadline only after tunnel readiness succeeds', async () => {
+    vi.useFakeTimers();
+    const clock = new FakeMonotonicClock(1_000);
+    const gateway = new DeferredGateway();
+    const service = createService({ clock, gateway, durationMs: 100 });
+
+    const opening = service.open(source('front_door'), 1);
+    await vi.advanceTimersByTimeAsync(0);
+    clock.advance(75);
+    gateway.resolveStart();
+    await vi.advanceTimersByTimeAsync(0);
+
+    await expect(opening).resolves.toMatchObject({
+      remainingMs: 100,
+      expiresMonotonicMs: 1_175,
+    });
+
+    clock.advance(99);
+    await vi.advanceTimersByTimeAsync(99);
+    expect(gateway.stopCalls).toBe(0);
+
+    clock.advance(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(gateway.stopCalls).toBe(1);
   });
 
   it('cancels a pending start when stop wins the transition queue', async () => {
@@ -371,6 +398,54 @@ describe('LiveStreamSessionService', () => {
     expect(gateway.revoked).toHaveLength(2);
   });
 
+  it('replaces a user grant and revokes the previous gateway token hash', async () => {
+    const gateway = new FakeGateway();
+    const service = createService({ gateway });
+
+    const first = await service.open(source('front_door'), 1);
+    const firstToken = first.watchUrl.split('/').at(-1)!;
+    const firstHash = createHash('sha256').update(firstToken).digest('hex');
+    const second = await service.open(source('front_door'), 1);
+
+    expect(second.watchUrl).not.toBe(first.watchUrl);
+    expect(gateway.revoked).toEqual([firstHash]);
+  });
+
+  it('rejects a third distinct user without evicting existing grants', async () => {
+    const gateway = new FakeGateway();
+    const service = createService({ gateway });
+
+    const first = await service.open(source('front_door'), 1);
+    const second = await service.open(source('front_door'), 2);
+
+    await expect(service.open(source('front_door'), 3)).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    expect(gateway.revoked).toEqual([]);
+    expect(first.watchUrl).toContain('/watch/');
+    expect(second.watchUrl).toContain('/watch/');
+  });
+
+  it('releases a revoked user message slot before later users register', async () => {
+    const lease = new FakeLease();
+    const messages = new FakeMessageCleanup();
+    const service = createService({ lease, messages });
+    const first = await service.open(source('front_door'), 1);
+    await first.registerMessageReference({ chatId: 42, messageId: 1 });
+
+    await service.revokeUser(1);
+    const second = await service.open(source('front_door'), 2);
+    await second.registerMessageReference({ chatId: 42, messageId: 2 });
+    const third = await service.open(source('front_door'), 3);
+    await third.registerMessageReference({ chatId: 42, messageId: 3 });
+
+    expect(lease.current()?.messageReferences).toEqual([
+      { telegramId: 2, chatId: 42, messageId: 2 },
+      { telegramId: 3, chatId: 42, messageId: 3 },
+    ]);
+    expect(messages.deleted).toContainEqual({ telegramId: 1, chatId: 42, messageId: 1 });
+  });
+
   it('maps a gateway revoke failure to a domain error', async () => {
     const gateway = new FakeGateway();
     gateway.revokeError = new Error('revoke failed');
@@ -412,8 +487,30 @@ describe('LiveStreamSessionService', () => {
     await opened.registerMessageReference({ chatId: 42, messageId: 9 });
 
     expect(lease.writes.at(-1)?.messageReferences).toEqual([
-      { chatId: 42, messageId: 9 },
+      { telegramId: 1, chatId: 42, messageId: 9 },
     ]);
+  });
+
+  it('keeps one grant and one retained message after one hundred opens by one user', async () => {
+    const gateway = new FakeGateway();
+    const lease = new FakeLease();
+    const messages = new FakeMessageCleanup();
+    const service = createService({ gateway, lease, messages });
+
+    for (let index = 1; index <= 100; index += 1) {
+      const opened = await service.open(source('front_door'), 1);
+      await opened.registerMessageReference({ chatId: 42, messageId: index });
+    }
+
+    expect(gateway.revoked).toHaveLength(99);
+    expect(lease.current()?.messageReferences).toEqual([
+      { telegramId: 1, chatId: 42, messageId: 100 },
+    ]);
+    expect(messages.deleted).toHaveLength(99);
+    expect(messages.deleted.at(-1)).toEqual({ telegramId: 1, chatId: 42, messageId: 99 });
+
+    await service.stop(1);
+    expect(messages.deleted.filter((reference) => reference.messageId === 100)).toHaveLength(1);
   });
 
   it('deletes stored watch messages when explicitly stopped', async () => {
@@ -424,7 +521,7 @@ describe('LiveStreamSessionService', () => {
 
     await expect(service.stop(1)).resolves.toBe('front_door');
 
-    expect(messages.deleted).toEqual([{ chatId: 42, messageId: 9 }]);
+    expect(messages.deleted).toEqual([{ telegramId: 1, chatId: 42, messageId: 9 }]);
   });
 
   it('keeps explicit tunnel teardown successful when watch-message deletion fails', async () => {
@@ -462,7 +559,7 @@ describe('LiveStreamSessionService', () => {
     gateway.resolveStop();
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(messages.deleted).toEqual([{ chatId: 42, messageId: 9 }]);
+    expect(messages.deleted).toEqual([{ telegramId: 1, chatId: 42, messageId: 9 }]);
     await expect(service.stop(1)).resolves.toBeNull();
     expect(messages.deleted).toHaveLength(1);
   });
@@ -490,7 +587,7 @@ describe('LiveStreamSessionService', () => {
       cameraName: 'garden',
     });
 
-    expect(messages.deleted).toEqual([{ chatId: 42, messageId: 9 }]);
+    expect(messages.deleted).toEqual([{ telegramId: 1, chatId: 42, messageId: 9 }]);
   });
 
   it('deletes stored watch messages when the session expires', async () => {
@@ -504,7 +601,7 @@ describe('LiveStreamSessionService', () => {
     clock.advance(100);
     await vi.advanceTimersByTimeAsync(100);
 
-    expect(messages.deleted).toEqual([{ chatId: 42, messageId: 9 }]);
+    expect(messages.deleted).toEqual([{ telegramId: 1, chatId: 42, messageId: 9 }]);
   });
 
   it('maps a message-reference lease write failure to a domain error', async () => {
@@ -518,6 +615,30 @@ describe('LiveStreamSessionService', () => {
     ).rejects.toMatchObject({
       code: 'LIVE_STREAM_UNAVAILABLE',
     });
+  });
+
+  it('retains the previous bounded reference when replacement registration fails', async () => {
+    const gateway = new FakeGateway();
+    const lease = new FakeLease();
+    const messages = new FakeMessageCleanup();
+    const service = createService({ gateway, lease, messages });
+    const first = await service.open(source('front_door'), 1);
+    await first.registerMessageReference({ chatId: 42, messageId: 9 });
+    const replacement = await service.open(source('front_door'), 1);
+    lease.writeError = new Error('lease write failed');
+
+    await expect(
+      replacement.registerMessageReference({ chatId: 42, messageId: 10 }),
+    ).rejects.toMatchObject({ code: 'LIVE_STREAM_UNAVAILABLE' });
+
+    expect(lease.current()?.messageReferences).toEqual([
+      { telegramId: 1, chatId: 42, messageId: 9 },
+    ]);
+    expect(messages.deleted).toEqual([]);
+    await expect(service.revokeUser(1)).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    expect(gateway.revoked).toHaveLength(2);
   });
 
   it('times out a hung lease write, rejects callers, and retains the cleanup blocker', async () => {
@@ -831,6 +952,60 @@ describe('LiveStreamSessionService', () => {
       process.off('unhandledRejection', onUnhandled);
     }
   });
+
+  it('tears down an active session once across explicit and module shutdown', async () => {
+    const gateway = new FakeGateway();
+    const lease = new FakeLease();
+    const messages = new FakeMessageCleanup();
+    const service = createService({ gateway, lease, messages });
+    const opened = await service.open(source('front_door'), 1);
+    await opened.registerMessageReference({ chatId: 42, messageId: 9 });
+
+    await service.shutdown();
+    await service.onModuleDestroy();
+
+    expect(gateway.stopCalls).toBe(1);
+    expect(lease.clearCalls).toBe(1);
+    expect(messages.deleted).toEqual([
+      { telegramId: 1, chatId: 42, messageId: 9 },
+    ]);
+  });
+
+  it('contains teardown errors and rejects opens after shutdown begins', async () => {
+    const gateway = new FakeGateway();
+    const lease = new FakeLease();
+    const messages = new FakeMessageCleanup();
+    const service = createService({ gateway, lease, messages });
+    const opened = await service.open(source('front_door'), 1);
+    await opened.registerMessageReference({ chatId: 42, messageId: 9 });
+    gateway.stopError = new Error('stop failed');
+    lease.clearError = new Error('clear failed');
+    messages.deleteError = new Error('delete failed');
+
+    await expect(service.shutdown()).resolves.toBeUndefined();
+    await expect(service.open(source('front_door'), 2)).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    expect(gateway.stopCalls).toBe(1);
+    expect(lease.clearCalls).toBe(0);
+  });
+
+  it('bounds a stalled shutdown and keeps the module fallback exactly once', async () => {
+    vi.useFakeTimers();
+    const gateway = new FakeGateway();
+    gateway.hangStop = true;
+    const lease = new FakeLease();
+    const service = createService({ gateway, lease, operationTimeoutMs: 100 });
+    await service.open(source('front_door'), 1);
+
+    const shuttingDown = service.shutdown();
+    await vi.advanceTimersByTimeAsync(100);
+
+    await expect(shuttingDown).resolves.toBeUndefined();
+    await expect(service.onModuleDestroy()).resolves.toBeUndefined();
+    expect(gateway.stopCalls).toBe(1);
+    expect(lease.clearCalls).toBe(1);
+  });
 });
 
 function source(cameraName: string): LiveStreamSource {
@@ -875,9 +1050,9 @@ class FakeMonotonicClock implements MonotonicClockPort {
 }
 
 class FakeGateway implements LiveStreamGatewayPort {
-  startCalls: Array<{ source: LiveStreamSource }> = [];
+  startCalls: { source: LiveStreamSource }[] = [];
   revoked: string[] = [];
-  recoveryCalls: Array<{ pid: ReturnType<typeof createLiveStreamProcessId>; processIdentity: string }> = [];
+  recoveryCalls: { pid: ReturnType<typeof createLiveStreamProcessId>; processIdentity: string }[] = [];
   stopCalls = 0;
   recoveryResult: 'stopped' | 'not-owned' = 'stopped';
   stopError?: Error;
@@ -889,8 +1064,8 @@ class FakeGateway implements LiveStreamGatewayPort {
   hangStop = false;
   deferStop = false;
   throwStartSynchronously = false;
-  private readonly stopResolvers: Array<() => void> = [];
-  private readonly stopRejectors: Array<(error: Error) => void> = [];
+  private readonly stopResolvers: (() => void)[] = [];
+  private readonly stopRejectors: ((error: Error) => void)[] = [];
 
   start(input: { source: LiveStreamSource }): Promise<{
     publicHostname: string;
@@ -950,7 +1125,7 @@ class FakeGateway implements LiveStreamGatewayPort {
 }
 
 class DeferredGateway extends FakeGateway {
-  private readonly resolvers: Array<() => void> = [];
+  private readonly resolvers: (() => void)[] = [];
 
   override async start(input: { source: LiveStreamSource }): Promise<{
     publicHostname: string;
@@ -983,8 +1158,8 @@ class FakeLease implements LiveStreamLeasePort {
   hangClear = false;
   deferNextWrite = false;
   deferNextClear = false;
-  private readonly writeResolvers: Array<() => void> = [];
-  private readonly clearResolvers: Array<() => void> = [];
+  private readonly writeResolvers: (() => void)[] = [];
+  private readonly clearResolvers: (() => void)[] = [];
 
   constructor(private lease: LiveStreamLease | null = null) {}
 
@@ -1029,7 +1204,7 @@ class FakeLease implements LiveStreamLeasePort {
 }
 
 class FakeMessageCleanup {
-  deleted: Array<{ chatId: number; messageId: number }> = [];
+  deleted: { chatId: number; messageId: number }[] = [];
   deleteError?: Error;
 
   async delete(reference: { chatId: number; messageId: number }): Promise<void> {
@@ -1039,7 +1214,7 @@ class FakeMessageCleanup {
 }
 
 class FakeAdminAlert implements AdminAlertPort {
-  alerts: Array<[string, string | undefined]> = [];
+  alerts: [string, string | undefined][] = [];
 
   async alert(kind: Parameters<AdminAlertPort['alert']>[0], detail?: string): Promise<void> {
     this.alerts.push([kind, detail]);

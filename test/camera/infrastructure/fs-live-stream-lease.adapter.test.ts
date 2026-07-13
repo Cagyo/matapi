@@ -50,6 +50,20 @@ describe('FsLiveStreamLeaseAdapter', () => {
     });
   });
 
+  it('rejects legacy message references without an owning telegram user', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'live-stream-lease-'));
+    roots.push(root);
+    const adapter = new FsLiveStreamLeaseAdapter(root);
+    await writeFile(join(root, 'lease.json'), JSON.stringify({
+      ...lease(),
+      messageReferences: [{ chatId: 11, messageId: 22 }],
+    }));
+
+    await expect(adapter.read()).rejects.toMatchObject({
+      message: 'Live stream lease could not be read',
+    });
+  });
+
   it('throws a sanitized error for non-ENOENT filesystem failures', async () => {
     const root = await mkdtemp(join(tmpdir(), 'live-stream-lease-'));
     roots.push(root);
@@ -82,6 +96,6 @@ function lease(): LiveStreamLease {
     processIdentity: 'linux-start:987654',
     cameraId: 'front-door',
     diagnosticExpiresAtUnixMs: 2_000_000_000_000,
-    messageReferences: [{ chatId: 11, messageId: 22 }],
+    messageReferences: [{ telegramId: 33, chatId: 11, messageId: 22 }],
   };
 }
