@@ -17,7 +17,9 @@ Consequently, an internal-rules audit comes back mostly green, and the highest-v
 
 **The deep pass (§2.8) reinforced this conclusion rather than overturning it.** Reading the hardest code line by line — the 880-LOC live-stream concurrency core, the process-spawning tunnel adapter, the event/notification pipeline, the GPIO edge driver, the SQLite backup path — surfaced **no P0/P1 correctness defect**, and confirmed that the two classic trap areas are handled correctly: SQLite is snapshotted with the online `.backup()` API (WAL-safe), and stale-lease process kills are guarded against **PID reuse** via `/proc` start-time + `exe` identity before any signal. The deep pass produced three small, concrete items (an at-risk non-atomic backup write, two pieces of dead code) — none structural.
 
-The backlog in §3 is anchored by one P1 refactor (unify conversation handling) with the cheap wins (§3, P2/P3) sequenced around it. No deep-audit finding displaces R1 as the top item.
+**The pressure-test pass (§2.9) — adversarial inputs against the untrusted Telegram surface — found exactly one genuine correctness bug (R16):** an unbounded sensor name overflows Telegram's 64-byte `callback_data` limit and breaks `/logs`, `/mute`, `/unmute`, and the `/config` pickers at once. CSV formula-injection, export OOM, path traversal, and hostile numeric input were all probed and are properly defended. R16 is admin-gated and non-corrupting (→ P1, not P0) with a single-line root fix.
+
+The backlog in §3 is anchored by R16 (the one real correctness bug, a quick fix) and R1 (the structural refactor), with the cheap wins (§3, P2/P3) sequenced around them.
 
 ## 2. Dimension scorecard
 
@@ -99,15 +101,42 @@ The breadth pass rated §2.4–§2.6 strong from signals (grep + metrics). The d
 
 **Net:** the critical paths are not merely clean, they are correct under adversarial reading. The deep pass's only new defects are R13 (a real, if narrow, robustness bug) and R14/R15 (dead code + one design tradeoff to ratify). None is structural; **R1 remains the top item.**
 
+### 2.9 Edge-case & pressure testing — mostly ✅, one real defect
+
+A third pass constructed adversarial inputs (hostile numbers, boundary lengths, formula payloads, path traversal, huge exports) and traced them through the untrusted Telegram-input surface. Most held; one broke.
+
+**Held up under pressure (verified defended):**
+
+| Attack / edge | Result |
+|---|---|
+| **CSV formula injection** — sensor name / message = `=cmd`, `+`, `-`, `@…` | ✅ Neutralized: `FORMULA_PREFIX` prefixes `'`, RFC-4180 quoting, BOM (`csv-export.formatter.ts:6,72`). Derived `value` column bypasses `csvText` but the regex constrains it to a numeric literal. |
+| **CSV export OOM** on the 512 MB Pi (year of logs) | ✅ Streamed row-by-row to a temp file via a generator; never buffered. Hard `MAX_CSV_BYTES` cap → `CsvDocumentTooLargeError` (`node-csv-temp-file.adapter.ts:52-59`). |
+| **CSV path traversal / temp-file attack** | ✅ `basename` check rejects paths; `openSync(path,'wx',0o600)`, dir `0o700`, random UUID suffix; symlink-safe stale cleanup. |
+| **Hostile numeric input** — `1e9`, `0x1F`, `1.5`, `٣` (unicode), `+5`, ` 5 ` | ✅ `parseIntStrict` (`/^-?\d+$/` + `Number.isFinite`) rejects all (`config.handler.ts:980`). |
+| **Invalid GPIO pin** — `NaN`, `Infinity`, `3.5`, `99`, `-1` | ✅ `GpioPin` rejects (`Number.isInteger` + range 0–27). |
+| **Empty / whitespace / injection name** | ✅ Input `.trim()`ed; `isValidSensorName` = `[A-Za-z0-9_]+` rejects empty and all metacharacters. |
+| **Duplicate pin via *modify*** (bypassing the add-flow picker) | ✅ Authoritatively enforced in the use case (`modify-sensor.use-case.ts:66` → `PinAlreadyInUseError`), not just the handler. |
+
+**Broke under pressure (→ R16):**
+
+- ❌ **Unbounded name overflows Telegram's 64-byte `callback_data` cap.** `isValidSensorName` sets **no maximum length**, and **five** keyboard builders embed the raw name as callback data — `logs.handler:54`, `mute.handler:44,48`, `unmute.handler:44,48`, `config.handler:171,186` (`cfg:mod:`/`cfg:rem:`). A sensor named ≈57+ ASCII chars (admin-creatable, passes validation) makes Telegram reject the **entire** keyboard message (`BUTTON_DATA_INVALID`), breaking `/logs`, `/mute`, `/unmute`, and the `/config modify`+`remove` pickers at once. Because the *modify* picker is itself broken, the offending sensor can't be renamed from the UI — recovery needs a config-import/DB edit. The codebase already guards this exact limit in **one** place (`csv.handler.ts:306`, `MAX_CALLBACK_BYTES`) — the five name builders are the inconsistency. → **R16**. A minor sibling: `parseIntStrict` has no upper bound, so a giant debounce/threshold is accepted (a `setTimeout` overflow foot-gun, not exploitable) → **R17**.
+
+**This is the first genuine correctness defect either pass surfaced.** It is admin-gated and non-corrupting, so it lands P1 rather than P0 — but its single-line root cause (a length bound on `isValidSensorName`) makes it a high-value, low-effort fix.
+
 ## 3. Prioritized refactoring backlog
 
 Each item: `[tier] [effort S/M/L] [risk]` · *Why* · *Files* · *Done when*.
 
 ### P0 — Correctness / Security (do first)
 
-**None.** No correctness or security defect surfaced — and this now rests on a **line-by-line read** of the critical paths (§2.8: concurrency core, tunnel process lifecycle, event pipeline, GPIO driver, SQLite backup), not only on metrics. The two classic traps (WAL-safe hot backup, PID-reuse-safe process kills) are handled correctly. Stated explicitly so the absence is a finding, not an omission. The nearest thing to a correctness bug is **R13** (non-atomic backup write), triaged P2 because it corrupts only a *derived* file (the DB backup), never live data.
+**None.** No P0-severity defect surfaced across three passes (metrics, line-by-line deep read §2.8, adversarial pressure test §2.9). The two classic traps (WAL-safe hot backup, PID-reuse-safe process kills) are handled correctly. The pressure test *did* find one genuine correctness bug — **R16** (unbounded name → `callback_data` overflow) — placed at P1 rather than P0 because it is admin-gated, non-corrupting, and recoverable via config import. The nearest data-integrity concern is **R13** (non-atomic backup write), P2 because it corrupts only a *derived* file, never live data. Stated explicitly so the absence of a P0 is a finding, not an omission.
 
-### P1 — High-value structural
+### P1 — High-value structural & the one real correctness bug
+
+**R16 — Bound sensor/camera name length so it can't overflow Telegram's 64-byte `callback_data`.** `[P1] [effort S] [risk L]` *(pressure test §2.9)*
+*Why:* `isValidSensorName` (`/^[A-Za-z0-9_]+$/`) has no max length, and five keyboard builders embed the raw name as callback data (`logs.handler:54`, `mute.handler:44,48`, `unmute.handler:44,48`, `config.handler:171,186`). A ≈57+ char name makes Telegram reject the whole keyboard (`BUTTON_DATA_INVALID`), breaking `/logs`, `/mute`, `/unmute`, and the `/config modify`+`remove` pickers — and the broken modify picker blocks UI recovery. This is the one genuine correctness defect found; it is admin-gated and non-corrupting, hence P1 not P0.
+*Fix:* add a max-length bound to `isValidSensorName` (e.g. ≤ 32 chars — clears the longest prefix `cfg:mod:`/`cfg:rem:` with margin) as the single root-cause fix; optionally add a `Buffer.byteLength(...) <= 64` guard at the keyboard builders as defense-in-depth, mirroring `csv.handler.ts:306`.
+*Files:* `src/sensors/domain/errors/invalid-sensor-name.error.ts`; verify `mute/unmute/logs.handler`, `config.handler`. *Done when:* no name can produce callback data > 64 bytes; a regression test covers a 60-char name.
 
 **R1 — Unify multi-step conversation handling; migrate the two mega-handlers onto it.** `[P1] [effort L] [risk M]`
 *Why:* Resolves four things at once — the two largest non-data files (§2.2), orchestration state leaking into `interfaces/` (§2.1), the config-wizard eviction gap (§2.6/R2), and the unused-dep/dead-stub inconsistency (§2.7/R5). Decide the abstraction: **either** build out `flows/flow.engine.ts` into a real step/TTL-managed engine, **or** adopt the already-declared `@grammyjs/conversations`. Then move the FSMs out of `config.handler.ts` / `camera.handler.ts` into `telegram/application/` flows, leaving the handlers as thin wire-in/render layers.
@@ -165,17 +194,23 @@ Each item: `[tier] [effort S/M/L] [risk]` · *Why* · *Files* · *Done when*.
 *Why:* When a digital sensor trips the >30-transitions/min circuit breaker it drops to **10 s polled sampling for 5 min** (`FLAP_RECOVERY_MS`). During that window a real `alarm`/`leak_hazard` pulse shorter than ~10 s can be missed. The operator *is* alerted to the `flapping_fault`, so this is a deliberate tradeoff — but for a security worker it should be an explicit, documented decision, not an accident. Options: accept and document, or use a shorter poll for `alarm`/`leak_hazard` step types.
 *Files:* `src/sensors/infrastructure/digital-gpio.adapter.ts`, `docs/specs/` (record the decision). *Done when:* the behavior is either documented as intended or tightened for alarm-class sensors.
 
+**R17 — Give `parseIntStrict`-fed fields sane upper bounds.** `[P3] [effort S] [risk L]` *(pressure test §2.9)*
+*Why:* `parseIntStrict` accepts arbitrarily large integers; a giant `debounceMs` overflows `setTimeout`'s 32-bit range (Node warns and fires at 1 ms — effectively no debounce), and giant thresholds lose precision past `MAX_SAFE_INTEGER`. Non-exploitable, but a foot-gun.
+*Files:* `src/telegram/interfaces/config.handler.ts` (threshold/debounce parse arms). *Done when:* debounce and thresholds reject values above a documented ceiling.
+
 ## 4. Sequencing
 
 ```
-Quick wins (parallel-safe, any time):   R4 · R6 · R7 · R13 · R14
-Before the big refactor:                 R3  (test safety net for R1)
+Fix first (real bug, one-line root):     R16 (name length bound)
+Quick wins (parallel-safe, any time):    R4 · R6 · R7 · R13 · R14 · R17
+Before the big refactor:                  R3  (test safety net for R1)
 Anchor:                                   R1  (absorbs R2 + R5)
 Decide, then act:                         R15 (ratify or tighten)
 Independent, later:                       R8 · R9 · R11 · R12 · R10
 ```
 
-- **R4, R6, R7, R13, R14** are isolated and low-risk — land them first to bank value. **R13** (atomic backup) is the highest-value quick win: it closes a real, if narrow, corruption path.
+- **R16 leads** — it is the only genuine correctness defect, a single-line fix, and breaks four live commands until closed.
+- **R4, R6, R7, R13, R14, R17** are isolated and low-risk — land them next to bank value. **R13** (atomic backup) is the highest-value of these: it closes a real, if narrow, corruption path.
 - **R3 precedes R1**: the coverage net makes the behavior-preserving refactor safe.
 - **R1** is the centerpiece and folds in **R2** and **R5**.
 - **R15** is a decision, not just code — ratify the flap-cooldown tradeoff (or tighten it for alarm-class sensors) before closing it.
