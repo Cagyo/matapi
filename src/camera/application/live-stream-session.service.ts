@@ -103,10 +103,14 @@ export class LiveStreamSessionService implements OnModuleInit {
       if (!staleLease) return;
 
       try {
-        const result = await this.gateway.recoverOwnedProcess({
-          pid: staleLease.pid,
-          processIdentity: staleLease.processIdentity,
-        });
+        const result = await this.withOperationTimeout(
+          Promise.resolve().then(() =>
+            this.gateway.recoverOwnedProcess({
+              pid: staleLease.pid,
+              processIdentity: staleLease.processIdentity,
+            }),
+          ),
+        );
         if (result === 'not-owned') {
           await this.alertRecoveryFailure();
         }
@@ -210,7 +214,9 @@ export class LiveStreamSessionService implements OnModuleInit {
 
       const hashes = this.active.viewerTokenHashes.get(telegramId) ?? [];
       for (const tokenHash of hashes) {
-        await this.gateway.revokeViewer(tokenHash);
+        await this.withOperationTimeout(
+          Promise.resolve().then(() => this.gateway.revokeViewer(tokenHash)),
+        );
       }
       this.active.viewerTokenHashes.delete(telegramId);
     }).catch(() => {
@@ -487,6 +493,11 @@ export class LiveStreamSessionService implements OnModuleInit {
       },
       (error: unknown) => {
         if (error instanceof GatewayOperationTimeoutError) {
+          void this.enqueue(async () => {
+            if (pending) this.rejectReplacement(pending);
+          }).catch(() => {
+            // A timed-out cleanup cannot leave a replacement caller pending.
+          });
           void teardown.then(
             () => {
               void this.enqueue(() => this.finishBlockedTeardown(active, pending)).catch(() => {

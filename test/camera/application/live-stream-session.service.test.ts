@@ -83,6 +83,34 @@ describe('LiveStreamSessionService', () => {
     expect(gateway.startCalls).toHaveLength(1);
   });
 
+  it('rejects a replacement when cancelled-start cleanup times out and never starts it late', async () => {
+    vi.useFakeTimers();
+    const gateway = new DeferredGateway();
+    gateway.deferStop = true;
+    const service = createService({ gateway, operationTimeoutMs: 100 });
+    const opening = service.open(source('front_door'), 1);
+    const replacement = service.open(source('garden'), 2);
+    const openingRejected = expect(opening).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    const replacementRejected = expect(replacement).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(gateway.startCalls).toHaveLength(1);
+    gateway.resolveStart();
+    await vi.advanceTimersByTimeAsync(100);
+
+    await openingRejected;
+    await replacementRejected;
+
+    gateway.resolveStop();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(gateway.startCalls).toHaveLength(1);
+  });
+
   it('joins a pending start for the same camera', async () => {
     const gateway = new DeferredGateway();
     const service = createService({ gateway });
@@ -272,6 +300,27 @@ describe('LiveStreamSessionService', () => {
 
     await expect(service.revokeUser(1)).rejects.toMatchObject({
       code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+  });
+
+  it('times out a hung viewer revocation without blocking later transitions', async () => {
+    vi.useFakeTimers();
+    const gateway = new FakeGateway();
+    gateway.hangRevoke = true;
+    const service = createService({ gateway, operationTimeoutMs: 100 });
+
+    await service.open(source('front_door'), 1);
+    const revoking = service.revokeUser(1);
+    const revokingRejected = expect(revoking).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(100);
+
+    await revokingRejected;
+
+    await expect(service.open(source('front_door'), 2)).resolves.toMatchObject({
+      cameraName: 'front_door',
     });
   });
 
@@ -491,6 +540,30 @@ describe('LiveStreamSessionService', () => {
     expect(alerts.alerts).toEqual([['live-stream-recovery-failed', undefined]]);
   });
 
+  it('times out stalled boot recovery and emits only a sanitized alert', async () => {
+    vi.useFakeTimers();
+    const gateway = new FakeGateway();
+    gateway.hangRecovery = true;
+    const lease = new FakeLease({
+      sessionNonce: 'stale',
+      pid: createLiveStreamProcessId(123),
+      processIdentity: 'owned-process',
+      cameraId: 'front_door',
+      diagnosticExpiresAtUnixMs: 0,
+      messageReferences: [],
+    });
+    const alerts = new FakeAdminAlert();
+    const service = createService({ gateway, lease, alerts, operationTimeoutMs: 100 });
+    const initializing = service.onModuleInit();
+
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(100);
+
+    await expect(initializing).resolves.toBeUndefined();
+    expect(alerts.alerts).toEqual([['live-stream-recovery-failed', undefined]]);
+    expect(lease.clearCalls).toBe(1);
+  });
+
   it('settles a synchronous gateway start failure and preserves queue usability', async () => {
     const gateway = new FakeGateway();
     gateway.throwStartSynchronously = true;
@@ -566,8 +639,12 @@ class FakeGateway implements LiveStreamGatewayPort {
   addViewerError?: Error;
   revokeError?: Error;
   hangAddViewer = false;
+  hangRecovery = false;
+  hangRevoke = false;
   hangStop = false;
+  deferStop = false;
   throwStartSynchronously = false;
+  private readonly stopResolvers: Array<() => void> = [];
 
   start(input: { source: LiveStreamSource }): Promise<{
     publicHostname: string;
@@ -590,6 +667,7 @@ class FakeGateway implements LiveStreamGatewayPort {
 
   async revokeViewer(tokenHash: string): Promise<void> {
     if (this.revokeError) throw this.revokeError;
+    if (this.hangRevoke) await new Promise<never>(() => undefined);
     this.revoked.push(tokenHash);
   }
 
@@ -597,6 +675,15 @@ class FakeGateway implements LiveStreamGatewayPort {
     this.stopCalls += 1;
     if (this.stopError) throw this.stopError;
     if (this.hangStop) await new Promise<never>(() => undefined);
+    if (this.deferStop) {
+      await new Promise<void>((resolve) => {
+        this.stopResolvers.push(resolve);
+      });
+    }
+  }
+
+  resolveStop(): void {
+    this.stopResolvers.shift()?.();
   }
 
   async recoverOwnedProcess(input: {
@@ -604,6 +691,7 @@ class FakeGateway implements LiveStreamGatewayPort {
     processIdentity: string;
   }): Promise<'stopped' | 'not-owned'> {
     this.recoveryCalls.push(input);
+    if (this.hangRecovery) await new Promise<never>(() => undefined);
     return this.recoveryResult;
   }
 }
