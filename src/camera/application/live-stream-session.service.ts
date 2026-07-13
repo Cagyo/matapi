@@ -45,6 +45,7 @@ interface ActiveSession {
   publicHostname: string;
   pid: LiveStreamLease['pid'];
   processIdentity: string;
+  sourceKind: LiveStreamSource['kind'];
   viewerGrants: Map<number, ViewerGrant>;
   messageReferences: RuntimeMessageReference[];
 }
@@ -135,6 +136,7 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
           Promise.resolve().then(() =>
             this.gateway.recoverOwnedProcess({
               sessionId: staleLease.sessionNonce,
+              sourceKind: staleLease.sourceKind ?? 'motion-mjpeg',
               pid: staleLease.pid,
               processIdentity: staleLease.processIdentity,
             }),
@@ -419,6 +421,7 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
         publicHostname: started.publicHostname,
         pid: started.pid,
         processIdentity: started.processIdentity,
+        sourceKind: pending.source.kind,
         viewerGrants: new Map(),
         messageReferences: [],
       });
@@ -435,6 +438,7 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
       publicHostname: started.publicHostname,
       pid: started.pid,
       processIdentity: started.processIdentity,
+      sourceKind: pending.source.kind,
       viewerGrants: new Map(),
       messageReferences: [],
     };
@@ -622,6 +626,7 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
       publicHostname: started.publicHostname,
       pid: started.pid,
       processIdentity: started.processIdentity,
+      sourceKind: pending.source.kind,
       viewerGrants: new Map(),
       messageReferences: [],
     });
@@ -768,6 +773,7 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
         pid: active.pid,
         processIdentity: active.processIdentity,
         cameraId: active.session.cameraId,
+        sourceKind: active.sourceKind,
         diagnosticExpiresAtUnixMs: Date.now() + Math.max(
           0,
           active.session.expiresMonotonicMs - this.clock.now(),

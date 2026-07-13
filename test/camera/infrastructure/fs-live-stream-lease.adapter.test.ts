@@ -27,6 +27,17 @@ describe('FsLiveStreamLeaseAdapter', () => {
     expect(await readdir(runtimeDir)).toEqual(['lease.json']);
   });
 
+  it('round-trips the non-secret source kind while accepting historical leases without it', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'live-stream-lease-'));
+    roots.push(root);
+    const adapter = new FsLiveStreamLeaseAdapter(root);
+    await adapter.write({ ...lease(), sourceKind: 'rtsp' });
+    expect(await adapter.read()).toMatchObject({ sourceKind: 'rtsp' });
+
+    await writeFile(join(root, 'lease.json'), JSON.stringify(lease()));
+    expect(await adapter.read()).not.toHaveProperty('sourceKind');
+  });
+
   it('throws a sanitized error for malformed JSON without exposing contents', async () => {
     const root = await mkdtemp(join(tmpdir(), 'live-stream-lease-'));
     roots.push(root);

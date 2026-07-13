@@ -20,6 +20,7 @@ export interface LiveStreamGatewayPort {
   stop(): Promise<void>;
   recoverOwnedProcess(input: {
     sessionId: string;
+    sourceKind: LiveStreamSource['kind'];
     pid: LiveStreamProcessId;
     processIdentity: string;
   }): Promise<'stopped' | 'not-owned'>;

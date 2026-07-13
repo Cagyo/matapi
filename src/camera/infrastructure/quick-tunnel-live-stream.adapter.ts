@@ -339,6 +339,7 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
 
   recoverOwnedProcess(input: {
     sessionId: string;
+    sourceKind: LiveStreamSource['kind'];
     pid: LiveStreamProcessId;
     processIdentity: string;
   }): Promise<'stopped' | 'not-owned'> {
@@ -347,11 +348,14 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
 
   private async recoverExclusive(input: {
     sessionId: string;
+    sourceKind: LiveStreamSource['kind'];
     pid: LiveStreamProcessId;
     processIdentity: string;
   }): Promise<'stopped' | 'not-owned'> {
-    const runtimeRecovery = this.rtspRuntime?.recover(input.sessionId) ?? Promise.resolve();
-    const socketRecovery = input.sessionId
+    const runtimeRecovery = input.sourceKind === 'rtsp'
+      ? this.rtspRuntime?.recover(input.sessionId) ?? Promise.resolve()
+      : Promise.resolve();
+    const socketRecovery = input.sourceKind === 'rtsp' && input.sessionId
       ? this.removeRecoveredRtspSocket(input.sessionId)
       : Promise.resolve();
     const cloudRecovery = this.recoverCloudflared(input.pid, input.processIdentity);

@@ -161,7 +161,10 @@ export interface ProbeProcessHandle {
 export class FfmpegLiveSourceProbeAdapter implements LiveSourceProbePort, RtspRuntimeCoordinatorPort {
   readonly #cidrs: readonly ParsedCidr[];
   readonly #dependencies: FfmpegLiveSourceProbeDependencies;
-  readonly #pendingRestrictedCleanup = new Map<string, { lease?: StreamEgressLease; startAttempted: boolean }>();
+  readonly #pendingRestrictedCleanup = new Map<string, {
+    lease?: StreamEgressLease;
+    sandboxPending: boolean;
+  }>();
 
   constructor(
     private readonly egress: StreamEgressPort,
@@ -369,12 +372,22 @@ export class FfmpegLiveSourceProbeAdapter implements LiveSourceProbePort, RtspRu
   /** Shared restricted orchestration used by both configuration probe and live runtime. */
   async startRestrictedRuntime(
     source: LiveSource,
-    input: { sessionId: string; socketPath: string; expiresAtUnixMs: number },
+    input: {
+      sessionId: string;
+      socketPath: string;
+      expiresAtUnixMs: number;
+      deadlineMonotonicMs?: number;
+    },
   ): Promise<RtspStreamRuntimeHandle> {
     const sandbox = this.#dependencies.sandbox;
     if (!sandbox) throw new LiveSourceProbeFailedError();
     const monotonicNow = () => this.#dependencies.monotonicNow();
-    const deadline = monotonicNow() + this.options.timeoutMs;
+    const enteredAt = monotonicNow();
+    const deadline = Math.min(
+      input.deadlineMonotonicMs ?? enteredAt + this.options.timeoutMs,
+      enteredAt + this.options.timeoutMs,
+    );
+    if (deadline <= enteredAt) throw new LiveSourceProbeFailedError();
     let lease: StreamEgressLease | undefined;
     let startAttempted = false;
     try {
@@ -412,9 +425,9 @@ export class FfmpegLiveSourceProbeAdapter implements LiveSourceProbePort, RtspRu
         this.egress.grant(grant), deadline, monotonicNow,
         (lateLease) => this.egress.revoke(lateLease),
       );
-      this.#pendingRestrictedCleanup.set(input.sessionId, { lease, startAttempted: false });
+      this.#pendingRestrictedCleanup.set(input.sessionId, { lease, sandboxPending: false });
       startAttempted = true;
-      this.#pendingRestrictedCleanup.set(input.sessionId, { lease, startAttempted: true });
+      this.#pendingRestrictedCleanup.set(input.sessionId, { lease, sandboxPending: true });
       const started = await awaitBeforeDeadline(
         sandbox.start({
           sessionId: input.sessionId,
@@ -443,52 +456,85 @@ export class FfmpegLiveSourceProbeAdapter implements LiveSourceProbePort, RtspRu
       };
     } catch {
       if (lease || startAttempted) {
-        this.#pendingRestrictedCleanup.set(input.sessionId, { lease, startAttempted });
-        await this.recoverRestrictedRuntime(input.sessionId).catch(() => undefined);
+        this.#pendingRestrictedCleanup.set(input.sessionId, {
+          lease,
+          sandboxPending: startAttempted,
+        });
+        await this.recoverRestrictedRuntime(input.sessionId, deadline).catch(() => undefined);
       }
       throw new LiveSourceProbeFailedError();
     }
   }
 
-  async recoverRestrictedRuntime(sessionId: string): Promise<void> {
+  async recoverRestrictedRuntime(sessionId: string, deadlineMonotonicMs?: number): Promise<void> {
     const sandbox = this.#dependencies.sandbox;
     if (!sandbox) throw new LiveSourceProbeFailedError();
-    const pending = this.#pendingRestrictedCleanup.get(sessionId);
+    const pending = this.#pendingRestrictedCleanup.get(sessionId) ?? {
+      sandboxPending: true,
+    };
     const monotonicNow = () => this.#dependencies.monotonicNow();
-    const deadline = monotonicNow() + this.options.timeoutMs;
-    const results = await Promise.all([
-      cleanupBeforeDeadline(() => sandbox.stop(sessionId), deadline, monotonicNow),
-      ...(pending?.lease
-        ? [cleanupBeforeDeadline(() => this.egress.revoke(pending.lease!), deadline, monotonicNow)]
-        : []),
+    const deadline = Math.min(
+      deadlineMonotonicMs ?? monotonicNow() + this.options.timeoutMs,
+      monotonicNow() + this.options.timeoutMs,
+    );
+    const [sandboxStopped, leaseRevoked] = await Promise.all([
+      pending.sandboxPending
+        ? cleanupBeforeDeadline(() => sandbox.stop(sessionId), deadline, monotonicNow)
+        : Promise.resolve(true),
+      pending.lease
+        ? cleanupBeforeDeadline(() => this.egress.revoke(pending.lease!), deadline, monotonicNow)
+        : Promise.resolve(true),
     ]);
-    if (results.some((ok) => !ok)) throw new LiveSourceProbeFailedError();
-    this.#pendingRestrictedCleanup.delete(sessionId);
+    if (sandboxStopped) pending.sandboxPending = false;
+    if (leaseRevoked) pending.lease = undefined;
+    if (!pending.sandboxPending && !pending.lease) {
+      this.#pendingRestrictedCleanup.delete(sessionId);
+      return;
+    }
+    this.#pendingRestrictedCleanup.set(sessionId, pending);
+    throw new LiveSourceProbeFailedError();
   }
 
   private async runRestrictedProbe(source: LiveSource): Promise<void> {
     const monotonicNow = () => this.#dependencies.monotonicNow();
     const finalDeadline = monotonicNow() + this.options.timeoutMs;
+    const entryWallNow = this.#dependencies.wallNow();
     const sessionId = this.#dependencies.randomUUID();
     const socketPath = join('/run/home-worker/live-stream-output', `${sessionId}.sock`);
     let sink: UnixSink | undefined;
     let runtime: RtspStreamRuntimeHandle | undefined;
     let failed = false;
     try {
-      sink = await this.#dependencies.openUnixSink(socketPath, 0o660);
+      sink = await awaitBeforeDeadline(
+        this.#dependencies.openUnixSink(socketPath, 0o660),
+        finalDeadline,
+        monotonicNow,
+        (lateSink) => lateSink.close(),
+      );
       runtime = await this.startRestrictedRuntime(source, {
         sessionId,
         socketPath,
-        expiresAtUnixMs: this.#dependencies.wallNow() + this.options.timeoutMs,
+        expiresAtUnixMs: entryWallNow + this.options.timeoutMs,
+        deadlineMonotonicMs: finalDeadline,
       });
-      await sink.confirmFrame(this.options.timeoutMs);
+      const remainingMs = finalDeadline - monotonicNow();
+      if (remainingMs <= 0) throw new LiveSourceProbeFailedError();
+      await awaitBeforeDeadline(
+        sink.confirmFrame(remainingMs),
+        finalDeadline,
+        monotonicNow,
+      );
     } catch {
       failed = true;
     } finally {
       const runtimeToStop = runtime;
       const sinkToClose = sink;
       const results = await Promise.all([
-        ...(runtimeToStop ? [cleanupBeforeDeadline(() => runtimeToStop.stop(), finalDeadline, monotonicNow)] : []),
+        ...(runtimeToStop ? [cleanupBeforeDeadline(
+          () => this.recoverRestrictedRuntime(sessionId, finalDeadline),
+          finalDeadline,
+          monotonicNow,
+        )] : []),
         ...(sinkToClose ? [cleanupBeforeDeadline(() => sinkToClose.close(), finalDeadline, monotonicNow)] : []),
       ]);
       if (results.some((ok) => !ok)) failed = true;

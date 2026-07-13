@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { LiveStreamSessionService } from '../../../src/camera/application/live-stream-session.service';
-import { MotionLiveSourceService } from '../../../src/camera/application/motion-live-source.service';
+import { LiveStreamSourceResolverService } from '../../../src/camera/application/live-stream-source-resolver.service';
 import { OpenLiveStreamUseCase } from '../../../src/camera/application/open-live-stream.use-case';
 import { LiveStreamSourceUnavailableError } from '../../../src/camera/domain/errors/live-stream-source-unavailable.error';
 import type { Camera } from '../../../src/camera/domain/camera.entity';
@@ -25,7 +25,7 @@ describe('OpenLiveStreamUseCase', () => {
   });
 
   it('derives the installer-owned localhost Motion route', async () => {
-    const source = await new MotionLiveSourceService(
+    const source = await new LiveStreamSourceResolverService(
       new FakeMediaRepository([camera('Front door')]),
     ).resolve('Front door');
 
@@ -37,7 +37,7 @@ describe('OpenLiveStreamUseCase', () => {
       { ...camera('Front door'), id: 'front_door_camera' },
     ]);
 
-    const source = await new MotionLiveSourceService(media).resolveById('front_door_camera');
+    const source = await new LiveStreamSourceResolverService(media).resolveById('front_door_camera');
 
     expect(source).toMatchObject({
       cameraId: 'front_door_camera',
@@ -86,7 +86,7 @@ describe('OpenLiveStreamUseCase', () => {
     const media = new FakeMediaRepository([camera('Front door')]);
     media.findCameraError = new Error('database unavailable');
 
-    await expect(new MotionLiveSourceService(media).resolve('Front door'))
+    await expect(new LiveStreamSourceResolverService(media).resolve('Front door'))
       .rejects.toBeInstanceOf(LiveStreamSourceUnavailableError);
   });
 
@@ -94,7 +94,7 @@ describe('OpenLiveStreamUseCase', () => {
     const media = new FakeMediaRepository([camera('Front door')]);
     media.listCamerasError = new Error('database unavailable');
 
-    await expect(new MotionLiveSourceService(media).resolve())
+    await expect(new LiveStreamSourceResolverService(media).resolve())
       .rejects.toBeInstanceOf(LiveStreamSourceUnavailableError);
   });
 
@@ -104,7 +104,7 @@ describe('OpenLiveStreamUseCase', () => {
       { ...camera('Front door'), id: 'front-door' },
     ]);
 
-    await expect(new MotionLiveSourceService(media).resolve()).resolves.toMatchObject({
+    await expect(new LiveStreamSourceResolverService(media).resolve()).resolves.toMatchObject({
       cameraId: 'front-door',
       cameraName: 'Front door',
     });
@@ -138,7 +138,7 @@ function createUseCase(media: FakeMediaRepository): OpenLiveStreamUseCase {
     300_000,
   );
   return new OpenLiveStreamUseCase(
-    new MotionLiveSourceService(media),
+    new LiveStreamSourceResolverService(media),
     session,
     { isAvailable: async () => true },
   );

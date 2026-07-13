@@ -13,9 +13,9 @@ import {
 
 const MOTION_MJPEG_UPSTREAM = 'http://127.0.0.1:8081/?action=stream';
 
-/** Resolves only the installer-owned Motion MJPEG route for enabled cameras. */
+/** Resolves configured RTSP when ready, otherwise the installer-owned Motion route. */
 @Injectable()
-export class MotionLiveSourceService {
+export class LiveStreamSourceResolverService {
   constructor(
     @Inject(MEDIA_REPOSITORY) private readonly media: MediaRepositoryPort,
     @Optional() @Inject(LIVE_SOURCE_REPOSITORY)
@@ -32,7 +32,7 @@ export class MotionLiveSourceService {
         camera = cameras.find((candidate) => candidate.enabled && candidate.type === 'motion') ?? null;
         if (!camera && this.liveSources) {
           for (const candidate of cameras) {
-            if (candidate.enabled && candidate.type === 'rtsp' && await this.liveSources.isReady(candidate.id)) {
+            if (candidate.enabled && await this.liveSources.isReady(candidate.id)) {
               camera = candidate;
               break;
             }
@@ -58,16 +58,15 @@ export class MotionLiveSourceService {
   }
 
   private async toSource(camera: Camera | null): Promise<LiveStreamSource> {
-    if (!camera || !camera.enabled || !['motion', 'rtsp'].includes(camera.type)) {
+    if (!camera?.enabled) {
       throw new LiveStreamSourceUnavailableError();
     }
 
-    if (camera.type === 'rtsp') {
-      if (!this.liveSources || !(await this.liveSources.isReady(camera.id))) {
-        throw new LiveStreamSourceUnavailableError();
-      }
+    if (this.liveSources && await this.liveSources.isReady(camera.id)) {
       return { kind: 'rtsp', cameraId: camera.id, cameraName: camera.name };
     }
+
+    if (camera.type !== 'motion') throw new LiveStreamSourceUnavailableError();
 
     return {
       kind: 'motion-mjpeg',

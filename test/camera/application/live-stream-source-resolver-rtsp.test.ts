@@ -1,8 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
-import { MotionLiveSourceService } from '../../../src/camera/application/motion-live-source.service';
+import { LiveStreamSourceResolverService } from '../../../src/camera/application/live-stream-source-resolver.service';
+import { ConfigureLiveSourceUseCase } from '../../../src/camera/application/configure-live-source.use-case';
 import { LiveStreamSourceUnavailableError } from '../../../src/camera/domain/errors/live-stream-source-unavailable.error';
 import type { LiveSourceRepositoryPort } from '../../../src/camera/domain/ports/live-source-repository.port';
 import type { MediaRepositoryPort } from '../../../src/camera/domain/ports/media-repository.port';
+import type { LiveSourceProbePort } from '../../../src/camera/domain/ports/live-source-probe.port';
+import { AesGcmLiveSourceCredentialAdapter } from '../../../src/camera/infrastructure/aes-gcm-live-source-credential.adapter';
+import { InMemoryLiveSourceRepository } from '../../../src/camera/infrastructure/in-memory-live-source.repository';
 
 function media(cameras: { id: string; name: string; type: string; enabled: boolean }[]): MediaRepositoryPort {
   return {
@@ -24,7 +28,7 @@ describe('live stream source resolver RTSP metadata boundary', () => {
       isReady: vi.fn(async (id: string) => id === 'rtsp-1'),
       loadForStream: vi.fn(() => { throw new Error('must not decrypt'); }),
     } as unknown as LiveSourceRepositoryPort;
-    const resolver = new MotionLiveSourceService(media(cameras), sources);
+    const resolver = new LiveStreamSourceResolverService(media(cameras), sources);
 
     await expect(resolver.resolve('Motion')).resolves.toEqual({
       kind: 'motion-mjpeg', cameraId: 'motion-1', cameraName: 'Motion',
@@ -44,7 +48,7 @@ describe('live stream source resolver RTSP metadata boundary', () => {
     { id: 'pending', name: 'Pending', type: 'rtsp', enabled: true, ready: false },
   ])('rejects unavailable RTSP metadata for $id', async (camera) => {
     const sources = { isReady: vi.fn(async () => camera.ready) } as unknown as LiveSourceRepositoryPort;
-    const resolver = new MotionLiveSourceService(media([camera]), sources);
+    const resolver = new LiveStreamSourceResolverService(media([camera]), sources);
     await expect(resolver.resolveById(camera.id)).rejects.toBeInstanceOf(LiveStreamSourceUnavailableError);
   });
 
@@ -56,10 +60,52 @@ describe('live stream source resolver RTSP metadata boundary', () => {
     const sources = {
       isReady: vi.fn(async (id: string) => id === 'ready'),
     } as unknown as LiveSourceRepositoryPort;
-    const resolver = new MotionLiveSourceService(media(cameras), sources);
+    const resolver = new LiveStreamSourceResolverService(media(cameras), sources);
 
     await expect(resolver.resolve()).resolves.toEqual({
       kind: 'rtsp', cameraId: 'ready', cameraName: 'Ready',
     });
+  });
+
+  it('resolves a configured RTSP source attached to a canonical Motion camera', async () => {
+    const cameras = [{ id: 'front', name: 'Front', type: 'motion', enabled: true }];
+    const mediaPort = media(cameras);
+    const credentials = new AesGcmLiveSourceCredentialAdapter({
+      currentKey: '11'.repeat(32), currentVersion: 1,
+    });
+    const repository = new InMemoryLiveSourceRepository(credentials);
+    await repository.rotate();
+    const configure = new ConfigureLiveSourceUseCase(
+      mediaPort,
+      repository,
+      credentials,
+      { run: vi.fn().mockResolvedValue(undefined) } satisfies LiveSourceProbePort,
+    );
+    await configure.execute({
+      cameraName: 'Front', url: 'rtsp://user:pass@camera.local/live',
+      transport: 'tcp', tlsMode: 'none', profile: 'balanced',
+    });
+    const resolver = new LiveStreamSourceResolverService(mediaPort, repository);
+
+    const expected = { kind: 'rtsp', cameraId: 'front', cameraName: 'Front' };
+    await expect(resolver.resolve('Front')).resolves.toEqual(expected);
+    await expect(resolver.resolveById('front')).resolves.toEqual(expected);
+    await expect(resolver.resolve()).resolves.toEqual(expected);
+  });
+
+  it('keeps the historical first-Motion default when that camera has no ready RTSP source', async () => {
+    const cameras = [
+      { id: 'first', name: 'First', type: 'motion', enabled: true },
+      { id: 'second', name: 'Second', type: 'motion', enabled: true },
+    ];
+    const sources = {
+      isReady: vi.fn(async (id: string) => id === 'second'),
+    } as unknown as LiveSourceRepositoryPort;
+
+    await expect(new LiveStreamSourceResolverService(media(cameras), sources).resolve())
+      .resolves.toEqual({
+        kind: 'motion-mjpeg', cameraId: 'first', cameraName: 'First',
+        upstreamUrl: 'http://127.0.0.1:8081/?action=stream',
+      });
   });
 });

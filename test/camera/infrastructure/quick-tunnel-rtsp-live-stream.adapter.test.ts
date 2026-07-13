@@ -148,20 +148,30 @@ describe('QuickTunnelLiveStreamAdapter RTSP data plane', () => {
     const { adapter, runtime, output } = await fixture(async () => { throw new Error('unused'); }, 1_000, {
       unlinkRtspSocket: unlinkSocket,
     });
-    await adapter.recoverOwnedProcess({ sessionId: SESSION, pid: 4321 as never, processIdentity: 'cloud-id' });
+    await adapter.recoverOwnedProcess({ sessionId: SESSION, sourceKind: 'rtsp', pid: 4321 as never, processIdentity: 'cloud-id' });
     expect(runtime.recover).toHaveBeenCalledWith(SESSION);
     expect(unlinkSocket).toHaveBeenCalledWith(join(output, `${SESSION}.sock`));
   });
 
   it('preserves Motion recovery when the RTSP output directory does not exist', async () => {
     const missing = Object.assign(new Error('missing'), { code: 'ENOENT' });
-    const { adapter } = await fixture(async () => { throw new Error('unused'); }, 1_000, {
+    const { adapter, runtime } = await fixture(async () => { throw new Error('unused'); }, 1_000, {
       inspectRtspDirectory: vi.fn().mockRejectedValue(missing),
     });
 
     await expect(adapter.recoverOwnedProcess({
-      sessionId: SESSION, pid: 4321 as never, processIdentity: 'cloud-id',
+      sessionId: SESSION, sourceKind: 'motion-mjpeg', pid: 4321 as never, processIdentity: 'cloud-id',
     })).resolves.toBe('stopped');
+    expect(runtime.recover).not.toHaveBeenCalled();
+  });
+
+  it('treats a backward-compatible lease without source kind as Motion recovery', async () => {
+    const { adapter, runtime } = await fixture(async () => { throw new Error('unused'); });
+
+    await expect(adapter.recoverOwnedProcess({
+      sessionId: SESSION, pid: 4321 as never, processIdentity: 'cloud-id',
+    } as never)).resolves.toBe('stopped');
+    expect(runtime.recover).not.toHaveBeenCalled();
   });
 
   it('reverses the live lifecycle after a ready producer terminates', async () => {
@@ -206,7 +216,7 @@ describe('QuickTunnelLiveStreamAdapter RTSP data plane', () => {
     });
     vi.mocked(runtime.recover).mockRejectedValueOnce(new Error('systemd unavailable'));
 
-    await expect(adapter.recoverOwnedProcess({ sessionId: SESSION, pid: 4321 as never, processIdentity: 'cloud-id' }))
+    await expect(adapter.recoverOwnedProcess({ sessionId: SESSION, sourceKind: 'rtsp', pid: 4321 as never, processIdentity: 'cloud-id' }))
       .rejects.toThrow('recovery incomplete');
     expect(signal).toHaveBeenCalledWith(4321, 'SIGTERM');
   });

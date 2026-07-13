@@ -6,7 +6,12 @@ export const RTSP_RUNTIME_COORDINATOR = Symbol('RTSP_RUNTIME_COORDINATOR');
 export interface RtspRuntimeCoordinatorPort {
   startRestrictedRuntime(
     source: LiveSource,
-    input: { sessionId: string; socketPath: string; expiresAtUnixMs: number },
+    input: {
+      sessionId: string;
+      socketPath: string;
+      expiresAtUnixMs: number;
+      deadlineMonotonicMs?: number;
+    },
   ): Promise<RtspStreamRuntimeHandle>;
-  recoverRestrictedRuntime(sessionId: string): Promise<void>;
+  recoverRestrictedRuntime(sessionId: string, deadlineMonotonicMs?: number): Promise<void>;
 }

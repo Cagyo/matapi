@@ -8,7 +8,7 @@ import {
   LiveStreamSessionService,
   type OpenLiveStreamResult,
 } from './live-stream-session.service';
-import { MotionLiveSourceService } from './motion-live-source.service';
+import { LiveStreamSourceResolverService } from './live-stream-source-resolver.service';
 
 export interface OpenLiveStreamInput {
   telegramId: number;
@@ -24,7 +24,7 @@ export interface OpenLiveStreamByIdInput {
 @Injectable()
 export class OpenLiveStreamUseCase {
   constructor(
-    private readonly source: MotionLiveSourceService,
+    private readonly source: LiveStreamSourceResolverService,
     private readonly sessions: LiveStreamSessionService,
     @Inject(LIVE_STREAM_CAPABILITY)
     private readonly capability: LiveStreamCapabilityPort,

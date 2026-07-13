@@ -68,6 +68,8 @@ export interface LiveStreamLease {
   pid: LiveStreamProcessId;
   processIdentity: string;
   cameraId: string;
+  /** Optional for backward compatibility; missing historical leases are Motion. */
+  sourceKind?: LiveStreamSource['kind'];
   diagnosticExpiresAtUnixMs: number;
   messageReferences: LiveStreamMessageReference[];
 }

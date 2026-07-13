@@ -947,9 +947,27 @@ describe('LiveStreamSessionService', () => {
     await service.onModuleInit();
 
     expect(gateway.recoveryCalls).toEqual([
-      { sessionId: 'stale', pid: createLiveStreamProcessId(123), processIdentity: 'owned-process' },
+      { sessionId: 'stale', sourceKind: 'motion-mjpeg', pid: createLiveStreamProcessId(123), processIdentity: 'owned-process' },
     ]);
     expect(lease.clearCalls).toBe(1);
+  });
+
+  it('persists and recovers the non-secret RTSP source discriminator', async () => {
+    const gateway = new FakeGateway();
+    const stale = new FakeLease({
+      sessionNonce: 'stale', sourceKind: 'rtsp',
+      pid: createLiveStreamProcessId(123), processIdentity: 'owned-process',
+      cameraId: 'front_door', diagnosticExpiresAtUnixMs: 0, messageReferences: [],
+    });
+    const recovery = createService({ gateway, lease: stale });
+    await recovery.onModuleInit();
+    expect(gateway.recoveryCalls[0]).toMatchObject({ sourceKind: 'rtsp' });
+
+    const lease = new FakeLease();
+    const service = createService({ gateway: new FakeGateway(), lease });
+    await service.open(rtspSource('front_door'), 1);
+    expect(lease.current()?.sourceKind).toBe('rtsp');
+    expect(JSON.stringify(lease.current())).not.toMatch(/rtsp:\/\/|credential|password/i);
   });
 
   it('raises a sanitized alert without stopping an unowned stale process', async () => {
@@ -1120,6 +1138,10 @@ function source(cameraName: string): LiveStreamSource {
   };
 }
 
+function rtspSource(cameraName: string): LiveStreamSource {
+  return { kind: 'rtsp', cameraId: cameraName, cameraName };
+}
+
 function createService(input: {
   clock?: FakeMonotonicClock;
   gateway?: FakeGateway;
@@ -1155,7 +1177,12 @@ class FakeMonotonicClock implements MonotonicClockPort {
 class FakeGateway implements LiveStreamGatewayPort {
   startCalls: { source: LiveStreamSource }[] = [];
   revoked: string[] = [];
-  recoveryCalls: { pid: ReturnType<typeof createLiveStreamProcessId>; processIdentity: string }[] = [];
+  recoveryCalls: {
+    sessionId: string;
+    sourceKind: LiveStreamSource['kind'];
+    pid: ReturnType<typeof createLiveStreamProcessId>;
+    processIdentity: string;
+  }[] = [];
   stopCalls = 0;
   recoveryResult: 'stopped' | 'not-owned' = 'stopped';
   stopError?: Error;
@@ -1227,6 +1254,8 @@ class FakeGateway implements LiveStreamGatewayPort {
   }
 
   async recoverOwnedProcess(input: {
+    sessionId: string;
+    sourceKind: LiveStreamSource['kind'];
     pid: ReturnType<typeof createLiveStreamProcessId>;
     processIdentity: string;
   }): Promise<'stopped' | 'not-owned'> {

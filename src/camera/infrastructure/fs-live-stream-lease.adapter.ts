@@ -81,6 +81,7 @@ function parseLease(value: unknown): LiveStreamLease | null {
   if (!nonEmptyString(value.cameraId) || !positiveSafeInteger(value.pid)) return null;
   if (!nonNegativeSafeInteger(value.diagnosticExpiresAtUnixMs)) return null;
   if (!Array.isArray(value.messageReferences)) return null;
+  if (value.sourceKind !== undefined && value.sourceKind !== 'motion-mjpeg' && value.sourceKind !== 'rtsp') return null;
   const messageReferences = value.messageReferences.map(parseMessageReference);
   if (messageReferences.some((reference) => reference === null)) return null;
   return {
@@ -88,6 +89,7 @@ function parseLease(value: unknown): LiveStreamLease | null {
     pid: createLiveStreamProcessId(value.pid),
     processIdentity: value.processIdentity,
     cameraId: value.cameraId,
+    ...(value.sourceKind === undefined ? {} : { sourceKind: value.sourceKind }),
     diagnosticExpiresAtUnixMs: value.diagnosticExpiresAtUnixMs,
     messageReferences: messageReferences as LiveStreamMessageReference[],
   };

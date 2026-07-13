@@ -28,7 +28,7 @@ import { ListMotionEventsUseCase } from './application/list-motion-events.use-ca
 import { LiveStreamMessageCleanupService } from './application/live-stream-message-cleanup.service';
 import { LiveStreamSessionService } from './application/live-stream-session.service';
 import { LiveSourceCredentialRotationCoordinator } from './application/live-source-credential-rotation-coordinator.service';
-import { MotionLiveSourceService } from './application/motion-live-source.service';
+import { LiveStreamSourceResolverService } from './application/live-stream-source-resolver.service';
 import { MotionWatcherService } from './application/motion-watcher.service';
 import { OpenLiveStreamUseCase } from './application/open-live-stream.use-case';
 import { RecordMotionEndUseCase } from './application/record-motion-end.use-case';
@@ -347,7 +347,7 @@ const liveStreamOptions = liveStreamOptionsFromEnv(process.env);
       provide: LIVE_STREAM_MESSAGE_CLEANUP,
       useExisting: LiveStreamMessageCleanupService,
     },
-    MotionLiveSourceService,
+    LiveStreamSourceResolverService,
     {
       provide: LiveStreamSessionService,
       useFactory: (
