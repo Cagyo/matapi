@@ -3,9 +3,139 @@ set -euo pipefail
 FEATURE="${1:-}"
 USER="${HOME_WORKER_USER:-homeworker}"
 APT_LOCK_TIMEOUT_SECONDS=300
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INSTALL_DIR="${HOME_WORKER_INSTALL_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 apt_get() {
   sudo apt-get -o "DPkg::Lock::Timeout=${APT_LOCK_TIMEOUT_SECONDS}" "$@"
+}
+
+install_rtsp_runtime() {
+  local stream_user="homeworker-stream"
+  local stream_group="homeworker-stream"
+  local env_file="$INSTALL_DIR/.env"
+  local policy_dir="/etc/home-worker"
+  local policy_file="$policy_dir/live-stream-policy.json"
+
+  if ! [[ "$USER" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+    echo "ERROR: unsafe worker account name" >&2
+    return 1
+  fi
+  apt_get install -y ffmpeg nftables policykit-1
+  if ! getent group "$stream_group" >/dev/null; then
+    sudo groupadd --system "$stream_group"
+  fi
+  if ! id "$stream_user" >/dev/null 2>&1; then
+    sudo useradd --system --no-create-home --home-dir /nonexistent \
+      --shell /usr/sbin/nologin --gid "$stream_group" "$stream_user"
+  fi
+  sudo usermod --home /nonexistent --shell /usr/sbin/nologin --gid "$stream_group" "$stream_user"
+  sudo usermod -L "$stream_user"
+  sudo usermod -aG "$stream_group" "$USER"
+
+  if ! sudo test -f "$env_file"; then
+    echo "ERROR: $env_file is required before RTSP runtime installation" >&2
+    return 1
+  fi
+  # Generate the key only when absent/blank. Existing non-empty keys are never
+  # printed or replaced; malformed non-empty values fail closed.
+  sudo python3 - "$env_file" <<'PY'
+import os, re, secrets, sys, tempfile
+path = sys.argv[1]
+st = os.stat(path, follow_symlinks=False)
+if not os.path.isfile(path) or os.path.islink(path):
+    raise SystemExit("unsafe env file")
+with open(path, encoding="utf-8") as stream:
+    lines = stream.read().splitlines()
+indexes = [i for i, line in enumerate(lines) if line.startswith("RTSP_CREDENTIALS_KEY=")]
+if len(indexes) > 1:
+    raise SystemExit("duplicate RTSP credential key")
+if indexes:
+    value = lines[indexes[0]].split("=", 1)[1]
+    if value and not re.fullmatch(r"[0-9a-fA-F]{64}", value):
+        raise SystemExit("malformed RTSP credential key")
+    if value:
+        raise SystemExit(0)
+    lines[indexes[0]] = "RTSP_CREDENTIALS_KEY=" + secrets.token_hex(32)
+else:
+    lines.append("RTSP_CREDENTIALS_KEY=" + secrets.token_hex(32))
+directory = os.path.dirname(path)
+fd, temporary = tempfile.mkstemp(prefix=".env.rtsp.", dir=directory)
+try:
+    os.fchmod(fd, st.st_mode & 0o777)
+    os.fchown(fd, st.st_uid, st.st_gid)
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        stream.write("\n".join(lines) + "\n")
+        stream.flush(); os.fsync(stream.fileno())
+    os.replace(temporary, path)
+finally:
+    try: os.unlink(temporary)
+    except FileNotFoundError: pass
+PY
+
+  local policy_tmp
+  policy_tmp="$(mktemp)"
+  if ! sudo python3 - "$env_file" "$policy_tmp" "$(id -u "$USER")" "$(id -u "$stream_user")" <<'PY'
+import ipaddress, json, os, re, sys
+env_path, output, worker_uid, stream_uid = sys.argv[1:]
+values = {}
+with open(env_path, encoding="utf-8") as stream:
+    for raw in stream:
+        line = raw.rstrip("\r\n")
+        if not line or line.startswith("#") or "=" not in line: continue
+        key, value = line.split("=", 1)
+        if key in values: raise SystemExit("duplicate policy setting")
+        values[key] = value.strip().strip('"').strip("'")
+cidr_text = values.get("RTSP_ALLOWED_CIDRS", "")
+cidrs = [part.strip() for part in cidr_text.split(",") if part.strip()]
+if not cidrs: raise SystemExit("RTSP_ALLOWED_CIDRS is required")
+canonical = []
+for text in cidrs:
+    network = ipaddress.ip_network(text, strict=True)
+    minimum = 8
+    if network.prefixlen < minimum or network.is_global or network.is_multicast or network.is_unspecified:
+        raise SystemExit("unsafe RTSP CIDR")
+    canonical.append(str(network))
+first = int(values.get("RTSP_UDP_PORT_FIRST", "24000"))
+last = int(values.get("RTSP_UDP_PORT_LAST", "24001"))
+if not (1 <= first <= last <= 65535 and last - first + 1 <= 64):
+    raise SystemExit("unsafe RTSP UDP range")
+with open(output, "w", encoding="utf-8") as stream:
+    json.dump({"version": 1, "workerUid": int(worker_uid), "streamUid": int(stream_uid), "allowedCidrs": canonical, "udpPortFirst": first, "udpPortLast": last}, stream, separators=(",", ":"), sort_keys=True)
+    stream.write("\n")
+PY
+  then
+    rm -f "$policy_tmp"
+    return 1
+  fi
+
+  sudo install -d -m 0755 -o root -g root "$policy_dir" /etc/home-worker/ca /usr/lib/home-worker /etc/polkit-1/rules.d /etc/tmpfiles.d
+  sudo install -m 0600 -o root -g root "$policy_tmp" "$policy_file"
+  rm -f "$policy_tmp"
+  sudo install -m 0755 -o root -g root "$SCRIPT_DIR/live-stream-net-helper" /usr/lib/home-worker/live-stream-net-helper
+  sudo install -m 0755 -o root -g root "$SCRIPT_DIR/live-stream-ffmpeg-runner" /usr/lib/home-worker/live-stream-ffmpeg-runner
+  sudo install -m 0644 -o root -g root "$INSTALL_DIR/systemd/homeworker-ffmpeg-stream@.service" /etc/systemd/system/homeworker-ffmpeg-stream@.service
+  sudo install -m 0644 -o root -g root "$INSTALL_DIR/systemd/homeworker-stream-net.service" /etc/systemd/system/homeworker-stream-net.service
+  local polkit_tmp
+  polkit_tmp="$(mktemp)"
+  sed "s/@HOME_WORKER_USER@/$USER/g" "$INSTALL_DIR/systemd/homeworker-stream-systemd.rules" > "$polkit_tmp"
+  sudo install -m 0644 -o root -g root "$polkit_tmp" /etc/polkit-1/rules.d/49-homeworker-stream-systemd.rules
+  rm -f "$polkit_tmp"
+  local tmpfiles_tmp
+  tmpfiles_tmp="$(mktemp)"
+  cat > "$tmpfiles_tmp" <<EOF
+d /run/home-worker 0750 root $stream_group - -
+d /run/home-worker/live-stream-config 2730 root $stream_group - -
+d /run/home-worker/live-stream-output 3770 root $stream_group - -
+d /run/home-worker/live-source-probe 0700 $USER $USER - -
+EOF
+  sudo install -m 0644 -o root -g root "$tmpfiles_tmp" /etc/tmpfiles.d/homeworker-stream.conf
+  rm -f "$tmpfiles_tmp"
+  sudo systemd-tmpfiles --create /etc/tmpfiles.d/homeworker-stream.conf
+  sudo systemctl daemon-reload
+  sudo systemctl enable homeworker-stream-net.service
+  sudo systemctl restart homeworker-stream-net.service
+  sudo systemctl is-active --quiet homeworker-stream-net.service
 }
 
 case "$FEATURE" in
@@ -222,6 +352,12 @@ EOF
     fi
     cleanup_cloudflared_diagnostics
     trap - EXIT
+    if [ "${HOME_WORKER_RTSP_SKIP_RUNTIME_INSTALL:-0}" = "1" ] && [ "${VITEST:-}" = "true" ]; then
+      : # Legacy cloudflared harness exercises only repository/diagnostic behavior.
+    else
+      install_rtsp_runtime
+    fi
+    echo "RTSP runtime installed; restart the worker supervisor to refresh its homeworker-stream group membership. Until then RTSP startup remains fail closed."
     echo "Experimental cloudflared live-stream capability installed."
     ;;
   digital|neobox)

@@ -1,0 +1,49 @@
+[Unit]
+Description=Restricted Home Worker RTSP converter %i
+After=network-online.target homeworker-stream-net.service
+Requires=homeworker-stream-net.service
+
+[Service]
+Type=simple
+User=homeworker-stream
+Group=homeworker-stream
+UMask=0007
+ExecStart=/usr/lib/home-worker/live-stream-ffmpeg-runner %i
+ExecStopPost=/usr/bin/rm -f /run/home-worker/live-stream-config/%i.json
+RuntimeMaxSec=300
+TimeoutStartSec=30
+TimeoutStopSec=5
+KillMode=mixed
+KillSignal=SIGTERM
+FinalKillSignal=SIGKILL
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RemoveIPC=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+ReadWritePaths=/run/home-worker/live-stream-config /run/home-worker/live-stream-output
+ReadOnlyPaths=/etc/ssl/certs /etc/home-worker/ca
+StandardOutput=null
+StandardError=null
+MemoryMax=128M
+CPUQuota=80%
+TasksMax=24
+
+[Install]
+# Instances are started on demand only; this template is never enabled.

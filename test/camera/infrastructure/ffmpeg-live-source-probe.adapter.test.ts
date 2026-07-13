@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { LiveSource } from '../../../src/camera/domain/live-source.entity';
 import type { StreamEgressPort } from '../../../src/camera/domain/ports/stream-egress.port';
+import type { StreamSandboxPort } from '../../../src/camera/domain/ports/stream-sandbox.port';
 import {
   BoundedJpegFrameTracker,
   FfmpegLiveSourceProbeAdapter,
@@ -42,6 +43,7 @@ function fixture(
     monotonicNow?: () => number;
     wallNow?: () => number;
   } = {},
+  sandbox?: StreamSandboxPort,
 ) {
   const egress: StreamEgressPort = {
     grant: vi.fn().mockResolvedValue(lease),
@@ -75,6 +77,7 @@ function fixture(
       monotonicNow: clocks.monotonicNow ?? (() => Date.now()),
       randomUUID: () => lease.sessionId,
       randomBytes: () => Buffer.alloc(32, 7),
+      ...(sandbox ? { sandbox } : {}),
     } as never,
   );
   return {
@@ -160,6 +163,99 @@ describe('FfmpegLiveSourceProbeAdapter', () => {
       expect(JSON.stringify(error)).not.toMatch(/user|pass|private|stderr/i);
     }
     expect(egress.revoke).toHaveBeenCalledWith(lease);
+  });
+
+  it('routes a real-mode probe through the stream sandbox and never direct-spawns FFmpeg', async () => {
+    const sandbox: StreamSandboxPort = {
+      start: vi.fn(async ({ sessionId }) => ({
+        processIdentity: 'pid:44:start:55', health: { ready: true },
+        output: {
+          kind: 'unix-socket',
+          socketPath: `/run/home-worker/live-stream-output/${sessionId}.sock`,
+          queueCapacityFrames: 2,
+        },
+      })),
+      stop: vi.fn().mockResolvedValue(undefined),
+    };
+    const { adapter, startProcess, openUnixSink, egress } = fixture(undefined, 30_000, {}, sandbox);
+    const source = LiveSource.create({ cameraId: 'c1', url: 'rtsp://cam.local/live' });
+
+    await adapter.run(source);
+
+    expect(startProcess).not.toHaveBeenCalled();
+    expect(openUnixSink).toHaveBeenCalledWith(`/run/home-worker/live-stream-output/${lease.sessionId}.sock`, 0o660);
+    expect(sandbox.start).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: lease.sessionId,
+      connectionAddress: '192.168.1.20',
+      tlsServerName: null,
+    }));
+    expect(sandbox.stop).toHaveBeenCalledWith(lease.sessionId);
+    expect(egress.revoke).toHaveBeenCalledWith(lease);
+  });
+
+  it('passes a grant-derived literal while retaining the original strict TLS server name', async () => {
+    const sandbox: StreamSandboxPort = {
+      start: vi.fn(async ({ sessionId }) => ({
+        processIdentity: 'pid:44:start:55', health: { ready: true },
+        output: { kind: 'unix-socket', socketPath: `/run/home-worker/live-stream-output/${sessionId}.sock`, queueCapacityFrames: 2 },
+      })),
+      stop: vi.fn().mockResolvedValue(undefined),
+    };
+    const { adapter } = fixture(undefined, 30_000, {}, sandbox);
+
+    await adapter.run(LiveSource.create({
+      cameraId: 'c1', url: 'rtsps://user:pass@camera.local/private', tlsMode: 'strict',
+    }));
+
+    expect(sandbox.start).toHaveBeenCalledWith(expect.objectContaining({
+      connectionAddress: '192.168.1.20',
+      tlsServerName: 'camera.local',
+    }));
+  });
+
+  it('stops the sandbox and revokes egress when frame delivery fails', async () => {
+    const sandbox: StreamSandboxPort = {
+      start: vi.fn(async ({ sessionId }) => ({
+        processIdentity: 'pid:44:start:55', health: { ready: true },
+        output: { kind: 'unix-socket', socketPath: `/run/home-worker/live-stream-output/${sessionId}.sock`, queueCapacityFrames: 2 },
+      })),
+      stop: vi.fn().mockResolvedValue(undefined),
+    };
+    const { adapter, openUnixSink, egress } = fixture(undefined, 30_000, {}, sandbox);
+    openUnixSink.mockResolvedValueOnce({
+      confirmFrame: vi.fn().mockRejectedValue(new Error('no frame')),
+      close: vi.fn().mockResolvedValue(undefined),
+    });
+
+    await expect(adapter.run(LiveSource.create({ cameraId: 'c1', url: 'rtsp://cam.local/live' })))
+      .rejects.toMatchObject({ code: 'LIVE_SOURCE_PROBE_FAILED' });
+    expect(sandbox.stop).toHaveBeenCalledWith(lease.sessionId);
+    expect(egress.revoke).toHaveBeenCalledWith(lease);
+  });
+
+  it('starts firewall revoke immediately and remains bounded when sandbox stop hangs', async () => {
+    vi.useFakeTimers();
+    try {
+      const sandbox: StreamSandboxPort = {
+        start: vi.fn(async ({ sessionId }) => ({
+          processIdentity: 'pid:44:start:55', health: { ready: true },
+          output: { kind: 'unix-socket', socketPath: `/run/home-worker/live-stream-output/${sessionId}.sock`, queueCapacityFrames: 2 },
+        })),
+        stop: vi.fn(() => new Promise<void>(() => undefined)),
+      };
+      const { adapter, egress } = fixture(undefined, 1_000, { monotonicNow: () => Date.now() }, sandbox);
+      let outcome = 'pending';
+      void adapter.run(LiveSource.create({ cameraId: 'c1', url: 'rtsp://cam.local/live' })).then(
+        () => { outcome = 'resolved'; },
+        () => { outcome = 'rejected'; },
+      );
+      await vi.advanceTimersByTimeAsync(1);
+      expect(egress.revoke).toHaveBeenCalledWith(lease);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(outcome).toBe('rejected');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('rejects an exit-zero probe that delivered no complete JPEG frame', async () => {

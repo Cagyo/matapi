@@ -1,0 +1,190 @@
+#!/usr/bin/python3
+"""Validate one private session record, unlink it, then exec fixed FFmpeg argv."""
+
+import json
+import fcntl
+import ipaddress
+import os
+import re
+import stat
+import sys
+import time
+import urllib.parse
+from pathlib import Path
+
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.I)
+KEYS = {"version", "sessionId", "inputUrl", "tlsServerName", "transport", "tlsMode", "profile", "udpPortFirst", "udpPortLast", "outputSocket", "expiresAtUnixMs", "ownerUid", "caFile"}
+CONFIG_ROOT = Path(os.environ.get("HOMEWORKER_STREAM_CONFIG_DIR", "/run/home-worker/live-stream-config"))
+OUTPUT_ROOT = Path(os.environ.get("HOMEWORKER_STREAM_OUTPUT_DIR", "/run/home-worker/live-stream-output"))
+EXPECTED_CONFIG_OWNER_UID = 0
+EXPECTED_CONFIG_PARENT_MODE = 0o2730
+EXPECTED_SHARED_GID = os.getegid()
+EXPECTED_STREAM_UID = os.geteuid()
+CA_ROOTS = (Path("/etc/ssl/certs"), Path("/etc/home-worker/ca"))
+EXPECTED_CA_OWNER_UID = 0
+
+
+def fail():
+    print("stream configuration rejected", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def strict_json_loads(raw):
+    def unique_object(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate key")
+            value[key] = item
+        return value
+    return json.loads(raw, object_pairs_hook=unique_object)
+
+
+def validate_ca_file(value):
+    if value is None:
+        return
+    if not isinstance(value, str) or not value.startswith("/") or len(value) > 4096 or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        fail()
+    path = Path(value)
+    try:
+        info = path.lstat()
+    except OSError:
+        fail()
+    if path != Path(os.path.normpath(value)) or not any(path.is_relative_to(root) for root in CA_ROOTS) or not stat.S_ISREG(info.st_mode) or info.st_uid != EXPECTED_CA_OWNER_UID or info.st_mode & 0o022 or not info.st_mode & 0o004:
+        fail()
+
+
+def load(session_id):
+    if not UUID_RE.fullmatch(session_id):
+        fail()
+    session_id = session_id.lower()
+    path = CONFIG_ROOT / (session_id + ".json")
+    try:
+        parent = CONFIG_ROOT.lstat()
+        if not stat.S_ISDIR(parent.st_mode) or stat.S_IMODE(parent.st_mode) != EXPECTED_CONFIG_PARENT_MODE or parent.st_uid != EXPECTED_CONFIG_OWNER_UID or parent.st_gid != EXPECTED_SHARED_GID:
+            fail()
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0))
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o640 or info.st_gid != EXPECTED_SHARED_GID or info.st_size > 16_384:
+            fail()
+        raw = os.read(descriptor, 16_385)
+        value = strict_json_loads(raw)
+    except (OSError, ValueError):
+        fail()
+    if not isinstance(value, dict) or set(value) != KEYS or value["version"] != 1 or value["sessionId"] != session_id:
+        fail()
+    if value["transport"] not in ("tcp", "udp") or value["tlsMode"] not in ("none", "strict") or value["profile"] not in ("eco", "balanced", "quality"):
+        fail()
+    owner_uid = value["ownerUid"]
+    if not isinstance(owner_uid, int) or isinstance(owner_uid, bool) or owner_uid < 0 or info.st_uid != owner_uid or owner_uid == EXPECTED_STREAM_UID:
+        fail()
+    validate_ca_file(value["caFile"])
+    first, last = value["udpPortFirst"], value["udpPortLast"]
+    if not isinstance(first, int) or isinstance(first, bool) or not isinstance(last, int) or isinstance(last, bool) or not (1 <= first <= last <= 65535 and last - first + 1 <= 64):
+        fail()
+    expiry = value["expiresAtUnixMs"]
+    now = int(time.time() * 1000)
+    if not isinstance(expiry, int) or isinstance(expiry, bool) or expiry <= now or expiry - now > 300_000:
+        fail()
+    url = value["inputUrl"]
+    if not isinstance(url, str) or len(url) > 8_192 or any(ord(char) < 32 or ord(char) == 127 for char in url) or "\\" in url:
+        fail()
+    parsed = urllib.parse.urlsplit(url)
+    expected_scheme = "rtsps" if value["tlsMode"] == "strict" else "rtsp"
+    if parsed.scheme != expected_scheme or not parsed.hostname:
+        fail()
+    try:
+        ipaddress.ip_address(parsed.hostname)
+    except ValueError:
+        fail()
+    tls_server_name = value["tlsServerName"]
+    if value["tlsMode"] == "strict":
+        if not isinstance(tls_server_name, str) or not tls_server_name or len(tls_server_name) > 253 or any(ord(char) < 33 or ord(char) == 127 for char in tls_server_name):
+            fail()
+    elif tls_server_name is not None or value["caFile"] is not None:
+        fail()
+    output = OUTPUT_ROOT / (session_id + ".sock")
+    if value["outputSocket"] != str(output):
+        fail()
+    try:
+        socket_info = output.lstat()
+        if not stat.S_ISSOCK(socket_info.st_mode) or stat.S_IMODE(socket_info.st_mode) != 0o660 or socket_info.st_gid != EXPECTED_SHARED_GID or socket_info.st_uid != owner_uid:
+            fail()
+    except OSError:
+        fail()
+    try:
+        current = path.lstat()
+        if current.st_dev != info.st_dev or current.st_ino != info.st_ino:
+            fail()
+        path.unlink()
+        os.close(descriptor)
+    except OSError:
+        fail()
+    return value, tls_server_name
+
+
+def ffconcat_document(config, hostname):
+    def quote(value):
+        return "'" + value.replace("'", "'\\''") + "'"
+    lines = [
+        "ffconcat version 1.0",
+        "file " + quote(config["inputUrl"]),
+        "option rtsp_transport " + config["transport"],
+        "option min_port " + str(config["udpPortFirst"]),
+        "option max_port " + str(config["udpPortLast"]),
+        "option timeout 5000000",
+    ]
+    if config["tlsMode"] == "strict":
+        lines.extend(["option tls_verify 1", "option verifyhost " + quote(hostname)])
+        if config["caFile"] is not None:
+            lines.append("option ca_file " + quote(config["caFile"]))
+    return "\n".join(lines) + "\n"
+
+
+def create_private_input(config, hostname):
+    flags = getattr(os, "MFD_ALLOW_SEALING", 0x0002)
+    descriptor = os.memfd_create("homeworker-rtsp-input", flags=flags)
+    try:
+        payload = ffconcat_document(config, hostname).encode("utf-8")
+        if len(payload) > 16_384:
+            fail()
+        os.write(descriptor, payload)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        seals = fcntl.F_SEAL_SEAL | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_GROW | fcntl.F_SEAL_WRITE
+        fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS, seals)
+        os.set_inheritable(descriptor, True)
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def arguments(config, hostname, input_fd):
+    profile = {
+        "eco": ("fps=10,scale=320:-2", "5"),
+        "balanced": ("fps=15,scale=640:-2", "4"),
+        "quality": ("fps=20,scale=1280:-2", "3"),
+    }[config["profile"]]
+    return [
+        "ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
+        "-protocol_whitelist", "file,rtp,rtsp,tcp,tls,udp,unix",
+        "-f", "concat", "-safe", "0", "-i", "/proc/self/fd/" + str(input_fd),
+        "-map", "0:v:0", "-an", "-vf", profile[0], "-c:v", "mjpeg", "-q:v", profile[1],
+        "-flush_packets", "1", "-f", "image2pipe", "unix://" + config["outputSocket"],
+    ]
+
+
+def main():
+    if len(sys.argv) != 2:
+        fail()
+    config, hostname = load(sys.argv[1])
+    input_fd = create_private_input(config, hostname)
+    argv = arguments(config, hostname, input_fd)
+    try:
+        os.execve("/usr/bin/ffmpeg", argv, {"PATH": "/usr/bin:/bin", "LANG": "C"})
+    finally:
+        os.close(input_fd)
+
+
+if __name__ == "__main__":
+    main()

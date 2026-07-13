@@ -63,6 +63,8 @@ function createRepositoryHarness(architecture = 'armhf') {
       ...process.env,
       PATH: `${bin}:/usr/bin:/bin`,
       HOME_WORKER_USER: worker,
+      HOME_WORKER_RTSP_SKIP_RUNTIME_INSTALL: '1',
+      VITEST: 'true',
       CLOUDFLARE_KEYRING_DIR: keyrings,
       CLOUDFLARE_SOURCE_LIST_DIR: sources,
     },
@@ -216,6 +218,8 @@ describe('experimental live-stream installation', () => {
             PATH: `${bin}:${process.env.PATH ?? ''}`,
             HOME_WORKER_USER: worker,
             HOME_WORKER_DEBIAN_ARCH: 'amd64',
+            HOME_WORKER_RTSP_SKIP_RUNTIME_INSTALL: '1',
+            VITEST: 'true',
           },
         },
       );

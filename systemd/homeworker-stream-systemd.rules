@@ -1,0 +1,12 @@
+polkit.addRule(function(action, subject) {
+    if (action.id !== "org.freedesktop.systemd1.manage-units" ||
+        subject.user !== "@HOME_WORKER_USER@") {
+        return;
+    }
+    var unit = action.lookup("unit");
+    var verb = action.lookup("verb");
+    var streamUnit = /^homeworker-ffmpeg-stream@[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.service$/i;
+    if (streamUnit.test(unit) && (verb === "start" || verb === "stop")) {
+        return polkit.Result.YES;
+    }
+});

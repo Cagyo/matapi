@@ -95,6 +95,7 @@ import {
 import { RETENTION_PRUNE } from './domain/ports/retention-prune.port';
 import { SNAPSHOT } from './domain/ports/snapshot.port';
 import { STREAM_EGRESS, type StreamEgressPort } from './domain/ports/stream-egress.port';
+import { STREAM_SANDBOX, type StreamSandboxPort } from './domain/ports/stream-sandbox.port';
 import { DrizzleMediaRepository } from './infrastructure/drizzle-media.repository';
 import { DrizzleLiveSourceRepository } from './infrastructure/drizzle-live-source.repository';
 import { InMemoryLiveSourceRepository } from './infrastructure/in-memory-live-source.repository';
@@ -105,6 +106,9 @@ import {
 } from './infrastructure/ffmpeg-live-source-probe.adapter';
 import { UnavailableLiveSourceProbeAdapter } from './infrastructure/unavailable-live-source-probe.adapter';
 import { UnavailableStreamEgressAdapter } from './infrastructure/unavailable-stream-egress.adapter';
+import { UnavailableStreamSandboxAdapter } from './infrastructure/unavailable-stream-sandbox.adapter';
+import { NftStreamEgressAdapter, UnixLocalStreamHelperClient } from './infrastructure/nft-stream-egress.adapter';
+import { SystemdFfmpegStreamAdapter } from './infrastructure/systemd-ffmpeg-stream.adapter';
 import { LiveStreamSessionControlAdapter } from './infrastructure/live-stream-session-control.adapter';
 import { DrizzleRetentionPruneAdapter } from './infrastructure/drizzle-retention-prune.adapter';
 import { EventsMotionAlertAdapter } from './infrastructure/events-motion-alert.adapter';
@@ -289,17 +293,39 @@ const liveStreamOptions = liveStreamOptionsFromEnv(process.env);
     DrizzleLiveSourceRepository,
     {
       provide: STREAM_EGRESS,
-      useClass: UnavailableStreamEgressAdapter,
+      useFactory: (): StreamEgressPort => mode === 'stub'
+        ? new UnavailableStreamEgressAdapter()
+        : new NftStreamEgressAdapter(new UnixLocalStreamHelperClient()),
+    },
+    {
+      provide: STREAM_SANDBOX,
+      useFactory: (): StreamSandboxPort => {
+        const probe = liveSourceProbeOptionsFromEnvironment(process.env);
+        return mode === 'stub' || !probe
+          ? new UnavailableStreamSandboxAdapter()
+          : new SystemdFfmpegStreamAdapter({
+            configDirectory: '/run/home-worker/live-stream-config',
+            outputDirectory: '/run/home-worker/live-stream-output',
+            startupTimeoutMs: liveStreamOptions.startTimeoutMs,
+            udpPortFirst: probe.udpPortFirst,
+            udpPortLast: probe.udpPortLast,
+            caFile: probe.caFile,
+          });
+      },
     },
     {
       provide: LIVE_SOURCE_PROBE,
-      useFactory: (egress: StreamEgressPort): LiveSourceProbePort => {
+      useFactory: (egress: StreamEgressPort, sandbox: StreamSandboxPort): LiveSourceProbePort => {
         const options = liveSourceProbeOptionsFromEnvironment(process.env);
         return options
-          ? new FfmpegLiveSourceProbeAdapter(egress, options)
+          ? new FfmpegLiveSourceProbeAdapter(
+              egress,
+              options,
+              mode === 'real' ? { sandbox } : {},
+            )
           : new UnavailableLiveSourceProbeAdapter();
       },
-      inject: [STREAM_EGRESS],
+      inject: [STREAM_EGRESS, STREAM_SANDBOX],
     },
     LiveStreamMessageCleanupService,
     {

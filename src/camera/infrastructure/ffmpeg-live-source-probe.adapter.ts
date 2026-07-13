@@ -14,6 +14,7 @@ import type {
   StreamEgressLease,
   StreamEgressPort,
 } from '../domain/ports/stream-egress.port';
+import type { StreamSandboxPort } from '../domain/ports/stream-sandbox.port';
 import { StreamEgressGrant } from '../domain/stream-egress-grant.value-object';
 
 const PROTOCOL_WHITELIST = 'rtp,rtsp,tcp,tls,udp,unix';
@@ -142,11 +143,12 @@ export interface FfmpegLiveSourceProbeDependencies {
     args: readonly string[],
     options: { maxBuffer: number; shell: false },
   ): ProbeProcessHandle;
-  openUnixSink(path: string): Promise<UnixSink>;
+  openUnixSink(path: string, mode: 0o600 | 0o660): Promise<UnixSink>;
   monotonicNow(): number;
   wallNow(): number;
   randomUUID(): string;
   randomBytes(): Buffer;
+  sandbox?: StreamSandboxPort;
 }
 
 export interface ProbeProcessHandle {
@@ -179,11 +181,12 @@ export class FfmpegLiveSourceProbeAdapter implements LiveSourceProbePort {
     this.#dependencies = {
       lookup: dependencies.lookup ?? defaultLookup,
       startProcess: dependencies.startProcess ?? startFfmpegProbeProcess,
-      openUnixSink: dependencies.openUnixSink ?? openFfmpegProbeUnixSink,
+      openUnixSink: dependencies.openUnixSink ?? ((path, mode) => openFfmpegProbeUnixSink(path, {}, mode)),
       monotonicNow: dependencies.monotonicNow ?? (() => performance.now()),
       wallNow: dependencies.wallNow ?? Date.now,
       randomUUID: dependencies.randomUUID ?? randomUUID,
       randomBytes: dependencies.randomBytes ?? (() => randomBytes(32)),
+      ...(dependencies.sandbox ? { sandbox: dependencies.sandbox } : {}),
     };
   }
 
@@ -203,6 +206,8 @@ export class FfmpegLiveSourceProbeAdapter implements LiveSourceProbePort {
     let process: ProbeProcessHandle | undefined;
     let processCompletion: Promise<void> | undefined;
     let processSettled = false;
+    let sandboxStartAttempted = false;
+    let sandboxSessionId: string | undefined;
     let failed = false;
     try {
       const payload = source.credentialPayload();
@@ -256,38 +261,47 @@ export class FfmpegLiveSourceProbeAdapter implements LiveSourceProbePort {
         monotonicNow,
         (lateLease) => this.egress.revoke(lateLease),
       );
-      const socketPath = join(
-        this.options.runtimeDirectory,
-        `probe-${sessionId}.sock`,
-      );
+      const socketPath = this.#dependencies.sandbox
+        ? join('/run/home-worker/live-stream-output', `${sessionId}.sock`)
+        : join(this.options.runtimeDirectory, `probe-${sessionId}.sock`);
       sink = await awaitBeforeDeadline(
-        this.#dependencies.openUnixSink(socketPath),
+        this.#dependencies.openUnixSink(socketPath, this.#dependencies.sandbox ? 0o660 : 0o600),
         workDeadline,
         monotonicNow,
         (lateSink) => lateSink.close(),
       );
-      process = this.#dependencies.startProcess(
-        'ffmpeg',
-        buildArguments(source, selectedUrl, socketPath, this.options),
-        {
-          maxBuffer: MAX_DIAGNOSTIC_BYTES,
-          shell: false,
-        },
-      );
-      processCompletion = process.completion.then(
-        () => {
-          processSettled = true;
-        },
-        (error: unknown) => {
-          processSettled = true;
-          throw error;
-        },
-      );
-      await awaitBeforeDeadline(
-        processCompletion,
-        workDeadline,
-        monotonicNow,
-      );
+      if (this.#dependencies.sandbox) {
+        sandboxSessionId = sessionId;
+        sandboxStartAttempted = true;
+        const started = await awaitBeforeDeadline(
+          this.#dependencies.sandbox.start({
+            sessionId,
+            source: { source, credential: payload },
+            connectionAddress: selected.addresses[0],
+            tlsServerName: source.tlsMode === 'strict' ? selected.hostname : null,
+            expiresAtUnixMs: leaseExpiresAtUnixMs,
+          }),
+          workDeadline,
+          monotonicNow,
+          () => this.#dependencies.sandbox?.stop(sessionId),
+        );
+        if (!/^pid:[1-9]\d*:start:[1-9]\d*$/u.test(started.processIdentity) ||
+            !started.health.ready || started.output.kind !== 'unix-socket' ||
+            started.output.socketPath !== socketPath || started.output.queueCapacityFrames !== 2) {
+          throw new LiveSourceProbeFailedError();
+        }
+      } else {
+        process = this.#dependencies.startProcess(
+          'ffmpeg',
+          buildArguments(source, selectedUrl, socketPath, this.options),
+          { maxBuffer: MAX_DIAGNOSTIC_BYTES, shell: false },
+        );
+        processCompletion = process.completion.then(
+          () => { processSettled = true; },
+          (error: unknown) => { processSettled = true; throw error; },
+        );
+        await awaitBeforeDeadline(processCompletion, workDeadline, monotonicNow);
+      }
       const remainingMs = Math.max(
         1,
         workDeadline - monotonicNow(),
@@ -301,6 +315,13 @@ export class FfmpegLiveSourceProbeAdapter implements LiveSourceProbePort {
       failed = true;
     } finally {
       const cleanupOperations: Promise<boolean>[] = [];
+      if (sandboxStartAttempted && sandboxSessionId && this.#dependencies.sandbox) {
+        cleanupOperations.push(cleanupBeforeDeadline(
+          () => this.#dependencies.sandbox!.stop(sandboxSessionId!),
+          finalDeadline,
+          monotonicNow,
+        ));
+      }
       if (process && processCompletion && !processSettled) {
         cleanupOperations.push(
           terminateAndReap(
@@ -339,7 +360,7 @@ export class FfmpegLiveSourceProbeAdapter implements LiveSourceProbePort {
 
   private async validateEndpoint(
     raw: string,
-  ): Promise<{ raw: string; addresses: string[]; port: number }> {
+  ): Promise<{ raw: string; addresses: string[]; port: number; hostname: string }> {
     const addresses = new Set<string>();
     const endpoint = new URL(raw);
     const hostname = endpoint.hostname.replace(/^\[|\]$/gu, '');
@@ -361,6 +382,7 @@ export class FfmpegLiveSourceProbeAdapter implements LiveSourceProbePort {
     return {
       raw,
       addresses: [...addresses],
+      hostname,
       port: endpoint.port
         ? Number(endpoint.port)
         : endpoint.protocol === 'rtsps:'
@@ -575,6 +597,7 @@ async function settlesBefore(
 export async function openFfmpegProbeUnixSink(
   path: string,
   dependencies: Partial<UnixSinkSetupDependencies> = {},
+  mode: 0o600 | 0o660 = 0o600,
 ): Promise<UnixSink> {
   const mkdirSink = dependencies.mkdir ?? mkdir;
   const unlinkSink = dependencies.unlink ?? unlink;
@@ -586,8 +609,16 @@ export async function openFfmpegProbeUnixSink(
   const sockets = new Set<Socket>();
   const tracker = new BoundedJpegFrameTracker();
   let sinkFailed = false;
+  let acceptedConnection = false;
   let closed = false;
   const server = createSinkServer((socket) => {
+    if (acceptedConnection) {
+      sinkFailed = true;
+      tracker.finish();
+      socket.destroy();
+      return;
+    }
+    acceptedConnection = true;
     sockets.add(socket);
     socket.on('data', (chunk: Buffer) => {
       try {
@@ -626,7 +657,7 @@ export async function openFfmpegProbeUnixSink(
         resolve();
       });
     });
-    await (dependencies.chmod ?? chmod)(path, 0o600);
+    await (dependencies.chmod ?? chmod)(path, mode);
   } catch (error) {
     await close().catch(() => undefined);
     throw error;

@@ -86,18 +86,28 @@ FFmpeg help keywords or ordinary CA-file verification.
 
 ## Ownership and cleanup contract
 
-- The Node live-session owner creates a per-session directory under the private
-  stream runtime root with owner/group `homeworker-stream` and mode `0700`.
-- The Node gateway creates the Unix stream socket inside that directory with
-  mode `0600`, starts listening before it starts FFmpeg, and accepts exactly the
-  one identity-tracked converter connection.
+The spike used one identity and therefore measured a `0700` directory and
+`0600` socket. Production deliberately splits the Node gateway (`homeworker`)
+from FFmpeg (`homeworker-stream`). Its least-privilege refinement is a dedicated
+`homeworker-stream` group: the root-owned setgid+sticky output parent is `3770`, the
+non-listable credential parent is `2730`, the
+gateway-owned Unix socket is `0660`, and the short-lived credential config is
+`0640`. Both service identities are members of that group and all “other” bits
+remain zero. This is the only production relaxation; it does not make the data
+plane or credentials accessible to unrelated local users.
+
+- The Node gateway creates the UUID-named Unix stream socket in the setgid
+  output parent with mode `0660`, starts listening before it starts FFmpeg, and
+  accepts exactly one converter connection. The setgid+sticky parent prevents
+  the stream identity from replacing the gateway-owned socket, while the
+  systemd PID/start identity is retained for bounded lifecycle control.
 - The gateway parses raw JPEG boundaries and retains no more than two frames in
   one shared drop-oldest queue. A partial JPEG is capped at 2,097,152 bytes and
   fails closed on overflow. It serves at most two viewers from the shared queue.
 - The session owner tracks the exact FFmpeg child identity. Stop/expiry/error
   sends `SIGTERM`, waits at most four seconds, sends `SIGKILL` only if required,
   waits for the child, closes the Unix listener, unlinks the socket, and removes
-  the per-session directory.
+  the matching short-lived credential config.
 - Startup is bounded to eight seconds and the entire spike trial to 15 seconds;
   planned runtime startup remains 30 seconds. RTSP socket I/O is bounded to five
   seconds. No process, listener, socket, or runtime file may survive a failed
@@ -105,6 +115,14 @@ FFmpeg help keywords or ordinary CA-file verification.
 - The script itself refuses root and any identity other than
   `homeworker-stream`; it uses `umask 077` and a trap implementing the same
   bounded teardown.
+
+Node 20 does not expose Linux `SO_PEERCRED` for accepted Unix sockets. A
+compromised orphan process already running as the same locked, no-shell
+`homeworker-stream` identity could therefore race the single connection. The
+one-global-session invariant, sticky worker-owned socket, rejection of a second
+peer, systemd cleanup, and `RuntimeMaxSec` bound that residual; cryptographic
+PID authentication would require a native credential-checking proxy and is not
+claimed here.
 
 ## Reproduction
 

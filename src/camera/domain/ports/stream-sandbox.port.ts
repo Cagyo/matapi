@@ -18,6 +18,10 @@ export interface StreamSandboxPort {
   start(input: {
     sessionId: string;
     source: LiveSourceForStream;
+    /** Exact grant-derived literal used for the network connection (no DNS). */
+    connectionAddress: string;
+    /** Original authority hostname used only for strict TLS identity checks. */
+    tlsServerName: string | null;
     expiresAtUnixMs: number;
   }): Promise<StreamSandboxStartResult>;
   stop(sessionId: string): Promise<void>;

@@ -1,0 +1,38 @@
+[Unit]
+Description=Home Worker restricted RTSP egress helper
+After=network-pre.target nftables.service
+Before=homeworker-ffmpeg-stream@.service
+
+[Service]
+Type=simple
+User=root
+Group=homeworker-stream
+ExecStart=/usr/lib/home-worker/live-stream-net-helper
+Restart=on-failure
+RestartSec=2
+RuntimeDirectory=home-worker-stream-net
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+UMask=0027
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_CHOWN
+AmbientCapabilities=CAP_NET_ADMIN CAP_CHOWN
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+ReadWritePaths=/run/home-worker-stream-net
+MemoryMax=32M
+CPUQuota=20%
+TasksMax=8
+
+[Install]
+WantedBy=multi-user.target

@@ -24,9 +24,12 @@ motion:
   scripts:
     - "curl https://rclone.org/install.sh | sudo bash"
 
-# Explicit opt-in for the experimental Motion MJPEG Quick Tunnel view.
+# Explicit opt-in for the restricted RTSP converter and Quick Tunnel view.
 rtsp:
   apt:
+    - ffmpeg
+    - nftables
+    - policykit-1
     - cloudflared
 
 uart:

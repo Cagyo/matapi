@@ -1,0 +1,381 @@
+#!/usr/bin/python3
+"""Root-only, authenticated RTSP egress lease helper.
+
+The protocol accepts grant/revoke records only. It never accepts URLs, hostnames,
+commands, unit names, or nft syntax. Errors intentionally expose one short code.
+"""
+
+import copy
+import grp
+import ipaddress
+import json
+import os
+import pwd
+import secrets
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+MAX_MESSAGE_BYTES = 16_384
+UUID_RE = __import__("re").compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", __import__("re").I)
+HEX64_RE = __import__("re").compile(r"^[0-9a-f]{64}$", __import__("re").I)
+LEASE_RE = __import__("re").compile(r"^[0-9a-f]{32}$")
+MAX_LEASE_MS = 300_000
+MAX_UDP_PORTS = 64
+
+
+class Reject(Exception):
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def strict_json_loads(raw):
+    def unique_object(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise Reject("request")
+            value[key] = item
+        return value
+    return json.loads(raw, object_pairs_hook=unique_object)
+
+
+class Policy:
+    def __init__(self, raw):
+        if not isinstance(raw, dict) or set(raw) != {"version", "workerUid", "streamUid", "allowedCidrs", "udpPortFirst", "udpPortLast"}:
+            raise Reject("policy")
+        if raw["version"] != 1 or not all(isinstance(raw[key], int) and raw[key] >= 0 for key in ("workerUid", "streamUid")):
+            raise Reject("policy")
+        if not isinstance(raw["allowedCidrs"], list) or not raw["allowedCidrs"]:
+            raise Reject("policy")
+        self.networks = []
+        for text in raw["allowedCidrs"]:
+            try:
+                network = ipaddress.ip_network(text, strict=True)
+            except (TypeError, ValueError):
+                raise Reject("policy")
+            minimum = 8
+            if network.prefixlen < minimum or network.is_global or network.is_multicast or network.is_unspecified:
+                raise Reject("policy")
+            self.networks.append(network)
+        self.worker_uid = raw["workerUid"]
+        self.stream_uid = raw["streamUid"]
+        self.udp_first = valid_port(raw["udpPortFirst"])
+        self.udp_last = valid_port(raw["udpPortLast"])
+        if self.udp_first > self.udp_last or self.udp_last - self.udp_first + 1 > MAX_UDP_PORTS:
+            raise Reject("policy")
+
+    def address(self, text):
+        if not isinstance(text, str):
+            raise Reject("address")
+        try:
+            address = ipaddress.ip_address(text)
+        except ValueError:
+            raise Reject("address")
+        if str(address) != text.lower() or address.is_global or address.is_multicast or address.is_unspecified:
+            raise Reject("address")
+        if not any(address.version == network.version and address in network for network in self.networks):
+            raise Reject("address")
+        return str(address)
+
+
+class StateStore:
+    def __init__(self, path):
+        self.path = Path(path)
+
+    def load(self):
+        try:
+            raw = strict_json_loads(self.path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {"version": 1, "leases": {}, "usedNonces": {}}
+        except (OSError, ValueError):
+            raise Reject("state")
+        if not isinstance(raw, dict) or set(raw) != {"version", "leases", "usedNonces"} or raw["version"] != 1 or not isinstance(raw["leases"], dict) or not isinstance(raw["usedNonces"], dict):
+            raise Reject("state")
+        return raw
+
+    def save(self, state):
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd, temporary = tempfile.mkstemp(prefix="state.", dir=self.path.parent)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(state, stream, separators=(",", ":"), sort_keys=True)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.path)
+        finally:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+
+class NftBackend:
+    def apply(self, script):
+        exists = subprocess.run(
+            ["/usr/sbin/nft", "list", "table", "inet", "homeworker_stream"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=5, check=False,
+        ).returncode == 0
+        payload = (("delete table inet homeworker_stream\n" if exists else "") + script).encode()
+        subprocess.run(
+            ["/usr/sbin/nft", "-f", "-"], input=payload, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=5, check=True,
+        )
+
+
+class Engine:
+    def __init__(self, policy, store, nft, now_ms=None, lease_id=None):
+        self.policy = policy
+        self.store = store
+        self.nft = nft
+        self.now_ms = now_ms or (lambda: int(time.time() * 1000))
+        self.lease_id = lease_id or (lambda: secrets.token_hex(16))
+        self.state = store.load()
+        self.recover()
+
+    def recover(self):
+        now = self.now_ms()
+        self.state["leases"] = {key: value for key, value in self.state["leases"].items() if isinstance(value, dict) and value.get("expiresAtUnixMs", 0) > now}
+        self.state["usedNonces"] = {key: value for key, value in self.state["usedNonces"].items() if isinstance(value, int) and value > now}
+        self._commit(self.state)
+
+    def handle(self, request):
+        self._prune()
+        if not isinstance(request, dict) or not isinstance(request.get("op"), str):
+            raise Reject("request")
+        if request["op"] == "grant":
+            return self._grant(request)
+        if request["op"] == "revoke":
+            return self._revoke(request)
+        raise Reject("operation")
+
+    def _prune(self):
+        now = self.now_ms()
+        next_state = copy.deepcopy(self.state)
+        next_state["leases"] = {key: value for key, value in next_state["leases"].items() if isinstance(value, dict) and value.get("expiresAtUnixMs", 0) > now}
+        next_state["usedNonces"] = {key: value for key, value in next_state["usedNonces"].items() if isinstance(value, int) and value > now}
+        if next_state != self.state:
+            self._commit(next_state)
+
+    def _grant(self, request):
+        tcp_keys = {"op", "sessionId", "nonceHash", "addresses", "rtspControlPorts", "transport", "expiresAtUnixMs"}
+        udp_keys = tcp_keys | {"udpMediaPorts"}
+        if set(request) not in (tcp_keys, udp_keys):
+            raise Reject("unknown-field")
+        session = valid_session(request.get("sessionId"))
+        nonce = request.get("nonceHash")
+        if not isinstance(nonce, str) or not HEX64_RE.fullmatch(nonce):
+            raise Reject("nonce")
+        nonce = nonce.lower()
+        now = self.now_ms()
+        expiry = request.get("expiresAtUnixMs")
+        if not isinstance(expiry, int) or isinstance(expiry, bool) or expiry <= now or expiry - now > MAX_LEASE_MS:
+            raise Reject("expiry")
+        addresses = request.get("addresses")
+        if not isinstance(addresses, list) or not 1 <= len(addresses) <= 2:
+            raise Reject("address")
+        addresses = [self.policy.address(value) for value in addresses]
+        if len(set(addresses)) != len(addresses):
+            raise Reject("address")
+        ports = request.get("rtspControlPorts")
+        if not isinstance(ports, list) or not 1 <= len(ports) <= 2:
+            raise Reject("port")
+        ports = [valid_port(value) for value in ports]
+        if len(set(ports)) != len(ports):
+            raise Reject("port")
+        transport = request.get("transport")
+        udp = None
+        if transport == "tcp":
+            if set(request) != tcp_keys:
+                raise Reject("unknown-field")
+        elif transport in ("udp", "auto"):
+            if set(request) != udp_keys or not isinstance(request.get("udpMediaPorts"), dict) or set(request["udpMediaPorts"]) != {"first", "last"}:
+                raise Reject("udp-range")
+            first = valid_port(request["udpMediaPorts"].get("first"), "udp-range")
+            last = valid_port(request["udpMediaPorts"].get("last"), "udp-range")
+            if first != self.policy.udp_first or last != self.policy.udp_last or last - first + 1 > MAX_UDP_PORTS:
+                raise Reject("udp-range")
+            udp = {"first": first, "last": last}
+        else:
+            raise Reject("transport")
+        if nonce in self.state["usedNonces"]:
+            raise Reject("replay")
+        lease = self.lease_id()
+        if not LEASE_RE.fullmatch(lease) or lease in self.state["leases"]:
+            raise Reject("lease")
+        next_state = copy.deepcopy(self.state)
+        next_state["usedNonces"][nonce] = expiry
+        next_state["leases"][lease] = {
+            "sessionId": session, "addresses": addresses, "rtspControlPorts": ports,
+            "transport": transport, "udpMediaPorts": udp, "expiresAtUnixMs": expiry,
+        }
+        self._commit(next_state)
+        return {"ok": True, "leaseId": lease}
+
+    def _revoke(self, request):
+        if set(request) != {"op", "sessionId", "leaseId"}:
+            raise Reject("unknown-field")
+        session = valid_session(request.get("sessionId"))
+        lease = request.get("leaseId")
+        if not isinstance(lease, str) or not LEASE_RE.fullmatch(lease):
+            raise Reject("lease")
+        current = self.state["leases"].get(lease)
+        if current is None or current.get("sessionId") != session:
+            raise Reject("lease")
+        next_state = copy.deepcopy(self.state)
+        del next_state["leases"][lease]
+        self._commit(next_state)
+        return {"ok": True}
+
+    def _commit(self, next_state):
+        old_state = self.state
+        try:
+            self.nft.apply(render_nft(self.policy.stream_uid, next_state["leases"], self.now_ms()))
+            self.store.save(next_state)
+            self.state = next_state
+        except Exception:
+            try:
+                self.nft.apply(render_nft(self.policy.stream_uid, old_state["leases"], self.now_ms()))
+            except Exception:
+                pass
+            raise Reject("backend")
+
+
+def render_nft(stream_uid, leases, now_ms):
+    lines = ["table inet homeworker_stream {"]
+    rules = []
+    for lease_id, lease in sorted(leases.items()):
+        if not isinstance(lease, dict) or lease.get("expiresAtUnixMs", 0) <= now_ms:
+            continue
+        remaining = max(1, (lease["expiresAtUnixMs"] - now_ms + 999) // 1000)
+        suffix = lease_id[:12]
+        for version, nft_type, prefix in ((4, "ipv4_addr", "ip"), (6, "ipv6_addr", "ip6")):
+            addresses = [value for value in lease["addresses"] if ipaddress.ip_address(value).version == version]
+            if not addresses:
+                continue
+            tcp_name = "l_{}_{}_tcp".format(suffix, version)
+            elements = ["{} . {} timeout {}s".format(address, port, remaining) for address in addresses for port in lease["rtspControlPorts"]]
+            lines.append(" set {} {{ type {} . inet_service; flags timeout; elements = {{ {} }}; }}".format(tcp_name, nft_type, ", ".join(elements)))
+            rules.append("  meta skuid {} {} daddr . tcp dport @{} accept".format(stream_uid, prefix, tcp_name))
+            if lease["transport"] in ("udp", "auto"):
+                udp_name = "l_{}_{}_udp".format(suffix, version)
+                udp_elements = ["{} timeout {}s".format(address, remaining) for address in addresses]
+                lines.append(" set {} {{ type {}; flags timeout; elements = {{ {} }}; }}".format(udp_name, nft_type, ", ".join(udp_elements)))
+                udp = lease["udpMediaPorts"]
+                rules.append("  meta skuid {} {} daddr @{} udp sport {}-{} accept".format(stream_uid, prefix, udp_name, udp["first"], udp["last"]))
+    lines.extend([
+        " chain output {",
+        "  type filter hook output priority filter; policy accept;",
+        '  meta skuid {} oifname "lo" accept'.format(stream_uid),
+        *rules,
+        "  meta skuid {} reject".format(stream_uid),
+        " }",
+        "}",
+    ])
+    return "\n".join(lines) + "\n"
+
+
+def valid_port(value, reason="port"):
+    if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= 65535:
+        raise Reject(reason)
+    return value
+
+
+def valid_session(value):
+    if not isinstance(value, str) or not UUID_RE.fullmatch(value):
+        raise Reject("session")
+    return value.lower()
+
+
+def load_policy(path):
+    try:
+        return Policy(strict_json_loads(Path(path).read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        raise Reject("policy")
+
+
+def serve(policy_path, state_path, socket_path, group_name):
+    policy = load_policy(policy_path)
+    engine = Engine(policy, StateStore(state_path), NftBackend())
+    group_id = grp.getgrnam(group_name).gr_gid
+    path = Path(socket_path)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(path))
+    os.chown(path, 0, group_id)
+    os.chmod(path, 0o660)
+    server.listen(8)
+    while True:
+        connection, _ = server.accept()
+        with connection:
+            response = {"ok": False, "reason": "request"}
+            try:
+                if not hasattr(socket, "SO_PEERCRED"):
+                    raise Reject("peer")
+                _pid, uid, _gid = struct.unpack("3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
+                if uid != policy.worker_uid:
+                    raise Reject("peer")
+                data = read_capped_request(connection, time.monotonic() + 2.0)
+                if len(data) > MAX_MESSAGE_BYTES or not data.endswith(b"\n") or b"\n" in data[:-1]:
+                    raise Reject("request")
+                request = strict_json_loads(data.decode("utf-8"))
+                response = engine.handle(request)
+            except Reject as error:
+                response = {"ok": False, "reason": error.reason}
+            except Exception:
+                response = {"ok": False, "reason": "request"}
+            send_response(connection, response)
+
+
+def read_capped_request(connection, deadline):
+    data = bytearray()
+    while len(data) <= MAX_MESSAGE_BYTES:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise Reject("request")
+        connection.settimeout(remaining)
+        chunk = connection.recv(min(4096, MAX_MESSAGE_BYTES + 1 - len(data)))
+        if not chunk:
+            break
+        data.extend(chunk)
+        if b"\n" in chunk:
+            break
+    return data
+
+
+def send_response(connection, response):
+    try:
+        connection.settimeout(2.0)
+        connection.sendall((json.dumps(response, separators=(",", ":")) + "\n").encode())
+        return True
+    except OSError:
+        return False
+
+
+def main():
+    if os.geteuid() != 0:
+        print("live-stream-net-helper must run as root", file=sys.stderr)
+        return 1
+    serve(
+        os.environ.get("HOMEWORKER_STREAM_POLICY", "/etc/home-worker/live-stream-policy.json"),
+        os.environ.get("HOMEWORKER_STREAM_STATE", "/run/home-worker-stream-net/state.json"),
+        os.environ.get("HOMEWORKER_STREAM_SOCKET", "/run/home-worker-stream-net/helper.sock"),
+        os.environ.get("HOMEWORKER_STREAM_GROUP", "homeworker-stream"),
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

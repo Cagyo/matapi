@@ -6,6 +6,7 @@ INSTALL_DIR="${HOME_WORKER_INSTALL_DIR:-/opt/home-worker}"
 NODE_VERSION="${HOME_WORKER_NODE_VERSION:-20}"
 USER="${HOME_WORKER_USER:-homeworker}"
 APT_LOCK_TIMEOUT_SECONDS=300
+RTSP_GROUP_REFRESH_REQUIRED=0
 
 export DEBIAN_FRONTEND=noninteractive
 export APT_LISTCHANGES_FRONTEND=none
@@ -522,6 +523,11 @@ install_selected_features() {
     if ! "$INSTALL_DIR/scripts/install-feature.sh" rtsp; then
       echo "WARNING: Failed to install dependencies for rtsp"
       failed="$failed rtsp"
+    else
+      # usermod changes supplementary groups only for new processes. Force the
+      # PM2 daemon itself to be recreated later so the worker receives the
+      # private homeworker-stream group; before that, runtime adapters fail closed.
+      RTSP_GROUP_REFRESH_REQUIRED=1
     fi
   fi
 
@@ -617,6 +623,10 @@ setup_pm2() {
     sudo pm2 install pm2-logrotate
   fi
   cd "$INSTALL_DIR"
+  if [ "$RTSP_GROUP_REFRESH_REQUIRED" = "1" ]; then
+    echo "Restarting PM2 daemon to refresh RTSP runtime group membership..."
+    sudo -u "$USER" pm2 kill 2>/dev/null || true
+  fi
   if sudo -u "$USER" pm2 jlist 2>/dev/null | grep -q "\"name\":\"worker\""; then
     echo "Reloading existing PM2 worker process..."
     sudo -u "$USER" pm2 reload ecosystem.config.js 2>/dev/null || sudo -u "$USER" pm2 restart worker
