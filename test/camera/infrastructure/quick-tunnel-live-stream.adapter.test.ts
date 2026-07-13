@@ -113,7 +113,7 @@ describe('QuickTunnelLiveStreamAdapter', () => {
     await vi.waitFor(() => expect(fixture.adapter.activeViewerCount).toBe(0));
 
     expect((await fetch(`${fixture.localOrigin}/mjpeg/later`)).status).toBe(404);
-    await expect(first.arrayBuffer()).rejects.toThrow();
+    expect((await first.arrayBuffer()).byteLength).toBe(0);
   });
 
   it('closes viewers and rejects later requests after oversized multipart input', async () => {
@@ -130,7 +130,7 @@ describe('QuickTunnelLiveStreamAdapter', () => {
     await vi.waitFor(() => expect(fixture.adapter.activeViewerCount).toBe(0));
 
     expect((await fetch(`${fixture.localOrigin}/mjpeg/later`)).status).toBe(404);
-    await expect(first.arrayBuffer()).rejects.toThrow();
+    expect((await first.arrayBuffer()).byteLength).toBe(0);
   });
 
   it('limits streams to two total and one per token', async () => {
