@@ -7,6 +7,10 @@ export interface User {
   role: Role;
   locale: Locale;
   muted: boolean;
+  /** Timed non-critical pause deadline (1/4/8h) or `null` when no timed pause. */
+  nonCriticalPausedUntil: Date | null;
+  /** Compare-and-swap revision for pause/resume/undo mutations. */
+  notificationPauseRevision: number;
   /** Quiet-hours start (`HH:MM`, 24h, local TZ) or `null` when disabled. */
   quietStart: string | null;
   /** Quiet-hours end (`HH:MM`, 24h, local TZ) or `null` when disabled. */

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { DebounceService } from '../../../src/events/application/debounce.service';
 import { NotificationService } from '../../../src/events/application/notification.service';
 import { ClockPort } from '../../../src/events/domain/ports/clock.port';
@@ -78,6 +78,8 @@ class FakeNotifier implements NotifierPort {
 }
 
 class FakeDirectory implements RecipientDirectoryPort {
+  /** Counts per-sensor-mute lookups so tests can prove the critical path skips them. */
+  sensorMuteChecks = 0;
   constructor(
     private readonly recipients: NotificationRecipient[],
     private readonly sensorMutes: { telegramId: number; sensorId: string }[] = [],
@@ -86,6 +88,7 @@ class FakeDirectory implements RecipientDirectoryPort {
     return this.recipients;
   }
   async isSensorMuted(telegramId: number, sensorId: string): Promise<boolean> {
+    this.sensorMuteChecks += 1;
     return this.sensorMutes.some(
       (m) => m.telegramId === telegramId && m.sensorId === sensorId,
     );
@@ -96,14 +99,23 @@ const FIXED_NOW = new Date('2026-07-01T12:00:00Z'); // 15:00 Kyiv (summer)
 const TZ = 'Europe/Kyiv';
 
 function recipient(overrides: Partial<NotificationRecipient> = {}): NotificationRecipient {
-  return { telegramId: 1, muted: false, quietStart: null, quietEnd: null, ...overrides };
+  return {
+    telegramId: 1,
+    muted: false,
+    nonCriticalPausedUntil: null,
+    quietStart: null,
+    quietEnd: null,
+    ...overrides,
+  };
 }
+
+const ACTIVE_PAUSE = new Date('2026-07-01T13:00:00Z'); // 1h after FIXED_NOW
+const EXPIRED_PAUSE = new Date('2026-07-01T11:00:00Z'); // 1h before FIXED_NOW
 
 async function setup(opts: {
   sensor?: Sensor | null;
   recipients?: NotificationRecipient[];
   sensorMutes?: { telegramId: number; sensorId: string }[];
-  criticalIgnoresQuietHours?: boolean;
 }) {
   const repo = new InMemoryEventRepository();
   const sensor = opts.sensor === undefined ? makeSensor() : opts.sensor;
@@ -118,10 +130,10 @@ async function setup(opts: {
     sensorQuery,
     repo,
     clock,
-    { timezone: TZ, criticalIgnoresQuietHours: opts.criticalIgnoresQuietHours ?? true },
+    { timezone: TZ },
     debounce,
   );
-  return { repo, notifier, service };
+  return { repo, notifier, service, directory, debounce };
 }
 
 async function enqueueStateChange(
@@ -338,23 +350,122 @@ describe('NotificationService', () => {
     expect(repo.sentAtFor(event.id)).toBeNull();
   });
 
-  it('delivers critical events during quiet hours by default (flag on)', async () => {
+  it.each([
+    { label: 'legacy mute', overrides: { muted: true } },
+    { label: 'quiet hours', overrides: { quietStart: '14:00', quietEnd: '16:00' } },
+    {
+      label: 'legacy mute and quiet hours stacked',
+      overrides: { muted: true, quietStart: '14:00', quietEnd: '16:00' },
+    },
+  ])('delivers a critical alarm despite $label', async ({ overrides }) => {
     const { repo, notifier, service } = await setup({
       sensor: makeSensor({ severity: 'critical' }),
-      recipients: [recipient({ telegramId: 1, quietStart: '14:00', quietEnd: '16:00' })],
+      recipients: [recipient({ telegramId: 1, ...overrides })],
     });
     await service.process(await enqueueStateChange(repo));
     expect(notifier.userSends).toHaveLength(1);
   });
 
-  it('suppresses critical events during quiet hours when the flag is off', async () => {
+  it('delivers a critical alarm to a recipient who muted the sensor, without any per-sensor lookup', async () => {
+    const { repo, notifier, service, directory } = await setup({
+      sensor: makeSensor({ severity: 'critical' }),
+      recipients: [recipient({ telegramId: 1 })],
+      sensorMutes: [{ telegramId: 1, sensorId: 'front_door' }],
+    });
+
+    await service.process(await enqueueStateChange(repo));
+
+    expect(notifier.userSends.map((s) => s.telegramId)).toEqual([1]);
+    // Critical bypass is evaluated before any per-target query.
+    expect(directory.sensorMuteChecks).toBe(0);
+  });
+
+  it('never debounces critical alarms: a re-asserted identical critical state change delivers every time', async () => {
+    const { repo, notifier, service, debounce } = await setup({
+      sensor: makeSensor({ severity: 'critical' }),
+      recipients: [recipient({ telegramId: 1 })],
+    });
+    const shouldNotify = vi.spyOn(debounce, 'shouldNotify');
+
+    await service.process(await enqueueStateChange(repo, true));
+    await service.process(await enqueueStateChange(repo, true));
+
+    expect(notifier.userSends).toHaveLength(2);
+    // Debounce is never consulted on the critical path — it neither reads nor
+    // updates the marker, so a held-active alarm is never silently dropped.
+    expect(shouldNotify).not.toHaveBeenCalled();
+  });
+
+  it('broadcasts a fully-suppressible non-critical event when there are no recipients', async () => {
+    // Documents that the per-recipient suppression matrix does not govern the
+    // no-recipient broadcast fallback: an info event that any registered user
+    // would have had suppressed still reaches the shared chat.
+    const { repo, notifier, service } = await setup({
+      sensor: makeSensor({ severity: 'info' }),
+      recipients: [],
+    });
+    const event = await enqueueStateChange(repo);
+
+    await service.process(event);
+
+    expect(notifier.broadcasts).toHaveLength(1);
+    expect(repo.sentAtFor(event.id)).toBe(FIXED_NOW);
+  });
+
+  it('suppresses a warning for a user with an active timed pause but not others', async () => {
+    const { repo, notifier, service } = await setup({
+      sensor: makeSensor({ severity: 'warning' }),
+      recipients: [
+        recipient({ telegramId: 1, nonCriticalPausedUntil: ACTIVE_PAUSE }),
+        recipient({ telegramId: 2 }),
+      ],
+    });
+
+    await service.process(await enqueueStateChange(repo));
+
+    expect(notifier.userSends.map((s) => s.telegramId)).toEqual([2]);
+  });
+
+  it('suppresses an info event for a user with an active timed pause', async () => {
+    const { repo, notifier, service } = await setup({
+      sensor: makeSensor({ severity: 'info' }),
+      recipients: [recipient({ telegramId: 1, nonCriticalPausedUntil: ACTIVE_PAUSE })],
+    });
+
+    await service.process(await enqueueStateChange(repo));
+
+    expect(notifier.userSends).toHaveLength(0);
+  });
+
+  it('delivers to a user whose timed pause has already expired', async () => {
+    const { repo, notifier, service } = await setup({
+      sensor: makeSensor({ severity: 'info' }),
+      recipients: [recipient({ telegramId: 1, nonCriticalPausedUntil: EXPIRED_PAUSE })],
+    });
+
+    await service.process(await enqueueStateChange(repo));
+
+    expect(notifier.userSends.map((s) => s.telegramId)).toEqual([1]);
+  });
+
+  it('delivers a critical alarm despite an active timed pause stacked with every control', async () => {
     const { repo, notifier, service } = await setup({
       sensor: makeSensor({ severity: 'critical' }),
-      criticalIgnoresQuietHours: false,
-      recipients: [recipient({ telegramId: 1, quietStart: '14:00', quietEnd: '16:00' })],
+      recipients: [
+        recipient({
+          telegramId: 1,
+          muted: true,
+          nonCriticalPausedUntil: ACTIVE_PAUSE,
+          quietStart: '14:00',
+          quietEnd: '16:00',
+        }),
+      ],
+      sensorMutes: [{ telegramId: 1, sensorId: 'front_door' }],
     });
+
     await service.process(await enqueueStateChange(repo));
-    expect(notifier.userSends).toHaveLength(0);
+
+    expect(notifier.userSends).toHaveLength(1);
   });
 });
 
@@ -416,6 +527,19 @@ describe('NotificationService.notifyMotion', () => {
     });
 
     await service.notifyMotion('front_door', MOTION_AT, Buffer.from('jpeg'), 'cam_1');
+
+    expect(notifier.photoSends.map((s) => s.telegramId)).toEqual([2]);
+  });
+
+  it('suppresses motion for a user with an active timed pause but not others', async () => {
+    const { notifier, service } = await setup({
+      recipients: [
+        recipient({ telegramId: 1, nonCriticalPausedUntil: ACTIVE_PAUSE }),
+        recipient({ telegramId: 2 }),
+      ],
+    });
+
+    await service.notifyMotion('front_door', MOTION_AT, Buffer.from('jpeg'));
 
     expect(notifier.photoSends.map((s) => s.telegramId)).toEqual([2]);
   });

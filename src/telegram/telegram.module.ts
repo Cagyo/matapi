@@ -16,6 +16,9 @@ import {
   defaultInviteCodeGenerator,
 } from './application/invite.use-case';
 import { MuteSensorUseCase } from './application/mute-sensor.use-case';
+import { PauseNonCriticalNotificationsUseCase } from './application/pause-non-critical-notifications.use-case';
+import { ResumeNonCriticalNotificationsUseCase } from './application/resume-non-critical-notifications.use-case';
+import { UndoNonCriticalPauseUseCase } from './application/undo-non-critical-pause.use-case';
 import { PromoteUserUseCase } from './application/promote-user.use-case';
 import { ResolveUserTargetUseCase } from './application/resolve-user-target.use-case';
 import { RegisterUserUseCase } from './application/register-user.use-case';
@@ -38,6 +41,7 @@ import { ADMIN_CLAIM_CREDENTIAL } from './domain/ports/admin-claim-credential.po
 import { DIRECT_MESSENGER } from './domain/ports/direct-messenger.port';
 import { CONFIG_CODEC } from './domain/ports/config-codec.port';
 import { INVITE_CODE_REPOSITORY } from './domain/ports/invite-code-repository.port';
+import { NOTIFICATION_PAUSE_REPOSITORY } from './domain/ports/notification-pause-repository.port';
 import { USER_REPOSITORY } from './domain/ports/user-repository.port';
 import { USER_SENSOR_MUTE_REPOSITORY } from './domain/ports/user-sensor-mute-repository.port';
 import { ConsoleNotifierAdapter } from './infrastructure/console-notifier.adapter';
@@ -146,6 +150,13 @@ const mode = resolveBotMode();
           : DrizzleUserSensorMuteRepository,
     },
     { provide: INVITE_CODE_GENERATOR, useValue: defaultInviteCodeGenerator },
+    // One repository instance serves both the recipient reads and the pause
+    // mutations so their state cannot diverge. Foundation only — no handler,
+    // command, callback, or menu action is wired in this slice.
+    { provide: NOTIFICATION_PAUSE_REPOSITORY, useExisting: USER_REPOSITORY },
+    PauseNonCriticalNotificationsUseCase,
+    ResumeNonCriticalNotificationsUseCase,
+    UndoNonCriticalPauseUseCase,
     TelegramDirectMessenger,
     { provide: DIRECT_MESSENGER, useExisting: TelegramDirectMessenger },
     ClaimAdminUseCase,

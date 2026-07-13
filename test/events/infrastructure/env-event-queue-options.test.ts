@@ -4,7 +4,6 @@ import { eventQueueOptionsFromEnv } from '../../../src/events/infrastructure/env
 
 const defaults: DefaultsConfig['notifications'] = {
   quiet_hours_default: null,
-  critical_ignores_quiet_hours: true,
   max_queue_before_force_aggregate: 100,
 };
 

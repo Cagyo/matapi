@@ -5,17 +5,30 @@ import { AlreadyAdminError } from '../../../src/telegram/domain/errors/already-a
 import { AmbiguousUserTargetError } from '../../../src/telegram/domain/errors/ambiguous-user-target.error';
 import { UserNotFoundError } from '../../../src/telegram/domain/errors/user-not-found.error';
 import { InMemoryUserRepository } from '../../../src/telegram/infrastructure/in-memory-user.repository';
+import { User } from '../../../src/telegram/domain/user.entity';
+
+function seedUser(overrides: Partial<User> & Pick<User, 'telegramId' | 'name' | 'role'>): User {
+  return {
+    locale: 'en',
+    muted: false,
+    nonCriticalPausedUntil: null,
+    notificationPauseRevision: 0,
+    quietStart: null,
+    quietEnd: null,
+    createdAt: null,
+    ...overrides,
+  };
+}
 
 describe('PromoteUserUseCase', () => {
   it('promotes a regular user to admin', async () => {
     const users = new InMemoryUserRepository([
-      {
+      seedUser({
         telegramId: 2002,
         name: 'Alex',
         role: 'user',
-        locale: 'en',
         createdAt: new Date('2030-01-01T00:00:00.000Z'),
-      },
+      }),
     ]);
     const useCase = new PromoteUserUseCase(
       users,
@@ -30,13 +43,7 @@ describe('PromoteUserUseCase', () => {
 
   it('matches names case-insensitively and strips a leading @', async () => {
     const users = new InMemoryUserRepository([
-      {
-        telegramId: 2002,
-        name: 'Alex',
-        role: 'user',
-        locale: 'en',
-        createdAt: null,
-      },
+      seedUser({ telegramId: 2002, name: 'Alex', role: 'user' }),
     ]);
     const useCase = new PromoteUserUseCase(
       users,
@@ -60,13 +67,7 @@ describe('PromoteUserUseCase', () => {
 
   it('throws AlreadyAdminError when the target is already admin', async () => {
     const users = new InMemoryUserRepository([
-      {
-        telegramId: 1001,
-        name: 'Ada',
-        role: 'admin',
-        locale: 'en',
-        createdAt: null,
-      },
+      seedUser({ telegramId: 1001, name: 'Ada', role: 'admin' }),
     ]);
     const useCase = new PromoteUserUseCase(
       users,
@@ -79,8 +80,8 @@ describe('PromoteUserUseCase', () => {
 
   it('rejects an ambiguous name without changing either role', async () => {
     const users = new InMemoryUserRepository([
-      { telegramId: 1001, name: 'Alex', role: 'user', locale: 'en', createdAt: null },
-      { telegramId: 1002, name: 'alex', role: 'user', locale: 'en', createdAt: null },
+      seedUser({ telegramId: 1001, name: 'Alex', role: 'user' }),
+      seedUser({ telegramId: 1002, name: 'alex', role: 'user' }),
     ]);
     const useCase = new PromoteUserUseCase(
       users,
@@ -96,26 +97,21 @@ describe('PromoteUserUseCase', () => {
 
   it('retains only safe candidate fields for an ambiguous target', async () => {
     const users = new InMemoryUserRepository([
-      {
+      seedUser({
         telegramId: 1001,
         name: 'Alex',
         role: 'user',
-        locale: 'en',
         muted: true,
         quietStart: '22:00',
         quietEnd: '07:00',
         createdAt: new Date('2030-01-01T00:00:00.000Z'),
-      },
-      {
+      }),
+      seedUser({
         telegramId: 1002,
         name: 'alex',
         role: 'admin',
-        locale: 'en',
-        muted: false,
-        quietStart: null,
-        quietEnd: null,
         createdAt: new Date('2030-01-02T00:00:00.000Z'),
-      },
+      }),
     ]);
     const targets = new ResolveUserTargetUseCase(users);
 

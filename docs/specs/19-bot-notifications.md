@@ -21,25 +21,47 @@ Write to events table (sent_at = NULL)
        ▼
 NotificationService.process(event)
        │
-       ├─ Get all users
-       ├─ For each user:
-       │   ├─ Check: is sensor muted for this user? → skip
-       │   ├─ Check: is user globally muted? → skip
-       │   ├─ Check: quiet hours active AND severity = info? → skip
-       │   ├─ Check: debounce (same sensor, same state, within window)? → skip
+       ├─ Resolve severity (sensor row / payload / flapping-fault ⇒ warning)
+       ├─ Debounce gate (per-sensor): non-critical repeated identical value? → mark sent, stop
+       │     Critical is NEVER debounced — a re-asserted identical alarm
+       │     (e.g. smoke holding `active`) is always eligible for delivery.
+       ├─ No registered recipients? → broadcast to shared chat (matrix NOT applied), stop
+       ├─ For each recipient (per-recipient fan-out matrix):
+       │   ├─ critical? → ALWAYS send (bypasses mute, timed pause, per-sensor pause, quiet hours)
+       │   ├─ legacy muted OR timed pause active OR per-sensor pause? → skip
+       │   ├─ (info OR routine motion) AND quiet hours? → skip   (warning bypasses quiet hours)
        │   └─ Send message
        │
        ▼
-Mark event sent_at in DB
+Mark event sent_at in DB (unless every eligible send failed → stay queued for the drain)
 ```
+
+The critical early-allow is evaluated **before** any per-target lookup, so a
+critical event never queries per-sensor mute state and never reads the pause
+deadline. Delivery *eligibility* is not the same as successful transport: an
+eligible critical alarm still flows through the existing queue/retry path
+(05-event-queue.md) when Telegram is offline.
+
+## Suppression Matrix (per-recipient)
+
+| Class | Legacy mute | Timed pause | Per-sensor pause | Quiet hours |
+|-------|-------------|-------------|------------------|-------------|
+| critical | bypass | bypass | bypass | bypass |
+| warning | respect | respect | respect | **bypass** |
+| info | respect | respect | respect | respect |
+| routine motion | respect | respect | respect | respect |
+
+- **Timed pause** is active only while `nonCriticalPausedUntil > clock.now()` — strict. At the exact deadline instant it is already inactive.
+- **Legacy `muted = true`** is an indefinite pause until Resume clears it; critical still bypasses it. New indefinite global pauses can no longer be created — only 1/4/8-hour timed pauses (12-bot-cmd-mute.md).
+- The matrix governs **per-recipient fan-out only**. The no-recipient broadcast fallback (mock/dev, or before the first user registers) broadcasts to the shared chat **without** evaluating mute, timed pause, per-sensor pause, quiet hours, or the pure policy.
 
 ## Automatic Notification Events
 
 | Event | Recipients | Respects Quiet Hours |
 |-------|-----------|---------------------|
-| Sensor state change | All users (minus muted) | Info: yes. Warning/Critical: no |
+| Sensor state change | All users (minus suppressed) | Info: yes. Warning: no. Critical: bypasses all |
 | System start (full status) | All users | No |
-| Motion event (snapshot + timecode) | All users (minus muted) | Info: yes. Warning/Critical: no |
+| Motion event (snapshot + timecode) | All users (minus suppressed) | Routine (info): yes |
 | Disk/sync warnings | Admins only | No |
 | OTA update result | Admins only | No |
 | Crash-loop detection | Admins only | No |
@@ -73,6 +95,8 @@ export class DebounceService {
 Key rules:
 - Debounce suppresses repeated **identical** state changes (door OPEN→OPEN).
 - Actual state transitions (OPEN→CLOSE) always delivered.
+- Debounce is evaluated **only for non-critical** state changes. A critical alarm is never routed through `DebounceService` — a re-asserted identical critical value is always eligible and is never silently marked sent. Severity is resolved *before* the debounce gate so this ordering holds.
+- Debounce still applies unchanged to `warning`, `info`, and routine motion.
 - Critical-severity sensors can set `debounce=0`.
 - Debounce is per-sensor, not per-user.
 - Sensor lookup goes through `SensorQueryPort` — the notifications context never imports the sensors schema directly (../architecture.md → Anti-patterns).

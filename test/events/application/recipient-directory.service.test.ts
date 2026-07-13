@@ -4,7 +4,13 @@ import { RecipientDirectoryPort } from '../../../src/events/domain/ports/recipie
 
 const stub: RecipientDirectoryPort = {
   listRecipients: async () => [
-    { telegramId: 1, muted: false, quietStart: null, quietEnd: null },
+    {
+      telegramId: 1,
+      muted: false,
+      nonCriticalPausedUntil: null,
+      quietStart: null,
+      quietEnd: null,
+    },
   ],
   isSensorMuted: async (telegramId, sensorId) =>
     telegramId === 1 && sensorId === 'front_door',

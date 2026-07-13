@@ -151,9 +151,12 @@ sensor_defaults:
 
 notifications:
   quiet_hours_default: null
-  critical_ignores_quiet_hours: true
   max_queue_before_force_aggregate: 100
 ```
+
+> Critical alarms **always** bypass quiet hours (and every other user
+> suppression control). This is an invariant, not a configurable option — there
+> is no flag that can disable it. See 19-bot-notifications.md.
 
 ## Phased Delivery
 

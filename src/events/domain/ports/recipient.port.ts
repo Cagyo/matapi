@@ -3,8 +3,10 @@ export const RECIPIENT_DIRECTORY = Symbol('RECIPIENT_DIRECTORY');
 /** A notification recipient with the fields needed to filter delivery. */
 export interface NotificationRecipient {
   telegramId: number;
-  /** Global mute (`/mute` with no sensor — spec 12). */
+  /** Legacy indefinite global mute (`/mute` with no sensor — spec 12). */
   muted: boolean;
+  /** Timed non-critical pause deadline (1/4/8h) or `null` when none is set. */
+  nonCriticalPausedUntil: Date | null;
   /** Quiet-hours window bounds (`HH:MM`, local TZ) or `null` when disabled. */
   quietStart: string | null;
   quietEnd: string | null;

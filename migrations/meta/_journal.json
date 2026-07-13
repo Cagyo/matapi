@@ -22,6 +22,13 @@
       "when": 1783940117333,
       "tag": "0002_petite_mister_sinister",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1783943036915,
+      "tag": "0003_notification_safety_foundation",
+      "breakpoints": true
     }
   ]
 }

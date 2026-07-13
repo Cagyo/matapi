@@ -11,6 +11,8 @@ function seededRepo() {
       role: 'admin',
       locale: 'en',
       muted: false,
+      nonCriticalPausedUntil: null,
+      notificationPauseRevision: 0,
       quietStart: null,
       quietEnd: null,
       createdAt: null,

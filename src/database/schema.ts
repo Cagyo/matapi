@@ -68,6 +68,14 @@ export const users = sqliteTable('users', {
   role: text('role').notNull().default('user'),
   locale: text('locale').notNull().default(DEFAULT_LOCALE),
   muted: integer('muted', { mode: 'boolean' }).default(false),
+  // Timed non-critical pause deadline (1/4/8h). `null` = no timed pause active.
+  // Legacy `muted = true` remains an indefinite pause until Resume clears it.
+  nonCriticalPausedUntil: integer('non_critical_paused_until', { mode: 'timestamp' }),
+  // Compare-and-swap guard for pause/resume/undo mutations; every state change
+  // to muted or nonCriticalPausedUntil increments it, superseding stale receipts.
+  notificationPauseRevision: integer('notification_pause_revision')
+    .notNull()
+    .default(0),
   quietStart: text('quiet_start'),
   quietEnd: text('quiet_end'),
   createdBy: integer('created_by'),
@@ -82,6 +90,31 @@ export const userSensorMutes = sqliteTable(
     sensorId: text('sensor_id'),
   },
   (table) => [uniqueIndex('idx_user_sensor_mute').on(table.userId, table.sensorId)],
+);
+
+// ─── Notification Pause Receipts ───
+// One per timed global-pause application, enabling revision-safe Undo. Only the
+// newest receipt for a user is undoable; retention is capped per user in the
+// repository. `expiresAt` equals the applied deadline for a global pause but is
+// kept as a first-class column because future action types have independent
+// Undo windows.
+export const notificationPauseReceipts = sqliteTable(
+  'notification_pause_receipts',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.telegramId, { onDelete: 'cascade' }),
+    previousPausedUntil: integer('previous_paused_until', { mode: 'timestamp' }),
+    appliedPausedUntil: integer('applied_paused_until', { mode: 'timestamp' }).notNull(),
+    expectedRevision: integer('expected_revision').notNull(),
+    expiresAt: integer('expires_at', { mode: 'timestamp' }).notNull(),
+    consumedAt: integer('consumed_at', { mode: 'timestamp' }),
+    createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  },
+  (table) => [
+    index('idx_notification_pause_receipts_user_id').on(table.userId, table.id),
+  ],
 );
 
 // ─── Invite Codes ───

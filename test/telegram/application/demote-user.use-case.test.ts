@@ -5,24 +5,26 @@ import { LastAdminDemotionError } from '../../../src/telegram/domain/errors/last
 import { NotAdminError } from '../../../src/telegram/domain/errors/not-admin.error';
 import { UserNotFoundError } from '../../../src/telegram/domain/errors/user-not-found.error';
 import { InMemoryUserRepository } from '../../../src/telegram/infrastructure/in-memory-user.repository';
+import { User } from '../../../src/telegram/domain/user.entity';
+
+function seedUser(overrides: Partial<User> & Pick<User, 'telegramId' | 'name' | 'role'>): User {
+  return {
+    locale: 'en',
+    muted: false,
+    nonCriticalPausedUntil: null,
+    notificationPauseRevision: 0,
+    quietStart: null,
+    quietEnd: null,
+    createdAt: null,
+    ...overrides,
+  };
+}
 
 describe('DemoteUserUseCase', () => {
   it('demotes an admin to a regular user when another admin remains', async () => {
     const users = new InMemoryUserRepository([
-      {
-        telegramId: 1001,
-        name: 'Ada',
-        role: 'admin',
-        locale: 'en',
-        createdAt: null,
-      },
-      {
-        telegramId: 1002,
-        name: 'Linus',
-        role: 'admin',
-        locale: 'en',
-        createdAt: null,
-      },
+      seedUser({ telegramId: 1001, name: 'Ada', role: 'admin' }),
+      seedUser({ telegramId: 1002, name: 'Linus', role: 'admin' }),
     ]);
     const useCase = new DemoteUserUseCase(
       users,
@@ -37,13 +39,7 @@ describe('DemoteUserUseCase', () => {
 
   it('rejects demotion of the final admin', async () => {
     const users = new InMemoryUserRepository([
-      {
-        telegramId: 1001,
-        name: 'Ada',
-        role: 'admin',
-        locale: 'en',
-        createdAt: null,
-      },
+      seedUser({ telegramId: 1001, name: 'Ada', role: 'admin' }),
     ]);
     const useCase = new DemoteUserUseCase(
       users,
@@ -69,13 +65,7 @@ describe('DemoteUserUseCase', () => {
 
   it('throws NotAdminError when target is already a regular user', async () => {
     const users = new InMemoryUserRepository([
-      {
-        telegramId: 2002,
-        name: 'Alex',
-        role: 'user',
-        locale: 'en',
-        createdAt: null,
-      },
+      seedUser({ telegramId: 2002, name: 'Alex', role: 'user' }),
     ]);
     const useCase = new DemoteUserUseCase(
       users,
@@ -86,9 +76,9 @@ describe('DemoteUserUseCase', () => {
 
   it('demotes only the immutable id selected by id: syntax', async () => {
     const users = new InMemoryUserRepository([
-      { telegramId: 1, name: 'Admin', role: 'admin', locale: 'en', createdAt: null },
-      { telegramId: 1001, name: 'Alex', role: 'admin', locale: 'en', createdAt: null },
-      { telegramId: 1002, name: 'alex', role: 'admin', locale: 'en', createdAt: null },
+      seedUser({ telegramId: 1, name: 'Admin', role: 'admin' }),
+      seedUser({ telegramId: 1001, name: 'Alex', role: 'admin' }),
+      seedUser({ telegramId: 1002, name: 'alex', role: 'admin' }),
     ]);
     const useCase = new DemoteUserUseCase(
       users,

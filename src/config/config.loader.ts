@@ -6,7 +6,6 @@ export interface DefaultsConfig {
   sensor_defaults: Record<string, Record<string, unknown>>;
   notifications: {
     quiet_hours_default: string | null;
-    critical_ignores_quiet_hours: boolean;
     max_queue_before_force_aggregate: number;
   };
 }

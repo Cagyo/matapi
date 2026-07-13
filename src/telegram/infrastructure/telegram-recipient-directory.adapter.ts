@@ -32,6 +32,7 @@ export class TelegramRecipientDirectoryAdapter implements RecipientDirectoryPort
     return users.map((user) => ({
       telegramId: user.telegramId,
       muted: user.muted,
+      nonCriticalPausedUntil: user.nonCriticalPausedUntil,
       quietStart: user.quietStart,
       quietEnd: user.quietEnd,
     }));

@@ -20,7 +20,6 @@ function writeConfig(path: string, aggregateLimit: number): void {
       '    severity: info',
       'notifications:',
       '  quiet_hours_default: null',
-      '  critical_ignores_quiet_hours: true',
       `  max_queue_before_force_aggregate: ${aggregateLimit}`,
       '',
     ].join('\n'),
@@ -49,7 +48,6 @@ describe('loadDefaults', () => {
       },
       notifications: {
         quiet_hours_default: null,
-        critical_ignores_quiet_hours: true,
         max_queue_before_force_aggregate: 42,
       },
     });

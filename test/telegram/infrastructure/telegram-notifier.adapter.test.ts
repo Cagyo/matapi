@@ -28,6 +28,11 @@ function makeUser(overrides: Partial<User> = {}): User {
     name: 'Ada',
     role: 'admin',
     locale: 'en',
+    muted: false,
+    nonCriticalPausedUntil: null,
+    notificationPauseRevision: 0,
+    quietStart: null,
+    quietEnd: null,
     createdAt: new Date('2030-01-01T00:00:00.000Z'),
     ...overrides,
   };

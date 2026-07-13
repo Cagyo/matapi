@@ -6,6 +6,10 @@ import {
 import { en } from '../../locales/en';
 import { SensorSeverity } from '../../sensors/domain/sensor';
 import { isInQuietHours } from '../domain/quiet-hours';
+import {
+  isTimedPauseActive,
+  shouldSuppressNotification,
+} from '../domain/notification-suppression';
 import { formatMotionCaption } from '../domain/motion-notification';
 import { formatSensorNotification } from '../domain/sensor-notification';
 import { CLOCK, ClockPort } from '../domain/ports/clock.port';
@@ -69,20 +73,22 @@ export class NotificationService {
 
     const newValue = (event.payload as { newValue?: unknown } | null)?.newValue;
 
-    // Debounce only applies to repeated identical state changes.
-    if (event.type === 'state_change') {
+    const sensor = await this.sensors.findById(sensorId);
+    const isFlappingFault =
+      event.type === 'system' && newValue === 'flapping_fault';
+    const severity: SensorSeverity =
+      isFlappingFault ? 'warning' : sensor?.severity ?? readSeverity(event) ?? 'info';
+
+    // Critical alarms are never debounced: a re-asserted identical alarm must
+    // never be silently dropped. Debounce still applies to non-critical state
+    // changes (warning / info) exactly as before.
+    if (event.type === 'state_change' && severity !== 'critical') {
       const allowed = await this.debounce.shouldNotify(sensorId, newValue);
       if (!allowed) {
         await this.markSent(event);
         return;
       }
     }
-
-    const sensor = await this.sensors.findById(sensorId);
-    const isFlappingFault =
-      event.type === 'system' && newValue === 'flapping_fault';
-    const severity: SensorSeverity =
-      isFlappingFault ? 'warning' : sensor?.severity ?? readSeverity(event) ?? 'info';
     const name = sensor?.name ?? readName(event) ?? sensorId;
     const stepType =
       typeof sensor?.config?.stepType === 'string' ? sensor.config.stepType : undefined;
@@ -194,27 +200,43 @@ export class NotificationService {
     now: Date,
     cameraId?: string,
   ): Promise<boolean> {
-    if (recipient.muted) return true;
-    if (await this.recipients.isSensorMuted(recipient.telegramId, cameraName)) {
-      return true;
-    }
+    // Motion is routine (`info`-severity) and never critical, so it is always
+    // subject to the full non-critical suppression matrix.
+    const targetPaused = await this.isMotionTargetMuted(
+      recipient.telegramId,
+      cameraName,
+      cameraId,
+    );
+    return shouldSuppressNotification({
+      notificationClass: 'routine_motion',
+      legacyMuted: recipient.muted,
+      timedPauseActive: isTimedPauseActive(recipient.nonCriticalPausedUntil, now),
+      targetPaused,
+      inQuietHours: isInQuietHours(recipient, now, this.options.timezone),
+    });
+  }
+
+  /** Resolves every camera name/id/resolved-sensor mute alias into one boolean. */
+  private async isMotionTargetMuted(
+    telegramId: number,
+    cameraName: string,
+    cameraId?: string,
+  ): Promise<boolean> {
+    if (await this.recipients.isSensorMuted(telegramId, cameraName)) return true;
     if (
       cameraId &&
       cameraId !== cameraName &&
-      (await this.recipients.isSensorMuted(recipient.telegramId, cameraId))
+      (await this.recipients.isSensorMuted(telegramId, cameraId))
     ) {
       return true;
     }
     const lookup = await this.sensors.findByName(cameraName);
-    if (
+    return (
       lookup?.kind === 'active' &&
       lookup.sensor.id !== cameraName &&
       lookup.sensor.id !== cameraId &&
-      (await this.recipients.isSensorMuted(recipient.telegramId, lookup.sensor.id))
-    ) {
-      return true;
-    }
-    return isInQuietHours(recipient, now, this.options.timezone);
+      (await this.recipients.isSensorMuted(telegramId, lookup.sensor.id))
+    );
   }
 
   private async isSuppressed(
@@ -223,19 +245,20 @@ export class NotificationService {
     severity: SensorSeverity,
     now: Date,
   ): Promise<boolean> {
-    if (recipient.muted) return true;
-    if (await this.recipients.isSensorMuted(recipient.telegramId, sensorId)) {
-      return true;
-    }
-    // Quiet hours always silence `info`. `warning` always passes. `critical`
-    // is silenced only when the operator disables critical-ignores-quiet-hours.
-    const quietable =
-      severity === 'info' ||
-      (severity === 'critical' && !this.options.criticalIgnoresQuietHours);
-    if (quietable && isInQuietHours(recipient, now, this.options.timezone)) {
-      return true;
-    }
-    return false;
+    // Critical alarms bypass every user preference — resolved before any
+    // per-target mute lookup so a critical event never queries mute state.
+    if (severity === 'critical') return false;
+    const targetPaused = await this.recipients.isSensorMuted(
+      recipient.telegramId,
+      sensorId,
+    );
+    return shouldSuppressNotification({
+      notificationClass: severity,
+      legacyMuted: recipient.muted,
+      timedPauseActive: isTimedPauseActive(recipient.nonCriticalPausedUntil, now),
+      targetPaused,
+      inQuietHours: isInQuietHours(recipient, now, this.options.timezone),
+    });
   }
 
   private async broadcast(

@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Logger, Module } from '@nestjs/common';
 import { ConfigModule } from '../config/config.module';
 import { loadDefaults } from '../config/config.loader';
 import {
@@ -34,12 +34,8 @@ import { SENSOR_EVENT_SOURCE } from './domain/ports/sensor-event-source.port';
 import { DrizzleEventRepository } from './infrastructure/drizzle-event.repository';
 import { eventProcessorOptionsFromEnv } from './infrastructure/env-event-processor-options';
 import { eventQueueOptionsFromEnv } from './infrastructure/env-event-queue-options';
+import { criticalBypassDeprecationWarning } from './infrastructure/env-critical-bypass';
 import { SystemClockAdapter } from './infrastructure/system-clock.adapter';
-
-function boolFromEnv(value: string | undefined, fallback: boolean): boolean {
-  if (value === undefined) return fallback;
-  return value === 'true' || value === '1';
-}
 
 @Module({
   imports: [ConfigModule, SensorModule],
@@ -67,14 +63,9 @@ function boolFromEnv(value: string | undefined, fallback: boolean): boolean {
     {
       provide: NOTIFICATION_OPTIONS,
       useFactory: (timezoneOptions: TimezoneOptions): NotificationOptions => {
-        const defaults = loadDefaults().notifications;
-        return {
-          timezone: timezoneOptions.timezone,
-          criticalIgnoresQuietHours: boolFromEnv(
-            process.env.CRITICAL_IGNORES_QUIET_HOURS,
-            defaults.critical_ignores_quiet_hours,
-          ),
-        };
+        const warning = criticalBypassDeprecationWarning(process.env);
+        if (warning) new Logger('EventModule').warn(warning);
+        return { timezone: timezoneOptions.timezone };
       },
       inject: [TIMEZONE_OPTIONS],
     },

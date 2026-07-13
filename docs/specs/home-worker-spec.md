@@ -306,9 +306,12 @@ sensor_defaults:
 # Notification defaults
 notifications:
   quiet_hours_default: null          # no quiet hours by default
-  critical_ignores_quiet_hours: true
   max_queue_before_force_aggregate: 100
 ```
+
+> Critical alarms **always** bypass quiet hours and every other user
+> suppression control — an invariant that cannot be configured off. There is
+> no flag that can disable it.
 
 ---
 
