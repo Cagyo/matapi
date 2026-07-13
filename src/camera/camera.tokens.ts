@@ -1,3 +1,5 @@
+import { isAbsolute, normalize } from 'node:path';
+
 /** Resolved camera runtime mode (real Motion daemon vs. stub). */
 export const CAMERA_MODE = Symbol('CAMERA_MODE');
 export type CameraMode = 'real' | 'stub';
@@ -37,15 +39,11 @@ export function liveStreamOptionsFromEnv(
   };
 }
 
-const UNSAFE_RUNTIME_ROOTS = [
-  '/bin',
-  '/boot',
-  '/dev',
-  '/etc',
-  '/proc',
-  '/sbin',
-  '/sys',
-  '/usr',
+const SAFE_RUNTIME_ROOTS = [
+  '/run/home-worker',
+  '/opt/home-worker',
+  '/tmp',
+  '/private/var/folders',
 ] as const;
 
 function runtimeDirectory(raw: string | undefined): string {
@@ -62,12 +60,7 @@ function runtimeDirectory(raw: string | undefined): string {
   }
 
   const normalized = normalize(raw);
-  if (
-    normalized === '/' ||
-    UNSAFE_RUNTIME_ROOTS.some(
-      (root) => normalized === root || normalized.startsWith(`${root}/`),
-    )
-  ) {
+  if (!SAFE_RUNTIME_ROOTS.some((root) => normalized.startsWith(`${root}/`))) {
     return DEFAULTS.runtimeDirectory;
   }
   return normalized;
@@ -85,4 +78,3 @@ function boundedInteger(
     ? value
     : fallback;
 }
-import { isAbsolute, normalize } from 'node:path';

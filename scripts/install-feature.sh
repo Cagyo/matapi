@@ -144,35 +144,47 @@ EOF
       apt_get install -y cloudflared
     fi
 
-    # Both commands run with an empty environment, disposable HOME, and an
-    # explicit disposable config. Neither can discover a real user config.
+    CLOUDFLARED_BIN="$(command -v cloudflared)"
+    # The installer owns the traversable parent and removes it with sudo. All
+    # files below the private worker directory are created by the worker shell.
     DIAG_DIR="$(mktemp -d)"
-    trap 'rm -rf "$DIAG_DIR"' EXIT
-    DIAG_HOME="$DIAG_DIR/home"
-    DIAG_CONFIG_DIR="$DIAG_DIR/config"
+    cleanup_cloudflared_diagnostics() {
+      sudo rm -rf "$DIAG_DIR"
+    }
+    trap cleanup_cloudflared_diagnostics EXIT
+    chmod 711 "$DIAG_DIR"
+    DIAG_WORK_DIR="$DIAG_DIR/worker"
+    DIAG_HOME="$DIAG_WORK_DIR/home"
+    DIAG_CONFIG_DIR="$DIAG_WORK_DIR/config"
     DIAG_CONFIG="$DIAG_CONFIG_DIR/config.yml"
     sudo install -d -m 700 -o "$USER" -g "$USER" \
-      "$DIAG_DIR" "$DIAG_HOME" "$DIAG_CONFIG_DIR"
-    sudo install -m 600 -o "$USER" -g "$USER" /dev/null "$DIAG_CONFIG"
-    if ! sudo -H -u "$USER" env -i \
+      "$DIAG_WORK_DIR" "$DIAG_HOME" "$DIAG_CONFIG_DIR"
+
+    set +e
+    sudo -H -u "$USER" env -i \
       PATH="/usr/local/bin:/usr/bin:/bin" \
       HOME="$DIAG_HOME" \
       XDG_CONFIG_HOME="$DIAG_CONFIG_DIR" \
-      cloudflared --config "$DIAG_CONFIG" version >/dev/null 2>&1; then
+      sh -c '
+        set -eu
+        work_dir="$1"
+        config="$2"
+        cloudflared_bin="$3"
+        cd "$work_dir"
+        : > "$config"
+        "$cloudflared_bin" --config "$config" version >/dev/null 2>&1 || exit 1
+        "$cloudflared_bin" --config "$config" tunnel diag >diagnostic.log 2>&1 || exit 2
+      ' sh "$DIAG_WORK_DIR" "$DIAG_CONFIG" "$CLOUDFLARED_BIN"
+    DIAG_STATUS=$?
+    set -e
+    if [ "$DIAG_STATUS" -eq 1 ]; then
       echo "ERROR: cloudflared was installed but its version check failed." >&2
       exit 1
     fi
-    if ! (
-      cd "$DIAG_DIR"
-      sudo -H -u "$USER" env -i \
-        PATH="/usr/local/bin:/usr/bin:/bin" \
-        HOME="$DIAG_HOME" \
-        XDG_CONFIG_HOME="$DIAG_CONFIG_DIR" \
-        cloudflared --config "$DIAG_CONFIG" tunnel diag >diagnostic.log 2>&1
-    ); then
+    if [ "$DIAG_STATUS" -ne 0 ]; then
       echo "WARNING: cloudflared diagnostics failed. Check DNS resolution and outbound port 7844 (QUIC/HTTP2) before using live view." >&2
     fi
-    rm -rf "$DIAG_DIR"
+    cleanup_cloudflared_diagnostics
     trap - EXIT
     echo "Experimental cloudflared live-stream capability installed."
     ;;

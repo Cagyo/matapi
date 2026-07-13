@@ -39,6 +39,15 @@ describe('CameraModule live-stream composition', () => {
     ['leading whitespace', ' /tmp/live-stream'],
     ['path traversal', '/tmp/../etc/live-stream'],
     ['unsafe system root', '/etc/home-worker/live-stream'],
+    ['root home', '/root/home-worker/live-stream'],
+    ['user home', '/home/homeworker/live-stream'],
+    ['library root', '/lib/home-worker/live-stream'],
+    ['64-bit library root', '/lib64/home-worker/live-stream'],
+    ['variable-data root', '/var/lib/home-worker/live-stream'],
+    ['bare run safe root', '/run/home-worker'],
+    ['bare opt safe root', '/opt/home-worker'],
+    ['bare temp safe root', '/tmp'],
+    ['bare macOS temp safe root', '/private/var/folders'],
   ])('falls back for an unsafe runtime directory: %s', (_case, runtimeDirectory) => {
     expect(liveStreamOptionsFromEnv({
       LIVE_STREAM_RUNTIME_DIR: runtimeDirectory,
