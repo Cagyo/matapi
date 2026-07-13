@@ -21,6 +21,7 @@ PrivateTmp=yes
 PrivateDevices=yes
 ProtectHome=yes
 ProtectSystem=strict
+InaccessiblePaths=-/opt/home-worker/.env -/opt/home-worker/data
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes

@@ -21,7 +21,9 @@ install_rtsp_runtime() {
     echo "ERROR: unsafe worker account name" >&2
     return 1
   fi
-  apt_get install -y ffmpeg nftables policykit-1
+  # Debian 13 removed the legacy policykit-1 package name. Install the
+  # concrete daemon and client packages used by the systemd authorization flow.
+  apt_get install -y ffmpeg nftables polkitd pkexec
   if ! getent group "$stream_group" >/dev/null; then
     sudo groupadd --system "$stream_group"
   fi

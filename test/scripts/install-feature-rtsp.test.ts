@@ -39,6 +39,8 @@ describe('restricted RTSP runtime installation', () => {
     expect(installFeature).toContain('homeworker-stream-systemd.rules');
     expect(installFeature).toContain('systemctl restart homeworker-stream-net.service');
     expect(installFeature).toContain('systemctl is-active --quiet homeworker-stream-net.service');
+    expect(installFeature).toContain('apt_get install -y ffmpeg nftables polkitd pkexec');
+    expect(installFeature).not.toMatch(/apt_get install[^\n]*policykit-1/);
     expect(installFeature).toContain('d /run/home-worker/live-source-probe 0700 $USER $USER');
     expect(installFeature).not.toMatch(/sudoers[\s\S]*homeworker-ffmpeg-stream/);
     expect(installFeature).not.toMatch(/NOPASSWD:[^\n]*(?:nft|homeworker-ffmpeg|homeworker-stream-net)/);
@@ -98,12 +100,13 @@ describe('restricted RTSP runtime installation', () => {
     expect(unit).toContain('PrivateTmp=yes');
     expect(unit).toContain('ProtectHome=yes');
     expect(unit).toContain('ProtectSystem=strict');
+    expect(unit).toContain('InaccessiblePaths=-/opt/home-worker/.env -/opt/home-worker/data');
     expect(unit).toMatch(/RuntimeMaxSec=(?:[1-9]\d?|[12]\d\d|300)/);
     expect(unit).toMatch(/MemoryMax=\S+/);
     expect(unit).toMatch(/CPUQuota=\S+/);
     expect(unit).toContain('RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6');
     expect(unit).not.toContain('EnvironmentFile=');
-    expect(unit).not.toMatch(/\.env|\.db|\/home\//);
+    expect(unit).not.toMatch(/\.db|\/home\//);
     const helperUnit = readFileSync(resolve('systemd/homeworker-stream-net.service'), 'utf8');
     expect(helperUnit).not.toContain('CAP_DAC_OVERRIDE');
   });
