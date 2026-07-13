@@ -8,6 +8,8 @@ import type {
 export const LIVE_STREAM_GATEWAY = Symbol('LIVE_STREAM_GATEWAY');
 
 export interface LiveStreamGatewayPort {
+  /** Reports terminal data-plane failure to the session owner. */
+  onFailure?(handler: () => void): void;
   start(input: { session: LiveStreamSession; source: LiveStreamSource }): Promise<{
     publicHostname: string;
     pid: LiveStreamProcessId;
@@ -17,6 +19,7 @@ export interface LiveStreamGatewayPort {
   revokeViewer(tokenHash: string): Promise<void>;
   stop(): Promise<void>;
   recoverOwnedProcess(input: {
+    sessionId: string;
     pid: LiveStreamProcessId;
     processIdentity: string;
   }): Promise<'stopped' | 'not-owned'>;

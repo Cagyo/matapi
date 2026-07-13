@@ -131,6 +131,19 @@ describe('SystemdFfmpegStreamAdapter', () => {
     await expect(readFile(join(root, 'config', `${SESSION}.json`))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  it('fails closed when the secret-bearing session config cannot be removed', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'stream-sandbox-unlink-'));
+    const execFile = vi.fn(async () => ({ stdout: 'active\n', stderr: '' }));
+    const unlinkFile = vi.fn(async () => { throw Object.assign(new Error('denied secret path'), { code: 'EACCES' }); });
+    await mkdir(join(root, 'config')); await mkdir(join(root, 'output'));
+    const adapter = new SystemdFfmpegStreamAdapter({
+      configDirectory: join(root, 'config'), outputDirectory: join(root, 'output'), startupTimeoutMs: 1_000,
+    }, { execFile, unlinkFile });
+
+    await expect(adapter.stop(SESSION)).rejects.toThrow('stream runtime unavailable');
+    expect(unlinkFile).toHaveBeenCalledWith(join(root, 'config', `${SESSION}.json`));
+  });
+
   it('compensates with an exact stop and deletes credentials when readiness fails after start', async () => {
     const root = await mkdtemp(join(tmpdir(), 'stream-sandbox-compensate-'));
     await mkdir(join(root, 'config')); await mkdir(join(root, 'output'));

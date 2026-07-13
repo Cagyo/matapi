@@ -66,6 +66,18 @@ describe('LiveStreamSessionService', () => {
     expect(gateway.stopCalls).toBe(1);
   });
 
+  it('clears the active lease when the gateway reports terminal data-plane failure', async () => {
+    const gateway = new FakeGateway();
+    const lease = new FakeLease();
+    const service = createService({ gateway, lease });
+    await service.open(source('front_door'), 1);
+
+    gateway.triggerFailure();
+
+    await vi.waitFor(() => expect(gateway.stopCalls).toBe(1));
+    expect(lease.current()).toBeNull();
+  });
+
   it('rejects a stalled pending open promptly when stop wins', async () => {
     const gateway = new DeferredGateway();
     const service = createService({ gateway });
@@ -935,7 +947,7 @@ describe('LiveStreamSessionService', () => {
     await service.onModuleInit();
 
     expect(gateway.recoveryCalls).toEqual([
-      { pid: createLiveStreamProcessId(123), processIdentity: 'owned-process' },
+      { sessionId: 'stale', pid: createLiveStreamProcessId(123), processIdentity: 'owned-process' },
     ]);
     expect(lease.clearCalls).toBe(1);
   });
@@ -1157,6 +1169,15 @@ class FakeGateway implements LiveStreamGatewayPort {
   throwStartSynchronously = false;
   private readonly stopResolvers: (() => void)[] = [];
   private readonly stopRejectors: ((error: Error) => void)[] = [];
+  private failureHandler?: () => void;
+
+  onFailure(handler: () => void): void {
+    this.failureHandler = handler;
+  }
+
+  triggerFailure(): void {
+    this.failureHandler?.();
+  }
 
   start(input: { source: LiveStreamSource }): Promise<{
     publicHostname: string;

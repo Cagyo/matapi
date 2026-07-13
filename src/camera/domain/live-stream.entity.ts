@@ -10,12 +10,20 @@ export type LiveStreamProcessId = number & {
   readonly [liveStreamProcessIdBrand]: 'LiveStreamProcessId';
 };
 
-export interface LiveStreamSource {
+export interface MotionMjpegLiveStreamSource {
   kind: 'motion-mjpeg';
   cameraId: string;
   cameraName: string;
   upstreamUrl: string;
 }
+
+export interface RtspLiveStreamSource {
+  kind: 'rtsp';
+  cameraId: string;
+  cameraName: string;
+}
+
+export type LiveStreamSource = MotionMjpegLiveStreamSource | RtspLiveStreamSource;
 
 export interface LiveStreamViewer {
   tokenHash: string;

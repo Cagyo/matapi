@@ -113,6 +113,15 @@ export class DrizzleLiveSourceRepository implements LiveSourceRepositoryPort {
     };
   }
 
+  async isReady(cameraId: string): Promise<boolean> {
+    const row = this.db.select({ ready: cameraLiveSources.ready })
+      .from(cameraLiveSources)
+      .innerJoin(cameraLiveCredentials, eq(cameraLiveCredentials.cameraId, cameraLiveSources.cameraId))
+      .where(eq(cameraLiveSources.cameraId, cameraId))
+      .get();
+    return row?.ready === true;
+  }
+
   async saveMetadataBatch(sources: readonly LiveSource[]): Promise<void> {
     const now = Date.now();
     this.db.transaction((tx) => {

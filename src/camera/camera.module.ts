@@ -73,7 +73,6 @@ import {
 } from './domain/ports/live-source-credential.port';
 import {
   LIVE_SOURCE_PROBE,
-  type LiveSourceProbePort,
 } from './domain/ports/live-source-probe.port';
 import {
   LIVE_SOURCE_REPOSITORY,
@@ -96,6 +95,8 @@ import { RETENTION_PRUNE } from './domain/ports/retention-prune.port';
 import { SNAPSHOT } from './domain/ports/snapshot.port';
 import { STREAM_EGRESS, type StreamEgressPort } from './domain/ports/stream-egress.port';
 import { STREAM_SANDBOX, type StreamSandboxPort } from './domain/ports/stream-sandbox.port';
+import { RTSP_RUNTIME_COORDINATOR, type RtspRuntimeCoordinatorPort } from './domain/ports/rtsp-runtime-coordinator.port';
+import { RTSP_STREAM_RUNTIME, type RtspStreamRuntimePort } from './domain/ports/rtsp-stream-runtime.port';
 import { DrizzleMediaRepository } from './infrastructure/drizzle-media.repository';
 import { DrizzleLiveSourceRepository } from './infrastructure/drizzle-live-source.repository';
 import { InMemoryLiveSourceRepository } from './infrastructure/in-memory-live-source.repository';
@@ -104,11 +105,13 @@ import {
   FfmpegLiveSourceProbeAdapter,
   liveSourceProbeOptionsFromEnvironment,
 } from './infrastructure/ffmpeg-live-source-probe.adapter';
-import { UnavailableLiveSourceProbeAdapter } from './infrastructure/unavailable-live-source-probe.adapter';
 import { UnavailableStreamEgressAdapter } from './infrastructure/unavailable-stream-egress.adapter';
 import { UnavailableStreamSandboxAdapter } from './infrastructure/unavailable-stream-sandbox.adapter';
 import { NftStreamEgressAdapter, UnixLocalStreamHelperClient } from './infrastructure/nft-stream-egress.adapter';
 import { SystemdFfmpegStreamAdapter } from './infrastructure/systemd-ffmpeg-stream.adapter';
+import { RestrictedRtspStreamRuntimeAdapter } from './infrastructure/restricted-rtsp-stream-runtime.adapter';
+import { UnavailableRtspStreamRuntimeAdapter } from './infrastructure/unavailable-rtsp-stream-runtime.adapter';
+import { UnavailableRtspRuntimeCoordinatorAdapter } from './infrastructure/unavailable-rtsp-runtime-coordinator.adapter';
 import { LiveStreamSessionControlAdapter } from './infrastructure/live-stream-session-control.adapter';
 import { DrizzleRetentionPruneAdapter } from './infrastructure/drizzle-retention-prune.adapter';
 import { EventsMotionAlertAdapter } from './infrastructure/events-motion-alert.adapter';
@@ -247,14 +250,15 @@ const liveStreamOptions = liveStreamOptionsFromEnv(process.env);
     },
     {
       provide: LIVE_STREAM_GATEWAY,
-      useFactory: (options: LiveStreamOptions): LiveStreamGatewayPort =>
+      useFactory: (options: LiveStreamOptions, rtspRuntime: RtspStreamRuntimePort): LiveStreamGatewayPort =>
         mode === 'stub'
           ? new InMemoryLiveStreamGatewayAdapter()
           : new QuickTunnelLiveStreamAdapter({
               startupTimeoutMs: options.startTimeoutMs,
               maxViewers: options.maxViewers,
+              rtspRuntime,
             }),
-      inject: [LIVE_STREAM_OPTIONS],
+      inject: [LIVE_STREAM_OPTIONS, RTSP_STREAM_RUNTIME],
     },
     {
       provide: LIVE_STREAM_LEASE,
@@ -314,8 +318,8 @@ const liveStreamOptions = liveStreamOptionsFromEnv(process.env);
       },
     },
     {
-      provide: LIVE_SOURCE_PROBE,
-      useFactory: (egress: StreamEgressPort, sandbox: StreamSandboxPort): LiveSourceProbePort => {
+      provide: RTSP_RUNTIME_COORDINATOR,
+      useFactory: (egress: StreamEgressPort, sandbox: StreamSandboxPort): RtspRuntimeCoordinatorPort => {
         const options = liveSourceProbeOptionsFromEnvironment(process.env);
         return options
           ? new FfmpegLiveSourceProbeAdapter(
@@ -323,9 +327,20 @@ const liveStreamOptions = liveStreamOptionsFromEnv(process.env);
               options,
               mode === 'real' ? { sandbox } : {},
             )
-          : new UnavailableLiveSourceProbeAdapter();
+          : new UnavailableRtspRuntimeCoordinatorAdapter();
       },
       inject: [STREAM_EGRESS, STREAM_SANDBOX],
+    },
+    { provide: LIVE_SOURCE_PROBE, useExisting: RTSP_RUNTIME_COORDINATOR },
+    {
+      provide: RTSP_STREAM_RUNTIME,
+      useFactory: (
+        sources: LiveSourceRepositoryPort,
+        coordinator: RtspRuntimeCoordinatorPort,
+      ): RtspStreamRuntimePort => mode === 'real' && liveSourceProbeOptionsFromEnvironment(process.env)
+        ? new RestrictedRtspStreamRuntimeAdapter(sources, coordinator)
+        : new UnavailableRtspStreamRuntimeAdapter(),
+      inject: [LIVE_SOURCE_REPOSITORY, RTSP_RUNTIME_COORDINATOR],
     },
     LiveStreamMessageCleanupService,
     {

@@ -30,6 +30,8 @@ export interface LiveSourceRepositoryPort {
   /** Atomically upserts credential-free, not-ready import metadata. */
   saveMetadataBatch(sources: readonly LiveSource[]): Promise<void>;
   loadForStream(cameraId: string): Promise<LiveSourceForStream | null>;
+  /** Credential-free readiness lookup for public live-source resolution. */
+  isReady(cameraId: string): Promise<boolean>;
   listRedacted(): Promise<RedactedLiveSource[]>;
   remove(cameraId: string): Promise<void>;
   rotate(): Promise<void>;

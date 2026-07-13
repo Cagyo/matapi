@@ -3,7 +3,7 @@ import { spawn, type SpawnOptions } from 'node:child_process';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
-import { readFile, readlink } from 'node:fs/promises';
+import { chmod, lstat, readFile, readlink, unlink } from 'node:fs/promises';
 import {
   get as httpGet,
   createServer,
@@ -13,6 +13,7 @@ import {
   type ServerResponse,
 } from 'node:http';
 import type { Readable } from 'node:stream';
+import { createServer as createUnixServer, type Server as NetServer, type Socket } from 'node:net';
 import {
   createLiveStreamProcessId,
   type LiveStreamProcessId,
@@ -20,10 +21,12 @@ import {
   type LiveStreamViewer,
 } from '../domain/live-stream.entity';
 import type { LiveStreamGatewayPort } from '../domain/ports/live-stream-gateway.port';
+import type { RtspStreamRuntimeHandle, RtspStreamRuntimePort } from '../domain/ports/rtsp-stream-runtime.port';
 
 const OUTPUT_LIMIT_BYTES = 64 * 1024;
 const FRAME_BUFFER_LIMIT_BYTES = 2 * 1024 * 1024;
 const VIEWER_QUEUE_LIMIT = 2;
+const SESSION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const SECURITY_HEADERS = {
   'cache-control': 'no-store',
   'referrer-policy': 'no-referrer',
@@ -50,6 +53,12 @@ export interface QuickTunnelLiveStreamDependencies {
   startupTimeoutMs?: number;
   stopGraceMs?: number;
   maxViewers?: number;
+  rtspRuntime?: RtspStreamRuntimePort;
+  rtspSocketDirectory?: string;
+  inspectRtspDirectory?: (path: string) => Promise<void>;
+  inspectRtspSocket?: (path: string) => Promise<void>;
+  chmodRtspSocket?: (path: string, mode: number) => Promise<void>;
+  unlinkRtspSocket?: (path: string) => Promise<void>;
 }
 
 interface ActiveViewer {
@@ -85,6 +94,25 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
   private frameBuffer = Buffer.alloc(0);
   private outputMonitor?: CloudflaredOutputMonitor;
   private lifecycleTail: Promise<void> = Promise.resolve();
+  private readonly rtspRuntime?: RtspStreamRuntimePort;
+  private readonly rtspSocketDirectory: string;
+  private readonly inspectRtspDirectory: (path: string) => Promise<void>;
+  private readonly inspectRtspSocket: (path: string) => Promise<void>;
+  private readonly chmodRtspSocket: (path: string, mode: number) => Promise<void>;
+  private readonly unlinkRtspSocket: (path: string) => Promise<void>;
+  private rtspHandle?: RtspStreamRuntimeHandle;
+  private rtspSessionId?: string;
+  private rtspStartAttempted = false;
+  private producerServer?: NetServer;
+  private producerServerClose?: Promise<void>;
+  private producerSocket?: Socket;
+  private producerAccepted = false;
+  private producerPath?: string;
+  private frameReady?: Promise<void>;
+  private resolveFrameReady?: () => void;
+  private rejectFrameReady?: (error: Error) => void;
+  private rtspReady = false;
+  private failureHandler?: () => void;
 
   constructor(dependencies: QuickTunnelLiveStreamDependencies = {}) {
     this.spawnCloudflared = dependencies.spawnCloudflared ?? defaultSpawn;
@@ -96,6 +124,12 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
     this.startupTimeoutMs = dependencies.startupTimeoutMs ?? 30_000;
     this.stopGraceMs = dependencies.stopGraceMs ?? 2_000;
     this.maxViewers = dependencies.maxViewers ?? 2;
+    this.rtspRuntime = dependencies.rtspRuntime;
+    this.rtspSocketDirectory = dependencies.rtspSocketDirectory ?? '/run/home-worker/live-stream-output';
+    this.inspectRtspDirectory = dependencies.inspectRtspDirectory ?? inspectRestrictedOutputDirectory;
+    this.inspectRtspSocket = dependencies.inspectRtspSocket ?? inspectGatewayOwnedSocket;
+    this.chmodRtspSocket = dependencies.chmodRtspSocket ?? chmod;
+    this.unlinkRtspSocket = dependencies.unlinkRtspSocket ?? unlink;
   }
 
   get localOrigin(): string | null {
@@ -110,14 +144,32 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
     return this.activeViewers.size;
   }
 
-  start(input: { source: LiveStreamSource }): ReturnType<LiveStreamGatewayPort['start']> {
+  onFailure(handler: () => void): void {
+    this.failureHandler = handler;
+  }
+
+  start(input: Parameters<LiveStreamGatewayPort['start']>[0]): ReturnType<LiveStreamGatewayPort['start']> {
     return this.enqueueLifecycle(() => this.startExclusive(input));
   }
 
-  private async startExclusive(input: { source: LiveStreamSource }): ReturnType<LiveStreamGatewayPort['start']> {
+  private async startExclusive(input: Parameters<LiveStreamGatewayPort['start']>[0]): ReturnType<LiveStreamGatewayPort['start']> {
     if (this.server || this.child) throw new Error('Live stream gateway is already running');
     this.source = input.source;
     try {
+      if (input.source.kind === 'rtsp') {
+        if (!this.rtspRuntime) throw new Error('RTSP runtime unavailable');
+        await this.openRtspProducer(input.session.id);
+        this.rtspSessionId = input.session.id;
+        this.rtspStartAttempted = true;
+        this.rtspHandle = await this.rtspRuntime.start({
+          cameraId: input.source.cameraId,
+          sessionId: input.session.id,
+          socketPath: this.producerPath!,
+          expiresAtUnixMs: Date.now() + Math.min(input.session.durationMs, 300_000),
+        });
+        await withTimeout(this.frameReady!, this.startupTimeoutMs, 'RTSP frame readiness timed out');
+        this.rtspReady = true;
+      }
       await this.openLoopbackServer();
       const origin = this.localOrigin;
       if (!origin) throw new Error('Loopback listener did not publish an address');
@@ -194,6 +246,57 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
   }
 
   private async cleanupExclusive(): Promise<void> {
+    let cleanupError: unknown;
+    if (this.rtspHandle || (this.rtspStartAttempted && this.rtspSessionId && this.rtspRuntime)) {
+      try {
+        if (this.rtspHandle) await this.rtspHandle.stop();
+        else await this.rtspRuntime!.recover(this.rtspSessionId!);
+        this.rtspHandle = undefined;
+        this.rtspStartAttempted = false;
+        this.rtspSessionId = undefined;
+      } catch (error) {
+        cleanupError = error;
+      }
+    }
+    const producerSocket = this.producerSocket;
+    if (producerSocket) {
+      try {
+        await closeProducerSocket(producerSocket, Math.max(1, this.stopGraceMs));
+        if (this.producerSocket === producerSocket) this.producerSocket = undefined;
+      } catch (error) {
+        cleanupError ??= error;
+      }
+    }
+    const producerServer = this.producerServer;
+    if (producerServer) {
+      try {
+        this.producerServerClose ??= closeProducerServer(producerServer);
+        await withTimeout(
+          this.producerServerClose,
+          Math.max(1, this.stopGraceMs),
+          'RTSP listener close timed out',
+        );
+        if (this.producerServer === producerServer) this.producerServer = undefined;
+        this.producerServerClose = undefined;
+      } catch (error) {
+        cleanupError ??= error;
+      }
+    }
+    const producerPath = this.producerPath;
+    if (producerPath) {
+      try {
+        await this.unlinkRtspSocket(producerPath);
+        this.producerPath = undefined;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') this.producerPath = undefined;
+        else cleanupError ??= error;
+      }
+    }
+    this.producerAccepted = false;
+    this.rtspReady = false;
+    this.frameReady = undefined;
+    this.resolveFrameReady = undefined;
+    this.rejectFrameReady = undefined;
     this.upstreamRequest?.destroy();
     this.upstreamResponse?.destroy();
     this.upstreamRequest = undefined;
@@ -231,9 +334,11 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
     this.outputMonitor?.close();
     this.outputMonitor = undefined;
     this.source = undefined;
+    if (cleanupError) throw new Error('Live stream cleanup incomplete');
   }
 
   recoverOwnedProcess(input: {
+    sessionId: string;
     pid: LiveStreamProcessId;
     processIdentity: string;
   }): Promise<'stopped' | 'not-owned'> {
@@ -241,16 +346,55 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
   }
 
   private async recoverExclusive(input: {
+    sessionId: string;
     pid: LiveStreamProcessId;
     processIdentity: string;
   }): Promise<'stopped' | 'not-owned'> {
-    const pid = Number(input.pid);
+    const runtimeRecovery = this.rtspRuntime?.recover(input.sessionId) ?? Promise.resolve();
+    const socketRecovery = input.sessionId
+      ? this.removeRecoveredRtspSocket(input.sessionId)
+      : Promise.resolve();
+    const cloudRecovery = this.recoverCloudflared(input.pid, input.processIdentity);
+    const [runtimeResult, socketResult, cloudResult] = await Promise.allSettled([
+      runtimeRecovery, socketRecovery, cloudRecovery,
+    ]);
+    if (runtimeResult.status === 'rejected' || socketResult.status === 'rejected' || cloudResult.status === 'rejected') {
+      throw new Error('Live stream recovery incomplete');
+    }
+    return cloudResult.value;
+  }
+
+  private async removeRecoveredRtspSocket(sessionId: string): Promise<void> {
+    if (!SESSION_UUID.test(sessionId)) throw new Error('Invalid RTSP recovery identity');
+    try {
+      await this.inspectRtspDirectory(this.rtspSocketDirectory);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw error;
+    }
+    const path = `${this.rtspSocketDirectory}/${sessionId.toLowerCase()}.sock`;
+    try {
+      await this.inspectRtspSocket(path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw error;
+    }
+    try {
+      await this.unlinkRtspSocket(path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+
+  private async recoverCloudflared(
+    opaquePid: LiveStreamProcessId,
+    identity: string,
+  ): Promise<'stopped' | 'not-owned'> {
+    const pid = Number(opaquePid);
     if (!(await this.isDetachedProcessGroup(pid))) return 'not-owned';
     const current = await this.identifyProcess(pid);
-    if (!current || current !== input.processIdentity) return 'not-owned';
-    return (await this.terminateVerifiedGroup(pid, input.processIdentity))
-      ? 'stopped'
-      : 'not-owned';
+    if (!current || current !== identity) return 'not-owned';
+    return (await this.terminateVerifiedGroup(pid, identity)) ? 'stopped' : 'not-owned';
   }
 
   private async openLoopbackServer(): Promise<void> {
@@ -262,6 +406,82 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
         resolve();
       });
     });
+  }
+
+  private async openRtspProducer(sessionId: string): Promise<void> {
+    if (!SESSION_UUID.test(sessionId)) {
+      throw new Error('Invalid RTSP session identity');
+    }
+    await this.inspectRtspDirectory(this.rtspSocketDirectory);
+    const path = `${this.rtspSocketDirectory}/${sessionId.toLowerCase()}.sock`;
+    this.producerPath = path;
+    this.frameReady = new Promise<void>((resolve, reject) => {
+      this.resolveFrameReady = resolve;
+      this.rejectFrameReady = reject;
+    });
+    void this.frameReady.catch(() => undefined);
+    this.producerServer = createUnixServer((socket) => this.acceptProducer(socket));
+    await new Promise<void>((resolve, reject) => {
+      this.producerServer!.once('error', reject);
+      this.producerServer!.listen(path, () => {
+        this.producerServer!.off('error', reject);
+        resolve();
+      });
+    });
+    await this.chmodRtspSocket(path, 0o660);
+    await this.inspectRtspSocket(path);
+  }
+
+  private acceptProducer(socket: Socket): void {
+    if (this.producerAccepted) {
+      socket.destroy();
+      this.rejectFrameReady?.(new Error('Second RTSP producer rejected'));
+      return;
+    }
+    this.producerAccepted = true;
+    this.producerSocket = socket;
+    socket.on('data', (chunk: Buffer) => this.consumeRawJpeg(chunk));
+    const failed = () => {
+      this.rejectFrameReady?.(new Error('RTSP producer ended before readiness'));
+      this.closeAllViewers();
+      this.handleTerminalRtspFailure();
+    };
+    socket.once('error', failed);
+    socket.once('end', failed);
+    socket.once('close', () => {
+      if (this.producerSocket === socket) this.producerSocket = undefined;
+    });
+  }
+
+  private consumeRawJpeg(chunk: Buffer): void {
+    if (this.frameBuffer.length + chunk.length > FRAME_BUFFER_LIMIT_BYTES) {
+      this.rejectFrameReady?.(new Error('RTSP frame exceeded bounded limit'));
+      this.producerSocket?.destroy();
+      this.closeAllViewers();
+      this.handleTerminalRtspFailure();
+      return;
+    }
+    this.frameBuffer = Buffer.concat([this.frameBuffer, chunk]);
+    while (true) {
+      const start = this.frameBuffer.indexOf(Buffer.from([0xff, 0xd8]));
+      if (start < 0) {
+        this.frameBuffer = this.frameBuffer.subarray(Math.max(0, this.frameBuffer.length - 1));
+        return;
+      }
+      if (start > 0) this.frameBuffer = this.frameBuffer.subarray(start);
+      const end = this.frameBuffer.indexOf(Buffer.from([0xff, 0xd9]), 2);
+      if (end < 0) return;
+      const jpeg = this.frameBuffer.subarray(0, end + 2);
+      this.frameBuffer = this.frameBuffer.subarray(end + 2);
+      this.resolveFrameReady?.();
+      this.resolveFrameReady = undefined;
+      this.rejectFrameReady = undefined;
+      this.broadcast(Buffer.concat([
+        Buffer.from('--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ' + jpeg.length + '\r\n\r\n'),
+        jpeg,
+        Buffer.from('\r\n'),
+      ]));
+    }
   }
 
   private handleRequest(request: IncomingMessage, response: ServerResponse): void {
@@ -319,6 +539,7 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
 
   private ensureUpstream(): void {
     if (this.upstreamOpened || !this.source) return;
+    if (this.source.kind === 'rtsp') return;
     this.upstreamOpened = true;
     this.upstreamRequest = httpGet(this.source.upstreamUrl, (upstream) => {
       this.upstreamResponse = upstream;
@@ -423,6 +644,14 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
     const run = this.lifecycleTail.then(operation, operation);
     this.lifecycleTail = run.then(() => undefined, () => undefined);
     return run;
+  }
+
+  private handleTerminalRtspFailure(): void {
+    if (!this.rtspReady) return;
+    this.rtspReady = false;
+    void this.enqueueLifecycle(() => this.cleanupExclusive())
+      .finally(() => this.failureHandler?.())
+      .catch(() => undefined);
   }
 }
 
@@ -597,6 +826,21 @@ async function withTimeout<T>(promise: Promise<T>, milliseconds: number, message
   }
 }
 
+async function closeProducerSocket(socket: Socket, timeoutMs: number): Promise<void> {
+  if (socket.closed) return;
+  await withTimeout(new Promise<void>((resolve) => {
+    socket.once('close', resolve);
+    socket.destroy();
+  }), timeoutMs, 'RTSP producer close timed out');
+}
+
+async function closeProducerServer(server: NetServer): Promise<void> {
+  if (!server.listening) return;
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+  });
+}
+
 async function waitForExit(child: CloudflaredChild, milliseconds: number): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
     const timer = setTimeout(() => {
@@ -624,4 +868,23 @@ async function waitUntilGone(
     await new Promise((resolve) => setTimeout(resolve, Math.min(25, milliseconds)));
   }
   return false;
+}
+
+async function inspectRestrictedOutputDirectory(path: string): Promise<void> {
+  const value = await lstat(path);
+  const groups = typeof process.getgroups === 'function' ? process.getgroups() : [];
+  if (!value.isDirectory() || value.isSymbolicLink() || (value.mode & 0o7777) !== 0o3770 ||
+      value.uid !== 0 || !groups.includes(value.gid)) {
+    throw new Error('Unsafe RTSP output directory');
+  }
+}
+
+async function inspectGatewayOwnedSocket(path: string): Promise<void> {
+  const value = await lstat(path);
+  const groups = typeof process.getgroups === 'function' ? process.getgroups() : [];
+  const uid = typeof process.getuid === 'function' ? process.getuid() : -1;
+  if (!value.isSocket() || value.isSymbolicLink() || (value.mode & 0o777) !== 0o660 ||
+      value.uid !== uid || !groups.includes(value.gid)) {
+    throw new Error('Unsafe RTSP producer socket');
+  }
 }

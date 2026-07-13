@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { LiveStreamSourceUnavailableError } from '../domain/errors/live-stream-source-unavailable.error';
 import type { LiveStreamSource } from '../domain/live-stream.entity';
 import type { Camera } from '../domain/camera.entity';
@@ -6,6 +6,10 @@ import {
   MEDIA_REPOSITORY,
   type MediaRepositoryPort,
 } from '../domain/ports/media-repository.port';
+import {
+  LIVE_SOURCE_REPOSITORY,
+  type LiveSourceRepositoryPort,
+} from '../domain/ports/live-source-repository.port';
 
 const MOTION_MJPEG_UPSTREAM = 'http://127.0.0.1:8081/?action=stream';
 
@@ -14,6 +18,8 @@ const MOTION_MJPEG_UPSTREAM = 'http://127.0.0.1:8081/?action=stream';
 export class MotionLiveSourceService {
   constructor(
     @Inject(MEDIA_REPOSITORY) private readonly media: MediaRepositoryPort,
+    @Optional() @Inject(LIVE_SOURCE_REPOSITORY)
+    private readonly liveSources?: LiveSourceRepositoryPort,
   ) {}
 
   async resolve(cameraName?: string): Promise<LiveStreamSource> {
@@ -22,15 +28,21 @@ export class MotionLiveSourceService {
       if (cameraName) {
         camera = await this.media.findCameraByName(cameraName);
       } else {
-        camera = (await this.media.listCameras()).find(
-            (candidate) => candidate.enabled && candidate.type === 'motion',
-          ) ?? null;
+        const cameras = await this.media.listCameras();
+        camera = cameras.find((candidate) => candidate.enabled && candidate.type === 'motion') ?? null;
+        if (!camera && this.liveSources) {
+          for (const candidate of cameras) {
+            if (candidate.enabled && candidate.type === 'rtsp' && await this.liveSources.isReady(candidate.id)) {
+              camera = candidate;
+              break;
+            }
+          }
+        }
       }
+      return await this.toSource(camera);
     } catch {
       throw new LiveStreamSourceUnavailableError();
     }
-
-    return this.toSource(camera);
   }
 
   async resolveById(cameraId: string): Promise<LiveStreamSource> {
@@ -39,16 +51,22 @@ export class MotionLiveSourceService {
       camera = (await this.media.listCameras()).find(
         (candidate) => candidate.id === cameraId,
       ) ?? null;
+      return await this.toSource(camera);
     } catch {
       throw new LiveStreamSourceUnavailableError();
     }
-
-    return this.toSource(camera);
   }
 
-  private toSource(camera: Camera | null): LiveStreamSource {
-    if (!camera || !camera.enabled || camera.type !== 'motion') {
+  private async toSource(camera: Camera | null): Promise<LiveStreamSource> {
+    if (!camera || !camera.enabled || !['motion', 'rtsp'].includes(camera.type)) {
       throw new LiveStreamSourceUnavailableError();
+    }
+
+    if (camera.type === 'rtsp') {
+      if (!this.liveSources || !(await this.liveSources.isReady(camera.id))) {
+        throw new LiveStreamSourceUnavailableError();
+      }
+      return { kind: 'rtsp', cameraId: camera.id, cameraName: camera.name };
     }
 
     return {

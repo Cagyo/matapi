@@ -48,6 +48,11 @@ export class InMemoryLiveSourceRepository implements LiveSourceRepositoryPort {
     };
   }
 
+  async isReady(cameraId: string): Promise<boolean> {
+    const stored = this.#sources.get(cameraId);
+    return Boolean(stored?.source.ready && stored.credential);
+  }
+
   async saveMetadataBatch(sources: readonly LiveSource[]): Promise<void> {
     const replacements = new Map(this.#sources);
     for (const source of sources) {

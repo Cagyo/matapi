@@ -112,7 +112,11 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
     private readonly durationMs = 300_000,
     private readonly operationTimeoutMs = 30_000,
     private readonly maxViewers = 2,
-  ) {}
+  ) {
+    this.gateway.onFailure?.(() => {
+      void this.stop(0).catch(() => undefined);
+    });
+  }
 
   async onModuleInit(): Promise<void> {
     await this.enqueue(async () => {
@@ -130,6 +134,7 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
         const result = await this.withOperationTimeout(
           Promise.resolve().then(() =>
             this.gateway.recoverOwnedProcess({
+              sessionId: staleLease.sessionNonce,
               pid: staleLease.pid,
               processIdentity: staleLease.processIdentity,
             }),
@@ -405,13 +410,27 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
     if (this.pending !== pending) return;
 
     const readyMonotonicMs = this.clock.now();
+    const activeDurationMs = pending.source.kind === 'rtsp'
+      ? Math.max(0, pending.provisionalSession.expiresMonotonicMs - readyMonotonicMs)
+      : this.durationMs;
+    if (activeDurationMs < 1) {
+      this.abortStartedPending(pending, {
+        session: pending.provisionalSession,
+        publicHostname: started.publicHostname,
+        pid: started.pid,
+        processIdentity: started.processIdentity,
+        viewerGrants: new Map(),
+        messageReferences: [],
+      });
+      return;
+    }
     const active: ActiveSession = {
       session: createLiveStreamSession({
         id: pending.provisionalSession.id,
         cameraId: pending.provisionalSession.cameraId,
         cameraName: pending.provisionalSession.cameraName,
         startedMonotonicMs: readyMonotonicMs,
-        durationMs: this.durationMs,
+        durationMs: activeDurationMs,
       }),
       publicHostname: started.publicHostname,
       pid: started.pid,

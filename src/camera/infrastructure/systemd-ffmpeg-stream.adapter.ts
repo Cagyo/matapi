@@ -39,6 +39,7 @@ interface Dependencies {
   inspectCaFile(path: string): Promise<unknown>;
   now(): number;
   randomSuffix(): string;
+  unlinkFile(path: string): Promise<void>;
 }
 
 interface SystemctlProcessHandle {
@@ -80,6 +81,7 @@ export class SystemdFfmpegStreamAdapter implements StreamSandboxPort {
       inspectCaFile: dependencies.inspectCaFile ?? validateCaFile,
       now: dependencies.now ?? Date.now,
       randomSuffix: dependencies.randomSuffix ?? (() => randomBytes(8).toString('hex')),
+      unlinkFile: dependencies.unlinkFile ?? unlink,
     };
   }
 
@@ -155,9 +157,11 @@ export class SystemdFfmpegStreamAdapter implements StreamSandboxPort {
         output: { kind: 'unix-socket', socketPath, queueCapacityFrames: 2 },
       };
     } catch {
-      if (startAttempted && unit) await this.runSystemctl(['stop', unit]).catch(() => undefined);
-      if (temporaryPath) await unlink(temporaryPath).catch(() => undefined);
-      if (configPath) await unlink(configPath).catch(() => undefined);
+      await Promise.allSettled([
+        ...(startAttempted && unit ? [this.runSystemctl(['stop', unit])] : []),
+        ...(temporaryPath ? [this.#dependencies.unlinkFile(temporaryPath)] : []),
+        ...(configPath ? [this.#dependencies.unlinkFile(configPath)] : []),
+      ]);
       throw new StreamRuntimeUnavailableError();
     }
   }
@@ -166,13 +170,17 @@ export class SystemdFfmpegStreamAdapter implements StreamSandboxPort {
     let sessionId: string;
     try {
       sessionId = normalizeSession(rawSessionId);
-      await this.runSystemctl(['stop', `homeworker-ffmpeg-stream@${sessionId}.service`]);
     } catch {
       throw new StreamRuntimeUnavailableError();
-    } finally {
-      if (UUID.test(rawSessionId)) {
-        await unlink(`${this.options.configDirectory}/${rawSessionId.toLowerCase()}.json`).catch(() => undefined);
-      }
+    }
+    const results = await Promise.allSettled([
+      this.runSystemctl(['stop', `homeworker-ffmpeg-stream@${sessionId}.service`]),
+      this.#dependencies.unlinkFile(`${this.options.configDirectory}/${sessionId}.json`).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== 'ENOENT') throw error;
+      }),
+    ]);
+    if (results.some((result) => result.status === 'rejected')) {
+      throw new StreamRuntimeUnavailableError();
     }
   }
 

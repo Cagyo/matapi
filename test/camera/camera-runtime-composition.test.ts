@@ -1,7 +1,12 @@
 import 'reflect-metadata';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-interface Provider { provide?: { description?: string }; useFactory?: () => unknown }
+interface Provider {
+  provide?: { description?: string };
+  useFactory?: () => unknown;
+  useExisting?: { description?: string };
+  inject?: { description?: string }[];
+}
 
 async function runtimeAdapters(mode: 'real' | 'stub') {
   vi.resetModules();
@@ -14,7 +19,14 @@ async function runtimeAdapters(mode: 'real' | 'stub') {
     expect(provider?.useFactory).toBeTypeOf('function');
     return provider?.useFactory?.();
   };
-  return { egress: create('STREAM_EGRESS'), sandbox: create('STREAM_SANDBOX') };
+  const gateway = providers.find((candidate) => candidate.provide?.description === 'LIVE_STREAM_GATEWAY');
+  const probe = providers.find((candidate) => candidate.provide?.description === 'LIVE_SOURCE_PROBE');
+  return {
+    egress: create('STREAM_EGRESS'),
+    sandbox: create('STREAM_SANDBOX'),
+    gatewayInjectsRuntime: gateway?.inject?.some((token) => token.description === 'RTSP_STREAM_RUNTIME'),
+    probeCoordinator: probe?.useExisting?.description,
+  };
 }
 
 afterEach(() => {
@@ -27,11 +39,14 @@ describe('CameraModule restricted RTSP runtime composition', () => {
     const adapters = await runtimeAdapters('real');
     expect(adapters.egress?.constructor.name).toBe('NftStreamEgressAdapter');
     expect(adapters.sandbox?.constructor.name).toBe('SystemdFfmpegStreamAdapter');
+    expect(adapters.gatewayInjectsRuntime).toBe(true);
+    expect(adapters.probeCoordinator).toBe('RTSP_RUNTIME_COORDINATOR');
   }, 15_000);
 
   it('keeps both privileged runtime ports unavailable in stub mode', async () => {
     const adapters = await runtimeAdapters('stub');
     expect(adapters.egress?.constructor.name).toBe('UnavailableStreamEgressAdapter');
     expect(adapters.sandbox?.constructor.name).toBe('UnavailableStreamSandboxAdapter');
+    expect(adapters.gatewayInjectsRuntime).toBe(true);
   }, 15_000);
 });
