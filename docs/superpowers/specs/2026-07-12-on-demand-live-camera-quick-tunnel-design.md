@@ -2,7 +2,13 @@
 
 ## Status
 
-Approved design, pending written-spec review. This document defines an explicitly experimental, no-domain live-view feature. It does not claim production reliability, Cloudflare Access authentication, Cloudflare ToS approval, or zero internet exposure.
+Implemented and target-Pi accepted with documented verification deviations for
+Motion/MJPEG and the tested RTSP matrix.
+Public-CA RTSPS remains best effort, and self-signed RTSPS is unsupported. See
+`docs/compatibility/live-camera-rtsp.md` for measured evidence and remaining
+manual-browser coverage. This remains an explicitly experimental, no-domain
+live-view feature. It does not claim production reliability, Cloudflare Access
+authentication, Cloudflare ToS approval, or zero internet exposure.
 
 ## Purpose and scope
 
@@ -88,22 +94,50 @@ Motion sources are derived from installer-owned loopback configuration, never en
 
 ### RTSP compatibility feature
 
-RTSP supports rtsp:// and rtsps://, hostnames or IPs, H.264/H.265, TCP or UDP, and cameras with self-signed certificates. Each source exposes these admin-visible settings:
+RTSP supports rtsp:// and strict rtsps://, hostnames or IPs, H.264/H.265, and
+TCP or UDP. Public-CA RTSPS is best effort until a behavioral fixture is
+accepted. Self-signed RTSPS is not exposed because target FFmpeg cannot enforce
+a configured certificate fingerprint. Each source exposes these admin-visible
+settings:
 
 - transport: auto, tcp, or udp;
-- TLS verification: strict or self-signed with a confirmed certificate fingerprint;
+- TLS verification: strict CA and hostname verification;
 - output profile: eco, balanced, or quality;
 - optional low-resolution substream URL.
 
-The default is TCP, strict certificate verification, eco, one converter, and two viewer responses. Self-signed mode requires the administrator to confirm the observed certificate fingerprint; it never means trust any certificate. Setup probes the exact runtime configuration, detects codec/resolution/transport, and saves only after a successful bounded sample stream. The same protocol allowlist, FFmpeg arguments, network timeouts, video-only selection, and resource limits are used by the probe and live converter. An admin can relax compatibility settings only after seeing an explicit warning.
+The default is TCP, strict certificate verification, eco, one converter, and
+two viewer responses. Trust-any-certificate behavior is forbidden. Setup probes
+the exact runtime configuration, detects codec/resolution/transport, and saves
+only after a successful bounded sample stream. The same protocol allowlist,
+network timeouts, video-only selection, port range, and resource profile are
+used by the probe and live converter. An admin can relax supported compatibility
+settings only after seeing an explicit warning.
 
 Hostnames are permitted only if all resolved addresses are within installer-configured ranges. Before each session, the worker resolves the selected source and installs an ephemeral UID-scoped egress rule that allows the stream service to reach only the resolved addresses, configured camera ports, and required TCP/UDP transport. A runtime resolution mismatch rejects the stream. This contains time-of-check/time-of-use resolution changes; a legitimate camera address change requires a new probe. H.265 and high-resolution streams are best-effort: the session stops if measured resource or delivery limits are exceeded. The compatibility matrix labels combinations as tested, best-effort, or unsupported.
 
 ### FFmpeg sandbox
 
-The FFmpeg converter is not a child with the worker's authority. The installer creates a dedicated stream-service account and an installer-owned systemd service template that starts one instance per session with a five-minute runtime maximum, CPU and memory limits, no new privileges, a private temporary directory, protected home and system paths, and an address-family restriction. The installer also configures protected process visibility. The stream account cannot read the worker environment, Telegram token, database, or RTSP encryption key.
+The FFmpeg converter is not a child with the worker's authority. The installer
+creates a dedicated stream-service account and an installer-owned systemd
+service template that starts one instance per session with a five-minute runtime
+maximum, CPU and memory limits, no new privileges, a private temporary
+directory, protected home and system paths, explicit inaccessibility for the
+worker environment and data directory, and an address-family restriction. The
+stream service cannot read the worker environment, Telegram token, database, or
+RTSP encryption key.
 
-The stream service receives only the selected source for the current session and has egress limited to the ephemeral camera-address rule above. A root-owned installer helper accepts only a session ID plus previously validated resolved addresses and updates that rule; it never accepts a raw RTSP URL. Its local interface authenticates the worker service identity, accepts addresses only inside installer-configured camera ranges, applies a bounded rule count and lease, and has no general command-execution operation. cloudflared runs outside this sandbox and retains only outbound Cloudflare connectivity on port 7844. The design does not claim the RTSP URL is absent from the FFmpeg argv: root and the stream-service account remain able to inspect it. The security boundary instead prevents ordinary local accounts and the worker account from inspecting the service process, requires a read-only camera account, and forbids process arguments or raw stderr from logs.
+The stream service receives only the selected source for the current session and
+has egress limited to the ephemeral camera-address rule above. A root-owned
+installer helper accepts only a session ID plus previously validated resolved
+addresses and updates that rule; it never accepts a raw RTSP URL. Its local
+interface authenticates the worker service identity, accepts addresses only
+inside installer-configured camera ranges, applies a bounded rule count and
+lease, and has no general command-execution operation. cloudflared runs outside
+this sandbox and retains only outbound Cloudflare connectivity on port 7844.
+The runner passes the source through a sealed memory file, so the inspectable
+FFmpeg argv contains no URL or credential. Root and the stream-service identity
+remain inside the residual runtime trust boundary. Process arguments and raw
+stderr are never logged.
 
 Administrators configure RTSP sources through the admin-only /camera sources conversation: add, edit, test, list, and remove. The bot deletes a credential-bearing incoming message immediately after processing and reports a deletion failure without echoing the value. This reduces chat-history exposure but is not confidential credential transport; bots cannot use Telegram Secret Chats.
 
