@@ -3,8 +3,18 @@ import { CallbackQueryContext, Composer, InlineKeyboard } from 'grammy';
 import { en } from '../../locales/en';
 import {
   ImportPlan,
+  ImportSummary,
   ImportSensorsUseCase,
 } from '../../sensors/application/import-sensors.use-case';
+import {
+  CameraLiveSourceImportPlan,
+  ImportCameraLiveSourcesUseCase,
+} from '../application/import-camera-live-sources.use-case';
+import {
+  USER_REPOSITORY,
+  UserRepositoryPort,
+} from '../domain/ports/user-repository.port';
+import { validateLiveSourceConfig } from '../domain/live-source-config-import';
 import { validateImportConfig } from '../../sensors/domain/config-import';
 import {
   CONFIG_CODEC,
@@ -23,15 +33,21 @@ const MAX_FILE_BYTES = 1_000_000;
  */
 type ImportState =
   | { kind: 'awaitingFile' }
-  | { kind: 'awaitingConfirm'; plan: ImportPlan };
+  | {
+      kind: 'awaitingConfirm';
+      sensorPlan: ImportPlan;
+      cameraPlan: CameraLiveSourceImportPlan;
+    };
 
 /**
  * `/import_config` — spec 16. Admin-only, two-step FSM:
  *  1. Prompt for a `.yml` upload.
  *  2. Validate + diff, show a summary, then Apply/Cancel.
  *
- * Apply is transactional (see `ImportSensorsUseCase.commit`) and hot-reloads
- * the sensor registry.
+ * Confirmation applies the credential-free camera batch first (one camera DB
+ * transaction), rechecks the current admin role, then applies the existing
+ * sensor transaction and hot reload. A localized partial-state reply is sent
+ * if the second phase cannot run or fails.
  */
 @Injectable()
 export class ImportConfigHandler implements TelegramHandler {
@@ -41,8 +57,10 @@ export class ImportConfigHandler implements TelegramHandler {
 
   constructor(
     private readonly importSensors: ImportSensorsUseCase,
+    private readonly importCameraSources: ImportCameraLiveSourcesUseCase,
     @Inject(CONFIG_CODEC) private readonly codec: ConfigCodecPort,
     private readonly guard: RoleMiddleware,
+    @Inject(USER_REPOSITORY) private readonly users: UserRepositoryPort,
   ) {}
 
   register(composer: Composer<TelegramContext>): void {
@@ -118,36 +136,67 @@ export class ImportConfigHandler implements TelegramHandler {
       return; // keep awaitingFile
     }
 
+    const catalog = ctx.localeState?.catalog ?? en;
     const validation = validateImportConfig(parsed);
-    if (!validation.ok) {
-      await ctx.reply(en.importConfig.validationFailed(validation.errors));
+    const liveSourceValidation = validateLiveSourceConfig(
+      typeof parsed === 'object' && parsed !== null
+        ? (parsed as { live_sources?: unknown }).live_sources
+        : undefined,
+    );
+    if (!validation.ok || !liveSourceValidation.ok) {
+      const errors = [
+        ...(validation.ok ? [] : validation.errors),
+        ...(liveSourceValidation.ok
+          ? []
+          : [catalog.importConfig.invalidLiveSources]),
+      ];
+      await ctx.reply(catalog.importConfig.validationFailed(errors));
       return; // keep awaitingFile
     }
 
-    let plan: ImportPlan;
+    let sensorPlan: ImportPlan;
+    let cameraPlan: CameraLiveSourceImportPlan;
     try {
-      plan = await this.importSensors.prepare(validation.sensors);
+      [sensorPlan, cameraPlan] = await Promise.all([
+        this.importSensors.prepare(validation.sensors),
+        this.importCameraSources.prepare(liveSourceValidation.liveSources),
+      ]);
     } catch (error) {
       this.logger.error('import_config prepare failed', error as Error);
-      await ctx.reply(en.importConfig.failed((error as Error).message));
+      await ctx.reply(catalog.importConfig.applyFailed);
       this.states.delete(userId);
       return;
     }
 
-    const { added, updated, archived } = plan.summary;
-    if (added.length === 0 && updated.length === 0 && archived.length === 0) {
-      await ctx.reply(en.importConfig.noChanges);
+    const { added, updated, archived } = sensorPlan.summary;
+    if (
+      added.length === 0 &&
+      updated.length === 0 &&
+      archived.length === 0 &&
+      cameraPlan.configured.length === 0
+    ) {
+      await ctx.reply(catalog.importConfig.noChanges);
       this.states.delete(userId);
       return;
     }
 
-    this.states.set(userId, { kind: 'awaitingConfirm', plan });
+    this.states.set(userId, {
+      kind: 'awaitingConfirm',
+      sensorPlan,
+      cameraPlan,
+    });
     const keyboard = new InlineKeyboard()
       .text(en.importConfig.applyButton, 'imp:apply')
       .text(en.importConfig.cancelButton, 'imp:cancel');
-    await ctx.reply(en.importConfig.summary(plan.summary), {
+    await ctx.reply(
+      catalog.importConfig.summary({
+        ...sensorPlan.summary,
+        liveSources: [...cameraPlan.configured],
+      }),
+      {
       reply_markup: keyboard,
-    });
+      },
+    );
   }
 
   private async onCallback(ctx: CallbackQueryContext<TelegramContext>): Promise<void> {
@@ -170,15 +219,53 @@ export class ImportConfigHandler implements TelegramHandler {
         await ctx.reply(en.common.interrupted);
         return;
       }
+      const catalog = ctx.localeState?.catalog ?? en;
+      let cameraApplied = false;
+      let phase: 'camera' | 'sensor' = 'camera';
+      let summary: ImportSummary | undefined;
+      let replyText: string | undefined;
       try {
-        const summary = await this.importSensors.commit(state.plan);
-        this.states.delete(userId);
-        await ctx.reply(en.importConfig.applied(summary));
-      } catch (error) {
-        this.logger.error('import_config apply failed', error as Error);
-        this.states.delete(userId);
-        await ctx.reply(en.importConfig.failed((error as Error).message));
+        if (!(await this.isCurrentAdmin(userId))) {
+          replyText = catalog.common.adminRequired;
+        } else {
+          if (state.cameraPlan.configured.length > 0) {
+            await this.importCameraSources.commit(state.cameraPlan);
+            cameraApplied = true;
+          }
+
+          if (!(await this.isCurrentAdmin(userId))) {
+            replyText = cameraApplied
+              ? catalog.importConfig.partialRoleChanged
+              : catalog.common.adminRequired;
+          } else {
+            phase = 'sensor';
+            summary = await this.importSensors.commit(state.sensorPlan);
+          }
+        }
+      } catch (_error) {
+        this.logger.error('import_config apply failed');
+        replyText =
+          phase === 'sensor'
+            ? cameraApplied
+              ? catalog.importConfig.partialFailed
+              : catalog.importConfig.sensorOutcomeUncertain
+            : catalog.importConfig.applyFailed;
       }
+      this.states.delete(userId);
+      if (!replyText && summary) {
+        replyText = catalog.importConfig.applied({
+          ...summary,
+          liveSources: [...state.cameraPlan.configured],
+        });
+      }
+      replyText ??= catalog.importConfig.applyFailed;
+      await ctx.reply(replyText).catch(() => {
+        this.logger.warn('import_config result reply failed');
+      });
     }
+  }
+
+  private async isCurrentAdmin(telegramId: number): Promise<boolean> {
+    return (await this.users.findByTelegramId(telegramId))?.role === 'admin';
   }
 }

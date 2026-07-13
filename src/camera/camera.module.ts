@@ -21,6 +21,9 @@ import { GetMotionPhotoUseCase } from './application/get-motion-photo.use-case';
 import { GetMotionVideoUseCase } from './application/get-motion-video.use-case';
 import { GetSnapshotUseCase } from './application/get-snapshot.use-case';
 import { ListCamerasUseCase } from './application/list-cameras.use-case';
+import { ConfigureLiveSourceUseCase } from './application/configure-live-source.use-case';
+import { ListLiveSourcesUseCase } from './application/list-live-sources.use-case';
+import { RemoveLiveSourceUseCase } from './application/remove-live-source.use-case';
 import { ListMotionEventsUseCase } from './application/list-motion-events.use-case';
 import { LiveStreamMessageCleanupService } from './application/live-stream-message-cleanup.service';
 import { LiveStreamSessionService } from './application/live-stream-session.service';
@@ -63,8 +66,24 @@ import {
   type LiveStreamMessageCleanupPort,
 } from './domain/ports/live-stream-message-cleanup.port';
 import { LOCAL_STORAGE } from './domain/ports/local-storage.port';
+import {
+  LIVE_SOURCE_CREDENTIAL,
+  type LiveSourceCredentialPort,
+} from './domain/ports/live-source-credential.port';
+import {
+  LIVE_SOURCE_PROBE,
+  type LiveSourceProbePort,
+} from './domain/ports/live-source-probe.port';
+import {
+  LIVE_SOURCE_REPOSITORY,
+  type LiveSourceRepositoryPort,
+} from './domain/ports/live-source-repository.port';
+import { LIVE_SOURCE_SESSION_CONTROL } from './domain/ports/live-source-session-control.port';
 import { MEDIA_FILE } from './domain/ports/media-file.port';
-import { MEDIA_REPOSITORY } from './domain/ports/media-repository.port';
+import {
+  MEDIA_REPOSITORY,
+  type MediaRepositoryPort,
+} from './domain/ports/media-repository.port';
 import { MEDIA_WRITER } from './domain/ports/media-writer.port';
 import { MOTION_ALERT } from './domain/ports/motion-alert.port';
 import { MOTION_CONTROL } from './domain/ports/motion-control.port';
@@ -74,7 +93,18 @@ import {
 } from './domain/ports/monotonic-clock.port';
 import { RETENTION_PRUNE } from './domain/ports/retention-prune.port';
 import { SNAPSHOT } from './domain/ports/snapshot.port';
+import { STREAM_EGRESS, type StreamEgressPort } from './domain/ports/stream-egress.port';
 import { DrizzleMediaRepository } from './infrastructure/drizzle-media.repository';
+import { DrizzleLiveSourceRepository } from './infrastructure/drizzle-live-source.repository';
+import { InMemoryLiveSourceRepository } from './infrastructure/in-memory-live-source.repository';
+import { liveSourceCredentialFromEnvironment } from './infrastructure/aes-gcm-live-source-credential.adapter';
+import {
+  FfmpegLiveSourceProbeAdapter,
+  liveSourceProbeOptionsFromEnvironment,
+} from './infrastructure/ffmpeg-live-source-probe.adapter';
+import { UnavailableLiveSourceProbeAdapter } from './infrastructure/unavailable-live-source-probe.adapter';
+import { UnavailableStreamEgressAdapter } from './infrastructure/unavailable-stream-egress.adapter';
+import { LiveStreamSessionControlAdapter } from './infrastructure/live-stream-session-control.adapter';
 import { DrizzleRetentionPruneAdapter } from './infrastructure/drizzle-retention-prune.adapter';
 import { EventsMotionAlertAdapter } from './infrastructure/events-motion-alert.adapter';
 import { FfmpegSnapshotAdapter } from './infrastructure/ffmpeg-snapshot.adapter';
@@ -235,6 +265,41 @@ const liveStreamOptions = liveStreamOptionsFromEnv(process.env);
         ? InMemoryMonotonicClockAdapter
         : SystemMonotonicClockAdapter,
     },
+    {
+      provide: LIVE_SOURCE_CREDENTIAL,
+      useFactory: (): LiveSourceCredentialPort =>
+        liveSourceCredentialFromEnvironment(process.env),
+    },
+    {
+      provide: LIVE_SOURCE_REPOSITORY,
+      useFactory: (
+        credentials: LiveSourceCredentialPort,
+        drizzleRepository: DrizzleLiveSourceRepository,
+        media: MediaRepositoryPort,
+      ): LiveSourceRepositoryPort =>
+        mode === 'stub'
+          ? new InMemoryLiveSourceRepository(credentials, async (cameraId) =>
+              (await media.listCameras()).find((camera) => camera.id === cameraId)
+                ?.name ?? cameraId,
+            )
+          : drizzleRepository,
+      inject: [LIVE_SOURCE_CREDENTIAL, DrizzleLiveSourceRepository, MEDIA_REPOSITORY],
+    },
+    DrizzleLiveSourceRepository,
+    {
+      provide: STREAM_EGRESS,
+      useClass: UnavailableStreamEgressAdapter,
+    },
+    {
+      provide: LIVE_SOURCE_PROBE,
+      useFactory: (egress: StreamEgressPort): LiveSourceProbePort => {
+        const options = liveSourceProbeOptionsFromEnvironment(process.env);
+        return options
+          ? new FfmpegLiveSourceProbeAdapter(egress, options)
+          : new UnavailableLiveSourceProbeAdapter();
+      },
+      inject: [STREAM_EGRESS],
+    },
     LiveStreamMessageCleanupService,
     {
       provide: LIVE_STREAM_MESSAGE_CLEANUP,
@@ -269,6 +334,15 @@ const liveStreamOptions = liveStreamOptionsFromEnv(process.env);
         LIVE_STREAM_OPTIONS,
       ],
     },
+    {
+      provide: LIVE_SOURCE_SESSION_CONTROL,
+      useFactory: (sessions: LiveStreamSessionService) =>
+        new LiveStreamSessionControlAdapter(sessions),
+      inject: [LiveStreamSessionService],
+    },
+    ConfigureLiveSourceUseCase,
+    ListLiveSourcesUseCase,
+    RemoveLiveSourceUseCase,
     OpenLiveStreamUseCase,
     StopLiveStreamUseCase,
     GetSnapshotUseCase,
@@ -296,6 +370,8 @@ const liveStreamOptions = liveStreamOptionsFromEnv(process.env);
   ],
   exports: [
     MEDIA_REPOSITORY,
+    LIVE_SOURCE_REPOSITORY,
+    ListLiveSourcesUseCase,
     GetSnapshotUseCase,
     BrowseMotionEventsUseCase,
     ListMotionEventsUseCase,

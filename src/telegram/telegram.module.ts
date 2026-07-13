@@ -28,6 +28,7 @@ import { SystemUpdateUseCase } from './application/system-update.use-case';
 import { UnmuteSensorUseCase } from './application/unmute-sensor.use-case';
 import { UpdateSystemUseCase } from './application/update-system.use-case';
 import { ExportConfigUseCase } from './application/export-config.use-case';
+import { ImportCameraLiveSourcesUseCase } from './application/import-camera-live-sources.use-case';
 import { StageCsvExportUseCase } from './application/stage-csv-export.use-case';
 import {
   CSV_TEMP_DIRECTORY,
@@ -163,6 +164,7 @@ const mode = resolveBotMode();
     SystemOnlineNotifier,
     BotCommandsMenuService,
     ExportConfigUseCase,
+    ImportCameraLiveSourcesUseCase,
     StageCsvExportUseCase,
     { provide: CONFIG_CODEC, useClass: YamlConfigCodec },
     { provide: CSV_TEMP_DIRECTORY, useValue: join(tmpdir(), 'home-worker-csv') },

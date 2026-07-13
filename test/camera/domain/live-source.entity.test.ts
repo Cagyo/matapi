@@ -184,6 +184,9 @@ describe('LiveSource', () => {
       scheme: 'rtsp',
       host: 'cam.local:554',
       transport: 'tcp',
+      tlsMode: 'none',
+      profile: 'eco',
+      substreamHost: null,
       ready: true,
     });
     expect(JSON.stringify(source)).not.toMatch(

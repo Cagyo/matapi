@@ -69,7 +69,10 @@ Status legend: ✅ canonical · 🚧 in transition · 📝 planned
 
 | Port | Adapters | Status | Source |
 |---|---|---|---|
-| `LiveSourceRepositoryPort` (`LIVE_SOURCE_REPOSITORY`) | `DrizzleLiveSourceRepository` (Task 2) | 📝 contract added; encrypted persistence adapter planned | [live-source-repository.port.ts](../src/camera/domain/ports/live-source-repository.port.ts) |
+| `LiveSourceRepositoryPort` (`LIVE_SOURCE_REPOSITORY`) | `DrizzleLiveSourceRepository`, `InMemoryLiveSourceRepository` | ✅ encrypted persistence, metadata-only read model/import, authenticated startup load, transactional key rotation | [live-source-repository.port.ts](../src/camera/domain/ports/live-source-repository.port.ts) |
+| `LiveSourceCredentialPort` (`LIVE_SOURCE_CREDENTIAL`) | `AesGcmLiveSourceCredentialAdapter`, fail-closed unavailable adapter | ✅ versioned AES-256-GCM with camera/version AAD and transactional repository rotation | [live-source-credential.port.ts](../src/camera/domain/ports/live-source-credential.port.ts) |
+| `LiveSourceProbePort` (`LIVE_SOURCE_PROBE`) | `FfmpegLiveSourceProbeAdapter`, fail-closed unavailable adapter | ✅ DNS-all-answer/CIDR validation, exact temporary egress lease, bounded Unix-socket FFmpeg probe | [live-source-probe.port.ts](../src/camera/domain/ports/live-source-probe.port.ts) |
+| `LiveSourceSessionControlPort` (`LIVE_SOURCE_SESSION_CONTROL`) | `LiveStreamSessionControlAdapter` | ✅ conservatively stops the one global live session before source removal | [live-source-session-control.port.ts](../src/camera/domain/ports/live-source-session-control.port.ts) |
 | `StreamSandboxPort` (`STREAM_SANDBOX`) | `SystemdFfmpegStreamAdapter` (Task 3) | 📝 contract added; fixed Unix-socket/two-frame output | [stream-sandbox.port.ts](../src/camera/domain/ports/stream-sandbox.port.ts) |
 | `StreamEgressPort` (`STREAM_EGRESS`) | `NftStreamEgressAdapter` (Task 3) | 📝 contract added; accepts only a runtime-validated, lease-scoped RTSP/RTP egress grant | [stream-egress.port.ts](../src/camera/domain/ports/stream-egress.port.ts) |
 | `MotionControlPort` (`MOTION_CONTROL`) | `MotionDaemonAdapter` (systemctl, incl. `restart()`), `StubMotionControlAdapter` (dev) | ✅ | [motion-daemon.adapter.ts](../src/camera/infrastructure/motion-daemon.adapter.ts) |

@@ -1193,10 +1193,16 @@ const ruCatalog = {
         'Исправьте и загрузите файл повторно.',
       ].join('\n'),
     noChanges: 'ℹ️ Конфигурация совпадает с текущей. Применять нечего.',
-    summary: (s: ImportSummary): string => {
+    invalidLiveSources: 'Метаданные источников видео неверны или содержат неподдерживаемые поля.',
+    summary: (s: ImportSummary & { liveSources?: string[] }): string => {
       const lines = ['📋 Итоги импорта:', ''];
       lines.push(
         s.added.length > 0 ? `➕ Добавить: ${s.added.join(', ')}` : '➕ Добавить: нет',
+      );
+      lines.push(
+        s.liveSources?.length
+          ? `📷 Настроить источники видео: ${s.liveSources.join(', ')}`
+          : '📷 Настроить источники видео: нет',
       );
       lines.push(
         s.updated.length > 0
@@ -1213,8 +1219,12 @@ const ruCatalog = {
     },
     applyButton: 'Применить',
     cancelButton: '❌ Отмена',
-    applied: (s: ImportSummary): string =>
-      `✅ Конфигурация импортирована. Добавлено: ${s.added.length}, обновлено: ${s.updated.length}, архивировано: ${s.archived.length}.`,
+    applied: (s: ImportSummary & { liveSources?: string[] }): string =>
+      `✅ Конфигурация импортирована. Добавлено: ${s.added.length}, обновлено: ${s.updated.length}, архивировано: ${s.archived.length}, источников видео без учётных данных: ${s.liveSources?.length ?? 0}.`,
+    applyFailed: '❌ Импорт завершился ошибкой до применения изменений.',
+    partialFailed: '⚠️ Метаданные источников видео применены; импорт датчиков завершился некорректно, и его изменения базы данных также могли быть применены. Проверьте текущую конфигурацию перед повтором.',
+    sensorOutcomeUncertain: '⚠️ Импорт датчиков завершился некорректно, и изменения базы данных могли быть применены. Проверьте текущую конфигурацию перед повтором.',
+    partialRoleChanged: '⚠️ Метаданные источников видео применены, но импорт датчиков остановлен из-за изменения прав администратора.',
     cancelled: 'Импорт отменён. Изменения не внесены.',
     failed: (reason: string) =>
       `❌ Импорт не удался: ${reason}. Изменения не внесены.`,

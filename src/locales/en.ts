@@ -1188,10 +1188,16 @@ const enCatalog = {
         'Fix and re-upload.',
       ].join('\n'),
     noChanges: 'ℹ️ Config matches the current setup. No changes to apply.',
-    summary: (s: ImportSummary): string => {
+    invalidLiveSources: 'Live-source metadata is invalid or contains unsupported fields.',
+    summary: (s: ImportSummary & { liveSources?: string[] }): string => {
       const lines = ['📋 Import summary:', ''];
       lines.push(
         s.added.length > 0 ? `➕ Add: ${s.added.join(', ')}` : '➕ Add: none',
+      );
+      lines.push(
+        s.liveSources?.length
+          ? `📷 Configure live sources: ${s.liveSources.join(', ')}`
+          : '📷 Configure live sources: none',
       );
       lines.push(
         s.updated.length > 0
@@ -1208,8 +1214,12 @@ const enCatalog = {
     },
     applyButton: 'Apply',
     cancelButton: '❌ Cancel',
-    applied: (s: ImportSummary): string =>
-      `✅ Config imported. ${s.added.length} added, ${s.updated.length} updated, ${s.archived.length} archived.`,
+    applied: (s: ImportSummary & { liveSources?: string[] }): string =>
+      `✅ Config imported. ${s.added.length} added, ${s.updated.length} updated, ${s.archived.length} archived, ${s.liveSources?.length ?? 0} live sources configured without credentials.`,
+    applyFailed: '❌ Import failed before any changes were applied.',
+    partialFailed: '⚠️ Live-source metadata was applied; sensor import did not complete cleanly and its database changes may also have been applied. Review the current configuration before retrying.',
+    sensorOutcomeUncertain: '⚠️ Sensor import did not complete cleanly and its database changes may have been applied. Review the current configuration before retrying.',
+    partialRoleChanged: '⚠️ Live-source metadata was applied, but sensor import was stopped because administrator access changed.',
     cancelled: 'Import cancelled. No changes made.',
     failed: (reason: string) =>
       `❌ Import failed: ${reason}. No changes were made.`,

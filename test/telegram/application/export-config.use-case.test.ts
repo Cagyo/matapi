@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { parse } from 'yaml';
 import { ListCamerasUseCase } from '../../../src/camera/application/list-cameras.use-case';
+import { ListLiveSourcesUseCase } from '../../../src/camera/application/list-live-sources.use-case';
 import { ClockPort } from '../../../src/events/domain/ports/clock.port';
 import { InMemoryFeatureQuery } from '../../../src/features/infrastructure/in-memory-feature.query';
 import { Sensor } from '../../../src/sensors/domain/sensor';
@@ -40,9 +41,26 @@ describe('ExportConfigUseCase', () => {
       { name: 'digital', enabled: true, installed: true, config: null },
       { name: 'motion', enabled: false, installed: true, config: null },
     ]);
+    const liveSources = {
+      execute: vi.fn().mockResolvedValue([
+        {
+          cameraId: 'c1',
+          cameraName: 'front_door',
+          summary: {
+            scheme: 'rtsp',
+            host: 'cam.local:554',
+            transport: 'tcp',
+            tlsMode: 'none',
+            profile: 'eco',
+            substreamHost: 'cam.local:8554',
+            ready: true,
+          },
+        },
+      ]),
+    } as unknown as ListLiveSourcesUseCase;
     const codec = new YamlConfigCodec();
 
-    const useCase = new ExportConfigUseCase(sensors, cameras, features, codec, clock);
+    const useCase = new ExportConfigUseCase(sensors, cameras, liveSources, features, codec, clock);
     const { yaml, filename } = await useCase.execute();
 
     expect(filename).toBe('home-worker-config-2026-04-08.yml');
@@ -68,5 +86,18 @@ describe('ExportConfigUseCase', () => {
       { name: 'digital', enabled: true },
       { name: 'motion', enabled: false },
     ]);
+    expect(parsed.live_sources).toEqual([
+      {
+        camera_name: 'front_door',
+        scheme: 'rtsp',
+        host: 'cam.local:554',
+        transport: 'tcp',
+        tls_mode: 'none',
+        profile: 'eco',
+        substream_host: 'cam.local:8554',
+        ready: false,
+      },
+    ]);
+    expect(yaml).not.toMatch(/user|password|private|token|ciphertext|nonce|auth_tag/i);
   });
 });

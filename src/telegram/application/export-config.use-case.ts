@@ -1,6 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { format } from 'date-fns';
 import { ListCamerasUseCase } from '../../camera/application/list-cameras.use-case';
+import { ListLiveSourcesUseCase } from '../../camera/application/list-live-sources.use-case';
 import { CLOCK, ClockPort } from '../../events/domain/ports/clock.port';
 import {
   FEATURE_QUERY,
@@ -30,15 +31,17 @@ export class ExportConfigUseCase {
   constructor(
     @Inject(SENSOR_QUERY) private readonly sensors: SensorQueryPort,
     private readonly cameras: ListCamerasUseCase,
+    private readonly liveSources: ListLiveSourcesUseCase,
     @Inject(FEATURE_QUERY) private readonly features: FeatureQueryPort,
     @Inject(CONFIG_CODEC) private readonly codec: ConfigCodecPort,
     @Inject(CLOCK) private readonly clock: ClockPort,
   ) {}
 
   async execute(): Promise<ExportedConfig> {
-    const [sensorRows, cameraRows, featureRows] = await Promise.all([
+    const [sensorRows, cameraRows, liveSourceRows, featureRows] = await Promise.all([
       this.sensors.listEnabled(),
       this.cameras.execute(),
+      this.liveSources.execute(),
       this.features.listAll(),
     ]);
 
@@ -54,6 +57,18 @@ export class ExportConfigUseCase {
         name: c.name,
         type: c.type,
         config: c.config,
+      })),
+      live_sources: liveSourceRows.map(({ cameraName, summary }) => ({
+        camera_name: cameraName,
+        scheme: summary.scheme,
+        host: summary.host,
+        transport: summary.transport,
+        tls_mode: summary.tlsMode,
+        profile: summary.profile,
+        ...(summary.substreamHost
+          ? { substream_host: summary.substreamHost }
+          : {}),
+        ready: false as const,
       })),
       features: featureRows.map((f) => ({
         name: f.name,

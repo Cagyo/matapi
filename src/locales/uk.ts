@@ -1189,10 +1189,16 @@ const ukCatalog = {
         'Виправте та завантажте повторно.',
       ].join('\n'),
     noChanges: 'ℹ️ Конфігурація відповідає поточним налаштуванням. Застосовувати нічого.',
-    summary: (s: ImportSummary): string => {
+    invalidLiveSources: 'Метадані джерел відео некоректні або містять непідтримувані поля.',
+    summary: (s: ImportSummary & { liveSources?: string[] }): string => {
       const lines = ['📋 Підсумок імпорту:', ''];
       lines.push(
         s.added.length > 0 ? `➕ Додати: ${s.added.join(', ')}` : '➕ Додати: немає',
+      );
+      lines.push(
+        s.liveSources?.length
+          ? `📷 Налаштувати джерела відео: ${s.liveSources.join(', ')}`
+          : '📷 Налаштувати джерела відео: немає',
       );
       lines.push(
         s.updated.length > 0
@@ -1209,8 +1215,12 @@ const ukCatalog = {
     },
     applyButton: 'Застосувати',
     cancelButton: '❌ Скасувати',
-    applied: (s: ImportSummary): string =>
-      `✅ Конфігурацію імпортовано. Додано: ${s.added.length}, оновлено: ${s.updated.length}, архівовано: ${s.archived.length}.`,
+    applied: (s: ImportSummary & { liveSources?: string[] }): string =>
+      `✅ Конфігурацію імпортовано. Додано: ${s.added.length}, оновлено: ${s.updated.length}, архівовано: ${s.archived.length}, джерел відео без облікових даних: ${s.liveSources?.length ?? 0}.`,
+    applyFailed: '❌ Імпорт завершився помилкою до застосування змін.',
+    partialFailed: '⚠️ Метадані джерел відео застосовано; імпорт датчиків завершився некоректно, і його зміни бази даних також могли бути застосовані. Перевірте поточну конфігурацію перед повтором.',
+    sensorOutcomeUncertain: '⚠️ Імпорт датчиків завершився некоректно, і зміни бази даних могли бути застосовані. Перевірте поточну конфігурацію перед повтором.',
+    partialRoleChanged: '⚠️ Метадані джерел відео застосовано, але імпорт датчиків зупинено через зміну прав адміністратора.',
     cancelled: 'Імпорт скасовано. Змін не внесено.',
     failed: (reason: string) =>
       `❌ Імпорт не вдався: ${reason}. Змін не внесено.`,

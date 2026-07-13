@@ -51,6 +51,9 @@ export interface LiveSourceSummary {
   scheme: LiveSourceSecuritySettings['scheme'];
   host: string;
   transport: LiveSourceTransportSettings['transport'];
+  tlsMode: LiveSourceSecuritySettings['tlsMode'];
+  profile: LiveSourceProfileSettings['profile'];
+  substreamHost: string | null;
   ready: boolean;
 }
 
@@ -158,6 +161,31 @@ export class LiveSource {
     });
   }
 
+  static restore(input: {
+    cameraId: string;
+    normalizedUrl: string;
+    settings: LiveSourceSettings;
+    ready: boolean;
+    credentialPayload: LiveSourceCredentialPayload;
+  }): LiveSource {
+    const restored = LiveSource.create({
+      cameraId: input.cameraId,
+      url: input.credentialPayload.primaryUrl,
+      tlsMode: input.settings.tlsMode,
+      transport: input.settings.transport,
+      profile: input.settings.profile,
+      substream: input.credentialPayload.substreamUrl,
+      ready: input.ready,
+    });
+    if (
+      restored.normalizedUrl !== input.normalizedUrl ||
+      JSON.stringify(restored.settings) !== JSON.stringify(input.settings)
+    ) {
+      throw new InvalidLiveSourceError('stored metadata is inconsistent');
+    }
+    return restored;
+  }
+
   credentialPayload(): LiveSourceCredentialPayload {
     return { ...this.#credentialPayload };
   }
@@ -168,6 +196,11 @@ export class LiveSource {
       scheme: this.settings.scheme,
       host: parsed.host,
       transport: this.settings.transport,
+      tlsMode: this.settings.tlsMode,
+      profile: this.settings.profile,
+      substreamHost: this.settings.substream
+        ? new URL(this.settings.substream).host
+        : null,
       ready: this.ready,
     };
   }

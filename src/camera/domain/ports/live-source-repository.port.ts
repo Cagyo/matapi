@@ -3,6 +3,9 @@ import type {
   LiveSourceCredentialPayload,
   LiveSourceSummary,
 } from '../live-source.entity';
+import type { EncryptedLiveSourceCredential } from './live-source-credential.port';
+
+export type { EncryptedLiveSourceCredential } from './live-source-credential.port';
 
 export const LIVE_SOURCE_REPOSITORY = Symbol('LIVE_SOURCE_REPOSITORY');
 
@@ -12,15 +15,9 @@ export interface LiveSourceForStream {
   credential: LiveSourceCredentialPayload;
 }
 
-export interface EncryptedLiveSourceCredential {
-  ciphertext: string;
-  nonce: string;
-  authTag: string;
-  keyVersion: number;
-}
-
 export interface RedactedLiveSource {
   cameraId: string;
+  cameraName: string;
   summary: LiveSourceSummary;
 }
 
@@ -30,6 +27,8 @@ export interface LiveSourceRepositoryPort {
     source: LiveSource,
     credential: EncryptedLiveSourceCredential | null,
   ): Promise<void>;
+  /** Atomically upserts credential-free, not-ready import metadata. */
+  saveMetadataBatch(sources: readonly LiveSource[]): Promise<void>;
   loadForStream(cameraId: string): Promise<LiveSourceForStream | null>;
   listRedacted(): Promise<RedactedLiveSource[]>;
   remove(cameraId: string): Promise<void>;
