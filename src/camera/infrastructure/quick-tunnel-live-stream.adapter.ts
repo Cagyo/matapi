@@ -34,6 +34,7 @@ export interface CloudflaredChild extends EventEmitter {
   pid?: number;
   stdout: Readable;
   stderr: Readable;
+  kill(signal?: NodeJS.Signals): boolean;
 }
 
 export interface QuickTunnelLiveStreamDependencies {
@@ -44,7 +45,7 @@ export interface QuickTunnelLiveStreamDependencies {
   publicProbe?: (input: { hostname: string; path: string }) => Promise<void>;
   identifyProcess?: (pid: number) => Promise<string | null>;
   processGroupId?: (pid: number) => Promise<number | null>;
-  signalProcessGroup?: (pid: number, signal: NodeJS.Signals) => void;
+  signalProcessGroup?: (pid: number, signal: NodeJS.Signals) => boolean | void;
   workerProcessGroupId?: number;
   startupTimeoutMs?: number;
   stopGraceMs?: number;
@@ -72,12 +73,16 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
   private server?: Server;
   private child?: CloudflaredChild;
   private childIdentity?: string;
+  private childGroupValidated = false;
   private source?: LiveStreamSource;
   private upstreamRequest?: ClientRequest;
   private upstreamResponse?: IncomingMessage;
   private upstreamBoundary?: Buffer;
   private upstreamOpened = false;
+  private upstreamUnavailable = false;
   private frameBuffer = Buffer.alloc(0);
+  private outputMonitor?: CloudflaredOutputMonitor;
+  private lifecycleTail: Promise<void> = Promise.resolve();
 
   constructor(dependencies: QuickTunnelLiveStreamDependencies = {}) {
     this.spawnCloudflared = dependencies.spawnCloudflared ?? defaultSpawn;
@@ -102,7 +107,11 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
     return this.activeViewers.size;
   }
 
-  async start(input: { source: LiveStreamSource }): ReturnType<LiveStreamGatewayPort['start']> {
+  start(input: { source: LiveStreamSource }): ReturnType<LiveStreamGatewayPort['start']> {
+    return this.enqueueLifecycle(() => this.startExclusive(input));
+  }
+
+  private async startExclusive(input: { source: LiveStreamSource }): ReturnType<LiveStreamGatewayPort['start']> {
     if (this.server || this.child) throw new Error('Live stream gateway is already running');
     this.source = input.source;
     try {
@@ -114,18 +123,24 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
         { detached: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'] },
       );
       this.child = child;
-      const hostnamePromise = this.readSingleHostname(child);
-      void hostnamePromise.catch(() => undefined);
+      const monitor = createCloudflaredOutputMonitor(child);
+      this.outputMonitor = monitor;
+      void monitor.failure.catch(() => undefined);
       if (!child.pid || !Number.isSafeInteger(child.pid) || child.pid <= 0) {
         throw new Error('Cloudflared did not publish a valid process identifier');
-      }
-      if (!(await this.isDetachedProcessGroup(child.pid))) {
-        throw new Error('Cloudflared process group is not detached from the worker');
       }
       const processIdentity = await this.identifyProcess(child.pid);
       if (!processIdentity) throw new Error('Cloudflared process identity is unavailable');
       this.childIdentity = processIdentity;
-      const hostname = await hostnamePromise;
+      if (!(await this.isDetachedProcessGroup(child.pid))) {
+        throw new Error('Cloudflared process group is not detached from the worker');
+      }
+      this.childGroupValidated = true;
+      const hostname = await withTimeout(
+        Promise.race([monitor.hostname, monitor.failure]),
+        this.startupTimeoutMs,
+        'Quick Tunnel hostname timed out',
+      );
       const readinessToken = randomBytes(32).toString('base64url');
       const readinessHash = hashToken(readinessToken);
       this.viewers.set(readinessHash, {
@@ -135,20 +150,24 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
       });
       try {
         await withTimeout(
-          this.publicProbe({ hostname, path: `/watch/${readinessToken}` }),
+          Promise.race([
+            this.publicProbe({ hostname, path: `/watch/${readinessToken}` }),
+            monitor.failure,
+          ]),
           this.startupTimeoutMs,
           'Quick Tunnel did not become externally ready',
         );
       } finally {
         this.viewers.delete(readinessHash);
       }
+      monitor.beginDrain();
       return {
         publicHostname: hostname,
         pid: createLiveStreamProcessId(child.pid),
         processIdentity,
       };
     } catch (error) {
-      await this.stop();
+      await this.cleanupExclusive();
       throw error;
     }
   }
@@ -167,13 +186,18 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
     }
   }
 
-  async stop(): Promise<void> {
+  stop(): Promise<void> {
+    return this.enqueueLifecycle(() => this.cleanupExclusive());
+  }
+
+  private async cleanupExclusive(): Promise<void> {
     this.upstreamRequest?.destroy();
     this.upstreamResponse?.destroy();
     this.upstreamRequest = undefined;
     this.upstreamResponse = undefined;
     this.upstreamBoundary = undefined;
     this.upstreamOpened = false;
+    this.upstreamUnavailable = false;
     this.frameBuffer = Buffer.alloc(0);
     for (const viewer of [...this.activeViewers]) viewer.response.destroy();
     this.activeViewers.clear();
@@ -186,18 +210,34 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
     }
     const child = this.child;
     const identity = this.childIdentity;
+    const groupValidated = this.childGroupValidated;
     this.child = undefined;
     this.childIdentity = undefined;
-    if (child?.pid && identity) {
+    this.childGroupValidated = false;
+    if (child?.pid) {
+      const terminated = identity
+        ? await this.terminateVerifiedGroup(child.pid, identity, child)
+        : false;
+      if (!terminated && !groupValidated) child.kill('SIGTERM');
+      this.outputMonitor?.close();
+      this.outputMonitor = undefined;
       child.stdout.removeAllListeners();
       child.stderr.removeAllListeners();
       child.removeAllListeners();
-      await this.terminateVerifiedGroup(child.pid, identity, child);
     }
+    this.outputMonitor?.close();
+    this.outputMonitor = undefined;
     this.source = undefined;
   }
 
-  async recoverOwnedProcess(input: {
+  recoverOwnedProcess(input: {
+    pid: LiveStreamProcessId;
+    processIdentity: string;
+  }): Promise<'stopped' | 'not-owned'> {
+    return this.enqueueLifecycle(() => this.recoverExclusive(input));
+  }
+
+  private async recoverExclusive(input: {
     pid: LiveStreamProcessId;
     processIdentity: string;
   }): Promise<'stopped' | 'not-owned'> {
@@ -205,8 +245,9 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
     if (!(await this.isDetachedProcessGroup(pid))) return 'not-owned';
     const current = await this.identifyProcess(pid);
     if (!current || current !== input.processIdentity) return 'not-owned';
-    await this.terminateVerifiedGroup(pid, input.processIdentity);
-    return 'stopped';
+    return (await this.terminateVerifiedGroup(pid, input.processIdentity))
+      ? 'stopped'
+      : 'not-owned';
   }
 
   private async openLoopbackServer(): Promise<void> {
@@ -251,7 +292,7 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
   }
 
   private openViewer(tokenHash: string, response: ServerResponse): void {
-    if (this.activeViewers.size >= 2) return notFound(response);
+    if (this.upstreamUnavailable || this.activeViewers.size >= 2) return notFound(response);
     for (const viewer of this.activeViewers) {
       if (safeHashEqual(viewer.tokenHash, tokenHash)) return notFound(response);
     }
@@ -292,17 +333,24 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
   private consumeUpstreamChunk(chunk: Buffer): void {
     const boundary = this.upstreamBoundary;
     if (!boundary) return;
+    if (this.frameBuffer.length + chunk.length > FRAME_BUFFER_LIMIT_BYTES) {
+      this.closeAllViewers();
+      return;
+    }
     this.frameBuffer = Buffer.concat([this.frameBuffer, chunk]);
-    if (this.frameBuffer.length > FRAME_BUFFER_LIMIT_BYTES) return this.closeAllViewers();
     let first = this.frameBuffer.indexOf(boundary);
     if (first < 0) return;
     if (first > 0) this.frameBuffer = this.frameBuffer.subarray(first);
     while ((first = this.frameBuffer.indexOf(boundary)) === 0) {
       const next = this.frameBuffer.indexOf(boundary, boundary.length);
       if (next < 0) return;
-      const frame = Buffer.from(this.frameBuffer.subarray(0, next));
+      const upstreamFrame = this.frameBuffer.subarray(0, next);
+      const frame = Buffer.concat([
+        Buffer.from('--frame'),
+        upstreamFrame.subarray(boundary.length),
+      ]);
       this.frameBuffer = this.frameBuffer.subarray(next);
-      if (frame.length > boundary.length) this.broadcast(frame);
+      if (upstreamFrame.length > boundary.length) this.broadcast(frame);
     }
   }
 
@@ -341,79 +389,111 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
   }
 
   private closeAllViewers(): void {
+    this.upstreamUnavailable = true;
     for (const viewer of [...this.activeViewers]) viewer.response.destroy();
     this.closeUpstream();
-  }
-
-  private readSingleHostname(child: CloudflaredChild): Promise<string> {
-    return withTimeout(
-      new Promise<string>((resolve, reject) => {
-        let stdout = Buffer.alloc(0);
-        let stderr = Buffer.alloc(0);
-        let settled = false;
-        const inspect = () => {
-          const combined = Buffer.concat([stdout, stderr]).toString('utf8');
-          const matches = [...combined.matchAll(/https:\/\/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.trycloudflare\.com)(?=[\s/]|$)/gi)];
-          const hostnames = new Set(matches.map((match) => match[1].toLowerCase()));
-          if (matches.length > 1 || hostnames.size > 1) return finish(new Error('Quick Tunnel emitted duplicate hostname data'));
-          if (hostnames.size === 1) queueMicrotask(() => {
-            const latest = Buffer.concat([stdout, stderr]).toString('utf8');
-            const all = [...latest.matchAll(/https:\/\/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.trycloudflare\.com)(?=[\s/]|$)/gi)];
-            if (all.length !== 1) finish(new Error('Quick Tunnel emitted duplicate hostname data'));
-            else finish(undefined, all[0][1].toLowerCase());
-          });
-        };
-        const append = (target: 'stdout' | 'stderr', chunk: Buffer | string) => {
-          const next = Buffer.from(chunk);
-          if ((target === 'stdout' ? stdout.length : stderr.length) + next.length > OUTPUT_LIMIT_BYTES) {
-            return finish(new Error('Quick Tunnel output exceeded its bounded limit'));
-          }
-          if (target === 'stdout') stdout = Buffer.concat([stdout, next]);
-          else stderr = Buffer.concat([stderr, next]);
-          inspect();
-        };
-        const finish = (error?: Error, hostname?: string) => {
-          if (settled) return;
-          settled = true;
-          child.stdout.off('data', onStdout);
-          child.stderr.off('data', onStderr);
-          child.off('exit', onExit);
-          child.off('error', onError);
-          if (error) reject(error);
-          else resolve(hostname!);
-        };
-        const onStdout = (chunk: Buffer | string) => append('stdout', chunk);
-        const onStderr = (chunk: Buffer | string) => append('stderr', chunk);
-        const onExit = () => finish(new Error('Quick Tunnel exited before publishing a hostname'));
-        const onError = (error: Error) => finish(error);
-        child.stdout.on('data', onStdout);
-        child.stderr.on('data', onStderr);
-        child.once('exit', onExit);
-        child.once('error', onError);
-      }),
-      this.startupTimeoutMs,
-      'Quick Tunnel hostname timed out',
-    );
   }
 
   private async terminateVerifiedGroup(
     pid: number,
     identity: string,
     child?: CloudflaredChild,
-  ): Promise<void> {
-    if (!(await this.isDetachedProcessGroup(pid))) return;
-    if ((await this.identifyProcess(pid)) !== identity) return;
-    this.signalProcessGroup(pid, 'SIGTERM');
-    if (this.stopGraceMs <= 0) return;
+  ): Promise<boolean> {
+    if (!(await this.isDetachedProcessGroup(pid))) return false;
+    if ((await this.identifyProcess(pid)) !== identity) return false;
+    if (this.signalProcessGroup(pid, 'SIGTERM') === false) return false;
+    if (this.stopGraceMs <= 0) return true;
     const exited = child ? await waitForExit(child, this.stopGraceMs) : await waitUntilGone(pid, identity, this.identifyProcess, this.stopGraceMs);
-    if (exited || !(await this.isDetachedProcessGroup(pid)) || (await this.identifyProcess(pid)) !== identity) return;
+    if (exited || !(await this.isDetachedProcessGroup(pid)) || (await this.identifyProcess(pid)) !== identity) return true;
     this.signalProcessGroup(pid, 'SIGKILL');
+    return true;
   }
 
   private async isDetachedProcessGroup(pid: number): Promise<boolean> {
     const processGroupId = await this.processGroupId(pid);
     return processGroupId === pid && processGroupId !== this.workerProcessGroupId;
   }
+
+  private enqueueLifecycle<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.lifecycleTail.then(operation, operation);
+    this.lifecycleTail = run.then(() => undefined, () => undefined);
+    return run;
+  }
+}
+
+class CloudflaredOutputMonitor {
+  readonly hostname: Promise<string>;
+  readonly failure: Promise<never>;
+  private resolveHostname!: (hostname: string) => void;
+  private rejectFailure!: (error: Error) => void;
+  private retained = Buffer.alloc(0);
+  private hostnameResolved = false;
+  private failed = false;
+  private scanning = true;
+
+  constructor(private readonly child: CloudflaredChild) {
+    this.hostname = new Promise<string>((resolve) => {
+      this.resolveHostname = resolve;
+    });
+    this.failure = new Promise<never>((_, reject) => {
+      this.rejectFailure = reject;
+    });
+    child.stdout.on('data', this.onData);
+    child.stderr.on('data', this.onData);
+    child.once('exit', this.onExit);
+    child.once('error', this.onError);
+  }
+
+  beginDrain(): void {
+    this.scanning = false;
+    this.retained = Buffer.alloc(0);
+  }
+
+  close(): void {
+    this.child.stdout.off('data', this.onData);
+    this.child.stderr.off('data', this.onData);
+    this.child.off('exit', this.onExit);
+    this.child.off('error', this.onError);
+    this.retained = Buffer.alloc(0);
+  }
+
+  private readonly onData = (chunk: Buffer | string): void => {
+    if (!this.scanning || this.failed) return;
+    const next = Buffer.from(chunk);
+    if (this.retained.length + next.length > OUTPUT_LIMIT_BYTES) {
+      this.fail(new Error('Quick Tunnel output exceeded its bounded limit'));
+      return;
+    }
+    this.retained = Buffer.concat([this.retained, next]);
+    const text = this.retained.toString('utf8');
+    const matches = [...text.matchAll(/https:\/\/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.trycloudflare\.com)(?=[\s/]|$)/gi)];
+    if (matches.length > 1) {
+      this.fail(new Error('Quick Tunnel emitted duplicate hostname data'));
+      return;
+    }
+    if (matches.length === 1 && !this.hostnameResolved) {
+      this.hostnameResolved = true;
+      this.resolveHostname(matches[0][1].toLowerCase());
+    }
+  };
+
+  private readonly onExit = (): void => {
+    this.fail(new Error('Quick Tunnel exited before readiness'));
+  };
+
+  private readonly onError = (error: Error): void => {
+    this.fail(error);
+  };
+
+  private fail(error: Error): void {
+    if (this.failed) return;
+    this.failed = true;
+    this.rejectFailure(error);
+  }
+}
+
+function createCloudflaredOutputMonitor(child: CloudflaredChild): CloudflaredOutputMonitor {
+  return new CloudflaredOutputMonitor(child);
 }
 
 function defaultSpawn(args: string[], options: SpawnOptions): CloudflaredChild {
@@ -429,11 +509,13 @@ async function defaultPublicProbe(input: { hostname: string; path: string }): Pr
   await response.body?.cancel();
 }
 
-function defaultSignalProcessGroup(pid: number, signal: NodeJS.Signals): void {
+function defaultSignalProcessGroup(pid: number, signal: NodeJS.Signals): boolean {
   try {
     process.kill(-pid, signal);
+    return true;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+    if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false;
+    throw error;
   }
 }
 

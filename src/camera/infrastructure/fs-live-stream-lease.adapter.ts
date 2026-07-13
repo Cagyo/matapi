@@ -23,9 +23,12 @@ export class FsLiveStreamLeaseAdapter implements LiveStreamLeasePort {
       const raw: unknown = JSON.parse(
         await readFile(join(this.runtimeDirectory, LEASE_FILE), 'utf8'),
       );
-      return parseLease(raw);
-    } catch {
-      return null;
+      const lease = parseLease(raw);
+      if (!lease) throw new InvalidLeaseError();
+      return lease;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw new Error('Live stream lease could not be read');
     }
   }
 
@@ -53,6 +56,8 @@ export class FsLiveStreamLeaseAdapter implements LiveStreamLeasePort {
     await syncDirectory(this.runtimeDirectory);
   }
 }
+
+class InvalidLeaseError extends Error {}
 
 async function syncDirectory(directory: string): Promise<void> {
   try {

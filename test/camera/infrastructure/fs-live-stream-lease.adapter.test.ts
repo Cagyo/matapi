@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -27,16 +27,38 @@ describe('FsLiveStreamLeaseAdapter', () => {
     expect(await readdir(runtimeDir)).toEqual(['lease.json']);
   });
 
-  it('returns a safe empty state for malformed or invalid identity data', async () => {
+  it('throws a sanitized error for malformed JSON without exposing contents', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'live-stream-lease-'));
+    roots.push(root);
+    const adapter = new FsLiveStreamLeaseAdapter(root);
+    await writeFile(join(root, 'lease.json'), '{secret-content:not-json');
+
+    await expect(adapter.read()).rejects.toMatchObject({
+      message: 'Live stream lease could not be read',
+    });
+    await expect(adapter.read()).rejects.not.toThrow(/secret-content/);
+  });
+
+  it('throws a sanitized error for invalid recovery identity data', async () => {
     const root = await mkdtemp(join(tmpdir(), 'live-stream-lease-'));
     roots.push(root);
     const adapter = new FsLiveStreamLeaseAdapter(root);
     await writeFile(join(root, 'lease.json'), JSON.stringify({ ...lease(), processIdentity: '' }));
 
-    expect(await adapter.read()).toBeNull();
+    await expect(adapter.read()).rejects.toMatchObject({
+      message: 'Live stream lease could not be read',
+    });
+  });
 
-    await writeFile(join(root, 'lease.json'), '{not-json');
-    expect(await adapter.read()).toBeNull();
+  it('throws a sanitized error for non-ENOENT filesystem failures', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'live-stream-lease-'));
+    roots.push(root);
+    const adapter = new FsLiveStreamLeaseAdapter(root);
+    await mkdir(join(root, 'lease.json'));
+
+    await expect(adapter.read()).rejects.toMatchObject({
+      message: 'Live stream lease could not be read',
+    });
   });
 
   it('clears the lease idempotently', async () => {

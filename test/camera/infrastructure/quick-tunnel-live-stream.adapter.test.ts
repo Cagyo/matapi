@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { createServer, type Server } from 'node:http';
+import { createServer, type Server, type ServerResponse } from 'node:http';
 import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createLiveStreamSession, type LiveStreamSource } from '../../../src/camera/domain/live-stream.entity';
@@ -67,6 +67,63 @@ describe('QuickTunnelLiveStreamAdapter', () => {
     expect(fixture.adapter.activeViewerCount).toBe(2);
     await fixture.adapter.stop();
     await Promise.all([first, second]);
+  });
+
+  it('fans identical complete multipart frames to two viewers across fragmented boundaries', async () => {
+    let upstream!: ServerResponse;
+    const fixture = await createFixture((response) => {
+      upstream = response;
+    }, 'multipart/x-mixed-replace; boundary=motion');
+    await fixture.adapter.addViewer(viewer('first'));
+    await fixture.adapter.addViewer(viewer('second'));
+    const firstPromise = fetch(`${fixture.localOrigin}/mjpeg/first`);
+    const secondPromise = fetch(`${fixture.localOrigin}/mjpeg/second`);
+    await vi.waitFor(() => expect(upstream).toBeDefined());
+    const first = await firstPromise;
+    const second = await secondPromise;
+    const upstreamPartOne = Buffer.from('--motion\r\nContent-Type: image/jpeg\r\nContent-Length: 3\r\n\r\nabc\r\n');
+    const upstreamPartTwo = Buffer.from('--motion\r\nContent-Type: image/jpeg\r\nContent-Length: 4\r\n\r\ndefg\r\n');
+    const payload = Buffer.concat([upstreamPartOne, upstreamPartTwo, Buffer.from('--motion')]);
+    const expectedPartOne = Buffer.from('--frame\r\nContent-Type: image/jpeg\r\nContent-Length: 3\r\n\r\nabc\r\n');
+    const expectedPartTwo = Buffer.from('--frame\r\nContent-Type: image/jpeg\r\nContent-Length: 4\r\n\r\ndefg\r\n');
+    const firstBytes = readBytes(first, expectedPartOne.length + expectedPartTwo.length);
+    const secondBytes = readBytes(second, expectedPartOne.length + expectedPartTwo.length);
+
+    for (const [start, end] of [[0, 3], [3, 11], [11, 67], [67, 73], [73, payload.length]] as const) {
+      upstream.write(payload.subarray(start, end));
+    }
+
+    const expected = Buffer.concat([expectedPartOne, expectedPartTwo]);
+    expect(await firstBytes).toEqual(expected);
+    expect(await secondBytes).toEqual(expected);
+  });
+
+  it('marks the gateway unavailable after malformed Motion multipart metadata', async () => {
+    const fixture = await createFixture(undefined, 'text/plain');
+    await fixture.adapter.addViewer(viewer('first'));
+    await fixture.adapter.addViewer(viewer('later'));
+    const first = await fetch(`${fixture.localOrigin}/mjpeg/first`);
+    await vi.waitFor(() => expect(fixture.adapter.activeViewerCount).toBe(0));
+
+    expect((await fetch(`${fixture.localOrigin}/mjpeg/later`)).status).toBe(404);
+    await expect(first.arrayBuffer()).rejects.toThrow();
+  });
+
+  it('closes viewers and rejects later requests after oversized multipart input', async () => {
+    let upstream!: ServerResponse;
+    const fixture = await createFixture((response) => {
+      upstream = response;
+    });
+    await fixture.adapter.addViewer(viewer('first'));
+    await fixture.adapter.addViewer(viewer('later'));
+    const first = await fetch(`${fixture.localOrigin}/mjpeg/first`);
+    await vi.waitFor(() => expect(upstream).toBeDefined());
+
+    upstream.write(Buffer.alloc(2 * 1024 * 1024 + 1, 0x61));
+    await vi.waitFor(() => expect(fixture.adapter.activeViewerCount).toBe(0));
+
+    expect((await fetch(`${fixture.localOrigin}/mjpeg/later`)).status).toBe(404);
+    await expect(first.arrayBuffer()).rejects.toThrow();
   });
 
   it('limits streams to two total and one per token', async () => {
@@ -143,6 +200,109 @@ describe('QuickTunnelLiveStreamAdapter', () => {
     expect(adapter.localOrigin).toBeNull();
   });
 
+  it('positively terminates the spawned child when ownership validation fails', async () => {
+    const child = fakeChild();
+    const adapter = new QuickTunnelLiveStreamAdapter({
+      spawnCloudflared: () => child,
+      identifyProcess: async () => null,
+      processGroupId: async (pid) => pid,
+      workerProcessGroupId: 99,
+      startupTimeoutMs: 500,
+      stopGraceMs: 0,
+    });
+    child.stdout.write('https://clear-moon.trycloudflare.com\n');
+
+    await expect(adapter.start(startInput('http://127.0.0.1:9'))).rejects.toThrow(/identity/i);
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+  });
+
+  it('retains and terminates an initializing child when stop races startup', async () => {
+    const child = fakeChild();
+    const identity = deferred<string | null>();
+    const identifyProcess = vi.fn(() => identity.promise);
+    const groupSignals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    const adapter = new QuickTunnelLiveStreamAdapter({
+      spawnCloudflared: () => child,
+      publicProbe: async () => undefined,
+      identifyProcess,
+      processGroupId: async (pid) => pid,
+      workerProcessGroupId: 99,
+      signalProcessGroup: (pid, signal) => groupSignals.push({ pid, signal }),
+      startupTimeoutMs: 500,
+      stopGraceMs: 0,
+    });
+    child.stdout.write('https://clear-moon.trycloudflare.com\n');
+
+    const starting = adapter.start(startInput('http://127.0.0.1:9'));
+    await vi.waitFor(() => expect(identifyProcess).toHaveBeenCalledOnce());
+    const stopping = adapter.stop();
+    identity.resolve('start:1');
+    await Promise.allSettled([starting, stopping]);
+
+    expect(groupSignals).toContainEqual({ pid: 41001, signal: 'SIGTERM' });
+    expect(adapter.localOrigin).toBeNull();
+  });
+
+  it('rejects a hostname duplicated while external readiness is pending', async () => {
+    const child = fakeChild();
+    const probe = deferred<void>();
+    const publicProbe = vi.fn(() => probe.promise);
+    const groupSignals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    const adapter = new QuickTunnelLiveStreamAdapter({
+      spawnCloudflared: () => child,
+      publicProbe,
+      identifyProcess: async () => 'start:1',
+      processGroupId: async (pid) => pid,
+      workerProcessGroupId: 99,
+      signalProcessGroup: (pid, signal) => groupSignals.push({ pid, signal }),
+      startupTimeoutMs: 500,
+      stopGraceMs: 0,
+    });
+    queueMicrotask(() => child.stdout.write('https://clear-moon.trycloudflare.com\n'));
+    const starting = adapter.start(startInput('http://127.0.0.1:9'));
+    await vi.waitFor(() => expect(publicProbe).toHaveBeenCalledOnce());
+    child.stderr.write('https://clear-moon.trycloudflare.com\n');
+    probe.resolve();
+
+    await expect(starting).rejects.toThrow(/duplicate hostname/i);
+    expect(groupSignals).toContainEqual({ pid: 41001, signal: 'SIGTERM' });
+  });
+
+  it('continuously drains cloudflared output after readiness without retaining it', async () => {
+    const fixture = await createFixture();
+    const noise = Buffer.alloc(256 * 1024, 0x78);
+
+    fixture.child.stdout.write(noise);
+    fixture.child.stderr.write(noise);
+    await vi.waitFor(() => {
+      expect(fixture.child.stdout.readableLength).toBe(0);
+      expect(fixture.child.stderr.readableLength).toBe(0);
+    });
+    expect(fixture.child.stdout.listenerCount('data')).toBeGreaterThan(0);
+    expect(fixture.child.stderr.listenerCount('data')).toBeGreaterThan(0);
+  });
+
+  it('bounds total retained hostname scan output across stdout and stderr', async () => {
+    const child = fakeChild();
+    const groupSignals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    const adapter = new QuickTunnelLiveStreamAdapter({
+      spawnCloudflared: () => child,
+      identifyProcess: async () => 'start:1',
+      processGroupId: async (pid) => pid,
+      workerProcessGroupId: 99,
+      signalProcessGroup: (pid, signal) => groupSignals.push({ pid, signal }),
+      startupTimeoutMs: 500,
+      stopGraceMs: 0,
+    });
+    queueMicrotask(() => {
+      child.stdout.write(Buffer.alloc(40 * 1024, 0x78));
+      child.stderr.write(Buffer.alloc(30 * 1024, 0x79));
+    });
+
+    await expect(adapter.start(startInput('http://127.0.0.1:9'))).rejects.toThrow(/bounded limit/i);
+    expect(groupSignals).toContainEqual({ pid: 41001, signal: 'SIGTERM' });
+  });
+
   it('recovers only a process whose current identity matches the lease', async () => {
     const groupSignals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
     const adapter = new QuickTunnelLiveStreamAdapter({
@@ -171,14 +331,34 @@ describe('QuickTunnelLiveStreamAdapter', () => {
     await expect(adapter.recoverOwnedProcess({ pid: 41001 as never, processIdentity: 'start:1' })).resolves.toBe('not-owned');
     expect(groupSignals).toEqual([]);
   });
+
+  it('reports not-owned when final group verification changes before signaling', async () => {
+    let groupChecks = 0;
+    const groupSignals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    const adapter = new QuickTunnelLiveStreamAdapter({
+      identifyProcess: async () => 'start:1',
+      processGroupId: async (pid) => ++groupChecks === 1 ? pid : 99,
+      workerProcessGroupId: 99,
+      signalProcessGroup: (pid, signal) => groupSignals.push({ pid, signal }),
+      stopGraceMs: 0,
+    });
+
+    await expect(adapter.recoverOwnedProcess({ pid: 41001 as never, processIdentity: 'start:1' })).resolves.toBe('not-owned');
+    expect(groupSignals).toEqual([]);
+  });
 });
 
-async function createFixture() {
+async function createFixture(
+  onMotion?: (response: ServerResponse) => void,
+  contentType = 'multipart/x-mixed-replace; boundary=frame',
+) {
   let motionRequests = 0;
   const motion = createServer((_request, response) => {
     motionRequests += 1;
-    response.writeHead(200, { 'content-type': 'multipart/x-mixed-replace; boundary=frame' });
-    response.write('--frame\r\nContent-Type: image/jpeg\r\nContent-Length: 3\r\n\r\nabc\r\n');
+    response.writeHead(200, { 'content-type': contentType });
+    response.flushHeaders();
+    if (onMotion) onMotion(response);
+    else response.write('--frame\r\nContent-Type: image/jpeg\r\nContent-Length: 3\r\n\r\nabc\r\n');
   });
   const motionOrigin = await listen(motion);
   const child = fakeChild();
@@ -225,7 +405,16 @@ function fakeChild(): CloudflaredChild {
   child.pid = 41001;
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
+  child.kill = vi.fn(() => true);
   return child;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
 }
 
 async function listen(server: Server): Promise<string> {
@@ -237,4 +426,22 @@ async function listen(server: Server): Promise<string> {
 
 async function close(server: Server): Promise<void> {
   await new Promise<void>((resolve) => server.close(() => resolve()));
+}
+
+async function readBytes(response: Response, length: number): Promise<Buffer> {
+  const reader = response.body!.getReader();
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    while (total < length) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error('stream closed before expected multipart bytes');
+      const chunk = Buffer.from(value);
+      chunks.push(chunk);
+      total += chunk.length;
+    }
+    return Buffer.concat(chunks).subarray(0, length);
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
 }
