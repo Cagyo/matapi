@@ -9,7 +9,7 @@ function readScript(path: string): string {
 function expectLockAwareAptWrapper(script: string): void {
   expect(script).toContain('APT_LOCK_TIMEOUT_SECONDS=300');
   expect(script).toMatch(
-    /apt_get\(\) \{\n  sudo apt-get -o "DPkg::Lock::Timeout=\$\{APT_LOCK_TIMEOUT_SECONDS\}" "\$@"\n\}/,
+    /apt_get\(\) \{\n {2}sudo apt-get -o "DPkg::Lock::Timeout=\$\{APT_LOCK_TIMEOUT_SECONDS\}" "\$@"\n\}/,
   );
 }
 

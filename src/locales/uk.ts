@@ -621,8 +621,8 @@ const ukCatalog = {
     },
     stateChange(stepType: string, oldVal: boolean, newVal: boolean): string {
       const steps = (uk.sensors?.steps as Record<string, Record<string, string>>)?.[stepType] || uk.sensors.steps.contact;
-      let oldStr = (oldVal ? steps.true : steps.false).toUpperCase();
-      let newStr = (newVal ? steps.true : steps.false).toUpperCase();
+      const oldStr = (oldVal ? steps.true : steps.false).toUpperCase();
+      const newStr = (newVal ? steps.true : steps.false).toUpperCase();
       return `Стан змінено: ${oldStr} → ${newStr}`;
     },
     debounceTriggered(count: number, windowSec: number): string {

@@ -9,7 +9,7 @@ import {
   type CloudflaredChild,
 } from '../../../src/camera/infrastructure/quick-tunnel-live-stream.adapter';
 
-const cleanup: Array<() => Promise<void>> = [];
+const cleanup: (() => Promise<void>)[] = [];
 
 describe('QuickTunnelLiveStreamAdapter', () => {
   afterEach(async () => {
@@ -152,7 +152,7 @@ describe('QuickTunnelLiveStreamAdapter', () => {
 
   it('cleans up the child and listener when the external readiness probe fails', async () => {
     const child = fakeChild();
-    const groupSignals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    const groupSignals: { pid: number; signal: NodeJS.Signals }[] = [];
     const adapter = new QuickTunnelLiveStreamAdapter({
       spawnCloudflared: () => child,
       publicProbe: async () => { throw new Error('not externally ready'); },
@@ -227,7 +227,7 @@ describe('QuickTunnelLiveStreamAdapter', () => {
     const child = fakeChild();
     const identity = deferred<string | null>();
     const identifyProcess = vi.fn(() => identity.promise);
-    const groupSignals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    const groupSignals: { pid: number; signal: NodeJS.Signals }[] = [];
     const adapter = new QuickTunnelLiveStreamAdapter({
       spawnCloudflared: () => child,
       publicProbe: async () => undefined,
@@ -254,7 +254,7 @@ describe('QuickTunnelLiveStreamAdapter', () => {
     const child = fakeChild();
     const probe = deferred<void>();
     const publicProbe = vi.fn(() => probe.promise);
-    const groupSignals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    const groupSignals: { pid: number; signal: NodeJS.Signals }[] = [];
     const adapter = new QuickTunnelLiveStreamAdapter({
       spawnCloudflared: () => child,
       publicProbe,
@@ -291,7 +291,7 @@ describe('QuickTunnelLiveStreamAdapter', () => {
 
   it('bounds total retained hostname scan output across stdout and stderr', async () => {
     const child = fakeChild();
-    const groupSignals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    const groupSignals: { pid: number; signal: NodeJS.Signals }[] = [];
     const adapter = new QuickTunnelLiveStreamAdapter({
       spawnCloudflared: () => child,
       identifyProcess: async () => 'start:1',
@@ -311,7 +311,7 @@ describe('QuickTunnelLiveStreamAdapter', () => {
   });
 
   it('recovers only a process whose current identity matches the lease', async () => {
-    const groupSignals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    const groupSignals: { pid: number; signal: NodeJS.Signals }[] = [];
     const adapter = new QuickTunnelLiveStreamAdapter({
       identifyProcess: async (pid) => pid === 41001 ? 'start:1' : null,
       processGroupId: async (pid) => pid,
@@ -326,7 +326,7 @@ describe('QuickTunnelLiveStreamAdapter', () => {
   });
 
   it('never signals a PID whose process group is not detached from the worker', async () => {
-    const groupSignals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    const groupSignals: { pid: number; signal: NodeJS.Signals }[] = [];
     const adapter = new QuickTunnelLiveStreamAdapter({
       identifyProcess: async () => 'start:1',
       processGroupId: async () => 99,
@@ -341,7 +341,7 @@ describe('QuickTunnelLiveStreamAdapter', () => {
 
   it('reports not-owned when final group verification changes before signaling', async () => {
     let groupChecks = 0;
-    const groupSignals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    const groupSignals: { pid: number; signal: NodeJS.Signals }[] = [];
     const adapter = new QuickTunnelLiveStreamAdapter({
       identifyProcess: async () => 'start:1',
       processGroupId: async (pid) => ++groupChecks === 1 ? pid : 99,
@@ -369,7 +369,7 @@ async function createFixture(
   });
   const motionOrigin = await listen(motion);
   const child = fakeChild();
-  const groupSignals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+  const groupSignals: { pid: number; signal: NodeJS.Signals }[] = [];
   let spawnArgs: string[] = [];
   let spawnOptions: Record<string, unknown> = {};
   const adapter = new QuickTunnelLiveStreamAdapter({
