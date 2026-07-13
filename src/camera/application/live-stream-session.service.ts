@@ -94,7 +94,7 @@ export class LiveStreamSessionService implements OnModuleInit {
     await this.enqueue(async () => {
       let staleLease: LiveStreamLease | null;
       try {
-        staleLease = await this.lease.read();
+        staleLease = await this.readLease();
       } catch {
         await this.alertRecoveryFailure();
         return;
@@ -118,7 +118,7 @@ export class LiveStreamSessionService implements OnModuleInit {
         await this.alertRecoveryFailure();
       } finally {
         try {
-          await this.lease.clear();
+          await this.clearLease();
         } catch {
           await this.alertRecoveryFailure();
         }
@@ -422,7 +422,7 @@ export class LiveStreamSessionService implements OnModuleInit {
     await this.stopGateway(this.active);
     this.active = undefined;
     this.clearExpiryTimer();
-    await this.lease.clear();
+    await this.clearLease();
     return cameraName;
   }
 
@@ -452,7 +452,7 @@ export class LiveStreamSessionService implements OnModuleInit {
     if (this.active === active) this.active = undefined;
     this.clearExpiryTimer();
     try {
-      await this.lease.clear();
+      await this.clearLease();
     } catch {
       // The tunnel is confirmed stopped, so a stale lease cannot create a duplicate tunnel.
     }
@@ -528,7 +528,7 @@ export class LiveStreamSessionService implements OnModuleInit {
     if (this.active === active) this.active = undefined;
     this.clearExpiryTimer();
     try {
-      await this.lease.clear();
+      await this.clearLease();
     } catch {
       // The tunnel is confirmed stopped, so a stale lease cannot create a duplicate tunnel.
     }
@@ -606,17 +606,29 @@ export class LiveStreamSessionService implements OnModuleInit {
   }
 
   private async writeLease(active: ActiveSession): Promise<void> {
-    await this.lease.write({
-      sessionNonce: active.session.id,
-      pid: active.pid,
-      processIdentity: active.processIdentity,
-      cameraId: active.session.cameraId,
-      diagnosticExpiresAtUnixMs: Date.now() + Math.max(
-        0,
-        active.session.expiresMonotonicMs - this.clock.now(),
+    await this.withOperationTimeout(
+      Promise.resolve().then(() =>
+        this.lease.write({
+          sessionNonce: active.session.id,
+          pid: active.pid,
+          processIdentity: active.processIdentity,
+          cameraId: active.session.cameraId,
+          diagnosticExpiresAtUnixMs: Date.now() + Math.max(
+            0,
+            active.session.expiresMonotonicMs - this.clock.now(),
+          ),
+          messageReferences: [...active.messageReferences],
+        }),
       ),
-      messageReferences: [...active.messageReferences],
-    });
+    );
+  }
+
+  private readLease(): Promise<LiveStreamLease | null> {
+    return this.withOperationTimeout(Promise.resolve().then(() => this.lease.read()));
+  }
+
+  private async clearLease(): Promise<void> {
+    await this.withOperationTimeout(Promise.resolve().then(() => this.lease.clear()));
   }
 
   private async alertRecoveryFailure(): Promise<void> {

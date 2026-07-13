@@ -226,6 +226,26 @@ describe('LiveStreamSessionService', () => {
     });
   });
 
+  it('times out a hung lease clear without blocking later transitions', async () => {
+    vi.useFakeTimers();
+    const lease = new FakeLease();
+    const service = createService({ lease, operationTimeoutMs: 100 });
+    await service.open(source('front_door'), 1);
+    lease.hangClear = true;
+    const stopping = service.stop(2);
+    const stoppingRejected = expect(stopping).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+
+    await vi.advanceTimersByTimeAsync(100);
+
+    await stoppingRejected;
+    lease.hangClear = false;
+    await expect(service.open(source('garden'), 3)).resolves.toMatchObject({
+      cameraName: 'garden',
+    });
+  });
+
   it('cleans up and rejects every pending caller when writing the lease fails', async () => {
     const gateway = new DeferredGateway();
     const lease = new FakeLease();
@@ -347,6 +367,28 @@ describe('LiveStreamSessionService', () => {
     ).rejects.toMatchObject({
       code: 'LIVE_STREAM_UNAVAILABLE',
     });
+  });
+
+  it('times out a hung lease write, rejects callers, and retains the cleanup blocker', async () => {
+    vi.useFakeTimers();
+    const gateway = new FakeGateway();
+    gateway.hangStop = true;
+    const lease = new FakeLease();
+    lease.hangWrite = true;
+    const service = createService({ gateway, lease, operationTimeoutMs: 100 });
+    const opening = service.open(source('front_door'), 1);
+    const openingRejected = expect(opening).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+
+    await vi.advanceTimersByTimeAsync(100);
+
+    await openingRejected;
+    expect(gateway.stopCalls).toBe(1);
+    await expect(service.open(source('garden'), 2)).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    expect(gateway.startCalls).toHaveLength(1);
   });
 
   it('rejects a hung gateway start at the operation timeout and blocks duplicates', async () => {
@@ -564,6 +606,22 @@ describe('LiveStreamSessionService', () => {
     expect(lease.clearCalls).toBe(1);
   });
 
+  it('times out a hung recovery lease read and emits only a sanitized alert', async () => {
+    vi.useFakeTimers();
+    const gateway = new FakeGateway();
+    const lease = new FakeLease();
+    lease.hangRead = true;
+    const alerts = new FakeAdminAlert();
+    const service = createService({ gateway, lease, alerts, operationTimeoutMs: 100 });
+    const initializing = service.onModuleInit();
+
+    await vi.advanceTimersByTimeAsync(100);
+
+    await expect(initializing).resolves.toBeUndefined();
+    expect(gateway.recoveryCalls).toEqual([]);
+    expect(alerts.alerts).toEqual([['live-stream-recovery-failed', undefined]]);
+  });
+
   it('settles a synchronous gateway start failure and preserves queue usability', async () => {
     const gateway = new FakeGateway();
     gateway.throwStartSynchronously = true;
@@ -725,21 +783,27 @@ class FakeLease implements LiveStreamLeasePort {
   clearCalls = 0;
   writeError?: Error;
   clearError?: Error;
+  hangRead = false;
+  hangWrite = false;
+  hangClear = false;
 
   constructor(private lease: LiveStreamLease | null = null) {}
 
   async read(): Promise<LiveStreamLease | null> {
+    if (this.hangRead) await new Promise<never>(() => undefined);
     return this.lease;
   }
 
   async write(lease: LiveStreamLease): Promise<void> {
     if (this.writeError) throw this.writeError;
+    if (this.hangWrite) await new Promise<never>(() => undefined);
     this.lease = lease;
     this.writes.push(lease);
   }
 
   async clear(): Promise<void> {
     if (this.clearError) throw this.clearError;
+    if (this.hangClear) await new Promise<never>(() => undefined);
     this.lease = null;
     this.clearCalls += 1;
   }
