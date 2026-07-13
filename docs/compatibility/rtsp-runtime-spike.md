@@ -42,23 +42,24 @@ gateway; it is a startup-path measurement, not glass-to-glass camera latency.
 
 | Data plane | RTSP media | Input | Frames / dropped | Startup latency | Converter + gateway peak RSS | Peak aggregate CPU | Boundary |
 | --- | --- | --- | ---: | ---: | ---: | ---: | --- |
-| FIFO | TCP | H.264 | 39 / 37 | 3,854 ms | 100,820 KiB (98.5 MiB) | 130.5% | `0600`, stream user/group |
-| Loopback HTTP | TCP | H.264 | 39 / 37 | 3,731 ms | 104,140 KiB (101.7 MiB) | 129.1% | configured `127.0.0.1` only |
-| Unix socket | TCP | H.264 | 39 / 37 | 3,706 ms | 100,688 KiB (98.3 MiB) | 127.0% | `0600`, stream user/group |
-| Unix socket | UDP | H.264 | 39 / 37 | 3,735 ms | 100,444 KiB (98.1 MiB) | 128.5% | RTP sockets observed at 24000–24001 |
-| Unix socket | TCP | H.265 | 36 / 34 | 4,370 ms | 98,928 KiB (96.6 MiB) | 128.3% | `0600`, stream user/group |
-| Unix socket | UDP | H.265 | 36 / 34 | 4,413 ms | 99,012 KiB (96.7 MiB) | 131.3% | RTP sockets observed at 24000–24001 |
+| FIFO | TCP | H.264 | 39 / 37 | 3,732 ms | 100,664 KiB (98.3 MiB) | 132.1% | `0600`, stream user/group |
+| Loopback HTTP | TCP | H.264 | 39 / 37 | 3,739 ms | 104,468 KiB (102.0 MiB) | 132.4% | configured `127.0.0.1` only |
+| Unix socket | TCP | H.264 | 39 / 37 | 3,800 ms | 100,336 KiB (98.0 MiB) | 86.0% | `0600`, stream user/group |
+| Unix socket | UDP | H.264 | 39 / 37 | 4,180 ms | 99,144 KiB (96.8 MiB) | 77.8% | converter-owned RTP sockets at 24000–24001 |
+| Unix socket | TCP | H.265 | 36 / 34 | 4,418 ms | 98,704 KiB (96.4 MiB) | 128.0% | `0600`, stream user/group |
+| Unix socket | UDP | H.265 | 36 / 34 | 4,507 ms | 99,916 KiB (97.6 MiB) | 127.1% | converter-owned RTP sockets at 24000–24001 |
 
 Every trial reached the gateway, hit a maximum queue depth of exactly two, and
 dropped old frames under the artificial stall. Every converter and gateway had
 exited before its trial returned. The harness then removed its private runtime
-directory. Available system memory was 261,400 KiB before and 241,544 KiB after
+directory. Available system memory was 247,212 KiB before and 230,392 KiB after
 the fresh final run; no inference is made from that noisy system-wide delta.
 
-The selected runtime peak of 100,688 KiB is 19.2% of the 512 MiB process budget,
-leaving approximately 413 MiB for the worker, tunnel, and operating-system
-variation. CPU briefly exceeded one core during software conversion, but stayed
-within the Pi's four-core capacity. The measured 3.6–4.4 second first-frame
+The selected runtime peak of 100,336 KiB is 19.1% of the 512 MiB process budget,
+which represents approximately 413 MiB of abstract 512 MiB process-budget headroom;
+it is not a claim about physically available RAM for the worker or operating
+system. CPU briefly exceeded one core during software conversion, but stayed
+within the Pi's four-core capacity. The measured 3.7–4.5 second first-frame
 startup is acceptable under the bounded 30-second startup contract, but later
 implementation should expose it as a metric and must not tighten that timeout
 without target-Pi evidence.
@@ -79,8 +80,9 @@ probe by weakening security or silently changing transport.
 | Any TLS mode that accepts every certificate | FORBIDDEN | No trust-any-certificate option or fallback |
 
 The installed TLS protocol exposes `ca_file`, `tls_verify`, and `verifyhost`, but
-no certificate fingerprint, `pinnedpubkey`, or `pin-sha256` control. Therefore
-the spike does not claim self-signed pinning from ordinary CA-file verification.
+the spike has no behavioral expected-fingerprint/mismatched-fingerprint fixture.
+It therefore reports DEFER unconditionally and can never infer pinning PASS from
+FFmpeg help keywords or ordinary CA-file verification.
 
 ## Ownership and cleanup contract
 
@@ -90,14 +92,16 @@ the spike does not claim self-signed pinning from ordinary CA-file verification.
   mode `0600`, starts listening before it starts FFmpeg, and accepts exactly the
   one identity-tracked converter connection.
 - The gateway parses raw JPEG boundaries and retains no more than two frames in
-  one shared drop-oldest queue. It serves at most two viewers from that queue.
+  one shared drop-oldest queue. A partial JPEG is capped at 2,097,152 bytes and
+  fails closed on overflow. It serves at most two viewers from the shared queue.
 - The session owner tracks the exact FFmpeg child identity. Stop/expiry/error
   sends `SIGTERM`, waits at most four seconds, sends `SIGKILL` only if required,
   waits for the child, closes the Unix listener, unlinks the socket, and removes
   the per-session directory.
-- Startup is bounded to eight seconds in the spike and 30 seconds in the planned
-  runtime. RTSP socket I/O is bounded to five seconds in the spike. No process,
-  listener, socket, or runtime file may survive a failed start or completed stop.
+- Startup is bounded to eight seconds and the entire spike trial to 15 seconds;
+  planned runtime startup remains 30 seconds. RTSP socket I/O is bounded to five
+  seconds. No process, listener, socket, or runtime file may survive a failed
+  start or completed stop, and every converter exit status must be zero.
 - The script itself refuses root and any identity other than
   `homeworker-stream`; it uses `umask 077` and a trap implementing the same
   bounded teardown.
@@ -116,3 +120,10 @@ The script depends only on installed system tools (`ffmpeg`, Node, `ps`, `ss`,
 and POSIX utilities). It does not read application configuration, databases, or
 secrets, and it does not install packages, modify the firewall, or start a
 persistent service.
+
+The script also runs three deliberate negative proofs before measuring data
+planes: converter status 23 is rejected, a 60-second child is stopped and reaped
+at a one-second proof deadline, and a malformed partial JPEG fails at the byte
+limit. UDP evidence is joined from the tracked converter's `/proc/<pid>/fd`
+socket inodes to `/proc/net/udp`/`udp6`, so unrelated system listeners cannot
+satisfy the configured media-range check.
