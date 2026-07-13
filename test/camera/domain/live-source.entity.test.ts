@@ -46,13 +46,71 @@ describe('LiveSource', () => {
     expect(source.settings.substream).toBe('rtsp://cam.local:8554');
     expect(source.credentialPayload()).toEqual({
       primaryUrl:
-        'rtsp://user:pass@CAM.local:554/private/main?token=secret#main',
+        'rtsp://user:pass@cam.local:554/private/main?token=secret#main',
       substreamUrl:
-        'rtsp://sub-user:sub-pass@CAM.local:8554/private/sub?key=hidden#sub',
+        'rtsp://sub-user:sub-pass@cam.local:8554/private/sub?key=hidden#sub',
     });
     expect(JSON.stringify(source)).not.toMatch(
       /user|pass|private|token|secret|hidden|#main|#sub/i,
     );
+  });
+
+  it.each([
+    [
+      'rtsp://usér:p@BÜCHER.example/private path?q=hello world#frägment',
+      'rtsp://us%C3%A9r:p@xn--bcher-kva.example/private%20path?q=hello%20world#fr%C3%A4gment',
+      'rtsp://xn--bcher-kva.example',
+    ],
+    [
+      'rtsp://user:pass@cam%2elocal:8554/a%2fb?q=%2f#x',
+      'rtsp://user:pass@cam.local:8554/a%2fb?q=%2f#x',
+      'rtsp://cam.local:8554',
+    ],
+    ['rtsp://0177.1/live', 'rtsp://127.0.0.1/live', 'rtsp://127.0.0.1'],
+    [
+      'rtsp://[2001:0DB8::1]:8554/live?q=x#f',
+      'rtsp://[2001:db8::1]:8554/live?q=x#f',
+      'rtsp://[2001:db8::1]:8554',
+    ],
+    ['rtsp://CAM.LOCAL./live', 'rtsp://cam.local/live', 'rtsp://cam.local'],
+    ['rtsp://CAM.LOCAL.../live', 'rtsp://cam.local/live', 'rtsp://cam.local'],
+    ['rtsp://CAM.LOCAL/live?', 'rtsp://cam.local/live?', 'rtsp://cam.local'],
+    ['rtsp://CAM.LOCAL/live#', 'rtsp://cam.local/live#', 'rtsp://cam.local'],
+    ['rtsp://CAM.LOCAL/live?#', 'rtsp://cam.local/live?#', 'rtsp://cam.local'],
+  ])(
+    'uses one canonical authority for metadata and primary/substream secret %s',
+    (url, credentialUrl, normalizedUrl) => {
+      const source = LiveSource.create({
+        cameraId: 'front_door',
+        url,
+        substream: url,
+      });
+      const payload = source.credentialPayload();
+
+      expect(source.normalizedUrl).toBe(normalizedUrl);
+      expect(source.settings.substream).toBe(normalizedUrl);
+      expect(payload).toEqual({
+        primaryUrl: credentialUrl,
+        substreamUrl: credentialUrl,
+      });
+      expect(`rtsp://${new URL(payload.primaryUrl).host}`).toBe(normalizedUrl);
+      expect(`rtsp://${new URL(payload.substreamUrl!).host}`).toBe(normalizedUrl);
+    },
+  );
+
+  it('does not include credential text in validation failures', () => {
+    try {
+      LiveSource.create({
+        cameraId: 'front_door',
+        url: 'rtsp://private-user:private-pass@bad_host/private?token=secret',
+      });
+      expect.unreachable('expected invalid source');
+    } catch (error) {
+      expect(error).toBeInstanceOf(InvalidLiveSourceError);
+      expect((error as Error).message).not.toMatch(
+        /private-user|private-pass|private|token|secret/,
+      );
+    }
   });
 
   it('uses strict CA and hostname verification for RTSPS', () => {

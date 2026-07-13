@@ -129,4 +129,22 @@ describe('StreamEgressGrant', () => {
       InvalidLiveSourceError,
     );
   });
+
+  it('rejects a negative current Unix epoch even when expiry is future', () => {
+    expect(() =>
+      StreamEgressGrant.create(
+        { ...validInput(), expiresAtUnixMs: 1 },
+        -1,
+      ),
+    ).toThrow(InvalidLiveSourceError);
+  });
+
+  it('rejects a negative expiry with a nonnegative current time', () => {
+    expect(() =>
+      StreamEgressGrant.create(
+        { ...validInput(), expiresAtUnixMs: -1 },
+        0,
+      ),
+    ).toThrow(InvalidLiveSourceError);
+  });
 });

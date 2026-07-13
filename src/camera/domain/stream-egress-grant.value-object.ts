@@ -71,7 +71,11 @@ export class StreamEgressGrant {
     nowUnixMs: number,
   ): StreamEgressGrant {
     if (typeof input !== 'object' || input === null) invalid('request');
-    if (typeof nowUnixMs !== 'number' || !Number.isSafeInteger(nowUnixMs)) {
+    if (
+      typeof nowUnixMs !== 'number' ||
+      !Number.isSafeInteger(nowUnixMs) ||
+      nowUnixMs < 0
+    ) {
       invalid('current time');
     }
     if (typeof input.sessionId !== 'string' || !UUID.test(input.sessionId)) {
@@ -100,6 +104,7 @@ export class StreamEgressGrant {
     if (
       typeof input.expiresAtUnixMs !== 'number' ||
       !Number.isSafeInteger(input.expiresAtUnixMs) ||
+      input.expiresAtUnixMs < 0 ||
       input.expiresAtUnixMs <= nowUnixMs ||
       input.expiresAtUnixMs - nowUnixMs > MAX_LEASE_MS
     ) {

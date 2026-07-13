@@ -57,6 +57,7 @@ export interface LiveSourceSummary {
 interface ParsedEndpoint {
   scheme: LiveSourceSecuritySettings['scheme'];
   normalizedUrl: string;
+  credentialUrl: string;
 }
 
 export class LiveSource {
@@ -151,8 +152,8 @@ export class LiveSource {
       },
       ready: input.ready ?? false,
       credentialPayload: {
-        primaryUrl: input.url,
-        substreamUrl: input.substream ?? null,
+        primaryUrl: primary.credentialUrl,
+        substreamUrl: substream?.credentialUrl ?? null,
       },
     });
   }
@@ -182,20 +183,44 @@ function parseEndpoint(rawUrl: string): ParsedEndpoint {
   }
   const scheme = parseScheme(`${authorityMatch[1].toLowerCase()}:`);
 
+  const suffix = rawUrl.slice(authorityMatch[0].length);
   let authorityUrl: URL;
   try {
-    new URL(rawUrl);
-    authorityUrl = new URL(`http://${authorityMatch[2]}/`);
+    authorityUrl = new URL(`http://${authorityMatch[2]}${suffix || '/'}`);
   } catch {
     throw new InvalidLiveSourceError('URL is malformed');
   }
 
   const hostname = canonicalizeHostname(authorityUrl.hostname);
   const port = parseAuthorityPort(authorityMatch[2]);
+  const canonicalAuthority = `${hostname}${port ? `:${port}` : ''}`;
+  const userinfo = canonicalizeUserinfo(authorityMatch[2], authorityUrl);
   return {
     scheme,
-    normalizedUrl: `${scheme}://${hostname}${port ? `:${port}` : ''}`,
+    normalizedUrl: `${scheme}://${canonicalAuthority}`,
+    credentialUrl: `${scheme}://${userinfo}${canonicalAuthority}${canonicalizeSuffix(
+      suffix,
+      authorityUrl,
+    )}`,
   };
+}
+
+function canonicalizeSuffix(rawSuffix: string, parsed: URL): string {
+  const queryIndex = rawSuffix.indexOf('?');
+  const fragmentIndex = rawSuffix.indexOf('#');
+  const hasQuery =
+    queryIndex >= 0 && (fragmentIndex < 0 || queryIndex < fragmentIndex);
+  const query = parsed.search || (hasQuery ? '?' : '');
+  const fragment = parsed.hash || (fragmentIndex >= 0 ? '#' : '');
+  return `${parsed.pathname}${query}${fragment}`;
+}
+
+function canonicalizeUserinfo(authority: string, parsed: URL): string {
+  const separator = authority.lastIndexOf('@');
+  if (separator < 0) return '';
+  const rawUserinfo = authority.slice(0, separator);
+  const password = rawUserinfo.includes(':') ? `:${parsed.password}` : '';
+  return `${parsed.username}${password}@`;
 }
 
 function parseAuthorityPort(authority: string): string {
