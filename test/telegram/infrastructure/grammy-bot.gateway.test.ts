@@ -1,8 +1,83 @@
 import { describe, expect, it, vi } from 'vitest';
+import { homeCallbackAckMiddleware } from '../../../src/telegram/interfaces/home-callback-ack.middleware';
+import { homeUpdateConstraints } from '../../../src/telegram/interfaces/home-update-constraints';
 import { GrammyBotGateway } from '../../../src/telegram/infrastructure/grammy-bot.gateway';
 import { TelegramHandler } from '../../../src/telegram/interfaces/telegram-handler';
 
+const mocks = vi.hoisted(() => {
+  const botUse = vi.fn();
+  const bot = {
+    api: { config: { use: vi.fn() } },
+    use: botUse,
+    catch: vi.fn(),
+  };
+  const sequentializedMiddleware = vi.fn();
+  const sequentialize = vi.fn(() => sequentializedMiddleware);
+  return { bot, botUse, sequentializedMiddleware, sequentialize };
+});
+
+vi.mock('grammy', () => ({
+  Bot: class {
+    constructor() {
+      return mocks.bot;
+    }
+  },
+  GrammyError: class GrammyError extends Error {},
+  HttpError: class HttpError extends Error {},
+}));
+
+vi.mock('@grammyjs/runner', () => ({
+  run: vi.fn(() => ({ isRunning: () => true })),
+  sequentialize: mocks.sequentialize,
+}));
+
 describe('GrammyBotGateway handler registration', () => {
+  it('installs Home acknowledgement and sequentialization before locale resolution', async () => {
+    mocks.botUse.mockClear();
+    mocks.bot.api.config.use.mockClear();
+    const handler = { register: vi.fn() } as TelegramHandler;
+    const resolveOptional = vi.fn();
+    const gateway = Object.create(GrammyBotGateway.prototype);
+    Object.assign(gateway, {
+      mode: 'real',
+      token: '123456:token',
+      logger: { log: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      lastUpdateAt: null,
+      liveStreamMessageCleanup: { register: vi.fn() },
+      telegramLiveStreamMessageCleanup: { setBot: vi.fn() },
+      eventNotifier: { register: vi.fn() },
+      recipientDirectory: { register: vi.fn() },
+      adminAlertService: { register: vi.fn() },
+      eventProcessor: { drain: vi.fn() },
+      telegramNotifier: { setBot: vi.fn() },
+      directMessenger: { setBot: vi.fn() },
+      botCommandsMenu: { setBot: vi.fn(), syncAllUsers: vi.fn().mockResolvedValue(undefined) },
+      telegramRecipients: {},
+      telegramAdminAlert: {},
+      botRunnerRegistry: { register: vi.fn() },
+      restartConfirmation: { run: vi.fn().mockResolvedValue(undefined) },
+      systemOnline: { run: vi.fn().mockResolvedValue(undefined) },
+      localeMiddleware: { resolveOptional },
+      claim: handler, mute: handler, unmute: handler, quietHours: handler, update: handler,
+      systemUpdate: handler, rollback: handler, restartHandler: handler, start: handler,
+      status: handler, ping: handler, help: handler, logs: handler, health: handler,
+      config: handler, invite: handler, promote: handler, demote: handler, camera: handler,
+      gdrive: handler, exportConfig: handler, importConfig: handler, feature: handler,
+      gdriveAuth: handler, csv: handler, menu: handler, settings: handler, clean: handler,
+    });
+
+    await gateway.onApplicationBootstrap();
+
+    expect(mocks.sequentialize).toHaveBeenCalledWith(homeUpdateConstraints);
+    expect(mocks.botUse.mock.calls.map(([middleware]) => middleware)).toEqual([
+      expect.any(Function),
+      expect.any(Function),
+      homeCallbackAckMiddleware,
+      mocks.sequentializedMiddleware,
+      resolveOptional,
+    ]);
+  });
+
   it('registers CsvHandler exactly once before MenuHandler', () => {
     const gateway = Object.create(GrammyBotGateway.prototype) as {
       handlers(): TelegramHandler[];

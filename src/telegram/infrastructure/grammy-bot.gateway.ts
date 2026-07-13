@@ -8,7 +8,7 @@ import {
   forwardRef,
 } from '@nestjs/common';
 import { autoRetry } from '@grammyjs/auto-retry';
-import { run, RunnerHandle } from '@grammyjs/runner';
+import { run, RunnerHandle, sequentialize } from '@grammyjs/runner';
 import { Bot, GrammyError, HttpError } from 'grammy';
 import { AdminAlertService } from '../../camera/application/admin-alert.service';
 import { LiveStreamMessageCleanupService } from '../../camera/application/live-stream-message-cleanup.service';
@@ -49,7 +49,9 @@ import { SettingsHandler } from '../interfaces/settings.handler';
 import { CleanHandler } from '../interfaces/clean.handler';
 import { GdriveAuthHandler } from '../interfaces/gdrive-auth.handler';
 import { LocaleMiddleware } from '../interfaces/locale.middleware';
+import { homeCallbackAckMiddleware } from '../interfaces/home-callback-ack.middleware';
 import { TelegramContext } from '../interfaces/telegram-context';
+import { homeUpdateConstraints } from '../interfaces/home-update-constraints';
 import { BotCommandsMenuService } from '../application/bot-commands-menu.service';
 import { ConsoleNotifierAdapter } from './console-notifier.adapter';
 import { TelegramAdminAlertAdapter } from './telegram-admin-alert.adapter';
@@ -229,6 +231,9 @@ export class GrammyBotGateway
       this.lastUpdateAt = new Date();
       return next();
     });
+
+    bot.use(homeCallbackAckMiddleware);
+    bot.use(sequentialize(homeUpdateConstraints));
 
     // Must run before guards and handlers: registered paths receive their
     // persisted locale, while `/start` and `/claim_admin` continue in English.

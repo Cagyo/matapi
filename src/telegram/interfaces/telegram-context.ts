@@ -11,4 +11,5 @@ export interface LocaleState {
 
 export type TelegramContext = Context & {
   localeState?: LocaleState;
+  homeCallbackAcknowledged?: boolean;
 };
