@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, index, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer, index, primaryKey, uniqueIndex } from 'drizzle-orm/sqlite-core';
 import { DEFAULT_LOCALE } from '../telegram/domain/locale';
 import type { LiveSourceSettings } from '../camera/domain/live-source.entity';
 
@@ -114,6 +114,36 @@ export const notificationPauseReceipts = sqliteTable(
   },
   (table) => [
     index('idx_notification_pause_receipts_user_id').on(table.userId, table.id),
+  ],
+);
+
+// ─── Authoritative Home Sessions ───
+// Active and pending Home render identities are kept together so their CAS
+// transitions can be committed atomically per Telegram user/chat pair.
+export const homeSessions = sqliteTable(
+  'home_sessions',
+  {
+    userId: integer('user_id').notNull().references(() => users.telegramId, { onDelete: 'cascade' }),
+    chatId: integer('chat_id').notNull(),
+    activeMessageId: integer('active_message_id'),
+    activeToken: text('active_token'),
+    activeRevision: integer('active_revision'),
+    activeView: text('active_view'),
+    activeSensorPage: integer('active_sensor_page'),
+    activeChecking: integer('active_checking', { mode: 'boolean' }),
+    pendingKind: text('pending_kind'),
+    pendingMessageId: integer('pending_message_id'),
+    pendingToken: text('pending_token'),
+    pendingRevision: integer('pending_revision'),
+    pendingView: text('pending_view'),
+    pendingSensorPage: integer('pending_sensor_page'),
+    pendingChecking: integer('pending_checking', { mode: 'boolean' }),
+    pendingExpiresAt: integer('pending_expires_at', { mode: 'timestamp' }),
+    updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.userId, table.chatId] }),
+    index('idx_home_sessions_pending_expiry').on(table.pendingExpiresAt),
   ],
 );
 

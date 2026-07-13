@@ -44,6 +44,7 @@ import { INVITE_CODE_REPOSITORY } from './domain/ports/invite-code-repository.po
 import { NOTIFICATION_PAUSE_REPOSITORY } from './domain/ports/notification-pause-repository.port';
 import { USER_REPOSITORY } from './domain/ports/user-repository.port';
 import { USER_SENSOR_MUTE_REPOSITORY } from './domain/ports/user-sensor-mute-repository.port';
+import { HOME_SESSION_STORE } from './domain/ports/home-session-store.port';
 import { ConsoleNotifierAdapter } from './infrastructure/console-notifier.adapter';
 import { EnvAdminClaimCredentialAdapter } from './infrastructure/env-admin-claim-credential.adapter';
 import { TelegramAdminAlertAdapter } from './infrastructure/telegram-admin-alert.adapter';
@@ -51,10 +52,12 @@ import { TelegramLiveStreamMessageCleanupAdapter } from './infrastructure/telegr
 import { DrizzleInviteCodeRepository } from './infrastructure/drizzle-invite-code.repository';
 import { DrizzleUserRepository } from './infrastructure/drizzle-user.repository';
 import { DrizzleUserSensorMuteRepository } from './infrastructure/drizzle-user-sensor-mute.repository';
+import { DrizzleHomeSessionStore } from './infrastructure/drizzle-home-session.store';
 import { GrammyBotGateway, BOT_MODE, BotMode } from './infrastructure/grammy-bot.gateway';
 import { InMemoryInviteCodeRepository } from './infrastructure/in-memory-invite-code.repository';
 import { InMemoryUserRepository } from './infrastructure/in-memory-user.repository';
 import { InMemoryUserSensorMuteRepository } from './infrastructure/in-memory-user-sensor-mute.repository';
+import { InMemoryHomeSessionStore } from './infrastructure/in-memory-home-session.store';
 import { TelegramDirectMessenger } from './infrastructure/telegram-direct-messenger.adapter';
 import { TelegramNotifierAdapter } from './infrastructure/telegram-notifier.adapter';
 import { TelegramRecipientDirectoryAdapter } from './infrastructure/telegram-recipient-directory.adapter';
@@ -149,6 +152,10 @@ const mode = resolveBotMode();
           ? InMemoryUserSensorMuteRepository
           : DrizzleUserSensorMuteRepository,
     },
+    {
+      provide: HOME_SESSION_STORE,
+      useClass: mode === 'mock' ? InMemoryHomeSessionStore : DrizzleHomeSessionStore,
+    },
     { provide: INVITE_CODE_GENERATOR, useValue: defaultInviteCodeGenerator },
     // One repository instance serves both the recipient reads and the pause
     // mutations so their state cannot diverge. Foundation only — no handler,
@@ -219,6 +226,6 @@ const mode = resolveBotMode();
     TelegramRecipientDirectoryAdapter,
     GrammyBotGateway,
   ],
-  exports: [GrammyBotGateway, USER_REPOSITORY, GdriveAuthHandler],
+  exports: [GrammyBotGateway, USER_REPOSITORY, HOME_SESSION_STORE, GdriveAuthHandler],
 })
 export class TelegramModule {}
