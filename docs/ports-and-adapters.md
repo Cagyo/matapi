@@ -81,6 +81,9 @@ Status legend: ✅ canonical · 🚧 in transition · 📝 planned
 | `MotionAlertPort` (`MOTION_ALERT`) | `EventsMotionAlertAdapter` (delegates to events `NotificationService`), `StubMotionAlertAdapter` (dev) | ✅ motion notification (spec 19, 20) | [motion-alert.port.ts](../src/camera/domain/ports/motion-alert.port.ts) |
 | `AdminAlertPort` (`ADMIN_ALERT`) | `AdminAlertService` (register/clear seam) ← `TelegramAdminAlertAdapter` registered at bot bootstrap | ✅ daemon up/down + Drive-sync / emergency-disk alerts (specs 20, 21) | [admin-alert.port.ts](../src/camera/domain/ports/admin-alert.port.ts) |
 | `LiveStreamMessageCleanupPort` (`LIVE_STREAM_MESSAGE_CLEANUP`) | Telegram adapter pending Task 4/5 | 🚧 application-owned seam for best-effort expiry/stop cleanup of stored watch-message references | [live-stream-message-cleanup.port.ts](../src/camera/domain/ports/live-stream-message-cleanup.port.ts) |
+| `LiveStreamGatewayPort` (`LIVE_STREAM_GATEWAY`) | `QuickTunnelLiveStreamAdapter`, `InMemoryLiveStreamGatewayAdapter` (dev/test) | ✅ token-gated loopback MJPEG fan-out and owned Quick Tunnel lifecycle | [live-stream-gateway.port.ts](../src/camera/domain/ports/live-stream-gateway.port.ts) |
+| `LiveStreamLeasePort` (`LIVE_STREAM_LEASE`) | `FsLiveStreamLeaseAdapter`, `InMemoryLiveStreamLeaseAdapter` (dev/test) | ✅ atomic private runtime recovery lease | [live-stream-lease.port.ts](../src/camera/domain/ports/live-stream-lease.port.ts) |
+| `MonotonicClockPort` (`MONOTONIC_CLOCK`) | `SystemMonotonicClockAdapter`, fixed test clocks | ✅ camera live-session expiry independent of wall-clock changes | [monotonic-clock.port.ts](../src/camera/domain/ports/monotonic-clock.port.ts) |
 
 ### System context
 
