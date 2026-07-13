@@ -15,6 +15,13 @@
       "when": 1783855468232,
       "tag": "0001_tiny_ser_duncan",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1783940117333,
+      "tag": "0002_petite_mister_sinister",
+      "breakpoints": true
     }
   ]
 }

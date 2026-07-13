@@ -1,5 +1,6 @@
 import { sqliteTable, text, integer, index, uniqueIndex } from 'drizzle-orm/sqlite-core';
 import { DEFAULT_LOCALE } from '../telegram/domain/locale';
+import type { LiveSourceSettings } from '../camera/domain/live-source.entity';
 
 // ─── Sensors ───
 export const sensors = sqliteTable('sensors', {
@@ -100,6 +101,30 @@ export const cameras = sqliteTable('cameras', {
   type: text('type').notNull(),
   config: text('config', { mode: 'json' }),
   enabled: integer('enabled', { mode: 'boolean' }).default(true),
+});
+
+// ─── Camera Live Sources ───
+export const cameraLiveSources = sqliteTable('camera_live_sources', {
+  cameraId: text('camera_id')
+    .primaryKey()
+    .references(() => cameras.id, { onDelete: 'cascade' }),
+  normalizedUrl: text('normalized_url').notNull(),
+  settings: text('settings', { mode: 'json' })
+    .$type<LiveSourceSettings>()
+    .notNull(),
+  ready: integer('ready', { mode: 'boolean' }).notNull().default(false),
+  createdAt: integer('created_at').notNull(),
+  updatedAt: integer('updated_at').notNull(),
+});
+
+export const cameraLiveCredentials = sqliteTable('camera_live_credentials', {
+  cameraId: text('camera_id')
+    .primaryKey()
+    .references(() => cameraLiveSources.cameraId, { onDelete: 'cascade' }),
+  ciphertext: text('ciphertext').notNull(),
+  nonce: text('nonce').notNull(),
+  authTag: text('auth_tag').notNull(),
+  keyVersion: integer('key_version').notNull(),
 });
 
 // ─── Motion Events ───
