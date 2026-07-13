@@ -3,6 +3,7 @@
 > **Date:** 2026-07-13 · **Type:** analysis spec (audit + prioritized backlog)
 > **Scope:** whole repo (`home-worker`, NestJS + grammY on Raspberry Pi, ~27k LOC / 9 contexts)
 > **Benchmarks:** the repo's own docs (`docs/architecture.md`, `naming-and-conventions.md`, `testing.md`, `error-handling.md`) **and** general software best practice for a TypeScript worker on constrained hardware.
+> **Depth:** two passes — (1) breadth (metrics + targeted hotspot reads), (2) a deep read of the highest-risk critical paths (§2.8), line by line.
 
 ## 1. Executive summary
 
@@ -14,7 +15,9 @@ Consequently, an internal-rules audit comes back mostly green, and the highest-v
 - The concentration of debt is in the **Telegram interface layer**: two mega-handlers (`config.handler.ts` 1020 LOC, `camera.handler.ts` 912 LOC) that hand-roll multi-step conversation state machines inside the `interfaces/` layer — where an empty `flows/flow.engine.ts` stub and an unused `@grammyjs/conversations` dependency show the intended-but-unbuilt abstraction.
 - A scattering of low-cost tooling/dependency hygiene items (loose `mqtt` pin, warn-level lint rules that should be errors, an unused dependency, a possibly-misplaced dev tool).
 
-The backlog in §3 is anchored by one P1 refactor (unify conversation handling) with the cheap wins (§3, P2/P3) sequenced around it.
+**The deep pass (§2.8) reinforced this conclusion rather than overturning it.** Reading the hardest code line by line — the 880-LOC live-stream concurrency core, the process-spawning tunnel adapter, the event/notification pipeline, the GPIO edge driver, the SQLite backup path — surfaced **no P0/P1 correctness defect**, and confirmed that the two classic trap areas are handled correctly: SQLite is snapshotted with the online `.backup()` API (WAL-safe), and stale-lease process kills are guarded against **PID reuse** via `/proc` start-time + `exe` identity before any signal. The deep pass produced three small, concrete items (an at-risk non-atomic backup write, two pieces of dead code) — none structural.
+
+The backlog in §3 is anchored by one P1 refactor (unify conversation handling) with the cheap wins (§3, P2/P3) sequenced around it. No deep-audit finding displaces R1 as the top item.
 
 ## 2. Dimension scorecard
 
@@ -79,13 +82,30 @@ network 6 · locales 5 · features 4 · setup-wizard 3 · database 3 · config 2
 - ⚠️ **Possibly-misplaced tool.** `drizzle-kit` sits in `dependencies` (`package.json:41`); it is a codegen/migration CLI. If on-device `db:migrate` is not required (migrations can ship pre-generated), it belongs in `devDependencies` to shrink the Pi install. Verify against `scripts/dev-update.sh` first. → **R8**.
 - 🟢 `tsconfig.json` already has `strict`, `strictNullChecks`, `noImplicitAny`, `noFallthroughCasesInSwitch`. Adding `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes` would catch a further class of real bugs. → **R9** (P3, may surface fallout).
 
+### 2.8 Deep-audit verification — critical paths — ✅ Verified correct
+
+The breadth pass rated §2.4–§2.6 strong from signals (grep + metrics). The deep pass read the actual logic of the highest-consequence paths to confirm — or refute — those ratings. It confirmed them, and this section records *what was verified* so the ✅ ratings are trustworthy, not assumed. It also produced the three concrete items **R13–R15**.
+
+| Path (file) | What a line-by-line read verified | Verdict |
+|---|---|---|
+| `camera/application/live-stream-session.service.ts` (880) | A single serialized queue plus a lease-mutation tail fences every transition; gateway start runs *outside* the queue so a stop can cancel a pending tunnel; timeouts convert to fenced "cleanup blockers" that never orphan; every detached `.then()` callback swallows to avoid unhandled rejections. Expiry uses `performance.now()` + libuv `setTimeout` — the **same monotonic base**, so the single non-rescheduling timer's guard (`clock.now() >= expiresMonotonicMs`) is not reachable-false in practice. | ✅ Correct (very high complexity — see R12) |
+| `camera/infrastructure/quick-tunnel-live-stream.adapter.ts` (627) | `cloudflared` is spawned `detached`, `shell:false`; the code asserts the child is its **own** process-group leader and *not* the worker's group before trusting it. `recoverOwnedProcess` and `terminateVerifiedGroup` re-verify **process identity** (`/proc/{pid}` start-time + `exe` readlink) before **and** between SIGTERM→SIGKILL, and signal the whole group (`kill(-pid)`). This is a correct **PID-reuse guard** — a recycled PID mismatches identity → `not-owned`. | ✅ Correct (a classic trap, handled right) |
+| `database/backup.service.ts` · `camera/infrastructure/sqlite-db-backup.adapter.ts` | Both use better-sqlite3's **online `.backup()`** — WAL-safe, non-blocking, no naive file copy. WAL pragmas (`journal_mode=WAL`, `synchronous=NORMAL`, `busy_timeout=5000`, `foreign_keys=ON`) and per-multi-write transactions are in place. | ✅ Snapshot correct — ⚠️ non-atomic *write* + dead dup → **R13** |
+| `events/application/{notification,drain-event-queue}` | `process()` re-queues only when **every** non-suppressed send fails (a single blocked user does not wedge); the periodic drain then delivers an **aggregate broadcast** and force-attaches as a file past `maxQueueBeforeForceAggregate` (backpressure). A true wedge needs per-user *and* broadcast to fail permanently — i.e. the bot is down, which `isReady()` already gates. | ✅ At-least-once, bounded |
+| `events/application/debounce.service.ts` | Suppresses only **byte-identical** repeats inside the window; every real transition fires; type/shape mismatches **fail open** (notify). Correct bias for a security worker. | ✅ Correct (fail-open) |
+| `events/domain/quiet-hours.ts` | Overnight wrap (`start > end`) and same-day windows both correct; `HH:MM` bounds validated. | ✅ Correct |
+| `sensors/infrastructure/digital-gpio.adapter.ts` (481) | Alarm/leak edges **rise fast** (`min(debounce, 50 ms)`) and **clear slow** (`max(debounce, 60 s)`); a re-trigger during the hold cancels the pending clear; hardware glitch filter + a >30-transitions/min circuit breaker that alerts the operator and drops to 10 s polled sampling. Timer lifecycle is cleaned on destroy/init. | ✅ Fail-safe biased — ⚠️ flap-cooldown gap → **R15**; dead field → **R14** |
+| `camera/application/drive-sync.scheduler.ts` + `@Interval`/`@Cron` handlers | Every scheduled handler delegates to a `run()` wrapper with a re-entrancy `Set` and an internal `try/catch/finally` — no overlap, no unhandled rejection escaping a timer. | ✅ Correct |
+
+**Net:** the critical paths are not merely clean, they are correct under adversarial reading. The deep pass's only new defects are R13 (a real, if narrow, robustness bug) and R14/R15 (dead code + one design tradeoff to ratify). None is structural; **R1 remains the top item.**
+
 ## 3. Prioritized refactoring backlog
 
 Each item: `[tier] [effort S/M/L] [risk]` · *Why* · *Files* · *Done when*.
 
 ### P0 — Correctness / Security (do first)
 
-**None.** No correctness or security defect surfaced in this pass. Stated explicitly so the absence is a finding, not an omission.
+**None.** No correctness or security defect surfaced — and this now rests on a **line-by-line read** of the critical paths (§2.8: concurrency core, tunnel process lifecycle, event pipeline, GPIO driver, SQLite backup), not only on metrics. The two classic traps (WAL-safe hot backup, PID-reuse-safe process kills) are handled correctly. Stated explicitly so the absence is a finding, not an omission. The nearest thing to a correctness bug is **R13** (non-atomic backup write), triaged P2 because it corrupts only a *derived* file (the DB backup), never live data.
 
 ### P1 — High-value structural
 
@@ -117,6 +137,10 @@ Each item: `[tier] [effort S/M/L] [risk]` · *Why* · *Files* · *Done when*.
 *Why:* Guarantee `en`/`ru`/`uk` share identical key sets; cheap guard against missing translations (§2.3).
 *Files:* `test/locales/**`. *Done when:* a test fails if any locale is missing/extra a key.
 
+**R13 — Make the local DB backup write atomic, then delete the dead duplicate.** `[P2] [effort S] [risk L]` *(deep audit §2.8)*
+*Why:* `SqliteDbBackupAdapter.createLocalBackup` runs `.backup()` **directly onto** `./data/backup.db`; a crash or failure mid-backup leaves a **partially-written, corrupt** file that the next Drive upload would ship. The unused `database/backup.service.ts` (`BackupService`, wired nowhere) already does the right thing — backup to `target.tmp` then atomic `renameSync`. Steal that pattern into the live adapter, then delete `BackupService`.
+*Files:* `src/camera/infrastructure/sqlite-db-backup.adapter.ts`, delete `src/database/backup.service.ts`. *Done when:* an interrupted backup never corrupts `BACKUP_LOCAL_PATH`; no dead duplicate remains.
+
 ### P3 — Nice-to-have
 
 **R7 — Pin `mqtt` to a minor range** like the rest of the manifest. `[P3] [effort S] [risk L]` · `package.json:44`.
@@ -133,20 +157,30 @@ Each item: `[tier] [effort S/M/L] [risk]` · *Why* · *Files* · *Done when*.
 *Why:* 880 LOC of deliberate concurrency coordination (promise-queue serializer `:94`, lease-mutation tail `:100`, cleanup blockers, expiry timer), recently hardened (commits `132ddc1`, `bd4e1f2`). Restructuring risks reintroducing the race/recovery bugs those commits closed. Instead raise use-case test coverage of the concurrency/recovery arms and, if a seam is clean, extract the promise-queue mutex as a named, independently-tested primitive.
 *Files:* `src/camera/application/live-stream-session.service.ts`, `test/camera/**`.
 
+**R14 — Remove the dead `lastEmittedAt` field from the digital GPIO adapter.** `[P3] [effort S] [risk L]` *(deep audit §2.8)*
+*Why:* `digital-gpio.adapter.ts:53` assigns `lastEmittedAt` (`:412`) but never reads it — its debounce is timer/level-verified, not timestamp-based. The field is real (and used) only in `mqtt-sensor.adapter.ts`; here it is vestigial cruft.
+*Files:* `src/sensors/infrastructure/digital-gpio.adapter.ts`. *Done when:* the unused field is gone.
+
+**R15 — Ratify (or shrink) the flap-cooldown sampling gap for alarm-class sensors.** `[P3] [effort S–M] [risk L]` *(deep audit §2.8)*
+*Why:* When a digital sensor trips the >30-transitions/min circuit breaker it drops to **10 s polled sampling for 5 min** (`FLAP_RECOVERY_MS`). During that window a real `alarm`/`leak_hazard` pulse shorter than ~10 s can be missed. The operator *is* alerted to the `flapping_fault`, so this is a deliberate tradeoff — but for a security worker it should be an explicit, documented decision, not an accident. Options: accept and document, or use a shorter poll for `alarm`/`leak_hazard` step types.
+*Files:* `src/sensors/infrastructure/digital-gpio.adapter.ts`, `docs/specs/` (record the decision). *Done when:* the behavior is either documented as intended or tightened for alarm-class sensors.
+
 ## 4. Sequencing
 
 ```
-Quick wins (parallel-safe, any time):   R4 · R6 · R7
+Quick wins (parallel-safe, any time):   R4 · R6 · R7 · R13 · R14
 Before the big refactor:                 R3  (test safety net for R1)
 Anchor:                                   R1  (absorbs R2 + R5)
+Decide, then act:                         R15 (ratify or tighten)
 Independent, later:                       R8 · R9 · R11 · R12 · R10
 ```
 
-- **R4, R6, R7** are isolated and low-risk — land them first to bank value.
+- **R4, R6, R7, R13, R14** are isolated and low-risk — land them first to bank value. **R13** (atomic backup) is the highest-value quick win: it closes a real, if narrow, corruption path.
 - **R3 precedes R1**: the coverage net makes the behavior-preserving refactor safe.
 - **R1** is the centerpiece and folds in **R2** and **R5**.
+- **R15** is a decision, not just code — ratify the flap-cooldown tradeoff (or tighten it for alarm-class sensors) before closing it.
 - **R8, R9, R11, R12, R10** touch independent areas and can be scheduled whenever.
-- **R12 is deliberately not a "split the big file" item** — the live-stream core is high-risk and was recently stabilized.
+- **R12 is deliberately not a "split the big file" item** — the live-stream core is high-risk and was recently stabilized (confirmed correct in §2.8).
 
 ## 5. Non-goals
 
