@@ -33,8 +33,44 @@ export function liveStreamOptionsFromEnv(
       DEFAULTS.startTimeoutMs,
     ),
     maxViewers: boundedInteger(env.LIVE_STREAM_MAX_VIEWERS, 1, 2, DEFAULTS.maxViewers),
-    runtimeDirectory: env.LIVE_STREAM_RUNTIME_DIR?.trim() || DEFAULTS.runtimeDirectory,
+    runtimeDirectory: runtimeDirectory(env.LIVE_STREAM_RUNTIME_DIR),
   };
+}
+
+const UNSAFE_RUNTIME_ROOTS = [
+  '/bin',
+  '/boot',
+  '/dev',
+  '/etc',
+  '/proc',
+  '/sbin',
+  '/sys',
+  '/usr',
+] as const;
+
+function runtimeDirectory(raw: string | undefined): string {
+  if (
+    raw === undefined ||
+    raw.length === 0 ||
+    raw.length > 1_024 ||
+    raw !== raw.trim() ||
+    /[\0-\x1f\x7f]/.test(raw) ||
+    !isAbsolute(raw) ||
+    raw.split('/').includes('..')
+  ) {
+    return DEFAULTS.runtimeDirectory;
+  }
+
+  const normalized = normalize(raw);
+  if (
+    normalized === '/' ||
+    UNSAFE_RUNTIME_ROOTS.some(
+      (root) => normalized === root || normalized.startsWith(`${root}/`),
+    )
+  ) {
+    return DEFAULTS.runtimeDirectory;
+  }
+  return normalized;
 }
 
 function boundedInteger(
@@ -49,3 +85,4 @@ function boundedInteger(
     ? value
     : fallback;
 }
+import { isAbsolute, normalize } from 'node:path';

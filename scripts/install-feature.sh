@@ -2,21 +2,10 @@
 set -euo pipefail
 FEATURE="${1:-}"
 USER="${HOME_WORKER_USER:-homeworker}"
-INSTALL_DIR="${HOME_WORKER_INSTALL_DIR:-/opt/home-worker}"
 APT_LOCK_TIMEOUT_SECONDS=300
 
 apt_get() {
   sudo apt-get -o "DPkg::Lock::Timeout=${APT_LOCK_TIMEOUT_SECONDS}" "$@"
-}
-
-enable_live_stream_runtime() {
-  local env_file="$INSTALL_DIR/.env"
-  [ -f "$env_file" ] || return 0
-  if sudo grep -q '^LIVE_STREAM_ENABLED=' "$env_file"; then
-    sudo sed -i 's/^LIVE_STREAM_ENABLED=.*/LIVE_STREAM_ENABLED=true/' "$env_file"
-  else
-    printf '\nLIVE_STREAM_ENABLED=true\n' | sudo tee -a "$env_file" >/dev/null
-  fi
 }
 
 case "$FEATURE" in
@@ -154,23 +143,37 @@ EOF
     if ! command -v cloudflared >/dev/null 2>&1; then
       apt_get install -y cloudflared
     fi
-    if ! cloudflared version >/dev/null 2>&1; then
+
+    # Both commands run with an empty environment, disposable HOME, and an
+    # explicit disposable config. Neither can discover a real user config.
+    DIAG_DIR="$(mktemp -d)"
+    trap 'rm -rf "$DIAG_DIR"' EXIT
+    DIAG_HOME="$DIAG_DIR/home"
+    DIAG_CONFIG_DIR="$DIAG_DIR/config"
+    DIAG_CONFIG="$DIAG_CONFIG_DIR/config.yml"
+    sudo install -d -m 700 -o "$USER" -g "$USER" \
+      "$DIAG_DIR" "$DIAG_HOME" "$DIAG_CONFIG_DIR"
+    sudo install -m 600 -o "$USER" -g "$USER" /dev/null "$DIAG_CONFIG"
+    if ! sudo -H -u "$USER" env -i \
+      PATH="/usr/local/bin:/usr/bin:/bin" \
+      HOME="$DIAG_HOME" \
+      XDG_CONFIG_HOME="$DIAG_CONFIG_DIR" \
+      cloudflared --config "$DIAG_CONFIG" version >/dev/null 2>&1; then
       echo "ERROR: cloudflared was installed but its version check failed." >&2
       exit 1
     fi
-
-    # Diagnostics may create an archive. Isolate it from the worker user's
-    # discovered ~/.cloudflared configuration and remove it after inspection.
-    DIAG_DIR="$(mktemp -d)"
-    sudo chown "$USER:$USER" "$DIAG_DIR"
     if ! (
       cd "$DIAG_DIR"
-      sudo -H -u "$USER" cloudflared tunnel diag >diagnostic.log 2>&1
+      sudo -H -u "$USER" env -i \
+        PATH="/usr/local/bin:/usr/bin:/bin" \
+        HOME="$DIAG_HOME" \
+        XDG_CONFIG_HOME="$DIAG_CONFIG_DIR" \
+        cloudflared --config "$DIAG_CONFIG" tunnel diag >diagnostic.log 2>&1
     ); then
       echo "WARNING: cloudflared diagnostics failed. Check DNS resolution and outbound port 7844 (QUIC/HTTP2) before using live view." >&2
     fi
     rm -rf "$DIAG_DIR"
-    enable_live_stream_runtime
+    trap - EXIT
     echo "Experimental cloudflared live-stream capability installed."
     ;;
   digital|neobox)
