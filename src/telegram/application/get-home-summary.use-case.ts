@@ -102,9 +102,13 @@ function compareAttention(left: ClassifiedSensorState, right: ClassifiedSensorSt
   const levelDifference = attentionPriority(left.level) - attentionPriority(right.level);
   if (levelDifference !== 0) return levelDifference;
 
-  const nameDifference = normalizedSensorName(left.sensor.name)
-    .localeCompare(normalizedSensorName(right.sensor.name));
-  return nameDifference !== 0 ? nameDifference : left.sensor.id.localeCompare(right.sensor.id);
+  const leftName = normalizedSensorName(left.sensor.name);
+  const rightName = normalizedSensorName(right.sensor.name);
+  if (leftName < rightName) return -1;
+  if (leftName > rightName) return 1;
+  if (left.sensor.id < right.sensor.id) return -1;
+  if (left.sensor.id > right.sensor.id) return 1;
+  return 0;
 }
 
 function attentionPriority(level: ClassifiedSensorState['level']): number {

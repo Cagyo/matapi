@@ -111,6 +111,26 @@ describe('GetHomeSummaryUseCase', () => {
     expect(snapshots.get).toHaveBeenCalledTimes(1);
   });
 
+  it('orders equal-priority attention by normalized Unicode name then immutable ID', async () => {
+    const { summary } = useCase({
+      sensors: [
+        sensor('z-id', { name: '  Ａ  ', severity: 'critical', lastValue: 'true' }),
+        sensor('a-id', { name: 'a', severity: 'critical', lastValue: 'true' }),
+        sensor('angstrom', { name: 'Ångström', severity: 'critical', lastValue: 'true' }),
+        sensor('zebra', { name: 'zebra', severity: 'critical', lastValue: 'true' }),
+      ],
+      snapshot: health(['z-id', 'a-id', 'angstrom', 'zebra']),
+    });
+
+    await expect(summary.execute(1)).resolves.toMatchObject({
+      attention: [
+        { sensor: { id: 'a-id' } },
+        { sensor: { id: 'z-id' } },
+        { sensor: { id: 'zebra' } },
+      ],
+    });
+  });
+
   it('fails when the current user is absent', async () => {
     const { summary, mutes, snapshots } = useCase({ currentUser: null });
 
