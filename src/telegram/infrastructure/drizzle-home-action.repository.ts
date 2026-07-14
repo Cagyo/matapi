@@ -84,7 +84,7 @@ export class DrizzleHomeActionRepository implements HomeActionRepositoryPort {
       }).returning().get();
       this.upsert(tx, {
         id: input.id, userId: input.userId, chatId: input.chatId, kind: 'undo-non-critical-pause', sessionToken: null,
-        status: 'pending', expiresAt: new Date(input.now.getTime() + 600_000),
+        status: 'pending', expiresAt: pausedUntil,
         payload: { foundationReceiptId: foundation.id, expectedRevision: expectedRevision + 1 },
       });
       const completed = tx.update(homeActionReceipts).set({ status: 'completed', updatedAt: input.now })

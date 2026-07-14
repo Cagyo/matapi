@@ -52,4 +52,24 @@ describe('DrizzleHomeActionRepository', () => {
     expect(sqlite.prepare("SELECT status FROM home_action_receipts WHERE kind = 'pause-confirmation'").get()).toEqual({ status: 'completed' });
     expect(sqlite.prepare("SELECT status FROM home_action_receipts WHERE kind = 'undo-non-critical-pause'").get()).toEqual({ status: 'pending' });
   });
+
+  it.each([1, 4, 8] as const)('allows the %ih pause Undo immediately before its deadline and rejects it at the deadline', async (hours) => {
+    const deadline = new Date(NOW.getTime() + hours * 3_600_000);
+    await repository.createPauseConfirmation({
+      id: '1234567890abcdef', userId: 100, chatId: 200, kind: 'pause-confirmation',
+      sessionToken: 'token-a', status: 'pending', payload: { hours }, expiresAt: new Date(NOW.getTime() + 120_000),
+    });
+    await repository.confirmPause({ userId: 100, chatId: 200, token: 'token-a', id: '1234567890abcdef', hours, now: NOW });
+    await expect(repository.undoPause({ userId: 100, chatId: 200, id: '1234567890abcdef', now: new Date(deadline.getTime() - 1) }))
+      .resolves.toEqual({ kind: 'applied' });
+
+    await repository.createPauseConfirmation({
+      id: 'abcdef1234567890', userId: 100, chatId: 200, kind: 'pause-confirmation',
+      sessionToken: 'token-a', status: 'pending', payload: { hours }, expiresAt: new Date(NOW.getTime() + 120_000),
+    });
+    await repository.confirmPause({ userId: 100, chatId: 200, token: 'token-a', id: 'abcdef1234567890', hours, now: NOW });
+    await expect(repository.undoPause({ userId: 100, chatId: 200, id: 'abcdef1234567890', now: deadline }))
+      .resolves.toEqual({ kind: 'expired' });
+    expect(sqlite.prepare('SELECT non_critical_paused_until AS pausedUntil FROM users WHERE telegram_id = 100').get()).toEqual({ pausedUntil: deadline.getTime() / 1_000 });
+  });
 });

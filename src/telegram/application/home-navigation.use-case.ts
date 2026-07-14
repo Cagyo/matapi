@@ -21,6 +21,26 @@ export interface HomeNavigationInput {
 
 const CONFIRMATION_TTL_MS = 120_000;
 
+function parentView(view: HomeView): HomeView | null {
+  switch (view.kind) {
+    case 'home': return null;
+    case 'sensors':
+    case 'notifications':
+    case 'more': return { kind: 'home', checking: false };
+    case 'notification-targets':
+    case 'pause-duration': return { kind: 'notifications' };
+    case 'notification-target': return { kind: 'notification-targets', page: view.page, targets: [] };
+    case 'pause-confirmation': return { kind: 'pause-duration' };
+    case 'history':
+    case 'admin-tools': return { kind: 'more' };
+    case 'admin-sensor-setup':
+    case 'admin-storage':
+    case 'admin-system': return { kind: 'admin-tools' };
+    case 'confirmation': return view.action === 'cleanup' ? { kind: 'admin-storage' } : { kind: 'admin-system' };
+    case 'cleanup-result': return { kind: 'admin-storage' };
+  }
+}
+
 @Injectable()
 export class HomeNavigationUseCase {
   constructor(
@@ -31,6 +51,10 @@ export class HomeNavigationUseCase {
 
   async execute(input: HomeNavigationInput): Promise<HomeNavigationResult> {
     const { action, view } = input;
+    if (action.kind === 'back') {
+      const parent = parentView(view);
+      return parent ? { kind: 'render', view: parent } : { kind: 'recovery', reason: 'superseded' };
+    }
     if (action.kind === 'confirm-pause') {
       if (view.kind !== 'pause-confirmation' || view.receiptId !== action.receiptId) return { kind: 'recovery', reason: 'superseded' };
       const result = await this.actions.confirmPause({
@@ -120,7 +144,7 @@ export class HomeNavigationUseCase {
       if (view.kind === expectedView) return { kind: 'external', destination: adminExternal[action.kind] };
     }
     if (action.kind === 'auto-clean-threshold' && view.kind === 'admin-system' && input.role === 'admin') return { kind: 'render', view };
-    if (action.kind === 'home' || action.kind === 'back') return { kind: 'render', view: { kind: 'home', checking: false } };
+    if (action.kind === 'home') return { kind: 'render', view: { kind: 'home', checking: false } };
     if (action.kind === 'sensors' && (view.kind === 'home' || view.kind === 'sensors')) return { kind: 'render', view: { kind: 'sensors', page: action.page, checking: false } };
     if (action.kind === 'check' && (view.kind === 'home' || view.kind === 'sensors')) return { kind: 'render', view: { ...view, checking: true } };
     return { kind: 'recovery', reason: 'superseded' };

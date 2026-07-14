@@ -72,4 +72,36 @@ describe('InMemoryHomeActionRepository', () => {
       userId: 100, chatId: 200, kind: 'undo-non-critical-pause', now: NOW,
     })).resolves.toMatchObject({ kind: 'undo-non-critical-pause', payload: { expectedRevision: 1 } });
   });
+
+  it.each([1, 4, 8] as const)('allows the %ih pause Undo immediately before its deadline and rejects it at the deadline', async (hours) => {
+    const createRepository = () => {
+      const users = new InMemoryUserRepository([{
+        telegramId: 100, name: 'Ada', role: 'user', locale: 'en', muted: false,
+        nonCriticalPausedUntil: null, notificationPauseRevision: 0,
+        quietStart: null, quietEnd: null, createdAt: null,
+      }]);
+      return { users, repository: new InMemoryHomeActionRepository(users) };
+    };
+    const deadline = new Date(NOW.getTime() + hours * 3_600_000);
+
+    const before = createRepository();
+    await before.repository.createPauseConfirmation({
+      id: '1234567890abcdef', userId: 100, chatId: 200, kind: 'pause-confirmation',
+      sessionToken: 'token-a', status: 'pending', payload: { hours }, expiresAt: new Date(NOW.getTime() + 120_000),
+    });
+    await expect(before.repository.confirmPause({ userId: 100, chatId: 200, token: 'token-a', id: '1234567890abcdef', hours, now: NOW }))
+      .resolves.toMatchObject({ kind: 'applied' });
+    await expect(before.repository.undoPause({ userId: 100, chatId: 200, id: '1234567890abcdef', now: new Date(deadline.getTime() - 1) }))
+      .resolves.toEqual({ kind: 'applied' });
+
+    const exact = createRepository();
+    await exact.repository.createPauseConfirmation({
+      id: '1234567890abcdef', userId: 100, chatId: 200, kind: 'pause-confirmation',
+      sessionToken: 'token-a', status: 'pending', payload: { hours }, expiresAt: new Date(NOW.getTime() + 120_000),
+    });
+    await exact.repository.confirmPause({ userId: 100, chatId: 200, token: 'token-a', id: '1234567890abcdef', hours, now: NOW });
+    await expect(exact.repository.undoPause({ userId: 100, chatId: 200, id: '1234567890abcdef', now: deadline }))
+      .resolves.toEqual({ kind: 'expired' });
+    await expect(exact.users.getNotificationPauseState(100)).resolves.toMatchObject({ nonCriticalPausedUntil: deadline });
+  });
 });

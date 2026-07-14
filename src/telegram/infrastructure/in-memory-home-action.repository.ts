@@ -39,14 +39,15 @@ export class InMemoryHomeActionRepository implements HomeActionRepositoryPort {
     return this.transaction(async () => runNotificationPreferencesTransaction(this.users!, async () => {
       const state = await this.users!.getNotificationPauseState(input.userId);
       if (!state || state.legacyMuted) return { kind: 'superseded' };
+      const pausedUntil = new Date(input.now.getTime() + input.hours * 3_600_000);
       const result = await this.users!.applyNonCriticalPause({
         userId: input.userId, expectedRevision: state.revision,
-        pausedUntil: new Date(input.now.getTime() + input.hours * 3_600_000), now: input.now,
+        pausedUntil, now: input.now,
       });
       if (result.kind !== 'applied') return { kind: 'superseded' };
       this.receipts.set(`${input.userId}:${input.chatId}:undo-non-critical-pause`, {
         id: input.id, userId: input.userId, chatId: input.chatId, kind: 'undo-non-critical-pause', sessionToken: null,
-        status: 'pending', expiresAt: new Date(input.now.getTime() + 600_000),
+        status: 'pending', expiresAt: pausedUntil,
         payload: { foundationReceiptId: result.receiptId, expectedRevision: result.state.revision },
       });
       this.receipts.set(`${input.userId}:${input.chatId}:pause-confirmation`, { ...receipt, status: 'completed' });
