@@ -16,6 +16,8 @@ import type { HomeSessionStorePort } from '../domain/ports/home-session-store.po
 type SessionRow = typeof homeSessions.$inferSelect;
 type SessionWriter = Pick<AppDatabase, 'delete' | 'insert' | 'select' | 'update'>;
 
+const HOME_TOKEN = /^[A-Za-z0-9_-]{16}$/;
+
 function sameIdentity(left: HomeIdentity, right: HomeIdentity): boolean {
   return left.userId === right.userId
     && left.chatId === right.chatId
@@ -49,7 +51,7 @@ function pendingValues(reservation: HomeReservation) {
     pendingView: reservation.view.kind,
     pendingSensorPage: encoded.sensorPage,
     pendingViewPayload: encoded.payload,
-    pendingChecking: encoded.checking,
+    pendingChecking: encoded.checking === null ? null : Number(encoded.checking),
     pendingExpiresAt: reservation.expiresAt,
   };
 }
@@ -63,7 +65,7 @@ function activeValues(active: HomeIdentity, view: HomeView) {
     activeView: view.kind,
     activeSensorPage: encoded.sensorPage,
     activeViewPayload: encoded.payload,
-    activeChecking: encoded.checking,
+    activeChecking: encoded.checking === null ? null : Number(encoded.checking),
   };
 }
 
@@ -88,7 +90,10 @@ function activeOf(row: SessionRow): { identity: HomeIdentity; view: HomeView } |
     || row.activeRevision === null
     || row.activeView === null
   ) return null;
-  const view = parseHomeView(row.activeView, row.activeSensorPage, row.activeViewPayload, row.activeChecking);
+  if (!isHomeToken(row.activeToken) || !isPositiveSafeInteger(row.activeMessageId) || !isPositiveSafeInteger(row.activeRevision)) return null;
+  const checking = parseStoredBoolean(row.activeChecking);
+  if (checking === undefined) return null;
+  const view = parseHomeView(row.activeView, row.activeSensorPage, row.activeViewPayload, checking);
   return view ? {
     identity: { userId: row.userId, chatId: row.chatId, messageId: row.activeMessageId, token: row.activeToken, revision: row.activeRevision },
     view,
@@ -103,8 +108,12 @@ function pendingOf(row: SessionRow): HomeReservation | null {
     || row.pendingView === null
     || row.pendingExpiresAt === null
   ) return null;
-  if (row.pendingKind === 'edit' && row.pendingMessageId === null) return null;
-  const view = parseHomeView(row.pendingView, row.pendingSensorPage, row.pendingViewPayload, row.pendingChecking);
+  if (!isHomeToken(row.pendingToken) || !isPositiveSafeInteger(row.pendingRevision)) return null;
+  if ((row.pendingKind === 'edit' && !isPositiveSafeInteger(row.pendingMessageId))
+    || (row.pendingKind === 'new' && row.pendingMessageId !== null)) return null;
+  const checking = parseStoredBoolean(row.pendingChecking);
+  if (checking === undefined) return null;
+  const view = parseHomeView(row.pendingView, row.pendingSensorPage, row.pendingViewPayload, checking);
   return view ? {
     kind: row.pendingKind,
     userId: row.userId,
@@ -115,6 +124,34 @@ function pendingOf(row: SessionRow): HomeReservation | null {
     view,
     expiresAt: row.pendingExpiresAt,
   } : null;
+}
+
+function hasPendingValues(row: SessionRow): boolean {
+  return row.pendingKind !== null
+    || row.pendingMessageId !== null
+    || row.pendingToken !== null
+    || row.pendingRevision !== null
+    || row.pendingView !== null
+    || row.pendingSensorPage !== null
+    || row.pendingViewPayload !== null
+    || row.pendingChecking !== null
+    || row.pendingExpiresAt !== null;
+}
+
+function isHomeToken(value: unknown): value is string {
+  return typeof value === 'string' && HOME_TOKEN.test(value);
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+}
+
+/** `undefined` marks a non-canonical raw SQLite boolean. */
+function parseStoredBoolean(value: number | null): boolean | null | undefined {
+  if (value === null) return null;
+  if (value === 0) return false;
+  if (value === 1) return true;
+  return undefined;
 }
 
 function isExpired(reservation: HomeReservation, now: Date): boolean {
@@ -171,6 +208,7 @@ export class DrizzleHomeSessionStore implements HomeSessionStorePort {
       if (!active) return { kind: 'closed' };
       if (!sameIdentity(active.identity, input.active)) return { kind: 'stale' };
       const pending = pendingOf(row);
+      if (hasPendingValues(row) && !pending) return { kind: 'closed' };
       const highestRevision = Math.max(active.identity.revision, pending && !isExpired(pending, input.now) ? pending.revision : 0);
       if (highestRevision >= Number.MAX_SAFE_INTEGER) {
         throw new RangeError('Home session revision cannot exceed Number.MAX_SAFE_INTEGER');
@@ -269,6 +307,7 @@ export class DrizzleHomeSessionStore implements HomeSessionStorePort {
       if (!row) return { kind: 'closed' };
       const active = activeOf(row);
       const pending = pendingOf(row);
+      if (hasPendingValues(row) && !pending) return { kind: 'closed' };
       const expired = pending !== null && isExpired(pending, input.now);
       if (!active) {
         if (expired) {
@@ -359,6 +398,7 @@ export class DrizzleHomeSessionStore implements HomeSessionStorePort {
     if (!active) return { kind: 'closed' };
     if (!sameIdentity(active.identity, input)) return { kind: 'stale' };
     const pending = pendingOf(row);
+    if (hasPendingValues(row) && !pending) return { kind: 'closed' };
     return pending?.kind === 'edit'
       ? { kind: 'updating' }
       : { kind: 'accepted', active: active.identity, view: active.view };

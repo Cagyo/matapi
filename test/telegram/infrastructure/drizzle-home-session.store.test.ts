@@ -14,20 +14,22 @@ import { DrizzleHomeSessionStore } from '../../../src/telegram/infrastructure/dr
 const NOW = new Date('2030-01-01T00:00:00.000Z');
 const HOME: HomeView = { kind: 'home', checking: false };
 const SENSORS: HomeView = { kind: 'sensors', page: 2, checking: true };
+const VALID_TOKEN = '1234567890abcdef';
+const SECOND_TOKEN = 'abcdef1234567890';
 
 function later(milliseconds = 60_000): Date {
   return new Date(NOW.getTime() + milliseconds);
 }
 
 function identity(overrides: Partial<HomeIdentity> = {}): HomeIdentity {
-  return { userId: 100, chatId: 200, messageId: 300, token: 'token-a', revision: 1, ...overrides };
+  return { userId: 100, chatId: 200, messageId: 300, token: VALID_TOKEN, revision: 1, ...overrides };
 }
 
 async function openActive(store: DrizzleHomeSessionStore, overrides: Partial<Pick<HomeIdentity, 'userId' | 'chatId' | 'messageId' | 'token'>> = {}): Promise<HomeIdentity> {
   const reservation = await store.reserveNew({
     userId: overrides.userId ?? 100,
     chatId: overrides.chatId ?? 200,
-    token: overrides.token ?? 'token-a',
+    token: overrides.token ?? VALID_TOKEN,
     view: HOME,
     now: NOW,
     expiresAt: later(),
@@ -67,6 +69,63 @@ function configureContentionConnection(sqlite: Database.Database): void {
 }
 
 describe('DrizzleHomeSessionStore', () => {
+  it('round-trips every Slice 3 view through reserve, promote, validate, and adapter restart', async () => {
+    const targets = Array.from({ length: 8 }, (_, index) => ({
+      kind: index % 2 === 0 ? 'sensor' as const : 'camera' as const,
+      id: `a0a0a0a0-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+    }));
+    const views: readonly HomeView[] = [
+      { kind: 'notifications' },
+      { kind: 'notification-targets', page: 0, targets },
+      { kind: 'notification-target', page: 0, target: targets[0] },
+      { kind: 'pause-duration' },
+      { kind: 'pause-confirmation', hours: 1, receiptId: VALID_TOKEN },
+      { kind: 'more' }, { kind: 'history' }, { kind: 'admin-tools' },
+      { kind: 'admin-sensor-setup' }, { kind: 'admin-storage' }, { kind: 'admin-system' },
+      { kind: 'confirmation', action: 'restart', receiptId: SECOND_TOKEN },
+      { kind: 'cleanup-result', outcome: 'failed', threshold: null },
+    ];
+    const restarted = new DrizzleHomeSessionStore(drizzle(sqlite, { schema }));
+    for (const [index, view] of views.entries()) {
+      const userId = 100;
+      const chatId = 1_000 + index;
+      const token = index % 2 === 0 ? VALID_TOKEN : SECOND_TOKEN;
+      const reservation = await store.reserveNew({ userId, chatId, token, view, now: NOW, expiresAt: later() });
+      const promoted = await store.promoteNew(reservation, 500 + index, NOW);
+      if (promoted.kind !== 'promoted') throw new Error('expected active Home');
+      await expect(store.validate({ ...promoted.active, now: NOW })).resolves.toEqual({ kind: 'accepted', active: promoted.active, view });
+      await expect(restarted.validate({ ...promoted.active, now: NOW })).resolves.toEqual({ kind: 'accepted', active: promoted.active, view });
+    }
+  });
+
+  it('fails closed for malformed persisted identity, reservation, and raw boolean values', async () => {
+    const insert = sqlite.prepare(`INSERT INTO home_sessions (
+      user_id, chat_id, active_message_id, active_token, active_revision, active_view,
+      active_sensor_page, active_view_payload, active_checking, pending_kind,
+      pending_message_id, pending_token, pending_revision, pending_view,
+      pending_sensor_page, pending_view_payload, pending_checking, pending_expires_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    const base = [100, 200, 300, VALID_TOKEN, 1, 'sensors', 0, null, 1, null, null, null, null, null, null, null, null, null, NOW.getTime() / 1000];
+    insert.run(...base);
+    await expect(store.validate({ ...identity(), now: NOW })).resolves.toMatchObject({ kind: 'accepted', view: { kind: 'sensors', page: 0, checking: true } });
+
+    for (const [chatId, token, revision, messageId, checking] of [
+      [201, 'too-short', 1, 300, 1],
+      [202, VALID_TOKEN, 0, 300, 1],
+      [203, VALID_TOKEN, 1, 0, 1],
+      [204, VALID_TOKEN, 1, 300, 2],
+    ] as const) {
+      insert.run(100, chatId, messageId, token, revision, 'home', null, null, checking, null, null, null, null, null, null, null, null, null, NOW.getTime() / 1000);
+      await expect(store.validate({ ...identity({ chatId, token, revision, messageId }), now: NOW })).resolves.toEqual({ kind: 'closed' });
+    }
+
+    insert.run(100, 205, null, null, null, null, null, null, null, 'new', 301, VALID_TOKEN, 1, 'home', null, null, 1, later().getTime() / 1000, NOW.getTime() / 1000);
+    await expect(store.validate({ ...identity({ chatId: 205 }), now: NOW })).resolves.toEqual({ kind: 'closed' });
+
+    insert.run(100, 206, 300, VALID_TOKEN, 1, 'home', null, null, 1, 'edit', 300, VALID_TOKEN, 2, 'home', null, null, 2, later().getTime() / 1000, NOW.getTime() / 1000);
+    await expect(store.validate({ ...identity({ chatId: 206 }), now: NOW })).resolves.toEqual({ kind: 'closed' });
+  });
+
   it('persists a typed Slice 3 notification-target view over an adapter restart', async () => {
     const view: HomeView = {
       kind: 'notification-targets', page: 1,
@@ -75,7 +134,7 @@ describe('DrizzleHomeSessionStore', () => {
         { kind: 'camera', id: 'a0a0a0a0-0000-4000-8000-000000000002' },
       ],
     };
-    const reservation = await store.reserveNew({ userId: 100, chatId: 200, token: 'token-a', view, now: NOW, expiresAt: later() });
+    const reservation = await store.reserveNew({ userId: 100, chatId: 200, token: VALID_TOKEN, view, now: NOW, expiresAt: later() });
     const promoted = await store.promoteNew(reservation, 300, NOW);
     if (promoted.kind !== 'promoted') throw new Error('expected active Home');
     const restarted = new DrizzleHomeSessionStore(drizzle(sqlite, { schema }));
@@ -105,15 +164,15 @@ describe('DrizzleHomeSessionStore', () => {
   });
 
   it('opens its first Home reservation and accepts its promoted identity', async () => {
-    const reservation = await store.reserveNew({ userId: 100, chatId: 200, token: 'token-a', view: HOME, now: NOW, expiresAt: later() });
-    expect(reservation).toEqual({ kind: 'new', userId: 100, chatId: 200, messageId: null, token: 'token-a', revision: 1, view: HOME, expiresAt: later() });
+    const reservation = await store.reserveNew({ userId: 100, chatId: 200, token: VALID_TOKEN, view: HOME, now: NOW, expiresAt: later() });
+    expect(reservation).toEqual({ kind: 'new', userId: 100, chatId: 200, messageId: null, token: VALID_TOKEN, revision: 1, view: HOME, expiresAt: later() });
     await expect(store.promoteNew(reservation, 300, NOW)).resolves.toEqual({ kind: 'promoted', active: identity(), previous: null });
     await expect(store.validate({ ...identity(), now: NOW })).resolves.toEqual({ kind: 'accepted', active: identity(), view: HOME });
   });
 
   it('uses immediate transactions for every read-decide-write session transition', async () => {
     const transaction = vi.spyOn(db, 'transaction');
-    const reservation = await store.reserveNew({ userId: 100, chatId: 200, token: 'token-a', view: HOME, now: NOW, expiresAt: later() });
+    const reservation = await store.reserveNew({ userId: 100, chatId: 200, token: VALID_TOKEN, view: HOME, now: NOW, expiresAt: later() });
     const promoted = await store.promoteNew(reservation, 300, NOW);
     if (promoted.kind !== 'promoted') throw new Error('expected active Home');
     const edit = await store.reserveEdit({ active: promoted.active, view: SENSORS, now: NOW, expiresAt: later() });
@@ -130,7 +189,7 @@ describe('DrizzleHomeSessionStore', () => {
 
   it('retains active authority through replacement and abandoned new-message reservations', async () => {
     const active = await openActive(store);
-    const replacement = await store.reserveNew({ userId: active.userId, chatId: active.chatId, token: 'token-b', view: SENSORS, now: NOW, expiresAt: later() });
+    const replacement = await store.reserveNew({ userId: active.userId, chatId: active.chatId, token: SECOND_TOKEN, view: SENSORS, now: NOW, expiresAt: later() });
     await expect(store.validate({ ...active, now: NOW })).resolves.toMatchObject({ kind: 'accepted', active });
     await store.abandon(replacement);
     await expect(store.validate({ ...active, now: NOW })).resolves.toMatchObject({ kind: 'accepted', active });
@@ -139,25 +198,25 @@ describe('DrizzleHomeSessionStore', () => {
 
   it('retains the active Home until a replacement new-message reservation is promoted', async () => {
     const active = await openActive(store);
-    const replacement = await store.reserveNew({ userId: active.userId, chatId: active.chatId, token: 'token-b', view: SENSORS, now: NOW, expiresAt: later() });
+    const replacement = await store.reserveNew({ userId: active.userId, chatId: active.chatId, token: SECOND_TOKEN, view: SENSORS, now: NOW, expiresAt: later() });
     await expect(store.validate({ ...active, now: NOW })).resolves.toEqual({ kind: 'accepted', active, view: HOME });
     await expect(store.promoteNew(replacement, 301, NOW)).resolves.toEqual({
       kind: 'promoted',
-      active: identity({ messageId: 301, token: 'token-b' }),
+      active: identity({ messageId: 301, token: SECOND_TOKEN }),
       previous: active,
     });
     await expect(store.validate({ ...active, now: NOW })).resolves.toEqual({ kind: 'stale' });
   });
 
   it('only promotes the newest concurrent new-message reservation', async () => {
-    const first = await store.reserveNew({ userId: 100, chatId: 200, token: 'token-a', view: HOME, now: NOW, expiresAt: later() });
-    const second = await store.reserveNew({ userId: 100, chatId: 200, token: 'token-b', view: SENSORS, now: NOW, expiresAt: later() });
+    const first = await store.reserveNew({ userId: 100, chatId: 200, token: VALID_TOKEN, view: HOME, now: NOW, expiresAt: later() });
+    const second = await store.reserveNew({ userId: 100, chatId: 200, token: SECOND_TOKEN, view: SENSORS, now: NOW, expiresAt: later() });
     await expect(store.promoteNew(first, 300, NOW)).resolves.toEqual({ kind: 'lost' });
-    await expect(store.promoteNew(second, 301, NOW)).resolves.toMatchObject({ kind: 'promoted', active: identity({ messageId: 301, token: 'token-b' }) });
+    await expect(store.promoteNew(second, 301, NOW)).resolves.toMatchObject({ kind: 'promoted', active: identity({ messageId: 301, token: SECOND_TOKEN }) });
   });
 
   it('requires the full pending reservation identity for promotion and abandonment', async () => {
-    const reservation = await store.reserveNew({ userId: 100, chatId: 200, token: 'token-a', view: HOME, now: NOW, expiresAt: later() });
+    const reservation = await store.reserveNew({ userId: 100, chatId: 200, token: VALID_TOKEN, view: HOME, now: NOW, expiresAt: later() });
     const altered: HomeReservation = { ...reservation, view: SENSORS, expiresAt: later(120_000) };
     await store.abandon(altered);
     await expect(store.promoteNew(altered, 300, NOW)).resolves.toEqual({ kind: 'lost' });
@@ -177,7 +236,7 @@ describe('DrizzleHomeSessionStore', () => {
 
   it('rejects stale edit reservations and retains active authority after abandon', async () => {
     const active = await openActive(store);
-    await expect(store.reserveEdit({ active: identity({ token: 'wrong-token' }), view: SENSORS, now: NOW, expiresAt: later() })).resolves.toEqual({ kind: 'stale' });
+    await expect(store.reserveEdit({ active: identity({ token: 'zyxwvutsrqponmlk' }), view: SENSORS, now: NOW, expiresAt: later() })).resolves.toEqual({ kind: 'stale' });
     const reserved = await store.reserveEdit({ active, view: SENSORS, now: NOW, expiresAt: later() });
     if (reserved.kind !== 'reserved') throw new Error('expected edit reservation');
     await store.abandon(reserved.reservation);
@@ -207,7 +266,7 @@ describe('DrizzleHomeSessionStore', () => {
     const reservation = await store.reserveNew({
       userId: 100,
       chatId: 200,
-      token: 'token-a',
+      token: VALID_TOKEN,
       view: HOME,
       now: NOW,
       expiresAt: NOW,
@@ -219,7 +278,7 @@ describe('DrizzleHomeSessionStore', () => {
 
   it('rejects malformed callback identities without changing authority and closes exact identities atomically', async () => {
     const active = await openActive(store);
-    for (const candidate of [{ ...active, messageId: 301 }, { ...active, token: 'wrong-token' }, { ...active, revision: 2 }]) {
+    for (const candidate of [{ ...active, messageId: 301 }, { ...active, token: 'zyxwvutsrqponmlk' }, { ...active, revision: 2 }]) {
       await expect(store.validate({ ...candidate, now: NOW })).resolves.toEqual({ kind: 'stale' });
     }
     await expect(store.validate({ ...active, userId: 101, now: NOW })).resolves.toEqual({ kind: 'closed' });
@@ -269,7 +328,7 @@ describe('DrizzleHomeSessionStore', () => {
       const second = new DrizzleHomeSessionStore(drizzle(secondSqlite, { schema }));
       const lockHolder = await holdImmediateLock(databasePath);
       try {
-        await expect(second.reserveNew({ userId: 100, chatId: 200, token: 'token-b', view: SENSORS, now: NOW, expiresAt: later() })).resolves.toMatchObject({ kind: 'new', token: 'token-b' });
+        await expect(second.reserveNew({ userId: 100, chatId: 200, token: SECOND_TOKEN, view: SENSORS, now: NOW, expiresAt: later() })).resolves.toMatchObject({ kind: 'new', token: SECOND_TOKEN });
       } finally {
         await lockHolder.terminate();
       }

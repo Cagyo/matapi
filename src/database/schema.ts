@@ -131,7 +131,9 @@ export const homeSessions = sqliteTable(
     activeView: text('active_view'),
     activeSensorPage: integer('active_sensor_page'),
     activeViewPayload: text('active_view_payload'),
-    activeChecking: integer('active_checking', { mode: 'boolean' }),
+    // Keep the raw SQLite value here so the Home session adapter can reject
+    // non-canonical persisted booleans instead of silently coercing them.
+    activeChecking: integer('active_checking'),
     pendingKind: text('pending_kind'),
     pendingMessageId: integer('pending_message_id'),
     pendingToken: text('pending_token'),
@@ -139,7 +141,7 @@ export const homeSessions = sqliteTable(
     pendingView: text('pending_view'),
     pendingSensorPage: integer('pending_sensor_page'),
     pendingViewPayload: text('pending_view_payload'),
-    pendingChecking: integer('pending_checking', { mode: 'boolean' }),
+    pendingChecking: integer('pending_checking'),
     pendingExpiresAt: integer('pending_expires_at', { mode: 'timestamp' }),
     updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
   },

@@ -110,7 +110,7 @@ function hasKeys(value: Record<string, unknown>, keys: readonly string[]): boole
 }
 
 function isPage(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1;
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 
 function isReceiptId(value: unknown): value is string {

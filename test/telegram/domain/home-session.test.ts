@@ -12,10 +12,10 @@ const TARGETS = [
 
 const VIEWS: readonly HomeView[] = [
   { kind: 'home', checking: false },
-  { kind: 'sensors', page: 2, checking: true },
+  { kind: 'sensors', page: 0, checking: true },
   { kind: 'notifications' },
-  { kind: 'notification-targets', page: 1, targets: TARGETS },
-  { kind: 'notification-target', page: 1, target: TARGETS[0] },
+  { kind: 'notification-targets', page: 0, targets: TARGETS },
+  { kind: 'notification-target', page: 0, target: TARGETS[0] },
   { kind: 'pause-duration' },
   { kind: 'pause-confirmation', hours: 4, receiptId: '1234567890abcdef' },
   { kind: 'more' },
@@ -51,6 +51,14 @@ describe('Home view codec', () => {
     expect(parseHomeView('cleanup-result', null, JSON.stringify({ outcome: 'executed', threshold: '42' }), null)).toBeNull();
     expect(parseHomeView('unknown', null, '{}', null)).toBeNull();
     expect(parseHomeView('more', null, `{\"x\":\"${'a'.repeat(MAX_HOME_VIEW_PAYLOAD_BYTES)}\"}`, null)).toBeNull();
+  });
+
+  it('uses zero-based pages consistently for persisted sensor and notification-target views', () => {
+    expect(parseHomeView('sensors', 0, null, false)).toEqual({ kind: 'sensors', page: 0, checking: false });
+    expect(parseHomeView('notification-targets', null, JSON.stringify({ page: 0, targets: TARGETS }), null))
+      .toEqual({ kind: 'notification-targets', page: 0, targets: TARGETS });
+    expect(parseHomeView('notification-target', null, JSON.stringify({ page: 0, target: TARGETS[0] }), null))
+      .toEqual({ kind: 'notification-target', page: 0, target: TARGETS[0] });
   });
 });
 
