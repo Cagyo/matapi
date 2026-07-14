@@ -25,6 +25,12 @@ async function telegramProviders(mode: 'mock' | 'real') {
   const {
     HOME_SESSION_STORE,
   } = await import('../../src/telegram/domain/ports/home-session-store.port');
+  const {
+    HOME_TOKEN_GENERATOR,
+  } = await import('../../src/telegram/domain/ports/home-token-generator.port');
+  const {
+    HOME_MESSAGE_DELIVERY,
+  } = await import('../../src/telegram/application/ports/home-message-delivery.port');
   const providers = Reflect.getMetadata('providers', TelegramModule) as Provider[];
 
   const providerFor = (token: unknown) => providers.find((provider) => provider.provide === token);
@@ -34,6 +40,8 @@ async function telegramProviders(mode: 'mock' | 'real') {
     inviteCodeRepository: providerFor(INVITE_CODE_REPOSITORY)?.useClass,
     userSensorMuteRepository: providerFor(USER_SENSOR_MUTE_REPOSITORY)?.useClass,
     homeSessionStore: providerFor(HOME_SESSION_STORE)?.useClass,
+    homeTokenGenerator: providerFor(HOME_TOKEN_GENERATOR)?.useClass,
+    homeMessageDelivery: providerFor(HOME_MESSAGE_DELIVERY)?.useClass,
   };
 }
 
@@ -52,6 +60,8 @@ describe('TelegramModule bot-mode composition', () => {
       inviteCodeRepository: expect.objectContaining({ name: 'InMemoryInviteCodeRepository' }),
       userSensorMuteRepository: expect.objectContaining({ name: 'InMemoryUserSensorMuteRepository' }),
       homeSessionStore: expect.objectContaining({ name: 'InMemoryHomeSessionStore' }),
+      homeTokenGenerator: expect.objectContaining({ name: 'CryptoHomeTokenGenerator' }),
+      homeMessageDelivery: expect.objectContaining({ name: 'InMemoryHomeMessageDeliveryAdapter' }),
     });
   });
 
@@ -64,6 +74,8 @@ describe('TelegramModule bot-mode composition', () => {
       inviteCodeRepository: expect.objectContaining({ name: 'DrizzleInviteCodeRepository' }),
       userSensorMuteRepository: expect.objectContaining({ name: 'DrizzleUserSensorMuteRepository' }),
       homeSessionStore: expect.objectContaining({ name: 'DrizzleHomeSessionStore' }),
+      homeTokenGenerator: expect.objectContaining({ name: 'CryptoHomeTokenGenerator' }),
+      homeMessageDelivery: expect.objectContaining({ name: 'InMemoryHomeMessageDeliveryAdapter' }),
     });
   });
 });

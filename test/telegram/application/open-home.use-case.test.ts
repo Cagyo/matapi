@@ -1,0 +1,190 @@
+import { describe, expect, it } from 'vitest';
+import type { ClockPort } from '../../../src/events/domain/ports/clock.port';
+import type { HomeScreen } from '../../../src/telegram/application/home-screen';
+import { OpenHomeUseCase } from '../../../src/telegram/application/open-home.use-case';
+import type {
+  HomeIdentity,
+  HomeReservation,
+} from '../../../src/telegram/domain/home-session';
+import { InMemoryHomeMessageDeliveryAdapter } from '../../../src/telegram/infrastructure/in-memory-home-message-delivery.adapter';
+import { InMemoryHomeSessionStore } from '../../../src/telegram/infrastructure/in-memory-home-session.store';
+
+const NOW = new Date('2030-01-01T00:00:00.000Z');
+const OLD: HomeIdentity = {
+  userId: 7,
+  chatId: 70,
+  messageId: 10,
+  token: 'oldtoken00000000',
+  revision: 1,
+};
+const screen: HomeScreen = {
+  kind: 'home',
+  summary: {
+    verdict: 'normal', sensors: [], attention: [], attentionTotal: 0,
+    knownCount: 0, unknownCount: 0, health: null, healthFresh: false,
+    notificationState: { kind: 'normal' },
+  },
+  checking: false,
+};
+
+class RecordingSessionStore extends InMemoryHomeSessionStore {
+  readonly calls: string[] = [];
+  reservation: HomeReservation | null = null;
+
+  override async reserveNew(input: Parameters<InMemoryHomeSessionStore['reserveNew']>[0]) {
+    this.calls.push('reserve');
+    const reservation = await super.reserveNew(input);
+    this.reservation = reservation;
+    return reservation;
+  }
+
+  override async promoteNew(
+    reservation: HomeReservation,
+    messageId: number,
+    now: Date,
+  ) {
+    this.calls.push('promote');
+    return super.promoteNew(reservation, messageId, now);
+  }
+
+  override async abandon(reservation: HomeReservation): Promise<void> {
+    this.calls.push('abandon');
+    return super.abandon(reservation);
+  }
+}
+
+function setup(tokens = ['abcdefghijklmnop']) {
+  const sessions = new RecordingSessionStore();
+  const delivery = new InMemoryHomeMessageDeliveryAdapter();
+  const getScreen = { execute: async () => screen };
+  const generator = { generate: () => tokens.shift() ?? 'qrstuvwxyzabcdef' };
+  const clock: ClockPort = { now: () => NOW };
+  return {
+    sessions,
+    delivery,
+    getScreen,
+    useCase: new OpenHomeUseCase(sessions, generator, getScreen, delivery, clock),
+  };
+}
+
+async function active(store: InMemoryHomeSessionStore): Promise<HomeIdentity> {
+  const reservation = await store.reserveNew({
+    userId: OLD.userId,
+    chatId: OLD.chatId,
+    token: OLD.token,
+    view: { kind: 'home', checking: false },
+    now: NOW,
+    expiresAt: new Date(NOW.getTime() + 60_000),
+  });
+  const result = await store.promoteNew(reservation, OLD.messageId, NOW);
+  if (result.kind !== 'promoted') throw new Error('expected active session');
+  return result.active;
+}
+
+describe('OpenHomeUseCase', () => {
+  it('reserves, sends, then promotes a new Home with a 60-second pending expiry', async () => {
+    const { sessions, delivery, useCase } = setup();
+
+    await expect(useCase.execute({
+      userId: 7, chatId: 70, locale: 'en', role: 'user',
+      view: { kind: 'home', checking: false },
+    })).resolves.toMatchObject({
+      kind: 'opened',
+      active: { userId: 7, chatId: 70, messageId: 1, token: 'abcdefghijklmnop', revision: 1 },
+    });
+    expect(sessions.calls).toEqual(['reserve', 'promote']);
+    expect(delivery.calls.map(({ kind }) => kind)).toEqual(['send']);
+    expect(sessions.reservation?.expiresAt).toEqual(new Date(NOW.getTime() + 60_000));
+    expect(delivery.calls[0]).toMatchObject({
+      kind: 'send',
+      input: { identity: { userId: 7, chatId: 70, token: 'abcdefghijklmnop', revision: 1 } },
+    });
+  });
+
+  it('strips the prior keyboard only after the replacement has been promoted', async () => {
+    const { sessions, delivery, useCase } = setup();
+    await active(sessions);
+    sessions.calls.length = 0;
+    delivery.calls.length = 0;
+
+    await expect(useCase.execute({
+      userId: 7, chatId: 70, locale: 'en', role: 'user',
+      view: { kind: 'home', checking: false },
+    })).resolves.toMatchObject({ kind: 'opened' });
+    expect([...sessions.calls, ...delivery.calls.map(({ kind }) => kind)]).toContain('stripKeyboard');
+    expect(sessions.calls).toEqual(['reserve', 'promote']);
+    expect(delivery.calls.map(({ kind }) => kind)).toEqual(['send', 'stripKeyboard']);
+    expect(delivery.calls[1]).toMatchObject({ kind: 'stripKeyboard', chatId: 70, messageId: 10 });
+  });
+
+  it('abandons the exact pending reservation and retains the old active Home when sending fails', async () => {
+    const { sessions, delivery, useCase } = setup();
+    await active(sessions);
+    sessions.calls.length = 0;
+    delivery.sendError = new Error('send failed');
+
+    await expect(useCase.execute({
+      userId: 7, chatId: 70, locale: 'en', role: 'user',
+      view: { kind: 'home', checking: false },
+    })).rejects.toThrow('send failed');
+    expect(sessions.calls).toEqual(['reserve', 'abandon']);
+    await expect(sessions.validate({ ...OLD, now: NOW })).resolves.toMatchObject({
+      kind: 'accepted', active: OLD,
+    });
+  });
+
+  it('abandons the exact pending reservation when screen construction fails before delivery', async () => {
+    const { sessions, delivery, getScreen, useCase } = setup();
+    await active(sessions);
+    sessions.calls.length = 0;
+    getScreen.execute = async () => { throw new Error('summary unavailable'); };
+
+    await expect(useCase.execute({
+      userId: 7, chatId: 70, locale: 'en', role: 'user',
+      view: { kind: 'home', checking: false },
+    })).rejects.toThrow('summary unavailable');
+    expect(sessions.calls).toEqual(['reserve', 'abandon']);
+    expect(delivery.calls).toEqual([]);
+    await expect(sessions.validate({ ...OLD, now: NOW })).resolves.toMatchObject({
+      kind: 'accepted', active: OLD,
+    });
+  });
+
+  it('strips a newly sent losing message when a competing reservation wins promotion', async () => {
+    const { sessions, delivery, useCase } = setup(['abcdefghijklmnop', 'qrstuvwxyzabcdef']);
+    await active(sessions);
+    delivery.onSend = async () => {
+      await sessions.reserveNew({
+        userId: 7,
+        chatId: 70,
+        token: 'qrstuvwxyzabcdef',
+        view: { kind: 'home', checking: false },
+        now: NOW,
+        expiresAt: new Date(NOW.getTime() + 60_000),
+      });
+    };
+    sessions.calls.length = 0;
+    delivery.calls.length = 0;
+
+    await expect(useCase.execute({
+      userId: 7, chatId: 70, locale: 'en', role: 'user',
+      view: { kind: 'home', checking: false },
+    })).resolves.toEqual({ kind: 'superseded' });
+    expect(delivery.calls.map(({ kind }) => kind)).toEqual(['send', 'stripKeyboard']);
+    expect(delivery.calls[1]).toMatchObject({ kind: 'stripKeyboard', chatId: 70, messageId: 1 });
+    await expect(sessions.validate({ ...OLD, now: NOW })).resolves.toMatchObject({
+      kind: 'accepted', active: OLD,
+    });
+  });
+
+  it('ignores keyboard-strip failure after a successful promotion', async () => {
+    const { sessions, delivery, useCase } = setup();
+    await active(sessions);
+    delivery.stripKeyboardError = new Error('strip failed');
+
+    await expect(useCase.execute({
+      userId: 7, chatId: 70, locale: 'en', role: 'user',
+      view: { kind: 'home', checking: false },
+    })).resolves.toMatchObject({ kind: 'opened' });
+  });
+});

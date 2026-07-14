@@ -26,6 +26,11 @@ import { RestartConfirmationService } from './application/restart-confirmation.s
 import { SystemOnlineNotifier } from './application/system-online-notifier.service';
 import { RefreshHomeMonitoringUseCase } from './application/refresh-home-monitoring.use-case';
 import { GetHomeSummaryUseCase } from './application/get-home-summary.use-case';
+import { GetHomeScreenUseCase } from './application/get-home-screen.use-case';
+import { OpenHomeUseCase } from './application/open-home.use-case';
+import { RenderHomeUseCase } from './application/render-home.use-case';
+import { CloseHomeUseCase } from './application/close-home.use-case';
+import { ValidateHomeCallbackUseCase } from './application/validate-home-callback.use-case';
 import { RestartSystemUseCase } from './application/restart-system.use-case';
 import { RollbackSystemUseCase } from './application/rollback-system.use-case';
 import { SetQuietHoursUseCase } from './application/set-quiet-hours.use-case';
@@ -47,7 +52,9 @@ import { NOTIFICATION_PAUSE_REPOSITORY } from './domain/ports/notification-pause
 import { USER_REPOSITORY } from './domain/ports/user-repository.port';
 import { USER_SENSOR_MUTE_REPOSITORY } from './domain/ports/user-sensor-mute-repository.port';
 import { HOME_SESSION_STORE } from './domain/ports/home-session-store.port';
+import { HOME_TOKEN_GENERATOR } from './domain/ports/home-token-generator.port';
 import { HOME_HEALTH_SNAPSHOT } from './application/ports/home-health-snapshot.port';
+import { HOME_MESSAGE_DELIVERY } from './application/ports/home-message-delivery.port';
 import { ConsoleNotifierAdapter } from './infrastructure/console-notifier.adapter';
 import { EnvAdminClaimCredentialAdapter } from './infrastructure/env-admin-claim-credential.adapter';
 import { TelegramAdminAlertAdapter } from './infrastructure/telegram-admin-alert.adapter';
@@ -62,6 +69,8 @@ import { InMemoryUserRepository } from './infrastructure/in-memory-user.reposito
 import { InMemoryUserSensorMuteRepository } from './infrastructure/in-memory-user-sensor-mute.repository';
 import { InMemoryHomeSessionStore } from './infrastructure/in-memory-home-session.store';
 import { InMemoryHomeHealthSnapshotAdapter } from './infrastructure/in-memory-home-health-snapshot.adapter';
+import { InMemoryHomeMessageDeliveryAdapter } from './infrastructure/in-memory-home-message-delivery.adapter';
+import { CryptoHomeTokenGenerator } from './infrastructure/crypto-home-token-generator.adapter';
 import { TelegramDirectMessenger } from './infrastructure/telegram-direct-messenger.adapter';
 import { TelegramNotifierAdapter } from './infrastructure/telegram-notifier.adapter';
 import { TelegramRecipientDirectoryAdapter } from './infrastructure/telegram-recipient-directory.adapter';
@@ -160,6 +169,8 @@ const mode = resolveBotMode();
       provide: HOME_SESSION_STORE,
       useClass: mode === 'mock' ? InMemoryHomeSessionStore : DrizzleHomeSessionStore,
     },
+    { provide: HOME_TOKEN_GENERATOR, useClass: CryptoHomeTokenGenerator },
+    { provide: HOME_MESSAGE_DELIVERY, useClass: InMemoryHomeMessageDeliveryAdapter },
     InMemoryHomeHealthSnapshotAdapter,
     { provide: HOME_HEALTH_SNAPSHOT, useExisting: InMemoryHomeHealthSnapshotAdapter },
     { provide: INVITE_CODE_GENERATOR, useValue: defaultInviteCodeGenerator },
@@ -189,6 +200,11 @@ const mode = resolveBotMode();
     SystemOnlineNotifier,
     RefreshHomeMonitoringUseCase,
     GetHomeSummaryUseCase,
+    GetHomeScreenUseCase,
+    ValidateHomeCallbackUseCase,
+    OpenHomeUseCase,
+    RenderHomeUseCase,
+    CloseHomeUseCase,
     BotCommandsMenuService,
     ExportConfigUseCase,
     ImportCameraLiveSourcesUseCase,
