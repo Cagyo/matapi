@@ -7,4 +7,6 @@ export interface UserSensorMuteRepositoryPort {
   unmute(userId: number, sensorId: string): Promise<void>;
   /** Sensor ids currently muted for the given user. */
   listForUser(userId: number): Promise<string[]>;
+  /** Number of sensors currently muted for the given user. */
+  countForUser(userId: number): Promise<number>;
 }

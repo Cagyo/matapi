@@ -9,6 +9,7 @@ const noMutes: UserSensorMuteRepositoryPort = {
   mute: async () => undefined,
   unmute: async () => undefined,
   listForUser: async () => [],
+  countForUser: async () => 0,
 };
 
 function seedUser(overrides: Partial<User> & Pick<User, 'telegramId'>): User {

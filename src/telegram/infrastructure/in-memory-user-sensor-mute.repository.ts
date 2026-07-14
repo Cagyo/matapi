@@ -27,4 +27,13 @@ export class InMemoryUserSensorMuteRepository
       .filter((key) => key.startsWith(prefix))
       .map((key) => key.slice(prefix.length));
   }
+
+  async countForUser(userId: number): Promise<number> {
+    const prefix = `${userId}:`;
+    let count = 0;
+    for (const key of this.store) {
+      if (key.startsWith(prefix)) count += 1;
+    }
+    return count;
+  }
 }

@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq } from 'drizzle-orm';
+import { and, count, eq } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../database/database.module';
 import { userSensorMutes } from '../../database/schema';
 import { UserSensorMuteRepositoryPort } from '../domain/ports/user-sensor-mute-repository.port';
@@ -52,5 +52,14 @@ export class DrizzleUserSensorMuteRepository
       .all()
       .map((row) => row.sensorId)
       .filter((id): id is string => id !== null);
+  }
+
+  async countForUser(userId: number): Promise<number> {
+    const [{ value }] = this.db
+      .select({ value: count() })
+      .from(userSensorMutes)
+      .where(eq(userSensorMutes.userId, userId))
+      .all();
+    return value;
   }
 }

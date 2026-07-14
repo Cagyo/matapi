@@ -25,6 +25,7 @@ import { RegisterUserUseCase } from './application/register-user.use-case';
 import { RestartConfirmationService } from './application/restart-confirmation.service';
 import { SystemOnlineNotifier } from './application/system-online-notifier.service';
 import { RefreshHomeMonitoringUseCase } from './application/refresh-home-monitoring.use-case';
+import { GetHomeSummaryUseCase } from './application/get-home-summary.use-case';
 import { RestartSystemUseCase } from './application/restart-system.use-case';
 import { RollbackSystemUseCase } from './application/rollback-system.use-case';
 import { SetQuietHoursUseCase } from './application/set-quiet-hours.use-case';
@@ -187,6 +188,7 @@ const mode = resolveBotMode();
     RestartConfirmationService,
     SystemOnlineNotifier,
     RefreshHomeMonitoringUseCase,
+    GetHomeSummaryUseCase,
     BotCommandsMenuService,
     ExportConfigUseCase,
     ImportCameraLiveSourcesUseCase,
