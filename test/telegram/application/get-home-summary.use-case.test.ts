@@ -8,6 +8,7 @@ import { UserRepositoryPort } from '../../../src/telegram/domain/ports/user-repo
 import { UserSensorMuteRepositoryPort } from '../../../src/telegram/domain/ports/user-sensor-mute-repository.port';
 import { User } from '../../../src/telegram/domain/user.entity';
 import { GetHomeSummaryUseCase } from '../../../src/telegram/application/get-home-summary.use-case';
+import { NotificationTarget, NotificationTargetDirectory } from '../../../src/telegram/application/notification-target-directory.service';
 
 const NOW = new Date('2030-01-01T12:00:00.000Z');
 const TIMEZONE: TimezoneOptions = { timezone: 'UTC' };
@@ -62,6 +63,7 @@ function useCase(input: {
   sensors?: Sensor[];
   currentUser?: User | null;
   mutedTargetCount?: number;
+  mutedTargets?: readonly NotificationTarget[];
   snapshot?: HomeHealthSnapshot | null;
 }) {
   const query = {
@@ -73,14 +75,25 @@ function useCase(input: {
   const mutes = {
     countForUser: vi.fn(async () => input.mutedTargetCount ?? 0),
   } as unknown as UserSensorMuteRepositoryPort;
+  const targetDirectory = {
+    listEnabled: vi.fn(async () => input.mutedTargets ?? Array.from(
+      { length: input.mutedTargetCount ?? 0 },
+      (_, index) => ({
+        ref: { kind: 'sensor' as const, id: `muted-${index}` },
+        name: `Muted ${index}`,
+        kind: 'sensor' as const,
+        muted: true,
+      }),
+    )),
+  } as unknown as NotificationTargetDirectory;
   const snapshots = { get: vi.fn(() => input.snapshot ?? health()) };
-  const summary = new GetHomeSummaryUseCase(query, users, mutes, snapshots, { now: () => NOW }, TIMEZONE);
-  return { summary, query, users, mutes, snapshots };
+  const summary = new GetHomeSummaryUseCase(query, users, snapshots, { now: () => NOW }, TIMEZONE, targetDirectory);
+  return { summary, query, users, mutes, targetDirectory, snapshots };
 }
 
 describe('GetHomeSummaryUseCase', () => {
   it('uses only cached reads and returns complete counts with capped ordered attention', async () => {
-    const { summary, query, users, mutes, snapshots } = useCase({
+    const { summary, query, users, mutes, targetDirectory, snapshots } = useCase({
       sensors: [
         sensor('4', { name: '  bravo  ', severity: 'warning', lastValue: 'true' }),
         sensor('2', { name: 'Zulu', severity: 'critical', lastValue: 'true' }),
@@ -107,7 +120,8 @@ describe('GetHomeSummaryUseCase', () => {
     });
     expect(query.listEnabled).toHaveBeenCalledTimes(1);
     expect(users.findByTelegramId).toHaveBeenCalledTimes(1);
-    expect(mutes.countForUser).toHaveBeenCalledWith(1);
+    expect(mutes.countForUser).not.toHaveBeenCalled();
+    expect(targetDirectory.listEnabled).toHaveBeenCalledWith(1);
     expect(snapshots.get).toHaveBeenCalledTimes(1);
   });
 
@@ -152,11 +166,19 @@ describe('GetHomeSummaryUseCase', () => {
   });
 
   it('uses the requested user\'s target count', async () => {
-    const { summary, mutes } = useCase({ mutedTargetCount: 7 });
+    const { summary, targetDirectory } = useCase({ mutedTargetCount: 7 });
     await expect(summary.execute(55)).resolves.toMatchObject({
       notificationState: { kind: 'paused_targets', count: 7 },
     });
-    expect(mutes.countForUser).toHaveBeenCalledWith(55);
+    expect(targetDirectory.listEnabled).toHaveBeenCalledWith(55);
+  });
+
+  it('excludes stale muted targets from the Home notification count', async () => {
+    const { summary } = useCase({ mutedTargetCount: 1, mutedTargets: [] });
+
+    await expect(summary.execute(1)).resolves.toMatchObject({
+      notificationState: { kind: 'normal' },
+    });
   });
 
   it('treats a future health snapshot as unavailable and not fresh', async () => {

@@ -12,4 +12,13 @@ describe('InMemoryUserSensorMuteRepository', () => {
     await expect(repository.countForUser(2)).resolves.toBe(1);
     await expect(repository.countForUser(3)).resolves.toBe(0);
   });
+
+  it('normalizes and deduplicates legacy sensor rows before counting', async () => {
+    const repository = new InMemoryUserSensorMuteRepository();
+    await repository.mute(1, 'door');
+    await repository.mute(1, { kind: 'sensor', id: 'door' });
+
+    await expect(repository.countForUser(1)).resolves.toBe(1);
+    await expect(repository.listForUser(1)).resolves.toEqual([{ kind: 'sensor', id: 'door' }]);
+  });
 });

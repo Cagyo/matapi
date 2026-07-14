@@ -21,14 +21,11 @@ import {
   UserRepositoryPort,
 } from '../domain/ports/user-repository.port';
 import {
-  USER_SENSOR_MUTE_REPOSITORY,
-  UserSensorMuteRepositoryPort,
-} from '../domain/ports/user-sensor-mute-repository.port';
-import {
   HOME_HEALTH_SNAPSHOT,
   HomeHealthSnapshotPort,
 } from './ports/home-health-snapshot.port';
 import { deriveHomeVerdict, HomeVerdict } from './home-verdict';
+import { NotificationTargetDirectory } from './notification-target-directory.service';
 
 export type HomeNotificationState =
   | { kind: 'legacy_pause' }
@@ -58,12 +55,11 @@ export class GetHomeSummaryUseCase {
   constructor(
     @Inject(SENSOR_QUERY) private readonly sensors: SensorQueryPort,
     @Inject(USER_REPOSITORY) private readonly users: UserRepositoryPort,
-    @Inject(USER_SENSOR_MUTE_REPOSITORY)
-    private readonly mutes: UserSensorMuteRepositoryPort,
     @Inject(HOME_HEALTH_SNAPSHOT)
     private readonly snapshots: HomeHealthSnapshotPort,
     @Inject(CLOCK) private readonly clock: ClockPort,
     @Inject(TIMEZONE_OPTIONS) private readonly timezone: TimezoneOptions,
+    private readonly notificationTargets: NotificationTargetDirectory,
   ) {}
 
   async execute(userId: number): Promise<HomeSummary> {
@@ -71,10 +67,11 @@ export class GetHomeSummaryUseCase {
     if (!user) throw new UserNotFoundError(String(userId));
 
     const now = this.clock.now();
-    const [enabled, mutedTargetCount] = await Promise.all([
+    const [enabled, notificationTargets] = await Promise.all([
       this.sensors.listEnabled(),
-      this.mutes.countForUser(userId),
+      this.notificationTargets.listEnabled(userId),
     ]);
+    const mutedTargetCount = notificationTargets.filter((target) => target.muted).length;
     const health = this.snapshots.get();
     const classified = enabled.map(classifySensorState);
     const attention = classified

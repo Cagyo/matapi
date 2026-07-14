@@ -48,12 +48,7 @@ export class InMemoryUserSensorMuteRepository
   }
 
   async countForUser(userId: number): Promise<number> {
-    const prefix = `${userId}:`;
-    let count = 0;
-    for (const key of this.store) {
-      if (key.startsWith(prefix)) count += 1;
-    }
-    return count;
+    return (await this.listForUser(userId)).length;
   }
 
   private targetKey(target: NotificationTargetRef | string): string {

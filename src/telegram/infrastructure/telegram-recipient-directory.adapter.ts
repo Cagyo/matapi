@@ -39,6 +39,6 @@ export class TelegramRecipientDirectoryAdapter implements RecipientDirectoryPort
   }
 
   async isSensorMuted(telegramId: number, sensorId: string): Promise<boolean> {
-    return this.mutes.isMuted(telegramId, sensorId);
+    return this.mutes.isMuted(telegramId, { kind: 'sensor', id: sensorId });
   }
 }
