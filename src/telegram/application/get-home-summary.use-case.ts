@@ -25,7 +25,7 @@ import {
   HomeHealthSnapshotPort,
 } from './ports/home-health-snapshot.port';
 import { deriveHomeVerdict, HomeVerdict } from './home-verdict';
-import { NotificationTargetDirectory } from './notification-target-directory.service';
+import { NotificationTargetDirectoryService } from './notification-target-directory.service';
 
 export type HomeNotificationState =
   | { kind: 'legacy_pause' }
@@ -59,7 +59,8 @@ export class GetHomeSummaryUseCase {
     private readonly snapshots: HomeHealthSnapshotPort,
     @Inject(CLOCK) private readonly clock: ClockPort,
     @Inject(TIMEZONE_OPTIONS) private readonly timezone: TimezoneOptions,
-    private readonly notificationTargets: NotificationTargetDirectory,
+    @Inject(NotificationTargetDirectoryService)
+    private readonly notificationTargets: NotificationTargetDirectoryService,
   ) {}
 
   async execute(userId: number): Promise<HomeSummary> {

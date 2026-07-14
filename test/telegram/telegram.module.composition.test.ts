@@ -1,4 +1,7 @@
 import 'reflect-metadata';
+import { rmSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 interface Provider {
@@ -45,6 +48,33 @@ async function telegramProviders(mode: 'mock' | 'real') {
   };
 }
 
+async function resolveHomeSummaryFromApplication(mode: 'mock' | 'real') {
+  const root = mkdtempSync(join(tmpdir(), 'home-worker-telegram-di-'));
+  vi.resetModules();
+  vi.stubEnv('BOT_MODE', mode);
+  vi.stubEnv('NODE_ENV', 'test');
+  vi.stubEnv('CAMERA_MODE', 'stub');
+  vi.stubEnv('SYSTEM_MODE', 'stub');
+  vi.stubEnv('PIGPIOD_ENABLED', 'false');
+  vi.stubEnv('DATABASE_PATH', join(root, 'worker.db'));
+
+  const { NestFactory } = await import('@nestjs/core');
+  const { AppModule } = await import('../../src/app.module');
+  const { GetHomeSummaryUseCase } = await import('../../src/telegram/application/get-home-summary.use-case');
+  const { NotificationTargetDirectoryService } = await import('../../src/telegram/application/notification-target-directory.service');
+  let app: Awaited<ReturnType<typeof NestFactory.createApplicationContext>> | undefined;
+  try {
+    app = await NestFactory.createApplicationContext(AppModule, { logger: false });
+    return {
+      summary: app.get(GetHomeSummaryUseCase),
+      targets: app.get(NotificationTargetDirectoryService),
+    };
+  } finally {
+    await app?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 afterEach(() => {
   vi.unstubAllEnvs();
   vi.resetModules();
@@ -77,5 +107,10 @@ describe('TelegramModule bot-mode composition', () => {
       homeTokenGenerator: expect.objectContaining({ name: 'CryptoHomeTokenGenerator' }),
       homeMessageDelivery: expect.objectContaining({ name: 'TelegramHomeMessageAdapter' }),
     });
+  });
+
+  it.each(['mock', 'real'] as const)('resolves GetHomeSummaryUseCase at runtime in %s mode', async (mode) => {
+    const { summary, targets } = await resolveHomeSummaryFromApplication(mode);
+    expect((summary as unknown as { notificationTargets: unknown }).notificationTargets === targets).toBe(true);
   });
 });
