@@ -42,10 +42,20 @@ function createTestSetup(executed = true, thresholdUsed = 80) {
 }
 
 describe('CleanHandler', () => {
-  it('registers /clean command and clean:trigger/menu:clean callback queries', () => {
+  it('registers /clean command and clean:trigger/legacy-menu:clean callback queries', () => {
     const { composer } = createTestSetup();
     expect(composer.command).toHaveBeenCalledWith('clean', expect.anything(), expect.anything());
     expect(composer.callbackQuery).toHaveBeenCalledWith(expect.any(RegExp), expect.anything(), expect.anything());
+  });
+
+  it('accepts the explicit legacy cleanup alias', async () => {
+    const { callbackQueryCallbacks, triggerClean } = createTestSetup(true, 80);
+    const callback = callbackQueryCallbacks[0];
+    expect(callback.regex.test('legacy-menu:clean')).toBe(true);
+    expect(callback.regex.test('menu:clean')).toBe(false);
+
+    await callback.fn({ answerCallbackQuery: vi.fn().mockResolvedValue(true), reply: vi.fn(), match: ['legacy-menu:clean'] });
+    expect(triggerClean.execute).toHaveBeenCalledWith(undefined);
   });
 
   it('executes cleanup without arguments on /clean command', async () => {

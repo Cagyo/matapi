@@ -65,7 +65,7 @@ describe('GrammyBotGateway handler registration', () => {
       status: handler, ping: handler, help: handler, logs: handler, health: handler,
       config: handler, invite: handler, promote: handler, demote: handler, camera: handler,
       gdrive: handler, exportConfig: handler, importConfig: handler, feature: handler,
-      gdriveAuth: handler, csv: handler, menu: handler, settings: handler, clean: handler,
+      gdriveAuth: handler, csv: handler, home: handler, legacyMenu: handler, settings: handler, clean: handler,
     });
 
     await gateway.onApplicationBootstrap();
@@ -81,25 +81,26 @@ describe('GrammyBotGateway handler registration', () => {
     expect(gateway.homeMessageDelivery.setBot).toHaveBeenCalledWith(mocks.bot);
   });
 
-  it('registers CsvHandler exactly once before MenuHandler', () => {
+  it('registers Home before the transitional LegacyMenuHandler', () => {
     const gateway = Object.create(GrammyBotGateway.prototype) as {
       handlers(): TelegramHandler[];
       [key: string]: unknown;
     };
     const csv = {} as TelegramHandler;
-    const menu = {} as TelegramHandler;
+    const home = {} as TelegramHandler;
+    const legacyMenu = {} as TelegramHandler;
     Object.assign(gateway, {
       claim: {}, mute: {}, unmute: {}, quietHours: {}, update: {}, systemUpdate: {},
       rollback: {}, restartHandler: {}, start: {}, status: {}, ping: {}, help: {},
       logs: {}, health: {}, config: {}, invite: {}, promote: {}, demote: {}, camera: {},
       gdrive: {}, exportConfig: {}, importConfig: {}, feature: {}, gdriveAuth: {},
-      csv, menu, settings: {}, clean: {},
+      csv, home, legacyMenu, settings: {}, clean: {},
     });
 
     const handlers = gateway.handlers();
 
     expect(handlers.filter((handler) => handler === csv)).toHaveLength(1);
-    expect(handlers.indexOf(csv)).toBeLessThan(handlers.indexOf(menu));
+    expect(handlers.indexOf(home)).toBeLessThan(handlers.indexOf(legacyMenu));
   });
 
   it('registers the Telegram live-message cleanup seam at bootstrap in mock mode', async () => {

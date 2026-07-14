@@ -105,7 +105,8 @@ import { StatusHandler } from './interfaces/status.handler';
 import { SystemUpdateHandler } from './interfaces/system-update.handler';
 import { UnmuteHandler } from './interfaces/unmute.handler';
 import { UpdateHandler } from './interfaces/update.handler';
-import { MenuHandler } from './interfaces/menu.handler';
+import { HomeHandler } from './interfaces/home.handler';
+import { LegacyMenuHandler } from './interfaces/legacy-menu.handler';
 import { SettingsHandler } from './interfaces/settings.handler';
 import { CleanHandler } from './interfaces/clean.handler';
 import { BotCommandsMenuService } from './application/bot-commands-menu.service';
@@ -246,7 +247,8 @@ const mode = resolveBotMode();
     ImportConfigHandler,
     FeatureHandler,
     CsvHandler,
-    MenuHandler,
+    HomeHandler,
+    LegacyMenuHandler,
     SettingsHandler,
     CleanHandler,
     TelegramNotifierAdapter,

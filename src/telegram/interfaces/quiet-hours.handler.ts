@@ -53,11 +53,11 @@ export class QuietHoursHandler implements TelegramHandler {
         const raw = (ctx.match ?? '').toString().trim();
         if (!raw) {
           const kb = new InlineKeyboard()
-            .text(en.menu.submenus.quiet22_07, 'menu:act:quiet:22:00-07:00')
-            .text(en.menu.submenus.quiet23_06, 'menu:act:quiet:23:00-06:00')
+            .text(en.menu.submenus.quiet22_07, 'legacy-menu:act:quiet:22:00-07:00')
+            .text(en.menu.submenus.quiet23_06, 'legacy-menu:act:quiet:23:00-06:00')
             .row()
-            .text(en.menu.submenus.quiet00_08, 'menu:act:quiet:00:00-08:00')
-            .text(en.menu.submenus.quietDisable, 'menu:act:quiet:off');
+            .text(en.menu.submenus.quiet00_08, 'legacy-menu:act:quiet:00:00-08:00')
+            .text(en.menu.submenus.quietDisable, 'legacy-menu:act:quiet:off');
           await ctx.reply(en.menu.submenus.quietTitle, { reply_markup: kb });
           return;
         }

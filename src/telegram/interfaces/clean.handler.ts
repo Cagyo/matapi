@@ -26,7 +26,7 @@ export class CleanHandler implements TelegramHandler {
     });
 
     composer.callbackQuery(
-      /^(?:clean:trigger|menu:clean)$/,
+      /^(?:clean:trigger|legacy-menu:clean)$/,
       this.guard.adminOnly,
       async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});

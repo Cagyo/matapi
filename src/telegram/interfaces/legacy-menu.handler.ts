@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, forwardRef } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { Composer, InlineKeyboard } from 'grammy';
 import { catalogFor, type LocaleCatalog } from '../../locales';
 import { RoleMiddleware } from './role.middleware';
@@ -24,9 +24,7 @@ import { GdriveAuthHandler } from './gdrive-auth.handler';
 import { CsvHandler } from './csv.handler';
 
 @Injectable()
-export class MenuHandler implements TelegramHandler {
-  private readonly logger = new Logger(MenuHandler.name);
-
+export class LegacyMenuHandler implements TelegramHandler {
   constructor(
     private readonly guard: RoleMiddleware,
     private readonly statusHandler: StatusHandler,
@@ -35,42 +33,23 @@ export class MenuHandler implements TelegramHandler {
     private readonly gdriveHandler: GdriveHandler,
     private readonly inviteHandler: InviteHandler,
     private readonly exportConfigHandler: ExportConfigHandler,
-    @Inject(forwardRef(() => LogsHandler))
     private readonly logsHandler: LogsHandler,
-    @Inject(forwardRef(() => MuteHandler))
     private readonly muteHandler: MuteHandler,
-    @Inject(forwardRef(() => UnmuteHandler))
     private readonly unmuteHandler: UnmuteHandler,
-    @Inject(forwardRef(() => ConfigHandler))
     private readonly configHandler: ConfigHandler,
-    @Inject(forwardRef(() => ImportConfigHandler))
     private readonly importConfigHandler: ImportConfigHandler,
-    @Inject(forwardRef(() => SystemUpdateHandler))
     private readonly systemUpdateHandler: SystemUpdateHandler,
-    @Inject(forwardRef(() => RestartHandler))
     private readonly restartHandler: RestartHandler,
-    @Inject(forwardRef(() => QuietHoursHandler))
     private readonly quietHoursHandler: QuietHoursHandler,
-    @Inject(forwardRef(() => SettingsHandler))
     private readonly settingsHandler: SettingsHandler,
-    @Inject(forwardRef(() => CleanHandler))
     private readonly cleanHandler: CleanHandler,
-    @Inject(forwardRef(() => GdriveAuthHandler))
     private readonly gdriveAuthHandler: GdriveAuthHandler,
-    @Inject(forwardRef(() => CsvHandler))
     private readonly csvHandler: CsvHandler,
   ) {}
 
   register(composer: Composer<TelegramContext>): void {
-    composer.command('menu', this.guard.registered, async (ctx) => {
-      const role = ctx.localeState?.user.role;
-      const catalog = this.catalog(ctx);
-      const keyboard = this.buildKeyboard(catalog, role === 'admin');
-      await ctx.reply(catalog.menu.title, { reply_markup: keyboard });
-    });
-
     composer.callbackQuery(
-      /^menu:(.+)$/,
+      /^legacy-menu:(.+)$/,
       this.guard.registered,
       async (ctx) => {
         await ctx.answerCallbackQuery().catch(() => {});
@@ -93,15 +72,15 @@ export class MenuHandler implements TelegramHandler {
             break;
           case 'sub:sensors': {
             const kb = new InlineKeyboard()
-              .text(catalog.menu.submenus.sensorsMute, 'menu:act:mute')
-              .text(catalog.menu.submenus.sensorsUnmute, 'menu:act:unmute')
+              .text(catalog.menu.submenus.sensorsMute, 'legacy-menu:act:mute')
+              .text(catalog.menu.submenus.sensorsUnmute, 'legacy-menu:act:unmute')
               .row()
-              .text(catalog.menu.submenus.sensorsMuteAll, 'menu:act:mute_all')
-              .text(catalog.menu.submenus.sensorsUnmuteAll, 'menu:act:unmute_all')
+              .text(catalog.menu.submenus.sensorsMuteAll, 'legacy-menu:act:mute_all')
+              .text(catalog.menu.submenus.sensorsUnmuteAll, 'legacy-menu:act:unmute_all')
               .row()
-              .text(catalog.menu.submenus.sensorsExportCsv, 'menu:sub:csv')
+              .text(catalog.menu.submenus.sensorsExportCsv, 'legacy-menu:sub:csv')
               .row()
-              .text(catalog.menu.submenus.backToMenu, 'menu:top');
+              .text(catalog.menu.submenus.backToMenu, 'legacy-menu:top');
             await this.renderSubmenu(ctx, catalog.menu.submenus.sensorsTitle, kb);
             break;
           }
@@ -114,15 +93,18 @@ export class MenuHandler implements TelegramHandler {
           case 'sub:camera':
             await this.cameraHandler.handleDashboard(ctx);
             break;
+          case 'sub:notifications':
+            await this.openNotifications(ctx);
+            break;
           case 'sub:quiet': {
             const kb = new InlineKeyboard()
-              .text(catalog.menu.submenus.quiet22_07, 'menu:act:quiet:22:00-07:00')
-              .text(catalog.menu.submenus.quiet23_06, 'menu:act:quiet:23:00-06:00')
+              .text(catalog.menu.submenus.quiet22_07, 'legacy-menu:act:quiet:22:00-07:00')
+              .text(catalog.menu.submenus.quiet23_06, 'legacy-menu:act:quiet:23:00-06:00')
               .row()
-              .text(catalog.menu.submenus.quiet00_08, 'menu:act:quiet:00:00-08:00')
-              .text(catalog.menu.submenus.quietDisable, 'menu:act:quiet:off')
+              .text(catalog.menu.submenus.quiet00_08, 'legacy-menu:act:quiet:00:00-08:00')
+              .text(catalog.menu.submenus.quietDisable, 'legacy-menu:act:quiet:off')
               .row()
-              .text(catalog.menu.submenus.backToMenu, 'menu:top');
+              .text(catalog.menu.submenus.backToMenu, 'legacy-menu:top');
             await this.renderSubmenu(ctx, catalog.menu.submenus.quietTitle, kb);
             break;
           }
@@ -132,20 +114,20 @@ export class MenuHandler implements TelegramHandler {
               break;
             }
             const kb = new InlineKeyboard()
-              .text(catalog.menu.submenus.systemHealth, 'menu:health')
-              .text(catalog.menu.submenus.systemDrive, 'menu:gdrive')
+              .text(catalog.menu.submenus.systemHealth, 'legacy-menu:health')
+              .text(catalog.menu.submenus.systemDrive, 'legacy-menu:gdrive')
               .row()
-              .text(catalog.menu.submenus.systemSettings, 'menu:settings')
-              .text(catalog.menu.submenus.systemClean, 'menu:clean')
+              .text(catalog.menu.submenus.systemSettings, 'legacy-menu:settings')
+              .text(catalog.menu.submenus.systemClean, 'legacy-menu:clean')
               .row()
-              .text(catalog.menu.submenus.systemUpdate, 'menu:act:sys_update')
-              .text(catalog.menu.submenus.systemRestart, 'menu:act:sys_restart')
+              .text(catalog.menu.submenus.systemUpdate, 'legacy-menu:act:sys_update')
+              .text(catalog.menu.submenus.systemRestart, 'legacy-menu:act:sys_restart')
               .row()
-              .text(catalog.menu.submenus.systemInvite, 'menu:invite')
+              .text(catalog.menu.submenus.systemInvite, 'legacy-menu:invite')
               .row()
-              .text(catalog.gdriveAuth.button, 'menu:gdrive_auth')
+              .text(catalog.gdriveAuth.button, 'legacy-menu:gdrive_auth')
               .row()
-              .text(catalog.menu.submenus.backToMenu, 'menu:top');
+              .text(catalog.menu.submenus.backToMenu, 'legacy-menu:top');
             await this.renderSubmenu(ctx, catalog.menu.submenus.systemTitle, kb);
             break;
           }
@@ -155,15 +137,15 @@ export class MenuHandler implements TelegramHandler {
               break;
             }
             const kb = new InlineKeyboard()
-              .text(catalog.menu.submenus.configAdd, 'menu:act:cfg_add')
-              .text(catalog.menu.submenus.configModify, 'menu:act:cfg_mod')
+              .text(catalog.menu.submenus.configAdd, 'legacy-menu:act:cfg_add')
+              .text(catalog.menu.submenus.configModify, 'legacy-menu:act:cfg_mod')
               .row()
-              .text(catalog.menu.submenus.configRemove, 'menu:act:cfg_rem')
-              .text(catalog.menu.buttons.exportConfig, 'menu:export_config')
+              .text(catalog.menu.submenus.configRemove, 'legacy-menu:act:cfg_rem')
+              .text(catalog.menu.buttons.exportConfig, 'legacy-menu:export_config')
               .row()
-              .text(catalog.importConfig.prompt, 'menu:act:cfg_imp')
+              .text(catalog.importConfig.prompt, 'legacy-menu:act:cfg_imp')
               .row()
-              .text(catalog.menu.submenus.backToMenu, 'menu:top');
+              .text(catalog.menu.submenus.backToMenu, 'legacy-menu:top');
             await this.renderSubmenu(ctx, catalog.menu.submenus.configTitle, kb);
             break;
           }
@@ -295,23 +277,43 @@ export class MenuHandler implements TelegramHandler {
     }
   }
 
+  /** Transitional workflow opened from Home's More action on its own message. */
+  async openDashboard(ctx: TelegramContext): Promise<void> {
+    const catalog = this.catalog(ctx);
+    const role = ctx.localeState?.user.role;
+    await ctx.reply(catalog.menu.title, {
+      reply_markup: this.buildKeyboard(catalog, role === 'admin'),
+    });
+  }
+
+  /** Transitional notification controls must never replace the Home message. */
+  async openNotifications(ctx: TelegramContext): Promise<void> {
+    const catalog = this.catalog(ctx);
+    const keyboard = new InlineKeyboard()
+      .text(catalog.home.legacyNotifications.muteSensors, 'legacy-menu:act:mute')
+      .text(catalog.home.legacyNotifications.unmuteSensors, 'legacy-menu:act:unmute')
+      .row()
+      .text(catalog.home.legacyNotifications.quietHours, 'legacy-menu:sub:quiet');
+    await ctx.reply(catalog.home.legacyNotifications.title, { reply_markup: keyboard });
+  }
+
   private buildKeyboard(catalog: LocaleCatalog, isAdmin: boolean): InlineKeyboard {
     const keyboard = new InlineKeyboard()
-      .text(catalog.menu.buttons.status, 'menu:status')
-      .text(catalog.menu.categories.sensors, 'menu:sub:sensors')
-      .text(catalog.menu.buttons.logs, 'menu:sub:logs')
+      .text(catalog.menu.buttons.status, 'legacy-menu:status')
+      .text(catalog.menu.categories.sensors, 'legacy-menu:sub:sensors')
+      .text(catalog.menu.buttons.logs, 'legacy-menu:sub:logs')
       .row()
-      .text(catalog.menu.categories.media, 'menu:sub:camera')
-      .text(catalog.common.quietModeButton, 'menu:sub:quiet')
-      .text(catalog.menu.buttons.exportCsv, 'menu:sub:csv')
+      .text(catalog.menu.categories.media, 'legacy-menu:sub:camera')
+      .text(catalog.home.buttons.notifications, 'legacy-menu:sub:notifications')
+      .text(catalog.menu.buttons.exportCsv, 'legacy-menu:sub:csv')
       .row()
-      .text(catalog.menu.buttons.settings, 'menu:settings');
+      .text(catalog.menu.buttons.settings, 'legacy-menu:settings');
 
     if (isAdmin) {
       keyboard
         .row()
-        .text(catalog.menu.buttons.config, 'menu:sub:config')
-        .text(catalog.menu.categories.lifecycle, 'menu:sub:system');
+        .text(catalog.menu.buttons.config, 'legacy-menu:sub:config')
+        .text(catalog.menu.categories.lifecycle, 'legacy-menu:sub:system');
     }
 
     return keyboard;
