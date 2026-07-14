@@ -1,5 +1,4 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { SYSTEM_META_REPOSITORY, type SystemMetaRepositoryPort } from '../../system/domain/ports/system-meta-repository.port';
 import {
   SENSOR_QUERY,
   type SensorQueryPort,
@@ -11,6 +10,7 @@ import { GetNotificationScreenUseCase } from './get-notification-screen.use-case
 import type { HomeScreen } from './home-screen';
 import { NotificationTargetDirectoryService, notificationTargetPage } from './notification-target-directory.service';
 import { NotificationTargetUnavailableError } from '../domain/errors/notification-target-unavailable.error';
+import { SetAutoCleanThresholdUseCase } from './set-auto-clean-threshold.use-case';
 
 export interface GetHomeScreenInput {
   userId: number;
@@ -26,7 +26,7 @@ export class GetHomeScreenUseCase {
     @Inject(SENSOR_QUERY) private readonly sensors: SensorQueryPort,
     private readonly notifications: GetNotificationScreenUseCase,
     private readonly targets: NotificationTargetDirectoryService,
-    @Inject(SYSTEM_META_REPOSITORY) private readonly meta: SystemMetaRepositoryPort,
+    private readonly autoClean?: SetAutoCleanThresholdUseCase,
   ) {}
 
   async execute(input: GetHomeScreenInput): Promise<HomeScreen> {
@@ -51,14 +51,8 @@ export class GetHomeScreenUseCase {
     if (input.view.kind === 'pause-duration' || input.view.kind === 'history' || input.view.kind === 'admin-tools' || input.view.kind === 'admin-sensor-setup' || input.view.kind === 'admin-storage') return { kind: input.view.kind };
     if (input.view.kind === 'pause-confirmation') return { kind: input.view.kind, hours: input.view.hours, receiptId: input.view.receiptId };
     if (input.view.kind === 'more') return { kind: 'more', isAdmin: input.role === 'admin' };
-    if (input.view.kind === 'admin-system') return { kind: 'admin-system', autoCleanThreshold: await this.autoCleanThreshold() };
+    if (input.view.kind === 'admin-system') return { kind: 'admin-system', autoCleanThreshold: this.autoClean ? await this.autoClean.current() : 80 };
     if (input.view.kind === 'confirmation') return { kind: 'confirmation', action: input.view.action, receiptId: input.view.receiptId };
     return { kind: 'cleanup-result', outcome: input.view.outcome, threshold: input.view.threshold };
-  }
-
-  private async autoCleanThreshold(): Promise<number> {
-    const raw = await this.meta.get('auto_clean_threshold');
-    const value = Number(raw);
-    return Number.isFinite(value) && value >= 10 && value <= 99 ? Math.trunc(value) : 80;
   }
 }

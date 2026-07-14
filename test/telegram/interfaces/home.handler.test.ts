@@ -62,7 +62,7 @@ function setup() {
         ? { kind: 'home', checking: false }
         : { kind: 'notifications' },
   })) } as unknown as HomeNavigationUseCase;
-  const handler = new HomeHandler(guard, open, validate, render, refresh, close, camera, legacy, navigation);
+  const handler = new HomeHandler(guard, open, validate, render, refresh, close, camera, legacy, navigation, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, { now: () => new Date('2030-01-01T00:00:00.000Z') } as never);
   const commands: Record<string, (...args: any[]) => Promise<void>> = {};
   const callbacks: { regex: RegExp; fn: (...args: any[]) => Promise<void> }[] = [];
   handler.register({
@@ -199,5 +199,19 @@ describe('HomeHandler', () => {
 
     expect(render.execute).not.toHaveBeenCalled();
     expect(camera.handleDashboard).toHaveBeenCalledWith(ctx);
+  });
+
+  it('renders the localized in-progress recovery for a repeated claimed cleanup', async () => {
+    const { callbacks, validate, navigation } = setup();
+    (validate.execute as any).mockResolvedValue({
+      kind: 'accepted', active: identity,
+      view: { kind: 'confirmation', action: 'cleanup', receiptId: '1234567890abcdef' },
+    });
+    (navigation.execute as any).mockResolvedValue({ kind: 'recovery', reason: 'executing' });
+    const ctx = context(encodeHomeCallback(identity.token, 1, { kind: 'confirm-cleanup', receiptId: '1234567890abcdef' }));
+
+    await callbacks[0].fn(ctx);
+
+    expect(ctx.reply).toHaveBeenCalledWith(ctx.localeState.catalog.home.cleanupResult.inProgress);
   });
 });

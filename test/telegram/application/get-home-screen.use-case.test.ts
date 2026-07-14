@@ -93,4 +93,16 @@ describe('GetHomeScreenUseCase', () => {
     expect(homeViewForScreen(screen)).toEqual({ kind: 'notification-targets', page: 1, targets: [rows[8].ref] });
     expect(getSummary.execute).not.toHaveBeenCalled();
   });
+
+  it('uses the strict threshold use case for the Home admin system screen', async () => {
+    const threshold = { current: vi.fn().mockResolvedValue(85) };
+    const useCase = new GetHomeScreenUseCase(
+      { execute: vi.fn() }, { listDashboardPage: vi.fn() }, { execute: vi.fn() }, { listEnabled: vi.fn() },
+      threshold as never,
+    );
+
+    await expect(useCase.execute({ userId: 7, chatId: 70, role: 'admin', view: { kind: 'admin-system' } }))
+      .resolves.toEqual({ kind: 'admin-system', autoCleanThreshold: 85 });
+    expect(threshold.current).toHaveBeenCalledOnce();
+  });
 });

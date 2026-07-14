@@ -28,7 +28,7 @@ import { SetAutoCleanThresholdUseCase } from '../application/set-auto-clean-thre
 import { SetNotificationTargetMutedUseCase } from '../application/set-notification-target-muted.use-case';
 import { HOME_ACTION_REPOSITORY, type HomeActionRepositoryPort } from '../application/ports/home-action-repository.port';
 import { Inject } from '@nestjs/common';
-import { en } from '../../locales/en';
+import { CLOCK, type ClockPort } from '../../events/domain/ports/clock.port';
 import { RoleMiddleware } from './role.middleware';
 import { TelegramContext, type LocaleState } from './telegram-context';
 import { TelegramHandler } from './telegram-handler';
@@ -62,6 +62,7 @@ export class HomeHandler implements TelegramHandler {
     private readonly thresholds?: SetAutoCleanThresholdUseCase,
     private readonly targetMute?: SetNotificationTargetMutedUseCase,
     @Inject(HOME_ACTION_REPOSITORY) private readonly actions?: HomeActionRepositoryPort,
+    @Inject(CLOCK) private readonly clock?: ClockPort,
   ) {}
 
   register(composer: Composer<TelegramContext>): void {
@@ -157,7 +158,14 @@ export class HomeHandler implements TelegramHandler {
       return;
     }
     const result = await this.navigation.execute({ active, role: ctx.localeState!.user.role, view, action });
-    if (result.kind === 'recovery') { await this.recover(ctx, 'stale'); return; }
+    if (result.kind === 'recovery') {
+      if (result.reason === 'executing') {
+        await ctx.reply(action.kind === 'confirm-restart'
+          ? ctx.localeState!.catalog.ota.restarting
+          : ctx.localeState!.catalog.home.cleanupResult.inProgress);
+      } else await this.recover(ctx, 'stale');
+      return;
+    }
     if (result.kind === 'external') { await this.external(ctx, result.destination); return; }
     if (result.kind === 'restart') { await this.restartClaimed(ctx, active, action); return; }
     if (action.kind === 'confirm-cleanup' && result.view.kind === 'cleanup-result') { await this.cleanupClaimed(ctx, active, action.receiptId); return; }
@@ -172,10 +180,10 @@ export class HomeHandler implements TelegramHandler {
     if (!this.clean || !this.actions) { await this.recover(ctx, 'unavailable'); return; }
     try {
       const outcome = await this.clean.execute();
-      await this.actions.finishExternal({ action: { id, userId: active.userId, chatId: active.chatId, kind: 'cleanup-confirmation' }, outcome: 'completed', now: new Date() });
+      await this.actions.finishExternal({ action: { id, userId: active.userId, chatId: active.chatId, kind: 'cleanup-confirmation' }, outcome: 'completed', now: this.clock!.now() });
       await this.render(ctx, active, { kind: 'cleanup-result', outcome: outcome.executed ? 'executed' : 'in-progress', threshold: outcome.thresholdUsed || null });
     } catch {
-      await this.actions.finishExternal({ action: { id, userId: active.userId, chatId: active.chatId, kind: 'cleanup-confirmation' }, outcome: 'failed', now: new Date() });
+      await this.actions.finishExternal({ action: { id, userId: active.userId, chatId: active.chatId, kind: 'cleanup-confirmation' }, outcome: 'failed', now: this.clock!.now() });
       await this.render(ctx, active, { kind: 'cleanup-result', outcome: 'failed', threshold: null });
     }
   }
@@ -183,12 +191,12 @@ export class HomeHandler implements TelegramHandler {
   private async restartClaimed(ctx: TelegramContext, active: Parameters<RenderHomeUseCase['execute']>[0]['active'], action: Extract<ReturnType<typeof parseHomeCallback>, { action: unknown }>['action']): Promise<void> {
     if (action.kind !== 'confirm-restart' || !this.restart || !this.actions) { await this.recover(ctx, 'unavailable'); return; }
     try {
-      await ctx.reply(en.ota.restarting);
+      await ctx.reply(ctx.localeState!.catalog.ota.restarting);
       await this.restart.execute();
-      await this.actions.finishExternal({ action: { id: action.receiptId, userId: active.userId, chatId: active.chatId, kind: 'restart-confirmation' }, outcome: 'completed', now: new Date() });
-    } catch {
-      await this.actions.finishExternal({ action: { id: action.receiptId, userId: active.userId, chatId: active.chatId, kind: 'restart-confirmation' }, outcome: 'failed', now: new Date() });
-      await ctx.reply(en.ota.restartFailed('restart failed'));
+      await this.actions.finishExternal({ action: { id: action.receiptId, userId: active.userId, chatId: active.chatId, kind: 'restart-confirmation' }, outcome: 'completed', now: this.clock!.now() });
+    } catch (error) {
+      await this.actions.finishExternal({ action: { id: action.receiptId, userId: active.userId, chatId: active.chatId, kind: 'restart-confirmation' }, outcome: 'failed', now: this.clock!.now() });
+      await ctx.reply(ctx.localeState!.catalog.ota.restartFailed(error instanceof Error ? error.message : 'unknown'));
     }
   }
 
@@ -199,7 +207,7 @@ export class HomeHandler implements TelegramHandler {
       case 'settings': return this.settings ? this.settings.handleCommand(ctx) : this.recover(ctx, 'unavailable');
       case 'help':
         if (!this.help) return this.recover(ctx, 'unavailable');
-        await ctx.reply(ctx.localeState!.user.role === 'admin' ? en.help.admin : en.help.user);
+        await ctx.reply(ctx.localeState!.user.role === 'admin' ? ctx.localeState!.catalog.help.admin : ctx.localeState!.catalog.help.user);
         return;
       case 'config-add': case 'config-modify': case 'config-remove': return this.config ? this.config.handleSubcommand(ctx, destination.slice('config-'.length)) : this.recover(ctx, 'unavailable');
       case 'config-import': return this.importConfig ? this.importConfig.handleCommand(ctx) : this.recover(ctx, 'unavailable');

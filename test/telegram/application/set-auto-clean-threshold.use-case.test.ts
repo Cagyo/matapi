@@ -14,4 +14,18 @@ describe('SetAutoCleanThresholdUseCase', () => {
     await expect(useCase.execute(85)).resolves.toBe(85);
     await expect(useCase.execute(73 as never)).rejects.toThrow(RangeError);
   });
+
+  it('uses the existing environment fallback when the persisted threshold is outside the whitelist', async () => {
+    const prior = process.env.DISK_CRITICAL_PERCENT;
+    process.env.DISK_CRITICAL_PERCENT = '85';
+    try {
+      const useCase = new SetAutoCleanThresholdUseCase({
+        get: async () => '73', set: async () => undefined, delete: async () => undefined,
+      });
+      await expect(useCase.current()).resolves.toBe(85);
+    } finally {
+      if (prior === undefined) delete process.env.DISK_CRITICAL_PERCENT;
+      else process.env.DISK_CRITICAL_PERCENT = prior;
+    }
+  });
 });

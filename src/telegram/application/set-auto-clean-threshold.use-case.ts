@@ -20,7 +20,9 @@ export class SetAutoCleanThresholdUseCase {
   }
 
   async current(): Promise<number> {
-    const value = Number(await this.meta.get('auto_clean_threshold'));
-    return VALID_THRESHOLDS.has(value) ? value : DEFAULT_THRESHOLD;
+    const stored = Number(await this.meta.get('auto_clean_threshold'));
+    if (VALID_THRESHOLDS.has(stored)) return stored;
+    const environment = Number(process.env.DISK_CRITICAL_PERCENT);
+    return VALID_THRESHOLDS.has(environment) ? environment : DEFAULT_THRESHOLD;
   }
 }
