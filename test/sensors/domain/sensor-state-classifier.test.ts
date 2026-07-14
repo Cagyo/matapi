@@ -85,16 +85,45 @@ describe('classifySensorState', () => {
     ).toMatchObject({ level: 'warning', active: null });
   });
 
-  it('accepts canonical scientific notation persisted from a numeric UART reading', () => {
+  it.each([
+    ['1e-7', 'normal'],
+    ['3.5e3', 'warning'],
+  ] as const)('accepts canonical decimal UART value %s', (lastValue, level) => {
     expect(
       classifySensorState(
         sensor({
           type: 'uart',
-          lastValue: '3.5e3',
+          lastValue,
           config: { thresholds: { warning: 3000, critical: 6000 } },
         }),
       ),
-    ).toMatchObject({ level: 'warning', active: null });
+    ).toMatchObject({ level, active: null });
+  });
+
+  it.each([
+    '',
+    ' ',
+    ' 800',
+    '800 ',
+    '0x320',
+    '0b10',
+    'Infinity',
+    'NaN',
+    '1e',
+    '1e+',
+    '1e-',
+    '1e1.2',
+    '800ppm',
+  ])('marks non-decimal persisted UART value %j unknown', (lastValue) => {
+    expect(
+      classifySensorState(
+        sensor({
+          type: 'uart',
+          lastValue,
+          config: { thresholds: { warning: 800, critical: 1200 } },
+        }),
+      ),
+    ).toMatchObject({ level: 'unknown', active: null });
   });
 
   it('marks invalid UART readings unknown', () => {

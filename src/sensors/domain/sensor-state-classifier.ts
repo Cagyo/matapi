@@ -1,6 +1,8 @@
 import { isValidPpm } from './co2';
 import { Sensor } from './sensor';
 
+const DECIMAL_PPM = /^[+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:e[+-]?\d+)?$/i;
+
 export type SensorStateLevel = 'unknown' | 'normal' | 'warning' | 'critical';
 
 export interface ClassifiedSensorState {
@@ -59,7 +61,7 @@ function classified(
 }
 
 function decimalPpm(value: string): number | null {
-  if (value.trim() === '') return null;
+  if (!DECIMAL_PPM.test(value)) return null;
   const ppm = Number(value);
   return isValidPpm(ppm) ? ppm : null;
 }
