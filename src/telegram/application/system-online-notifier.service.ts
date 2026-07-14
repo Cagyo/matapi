@@ -3,6 +3,7 @@ import { EventNotifierService } from '../../events/application/event-notifier.se
 import { en } from '../../locales/en';
 import {
   SENSOR_HEALTH,
+  SENSOR_HEALTH_PROBE_TIMEOUT_MS,
   SensorHealthPort,
 } from '../../sensors/application/ports/sensor-health.port';
 import {
@@ -33,8 +34,11 @@ export class SystemOnlineNotifier {
     const diagnostics = await this.bootRecovery.run();
 
     const sensors = await this.sensors.listEnabled();
-    const health = await this.health.probe();
-    const sensorsOnline = sensors.filter((sensor) => health.get(sensor.id) ?? false).length;
+    const probe = await this.health.probe(
+      sensors.map(({ id }) => id),
+      SENSOR_HEALTH_PROBE_TIMEOUT_MS,
+    );
+    const sensorsOnline = probe.filter(({ status }) => status === 'online').length;
 
     if (!this.notifier.isReady()) return;
 

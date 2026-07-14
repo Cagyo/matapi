@@ -1,8 +1,9 @@
-import { Inject, Injectable, Logger, forwardRef } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Composer } from 'grammy';
 import { en } from '../../locales/en';
 import {
   SENSOR_HEALTH,
+  SENSOR_HEALTH_PROBE_TIMEOUT_MS,
   SensorHealthPort,
 } from '../../sensors/application/ports/sensor-health.port';
 import {
@@ -13,7 +14,7 @@ import {
   SYSTEM_HEALTH,
   SystemHealthPort,
 } from '../../system/domain/ports/system-health.port';
-import { GrammyBotGateway } from '../infrastructure/grammy-bot.gateway';
+import { BotRunnerRegistry } from '../../network/application/bot-runner.registry';
 import { RoleMiddleware } from './role.middleware';
 import { TelegramHandler } from './telegram-handler';
 import { TelegramContext } from './telegram-context';
@@ -23,7 +24,7 @@ import { TelegramContext } from './telegram-context';
  *
  * Composes three ports: OS metrics (`SystemHealthPort`), sensor counts
  * (`SensorQueryPort` + `SensorHealthPort`) and bot polling freshness
- * (`GrammyBotGateway.getLastUpdateAt`). Each subquery is best-effort;
+ * (`BotRunnerRegistry.getLastUpdateAt`). Each subquery is best-effort;
  * a failure in one does not abort the others.
  */
 @Injectable()
@@ -34,8 +35,7 @@ export class HealthHandler implements TelegramHandler {
     @Inject(SYSTEM_HEALTH) private readonly system: SystemHealthPort,
     @Inject(SENSOR_QUERY) private readonly sensorQuery: SensorQueryPort,
     @Inject(SENSOR_HEALTH) private readonly sensorHealth: SensorHealthPort,
-    @Inject(forwardRef(() => GrammyBotGateway))
-    private readonly bot: GrammyBotGateway,
+    private readonly botRunner: BotRunnerRegistry,
     private readonly guard: RoleMiddleware,
   ) {}
 
@@ -47,14 +47,17 @@ export class HealthHandler implements TelegramHandler {
 
   async handleCommand(ctx: TelegramContext): Promise<void> {
     try {
-      const [snap, enabled, probe] = await Promise.all([
+      const [snap, enabled] = await Promise.all([
         this.system.collect(),
         this.sensorQuery.listEnabled(),
-        this.sensorHealth.probe(),
       ]);
+      const probe = await this.sensorHealth.probe(
+        enabled.map(({ id }) => id),
+        SENSOR_HEALTH_PROBE_TIMEOUT_MS,
+      );
 
-      const online = enabled.filter((s) => probe.get(s.id) === true).length;
-      const lastUpdate = this.bot.getLastUpdateAt();
+      const online = probe.filter(({ status }) => status === 'online').length;
+      const lastUpdate = this.botRunner.getLastUpdateAt();
       const lastUpdateAgoSec = lastUpdate
         ? Math.max(0, Math.round((Date.now() - lastUpdate.getTime()) / 1000))
         : null;

@@ -1,4 +1,12 @@
 export const SENSOR_HEALTH = Symbol('SENSOR_HEALTH');
+export const SENSOR_HEALTH_PROBE_TIMEOUT_MS = 5_000;
+
+export type SensorProbeStatus = 'online' | 'offline' | 'missing' | 'failed' | 'timed_out';
+
+export interface SensorProbeResult {
+  sensorId: string;
+  status: SensorProbeStatus;
+}
 
 /**
  * Live driver health probe — owned by sensors/application. Telegram's
@@ -6,6 +14,10 @@ export const SENSOR_HEALTH = Symbol('SENSOR_HEALTH');
  * into the registry or drivers directly.
  */
 export interface SensorHealthPort {
-  /** Probe every live driver. Returns a map of sensor id → online flag. */
-  probe(): Promise<Map<string, boolean>>;
+  /**
+   * Probe the requested live drivers concurrently within each caller's budget.
+   * A timeout only releases this caller's waiter; it cannot cancel a driver's
+   * third-party I/O unless that driver supports cancellation itself.
+   */
+  probe(sensorIds: readonly string[], timeoutMs: number): Promise<readonly SensorProbeResult[]>;
 }

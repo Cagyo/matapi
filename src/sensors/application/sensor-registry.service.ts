@@ -11,7 +11,11 @@ import {
   SensorDriverPort,
   SensorDriverShutdownContext,
 } from '../domain/ports/sensor-driver.port';
-import { SensorHealthPort } from './ports/sensor-health.port';
+import {
+  SensorHealthPort,
+  SensorProbeResult,
+  SensorProbeStatus,
+} from './ports/sensor-health.port';
 import {
   SENSOR_REPOSITORY,
   SensorRepositoryPort,
@@ -40,6 +44,7 @@ export class SensorRegistryService
   private readonly active = new Map<string, SensorDriverPort>();
   private readonly activeTypes = new Map<string, SensorType>();
   private readonly activeConfigKeys = new Map<string, string>();
+  private readonly activeHealthChecks = new Map<string, Promise<boolean>>();
   private readonly listeners: ((event: SensorEvent) => void)[] = [];
   private reloadChain: Promise<void> = Promise.resolve();
   private shuttingDown = false;
@@ -86,6 +91,7 @@ export class SensorRegistryService
     }
     this.active.clear();
     this.activeTypes.clear();
+    this.activeHealthChecks.clear();
   }
 
   /**
@@ -127,6 +133,7 @@ export class SensorRegistryService
         this.active.delete(id);
         this.activeTypes.delete(id);
         this.activeConfigKeys.delete(id);
+        this.activeHealthChecks.delete(id);
       }
     }
 
@@ -142,6 +149,7 @@ export class SensorRegistryService
         this.active.delete(sensor.id);
         this.activeTypes.delete(sensor.id);
         this.activeConfigKeys.delete(sensor.id);
+        this.activeHealthChecks.delete(sensor.id);
       }
     }
 
@@ -206,18 +214,54 @@ export class SensorRegistryService
     return [...this.active.entries()].map(([id, driver]) => ({ id, driver }));
   }
 
-  /** `SensorHealthPort.probe` — exposes live driver health to consumers. */
-  async probe(): Promise<Map<string, boolean>> {
-    const result = new Map<string, boolean>();
-    for (const [id, driver] of this.active.entries()) {
-      try {
-        result.set(id, await driver.healthCheck());
-      } catch {
-        this.logger.warn(`healthCheck failed for ${id}`);
-        result.set(id, false);
-      }
-    }
-    return result;
+  /** `SensorHealthPort.probe` — bounded concurrent live-driver probing. */
+  probe(
+    sensorIds: readonly string[],
+    timeoutMs: number,
+  ): Promise<readonly SensorProbeResult[]> {
+    return Promise.all(sensorIds.map((sensorId) => this.probeDriver(sensorId, timeoutMs)));
+  }
+
+  private probeDriver(sensorId: string, timeoutMs: number): Promise<SensorProbeResult> {
+    const driver = this.active.get(sensorId);
+    if (!driver) return Promise.resolve({ sensorId, status: 'missing' });
+
+    const healthCheck = this.activeHealthCheck(sensorId, driver);
+    return new Promise((resolve) => {
+      let finished = false;
+      const finish = (status: SensorProbeStatus) => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timeout);
+        resolve({ sensorId, status });
+      };
+      const timeout = setTimeout(() => finish('timed_out'), timeoutMs);
+      timeout.unref?.();
+
+      void healthCheck.then(
+        (online) => finish(online ? 'online' : 'offline'),
+        () => {
+          this.logger.warn(`healthCheck failed for ${sensorId}`);
+          finish('failed');
+        },
+      );
+    });
+  }
+
+  private activeHealthCheck(sensorId: string, driver: SensorDriverPort): Promise<boolean> {
+    const existing = this.activeHealthChecks.get(sensorId);
+    if (existing) return existing;
+
+    let check!: Promise<boolean>;
+    check = Promise.resolve()
+      .then(() => driver.healthCheck())
+      .finally(() => {
+        if (this.activeHealthChecks.get(sensorId) === check) {
+          this.activeHealthChecks.delete(sensorId);
+        }
+      });
+    this.activeHealthChecks.set(sensorId, check);
+    return check;
   }
 
   private fanOut(event: SensorEvent): void {

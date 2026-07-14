@@ -4,6 +4,7 @@ import { BootRecoveryService } from '../../../src/system/application/boot-recove
 import { EventNotifierService } from '../../../src/events/application/event-notifier.service';
 import { SensorQueryPort } from '../../../src/sensors/domain/ports/sensor-query.port';
 import { Sensor } from '../../../src/sensors/domain/sensor';
+import { SENSOR_HEALTH_PROBE_TIMEOUT_MS } from '../../../src/sensors/application/ports/sensor-health.port';
 
 function makeSensor(id: string): Sensor {
   return {
@@ -38,9 +39,11 @@ describe('SystemOnlineNotifier', () => {
       run: vi.fn(async () => ({ dbRecovery: null, clockSynchronized: true })),
     } as unknown as BootRecoveryService;
     const sensors = sensorQuery([makeSensor('a'), makeSensor('b')]);
-    const health = {
-      probe: async () => new Map([['a', true], ['b', false]]),
-    };
+    const probe = vi.fn(async () => [
+      { sensorId: 'a', status: 'online' as const },
+      { sensorId: 'b', status: 'offline' as const },
+    ]);
+    const health = { probe };
     const notify = vi.fn().mockResolvedValue(undefined);
     const notifier = { isReady: () => true, notify } as unknown as EventNotifierService;
 
@@ -51,6 +54,7 @@ describe('SystemOnlineNotifier', () => {
     const message = notify.mock.calls[0][0] as { text: string; asFile: boolean };
     expect(message.asFile).toBe(false);
     expect(message.text).toContain('1/2 online');
+    expect(probe).toHaveBeenCalledWith(['a', 'b'], SENSOR_HEALTH_PROBE_TIMEOUT_MS);
   });
 
   it('surfaces a database-recovery warning when one occurred', async () => {
@@ -61,7 +65,7 @@ describe('SystemOnlineNotifier', () => {
       })),
     } as unknown as BootRecoveryService;
     const sensors = sensorQuery([]);
-    const health = { probe: async () => new Map() };
+    const health = { probe: async () => [] };
     const notify = vi.fn().mockResolvedValue(undefined);
     const notifier = { isReady: () => true, notify } as unknown as EventNotifierService;
 
@@ -77,7 +81,7 @@ describe('SystemOnlineNotifier', () => {
     const run = vi.fn(async () => ({ dbRecovery: null, clockSynchronized: true }));
     const bootRecovery = { run } as unknown as BootRecoveryService;
     const sensors = sensorQuery([]);
-    const health = { probe: async () => new Map() };
+    const health = { probe: async () => [] };
     const notify = vi.fn();
     const notifier = { isReady: () => false, notify } as unknown as EventNotifierService;
 

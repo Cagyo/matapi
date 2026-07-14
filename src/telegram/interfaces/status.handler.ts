@@ -3,6 +3,7 @@ import { Composer } from 'grammy';
 import { en, StatusRow } from '../../locales/en';
 import {
   SENSOR_HEALTH,
+  SENSOR_HEALTH_PROBE_TIMEOUT_MS,
   SensorHealthPort,
 } from '../../sensors/application/ports/sensor-health.port';
 import {
@@ -48,7 +49,13 @@ export class StatusHandler implements TelegramHandler {
         return;
       }
 
-      const health = await this.health.probe();
+      const probe = await this.health.probe(
+        sensors.map(({ id }) => id),
+        SENSOR_HEALTH_PROBE_TIMEOUT_MS,
+      );
+      const onlineIds = new Set(
+        probe.filter(({ status }) => status === 'online').map(({ sensorId }) => sensorId),
+      );
       const rows: StatusRow[] = sensors.map((sensor) => {
         const { level } = classifySensorState(sensor);
         return {
@@ -56,7 +63,7 @@ export class StatusHandler implements TelegramHandler {
           type: sensor.type,
           lastValue: sensor.lastValue,
           lastValueAt: sensor.lastValueAt,
-          online: health.get(sensor.id) ?? false,
+          online: onlineIds.has(sensor.id),
           thresholdLevel:
             level === 'warning' || level === 'critical'
               ? level

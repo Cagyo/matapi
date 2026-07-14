@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { SensorHealthPort } from '../../../src/sensors/application/ports/sensor-health.port';
+import { SENSOR_HEALTH_PROBE_TIMEOUT_MS, SensorHealthPort } from '../../../src/sensors/application/ports/sensor-health.port';
 import { SensorQueryPort } from '../../../src/sensors/domain/ports/sensor-query.port';
 import { Sensor } from '../../../src/sensors/domain/sensor';
 import { StatusHandler } from '../../../src/telegram/interfaces/status.handler';
@@ -33,7 +33,8 @@ describe('StatusHandler', () => {
       findByName: async () => null,
       listHistoryTargets: async () => ({ targets: [], page: 0, pageCount: 0 }),
     };
-    const health: SensorHealthPort = { probe: async () => new Map([['co2', true]]) };
+    const probe = vi.fn(async () => [{ sensorId: 'co2', status: 'online' as const }]);
+    const health: SensorHealthPort = { probe };
     const guard = { registered: vi.fn() } as unknown as RoleMiddleware;
     const handler = new StatusHandler(sensors, health, guard);
     const reply = vi.fn().mockResolvedValue(undefined);
@@ -41,6 +42,7 @@ describe('StatusHandler', () => {
     await handler.handleCommand({ reply } as unknown as TelegramContext);
 
     expect(reply).toHaveBeenCalledWith(expect.stringContaining('1250.5 ppm ❌'));
+    expect(probe).toHaveBeenCalledWith(['co2'], SENSOR_HEALTH_PROBE_TIMEOUT_MS);
   });
 
   it('preserves an unmarked numeric UART value when thresholds are unavailable', async () => {
@@ -54,7 +56,9 @@ describe('StatusHandler', () => {
       findByName: async () => null,
       listHistoryTargets: async () => ({ targets: [], page: 0, pageCount: 0 }),
     };
-    const health: SensorHealthPort = { probe: async () => new Map([['co2', true]]) };
+    const health: SensorHealthPort = {
+      probe: async () => [{ sensorId: 'co2', status: 'online' }],
+    };
     const guard = { registered: vi.fn() } as unknown as RoleMiddleware;
     const handler = new StatusHandler(sensors, health, guard);
     const reply = vi.fn().mockResolvedValue(undefined);

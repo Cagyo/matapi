@@ -24,6 +24,7 @@ import { ResolveUserTargetUseCase } from './application/resolve-user-target.use-
 import { RegisterUserUseCase } from './application/register-user.use-case';
 import { RestartConfirmationService } from './application/restart-confirmation.service';
 import { SystemOnlineNotifier } from './application/system-online-notifier.service';
+import { RefreshHomeMonitoringUseCase } from './application/refresh-home-monitoring.use-case';
 import { RestartSystemUseCase } from './application/restart-system.use-case';
 import { RollbackSystemUseCase } from './application/rollback-system.use-case';
 import { SetQuietHoursUseCase } from './application/set-quiet-hours.use-case';
@@ -45,6 +46,7 @@ import { NOTIFICATION_PAUSE_REPOSITORY } from './domain/ports/notification-pause
 import { USER_REPOSITORY } from './domain/ports/user-repository.port';
 import { USER_SENSOR_MUTE_REPOSITORY } from './domain/ports/user-sensor-mute-repository.port';
 import { HOME_SESSION_STORE } from './domain/ports/home-session-store.port';
+import { HOME_HEALTH_SNAPSHOT } from './application/ports/home-health-snapshot.port';
 import { ConsoleNotifierAdapter } from './infrastructure/console-notifier.adapter';
 import { EnvAdminClaimCredentialAdapter } from './infrastructure/env-admin-claim-credential.adapter';
 import { TelegramAdminAlertAdapter } from './infrastructure/telegram-admin-alert.adapter';
@@ -58,6 +60,7 @@ import { InMemoryInviteCodeRepository } from './infrastructure/in-memory-invite-
 import { InMemoryUserRepository } from './infrastructure/in-memory-user.repository';
 import { InMemoryUserSensorMuteRepository } from './infrastructure/in-memory-user-sensor-mute.repository';
 import { InMemoryHomeSessionStore } from './infrastructure/in-memory-home-session.store';
+import { InMemoryHomeHealthSnapshotAdapter } from './infrastructure/in-memory-home-health-snapshot.adapter';
 import { TelegramDirectMessenger } from './infrastructure/telegram-direct-messenger.adapter';
 import { TelegramNotifierAdapter } from './infrastructure/telegram-notifier.adapter';
 import { TelegramRecipientDirectoryAdapter } from './infrastructure/telegram-recipient-directory.adapter';
@@ -156,6 +159,8 @@ const mode = resolveBotMode();
       provide: HOME_SESSION_STORE,
       useClass: mode === 'mock' ? InMemoryHomeSessionStore : DrizzleHomeSessionStore,
     },
+    InMemoryHomeHealthSnapshotAdapter,
+    { provide: HOME_HEALTH_SNAPSHOT, useExisting: InMemoryHomeHealthSnapshotAdapter },
     { provide: INVITE_CODE_GENERATOR, useValue: defaultInviteCodeGenerator },
     // One repository instance serves both the recipient reads and the pause
     // mutations so their state cannot diverge. Foundation only — no handler,
@@ -181,6 +186,7 @@ const mode = resolveBotMode();
     RestartSystemUseCase,
     RestartConfirmationService,
     SystemOnlineNotifier,
+    RefreshHomeMonitoringUseCase,
     BotCommandsMenuService,
     ExportConfigUseCase,
     ImportCameraLiveSourcesUseCase,

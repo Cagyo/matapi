@@ -344,7 +344,7 @@ describe('SensorRegistryService', () => {
     expect(good).toHaveBeenCalled();
   });
 
-  it('probe() returns online status per active sensor and tolerates failures', async () => {
+  it('probe() reports active driver failures as failed data', async () => {
     const repo = new InMemorySensorRepository([
       digitalSensor({ id: 'ok', name: 'ok', config: { pin: 17 } }),
       digitalSensor({ id: 'bad', name: 'bad', config: { pin: 18 } }),
@@ -360,11 +360,12 @@ describe('SensorRegistryService', () => {
     const registry = makeRegistry(repo, () => [...drivers.values()][i++]);
     await registry.reload();
 
-    const result = await registry.probe();
+    const result = await registry.probe(['ok', 'bad'], 5_000);
 
-    expect(result.get('ok')).toBe(true);
-    expect(result.get('bad')).toBe(false);
-    expect(result.size).toBe(2);
+    expect(result).toEqual([
+      { sensorId: 'ok', status: 'online' },
+      { sensorId: 'bad', status: 'failed' },
+    ]);
   });
 
   it('serializes concurrent reloads so a sensor is initialised once', async () => {
