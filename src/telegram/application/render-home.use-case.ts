@@ -8,6 +8,7 @@ import {
 } from '../domain/ports/home-session-store.port';
 import type { Role } from '../domain/role';
 import { GetHomeScreenUseCase } from './get-home-screen.use-case';
+import { homeViewForScreen } from './home-screen';
 import { OpenHomeUseCase } from './open-home.use-case';
 import {
   HOME_MESSAGE_DELIVERY,
@@ -22,7 +23,7 @@ export interface RenderHomeInput {
 }
 
 export type RenderHomeResult =
-  | { kind: 'rendered' | 'reopened'; active: HomeIdentity }
+  | { kind: 'rendered' | 'reopened'; active: HomeIdentity; view: HomeView }
   | { kind: 'stale' | 'superseded' | 'delivery_failed' };
 
 @Injectable()
@@ -36,27 +37,22 @@ export class RenderHomeUseCase {
   ) {}
 
   async execute(input: RenderHomeInput): Promise<RenderHomeResult> {
+    const screen = await this.screens.execute({
+      userId: input.active.userId,
+      role: input.role,
+      view: input.view,
+    });
+    const view = homeViewForScreen(screen);
     const now = this.clock.now();
     const reserved = await this.sessions.reserveEdit({
       active: input.active,
-      view: input.view,
+      view,
       now,
       expiresAt: new Date(now.getTime() + HOME_PENDING_TTL_MS),
     });
     if (reserved.kind !== 'reserved') return { kind: 'stale' };
 
     const pending = reserved.reservation;
-    let screen: Awaited<ReturnType<GetHomeScreenUseCase['execute']>>;
-    try {
-      screen = await this.screens.execute({
-        userId: input.active.userId,
-        role: input.role,
-        view: input.view,
-      });
-    } catch (error) {
-      await this.abandonWithoutMasking(pending);
-      throw error;
-    }
     const identity: HomeIdentity = {
       userId: pending.userId,
       chatId: pending.chatId,
@@ -69,12 +65,12 @@ export class RenderHomeUseCase {
       await this.delivery.edit({ identity, locale: input.locale, screen });
     } catch {
       await this.abandonWithoutMasking(pending);
-      return this.reopen(input);
+      return this.reopen({ ...input, view });
     }
 
     const promotion = await this.sessions.promoteEdit(pending, this.clock.now());
     return promotion.kind === 'promoted'
-      ? { kind: 'rendered', active: promotion.active }
+      ? { kind: 'rendered', active: promotion.active, view }
       : { kind: 'superseded' };
   }
 
@@ -88,7 +84,7 @@ export class RenderHomeUseCase {
         view: input.view,
       });
       return reopened.kind === 'opened'
-        ? { kind: 'reopened', active: reopened.active }
+        ? { kind: 'reopened', active: reopened.active, view: reopened.view }
         : { kind: 'superseded' };
     } catch {
       return { kind: 'delivery_failed' };

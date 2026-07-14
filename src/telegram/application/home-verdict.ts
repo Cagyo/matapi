@@ -1,7 +1,7 @@
 import { ClassifiedSensorState } from '../../sensors/domain/sensor-state-classifier';
 import {
-  HOME_HEALTH_FRESH_MS,
   HomeHealthSnapshot,
+  isHomeHealthFresh,
 } from '../domain/home-health-snapshot';
 
 export type HomeVerdict = 'attention' | 'unavailable' | 'normal';
@@ -27,7 +27,7 @@ export function deriveHomeVerdict(input: HomeVerdictInput): HomeVerdict {
     sensors.length === 0 ||
     sensors.some(({ level }) => level === 'unknown') ||
     health === null ||
-    now.getTime() - health.completedAt.getTime() >= HOME_HEALTH_FRESH_MS ||
+    !isHomeHealthFresh(health.completedAt, now) ||
     !sameIds(sensors.map(({ sensor }) => sensor.id), health.enabledSensorIds) ||
     !sameIds(sensors.map(({ sensor }) => sensor.id), health.onlineSensorIds) ||
     health.missingSensorIds.length > 0 ||

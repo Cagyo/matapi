@@ -25,6 +25,16 @@ const screen: HomeScreen = {
   checking: false,
 };
 
+const clampedSensorsScreen: HomeScreen = {
+  kind: 'sensors',
+  summary: screen.summary,
+  page: {
+    sensors: [], requestedPage: 12, page: 2, pageCount: 3, total: 17, clamped: true,
+  },
+  checking: false,
+  isAdmin: false,
+};
+
 type ProtocolEvent = 'reserve' | 'edit' | 'promote' | 'abandon';
 
 class RecordingSessionStore extends InMemoryHomeSessionStore {
@@ -112,12 +122,31 @@ describe('RenderHomeUseCase', () => {
     await expect(useCase.execute(input)).resolves.toEqual({
       kind: 'rendered',
       active: { ...ACTIVE, revision: 2 },
+      view: { kind: 'home', checking: false },
     });
     expect(protocolEvents).toEqual(['reserve', 'edit', 'promote']);
     expect(delivery.calls).toEqual([expect.objectContaining({
       kind: 'edit',
       input: expect.objectContaining({ identity: { ...ACTIVE, revision: 2 } }),
     })]);
+  });
+
+  it('reserves and returns the sensor page resolved by the displayed screen', async () => {
+    const { sessions, getScreen, useCase } = setup();
+    await seed(sessions);
+    getScreen.execute = async () => clampedSensorsScreen;
+
+    await expect(useCase.execute({
+      ...input,
+      view: { kind: 'sensors', page: 12, checking: false },
+    })).resolves.toMatchObject({
+      kind: 'rendered',
+      view: { kind: 'sensors', page: 2, checking: false },
+    });
+    await expect(sessions.validate({ ...ACTIVE, revision: 2, now: NOW })).resolves.toMatchObject({
+      kind: 'accepted',
+      view: { kind: 'sensors', page: 2, checking: false },
+    });
   });
 
   it('abandons the exact edit then successfully reopens after an edit delivery failure', async () => {
@@ -176,14 +205,14 @@ describe('RenderHomeUseCase', () => {
     expect(delivery.calls).toEqual([]);
   });
 
-  it('abandons the exact pending edit when screen construction fails', async () => {
+  it('does not reserve an edit when screen construction fails', async () => {
     const { sessions, delivery, getScreen, useCase } = setup();
     await seed(sessions);
     sessions.calls.length = 0;
     getScreen.execute = async () => { throw new Error('summary unavailable'); };
 
     await expect(useCase.execute(input)).rejects.toThrow('summary unavailable');
-    expect(sessions.calls).toEqual(['reserve', 'abandon']);
+    expect(sessions.calls).toEqual([]);
     expect(delivery.calls).toEqual([]);
     await expect(sessions.validate({ ...ACTIVE, now: NOW })).resolves.toMatchObject({
       kind: 'accepted', active: ACTIVE,

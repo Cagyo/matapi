@@ -14,7 +14,7 @@ import {
   SENSOR_QUERY,
   SensorQueryPort,
 } from '../../sensors/domain/ports/sensor-query.port';
-import { HomeHealthSnapshot } from '../domain/home-health-snapshot';
+import { HomeHealthSnapshot, isHomeHealthFresh } from '../domain/home-health-snapshot';
 import { UserNotFoundError } from '../domain/errors/user-not-found.error';
 import {
   USER_REPOSITORY,
@@ -29,7 +29,6 @@ import {
   HomeHealthSnapshotPort,
 } from './ports/home-health-snapshot.port';
 import { deriveHomeVerdict, HomeVerdict } from './home-verdict';
-import { HOME_HEALTH_FRESH_MS } from '../domain/home-health-snapshot';
 
 export type HomeNotificationState =
   | { kind: 'legacy_pause' }
@@ -91,8 +90,7 @@ export class GetHomeSummaryUseCase {
       knownCount: classified.length - unknownCount,
       unknownCount,
       health,
-      healthFresh: health !== null
-        && now.getTime() - health.completedAt.getTime() < HOME_HEALTH_FRESH_MS,
+      healthFresh: health !== null && isHomeHealthFresh(health.completedAt, now),
       notificationState: notificationStateFor(user, now, mutedTargetCount, this.timezone),
     };
   }

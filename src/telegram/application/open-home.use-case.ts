@@ -16,6 +16,7 @@ import {
 } from '../domain/ports/home-token-generator.port';
 import type { Role } from '../domain/role';
 import { GetHomeScreenUseCase } from './get-home-screen.use-case';
+import { homeViewForScreen } from './home-screen';
 import {
   HOME_MESSAGE_DELIVERY,
   type HomeMessageDeliveryPort,
@@ -30,7 +31,7 @@ export interface OpenHomeInput {
 }
 
 export type OpenHomeResult =
-  | { kind: 'opened'; active: HomeIdentity }
+  | { kind: 'opened'; active: HomeIdentity; view: HomeView }
   | { kind: 'superseded' };
 
 @Injectable()
@@ -44,27 +45,21 @@ export class OpenHomeUseCase {
   ) {}
 
   async execute(input: OpenHomeInput): Promise<OpenHomeResult> {
+    const screen = await this.screens.execute({
+      userId: input.userId,
+      role: input.role,
+      view: input.view,
+    });
+    const view = homeViewForScreen(screen);
     const now = this.clock.now();
     const reservation = await this.sessions.reserveNew({
       userId: input.userId,
       chatId: input.chatId,
       token: this.tokens.generate(),
-      view: input.view,
+      view,
       now,
       expiresAt: new Date(now.getTime() + HOME_PENDING_TTL_MS),
     });
-    let screen: Awaited<ReturnType<GetHomeScreenUseCase['execute']>>;
-    try {
-      screen = await this.screens.execute({
-        userId: input.userId,
-        role: input.role,
-        view: input.view,
-      });
-    } catch (error) {
-      await this.abandonWithoutMasking(reservation);
-      throw error;
-    }
-
     let sent: { messageId: number };
     try {
       sent = await this.delivery.send({
@@ -92,7 +87,7 @@ export class OpenHomeUseCase {
     if (promotion.previous) {
       await this.stripWithoutFailing(promotion.previous.chatId, promotion.previous.messageId);
     }
-    return { kind: 'opened', active: promotion.active };
+    return { kind: 'opened', active: promotion.active, view };
   }
 
   private async abandonWithoutMasking(reservation: Parameters<HomeSessionStorePort['abandon']>[0]): Promise<void> {

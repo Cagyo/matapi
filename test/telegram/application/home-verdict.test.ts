@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ClassifiedSensorState } from '../../../src/sensors/domain/sensor-state-classifier';
 import { Sensor } from '../../../src/sensors/domain/sensor';
-import { HomeHealthSnapshot } from '../../../src/telegram/domain/home-health-snapshot';
+import { HomeHealthSnapshot, isHomeHealthFresh } from '../../../src/telegram/domain/home-health-snapshot';
 import { deriveHomeVerdict } from '../../../src/telegram/application/home-verdict';
 
 const NOW = new Date('2030-01-01T00:00:00.000Z');
@@ -36,10 +36,21 @@ function health(overrides: Partial<HomeHealthSnapshot> = {}): HomeHealthSnapshot
 
 describe('deriveHomeVerdict', () => {
   it.each([
+    ['a current snapshot', NOW, true],
+    ['a snapshot just inside the freshness window', new Date(NOW.getTime() - 119_999), true],
+    ['a snapshot exactly at the freshness boundary', new Date(NOW.getTime() - 120_000), false],
+    ['a future snapshot', new Date(NOW.getTime() + 1), false],
+    ['an invalid snapshot date', new Date('invalid'), false],
+  ])('marks %s as fresh=%s', (_case, completedAt, expected) => {
+    expect(isHomeHealthFresh(completedAt, NOW)).toBe(expected);
+  });
+
+  it.each([
     ['zero enabled sensors', [], null, 'unavailable'],
     ['unknown sensor state', [classified('a', 'unknown')], health(), 'unavailable'],
     ['absent health snapshot', [classified('a')], null, 'unavailable'],
     ['health exactly two minutes old', [classified('a')], health({ completedAt: new Date(NOW.getTime() - 120_000) }), 'unavailable'],
+    ['future health snapshot', [classified('a')], health({ completedAt: new Date(NOW.getTime() + 1) }), 'unavailable'],
     ['enabled id mismatch', [classified('a')], health({ enabledSensorIds: ['b'] }), 'unavailable'],
     ['missing health result', [classified('a')], health({ missingSensorIds: ['a'] }), 'unavailable'],
     ['failed health result', [classified('a')], health({ failedSensorIds: ['a'] }), 'unavailable'],
@@ -55,6 +66,7 @@ describe('deriveHomeVerdict', () => {
     for (const snapshot of [
       null,
       health({ completedAt: new Date(NOW.getTime() - 120_000) }),
+      health({ completedAt: new Date(NOW.getTime() + 1) }),
       health({ enabledSensorIds: ['other'] }),
       health({ missingSensorIds: ['a'] }),
       health({ failedSensorIds: ['a'] }),

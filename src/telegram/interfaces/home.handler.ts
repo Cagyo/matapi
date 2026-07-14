@@ -150,7 +150,7 @@ export class HomeHandler implements TelegramHandler {
     const complete = await this.renderHome.execute({
       active: checking.active,
       ...this.renderOptions(ctx),
-      view: { ...acceptedView, checking: false },
+      view: { ...checking.view, checking: false },
     });
     if (!this.isRendered(complete)) await this.recoverRenderFailure(ctx, complete);
   }

@@ -158,4 +158,15 @@ describe('GetHomeSummaryUseCase', () => {
     });
     expect(mutes.countForUser).toHaveBeenCalledWith(55);
   });
+
+  it('treats a future health snapshot as unavailable and not fresh', async () => {
+    const { summary } = useCase({
+      snapshot: { ...health(), completedAt: new Date(NOW.getTime() + 1) },
+    });
+
+    await expect(summary.execute(1)).resolves.toMatchObject({
+      verdict: 'unavailable',
+      healthFresh: false,
+    });
+  });
 });

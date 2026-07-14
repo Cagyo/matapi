@@ -37,9 +37,15 @@ function context(data?: string) {
 
 function setup() {
   const guard = { registered: vi.fn() } as unknown as RoleMiddleware;
-  const open = { execute: vi.fn().mockResolvedValue({ kind: 'opened', active: identity }) } as unknown as OpenHomeUseCase;
+  const open = {
+    execute: vi.fn().mockResolvedValue({ kind: 'opened', active: identity, view: { kind: 'home', checking: false } }),
+  } as unknown as OpenHomeUseCase;
   const validate = { execute: vi.fn().mockResolvedValue({ kind: 'accepted', active: identity, view: { kind: 'home', checking: false } }) } as unknown as ValidateHomeCallbackUseCase;
-  const render = { execute: vi.fn().mockResolvedValue({ kind: 'rendered', active: { ...identity, revision: 2 } }) } as unknown as RenderHomeUseCase;
+  const render = {
+    execute: vi.fn().mockResolvedValue({
+      kind: 'rendered', active: { ...identity, revision: 2 }, view: { kind: 'home', checking: false },
+    }),
+  } as unknown as RenderHomeUseCase;
   const refresh = { execute: vi.fn().mockResolvedValue({ kind: 'refreshed' }) } as unknown as RefreshHomeMonitoringUseCase;
   const close = { execute: vi.fn().mockResolvedValue('closed') } as unknown as CloseHomeUseCase;
   const camera = { handleDashboard: vi.fn().mockResolvedValue(undefined) } as any;
@@ -101,13 +107,19 @@ describe('HomeHandler', () => {
     });
   });
 
-  it('keeps the accepted Sensors view during Check now and renders through the returned identity', async () => {
+  it('keeps the page clamped while a refresh grows the sensor list', async () => {
     const { callbacks, validate, render, refresh } = setup();
     const checkingIdentity = { ...identity, revision: 2 };
     (validate.execute as any).mockResolvedValue({ kind: 'accepted', active: identity, view: { kind: 'sensors', page: 3, checking: false } });
     (render.execute as any)
-      .mockResolvedValueOnce({ kind: 'reopened', active: checkingIdentity })
-      .mockResolvedValueOnce({ kind: 'rendered', active: { ...identity, revision: 3 } });
+      .mockResolvedValueOnce({
+        kind: 'reopened', active: checkingIdentity,
+        view: { kind: 'sensors', page: 0, checking: true },
+      })
+      .mockResolvedValueOnce({
+        kind: 'rendered', active: { ...identity, revision: 3 },
+        view: { kind: 'sensors', page: 0, checking: false },
+      });
     const ctx = context(encodeHomeCallback(identity.token, 1, { kind: 'check' }));
 
     await callbacks[0].fn(ctx);
@@ -117,7 +129,7 @@ describe('HomeHandler', () => {
     });
     expect(refresh.execute).toHaveBeenCalledTimes(1);
     expect(render.execute).toHaveBeenNthCalledWith(2, {
-      active: checkingIdentity, locale: 'en', role: 'user', view: { kind: 'sensors', page: 3, checking: false },
+      active: checkingIdentity, locale: 'en', role: 'user', view: { kind: 'sensors', page: 0, checking: false },
     });
   });
 

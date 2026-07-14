@@ -27,6 +27,16 @@ const screen: HomeScreen = {
   checking: false,
 };
 
+const clampedSensorsScreen: HomeScreen = {
+  kind: 'sensors',
+  summary: screen.summary,
+  page: {
+    sensors: [], requestedPage: 12, page: 2, pageCount: 3, total: 17, clamped: true,
+  },
+  checking: false,
+  isAdmin: false,
+};
+
 type ProtocolEvent = 'reserve' | 'send' | 'promote' | 'stripKeyboard' | 'abandon';
 
 class RecordingSessionStore extends InMemoryHomeSessionStore {
@@ -127,6 +137,20 @@ describe('OpenHomeUseCase', () => {
     });
   });
 
+  it('reserves and returns the sensor page resolved by the displayed screen', async () => {
+    const { sessions, getScreen, useCase } = setup();
+    getScreen.execute = async () => clampedSensorsScreen;
+
+    await expect(useCase.execute({
+      userId: 7, chatId: 70, locale: 'en', role: 'user',
+      view: { kind: 'sensors', page: 12, checking: false },
+    })).resolves.toMatchObject({
+      kind: 'opened',
+      view: { kind: 'sensors', page: 2, checking: false },
+    });
+    expect(sessions.reservation?.view).toEqual({ kind: 'sensors', page: 2, checking: false });
+  });
+
   it('strips the prior keyboard only after the replacement has been promoted', async () => {
     const { sessions, delivery, protocolEvents, useCase } = setup();
     await active(sessions);
@@ -158,7 +182,7 @@ describe('OpenHomeUseCase', () => {
     });
   });
 
-  it('abandons the exact pending reservation when screen construction fails before delivery', async () => {
+  it('does not reserve when screen construction fails before delivery', async () => {
     const { sessions, delivery, getScreen, useCase } = setup();
     await active(sessions);
     sessions.calls.length = 0;
@@ -168,7 +192,7 @@ describe('OpenHomeUseCase', () => {
       userId: 7, chatId: 70, locale: 'en', role: 'user',
       view: { kind: 'home', checking: false },
     })).rejects.toThrow('summary unavailable');
-    expect(sessions.calls).toEqual(['reserve', 'abandon']);
+    expect(sessions.calls).toEqual([]);
     expect(delivery.calls).toEqual([]);
     await expect(sessions.validate({ ...OLD, now: NOW })).resolves.toMatchObject({
       kind: 'accepted', active: OLD,
