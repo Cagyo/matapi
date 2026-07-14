@@ -5,6 +5,45 @@
 - 01-database.md (sensors table)
 - 02-sensor-core.md (sensor registry)
 
+## /menu — Authoritative Home
+
+### Access and opening behavior
+
+Registered private-chat users run `/menu` to open a fresh authoritative Home.
+Opening reserves a 60-second pending session, renders from persisted sensor
+state and the cached health snapshot, sends a new Telegram message, CAS-promotes
+that exact reservation, and then strips the previous keyboard best-effort. A
+send failure leaves the prior Home authoritative; a lost promotion strips the
+losing message keyboard best-effort. Home identity requires the current user,
+private chat, callback message ID, 16-character 96-bit token, and revision.
+
+`/menu` **never calls `SensorHealthPort.probe`**. It can therefore open without
+waiting on hardware and initially reports unavailable/stale health from the
+cache. Complete health is fresh for two minutes; missing, failed, timed-out,
+partial, absent, stale, or enabled-ID-mismatched cache data cannot produce the
+normal verdict. `Check now` first renders a checking view, performs the shared
+single-flight bounded 5-second driver probe, caches its result, and renders
+again only for the currently authoritative identity.
+
+### Views and callbacks
+
+Home has Home and Sensors views in Slice 2. In-place navigation first reserves
+a pending revision, edits the exact active Telegram message, and CAS-promotes
+the pending view. A callback bearing that pending revision may promote it only
+when it is still the winning reservation; otherwise it is updating or stale
+and cannot mutate. Failed edits abandon pending state and attempt a fresh Home;
+all Telegram cleanup is best-effort while server-side session validation is the
+correctness boundary. Close clears the active row first, then best-effort
+replaces the message with localized closed copy.
+
+Sensors are text rows, not sensor callbacks: eight enabled sensors per page,
+ordered by normalized name then immutable ID. A page is clamped if the set
+changed; the attention summary may update without moving the selected
+alphabetical page. Callback data is `h:<token>:<revision>:<action>[:<page>]`,
+with compact action codes and a 64-byte UTF-8 maximum. Stale/unknown callbacks
+offer the stateless `ho` action to create a new Home rather than revive an old
+message.
+
 ---
 
 ## /status

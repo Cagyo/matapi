@@ -83,6 +83,40 @@ Triggered by a `ReloadSensorsUseCase` (called from `/config add|modify|remove` a
 - **State** (`sensors.lastValue` + `sensors.lastValueAt`): current value, written by the registry/driver, consumed by `/status`.
 - **Events** (`events` table): state transitions, written through `EventRepositoryPort`, consumed by notifications.
 
+## Shared dashboard classification, paging, and health probe
+
+Home and `/status` share
+[`src/sensors/domain/sensor-state-classifier.ts`](../../src/sensors/domain/sensor-state-classifier.ts):
+`classifySensorState` returns `unknown`, `normal`, `warning`, or `critical`
+from the persisted sensor state and configuration. This is the sole classifier
+for `/status`, Home/Sensors, and Home attention ordering, so one surface cannot
+silently disagree with another. Names are normalized as NFKC, trimmed, and
+lower-cased before ordering.
+
+`SensorQueryPort.listDashboardPage({ page, pageSize: 8 })` builds the Sensors
+page through
+[`src/sensors/domain/sensor-dashboard-page.ts`](../../src/sensors/domain/sensor-dashboard-page.ts).
+It lists enabled sensors in deterministic normalized-name order with immutable
+sensor ID as the tie-breaker, returns eight items per page, and clamps an
+invalid page to the last valid page (page zero for an empty set). The page
+response reports the requested page, effective page, count, total, and whether
+it was clamped; a refresh preserves the selected alphabetical page.
+
+Live reporting health is a separate application port,
+`SensorHealthPort` (`SENSOR_HEALTH`) in
+[`src/sensors/application/ports/sensor-health.port.ts`](../../src/sensors/application/ports/sensor-health.port.ts).
+`SensorRegistryService.probe` resolves every requested active driver as
+`online`, `offline`, `missing`, `failed`, or `timed_out`. Home's refresh budget
+is `SENSOR_HEALTH_PROBE_TIMEOUT_MS = 5_000`; a timeout releases the caller but
+cannot cancel third-party driver I/O. A current driver health check is shared
+while it is in flight, and `RefreshHomeMonitoringUseCase` makes concurrent
+Home checks a system-wide single flight.
+
+`/menu` **does not probe**. It renders persisted state plus the cached Home
+health snapshot. Only the Home `Check now` action invokes the bounded probe;
+its snapshot is process-local, complete only when all enabled IDs are covered,
+and fresh for two minutes.
+
 ## Driver Selection (composition root)
 
 Driver selection is environment-driven and lives in `sensors.module.ts` per [../dependency-injection.md](../dependency-injection.md):

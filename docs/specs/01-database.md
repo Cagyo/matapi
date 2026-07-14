@@ -26,7 +26,7 @@ export class DatabaseModule {}
 ## Schema
 
 ```typescript
-import { sqliteTable, text, integer, index, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer, index, primaryKey, uniqueIndex } from 'drizzle-orm/sqlite-core';
 
 // ─── Sensors ───
 export const sensors = sqliteTable('sensors', {
@@ -128,6 +128,34 @@ export const notificationPauseReceipts = sqliteTable('notification_pause_receipt
   index('idx_notification_pause_receipts_user_id').on(table.userId, table.id),
 ]);
 
+// ─── Authoritative Home Sessions ───
+// Exactly one row per Telegram user/private-chat pair. Active and pending
+// render identities live in the same row so every authority transition is a
+// compare-and-swap transaction.
+export const homeSessions = sqliteTable('home_sessions', {
+  userId:            integer('user_id').notNull()
+                       .references(() => users.telegramId, { onDelete: 'cascade' }),
+  chatId:            integer('chat_id').notNull(),
+  activeMessageId:   integer('active_message_id'),
+  activeToken:       text('active_token'),
+  activeRevision:    integer('active_revision'),
+  activeView:        text('active_view'),
+  activeSensorPage:  integer('active_sensor_page'),
+  activeChecking:    integer('active_checking', { mode: 'boolean' }),
+  pendingKind:       text('pending_kind'),          // 'new' | 'edit'
+  pendingMessageId:  integer('pending_message_id'), // null until a new send returns
+  pendingToken:      text('pending_token'),
+  pendingRevision:   integer('pending_revision'),
+  pendingView:       text('pending_view'),
+  pendingSensorPage: integer('pending_sensor_page'),
+  pendingChecking:   integer('pending_checking', { mode: 'boolean' }),
+  pendingExpiresAt:  integer('pending_expires_at', { mode: 'timestamp' }),
+  updatedAt:         integer('updated_at', { mode: 'timestamp' }).notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.userId, table.chatId] }),
+  index('idx_home_sessions_pending_expiry').on(table.pendingExpiresAt),
+]);
+
 // ─── Invite Codes ───
 export const inviteCodes = sqliteTable('invite_codes', {
   code:      text('code').primaryKey(),
@@ -177,6 +205,25 @@ export const systemMeta = sqliteTable('system_meta', {
   value: text('value'),
 });
 ```
+
+## Authoritative Home-session protocol
+
+`home_sessions` is deliberately one composite-key row, not a history table:
+the `(user_id, chat_id)` primary key binds the only accepted Home to the
+Telegram user and private chat. The active fields hold the promoted
+`messageId`, 96-bit base64url token, bounded revision, view, page, and checking
+state. The parallel pending fields hold an exact new-message or in-place-edit
+reservation. `pending_expires_at` is always 60 seconds after reservation; an
+expired pending reservation is cleared (or its otherwise-empty row removed)
+without changing an existing active Home.
+
+The Drizzle adapter at
+[`src/telegram/infrastructure/drizzle-home-session.store.ts`](../../src/telegram/infrastructure/drizzle-home-session.store.ts)
+uses SQLite immediate transactions and row-wide compare-and-swap guards for
+reserve, promote, validation, expiry, and close. The mock/test composition
+uses `InMemoryHomeSessionStore`, but production authority survives process
+restart in this table. Do not hand-edit its migration: edit
+[`src/database/schema.ts`](../../src/database/schema.ts) and run `yarn db:generate`.
 
 ## Sensor Deletion Flow
 

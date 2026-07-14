@@ -47,6 +47,43 @@ grammY runner handles basic reconnection. Additional safeguard:
 - If no update received in 2 minutes, force-restart polling
 - Explicit 30s timeout on polling requests prevents half-open TCP sockets
 
+## Authoritative Home callback pipeline
+
+`/menu` is handled by
+[`src/telegram/interfaces/home.handler.ts`](../../src/telegram/interfaces/home.handler.ts).
+The composition root binds `HOME_SESSION_STORE` to `DrizzleHomeSessionStore`
+in real mode and `InMemoryHomeSessionStore` when `BOT_MODE=mock`; it binds
+`HOME_MESSAGE_DELIVERY` similarly to `TelegramHomeMessageAdapter` or
+`InMemoryHomeMessageDeliveryAdapter`. `HOME_TOKEN_GENERATOR` is the crypto
+96-bit base64url generator and `HOME_HEALTH_SNAPSHOT` is the bounded in-memory
+snapshot adapter in every mode.
+
+For every private update, `GrammyBotGateway` installs
+[`homeCallbackAckMiddleware`](../../src/telegram/interfaces/home-callback-ack.middleware.ts)
+before `sequentialize(homeUpdateConstraints)`, then locale middleware and
+handlers. The acknowledgement middleware promptly calls
+`answerCallbackQuery` for Home payloads (`h:`) and the recovery action (`ho`),
+without preventing later handling if acknowledgement fails. Sequentialization
+uses both `home:chat:<chatId>` and `home:user:<userId>` keys, so competing
+private-user/chat Home updates are processed in order before locale/role lookup
+and callback validation. Database CAS remains the authority across a restart.
+
+Normal callback data is UTF-8 bounded to Telegram's 64-byte limit and has the
+format `h:<16-character-base64url-token>:<base36-revision>:<action>[:<page>]`.
+The action codes are `h` (Home), `s` (Sensors page), `c` (camera), `n`
+(notifications), `m` (More), `k` (Check now), and `x` (Close); `ho` is the
+stateless Open-new-Home recovery action. The handler acknowledges first, parses
+the bounded value, loads current locale/role, validates user/chat/message/token/
+revision, then renders or executes. A stale, closed, or unavailable authority
+never mutates state and receives localized recovery.
+
+Slice 2 keeps camera, notification, and More destinations as a **transitional
+external-workflow boundary**: after Home validation, `CameraHandler` or
+`LegacyMenuHandler` owns those flows. They do not reuse the Home session or
+perform Home protocol transitions. The shared Return-to-Home contract for
+external workflows is deferred to Slice 4; this slice makes no claim that
+every legacy terminal screen has a Home button.
+
 ## Role Model
 
 | Role | Capabilities |
