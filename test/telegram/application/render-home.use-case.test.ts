@@ -25,22 +25,42 @@ const screen: HomeScreen = {
   checking: false,
 };
 
+type ProtocolEvent = 'reserve' | 'edit' | 'promote' | 'abandon';
+
 class RecordingSessionStore extends InMemoryHomeSessionStore {
   readonly calls: string[] = [];
 
+  constructor(private readonly protocolEvents: ProtocolEvent[]) {
+    super();
+  }
+
   override async reserveEdit(input: Parameters<InMemoryHomeSessionStore['reserveEdit']>[0]) {
     this.calls.push('reserve');
+    this.protocolEvents.push('reserve');
     return super.reserveEdit(input);
   }
 
   override async promoteEdit(reservation: HomeReservation, now: Date) {
     this.calls.push('promote');
+    this.protocolEvents.push('promote');
     return super.promoteEdit(reservation, now);
   }
 
   override async abandon(reservation: HomeReservation): Promise<void> {
     this.calls.push('abandon');
+    this.protocolEvents.push('abandon');
     return super.abandon(reservation);
+  }
+}
+
+class RecordingDelivery extends InMemoryHomeMessageDeliveryAdapter {
+  constructor(private readonly protocolEvents: ProtocolEvent[]) {
+    super();
+  }
+
+  override async edit(input: Parameters<InMemoryHomeMessageDeliveryAdapter['edit']>[0]): Promise<void> {
+    this.protocolEvents.push('edit');
+    return super.edit(input);
   }
 }
 
@@ -59,8 +79,9 @@ async function seed(store: InMemoryHomeSessionStore): Promise<HomeIdentity> {
 }
 
 function setup(tokens = ['qrstuvwxyzabcdef']) {
-  const sessions = new RecordingSessionStore();
-  const delivery = new InMemoryHomeMessageDeliveryAdapter();
+  const protocolEvents: ProtocolEvent[] = [];
+  const sessions = new RecordingSessionStore(protocolEvents);
+  const delivery = new RecordingDelivery(protocolEvents);
   const getScreen = { execute: async () => screen };
   const clock: ClockPort = { now: () => NOW };
   const generator = { generate: () => tokens.shift() ?? 'ponmlkjihgfedcba' };
@@ -68,6 +89,7 @@ function setup(tokens = ['qrstuvwxyzabcdef']) {
   return {
     sessions,
     delivery,
+    protocolEvents,
     getScreen,
     useCase: new RenderHomeUseCase(sessions, getScreen, delivery, open, clock),
   };
@@ -82,15 +104,16 @@ const input = {
 
 describe('RenderHomeUseCase', () => {
   it('reserves, edits with the pending revision, then promotes the exact active identity', async () => {
-    const { sessions, delivery, useCase } = setup();
+    const { sessions, delivery, protocolEvents, useCase } = setup();
     await seed(sessions);
     sessions.calls.length = 0;
+    protocolEvents.length = 0;
 
     await expect(useCase.execute(input)).resolves.toEqual({
       kind: 'rendered',
       active: { ...ACTIVE, revision: 2 },
     });
-    expect(sessions.calls).toEqual(['reserve', 'promote']);
+    expect(protocolEvents).toEqual(['reserve', 'edit', 'promote']);
     expect(delivery.calls).toEqual([expect.objectContaining({
       kind: 'edit',
       input: expect.objectContaining({ identity: { ...ACTIVE, revision: 2 } }),

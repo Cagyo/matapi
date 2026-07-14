@@ -27,12 +27,19 @@ const screen: HomeScreen = {
   checking: false,
 };
 
+type ProtocolEvent = 'reserve' | 'send' | 'promote' | 'stripKeyboard' | 'abandon';
+
 class RecordingSessionStore extends InMemoryHomeSessionStore {
   readonly calls: string[] = [];
   reservation: HomeReservation | null = null;
 
+  constructor(private readonly protocolEvents: ProtocolEvent[]) {
+    super();
+  }
+
   override async reserveNew(input: Parameters<InMemoryHomeSessionStore['reserveNew']>[0]) {
     this.calls.push('reserve');
+    this.protocolEvents.push('reserve');
     const reservation = await super.reserveNew(input);
     this.reservation = reservation;
     return reservation;
@@ -44,24 +51,44 @@ class RecordingSessionStore extends InMemoryHomeSessionStore {
     now: Date,
   ) {
     this.calls.push('promote');
+    this.protocolEvents.push('promote');
     return super.promoteNew(reservation, messageId, now);
   }
 
   override async abandon(reservation: HomeReservation): Promise<void> {
     this.calls.push('abandon');
+    this.protocolEvents.push('abandon');
     return super.abandon(reservation);
   }
 }
 
+class RecordingDelivery extends InMemoryHomeMessageDeliveryAdapter {
+  constructor(private readonly protocolEvents: ProtocolEvent[]) {
+    super();
+  }
+
+  override async send(input: Parameters<InMemoryHomeMessageDeliveryAdapter['send']>[0]) {
+    this.protocolEvents.push('send');
+    return super.send(input);
+  }
+
+  override async stripKeyboard(chatId: number, messageId: number): Promise<void> {
+    this.protocolEvents.push('stripKeyboard');
+    return super.stripKeyboard(chatId, messageId);
+  }
+}
+
 function setup(tokens = ['abcdefghijklmnop']) {
-  const sessions = new RecordingSessionStore();
-  const delivery = new InMemoryHomeMessageDeliveryAdapter();
+  const protocolEvents: ProtocolEvent[] = [];
+  const sessions = new RecordingSessionStore(protocolEvents);
+  const delivery = new RecordingDelivery(protocolEvents);
   const getScreen = { execute: async () => screen };
   const generator = { generate: () => tokens.shift() ?? 'qrstuvwxyzabcdef' };
   const clock: ClockPort = { now: () => NOW };
   return {
     sessions,
     delivery,
+    protocolEvents,
     getScreen,
     useCase: new OpenHomeUseCase(sessions, generator, getScreen, delivery, clock),
   };
@@ -83,7 +110,7 @@ async function active(store: InMemoryHomeSessionStore): Promise<HomeIdentity> {
 
 describe('OpenHomeUseCase', () => {
   it('reserves, sends, then promotes a new Home with a 60-second pending expiry', async () => {
-    const { sessions, delivery, useCase } = setup();
+    const { sessions, delivery, protocolEvents, useCase } = setup();
 
     await expect(useCase.execute({
       userId: 7, chatId: 70, locale: 'en', role: 'user',
@@ -92,8 +119,7 @@ describe('OpenHomeUseCase', () => {
       kind: 'opened',
       active: { userId: 7, chatId: 70, messageId: 1, token: 'abcdefghijklmnop', revision: 1 },
     });
-    expect(sessions.calls).toEqual(['reserve', 'promote']);
-    expect(delivery.calls.map(({ kind }) => kind)).toEqual(['send']);
+    expect(protocolEvents).toEqual(['reserve', 'send', 'promote']);
     expect(sessions.reservation?.expiresAt).toEqual(new Date(NOW.getTime() + 60_000));
     expect(delivery.calls[0]).toMatchObject({
       kind: 'send',
@@ -102,18 +128,17 @@ describe('OpenHomeUseCase', () => {
   });
 
   it('strips the prior keyboard only after the replacement has been promoted', async () => {
-    const { sessions, delivery, useCase } = setup();
+    const { sessions, delivery, protocolEvents, useCase } = setup();
     await active(sessions);
     sessions.calls.length = 0;
     delivery.calls.length = 0;
+    protocolEvents.length = 0;
 
     await expect(useCase.execute({
       userId: 7, chatId: 70, locale: 'en', role: 'user',
       view: { kind: 'home', checking: false },
     })).resolves.toMatchObject({ kind: 'opened' });
-    expect([...sessions.calls, ...delivery.calls.map(({ kind }) => kind)]).toContain('stripKeyboard');
-    expect(sessions.calls).toEqual(['reserve', 'promote']);
-    expect(delivery.calls.map(({ kind }) => kind)).toEqual(['send', 'stripKeyboard']);
+    expect(protocolEvents).toEqual(['reserve', 'send', 'promote', 'stripKeyboard']);
     expect(delivery.calls[1]).toMatchObject({ kind: 'stripKeyboard', chatId: 70, messageId: 10 });
   });
 
