@@ -1,7 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { and, eq } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../database/database.module';
-import { homeActionReceipts } from '../../database/schema';
+import { homeActionReceipts, notificationPauseReceipts, users } from '../../database/schema';
 import type { HomeActionRepositoryPort } from '../application/ports/home-action-repository.port';
 import {
   isExternalReceipt,
@@ -12,7 +12,7 @@ import {
 } from '../domain/home-action-receipt';
 
 type ReceiptRow = typeof homeActionReceipts.$inferSelect;
-type ReceiptWriter = Pick<AppDatabase, 'insert' | 'select' | 'update'>;
+type ReceiptWriter = Pick<AppDatabase, 'insert' | 'select' | 'update' | 'delete'>;
 
 function key(input: Pick<HomeActionReceipt, 'userId' | 'chatId' | 'kind'>) {
   return and(
@@ -54,6 +54,99 @@ export class DrizzleHomeActionRepository implements HomeActionRepositoryPort {
     });
   }
 
+  async createPauseConfirmation(receipt: Extract<HomeActionReceipt, { kind: 'pause-confirmation' }>): Promise<void> {
+    return this.create(receipt);
+  }
+
+  async createExternalConfirmation(receipt: Extract<HomeActionReceipt, { kind: 'cleanup-confirmation' | 'restart-confirmation' }>): Promise<void> {
+    return this.create(receipt);
+  }
+
+  async confirmPause(input: { userId: number; chatId: number; token: string; id: string; hours: 1 | 4 | 8; now: Date }): Promise<{ kind: 'applied'; expectedRevision: number } | { kind: 'expired' | 'superseded' | 'terminal' }> {
+    return this.immediate((tx) => {
+      const row = tx.select().from(homeActionReceipts).where(key({ ...input, kind: 'pause-confirmation' })).get();
+      const receipt = row && decode(row);
+      if (!receipt || receipt.kind !== 'pause-confirmation' || receipt.id !== input.id || receipt.sessionToken !== input.token || receipt.payload.hours !== input.hours) return { kind: 'superseded' };
+      if (receipt.status === 'completed') return { kind: 'terminal' };
+      if (receipt.expiresAt.getTime() <= input.now.getTime()) return { kind: 'expired' };
+      const user = tx.select().from(users).where(eq(users.telegramId, input.userId)).get();
+      if (!user || user.muted) return { kind: 'superseded' };
+      const expectedRevision = user.notificationPauseRevision ?? 0;
+      const pausedUntil = new Date(input.now.getTime() + input.hours * 3_600_000);
+      const updated = tx.update(users).set({ nonCriticalPausedUntil: pausedUntil, notificationPauseRevision: expectedRevision + 1 })
+        .where(and(eq(users.telegramId, input.userId), eq(users.notificationPauseRevision, expectedRevision))).run();
+      if (updated.changes !== 1) return { kind: 'superseded' };
+      const foundation = tx.insert(notificationPauseReceipts).values({
+        userId: input.userId,
+        previousPausedUntil: user.nonCriticalPausedUntil && user.nonCriticalPausedUntil.getTime() > input.now.getTime() ? user.nonCriticalPausedUntil : null,
+        appliedPausedUntil: pausedUntil, expectedRevision: expectedRevision + 1,
+        expiresAt: pausedUntil, consumedAt: null, createdAt: input.now,
+      }).returning().get();
+      this.upsert(tx, {
+        id: input.id, userId: input.userId, chatId: input.chatId, kind: 'undo-non-critical-pause', sessionToken: null,
+        status: 'pending', expiresAt: new Date(input.now.getTime() + 600_000),
+        payload: { foundationReceiptId: foundation.id, expectedRevision: expectedRevision + 1 },
+      });
+      const completed = tx.update(homeActionReceipts).set({ status: 'completed', updatedAt: input.now })
+        .where(and(key({ ...input, kind: 'pause-confirmation' }), eq(homeActionReceipts.id, input.id), eq(homeActionReceipts.sessionToken, input.token), eq(homeActionReceipts.status, 'pending'))).run();
+      if (completed.changes !== 1) throw new Error('Pause confirmation changed during transaction');
+      return { kind: 'applied', expectedRevision: expectedRevision + 1 };
+    });
+  }
+
+  async undoPause(input: { userId: number; chatId: number; id: string; now: Date }): Promise<{ kind: 'applied' } | { kind: 'expired' | 'superseded' | 'terminal' }> {
+    return this.immediate((tx) => {
+      const row = tx.select().from(homeActionReceipts).where(key({ ...input, kind: 'undo-non-critical-pause' })).get();
+      const receipt = row && decode(row);
+      if (!receipt || receipt.kind !== 'undo-non-critical-pause' || receipt.id !== input.id) return { kind: 'superseded' };
+      if (receipt.status === 'completed') return { kind: 'terminal' };
+      if (receipt.expiresAt.getTime() <= input.now.getTime()) return { kind: 'expired' };
+      const foundation = tx.select().from(notificationPauseReceipts).where(and(eq(notificationPauseReceipts.id, receipt.payload.foundationReceiptId), eq(notificationPauseReceipts.userId, input.userId))).get();
+      if (!foundation || foundation.consumedAt) return { kind: 'superseded' };
+      const restored = foundation.previousPausedUntil && foundation.previousPausedUntil.getTime() > input.now.getTime() ? foundation.previousPausedUntil : null;
+      const updated = tx.update(users).set({ nonCriticalPausedUntil: restored, notificationPauseRevision: receipt.payload.expectedRevision + 1 })
+        .where(and(eq(users.telegramId, input.userId), eq(users.notificationPauseRevision, receipt.payload.expectedRevision))).run();
+      if (updated.changes !== 1) return { kind: 'superseded' };
+      tx.update(notificationPauseReceipts).set({ consumedAt: input.now }).where(eq(notificationPauseReceipts.id, foundation.id)).run();
+      tx.update(homeActionReceipts).set({ status: 'completed', updatedAt: input.now }).where(and(key({ ...input, kind: 'undo-non-critical-pause' }), eq(homeActionReceipts.id, input.id), eq(homeActionReceipts.status, 'pending'))).run();
+      return { kind: 'applied' };
+    });
+  }
+
+  async setQuietHours(input: { userId: number; chatId: number; start: string | null; end: string | null; id: string; expiresAt: Date; now: Date }): Promise<{ kind: 'applied'; changed: boolean } | { kind: 'superseded' }> {
+    if ((input.start === null) !== (input.end === null)) throw new RangeError('Quiet hours require both range ends or neither');
+    return this.immediate((tx) => {
+      const user = tx.select().from(users).where(eq(users.telegramId, input.userId)).get();
+      if (!user) return { kind: 'superseded' };
+      const changed = (user.quietStart ?? null) !== input.start || (user.quietEnd ?? null) !== input.end;
+      if (!changed) return { kind: 'applied', changed: false };
+      const expectedRevision = user.notificationPauseRevision ?? 0;
+      const updated = tx.update(users).set({ quietStart: input.start, quietEnd: input.end, notificationPauseRevision: expectedRevision + 1 })
+        .where(and(eq(users.telegramId, input.userId), eq(users.notificationPauseRevision, expectedRevision))).run();
+      if (updated.changes !== 1) return { kind: 'superseded' };
+      this.upsert(tx, {
+        id: input.id, userId: input.userId, chatId: input.chatId, kind: 'undo-quiet-hours', sessionToken: null, status: 'pending', expiresAt: input.expiresAt,
+        payload: { start: user.quietStart ?? null, end: user.quietEnd ?? null, expectedRevision: expectedRevision + 1 },
+      });
+      return { kind: 'applied', changed: true };
+    });
+  }
+
+  async undoQuietHours(input: { userId: number; chatId: number; id: string; now: Date }): Promise<{ kind: 'applied' } | { kind: 'expired' | 'superseded' | 'terminal' }> {
+    return this.immediate((tx) => {
+      const row = tx.select().from(homeActionReceipts).where(key({ ...input, kind: 'undo-quiet-hours' })).get();
+      const receipt = row && decode(row);
+      if (!receipt || receipt.kind !== 'undo-quiet-hours' || receipt.id !== input.id) return { kind: 'superseded' };
+      if (receipt.status === 'completed') return { kind: 'terminal' };
+      if (receipt.expiresAt.getTime() <= input.now.getTime()) return { kind: 'expired' };
+      const updated = tx.update(users).set({ quietStart: receipt.payload.start, quietEnd: receipt.payload.end, notificationPauseRevision: receipt.payload.expectedRevision + 1 })
+        .where(and(eq(users.telegramId, input.userId), eq(users.notificationPauseRevision, receipt.payload.expectedRevision))).run();
+      if (updated.changes !== 1) return { kind: 'superseded' };
+      tx.update(homeActionReceipts).set({ status: 'completed', updatedAt: input.now }).where(and(key({ ...input, kind: 'undo-quiet-hours' }), eq(homeActionReceipts.id, input.id), eq(homeActionReceipts.status, 'pending'))).run();
+      return { kind: 'applied' };
+    });
+  }
+
   async findCurrentUndo(input: { userId: number; chatId: number; kind: UndoReceiptKind; now: Date }): Promise<HomeActionReceipt | null> {
     const row = this.db.select().from(homeActionReceipts).where(key(input)).get();
     const receipt = row && decode(row);
@@ -88,5 +181,15 @@ export class DrizzleHomeActionRepository implements HomeActionRepositoryPort {
 
   private immediate<T>(operation: (tx: ReceiptWriter) => T): T {
     return this.db.transaction((tx) => operation(tx), { behavior: 'immediate' });
+  }
+
+  private upsert(tx: ReceiptWriter, receipt: HomeActionReceipt): void {
+    tx.insert(homeActionReceipts).values({
+      userId: receipt.userId, chatId: receipt.chatId, kind: receipt.kind, id: receipt.id, sessionToken: receipt.sessionToken,
+      status: receipt.status, payload: JSON.stringify(receipt.payload), expiresAt: receipt.expiresAt, updatedAt: receipt.expiresAt,
+    }).onConflictDoUpdate({
+      target: [homeActionReceipts.userId, homeActionReceipts.chatId, homeActionReceipts.kind],
+      set: { id: receipt.id, sessionToken: receipt.sessionToken, status: receipt.status, payload: JSON.stringify(receipt.payload), expiresAt: receipt.expiresAt, updatedAt: receipt.expiresAt },
+    }).run();
   }
 }

@@ -4,6 +4,8 @@ import { UserRepositoryPort } from '../domain/ports/user-repository.port';
 import {
   ApplyNonCriticalPauseCommand,
   ApplyNonCriticalPauseResult,
+  CompareAndSetQuietHoursCommand,
+  CompareAndSetQuietHoursResult,
   MAX_NOTIFICATION_PAUSE_RECEIPTS_PER_USER,
   NotificationPauseRepositoryPort,
   NotificationPauseState,
@@ -174,6 +176,30 @@ export class InMemoryUserRepository
     return [...this.store.values()];
   }
 
+  /** Infrastructure-only transaction seam used by the paired Home receipt adapter. */
+  async transaction<T>(operation: () => Promise<T>): Promise<T> {
+    const users = new Map([...this.store].map(([id, user]) => [id, { ...user }]));
+    const receipts = new Map([...this.receipts].map(([id, receipt]) => [id, {
+      ...receipt,
+      previousPausedUntil: receipt.previousPausedUntil && new Date(receipt.previousPausedUntil),
+      appliedPausedUntil: new Date(receipt.appliedPausedUntil),
+      expiresAt: new Date(receipt.expiresAt),
+      consumedAt: receipt.consumedAt && new Date(receipt.consumedAt),
+      createdAt: new Date(receipt.createdAt),
+    }]));
+    const nextReceiptId = this.nextReceiptId;
+    try {
+      return await operation();
+    } catch (error) {
+      this.store.clear();
+      for (const [id, user] of users) this.store.set(id, user);
+      this.receipts.clear();
+      for (const [id, receipt] of receipts) this.receipts.set(id, receipt);
+      this.nextReceiptId = nextReceiptId;
+      throw error;
+    }
+  }
+
   // ─── NotificationPauseRepositoryPort ───
 
   async getNotificationPauseState(
@@ -254,6 +280,25 @@ export class InMemoryUserRepository
     return { kind: 'applied', state: this.stateOf(updated), changed: true };
   }
 
+  async compareAndSetQuietHours(
+    command: CompareAndSetQuietHoursCommand,
+  ): Promise<CompareAndSetQuietHoursResult> {
+    if ((command.start === null) !== (command.end === null)) {
+      throw new RangeError('Quiet hours require both range ends or neither');
+    }
+    const user = this.store.get(command.userId);
+    if (!user) return { kind: 'not_found' };
+    if (user.notificationPauseRevision !== command.expectedRevision) {
+      return { kind: 'conflict' };
+    }
+    const changed = user.quietStart !== command.start || user.quietEnd !== command.end;
+    const updated = changed
+      ? { ...user, quietStart: command.start, quietEnd: command.end, notificationPauseRevision: user.notificationPauseRevision + 1 }
+      : user;
+    this.store.set(command.userId, updated);
+    return { kind: 'applied', changed, state: this.quietHoursStateOf(updated) };
+  }
+
   async undoNonCriticalPause(
     userId: number,
     receiptId: number,
@@ -292,6 +337,10 @@ export class InMemoryUserRepository
       nonCriticalPausedUntil: user.nonCriticalPausedUntil,
       revision: user.notificationPauseRevision,
     };
+  }
+
+  private quietHoursStateOf(user: User) {
+    return { ...this.stateOf(user), quietStart: user.quietStart, quietEnd: user.quietEnd };
   }
 
   private stillFuture(deadline: Date | null, now: Date): deadline is Date {

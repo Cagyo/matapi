@@ -37,6 +37,9 @@ import { ValidateHomeCallbackUseCase } from './application/validate-home-callbac
 import { RestartSystemUseCase } from './application/restart-system.use-case';
 import { RollbackSystemUseCase } from './application/rollback-system.use-case';
 import { SetQuietHoursUseCase } from './application/set-quiet-hours.use-case';
+import { CompareAndSetQuietHoursUseCase } from './application/compare-and-set-quiet-hours.use-case';
+import { SetAutoCleanThresholdUseCase } from './application/set-auto-clean-threshold.use-case';
+import { HomeNavigationUseCase } from './application/home-navigation.use-case';
 import { SystemUpdateUseCase } from './application/system-update.use-case';
 import { UnmuteSensorUseCase } from './application/unmute-sensor.use-case';
 import { UpdateSystemUseCase } from './application/update-system.use-case';
@@ -179,7 +182,12 @@ const mode = resolveBotMode();
     },
     {
       provide: HOME_ACTION_REPOSITORY,
-      useClass: mode === 'mock' ? InMemoryHomeActionRepository : DrizzleHomeActionRepository,
+      ...(mode === 'mock'
+        ? {
+          useFactory: (users: InMemoryUserRepository) => new InMemoryHomeActionRepository(users),
+          inject: [USER_REPOSITORY],
+        }
+        : { useClass: DrizzleHomeActionRepository }),
     },
     { provide: HOME_TOKEN_GENERATOR, useClass: CryptoHomeTokenGenerator },
     {
@@ -209,6 +217,9 @@ const mode = resolveBotMode();
     MuteSensorUseCase,
     UnmuteSensorUseCase,
     SetQuietHoursUseCase,
+    CompareAndSetQuietHoursUseCase,
+    SetAutoCleanThresholdUseCase,
+    HomeNavigationUseCase,
     UpdateSystemUseCase,
     SystemUpdateUseCase,
     RollbackSystemUseCase,

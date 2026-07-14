@@ -33,7 +33,7 @@ export class GdriveHandler implements TelegramHandler {
     });
   }
 
-  async handleStatus(ctx: TelegramContext): Promise<void> {
+  async handleStatus(ctx: TelegramContext, options: { includeCleanupAction?: boolean } = {}): Promise<void> {
     try {
       const result = await this.status.execute();
       const body = en.gdrive.body({
@@ -45,9 +45,9 @@ export class GdriveHandler implements TelegramHandler {
         lastError: result.lastError,
         cleanupMinAgeDays: result.cleanupMinAgeDays,
       });
-      const kb = new InlineKeyboard()
-        .text(en.gdrive.cleanButton, 'clean:trigger')
-        .text(en.gdriveAuth.button, 'gdauth:start');
+      const kb = new InlineKeyboard();
+      if (options.includeCleanupAction !== false) kb.text(en.gdrive.cleanButton, 'clean:trigger');
+      kb.text(en.gdriveAuth.button, 'gdauth:start');
       await ctx.reply(`${en.gdrive.header}\n\n${body}`, { reply_markup: kb });
     } catch (err) {
       await this.handleError(ctx, err);

@@ -10,6 +10,23 @@ export interface NotificationPauseState {
   revision: number;
 }
 
+export interface QuietHoursNotificationPauseState extends NotificationPauseState {
+  quietStart: string | null;
+  quietEnd: string | null;
+}
+
+export interface CompareAndSetQuietHoursCommand {
+  userId: number;
+  expectedRevision: number;
+  start: string | null;
+  end: string | null;
+  now: Date;
+}
+
+export type CompareAndSetQuietHoursResult =
+  | { kind: 'applied'; state: QuietHoursNotificationPauseState; changed: boolean }
+  | { kind: 'not_found' | 'conflict' };
+
 export interface ApplyNonCriticalPauseCommand {
   userId: number;
   expectedRevision: number;
@@ -49,6 +66,9 @@ export interface NotificationPauseRepositoryPort {
   resumeNotifications(
     command: ResumeNotificationsCommand,
   ): Promise<ResumeNotificationsResult>;
+  compareAndSetQuietHours(
+    command: CompareAndSetQuietHoursCommand,
+  ): Promise<CompareAndSetQuietHoursResult>;
   undoNonCriticalPause(
     userId: number,
     receiptId: number,

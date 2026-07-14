@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { isHomeActionReceipt, type HomeActionReceipt } from '../../../src/telegram/domain/home-action-receipt';
 import { InMemoryHomeActionRepository } from '../../../src/telegram/infrastructure/in-memory-home-action.repository';
+import { InMemoryUserRepository } from '../../../src/telegram/infrastructure/in-memory-user.repository';
 
 const NOW = new Date('2030-01-01T00:00:00.000Z');
 const LATER = new Date('2030-01-01T00:01:00.000Z');
@@ -48,5 +49,27 @@ describe('InMemoryHomeActionRepository', () => {
     await repository.create(undo);
     await expect(repository.findCurrentUndo({ userId: 100, chatId: 200, kind: 'undo-non-critical-pause', now: NOW })).resolves.toEqual(undo);
     await expect(repository.findCurrentUndo({ userId: 100, chatId: 200, kind: 'undo-non-critical-pause', now: LATER })).resolves.toBeNull();
+  });
+
+  it('commits a confirmed pause, its foundation receipt, and its Home undo together', async () => {
+    const users = new InMemoryUserRepository([{
+      telegramId: 100, name: 'Ada', role: 'user', locale: 'en', muted: false,
+      nonCriticalPausedUntil: null, notificationPauseRevision: 0,
+      quietStart: null, quietEnd: null, createdAt: null,
+    }]);
+    const repository = new InMemoryHomeActionRepository(users);
+    await repository.createPauseConfirmation({
+      id: '1234567890abcdef', userId: 100, chatId: 200, kind: 'pause-confirmation',
+      sessionToken: 'token-a', status: 'pending', expiresAt: new Date(NOW.getTime() + 120_000),
+      payload: { hours: 4 },
+    });
+
+    await expect(repository.confirmPause({
+      userId: 100, chatId: 200, token: 'token-a', id: '1234567890abcdef', hours: 4, now: NOW,
+    })).resolves.toMatchObject({ kind: 'applied', expectedRevision: 1 });
+    expect(await users.getNotificationPauseState(100)).toMatchObject({ revision: 1 });
+    await expect(repository.findCurrentUndo({
+      userId: 100, chatId: 200, kind: 'undo-non-critical-pause', now: NOW,
+    })).resolves.toMatchObject({ kind: 'undo-non-critical-pause', payload: { expectedRevision: 1 } });
   });
 });

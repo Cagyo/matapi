@@ -8,6 +8,8 @@ import { UserRepositoryPort } from '../domain/ports/user-repository.port';
 import {
   ApplyNonCriticalPauseCommand,
   ApplyNonCriticalPauseResult,
+  CompareAndSetQuietHoursCommand,
+  CompareAndSetQuietHoursResult,
   MAX_NOTIFICATION_PAUSE_RECEIPTS_PER_USER,
   NotificationPauseRepositoryPort,
   NotificationPauseState,
@@ -325,6 +327,25 @@ export class DrizzleUserRepository
       if (!updated) return { kind: 'conflict' };
       return { kind: 'applied', state: this.pauseStateOf(updated), changed: true };
     });
+  }
+
+  async compareAndSetQuietHours(
+    command: CompareAndSetQuietHoursCommand,
+  ): Promise<CompareAndSetQuietHoursResult> {
+    if ((command.start === null) !== (command.end === null)) {
+      throw new RangeError('Quiet hours require both range ends or neither');
+    }
+    return this.db.transaction((tx): CompareAndSetQuietHoursResult => {
+      const user = tx.select().from(users).where(eq(users.telegramId, command.userId)).get();
+      if (!user) return { kind: 'not_found' };
+      if ((user.notificationPauseRevision ?? 0) !== command.expectedRevision) return { kind: 'conflict' };
+      const changed = (user.quietStart ?? null) !== command.start || (user.quietEnd ?? null) !== command.end;
+      const updated = changed
+        ? tx.update(users).set({ quietStart: command.start, quietEnd: command.end, notificationPauseRevision: command.expectedRevision + 1 }).where(and(eq(users.telegramId, command.userId), eq(users.notificationPauseRevision, command.expectedRevision))).returning().get()
+        : user;
+      if (!updated) return { kind: 'conflict' };
+      return { kind: 'applied', changed, state: { ...this.pauseStateOf(updated), quietStart: updated.quietStart ?? null, quietEnd: updated.quietEnd ?? null } };
+    }, { behavior: 'immediate' });
   }
 
   async undoNonCriticalPause(

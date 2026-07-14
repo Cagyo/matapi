@@ -5,6 +5,7 @@ import { RenderHomeUseCase } from '../../../src/telegram/application/render-home
 import { RefreshHomeMonitoringUseCase } from '../../../src/telegram/application/refresh-home-monitoring.use-case';
 import { ValidateHomeCallbackUseCase } from '../../../src/telegram/application/validate-home-callback.use-case';
 import { CloseHomeUseCase } from '../../../src/telegram/application/close-home.use-case';
+import { HomeNavigationUseCase } from '../../../src/telegram/application/home-navigation.use-case';
 import { HomeHandler } from '../../../src/telegram/interfaces/home.handler';
 import { RoleMiddleware } from '../../../src/telegram/interfaces/role.middleware';
 import { encodeHomeCallback } from '../../../src/telegram/domain/home-callback';
@@ -53,14 +54,22 @@ function setup() {
     openDashboard: vi.fn().mockResolvedValue(undefined),
     openNotifications: vi.fn().mockResolvedValue(undefined),
   } as any;
-  const handler = new HomeHandler(guard, open, validate, render, refresh, close, camera, legacy);
+  const navigation = { execute: vi.fn().mockImplementation(({ action }: any) => Promise.resolve({
+    kind: 'render',
+    view: action.kind === 'sensors'
+      ? { kind: 'sensors', page: action.page, checking: false }
+      : action.kind === 'home'
+        ? { kind: 'home', checking: false }
+        : { kind: 'notifications' },
+  })) } as unknown as HomeNavigationUseCase;
+  const handler = new HomeHandler(guard, open, validate, render, refresh, close, camera, legacy, navigation);
   const commands: Record<string, (...args: any[]) => Promise<void>> = {};
   const callbacks: { regex: RegExp; fn: (...args: any[]) => Promise<void> }[] = [];
   handler.register({
     command: vi.fn((name, middleware, fn) => { commands[name] = fn ?? middleware; }),
     callbackQuery: vi.fn((regex, middleware, fn) => { callbacks.push({ regex, fn: fn ?? middleware }); }),
   } as any);
-  return { commands, callbacks, open, validate, render, refresh, close, camera, legacy };
+  return { commands, callbacks, open, validate, render, refresh, close, camera, legacy, navigation };
 }
 
 describe('HomeHandler', () => {
@@ -170,19 +179,25 @@ describe('HomeHandler', () => {
     }
   });
 
-  it.each([
-    ['camera', { kind: 'camera' }],
-    ['notifications', { kind: 'notifications' }],
-    ['more', { kind: 'more' }],
-  ] as const)('delegates %s to a separate workflow without rendering Home', async (_name, action) => {
-    const { callbacks, render, camera, legacy } = setup();
+  it('routes Notifications through Home navigation and renders its returned Home view', async () => {
+    const { callbacks, render, navigation, legacy } = setup();
+    const ctx = context(encodeHomeCallback(identity.token, 1, { kind: 'notifications' }));
+
+    await callbacks[0].fn(ctx);
+
+    expect(navigation.execute).toHaveBeenCalledWith(expect.objectContaining({ action: { kind: 'notifications' } }));
+    expect(render.execute).toHaveBeenCalledWith(expect.objectContaining({ view: { kind: 'notifications' } }));
+    expect(legacy.openNotifications).not.toHaveBeenCalled();
+  });
+
+  it('delegates camera to its separate workflow without rendering Home', async () => {
+    const { callbacks, render, camera } = setup();
+    const action = { kind: 'camera' } as const;
     const ctx = context(encodeHomeCallback(identity.token, 1, action));
 
     await callbacks[0].fn(ctx);
 
     expect(render.execute).not.toHaveBeenCalled();
-    if (action.kind === 'camera') expect(camera.handleDashboard).toHaveBeenCalledWith(ctx);
-    if (action.kind === 'notifications') expect(legacy.openNotifications).toHaveBeenCalledWith(ctx);
-    if (action.kind === 'more') expect(legacy.openDashboard).toHaveBeenCalledWith(ctx);
+    expect(camera.handleDashboard).toHaveBeenCalledWith(ctx);
   });
 });
