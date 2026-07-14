@@ -32,4 +32,10 @@ describe('Telegram role-use-case dependency metadata', () => {
     expect(emitted).not.toMatch(/design:paramtypes".*\[Object\]/);
     expect(emitted).toContain('CSV_TEMP_DIRECTORY');
   });
+
+  it('injects the camera-source handler clock through the CLOCK token', () => {
+    const emitted = emittedParamTypes('src/telegram/interfaces/camera-sources.handler.ts');
+
+    expect(emitted).toMatch(/__param\(3,.*CLOCK/);
+  });
 });

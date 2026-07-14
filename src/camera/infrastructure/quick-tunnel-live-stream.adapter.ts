@@ -702,7 +702,7 @@ export class QuickTunnelLiveStreamAdapter implements LiveStreamGatewayPort {
 
   private closeAllViewers(): void {
     this.upstreamUnavailable = true;
-    for (const viewer of [...this.activeViewers]) viewer.response.destroy();
+    for (const viewer of [...this.activeViewers]) viewer.response.end();
     this.closeUpstream();
   }
 

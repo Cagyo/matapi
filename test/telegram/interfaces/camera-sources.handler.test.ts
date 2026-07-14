@@ -28,7 +28,7 @@ function setup(now = () => 1_000) {
     configure as unknown as ConfigureLiveSourceUseCase,
     list as unknown as ListLiveSourcesUseCase,
     remove as unknown as RemoveLiveSourceUseCase,
-    now,
+    { now: () => new Date(now()) },
   );
   return { handler, configure, list, remove };
 }

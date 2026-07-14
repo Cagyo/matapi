@@ -30,7 +30,7 @@ export class OpenLiveStreamUseCase {
     private readonly sessions: LiveStreamSessionService,
     @Inject(LIVE_STREAM_CAPABILITY)
     private readonly capability: LiveStreamCapabilityPort,
-    private readonly sourceStartGate = new RtspSourceStartGate(),
+    private readonly sourceStartGate: RtspSourceStartGate,
   ) {}
 
   async execute(input: OpenLiveStreamInput): Promise<OpenLiveStreamResult> {

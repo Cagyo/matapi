@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { OpenLiveStreamUseCase } from '../../../src/camera/application/open-live-stream.use-case';
+import { RtspSourceStartGate } from '../../../src/camera/application/rtsp-source-start-gate.service';
 import { FeatureLiveStreamCapabilityAdapter } from '../../../src/camera/infrastructure/feature-live-stream-capability.adapter';
 
 describe('live-stream capability', () => {
@@ -19,6 +20,7 @@ describe('live-stream capability', () => {
       } as never,
       { open: async () => { throw new Error('gateway must not start'); } } as never,
       { isAvailable: async () => false },
+      new RtspSourceStartGate(),
     );
 
     await expect(useCase.execute({ telegramId: 1 })).rejects.toMatchObject({

@@ -1,7 +1,13 @@
+import 'reflect-metadata';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { LiveStreamSessionService } from '../../../src/camera/application/live-stream-session.service';
 import { LiveStreamSourceResolverService } from '../../../src/camera/application/live-stream-source-resolver.service';
 import { OpenLiveStreamUseCase } from '../../../src/camera/application/open-live-stream.use-case';
+import { RtspSourceStartGate } from '../../../src/camera/application/rtsp-source-start-gate.service';
 import { LiveStreamSourceUnavailableError } from '../../../src/camera/domain/errors/live-stream-source-unavailable.error';
 import type { Camera } from '../../../src/camera/domain/camera.entity';
 import type { MediaRepositoryPort } from '../../../src/camera/domain/ports/media-repository.port';
@@ -10,6 +16,37 @@ import type { LiveStreamLeasePort } from '../../../src/camera/domain/ports/live-
 import type { MonotonicClockPort } from '../../../src/camera/domain/ports/monotonic-clock.port';
 
 describe('OpenLiveStreamUseCase', () => {
+  it('exposes the RTSP start gate as a Nest-resolvable constructor dependency', () => {
+    const outputDir = mkdtempSync(join(tmpdir(), 'home-worker-di-'));
+
+    try {
+      execFileSync(
+        process.execPath,
+        [
+          require.resolve('typescript/bin/tsc'),
+          '--project',
+          resolve('tsconfig.json'),
+          '--outDir',
+          outputDir,
+          '--incremental',
+          'false',
+        ],
+        { stdio: 'pipe' },
+      );
+
+      const compiledUseCase = readFileSync(
+        join(outputDir, 'camera/application/open-live-stream.use-case.js'),
+        'utf8',
+      );
+
+      expect(compiledUseCase).toContain(
+        'rtsp_source_start_gate_service_1.RtspSourceStartGate])',
+      );
+    } finally {
+      rmSync(outputDir, { force: true, recursive: true });
+    }
+  });
+
   it('returns a tokenized tunnel URL for an enabled camera without trusting a camera URL', async () => {
     const media = new FakeMediaRepository([camera('Front door')]);
     const result = await createUseCase(media).execute({
@@ -141,6 +178,7 @@ function createUseCase(media: FakeMediaRepository): OpenLiveStreamUseCase {
     new LiveStreamSourceResolverService(media),
     session,
     { isAvailable: async () => true },
+    new RtspSourceStartGate(),
   );
 }
 

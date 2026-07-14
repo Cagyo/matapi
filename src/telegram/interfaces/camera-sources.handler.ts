@@ -1,9 +1,10 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { InlineKeyboard } from 'grammy';
 import { ConfigureLiveSourceUseCase } from '../../camera/application/configure-live-source.use-case';
 import { ListLiveSourcesUseCase } from '../../camera/application/list-live-sources.use-case';
 import { RemoveLiveSourceUseCase } from '../../camera/application/remove-live-source.use-case';
 import type { RedactedLiveSource } from '../../camera/domain/ports/live-source-repository.port';
+import { CLOCK, type ClockPort } from '../../events/domain/ports/clock.port';
 import { catalogFor, type LocaleCatalog } from '../../locales';
 import { en } from '../../locales/en';
 import type { TelegramContext } from './telegram-context';
@@ -26,8 +27,12 @@ export class CameraSourcesHandler {
     private readonly configure: ConfigureLiveSourceUseCase,
     private readonly list: ListLiveSourcesUseCase,
     private readonly remove: RemoveLiveSourceUseCase,
-    private readonly now: () => number = Date.now,
+    @Inject(CLOCK) private readonly clock: ClockPort,
   ) {}
+
+  private now(): number {
+    return this.clock.now().getTime();
+  }
 
   async handleEntry(ctx: TelegramContext): Promise<void> {
     if (!(await this.requireAdmin(ctx))) return;

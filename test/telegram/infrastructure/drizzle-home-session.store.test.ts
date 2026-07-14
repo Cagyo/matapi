@@ -78,7 +78,7 @@ describe('DrizzleHomeSessionStore', () => {
     databasePath = join(databaseDirectory, 'home.db');
     sqlite = new Database(databasePath);
     configureContentionConnection(sqlite);
-    db = drizzle(sqlite, { schema }) as AppDatabase;
+    db = drizzle(sqlite, { schema });
     migrate(db, { migrationsFolder: './migrations' });
     sqlite.prepare(`INSERT INTO users (telegram_id, name, role, locale) VALUES (?, ?, ?, ?)`).run(100, 'User', 'user', 'en');
     store = new DrizzleHomeSessionStore(db);
@@ -219,7 +219,7 @@ describe('DrizzleHomeSessionStore', () => {
     const restartedSqlite = new Database(databasePath);
     restartedSqlite.pragma('foreign_keys = ON');
     try {
-      const restarted = new DrizzleHomeSessionStore(drizzle(restartedSqlite, { schema }) as AppDatabase);
+      const restarted = new DrizzleHomeSessionStore(drizzle(restartedSqlite, { schema }));
       await expect(restarted.validate({ ...active, now: NOW })).resolves.toEqual({ kind: 'accepted', active, view: HOME });
     } finally {
       restartedSqlite.close();
@@ -251,7 +251,7 @@ describe('DrizzleHomeSessionStore', () => {
     const secondSqlite = new Database(databasePath);
     configureContentionConnection(secondSqlite);
     try {
-      const second = new DrizzleHomeSessionStore(drizzle(secondSqlite, { schema }) as AppDatabase);
+      const second = new DrizzleHomeSessionStore(drizzle(secondSqlite, { schema }));
       const lockHolder = await holdImmediateLock(databasePath);
       try {
         await expect(second.reserveNew({ userId: 100, chatId: 200, token: 'token-b', view: SENSORS, now: NOW, expiresAt: later() })).resolves.toMatchObject({ kind: 'new', token: 'token-b' });
