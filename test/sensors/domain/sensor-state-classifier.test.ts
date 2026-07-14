@@ -73,6 +73,30 @@ describe('classifySensorState', () => {
     expect(classifySensorState({ ...uart, lastValue: '799.9' })).toMatchObject({ level: 'normal' });
   });
 
+  it('accepts finite positive thresholds above the valid reading range', () => {
+    expect(
+      classifySensorState(
+        sensor({
+          type: 'uart',
+          lastValue: '3500',
+          config: { thresholds: { warning: 3000, critical: 6000 } },
+        }),
+      ),
+    ).toMatchObject({ level: 'warning', active: null });
+  });
+
+  it('accepts canonical scientific notation persisted from a numeric UART reading', () => {
+    expect(
+      classifySensorState(
+        sensor({
+          type: 'uart',
+          lastValue: '3.5e3',
+          config: { thresholds: { warning: 3000, critical: 6000 } },
+        }),
+      ),
+    ).toMatchObject({ level: 'warning', active: null });
+  });
+
   it('marks invalid UART readings unknown', () => {
     expect(
       classifySensorState(sensor({ type: 'uart', lastValue: 'not-a-number' })),

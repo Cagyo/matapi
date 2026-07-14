@@ -63,6 +63,16 @@ describe('MockUartCo2Adapter (base UART CO2 behaviour)', () => {
     ).rejects.toThrow(UartConfigInvalidError);
   });
 
+  it.each([NaN, Infinity, -Infinity])('rejects a non-finite warning threshold (%s)', async (warning) => {
+    const adapter = new MockUartCo2Adapter(new InMemorySensorLogRepository(), new InMemoryCo2Source());
+    await expect(
+      adapter.init({
+        ...uartConfig(),
+        config: { port: '/dev/ttyS0', thresholds: { warning, critical: 1200 } },
+      }),
+    ).rejects.toThrow(UartConfigInvalidError);
+  });
+
   it('buffers readings and emits a threshold event when crossing a level', async () => {
     const logs = new InMemorySensorLogRepository();
     const source = new InMemoryCo2Source([620, 700, 850, 1300]);

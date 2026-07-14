@@ -59,7 +59,7 @@ function classified(
 }
 
 function decimalPpm(value: string): number | null {
-  if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value)) return null;
+  if (value.trim() === '') return null;
   const ppm = Number(value);
   return isValidPpm(ppm) ? ppm : null;
 }
@@ -73,8 +73,8 @@ function uartThresholds(
   if (
     typeof warning !== 'number' ||
     typeof critical !== 'number' ||
-    !isValidPpm(warning) ||
-    !isValidPpm(critical) ||
+    !Number.isFinite(warning) ||
+    !Number.isFinite(critical) ||
     warning <= 0 ||
     warning >= critical
   ) {

@@ -58,7 +58,13 @@ export function parseUartCo2Config(
     typeof rawThresholds.warning === 'number' ? rawThresholds.warning : defaults.warning;
   const critical =
     typeof rawThresholds.critical === 'number' ? rawThresholds.critical : defaults.critical;
-  if (warning <= 0 || critical <= 0 || critical <= warning) {
+  if (
+    !Number.isFinite(warning) ||
+    !Number.isFinite(critical) ||
+    warning <= 0 ||
+    critical <= 0 ||
+    critical <= warning
+  ) {
     throw new UartConfigInvalidError(
       `invalid thresholds (warning=${warning}, critical=${critical}); require 0 < warning < critical`,
     );
