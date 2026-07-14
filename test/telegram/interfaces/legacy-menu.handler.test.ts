@@ -46,31 +46,31 @@ describe('LegacyMenuHandler', () => {
     expect(callbacks[0].regex.test('menu:status')).toBe(false);
   });
 
-  it('opens the legacy dashboard as a new message with legacy callbacks', async () => {
-    const { handler } = setup();
+  it('does not expose transitional Home panels or a top-level notifications route', async () => {
+    const { handler, callbacks } = setup();
     const reply = vi.fn().mockResolvedValue(undefined);
-    await handler.openDashboard({ localeState: state('admin'), reply } as any);
+    const editMessageText = vi.fn().mockResolvedValue(undefined);
+    const callback = callbacks[0].fn;
 
-    expect(reply).toHaveBeenCalledWith(
-      expect.any(String), expect.objectContaining({ reply_markup: expect.anything() }),
-    );
-    expect(JSON.stringify(reply.mock.calls[0][1].reply_markup)).toContain('legacy-menu:');
-    expect(JSON.stringify(reply.mock.calls[0][1].reply_markup)).not.toContain('"callback_data":"menu:');
-  });
+    expect('openDashboard' in handler).toBe(false);
+    expect('openNotifications' in handler).toBe(false);
+    await callback({
+      localeState: state('admin'),
+      match: ['legacy-menu:top', 'top'],
+      answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+      reply,
+      editMessageText,
+    });
+    expect(JSON.stringify(editMessageText.mock.calls[0][1].reply_markup)).not.toContain('legacy-menu:sub:notifications');
 
-  it('opens localized notification controls as a separate message', async () => {
-    const { handler } = setup();
-    const reply = vi.fn().mockResolvedValue(undefined);
-    await handler.openNotifications({ localeState: state('user', 'uk'), reply } as any);
-
-    expect(reply).toHaveBeenCalledWith(
-      state('user', 'uk').catalog.home.legacyNotifications.title,
-      expect.objectContaining({ reply_markup: expect.anything() }),
-    );
-    const keyboard = JSON.stringify(reply.mock.calls[0][1].reply_markup);
-    expect(keyboard).toContain('legacy-menu:act:mute');
-    expect(keyboard).toContain('legacy-menu:act:unmute');
-    expect(keyboard).toContain('legacy-menu:sub:quiet');
+    await callback({
+      localeState: state(),
+      match: ['legacy-menu:sub:notifications', 'sub:notifications'],
+      answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+      reply,
+      editMessageText,
+    });
+    expect(reply).not.toHaveBeenCalled();
   });
 
   it('delegates legacy notification actions through the current handlers', async () => {

@@ -37,7 +37,7 @@ function createTestSetup(metaValue: string | null = null) {
   } as unknown as UserRepositoryPort;
   const menus = { updateUserMenu: vi.fn().mockResolvedValue(undefined) } as unknown as BotCommandsMenuService;
   const guard = { registered: vi.fn(), adminOnly: vi.fn() } as unknown as RoleMiddleware;
-  const handler = new SettingsHandler(meta, users, menus, guard);
+  const handler = new SettingsHandler(users, menus, guard);
 
   const commandCallbacks: Record<string, (...args: any[]) => any> = {};
   const callbackQueryCallbacks: { regex: RegExp; fn: (...args: any[]) => any }[] = [];
@@ -102,22 +102,17 @@ describe('SettingsHandler', () => {
     expect(answerCallbackQuery).toHaveBeenCalledWith(expect.objectContaining({ show_alert: true }));
   });
 
-  it('retains the admin guard and localized threshold controls', async () => {
-    const { callbackQueryCallbacks, meta } = createTestSetup('80');
-    const thresholdCallback = callbackQueryCallbacks.find(({ regex }) => regex.test('settings:set:85'))!.fn;
-    const answerCallbackQuery = vi.fn().mockResolvedValue(true);
-    const editMessageText = vi.fn().mockResolvedValue(true);
+  it.each(['user', 'admin'] as const)('renders only personal locale settings for %s', async (role) => {
+    const { callbackQueryCallbacks, commandCallbacks } = createTestSetup('80');
+    const reply = vi.fn().mockResolvedValue(true);
 
-    await thresholdCallback({
-      match: ['settings:set:85', '85'],
-      localeState: localeState('admin', 'uk'),
-      answerCallbackQuery,
-      editMessageText,
-      callbackQuery: { message: { message_id: 123 } },
-    });
+    await commandCallbacks.settings({ from: { id: 100 }, localeState: localeState(role), reply });
 
-    expect(meta.set).toHaveBeenCalledWith('auto_clean_threshold', '85');
-    expect(answerCallbackQuery).toHaveBeenCalledWith(expect.stringContaining('85%'));
-    expect(editMessageText).toHaveBeenCalledWith(expect.stringContaining('Параметри роботи системи'), expect.anything());
+    expect(callbackQueryCallbacks.some(({ regex }) => regex.test('settings:set:85'))).toBe(false);
+    const text = reply.mock.calls[0][0] as string;
+    const keyboard = JSON.stringify(reply.mock.calls[0][1].reply_markup);
+    expect(text).not.toContain('System settings');
+    expect(keyboard).not.toContain('settings:set:');
+    expect(keyboard).not.toContain('clean:trigger');
   });
 });

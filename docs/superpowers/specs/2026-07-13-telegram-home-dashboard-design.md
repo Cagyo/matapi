@@ -18,7 +18,8 @@ The feature also establishes reliable Telegram interaction semantics:
 - cached status renders without probing hardware;
 - critical sensor alarms are never intentionally suppressed by user settings;
 - consequential actions confirm before execution;
-- external workflows provide a consistent route to a fresh Home.
+- the Slice 4 return contract will provide external workflows a consistent
+  route to a fresh Home.
 
 The complete experience is delivered through four implementation slices. Each
 slice receives its own detailed implementation spec and plan; this document is
@@ -549,6 +550,11 @@ Existing command destinations may remain behind a transitional More screen.
 - More and Admin tools hierarchy;
 - restart and cleanup confirmations;
 - final EN/UK labels and row layouts.
+
+Slice 3 retires the transitional Home-to-legacy Notifications/More routes.
+Canonical Storage cleanup always starts from Home confirmation; it never emits
+the legacy direct `clean:trigger` control. Independent external workflows are
+intentionally not given a Return Home button until Slice 4.
 
 ### Slice 4 — External workflow return contract
 

@@ -93,9 +93,6 @@ export class LegacyMenuHandler implements TelegramHandler {
           case 'sub:camera':
             await this.cameraHandler.handleDashboard(ctx);
             break;
-          case 'sub:notifications':
-            await this.openNotifications(ctx);
-            break;
           case 'sub:quiet': {
             const kb = new InlineKeyboard()
               .text(catalog.menu.submenus.quiet22_07, 'legacy-menu:act:quiet:22:00-07:00')
@@ -277,26 +274,6 @@ export class LegacyMenuHandler implements TelegramHandler {
     }
   }
 
-  /** Transitional workflow opened from Home's More action on its own message. */
-  async openDashboard(ctx: TelegramContext): Promise<void> {
-    const catalog = this.catalog(ctx);
-    const role = ctx.localeState?.user.role;
-    await ctx.reply(catalog.menu.title, {
-      reply_markup: this.buildKeyboard(catalog, role === 'admin'),
-    });
-  }
-
-  /** Transitional notification controls must never replace the Home message. */
-  async openNotifications(ctx: TelegramContext): Promise<void> {
-    const catalog = this.catalog(ctx);
-    const keyboard = new InlineKeyboard()
-      .text(catalog.home.legacyNotifications.muteSensors, 'legacy-menu:act:mute')
-      .text(catalog.home.legacyNotifications.unmuteSensors, 'legacy-menu:act:unmute')
-      .row()
-      .text(catalog.home.legacyNotifications.quietHours, 'legacy-menu:sub:quiet');
-    await ctx.reply(catalog.home.legacyNotifications.title, { reply_markup: keyboard });
-  }
-
   private buildKeyboard(catalog: LocaleCatalog, isAdmin: boolean): InlineKeyboard {
     const keyboard = new InlineKeyboard()
       .text(catalog.menu.buttons.status, 'legacy-menu:status')
@@ -304,7 +281,6 @@ export class LegacyMenuHandler implements TelegramHandler {
       .text(catalog.menu.buttons.logs, 'legacy-menu:sub:logs')
       .row()
       .text(catalog.menu.categories.media, 'legacy-menu:sub:camera')
-      .text(catalog.home.buttons.notifications, 'legacy-menu:sub:notifications')
       .text(catalog.menu.buttons.exportCsv, 'legacy-menu:sub:csv')
       .row()
       .text(catalog.menu.buttons.settings, 'legacy-menu:settings');

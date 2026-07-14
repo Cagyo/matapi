@@ -141,6 +141,7 @@ export const homeSessions = sqliteTable('home_sessions', {
   activeRevision:    integer('active_revision'),
   activeView:        text('active_view'),
   activeSensorPage:  integer('active_sensor_page'),
+  activeViewPayload: text('active_view_payload'), // nullable canonical Home-view JSON
   activeChecking:    integer('active_checking', { mode: 'boolean' }),
   pendingKind:       text('pending_kind'),          // 'new' | 'edit'
   // Null only for a new-message reservation until Telegram send returns;
@@ -150,6 +151,7 @@ export const homeSessions = sqliteTable('home_sessions', {
   pendingRevision:   integer('pending_revision'),
   pendingView:       text('pending_view'),
   pendingSensorPage: integer('pending_sensor_page'),
+  pendingViewPayload:text('pending_view_payload'), // nullable canonical Home-view JSON
   pendingChecking:   integer('pending_checking', { mode: 'boolean' }),
   pendingExpiresAt:  integer('pending_expires_at', { mode: 'timestamp' }),
   updatedAt:         integer('updated_at', { mode: 'timestamp' }).notNull(),
@@ -167,6 +169,21 @@ export const inviteCodes = sqliteTable('invite_codes', {
   createdAt: integer('created_at', { mode: 'timestamp' }),
   usedAt:    integer('used_at', { mode: 'timestamp' }),
 });
+
+// ─── Home Action Receipts ───
+// Exactly one bounded current row per (user, private chat, action kind).
+// Replacement invalidates the prior receipt; this is not an action history.
+export const homeActionReceipts = sqliteTable('home_action_receipts', {
+  userId:       integer('user_id').notNull().references(() => users.telegramId, { onDelete: 'cascade' }),
+  chatId:       integer('chat_id').notNull(),
+  kind:         text('kind').notNull(),
+  id:           text('id').notNull(),
+  sessionToken: text('session_token'),
+  status:       text('status').notNull(), // pending | executing | completed | failed
+  payload:      text('payload').notNull(),
+  expiresAt:    integer('expires_at', { mode: 'timestamp' }).notNull(),
+  updatedAt:    integer('updated_at', { mode: 'timestamp' }).notNull(),
+}, (table) => [primaryKey({ columns: [table.userId, table.chatId, table.kind] })]);
 
 // ─── Cameras ───
 export const cameras = sqliteTable('cameras', {
@@ -218,6 +235,18 @@ state. The parallel pending fields hold an exact new-message or in-place-edit
 reservation. `pending_expires_at` is always 60 seconds after reservation; an
 expired pending reservation is cleared (or its otherwise-empty row removed)
 without changing an existing active Home.
+
+`active_view_payload` and `pending_view_payload` are nullable, bounded JSON
+columns for the canonical Home view only; the adapter rejects malformed or
+non-canonical values rather than coercing them. `home_action_receipts` has one
+current row per `(user_id, chat_id, kind)`: `pending` receipts expire, external
+cleanup/restart is atomically claimed as `executing`, and it reaches
+`completed` or `failed` exactly once. A replacement receipt makes the prior
+one stale, so retries cannot execute external work twice.
+
+`user_sensor_mutes.sensor_id` is a namespaced target key: `sensor:<id>` for a
+sensor and `camera:<id>` for a camera. The namespace prevents equal raw IDs
+from colliding across notification target types.
 
 The Drizzle adapter at
 [`src/telegram/infrastructure/drizzle-home-session.store.ts`](../../src/telegram/infrastructure/drizzle-home-session.store.ts)

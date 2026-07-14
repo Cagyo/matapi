@@ -77,12 +77,18 @@ the bounded value, loads current locale/role, validates user/chat/message/token/
 revision, then renders or executes. A stale, closed, or unavailable authority
 never mutates state and receives localized recovery.
 
-Slice 2 keeps camera, notification, and More destinations as a **transitional
-external-workflow boundary**: after Home validation, `CameraHandler` or
-`LegacyMenuHandler` owns those flows. They do not reuse the Home session or
-perform Home protocol transitions. The shared Return-to-Home contract for
-external workflows is deferred to Slice 4; this slice makes no claim that
-every legacy terminal screen has a Home button.
+Slice 3 owns canonical Home navigation: `n` renders Notifications and `m`
+renders More, never delegating to `LegacyMenuHandler`. More contains History
+(logs then CSV), My settings, Help, and Admin tools; Admin tools contains all
+five Sensor Setup destinations (add, edit, remove, import, export), Storage
+(Drive status/connect and receipt-backed cleanup), and System (health,
+packages, restart, and automatic-cleanup thresholds). Canonical Storage status
+never emits `clean:trigger`; Home is the only Slice 3 cleanup launcher.
+
+Independent external workflows remain registered and do not reuse the Home
+session or perform Home protocol transitions. Slice 4 still owns the shared
+Return-to-Home contract, so this slice explicitly does not promise that an
+external terminal screen returns the user to Home.
 
 ## Role Model
 

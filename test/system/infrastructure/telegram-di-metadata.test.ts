@@ -38,4 +38,13 @@ describe('Telegram role-use-case dependency metadata', () => {
 
     expect(emitted).toMatch(/__param\(3,.*CLOCK/);
   });
+
+  it('keeps Home on port-based dependencies and TelegramModule free of forwardRef wiring', () => {
+    const home = emittedParamTypes('src/telegram/interfaces/home.handler.ts');
+    const module = readFileSync(resolve('src/telegram/telegram.module.ts'), 'utf8');
+
+    expect(home).not.toContain('LegacyMenuHandler');
+    expect(home).not.toContain('DrizzleHomeActionRepository');
+    expect(module).not.toContain('forwardRef(');
+  });
 });

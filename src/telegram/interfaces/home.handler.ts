@@ -9,7 +9,6 @@ import { ValidateHomeCallbackUseCase } from '../application/validate-home-callba
 import type { HomeView } from '../domain/home-session';
 import { OPEN_NEW_HOME_CALLBACK, parseHomeCallback } from '../domain/home-callback';
 import { CameraHandler } from './camera.handler';
-import { LegacyMenuHandler } from './legacy-menu.handler';
 import { LogsHandler } from './logs.handler';
 import { CsvHandler } from './csv.handler';
 import { SettingsHandler } from './settings.handler';
@@ -43,7 +42,6 @@ export class HomeHandler implements TelegramHandler {
     private readonly refreshMonitoring: RefreshHomeMonitoringUseCase,
     private readonly closeHome: CloseHomeUseCase,
     private readonly camera: CameraHandler,
-    private readonly legacyMenu: LegacyMenuHandler,
     private readonly navigation?: HomeNavigationUseCase,
     private readonly logs?: LogsHandler,
     private readonly csv?: CsvHandler,

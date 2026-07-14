@@ -108,12 +108,14 @@ Info notifications suppressed. Critical alerts still delivered.
 
 ---
 
-## Global notification pause (internal foundation — no command yet)
+## Global notification pause (canonical Home control)
 
-This slice adds the persistence and application layer for a per-user global pause of **non-critical** notifications. **No bot command, menu action, or callback exposes it yet** — only application use cases exist (`Pause`, `Resume`, `Undo`). Behavior:
+The canonical Home Notifications screen exposes the per-user global pause of
+**non-critical** notifications; slash commands remain unchanged. Its
+receipt-backed confirmation and Undo use the Home action repository. Behavior:
 
 - **Legacy indefinite mute is preserved.** An existing `users.muted = true` remains an indefinite pause of non-critical notifications until Resume clears it. Critical alarms always bypass it.
 - **New global pauses are timed only** — exactly **1, 4, or 8 hours** (`users.nonCriticalPausedUntil`). A new *indefinite* global pause can no longer be created. A timed pause is active only while `nonCriticalPausedUntil > now` (strict; see 19-bot-notifications.md).
 - **Resume clears both mechanisms atomically** — it sets `muted = false` and `nonCriticalPausedUntil = null` together and increments `notificationPauseRevision` once. Clearing is by column *presence*: if either is set (even a deadline already in the past) Resume reports a change; if neither is set it is a no-op with no revision bump.
-- **Undo reverts the latest timed pause**, restoring the prior deadline, using a per-user receipt (01-database.md → `notification_pause_receipts`). Only the newest receipt is undoable; foreign, consumed, expired, and revision-superseded receipts are rejected without changing state. Any real `muted` toggle bumps the revision and thus supersedes a pending Undo.
+- **Undo reverts the latest timed pause**, restoring the prior deadline, using a receipt. Only the newest receipt is undoable; foreign, consumed, expired, and revision-superseded receipts are rejected without changing state. Any real `muted` toggle bumps the revision and thus supersedes a pending Undo.
 - **Per-sensor `/mute` and quiet-hours behavior above are unchanged.** Critical alarms bypass legacy mute, timed pause, per-sensor pause, and quiet hours (19-bot-notifications.md).

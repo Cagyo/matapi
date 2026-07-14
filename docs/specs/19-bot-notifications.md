@@ -42,6 +42,10 @@ deadline. Delivery *eligibility* is not the same as successful transport: an
 eligible critical alarm still flows through the existing queue/retry path
 (05-event-queue.md) when Telegram is offline.
 
+Home target mute keys are namespaced as `sensor:<id>` and `camera:<id>`; this
+does not change the policy matrix, but it prevents a camera and sensor with the
+same raw ID from sharing a mute state.
+
 ## Suppression Matrix (per-recipient)
 
 | Class | Legacy mute | Timed pause | Per-sensor pause | Quiet hours |
