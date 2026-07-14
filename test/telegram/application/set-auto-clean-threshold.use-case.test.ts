@@ -28,4 +28,20 @@ describe('SetAutoCleanThresholdUseCase', () => {
       else process.env.DISK_CRITICAL_PERCENT = prior;
     }
   });
+
+  it('uses the environment fallback when reading metadata fails', async () => {
+    const prior = process.env.DISK_CRITICAL_PERCENT;
+    process.env.DISK_CRITICAL_PERCENT = '90';
+    try {
+      const useCase = new SetAutoCleanThresholdUseCase({
+        get: async () => { throw new Error('database unavailable'); },
+        set: async () => undefined,
+        delete: async () => undefined,
+      });
+      await expect(useCase.current()).resolves.toBe(90);
+    } finally {
+      if (prior === undefined) delete process.env.DISK_CRITICAL_PERCENT;
+      else process.env.DISK_CRITICAL_PERCENT = prior;
+    }
+  });
 });

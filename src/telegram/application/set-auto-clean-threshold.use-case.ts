@@ -20,8 +20,12 @@ export class SetAutoCleanThresholdUseCase {
   }
 
   async current(): Promise<number> {
-    const stored = Number(await this.meta.get('auto_clean_threshold'));
-    if (VALID_THRESHOLDS.has(stored)) return stored;
+    try {
+      const stored = Number(await this.meta.get('auto_clean_threshold'));
+      if (VALID_THRESHOLDS.has(stored)) return stored;
+    } catch {
+      // A Home render must still be usable when the metadata adapter is down.
+    }
     const environment = Number(process.env.DISK_CRITICAL_PERCENT);
     return VALID_THRESHOLDS.has(environment) ? environment : DEFAULT_THRESHOLD;
   }
