@@ -143,7 +143,9 @@ export const homeSessions = sqliteTable('home_sessions', {
   activeSensorPage:  integer('active_sensor_page'),
   activeChecking:    integer('active_checking', { mode: 'boolean' }),
   pendingKind:       text('pending_kind'),          // 'new' | 'edit'
-  pendingMessageId:  integer('pending_message_id'), // null until a new send returns
+  // Null only for a new-message reservation until Telegram send returns;
+  // edit reservations store the active message ID immediately.
+  pendingMessageId:  integer('pending_message_id'),
   pendingToken:      text('pending_token'),
   pendingRevision:   integer('pending_revision'),
   pendingView:       text('pending_view'),
