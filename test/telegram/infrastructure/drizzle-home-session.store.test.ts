@@ -67,6 +67,21 @@ function configureContentionConnection(sqlite: Database.Database): void {
 }
 
 describe('DrizzleHomeSessionStore', () => {
+  it('persists a typed Slice 3 notification-target view over an adapter restart', async () => {
+    const view: HomeView = {
+      kind: 'notification-targets', page: 1,
+      targets: [
+        { kind: 'sensor', id: 'a0a0a0a0-0000-4000-8000-000000000001' },
+        { kind: 'camera', id: 'a0a0a0a0-0000-4000-8000-000000000002' },
+      ],
+    };
+    const reservation = await store.reserveNew({ userId: 100, chatId: 200, token: 'token-a', view, now: NOW, expiresAt: later() });
+    const promoted = await store.promoteNew(reservation, 300, NOW);
+    if (promoted.kind !== 'promoted') throw new Error('expected active Home');
+    const restarted = new DrizzleHomeSessionStore(drizzle(sqlite, { schema }));
+    await expect(restarted.validate({ ...promoted.active, now: NOW })).resolves.toEqual({ kind: 'accepted', active: promoted.active, view });
+  });
+
   let sqlite: Database.Database;
   let db: AppDatabase;
   let store: DrizzleHomeSessionStore;

@@ -36,6 +36,13 @@
       "when": 1783974271692,
       "tag": "0004_authoritative_home",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1784053900996,
+      "tag": "0005_home_slice_3_navigation",
+      "breakpoints": true
     }
   ]
 }

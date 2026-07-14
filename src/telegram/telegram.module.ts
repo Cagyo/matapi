@@ -55,6 +55,7 @@ import { HOME_SESSION_STORE } from './domain/ports/home-session-store.port';
 import { HOME_TOKEN_GENERATOR } from './domain/ports/home-token-generator.port';
 import { HOME_HEALTH_SNAPSHOT } from './application/ports/home-health-snapshot.port';
 import { HOME_MESSAGE_DELIVERY } from './application/ports/home-message-delivery.port';
+import { HOME_ACTION_REPOSITORY } from './application/ports/home-action-repository.port';
 import { ConsoleNotifierAdapter } from './infrastructure/console-notifier.adapter';
 import { EnvAdminClaimCredentialAdapter } from './infrastructure/env-admin-claim-credential.adapter';
 import { TelegramAdminAlertAdapter } from './infrastructure/telegram-admin-alert.adapter';
@@ -63,11 +64,13 @@ import { DrizzleInviteCodeRepository } from './infrastructure/drizzle-invite-cod
 import { DrizzleUserRepository } from './infrastructure/drizzle-user.repository';
 import { DrizzleUserSensorMuteRepository } from './infrastructure/drizzle-user-sensor-mute.repository';
 import { DrizzleHomeSessionStore } from './infrastructure/drizzle-home-session.store';
+import { DrizzleHomeActionRepository } from './infrastructure/drizzle-home-action.repository';
 import { GrammyBotGateway, BOT_MODE, BotMode } from './infrastructure/grammy-bot.gateway';
 import { InMemoryInviteCodeRepository } from './infrastructure/in-memory-invite-code.repository';
 import { InMemoryUserRepository } from './infrastructure/in-memory-user.repository';
 import { InMemoryUserSensorMuteRepository } from './infrastructure/in-memory-user-sensor-mute.repository';
 import { InMemoryHomeSessionStore } from './infrastructure/in-memory-home-session.store';
+import { InMemoryHomeActionRepository } from './infrastructure/in-memory-home-action.repository';
 import { InMemoryHomeHealthSnapshotAdapter } from './infrastructure/in-memory-home-health-snapshot.adapter';
 import { InMemoryHomeMessageDeliveryAdapter } from './infrastructure/in-memory-home-message-delivery.adapter';
 import { TelegramHomeMessageAdapter } from './infrastructure/telegram-home-message.adapter';
@@ -171,6 +174,10 @@ const mode = resolveBotMode();
       provide: HOME_SESSION_STORE,
       useClass: mode === 'mock' ? InMemoryHomeSessionStore : DrizzleHomeSessionStore,
     },
+    {
+      provide: HOME_ACTION_REPOSITORY,
+      useClass: mode === 'mock' ? InMemoryHomeActionRepository : DrizzleHomeActionRepository,
+    },
     { provide: HOME_TOKEN_GENERATOR, useClass: CryptoHomeTokenGenerator },
     {
       provide: HOME_MESSAGE_DELIVERY,
@@ -258,6 +265,6 @@ const mode = resolveBotMode();
     TelegramRecipientDirectoryAdapter,
     GrammyBotGateway,
   ],
-  exports: [GrammyBotGateway, USER_REPOSITORY, HOME_SESSION_STORE, GdriveAuthHandler],
+  exports: [GrammyBotGateway, USER_REPOSITORY, HOME_SESSION_STORE, HOME_ACTION_REPOSITORY, GdriveAuthHandler],
 })
 export class TelegramModule {}

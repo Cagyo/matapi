@@ -39,6 +39,32 @@ async function openActive(
 }
 
 describe('InMemoryHomeSessionStore', () => {
+  it('keeps caller-owned notification targets isolated across reservation and validation', async () => {
+    const store = new InMemoryHomeSessionStore();
+    const targets = [
+      { kind: 'sensor' as const, id: 'a0a0a0a0-0000-4000-8000-000000000001' },
+      { kind: 'camera' as const, id: 'a0a0a0a0-0000-4000-8000-000000000002' },
+    ];
+    const reservation = await store.reserveNew({
+      userId: 100, chatId: 200, token: 'token-a',
+      view: { kind: 'notification-targets', page: 1, targets }, now: NOW, expiresAt: later(),
+    });
+    targets[0].id = 'a0a0a0a0-0000-4000-8000-000000000003';
+    targets.push({ kind: 'sensor', id: 'a0a0a0a0-0000-4000-8000-000000000004' });
+    await store.promoteNew(reservation, 300, NOW);
+
+    await expect(store.validate({ ...identity(), now: NOW })).resolves.toEqual({
+      kind: 'accepted', active: identity(),
+      view: {
+        kind: 'notification-targets', page: 1,
+        targets: [
+          { kind: 'sensor', id: 'a0a0a0a0-0000-4000-8000-000000000001' },
+          { kind: 'camera', id: 'a0a0a0a0-0000-4000-8000-000000000002' },
+        ],
+      },
+    });
+  });
+
   it('opens its first Home reservation and accepts its promoted identity', async () => {
     const store = new InMemoryHomeSessionStore();
     const reservation = await store.reserveNew({

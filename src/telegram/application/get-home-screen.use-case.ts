@@ -26,6 +26,9 @@ export class GetHomeScreenUseCase {
     if (input.view.kind === 'home') {
       return { kind: 'home', summary, checking: input.view.checking };
     }
+    if (input.view.kind !== 'sensors') {
+      throw new RangeError(`Home view ${input.view.kind} has no Slice 2 screen`);
+    }
 
     const page = await this.sensors.listDashboardPage({
       page: input.view.page,

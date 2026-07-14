@@ -130,6 +130,7 @@ export const homeSessions = sqliteTable(
     activeRevision: integer('active_revision'),
     activeView: text('active_view'),
     activeSensorPage: integer('active_sensor_page'),
+    activeViewPayload: text('active_view_payload'),
     activeChecking: integer('active_checking', { mode: 'boolean' }),
     pendingKind: text('pending_kind'),
     pendingMessageId: integer('pending_message_id'),
@@ -137,6 +138,7 @@ export const homeSessions = sqliteTable(
     pendingRevision: integer('pending_revision'),
     pendingView: text('pending_view'),
     pendingSensorPage: integer('pending_sensor_page'),
+    pendingViewPayload: text('pending_view_payload'),
     pendingChecking: integer('pending_checking', { mode: 'boolean' }),
     pendingExpiresAt: integer('pending_expires_at', { mode: 'timestamp' }),
     updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
@@ -145,6 +147,25 @@ export const homeSessions = sqliteTable(
     primaryKey({ columns: [table.userId, table.chatId] }),
     index('idx_home_sessions_pending_expiry').on(table.pendingExpiresAt),
   ],
+);
+
+// ─── Home Action Receipts ───
+// One current receipt per Home action kind/user/chat. Replacing a receipt is a
+// bounded invalidation mechanism; terminal external work stays inspectable.
+export const homeActionReceipts = sqliteTable(
+  'home_action_receipts',
+  {
+    userId: integer('user_id').notNull().references(() => users.telegramId, { onDelete: 'cascade' }),
+    chatId: integer('chat_id').notNull(),
+    kind: text('kind').notNull(),
+    id: text('id').notNull(),
+    sessionToken: text('session_token'),
+    status: text('status').notNull(),
+    payload: text('payload').notNull(),
+    expiresAt: integer('expires_at', { mode: 'timestamp' }).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.userId, table.chatId, table.kind] })],
 );
 
 // ─── Invite Codes ───

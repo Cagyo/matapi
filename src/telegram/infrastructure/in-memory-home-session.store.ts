@@ -19,7 +19,9 @@ function keyOf(userId: number, chatId: number): string {
 }
 
 function cloneView(view: HomeView): HomeView {
-  return view.kind === 'home' ? { ...view } : { ...view };
+  if (view.kind === 'notification-targets') return { ...view, targets: view.targets.map((target) => ({ ...target })) };
+  if (view.kind === 'notification-target') return { ...view, target: { ...view.target } };
+  return { ...view };
 }
 
 function cloneIdentity(identity: HomeIdentity): HomeIdentity {
@@ -45,11 +47,7 @@ function sameIdentity(left: HomeIdentity, right: HomeIdentity): boolean {
 }
 
 function sameView(left: HomeView, right: HomeView): boolean {
-  return (
-    left.kind === right.kind &&
-    left.checking === right.checking &&
-    (left.kind !== 'sensors' || right.kind !== 'sensors' || left.page === right.page)
-  );
+  return JSON.stringify(cloneView(left)) === JSON.stringify(cloneView(right));
 }
 
 function sameReservation(left: HomeReservation, right: HomeReservation): boolean {

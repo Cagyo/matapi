@@ -2,6 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { and, eq, isNull } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../database/database.module';
 import { homeSessions } from '../../database/schema';
+import { encodeHomeView, parseHomeView } from '../domain/home-session';
 import type {
   HomeIdentity,
   HomeReservation,
@@ -24,9 +25,7 @@ function sameIdentity(left: HomeIdentity, right: HomeIdentity): boolean {
 }
 
 function sameView(left: HomeView, right: HomeView): boolean {
-  return left.kind === right.kind
-    && left.checking === right.checking
-    && (left.kind !== 'sensors' || right.kind !== 'sensors' || left.page === right.page);
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function sameReservation(left: HomeReservation, right: HomeReservation): boolean {
@@ -41,26 +40,30 @@ function sameReservation(left: HomeReservation, right: HomeReservation): boolean
 }
 
 function pendingValues(reservation: HomeReservation) {
+  const encoded = encodeHomeView(reservation.view);
   return {
     pendingKind: reservation.kind,
     pendingMessageId: reservation.messageId,
     pendingToken: reservation.token,
     pendingRevision: reservation.revision,
     pendingView: reservation.view.kind,
-    pendingSensorPage: reservation.view.kind === 'sensors' ? reservation.view.page : null,
-    pendingChecking: reservation.view.checking,
+    pendingSensorPage: encoded.sensorPage,
+    pendingViewPayload: encoded.payload,
+    pendingChecking: encoded.checking,
     pendingExpiresAt: reservation.expiresAt,
   };
 }
 
 function activeValues(active: HomeIdentity, view: HomeView) {
+  const encoded = encodeHomeView(view);
   return {
     activeMessageId: active.messageId,
     activeToken: active.token,
     activeRevision: active.revision,
     activeView: view.kind,
-    activeSensorPage: view.kind === 'sensors' ? view.page : null,
-    activeChecking: view.checking,
+    activeSensorPage: encoded.sensorPage,
+    activeViewPayload: encoded.payload,
+    activeChecking: encoded.checking,
   };
 }
 
@@ -72,6 +75,7 @@ function clearPendingValues() {
     pendingRevision: null,
     pendingView: null,
     pendingSensorPage: null,
+    pendingViewPayload: null,
     pendingChecking: null,
     pendingExpiresAt: null,
   };
@@ -83,21 +87,12 @@ function activeOf(row: SessionRow): { identity: HomeIdentity; view: HomeView } |
     || row.activeToken === null
     || row.activeRevision === null
     || row.activeView === null
-    || row.activeChecking === null
   ) return null;
-  if (row.activeView === 'home') {
-    return {
-      identity: { userId: row.userId, chatId: row.chatId, messageId: row.activeMessageId, token: row.activeToken, revision: row.activeRevision },
-      view: { kind: 'home', checking: row.activeChecking },
-    };
-  }
-  if (row.activeView === 'sensors' && row.activeSensorPage !== null) {
-    return {
-      identity: { userId: row.userId, chatId: row.chatId, messageId: row.activeMessageId, token: row.activeToken, revision: row.activeRevision },
-      view: { kind: 'sensors', page: row.activeSensorPage, checking: row.activeChecking },
-    };
-  }
-  return null;
+  const view = parseHomeView(row.activeView, row.activeSensorPage, row.activeViewPayload, row.activeChecking);
+  return view ? {
+    identity: { userId: row.userId, chatId: row.chatId, messageId: row.activeMessageId, token: row.activeToken, revision: row.activeRevision },
+    view,
+  } : null;
 }
 
 function pendingOf(row: SessionRow): HomeReservation | null {
@@ -106,35 +101,20 @@ function pendingOf(row: SessionRow): HomeReservation | null {
     || row.pendingToken === null
     || row.pendingRevision === null
     || row.pendingView === null
-    || row.pendingChecking === null
     || row.pendingExpiresAt === null
   ) return null;
   if (row.pendingKind === 'edit' && row.pendingMessageId === null) return null;
-  if (row.pendingView === 'home') {
-    return {
-      kind: row.pendingKind,
-      userId: row.userId,
-      chatId: row.chatId,
-      messageId: row.pendingMessageId,
-      token: row.pendingToken,
-      revision: row.pendingRevision,
-      view: { kind: 'home', checking: row.pendingChecking },
-      expiresAt: row.pendingExpiresAt,
-    };
-  }
-  if (row.pendingView === 'sensors' && row.pendingSensorPage !== null) {
-    return {
-      kind: row.pendingKind,
-      userId: row.userId,
-      chatId: row.chatId,
-      messageId: row.pendingMessageId,
-      token: row.pendingToken,
-      revision: row.pendingRevision,
-      view: { kind: 'sensors', page: row.pendingSensorPage, checking: row.pendingChecking },
-      expiresAt: row.pendingExpiresAt,
-    };
-  }
-  return null;
+  const view = parseHomeView(row.pendingView, row.pendingSensorPage, row.pendingViewPayload, row.pendingChecking);
+  return view ? {
+    kind: row.pendingKind,
+    userId: row.userId,
+    chatId: row.chatId,
+    messageId: row.pendingMessageId,
+    token: row.pendingToken,
+    revision: row.pendingRevision,
+    view,
+    expiresAt: row.pendingExpiresAt,
+  } : null;
 }
 
 function isExpired(reservation: HomeReservation, now: Date): boolean {
@@ -351,6 +331,7 @@ export class DrizzleHomeSessionStore implements HomeSessionStorePort {
       row.activeRevision === null ? isNull(homeSessions.activeRevision) : eq(homeSessions.activeRevision, row.activeRevision),
       row.activeView === null ? isNull(homeSessions.activeView) : eq(homeSessions.activeView, row.activeView),
       row.activeSensorPage === null ? isNull(homeSessions.activeSensorPage) : eq(homeSessions.activeSensorPage, row.activeSensorPage),
+      row.activeViewPayload === null ? isNull(homeSessions.activeViewPayload) : eq(homeSessions.activeViewPayload, row.activeViewPayload),
       row.activeChecking === null ? isNull(homeSessions.activeChecking) : eq(homeSessions.activeChecking, row.activeChecking),
       row.pendingKind === null ? isNull(homeSessions.pendingKind) : eq(homeSessions.pendingKind, row.pendingKind),
       row.pendingMessageId === null ? isNull(homeSessions.pendingMessageId) : eq(homeSessions.pendingMessageId, row.pendingMessageId),
@@ -358,6 +339,7 @@ export class DrizzleHomeSessionStore implements HomeSessionStorePort {
       row.pendingRevision === null ? isNull(homeSessions.pendingRevision) : eq(homeSessions.pendingRevision, row.pendingRevision),
       row.pendingView === null ? isNull(homeSessions.pendingView) : eq(homeSessions.pendingView, row.pendingView),
       row.pendingSensorPage === null ? isNull(homeSessions.pendingSensorPage) : eq(homeSessions.pendingSensorPage, row.pendingSensorPage),
+      row.pendingViewPayload === null ? isNull(homeSessions.pendingViewPayload) : eq(homeSessions.pendingViewPayload, row.pendingViewPayload),
       row.pendingChecking === null ? isNull(homeSessions.pendingChecking) : eq(homeSessions.pendingChecking, row.pendingChecking),
       row.pendingExpiresAt === null ? isNull(homeSessions.pendingExpiresAt) : eq(homeSessions.pendingExpiresAt, row.pendingExpiresAt),
     );

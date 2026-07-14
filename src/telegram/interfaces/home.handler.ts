@@ -130,6 +130,7 @@ export class HomeHandler implements TelegramHandler {
     active: Parameters<RenderHomeUseCase['execute']>[0]['active'],
     acceptedView: HomeView,
   ): Promise<void> {
+    if (acceptedView.kind !== 'home' && acceptedView.kind !== 'sensors') return;
     const checking = await this.renderHome.execute({
       active,
       ...this.renderOptions(ctx),
@@ -137,6 +138,10 @@ export class HomeHandler implements TelegramHandler {
     });
     if (!this.isRendered(checking)) {
       await this.recoverRenderFailure(ctx, checking);
+      return;
+    }
+    if (checking.view.kind !== 'home' && checking.view.kind !== 'sensors') {
+      await this.recover(ctx, 'unavailable');
       return;
     }
 
