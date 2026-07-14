@@ -1,52 +1,21 @@
-import { Inject, Injectable, Optional } from '@nestjs/common';
-import {
-  MEDIA_REPOSITORY,
-  MediaRepositoryPort,
-} from '../../camera/domain/ports/media-repository.port';
-import {
-  SENSOR_QUERY,
-  SensorQueryPort,
-} from '../../sensors/domain/ports/sensor-query.port';
+import { Injectable } from '@nestjs/common';
 import { SensorAlreadyMutedError } from '../domain/errors/sensor-already-muted.error';
 import { SensorNotFoundError } from '../domain/errors/sensor-not-found.error';
-import {
-  USER_SENSOR_MUTE_REPOSITORY,
-  UserSensorMuteRepositoryPort,
-} from '../domain/ports/user-sensor-mute-repository.port';
+import { NotificationTargetDirectoryService } from './notification-target-directory.service';
+import { SetNotificationTargetMutedUseCase } from './set-notification-target-muted.use-case';
 
 /** Spec 12 — `/mute <sensor>`. Per-user, per-sensor notification mute. */
 @Injectable()
 export class MuteSensorUseCase {
   constructor(
-    @Inject(SENSOR_QUERY) private readonly sensors: SensorQueryPort,
-    @Inject(USER_SENSOR_MUTE_REPOSITORY)
-    private readonly mutes: UserSensorMuteRepositoryPort,
-    @Optional()
-    @Inject(MEDIA_REPOSITORY)
-    private readonly media?: MediaRepositoryPort,
+    private readonly targets: NotificationTargetDirectoryService,
+    private readonly setMuted: SetNotificationTargetMutedUseCase,
   ) {}
 
   async execute(userId: number, sensorName: string): Promise<void> {
-    const lookup = await this.sensors.findByName(sensorName);
-    if (lookup?.kind === 'active') {
-      if (await this.mutes.isMuted(userId, lookup.sensor.id)) {
-        throw new SensorAlreadyMutedError(lookup.sensor.name);
-      }
-      await this.mutes.mute(userId, lookup.sensor.id);
-      return;
-    }
-
-    if (this.media) {
-      const camera = await this.media.findCameraByName(sensorName);
-      if (camera?.enabled) {
-        if (await this.mutes.isMuted(userId, camera.id)) {
-          throw new SensorAlreadyMutedError(camera.name);
-        }
-        await this.mutes.mute(userId, camera.id);
-        return;
-      }
-    }
-
-    throw new SensorNotFoundError(sensorName);
+    const target = await this.targets.findEnabledByName(sensorName, userId);
+    if (!target) throw new SensorNotFoundError(sensorName);
+    if (target.muted) throw new SensorAlreadyMutedError(target.name);
+    await this.setMuted.execute(userId, target.ref, true);
   }
 }

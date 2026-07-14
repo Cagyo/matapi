@@ -39,6 +39,7 @@ export class RenderHomeUseCase {
   async execute(input: RenderHomeInput): Promise<RenderHomeResult> {
     const screen = await this.screens.execute({
       userId: input.active.userId,
+      chatId: input.active.chatId,
       role: input.role,
       view: input.view,
     });

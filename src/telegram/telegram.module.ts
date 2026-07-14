@@ -27,6 +27,9 @@ import { SystemOnlineNotifier } from './application/system-online-notifier.servi
 import { RefreshHomeMonitoringUseCase } from './application/refresh-home-monitoring.use-case';
 import { GetHomeSummaryUseCase } from './application/get-home-summary.use-case';
 import { GetHomeScreenUseCase } from './application/get-home-screen.use-case';
+import { GetNotificationScreenUseCase } from './application/get-notification-screen.use-case';
+import { NotificationTargetDirectoryService } from './application/notification-target-directory.service';
+import { SetNotificationTargetMutedUseCase } from './application/set-notification-target-muted.use-case';
 import { OpenHomeUseCase } from './application/open-home.use-case';
 import { RenderHomeUseCase } from './application/render-home.use-case';
 import { CloseHomeUseCase } from './application/close-home.use-case';
@@ -214,6 +217,9 @@ const mode = resolveBotMode();
     SystemOnlineNotifier,
     RefreshHomeMonitoringUseCase,
     GetHomeSummaryUseCase,
+    GetNotificationScreenUseCase,
+    NotificationTargetDirectoryService,
+    SetNotificationTargetMutedUseCase,
     GetHomeScreenUseCase,
     ValidateHomeCallbackUseCase,
     OpenHomeUseCase,

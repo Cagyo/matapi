@@ -47,6 +47,7 @@ export class OpenHomeUseCase {
   async execute(input: OpenHomeInput): Promise<OpenHomeResult> {
     const screen = await this.screens.execute({
       userId: input.userId,
+      chatId: input.chatId,
       role: input.role,
       view: input.view,
     });

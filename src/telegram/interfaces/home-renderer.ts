@@ -18,12 +18,14 @@ export function renderHomeMessage(
   identity: PendingHomeIdentity,
   screen: HomeScreen,
 ): HomeRenderedMessage {
-  const text = screen.kind === 'home'
-    ? renderHomeText(catalog, screen.summary, screen.checking)
-    : renderSensorsText(catalog, screen);
-  const rows = screen.kind === 'home'
-    ? homeRows(catalog, identity)
-    : sensorRows(catalog, identity, screen);
+  if (screen.kind === 'home') {
+    return { text: renderHomeText(catalog, screen.summary, screen.checking), rows: homeRows(catalog, identity) };
+  }
+  if (screen.kind !== 'sensors') {
+    throw new RangeError(`Screen ${screen.kind} has no renderer in this slice`);
+  }
+  const text = renderSensorsText(catalog, screen);
+  const rows = sensorRows(catalog, identity, screen);
   return { text, rows };
 }
 
