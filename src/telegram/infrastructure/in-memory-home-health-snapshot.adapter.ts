@@ -7,16 +7,22 @@ export class InMemoryHomeHealthSnapshotAdapter implements HomeHealthSnapshotPort
   private snapshot: HomeHealthSnapshot | null = null;
 
   get(): HomeHealthSnapshot | null {
-    return this.snapshot;
+    return this.snapshot ? this.clone(this.snapshot) : null;
   }
 
   set(snapshot: HomeHealthSnapshot): void {
-    Object.freeze(snapshot.enabledSensorIds);
-    Object.freeze(snapshot.onlineSensorIds);
-    Object.freeze(snapshot.missingSensorIds);
-    Object.freeze(snapshot.failedSensorIds);
-    Object.freeze(snapshot.timedOutSensorIds);
-    Object.freeze(snapshot.offlineSensorIds);
-    this.snapshot = Object.freeze(snapshot);
+    this.snapshot = this.clone(snapshot);
+  }
+
+  private clone(snapshot: HomeHealthSnapshot): HomeHealthSnapshot {
+    return Object.freeze({
+      completedAt: new Date(snapshot.completedAt.getTime()),
+      enabledSensorIds: Object.freeze([...snapshot.enabledSensorIds]),
+      onlineSensorIds: Object.freeze([...snapshot.onlineSensorIds]),
+      missingSensorIds: Object.freeze([...snapshot.missingSensorIds]),
+      failedSensorIds: Object.freeze([...snapshot.failedSensorIds]),
+      timedOutSensorIds: Object.freeze([...snapshot.timedOutSensorIds]),
+      offlineSensorIds: Object.freeze([...snapshot.offlineSensorIds]),
+    });
   }
 }

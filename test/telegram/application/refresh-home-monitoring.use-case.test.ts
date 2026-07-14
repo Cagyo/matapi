@@ -89,4 +89,21 @@ describe('RefreshHomeMonitoringUseCase', () => {
     await expect(failedProbeUseCase.execute()).resolves.toEqual({ kind: 'failed', previous });
     expect(snapshots.set).not.toHaveBeenCalled();
   });
+
+  it('probes each enabled sensor once in its first-seen order', async () => {
+    const probe = vi.fn(async () => []);
+    const useCase = new RefreshHomeMonitoringUseCase(
+      query(['door', 'window', 'door', 'window']),
+      { probe } as SensorHealthPort,
+      { get: () => null, set: vi.fn() },
+      { now: () => new Date('2030-01-01T00:00:00.000Z') },
+    );
+
+    await useCase.execute();
+
+    expect(probe).toHaveBeenCalledWith(
+      ['door', 'window'],
+      SENSOR_HEALTH_PROBE_TIMEOUT_MS,
+    );
+  });
 });

@@ -46,7 +46,8 @@ export class RefreshHomeMonitoringUseCase {
   private async refresh(): Promise<RefreshHomeMonitoringResult> {
     const previous = this.snapshots.get();
     try {
-      const enabledSensorIds = (await this.sensors.listEnabled()).map(({ id }) => id);
+      const sensorIds = (await this.sensors.listEnabled()).map(({ id }) => id);
+      const enabledSensorIds = [...new Set(sensorIds)];
       const probes = await this.health.probe(
         enabledSensorIds,
         SENSOR_HEALTH_PROBE_TIMEOUT_MS,
