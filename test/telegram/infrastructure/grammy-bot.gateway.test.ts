@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { homeCallbackAckMiddleware } from '../../../src/telegram/interfaces/home-callback-ack.middleware';
 import { homeUpdateConstraints } from '../../../src/telegram/interfaces/home-update-constraints';
 import { GrammyBotGateway } from '../../../src/telegram/infrastructure/grammy-bot.gateway';
+import { TelegramHomeMessageAdapter } from '../../../src/telegram/infrastructure/telegram-home-message.adapter';
 import { TelegramHandler } from '../../../src/telegram/interfaces/telegram-handler';
 
 const mocks = vi.hoisted(() => {
@@ -45,6 +46,7 @@ describe('GrammyBotGateway handler registration', () => {
       lastUpdateAt: null,
       liveStreamMessageCleanup: { register: vi.fn() },
       telegramLiveStreamMessageCleanup: { setBot: vi.fn() },
+      homeMessageDelivery: Object.assign(Object.create(TelegramHomeMessageAdapter.prototype), { setBot: vi.fn() }),
       eventNotifier: { register: vi.fn() },
       recipientDirectory: { register: vi.fn() },
       adminAlertService: { register: vi.fn() },
@@ -76,6 +78,7 @@ describe('GrammyBotGateway handler registration', () => {
       mocks.sequentializedMiddleware,
       resolveOptional,
     ]);
+    expect(gateway.homeMessageDelivery.setBot).toHaveBeenCalledWith(mocks.bot);
   });
 
   it('registers CsvHandler exactly once before MenuHandler', () => {
@@ -133,6 +136,7 @@ describe('GrammyBotGateway handler registration', () => {
       directMessenger: { clearBot: vi.fn() },
       botCommandsMenu: { clearBot: vi.fn() },
       telegramLiveStreamMessageCleanup: { clearBot },
+      homeMessageDelivery: Object.assign(Object.create(TelegramHomeMessageAdapter.prototype), { clearBot: vi.fn() }),
       eventNotifier: { clear: vi.fn() },
       recipientDirectory: { clear: vi.fn() },
       adminAlertService: { clear: vi.fn() },
@@ -142,6 +146,7 @@ describe('GrammyBotGateway handler registration', () => {
     await gateway.onModuleDestroy();
 
     expect(clearBot).toHaveBeenCalledTimes(1);
+    expect(gateway.homeMessageDelivery.clearBot).toHaveBeenCalledTimes(1);
     expect(clear).toHaveBeenCalledTimes(1);
   });
 });

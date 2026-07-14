@@ -70,6 +70,7 @@ import { InMemoryUserSensorMuteRepository } from './infrastructure/in-memory-use
 import { InMemoryHomeSessionStore } from './infrastructure/in-memory-home-session.store';
 import { InMemoryHomeHealthSnapshotAdapter } from './infrastructure/in-memory-home-health-snapshot.adapter';
 import { InMemoryHomeMessageDeliveryAdapter } from './infrastructure/in-memory-home-message-delivery.adapter';
+import { TelegramHomeMessageAdapter } from './infrastructure/telegram-home-message.adapter';
 import { CryptoHomeTokenGenerator } from './infrastructure/crypto-home-token-generator.adapter';
 import { TelegramDirectMessenger } from './infrastructure/telegram-direct-messenger.adapter';
 import { TelegramNotifierAdapter } from './infrastructure/telegram-notifier.adapter';
@@ -170,7 +171,12 @@ const mode = resolveBotMode();
       useClass: mode === 'mock' ? InMemoryHomeSessionStore : DrizzleHomeSessionStore,
     },
     { provide: HOME_TOKEN_GENERATOR, useClass: CryptoHomeTokenGenerator },
-    { provide: HOME_MESSAGE_DELIVERY, useClass: InMemoryHomeMessageDeliveryAdapter },
+    {
+      provide: HOME_MESSAGE_DELIVERY,
+      useClass: mode === 'mock'
+        ? InMemoryHomeMessageDeliveryAdapter
+        : TelegramHomeMessageAdapter,
+    },
     InMemoryHomeHealthSnapshotAdapter,
     { provide: HOME_HEALTH_SNAPSHOT, useExisting: InMemoryHomeHealthSnapshotAdapter },
     { provide: INVITE_CODE_GENERATOR, useValue: defaultInviteCodeGenerator },

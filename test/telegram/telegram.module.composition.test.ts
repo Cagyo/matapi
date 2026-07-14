@@ -75,7 +75,7 @@ describe('TelegramModule bot-mode composition', () => {
       userSensorMuteRepository: expect.objectContaining({ name: 'DrizzleUserSensorMuteRepository' }),
       homeSessionStore: expect.objectContaining({ name: 'DrizzleHomeSessionStore' }),
       homeTokenGenerator: expect.objectContaining({ name: 'CryptoHomeTokenGenerator' }),
-      homeMessageDelivery: expect.objectContaining({ name: 'InMemoryHomeMessageDeliveryAdapter' }),
+      homeMessageDelivery: expect.objectContaining({ name: 'TelegramHomeMessageAdapter' }),
     });
   });
 });

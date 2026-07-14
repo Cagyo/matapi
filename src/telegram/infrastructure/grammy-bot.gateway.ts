@@ -53,12 +53,17 @@ import { homeCallbackAckMiddleware } from '../interfaces/home-callback-ack.middl
 import { TelegramContext } from '../interfaces/telegram-context';
 import { homeUpdateConstraints } from '../interfaces/home-update-constraints';
 import { BotCommandsMenuService } from '../application/bot-commands-menu.service';
+import {
+  HOME_MESSAGE_DELIVERY,
+  type HomeMessageDeliveryPort,
+} from '../application/ports/home-message-delivery.port';
 import { ConsoleNotifierAdapter } from './console-notifier.adapter';
 import { TelegramAdminAlertAdapter } from './telegram-admin-alert.adapter';
 import { TelegramLiveStreamMessageCleanupAdapter } from './telegram-live-stream-message-cleanup.adapter';
 import { TelegramDirectMessenger } from './telegram-direct-messenger.adapter';
 import { TelegramNotifierAdapter } from './telegram-notifier.adapter';
 import { TelegramRecipientDirectoryAdapter } from './telegram-recipient-directory.adapter';
+import { TelegramHomeMessageAdapter } from './telegram-home-message.adapter';
 
 /** Token for the env-resolved bot mode. */
 export const BOT_MODE = Symbol('BOT_MODE');
@@ -100,6 +105,8 @@ export class GrammyBotGateway
     private readonly consoleNotifier: ConsoleNotifierAdapter,
     @Inject(forwardRef(() => TelegramDirectMessenger))
     private readonly directMessenger: TelegramDirectMessenger,
+    @Inject(HOME_MESSAGE_DELIVERY)
+    private readonly homeMessageDelivery: HomeMessageDeliveryPort,
     @Inject(forwardRef(() => AdminAlertService))
     private readonly adminAlertService: AdminAlertService,
     @Inject(forwardRef(() => TelegramAdminAlertAdapter))
@@ -256,6 +263,9 @@ export class GrammyBotGateway
 
     this.telegramNotifier.setBot(bot);
     this.directMessenger.setBot(bot);
+    if (this.homeMessageDelivery instanceof TelegramHomeMessageAdapter) {
+      this.homeMessageDelivery.setBot(bot);
+    }
     this.botCommandsMenu.setBot(bot);
     this.telegramLiveStreamMessageCleanup.setBot(bot);
     this.eventNotifier.register(this.telegramNotifier);
@@ -297,6 +307,9 @@ export class GrammyBotGateway
     }
     this.telegramNotifier.clearBot();
     this.directMessenger.clearBot();
+    if (this.homeMessageDelivery instanceof TelegramHomeMessageAdapter) {
+      this.homeMessageDelivery.clearBot();
+    }
     this.botCommandsMenu.clearBot();
     this.telegramLiveStreamMessageCleanup.clearBot();
     this.eventNotifier.clear();

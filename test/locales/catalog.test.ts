@@ -42,4 +42,48 @@ describe('catalogFor', () => {
       expect(catalog.menu.submenus.sensorsExportCsv).toBeTruthy();
     }
   });
+
+  it('provides the complete Home rendering catalog with equal shapes in every locale', () => {
+    const [english, russian, ukrainian] = [catalogs.en, catalogs.ru, catalogs.uk];
+
+    expect(english.home).toEqual(expect.objectContaining({
+      title: expect.any(String),
+      verdicts: expect.objectContaining({
+        attention: expect.any(Function),
+        unavailable: expect.any(String),
+        normal: expect.any(String),
+      }),
+      buttons: expect.objectContaining({
+        sensors: expect.any(String),
+        camera: expect.any(String),
+        notifications: expect.any(String),
+        more: expect.any(String),
+        checkNow: expect.any(String),
+      }),
+      sensors: expect.objectContaining({
+        title: expect.any(String),
+        row: expect.any(Function),
+        page: expect.any(Function),
+        clamp: expect.any(Function),
+        emptyMember: expect.any(String),
+        emptyAdmin: expect.any(String),
+        setupSensors: expect.any(String),
+      }),
+      recovery: expect.objectContaining({
+        stale: expect.any(String),
+        updating: expect.any(String),
+        unavailable: expect.any(String),
+        openNewHome: expect.any(String),
+        closed: expect.any(String),
+      }),
+      legacyNotifications: expect.objectContaining({
+        title: expect.any(String),
+        muteSensors: expect.any(String),
+        unmuteSensors: expect.any(String),
+        quietHours: expect.any(String),
+      }),
+    }));
+    expect(Object.keys(russian.home).sort()).toEqual(Object.keys(english.home).sort());
+    expect(Object.keys(ukrainian.home).sort()).toEqual(Object.keys(english.home).sort());
+  });
 });
