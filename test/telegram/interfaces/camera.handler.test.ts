@@ -764,6 +764,32 @@ describe('CameraHandler browse return-home state transitions', () => {
     }
   });
 
+  it('clears expired cached results when Browse Back is selected', async () => {
+    vi.useFakeTimers();
+    try {
+      const { callbackQueryCallbacks, handler } = createTestSetup();
+      const callback = callbackQueryCallbacks[0].fn;
+      await callback(ctx('cam:browse:latest'));
+      vi.advanceTimersByTime(10 * 60_000 + 1);
+      const back = ctx('cam:browse:back');
+      await callback(back);
+
+      const state = handler as unknown as {
+        pendingBrowseInputs: Map<number, unknown>;
+        browseLastResults: Map<number, unknown>;
+      };
+      expect(state.pendingBrowseInputs.size).toBe(0);
+      expect(state.browseLastResults.size).toBe(0);
+      expect(back.reply).toHaveBeenCalledWith(
+        en.camera.browse.resultsExpired,
+        expect.objectContaining({ reply_markup: expect.anything() }),
+      );
+      expect(callbackData(lastKeyboard(back))).toEqual(expect.arrayContaining(['cam:browse', 'rh:a:t']));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('renders cached event actions and delivers media with Back to results', async () => {
     const { callbackQueryCallbacks, browse, video, photo } = createTestSetup();
     vi.mocked(browse.latest).mockResolvedValue({ events: [event()], hasMore: false });

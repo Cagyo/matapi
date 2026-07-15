@@ -543,14 +543,21 @@ export class CameraHandler implements TelegramHandler {
   private async handleBrowseBack(ctx: TelegramContext): Promise<void> {
     const userId = ctx.from?.id;
     const hadPending = userId ? this.pendingBrowseInputs.has(userId) : false;
-    const hadResults = userId ? this.browseLastResults.has(userId) : false;
+    const hadCachedResults = userId ? this.browseLastResults.has(userId) : false;
+    const results = userId ? this.currentBrowseResults(userId) : undefined;
+    const hadExpiredResults = hadCachedResults && !results;
 
     if (userId) {
       this.pendingBrowseInputs.delete(userId);
       this.browseLastResults.delete(userId);
     }
 
-    if (hadPending || hadResults) {
+    if (hadExpiredResults) {
+      await this.replyBrowseResultsExpired(ctx);
+      return;
+    }
+
+    if (hadPending || results) {
       await this.handleBrowseMenu(ctx);
       return;
     }
