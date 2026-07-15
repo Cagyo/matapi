@@ -19,7 +19,8 @@ The feature also establishes reliable Telegram interaction semantics:
 - critical sensor alarms are never intentionally suppressed by user settings;
 - consequential actions confirm before execution;
 - delivered Slice 4A gives logs, CSV, and settings a consistent route to a
-  fresh Home; later Slice 4 workflow groups remain pending.
+  fresh Home; delivered Slice 4B extends that contract through configuration,
+  import, Drive, and system package update; only camera remains pending.
 
 The complete experience is delivered through four implementation slices. Each
 slice receives its own detailed implementation spec and plan; this document is
@@ -431,10 +432,10 @@ jump to or reuse an older Home message.
 Workflow coverage is implemented in bounded groups:
 
 1. **Slice 4A — delivered:** logs, CSV, settings.
-2. **Later Slice 4 — pending:** configuration, import, Drive, and system
+2. **Slice 4B — delivered:** configuration, import, Drive, and system
    package update.
-3. **Later Slice 4 — pending:** camera as a separate change because it has
-   the largest state surface.
+3. **Slice 4C — pending:** camera as a separate change because it has the
+   largest state surface.
 
 Post-restart messages that currently support text only are not silently claimed
 to have buttons. If Return Home is required on such a message, the messaging
@@ -562,14 +563,17 @@ intentionally not given a Return Home button until Slice 4.
 
 - shared terminal-navigation/Home-launcher helper;
 - **Slice 4A — delivered:** logs, CSV, and settings;
-- **later Slice 4 — pending:** configuration, import, Drive, and system
-  package update;
-- **later Slice 4 — pending:** camera in a separate sub-slice.
+- **Slice 4B — delivered:** configuration, import, Drive, and system package
+  update;
+- **Slice 4C — pending:** camera in a separate sub-slice.
 
 The delivered Slice 4A staging status is live and localized: its `rh:c:r`
 action opens a fresh Home while the detached CSV upload and its active lock keep
-running. It does not cancel either. Later Slice 4 scope remains explicitly
-pending.
+running. It does not cancel either. Delivered Slice 4B applies the same shared
+contract to configuration, import, Drive, and system package update: pending
+workflow state is cleared locally before Home launches, completed mutations are
+not rolled back, and `rh:u:r` never stops the detached package-update script.
+Only camera navigation remains pending in Slice 4C.
 
 Each slice has a separate implementation spec, plan, migration where required,
 focused test suite, review, and rollback boundary. Schema fields are introduced

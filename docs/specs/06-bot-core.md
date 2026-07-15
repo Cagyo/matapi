@@ -64,7 +64,7 @@ before `sequentialize(homeUpdateConstraints)`, then locale middleware and
 handlers. The acknowledgement middleware promptly calls
 `answerCallbackQuery` for Home payloads (`h:`) and the recovery action (`ho`),
 plus valid external Return Home payloads with exact grammar
-`rh:<l|c|s>:<c|r|t>`, without preventing later handling if acknowledgement
+`rh:<l|c|s|f|i|d|u>:<c|r|t>`, without preventing later handling if acknowledgement
 fails. A valid external Return Home callback is therefore acknowledged before
 sequentialization; normal handling still serializes it by both
 `home:chat:<chatId>` and `home:user:<userId>` before locale/role lookup and
@@ -89,24 +89,43 @@ packages, restart, and automatic-cleanup thresholds). Canonical Storage status
 never emits `clean:trigger`; Home is the only Slice 3 cleanup launcher.
 
 Independent external workflows remain registered and do not reuse the Home
-session or perform Home protocol transitions. Slice 4A delivers their shared
-Return Home contract for logs, CSV, and settings. `ReturnHomeHandler` accepts
-only `rh:<l|c|s>:<c|r|t>` and delegates to `HomeLauncher`; after normal
-serialization and locale resolution, `OpenHomeUseCase` is the only
+session or perform Home protocol transitions. Slice 4 delivers their shared
+Return Home contract. `ReturnHomeHandler` accepts only
+`rh:<l|c|s|f|i|d|u>:<c|r|t>`. The callback acknowledgement is attempted before
+`sequentialize`; normal handling then serializes by private chat and user,
+checks that the sender is a registered user, resolves the sender's current
+locale and role, clears named pending interface state for `cancelPending`, and
+delegates to `HomeLauncher`. Registration is the eligibility rule for Return
+Home: an administrator demoted while a workflow is open receives the fresh
+member Home determined by the current role. `OpenHomeUseCase` is the only
 Home-opening authority. It always creates a new Home and never revives or
 reuses an older Home message, token, or revision.
 
-| State | Slice 4A behavior |
+| Workflow state | Return Home behavior |
 |---|---|
 | Logs picker / settings dashboard | `cancelPending`; no stored pending state exists, then new Home. |
 | CSV picker | `cancelPending`; no persisted conversation or confirmation exists, then new Home. |
 | CSV staging/upload | `leaveRunning`; live localized `csv.staging` status uses `rh:c:r`, picker markup is removed, and active upload/lock is never cancelled. |
 | Logs result/error/empty/.txt document, CSV document/error/empty | `alreadyTerminal`; new Home directly. |
 | CSV page navigation and settings locale update | `continuing`; keep workflow, no launcher call. |
+| Config add/modify/remove picker, prompt, retry, or confirmation | `cancelPending`; delete current `ConfigState`, then new Home. |
+| Config incremental modify result | `cancelPending`; keep completed mutation, delete only the remaining menu state, then new Home. |
+| Config/export terminal result or error with no live state | `alreadyTerminal`; new Home directly. |
+| Import upload prompt/retry or Apply confirmation | `cancelPending`; delete current import state, then new Home. |
+| Import applied/cancelled/no-change/failure/partial/uncertain result | `alreadyTerminal`; new Home directly. |
+| Drive status/error | `alreadyTerminal`; new Home directly. |
+| Drive auth prompt/retry with `awaitingConfig` | `cancelPending`; delete only the pending auth input state, then new Home. |
+| Drive auth success/typed terminal failure/demotion | `alreadyTerminal`; new Home directly. |
+| System package checking or Apply confirmation | `cancelPending`; clear any confirmation present when the serialized return runs, then new Home. |
+| System package update successfully spawned | `leaveRunning`; new Home without cancelling the detached script. |
+| System package terminal/no-op/failure result | `alreadyTerminal`; new Home directly. |
 
-`continuing` deliberately has no Return Home callback action. The live staging
-status is an explicit `leaveRunning` exception: opening Home does not cancel or
-wait for its detached upload.
+`continuing` deliberately has no Return Home callback action. `cancelPending`
+is interface-local in-memory cleanup only; it does not introduce a new
+application/domain port, undo completed mutations, or stop detached work. The
+CSV staging status and successfully spawned system package update are explicit
+`leaveRunning` exceptions: opening Home does not cancel or wait for their
+detached work.
 
 ## Role Model
 

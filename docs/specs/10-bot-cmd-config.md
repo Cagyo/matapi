@@ -137,6 +137,24 @@ Bot: ✅ Sensor "old_door" archived.
 
 ---
 
+## Return Home behavior
+
+Config uses the shared `rh:f:<c|t>` workflow code from
+[06-bot-core.md](06-bot-core.md#authoritative-home-callback-pipeline). The
+handler keeps `ConfigState` only in interface-local in-memory state.
+
+| Workflow state | Return Home behavior |
+|---|---|
+| Add/modify/remove picker, prompt, retry, or confirmation | `rh:f:c` (`cancelPending`); delete the current `ConfigState`, then open a new Home. |
+| Incremental modify result | `rh:f:c` (`cancelPending`); preserve the completed field mutation and delete only the remaining modify-menu state, then open a new Home. |
+| Terminal config result/error with no live state | `rh:f:t` (`alreadyTerminal`); open a new Home directly. |
+
+This cleanup does not roll back any completed mutation. Return Home remains
+available to a registered user whose current role has changed; the new Home is
+rendered for that current role.
+
+---
+
 ## Error Cases
 
 | Condition | Response |

@@ -56,11 +56,16 @@ Status legend: ✅ canonical · 🚧 in transition · 📝 planned
 ### Telegram context
 
 The syntax-validated external Return Home acknowledgement grammar is
-`rh:<l|c|s>:<c|r|t>`.
+`rh:<l|c|s|f|i|d|u>:<c|r|t>`. `ReturnHomeHandler` is an interface-layer
+orchestrator: on a `cancelPending` action it clears only the named workflow's
+in-memory interface state before delegating to `HomeLauncher`. That cleanup is
+not an application/domain port and does not roll back a completed mutation or
+cancel detached work. `OpenHomeUseCase` remains the only authority that opens
+a fresh Home.
 
 | Port | Adapters | Status | Source |
 |---|---|---|---|
-| `BotGateway` | `GrammyBotGateway` | ✅ single intentional gateway; do not abstract grammY itself further. It acknowledges syntax-validated external Return Home callbacks before grammY `sequentialize` constraints for private chat and user, then runs locale resolution and handlers. `ReturnHomeHandler` delegates only to `HomeLauncher`, whose `OpenHomeUseCase` is the only Home-opening authority and always creates fresh Home authority. | [grammy-bot.gateway.ts](../src/telegram/infrastructure/grammy-bot.gateway.ts) |
+| `BotGateway` | `GrammyBotGateway` | ✅ single intentional gateway; do not abstract grammY itself further. It acknowledges syntax-validated external Return Home callbacks before grammY `sequentialize` constraints for private chat and user, then runs locale resolution and handlers. `ReturnHomeHandler` may perform the workflow-specific interface-local cleanup above before delegating only to `HomeLauncher`, whose `OpenHomeUseCase` is the only Home-opening authority and always creates fresh Home authority. | [grammy-bot.gateway.ts](../src/telegram/infrastructure/grammy-bot.gateway.ts) |
 | `UserRepositoryPort` (`USER_REPOSITORY`) | `DrizzleUserRepository`, `InMemoryUserRepository` (mock/dev/tests) | ✅ canonical — `findByName` is case-insensitive and strips a leading `@`; first-admin claims and final-admin demotion protection are atomic. | [user-repository.port.ts](../src/telegram/domain/ports/user-repository.port.ts) |
 | `AdminClaimCredentialPort` (`ADMIN_CLAIM_CREDENTIAL`) | `EnvAdminClaimCredentialAdapter` | ✅ canonical — verifies the setup-generated `CLAIM_ADMIN_TOKEN` without exposing its value. | [admin-claim-credential.port.ts](../src/telegram/domain/ports/admin-claim-credential.port.ts) |
 | `InviteCodeRepositoryPort` (`INVITE_CODE_REPOSITORY`) | `DrizzleInviteCodeRepository`, `InMemoryInviteCodeRepository` (mock/tests) | ✅ canonical | [invite-code-repository.port.ts](../src/telegram/domain/ports/invite-code-repository.port.ts) |

@@ -145,3 +145,18 @@ Import is a full replacement — sensors in DB but not in YAML get archived. Thi
 | YAML parse error | "❌ YAML parse error: [details]" |
 | Validation fails | Detailed error list (see above) |
 | DB write fails | "❌ Import failed: [error]. No changes were made." (transaction rollback) |
+
+## Return Home behavior
+
+Export shares the configuration workflow (`rh:f:t`) because it is terminal.
+Import uses `rh:i:<c|t>`; its `ImportConfigState` is interface-local
+in-memory state.
+
+| Workflow state | Return Home behavior |
+|---|---|
+| Export result or error | `rh:f:t` (`alreadyTerminal`); open a new Home directly. |
+| Import upload prompt/retry or Apply confirmation | `rh:i:c` (`cancelPending`); delete the current import state, then open a new Home. |
+| Import applied, cancelled, no-change, failure, partial, or uncertain result | `rh:i:t` (`alreadyTerminal`); open a new Home directly. |
+
+Cancellation does not apply, roll back, or otherwise alter an already-completed
+import mutation.

@@ -46,3 +46,18 @@ If sync is failing:
 | rclone not installed | "❌ rclone is not installed" |
 | rclone not configured | "❌ Google Drive not configured. Run rclone config." |
 | rclone about fails | "❌ Failed to check Drive status: [error]" |
+
+## Return Home behavior
+
+Drive uses the shared `rh:d:<c|t>` workflow code from
+[06-bot-core.md](06-bot-core.md#authoritative-home-callback-pipeline).
+
+| Workflow state | Return Home behavior |
+|---|---|
+| Drive status or error | `rh:d:t` (`alreadyTerminal`); open a new Home directly. |
+| Drive-auth prompt or retry while `awaitingConfig` | `rh:d:c` (`cancelPending`); delete only the pending auth input state, then open a new Home. |
+| Drive-auth success, typed terminal failure, or demotion | `rh:d:t` (`alreadyTerminal`); open a new Home directly. |
+
+Drive-auth continuation messages resolve the current role before accepting
+input; demotion clears the pending auth state. Return Home does not expose or
+carry the submitted Drive configuration.

@@ -63,3 +63,17 @@ mosquitto: "latest"
 | apt update fails | "❌ Failed to check for updates: [error]" |
 | Update script fails | Direct curl notification to admin |
 | Node major version mismatch | "⚠️ Node.js major version change detected (20→22). This requires manual intervention." |
+
+## Return Home behavior
+
+System package update uses the shared `rh:u:<c|r|t>` workflow code from
+[06-bot-core.md](06-bot-core.md#authoritative-home-callback-pipeline). Its
+pending confirmation is interface-local in-memory state.
+
+| Workflow state | Return Home behavior |
+|---|---|
+| Checking packages or Apply confirmation | `rh:u:c` (`cancelPending`); clear any confirmation present when the serialized return runs, then open a new Home. |
+| Update successfully spawned | `rh:u:r` (`leaveRunning`); open a new Home without cancelling the detached script. |
+| Terminal, no-op, or failure result | `rh:u:t` (`alreadyTerminal`); open a new Home directly. |
+
+Return Home never stops a successfully detached package-update script.
