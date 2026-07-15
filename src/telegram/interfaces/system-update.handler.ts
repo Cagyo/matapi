@@ -5,6 +5,11 @@ import { SystemDepsCheckFailedError } from '../../system/domain/errors/system-de
 import { SystemDepsCheck } from '../../system/domain/ports/system-deps.port';
 import { SystemUpdateUseCase } from '../application/system-update.use-case';
 import { RoleMiddleware } from './role.middleware';
+import {
+  appendReturnHomeButton,
+  returnHomeKeyboard,
+  type ExternalWorkflowPhase,
+} from './return-home';
 import { TelegramHandler } from './telegram-handler';
 import { TelegramContext } from './telegram-context';
 
@@ -42,11 +47,25 @@ export class SystemUpdateHandler implements TelegramHandler {
     this.pending.delete(userId);
   }
 
+  private returnKeyboard(
+    ctx: TelegramContext,
+    phase: ExternalWorkflowPhase,
+    keyboard?: InlineKeyboard,
+  ): InlineKeyboard {
+    const catalog = ctx.localeState?.catalog ?? en;
+    const input = { workflow: 'systemUpdate' as const, phase };
+    return keyboard
+      ? appendReturnHomeButton(keyboard, catalog, input)
+      : returnHomeKeyboard(catalog, input);
+  }
+
   async handleCommand(ctx: TelegramContext): Promise<void> {
     const userId = ctx.from?.id;
     if (!userId) return;
 
-    await ctx.reply(en.systemUpdate.checking);
+    await ctx.reply(en.systemUpdate.checking, {
+      reply_markup: this.returnKeyboard(ctx, 'cancelPending'),
+    });
 
     let check: SystemDepsCheck;
     try {
@@ -54,14 +73,18 @@ export class SystemUpdateHandler implements TelegramHandler {
     } catch (err) {
       this.pending.delete(userId);
       if (err instanceof SystemDepsCheckFailedError) {
-        await ctx.reply(en.systemUpdate.checkFailed(err.reason));
+        await ctx.reply(en.systemUpdate.checkFailed(err.reason), {
+          reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
+        });
         return;
       }
       this.logger.error(
         `/system_update check failed: ${(err as Error).message}`,
         (err as Error).stack,
       );
-      await ctx.reply(en.systemUpdate.checkFailed((err as Error).message));
+      await ctx.reply(en.systemUpdate.checkFailed((err as Error).message), {
+        reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
+      });
       return;
     }
 
@@ -71,10 +94,14 @@ export class SystemUpdateHandler implements TelegramHandler {
     if (!check.hasUpdates) {
       this.pending.delete(userId);
       if (warning) {
-        await ctx.reply(`${en.systemUpdate.header}\n\n${body}\n\n${warning}`);
+        await ctx.reply(`${en.systemUpdate.header}\n\n${body}\n\n${warning}`, {
+          reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
+        });
         return;
       }
-      await ctx.reply(en.systemUpdate.allUpToDate);
+      await ctx.reply(en.systemUpdate.allUpToDate, {
+        reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
+      });
       return;
     }
 
@@ -84,7 +111,9 @@ export class SystemUpdateHandler implements TelegramHandler {
     const keyboard = new InlineKeyboard()
       .text(en.systemUpdate.applyButton, 'sysupd:apply')
       .text(en.systemUpdate.cancelButton, 'sysupd:cancel');
-    await ctx.reply(lines.join('\n'), { reply_markup: keyboard });
+    await ctx.reply(lines.join('\n'), {
+      reply_markup: this.returnKeyboard(ctx, 'cancelPending', keyboard),
+    });
   }
 
   private async onCallback(ctx: CallbackQueryContext<TelegramContext>): Promise<void> {
@@ -98,26 +127,34 @@ export class SystemUpdateHandler implements TelegramHandler {
 
     if (data === 'sysupd:cancel') {
       this.pending.delete(userId);
-      await ctx.reply(en.systemUpdate.cancelled);
+      await ctx.reply(en.systemUpdate.cancelled, {
+        reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
+      });
       return;
     }
 
     if (data === 'sysupd:apply') {
       if (!pending) {
-        await ctx.reply(en.common.interrupted);
+        await ctx.reply(en.common.interrupted, {
+          reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
+        });
         return;
       }
       try {
         await this.systemUpdate.apply();
         this.pending.delete(userId);
-        await ctx.reply(en.systemUpdate.applying);
+        await ctx.reply(en.systemUpdate.applying, {
+          reply_markup: this.returnKeyboard(ctx, 'leaveRunning'),
+        });
       } catch (err) {
         this.pending.delete(userId);
         this.logger.error(
           `/system_update apply failed: ${(err as Error).message}`,
           (err as Error).stack,
         );
-        await ctx.reply(en.systemUpdate.checkFailed((err as Error).message));
+        await ctx.reply(en.systemUpdate.checkFailed((err as Error).message), {
+          reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
+        });
       }
     }
   }
