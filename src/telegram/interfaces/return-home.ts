@@ -8,7 +8,8 @@ export type ExternalWorkflow =
   | 'config'
   | 'configImport'
   | 'drive'
-  | 'systemUpdate';
+  | 'systemUpdate'
+  | 'camera';
 export type ExternalWorkflowPhase =
   | 'cancelPending'
   | 'leaveRunning'
@@ -27,6 +28,7 @@ const workflowCode: Readonly<Record<ExternalWorkflow, string>> = {
   configImport: 'i',
   drive: 'd',
   systemUpdate: 'u',
+  camera: 'a',
 };
 
 const workflowByCode: Readonly<Record<string, ExternalWorkflow | undefined>> = {
@@ -37,6 +39,7 @@ const workflowByCode: Readonly<Record<string, ExternalWorkflow | undefined>> = {
   i: 'configImport',
   d: 'drive',
   u: 'systemUpdate',
+  a: 'camera',
 };
 
 const phaseCode: Readonly<Record<ExternalWorkflowPhase, string>> = {
@@ -58,7 +61,7 @@ export function returnHomeCallback(input: ReturnHomeCallbackInput): string {
 export function parseReturnHomeCallback(
   data: string,
 ): ReturnHomeCallbackInput | null {
-  const match = /^rh:([lcsfidu]):([crt])(?![\s\S])/.exec(data);
+  const match = /^rh:([lcsfidua]):([crt])(?![\s\S])/.exec(data);
   if (!match) return null;
 
   const workflow = workflowByCode[match[1]];

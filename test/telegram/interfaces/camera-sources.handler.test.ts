@@ -243,4 +243,30 @@ describe('CameraSourcesHandler', () => {
     expect(await handler.handleText(context({ userId: 101, chatId: 42, text: 'Front door' }))).toBe(false);
     expect(await handler.handleText(context({ userId: 100, chatId: 43, text: 'Front door' }))).toBe(false);
   });
+
+  it('cancels only the exact source-management state without use cases', async () => {
+    const { handler, configure, list, remove } = setup();
+    await handler.handleCallback(context({ userId: 100, chatId: 42 }), 'add');
+    await handler.handleCallback(context({ userId: 101, chatId: 42 }), 'add');
+    await handler.handleCallback(context({ userId: 100, chatId: 43 }), 'add');
+
+    handler.cancelPending(100, 42);
+
+    expect(handler.hasPending(100, 42)).toBe(false);
+    expect(handler.hasPending(101, 42)).toBe(true);
+    expect(handler.hasPending(100, 43)).toBe(true);
+    expect(configure.execute).not.toHaveBeenCalled();
+    expect(list.execute).not.toHaveBeenCalled();
+    expect(remove.execute).not.toHaveBeenCalled();
+  });
+
+  it('expires stale source-management state through its injected clock', async () => {
+    let now = 1_000;
+    const { handler } = setup(() => now);
+    await handler.handleCallback(context(), 'add');
+    now += 10 * 60_000 + 1;
+
+    expect(handler.hasPending(100, 42)).toBe(false);
+    expect(handler.hasPending(100, 42)).toBe(false);
+  });
 });

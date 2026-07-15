@@ -1,6 +1,7 @@
 import { Composer } from 'grammy';
 import { describe, expect, it, vi } from 'vitest';
 import { ConfigHandler } from '../../../src/telegram/interfaces/config.handler';
+import { CameraHandler } from '../../../src/telegram/interfaces/camera.handler';
 import { GdriveAuthHandler } from '../../../src/telegram/interfaces/gdrive-auth.handler';
 import { HomeLauncher } from '../../../src/telegram/interfaces/home-launcher';
 import { ImportConfigHandler } from '../../../src/telegram/interfaces/import-config.handler';
@@ -28,6 +29,7 @@ function setup() {
     configImport: { cancelPending: vi.fn() },
     drive: { cancelPending: vi.fn() },
     systemUpdate: { cancelPending: vi.fn() },
+    camera: { cancelPending: vi.fn() },
   };
   const handler = new ReturnHomeHandler(
     launcher,
@@ -36,6 +38,7 @@ function setup() {
     cancelers.configImport as unknown as ImportConfigHandler,
     cancelers.drive as unknown as GdriveAuthHandler,
     cancelers.systemUpdate as unknown as SystemUpdateHandler,
+    cancelers.camera as unknown as CameraHandler,
   );
   let capturedRegex!: RegExp;
   let callback!: (ctx: TelegramContext) => Promise<void>;
@@ -62,12 +65,14 @@ describe('ReturnHomeHandler', () => {
     );
     expect(capturedRegex.test('rh:c:t')).toBe(true);
     expect(capturedRegex.test('rh:c:x')).toBe(false);
+    expect(capturedRegex.test('rh:a:c')).toBe(true);
+    expect(capturedRegex.test('rh:a:x')).toBe(false);
     expect(capturedRegex.test('rh:f:c\n')).toBe(false);
     expect(capturedRegex.test('rh:f:c\r')).toBe(false);
     expect(capturedRegex.test('rh:f:c\u2028')).toBe(false);
     expect(capturedRegex.test('rh:f:c\u2029')).toBe(false);
     expect(capturedRegex.test('rh:f:c\r\n')).toBe(false);
-    expect(capturedRegex.source).toBe('^rh:[lcsfidu]:[crt](?![\\s\\S])');
+    expect(capturedRegex.source).toBe('^rh:[lcsfidua]:[crt](?![\\s\\S])');
   });
 
   it('does not acknowledge twice and delegates a valid return', async () => {
@@ -148,6 +153,52 @@ describe('ReturnHomeHandler', () => {
     await callback(ctx);
 
     expect(cancelers.config.cancelPending).not.toHaveBeenCalled();
+    expect(launcher.launch).toHaveBeenCalledWith(ctx);
+  });
+
+  it('clears exact camera UI state before opening Home', async () => {
+    const { callback, cancelers, launcher } = setup();
+    const order: string[] = [];
+    cancelers.camera.cancelPending.mockImplementation(() => order.push('cancel'));
+    (launcher.launch as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      order.push('launch');
+      return 'opened';
+    });
+    const ctx = callbackContext('rh:a:c', {
+      from: { id: 42 },
+      chat: { id: 84, type: 'private' },
+      homeCallbackAcknowledged: true,
+    });
+
+    await callback(ctx);
+
+    expect(cancelers.camera.cancelPending).toHaveBeenCalledWith(42, 84);
+    expect(order).toEqual(['cancel', 'launch']);
+  });
+
+  it.each(['rh:a:r', 'rh:a:t'])('does not cancel camera state for phase %s', async (data) => {
+    const { callback, cancelers, launcher } = setup();
+
+    await callback(callbackContext(data, {
+      from: { id: 42 },
+      chat: { id: 84, type: 'private' },
+    }));
+
+    expect(cancelers.camera.cancelPending).not.toHaveBeenCalled();
+    expect(launcher.launch).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    {},
+    { from: { id: 42 } },
+    { from: { id: 42 }, chat: { id: -84, type: 'group' } },
+  ])('does not cancel camera state without current private identity', async (identity) => {
+    const { callback, cancelers, launcher } = setup();
+    const ctx = callbackContext('rh:a:c', identity);
+
+    await callback(ctx);
+
+    expect(cancelers.camera.cancelPending).not.toHaveBeenCalled();
     expect(launcher.launch).toHaveBeenCalledWith(ctx);
   });
 });

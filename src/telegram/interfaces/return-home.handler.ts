@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { Composer } from 'grammy';
+import { CameraHandler } from './camera.handler';
 import { ConfigHandler } from './config.handler';
 import { GdriveAuthHandler } from './gdrive-auth.handler';
 import { HomeLauncher } from './home-launcher';
@@ -22,24 +23,31 @@ export class ReturnHomeHandler implements TelegramHandler {
     private readonly configImport: ImportConfigHandler,
     private readonly drive: GdriveAuthHandler,
     private readonly systemUpdate: SystemUpdateHandler,
+    private readonly camera: CameraHandler,
   ) {}
 
   register(composer: Composer<TelegramContext>): void {
-    composer.callbackQuery(/^rh:[lcsfidu]:[crt](?![\s\S])/, this.guard.registered, async (ctx) => {
+    composer.callbackQuery(/^rh:[lcsfidua]:[crt](?![\s\S])/, this.guard.registered, async (ctx) => {
       if (!ctx.homeCallbackAcknowledged) {
         await ctx.answerCallbackQuery().catch(() => undefined);
       }
       const action = parseReturnHomeCallback(ctx.callbackQuery?.data ?? '');
       if (!action) return;
 
-      if (action.phase === 'cancelPending' && ctx.from?.id) {
-        this.cancelPending(action.workflow, ctx.from.id);
+      const userId = ctx.from?.id;
+      const chatId = ctx.chat?.type === 'private' ? ctx.chat.id : undefined;
+      if (action.phase === 'cancelPending' && userId !== undefined) {
+        this.cancelPending(action.workflow, userId, chatId);
       }
       await this.launcher.launch(ctx);
     });
   }
 
-  private cancelPending(workflow: ExternalWorkflow, userId: number): void {
+  private cancelPending(
+    workflow: ExternalWorkflow,
+    userId: number,
+    chatId: number | undefined,
+  ): void {
     switch (workflow) {
       case 'config':
         this.config.cancelPending(userId);
@@ -52,6 +60,9 @@ export class ReturnHomeHandler implements TelegramHandler {
         return;
       case 'systemUpdate':
         this.systemUpdate.cancelPending(userId);
+        return;
+      case 'camera':
+        if (chatId !== undefined) this.camera.cancelPending(userId, chatId);
         return;
       case 'logs':
       case 'csv':

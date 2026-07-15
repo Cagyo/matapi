@@ -100,6 +100,12 @@ export class CameraHandler implements TelegramHandler {
     private readonly sources: CameraSourcesHandler,
   ) {}
 
+  cancelPending(userId: number, chatId: number): void {
+    this.pendingBrowseInputs.delete(userId);
+    this.browseLastResults.delete(userId);
+    this.sources.cancelPending(userId, chatId);
+  }
+
   register(composer: Composer<TelegramContext>): void {
     composer.command('camera', this.guard.registered, async (ctx) => {
       if (!ctx.from || !ctx.message || ctx.chat?.type !== 'private') return;

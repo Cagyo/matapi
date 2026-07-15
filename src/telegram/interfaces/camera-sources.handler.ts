@@ -34,6 +34,20 @@ export class CameraSourcesHandler {
     return this.clock.now().getTime();
   }
 
+  cancelPending(userId: number, chatId: number): void {
+    this.states.delete(`${userId}:${chatId}`);
+  }
+
+  hasPending(userId: number, chatId: number): boolean {
+    const key = `${userId}:${chatId}`;
+    const state = this.states.get(key);
+    if (state && this.now() - state.createdAtMs > SOURCE_STATE_TTL_MS) {
+      this.states.delete(key);
+      return false;
+    }
+    return state !== undefined;
+  }
+
   async handleEntry(ctx: TelegramContext): Promise<void> {
     if (!(await this.requireAdmin(ctx))) return;
     this.clear(ctx);

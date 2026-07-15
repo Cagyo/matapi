@@ -18,6 +18,7 @@ describe('return-home callback contract', () => {
     ['configImport', 'i'],
     ['drive', 'd'],
     ['systemUpdate', 'u'],
+    ['camera', 'a'],
   ] as const)('round-trips %s as code %s', (workflow, code) => {
     const data = returnHomeCallback({ workflow, phase: 'cancelPending' });
 
@@ -27,6 +28,16 @@ describe('return-home callback contract', () => {
       workflow,
       phase: 'cancelPending',
     });
+  });
+
+  it('round-trips all camera phases as bounded static callbacks', () => {
+    for (const phase of ['cancelPending', 'leaveRunning', 'alreadyTerminal'] as const) {
+      const data = returnHomeCallback({ workflow: 'camera', phase });
+      expect(Buffer.byteLength(data, 'utf8')).toBe(6);
+      expect(parseReturnHomeCallback(data)).toEqual({ workflow: 'camera', phase });
+    }
+    expect(returnHomeCallback({ workflow: 'camera', phase: 'cancelPending' }))
+      .toBe('rh:a:c');
   });
 
   it.each([
@@ -41,6 +52,11 @@ describe('return-home callback contract', () => {
     'h:token:0:h',
   ])(
     'rejects non-contract payload %s',
+    (data) => expect(parseReturnHomeCallback(data)).toBeNull(),
+  );
+
+  it.each(['rh:a', 'rh:a:x', 'rh:camera:t', 'rh:a:t:extra', 'rh:x:t'])(
+    'rejects malformed camera return %s',
     (data) => expect(parseReturnHomeCallback(data)).toBeNull(),
   );
 

@@ -132,6 +132,7 @@ function createTestSetup() {
     resolveRole: vi.fn().mockResolvedValue('user'),
   } as unknown as RoleMiddleware;
   const sources = {
+    cancelPending: vi.fn(),
     handleEntry: vi.fn().mockResolvedValue(undefined),
     handleCallback: vi.fn().mockResolvedValue(undefined),
     handleText: vi.fn().mockResolvedValue(false),
@@ -172,7 +173,14 @@ function createTestSetup() {
 
   return {
     handler,
+    snapshot,
+    listEvents,
     browse,
+    video,
+    photo,
+    enable,
+    disable,
+    status,
     open,
     stop,
     sessions,
@@ -211,6 +219,56 @@ describe('CameraHandler source delegation', () => {
     await messageCallbacks['message:text'](text, next);
     expect(sources.handleText).toHaveBeenCalledWith(text);
     expect(next).not.toHaveBeenCalled();
+  });
+});
+
+describe('CameraHandler return-home cancellation', () => {
+  it('clears camera browse state for one user and delegates exact source cleanup without use cases', async () => {
+    const {
+      handler,
+      callbackQueryCallbacks,
+      sources,
+      snapshot,
+      listEvents,
+      browse,
+      video,
+      photo,
+      enable,
+      disable,
+      status,
+      open,
+      stop,
+    } = createTestSetup();
+    const callback = callbackQueryCallbacks[0].fn;
+    const primary = ctx('cam:browse:pick-date');
+    const primaryLatest = ctx('cam:browse:latest');
+    const other = ctx('cam:browse:pick-date');
+    other.from = { id: 101 };
+    other.chat = { id: 43, type: 'private' };
+
+    await callback(primary);
+    await callback(primaryLatest);
+    await callback(other);
+    handler.cancelPending(100, 42);
+
+    const state = handler as unknown as {
+      pendingBrowseInputs: Map<number, unknown>;
+      browseLastResults: Map<number, unknown>;
+    };
+    expect(state.pendingBrowseInputs.has(100)).toBe(false);
+    expect(state.browseLastResults.has(100)).toBe(false);
+    expect(state.pendingBrowseInputs.has(101)).toBe(true);
+    expect(sources.cancelPending).toHaveBeenCalledWith(100, 42);
+    expect(snapshot.execute).not.toHaveBeenCalled();
+    expect(listEvents.execute).not.toHaveBeenCalled();
+    expect(browse.between).not.toHaveBeenCalled();
+    expect(video.execute).not.toHaveBeenCalled();
+    expect(photo.execute).not.toHaveBeenCalled();
+    expect(enable.execute).not.toHaveBeenCalled();
+    expect(disable.execute).not.toHaveBeenCalled();
+    expect(status.execute).not.toHaveBeenCalled();
+    expect(open.execute).not.toHaveBeenCalled();
+    expect(stop.execute).not.toHaveBeenCalled();
   });
 });
 
