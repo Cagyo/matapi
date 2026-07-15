@@ -134,6 +134,10 @@ describe("CameraSourcesHandler", () => {
       "user:pass",
     );
     expectHome(credential, "t");
+    expect(handler.hasPending(100, 42)).toBe(false);
+    expect(
+      await handler.handleText(context({ text: "another credential" })),
+    ).toBe(false);
   });
 
   it("deletes credential text in finally when configuration fails", async () => {
@@ -159,6 +163,10 @@ describe("CameraSourcesHandler", () => {
       expect.anything(),
     );
     expectHome(credential, "t");
+    expect(handler.hasPending(100, 42)).toBe(false);
+    expect(
+      await handler.handleText(context({ text: "another credential" })),
+    ).toBe(false);
   });
 
   it("reports deletion failure with localized secret-free text", async () => {
@@ -255,6 +263,10 @@ describe("CameraSourcesHandler", () => {
     expect(output).not.toContain("rtsp://");
     expect(output).not.toContain("password");
     expectHome(ctx, "t");
+    expect(handler.hasPending(100, 42)).toBe(false);
+    expect(await handler.handleText(context({ text: "Front door" }))).toBe(
+      false,
+    );
   });
 
   it.each(["edit", "test"] as const)(
@@ -275,6 +287,11 @@ describe("CameraSourcesHandler", () => {
           tlsMode: "strict",
         }),
       );
+      expectHome(credential, "t");
+      expect(handler.hasPending(100, 42)).toBe(false);
+      expect(
+        await handler.handleText(context({ text: "another credential" })),
+      ).toBe(false);
     },
   );
 
@@ -292,6 +309,10 @@ describe("CameraSourcesHandler", () => {
     );
     expect(configure.execute).not.toHaveBeenCalled();
     expectHome(ctx, "t");
+    expect(handler.hasPending(100, 42)).toBe(false);
+    expect(await handler.handleText(context({ text: "Front door" }))).toBe(
+      false,
+    );
   });
 
   it("removes the exact source selected from a fresh redacted list", async () => {
@@ -309,7 +330,55 @@ describe("CameraSourcesHandler", () => {
       expect.anything(),
     );
     expectHome(ctx, "t");
+    expect(handler.hasPending(100, 42)).toBe(false);
+    expect(await handler.handleText(context({ text: "Front door" }))).toBe(
+      false,
+    );
   });
+
+  it("clears source state before terminal remove failure output", async () => {
+    const { handler, list, remove } = setup();
+    remove.execute.mockRejectedValueOnce(new Error("offline"));
+    await handler.handleCallback(context(), "remove");
+    list.execute.mockResolvedValueOnce([source]);
+    const ctx = context();
+
+    await handler.handleCallback(ctx, "remove:cam-1");
+
+    expect(ctx.reply).toHaveBeenCalledWith(
+      en.camera.sources.removeFailed,
+      expect.anything(),
+    );
+    expectHome(ctx, "t");
+    expect(handler.hasPending(100, 42)).toBe(false);
+    expect(await handler.handleText(context({ text: "Front door" }))).toBe(
+      false,
+    );
+  });
+
+  it.each(["edit", "test"] as const)(
+    "clears claimed credential state before terminal %s failure output",
+    async (action) => {
+      const { handler, configure, list } = setup();
+      configure.execute.mockRejectedValueOnce(new Error("offline"));
+      await handler.handleCallback(context(), action);
+      list.execute.mockResolvedValueOnce([source]);
+      await handler.handleCallback(context(), `${action}:cam-1`);
+      const credential = context({ text: "rtsp://camera.local/live" });
+
+      await handler.handleText(credential);
+
+      expect(credential.reply).toHaveBeenCalledWith(
+        en.camera.sources.configureFailed,
+        expect.anything(),
+      );
+      expectHome(credential, "t");
+      expect(handler.hasPending(100, 42)).toBe(false);
+      expect(
+        await handler.handleText(context({ text: "another credential" })),
+      ).toBe(false);
+    },
+  );
 
   it("cancels and clears the current state", async () => {
     const { handler } = setup();
