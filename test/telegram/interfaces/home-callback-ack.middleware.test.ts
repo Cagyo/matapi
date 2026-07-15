@@ -56,6 +56,7 @@ describe('homeCallbackAckMiddleware', () => {
     'rh:drive:t',
     'rh:u:t:extra',
     'rh:x:t',
+    'rh:f:c\n',
   ])('does not acknowledge unrelated or malformed callbacks: %s', async (data) => {
     const answerCallbackQuery = vi.fn().mockResolvedValue(true);
     const ctx = callbackContext(data, answerCallbackQuery);

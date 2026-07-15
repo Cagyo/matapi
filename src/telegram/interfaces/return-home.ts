@@ -58,7 +58,7 @@ export function returnHomeCallback(input: ReturnHomeCallbackInput): string {
 export function parseReturnHomeCallback(
   data: string,
 ): ReturnHomeCallbackInput | null {
-  const match = /^rh:([lcsfidu]):([crt])$/.exec(data);
+  const match = /^rh:([lcsfidu]):([crt])(?![\s\S])/.exec(data);
   if (!match) return null;
 
   const workflow = workflowByCode[match[1]];

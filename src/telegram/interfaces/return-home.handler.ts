@@ -25,7 +25,7 @@ export class ReturnHomeHandler implements TelegramHandler {
   ) {}
 
   register(composer: Composer<TelegramContext>): void {
-    composer.callbackQuery(/^rh:[lcsfidu]:[crt]$/, this.guard.registered, async (ctx) => {
+    composer.callbackQuery(/^rh:[lcsfidu]:[crt](?![\s\S])/, this.guard.registered, async (ctx) => {
       if (!ctx.homeCallbackAcknowledged) {
         await ctx.answerCallbackQuery().catch(() => undefined);
       }

@@ -62,7 +62,12 @@ describe('ReturnHomeHandler', () => {
     );
     expect(capturedRegex.test('rh:c:t')).toBe(true);
     expect(capturedRegex.test('rh:c:x')).toBe(false);
-    expect(capturedRegex.source).toBe('^rh:[lcsfidu]:[crt]$');
+    expect(capturedRegex.test('rh:f:c\n')).toBe(false);
+    expect(capturedRegex.test('rh:f:c\r')).toBe(false);
+    expect(capturedRegex.test('rh:f:c\u2028')).toBe(false);
+    expect(capturedRegex.test('rh:f:c\u2029')).toBe(false);
+    expect(capturedRegex.test('rh:f:c\r\n')).toBe(false);
+    expect(capturedRegex.source).toBe('^rh:[lcsfidu]:[crt](?![\\s\\S])');
   });
 
   it('does not acknowledge twice and delegates a valid return', async () => {

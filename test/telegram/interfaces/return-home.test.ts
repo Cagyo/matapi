@@ -44,6 +44,17 @@ describe('return-home callback contract', () => {
     (data) => expect(parseReturnHomeCallback(data)).toBeNull(),
   );
 
+  it.each([
+    ['LF', 'rh:f:c\n'],
+    ['CR', 'rh:f:c\r'],
+    ['line separator', 'rh:f:c\u2028'],
+    ['paragraph separator', 'rh:f:c\u2029'],
+    ['CRLF', 'rh:f:c\r\n'],
+  ])('rejects a valid callback with a trailing %s', (_terminator, data) => {
+    expect(parseReturnHomeCallback(data)).toBeNull();
+    expect(isReturnHomeCallback(data)).toBe(false);
+  });
+
   it('recognizes only valid return-home callback payloads', () => {
     expect(isReturnHomeCallback('rh:l:c')).toBe(true);
     expect(isReturnHomeCallback('rh:l:x')).toBe(false);
