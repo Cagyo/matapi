@@ -3,6 +3,7 @@ import { Composer, InputFile } from 'grammy';
 import { en } from '../../locales/en';
 import { ExportConfigUseCase } from '../application/export-config.use-case';
 import { RoleMiddleware } from './role.middleware';
+import { returnHomeKeyboard } from './return-home';
 import { TelegramHandler } from './telegram-handler';
 import { TelegramContext } from './telegram-context';
 
@@ -30,10 +31,23 @@ export class ExportConfigHandler implements TelegramHandler {
     try {
       const { yaml, filename } = await this.exportConfig.execute();
       const file = new InputFile(Buffer.from(yaml, 'utf8'), filename);
-      await ctx.replyWithDocument(file, { caption: en.exportConfig.caption });
+      const catalog = ctx.localeState?.catalog ?? en;
+      await ctx.replyWithDocument(file, {
+        caption: en.exportConfig.caption,
+        reply_markup: returnHomeKeyboard(catalog, {
+          workflow: 'config',
+          phase: 'alreadyTerminal',
+        }),
+      });
     } catch (error) {
       this.logger.error('export_config failed', error as Error);
-      await ctx.reply(en.exportConfig.failed);
+      const catalog = ctx.localeState?.catalog ?? en;
+      await ctx.reply(en.exportConfig.failed, {
+        reply_markup: returnHomeKeyboard(catalog, {
+          workflow: 'config',
+          phase: 'alreadyTerminal',
+        }),
+      });
     }
   }
 }
