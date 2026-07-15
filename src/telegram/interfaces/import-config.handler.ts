@@ -76,7 +76,9 @@ export class ImportConfigHandler implements TelegramHandler {
       const userId = ctx.from?.id;
       if (userId && this.states.has(userId)) {
         this.states.delete(userId);
-        await ctx.reply(en.importConfig.cancelled);
+        await ctx.reply(en.importConfig.cancelled, {
+          reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
+        });
       } else {
         await ctx.reply(en.common.noActiveWizard);
       }

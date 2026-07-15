@@ -313,6 +313,30 @@ describe('ImportConfigHandler Return Home state matrix', () => {
     expect(callbackData(reply)).toEqual(['rh:i:t']);
   });
 
+  it('uses terminal Home after /cancel clears an active import', async () => {
+    const { handler, ctx, reply } = documentFixture();
+    const commands: Record<
+      string,
+      (context: TelegramContext) => Promise<void>
+    > = {};
+    const composer = {
+      command: vi.fn((name: string, ...handlers: Array<(context: TelegramContext) => Promise<void>>) => {
+        commands[name] = handlers.at(-1)!;
+      }),
+      callbackQuery: vi.fn(),
+      on: vi.fn(),
+    };
+    handler.register(composer as never);
+    (handler as unknown as { states: Map<number, unknown> }).states.set(42, {
+      kind: 'awaitingFile',
+    });
+
+    await commands.cancel(ctx);
+
+    expect(callbackData(reply)).toEqual(['rh:i:t']);
+    expect((handler as unknown as { states: Map<number, unknown> }).states.has(42)).toBe(false);
+  });
+
   it('cancels awaitingFile so the next document listener delegates without downloading or preparing', async () => {
     const { handler, importSensors, importCameraSources, ctx } = documentFixture();
     const listeners: Record<string, (context: TelegramContext, next: () => Promise<void>) => Promise<void>> = {};
