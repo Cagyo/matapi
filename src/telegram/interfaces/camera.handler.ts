@@ -858,7 +858,9 @@ export class CameraHandler implements TelegramHandler {
     if (!telegramId || chatId === undefined || ctx.chat?.type !== 'private') return;
     const catalog = this.catalog(ctx);
 
-    await ctx.reply(catalog.camera.live.opening);
+    await ctx.reply(catalog.camera.live.opening, {
+      reply_markup: this.returnKeyboard(ctx, 'leaveRunning'),
+    });
     try {
       const opened = resolution === 'id'
         ? await this.openLiveStream.executeById({
@@ -869,9 +871,10 @@ export class CameraHandler implements TelegramHandler {
             telegramId,
             cameraName: cameraReference,
           });
-      const keyboard = new InlineKeyboard().url(
-        catalog.camera.live.watchButton,
-        opened.watchUrl,
+      const keyboard = appendReturnHomeButton(
+        new InlineKeyboard().url(catalog.camera.live.watchButton, opened.watchUrl),
+        catalog,
+        { workflow: 'camera', phase: 'leaveRunning' },
       );
       const sent = await ctx.reply(
         catalog.camera.live.opened(
@@ -915,6 +918,7 @@ export class CameraHandler implements TelegramHandler {
       const cameraName = await this.stopLiveStream.execute(telegramId);
       await ctx.reply(
         cameraName ? catalog.camera.live.stopped : catalog.camera.live.noActive,
+        { reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal') },
       );
     } catch (error) {
       await this.handleLiveError(ctx, error, 'stop live stream');
@@ -928,19 +932,27 @@ export class CameraHandler implements TelegramHandler {
   ): Promise<void> {
     const live = this.catalog(ctx).camera.live;
     if (error instanceof LiveStreamSourceUnavailableError) {
-      await ctx.reply(live.sourceUnavailable);
+      await ctx.reply(live.sourceUnavailable, {
+        reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
+      });
       return;
     }
     if (error instanceof LiveStreamExpiredError) {
-      await ctx.reply(live.expired);
+      await ctx.reply(live.expired, {
+        reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
+      });
       return;
     }
     if (error instanceof LiveStreamUnavailableError) {
-      await ctx.reply(live.unavailable);
+      await ctx.reply(live.unavailable, {
+        reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
+      });
       return;
     }
     this.logger.error(`${action} failed`);
-    await ctx.reply(live.unavailable);
+    await ctx.reply(live.unavailable, {
+      reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
+    });
   }
 
   private catalog(ctx: TelegramContext): LocaleCatalog {

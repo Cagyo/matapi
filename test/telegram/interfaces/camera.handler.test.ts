@@ -310,26 +310,23 @@ function ctx(data?: string, locale: 'en' | 'uk' = 'en') {
 }
 
 describe('CameraHandler experimental live stream', () => {
-  it('opens a registered command request with a normal URL button and registers the sent message', async () => {
+  it('keeps the stream running when Home opens from the watch message', async () => {
     const { commandCallbacks, open, stop, sessions, registerMessageReference } = createTestSetup();
-    const context = ctx();
-    context.match = 'live front_door';
+    const context = ctx(undefined, 'uk');
+    context.match = 'live';
 
     await commandCallbacks.camera(context);
 
     expect(open.execute).toHaveBeenCalledWith({
       telegramId: 100,
-      cameraName: 'front_door',
+      cameraName: undefined,
     });
-    expect(context.reply).toHaveBeenNthCalledWith(1, en.camera.live.opening);
-    expect(context.reply).toHaveBeenNthCalledWith(
-      2,
-      en.camera.live.opened(5),
-      expect.objectContaining({ reply_markup: expect.anything() }),
-    );
-    expect(JSON.stringify(context.reply.mock.calls[1][1].reply_markup)).toContain(
-      'https://clear-moon.trycloudflare.com/watch/secret-token',
-    );
+    const openingMarkup = context.reply.mock.calls[0][1].reply_markup;
+    const watchMarkup = context.reply.mock.calls[1][1].reply_markup;
+    expect(JSON.stringify(openingMarkup)).toContain('rh:a:r');
+    expect(JSON.stringify(watchMarkup)).toContain('rh:a:r');
+    expect(JSON.stringify(watchMarkup)).toContain('https://clear-moon.trycloudflare.com');
+    expect(callbackData(watchMarkup)).not.toContain('secret-token');
     expect(registerMessageReference).toHaveBeenCalledWith({ chatId: 42, messageId: 9 });
     expect(context.api.deleteMessage).not.toHaveBeenCalled();
     expect(sessions.revokeUser).not.toHaveBeenCalled();
@@ -384,13 +381,21 @@ describe('CameraHandler experimental live stream', () => {
     await commandCallbacks.camera(stopped);
 
     expect(stop.execute).toHaveBeenCalledWith(100);
-    expect(stopped.reply).toHaveBeenCalledWith(en.camera.live.stopped);
+    expect(stopped.reply).toHaveBeenCalledWith(
+      en.camera.live.stopped,
+      expect.objectContaining({ reply_markup: expect.anything() }),
+    );
+    expect(callbackData(lastKeyboard(stopped))).toEqual(['rh:a:t']);
 
     (stop.execute as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
     const inactive = ctx();
     inactive.match = 'stop_stream';
     await commandCallbacks.camera(inactive);
-    expect(inactive.reply).toHaveBeenCalledWith(en.camera.live.noActive);
+    expect(inactive.reply).toHaveBeenCalledWith(
+      en.camera.live.noActive,
+      expect.objectContaining({ reply_markup: expect.anything() }),
+    );
+    expect(callbackData(lastKeyboard(inactive))).toEqual(['rh:a:t']);
   });
 
   it('maps live failures through the registered user locale without exposing diagnostics', async () => {
@@ -408,7 +413,29 @@ describe('CameraHandler experimental live stream', () => {
 
     await commandCallbacks.camera(context);
 
-    expect(context.reply).toHaveBeenLastCalledWith(ru.camera.live.sourceUnavailable);
+    expect(context.reply).toHaveBeenLastCalledWith(
+      ru.camera.live.sourceUnavailable,
+      expect.objectContaining({ reply_markup: expect.anything() }),
+    );
+    expect(callbackData(lastKeyboard(context))).toEqual(['rh:a:t']);
+    expect(JSON.stringify(context.reply.mock.calls)).not.toContain('secret-token');
+  });
+
+  it('uses terminal Home for generic live unavailability without exposing diagnostics', async () => {
+    const { commandCallbacks, open } = createTestSetup();
+    (open.execute as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new LiveStreamUnavailableError(),
+    );
+    const context = ctx();
+    context.match = 'live';
+
+    await commandCallbacks.camera(context);
+
+    expect(context.reply).toHaveBeenLastCalledWith(
+      en.camera.live.unavailable,
+      expect.objectContaining({ reply_markup: expect.anything() }),
+    );
+    expect(callbackData(lastKeyboard(context))).toEqual(['rh:a:t']);
     expect(JSON.stringify(context.reply.mock.calls)).not.toContain('secret-token');
   });
 
@@ -426,7 +453,11 @@ describe('CameraHandler experimental live stream', () => {
       (sessions.revokeUser as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0],
     );
     expect(stop.execute).not.toHaveBeenCalled();
-    expect(context.reply).toHaveBeenLastCalledWith(en.camera.live.unavailable);
+    expect(context.reply).toHaveBeenLastCalledWith(
+      en.camera.live.unavailable,
+      expect.objectContaining({ reply_markup: expect.anything() }),
+    );
+    expect(callbackData(lastKeyboard(context))).toEqual(['rh:a:t']);
   });
 
   it('contains watch-message deletion failure and still revokes the viewer', async () => {
@@ -439,7 +470,11 @@ describe('CameraHandler experimental live stream', () => {
     await commandCallbacks.camera(context);
 
     expect(sessions.revokeUser).toHaveBeenCalledWith(100);
-    expect(context.reply).toHaveBeenLastCalledWith(en.camera.live.unavailable);
+    expect(context.reply).toHaveBeenLastCalledWith(
+      en.camera.live.unavailable,
+      expect.objectContaining({ reply_markup: expect.anything() }),
+    );
+    expect(callbackData(lastKeyboard(context))).toEqual(['rh:a:t']);
   });
 
   it('stops the shared stream when viewer revocation fails', async () => {
@@ -457,7 +492,11 @@ describe('CameraHandler experimental live stream', () => {
     expect(stop.execute).toHaveBeenCalledWith(100);
     expect((sessions.revokeUser as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0])
       .toBeLessThan((stop.execute as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]);
-    expect(context.reply).toHaveBeenLastCalledWith(en.camera.live.unavailable);
+    expect(context.reply).toHaveBeenLastCalledWith(
+      en.camera.live.unavailable,
+      expect.objectContaining({ reply_markup: expect.anything() }),
+    );
+    expect(callbackData(lastKeyboard(context))).toEqual(['rh:a:t']);
   });
 
   it('does not open live view without complete private message context', async () => {
@@ -474,7 +513,52 @@ describe('CameraHandler experimental live stream', () => {
       context.match = 'live';
       await commandCallbacks.camera(context);
       expect(open.execute).not.toHaveBeenCalled();
+      expect(context.reply).not.toHaveBeenCalled();
     }
+  });
+
+  it('clears a pending source prompt before /camera live opens and leaves later text unclaimed', async () => {
+    const { commandCallbacks, messageCallbacks, open, sources } = createTestSetup();
+    vi.mocked(sources.hasPending).mockReturnValue(true);
+    const context = ctx();
+    context.match = 'live';
+
+    await commandCallbacks.camera(context);
+
+    expect(sources.cancelPending).toHaveBeenCalledWith(100, 42);
+    expect((sources.cancelPending as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0])
+      .toBeLessThan((open.execute as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]);
+
+    vi.mocked(sources.handleText).mockResolvedValue(false);
+    const later = ctx();
+    later.message = { text: 'front door' };
+    const next = vi.fn();
+    await messageCallbacks['message:text'](later, next);
+    expect(next).toHaveBeenCalledOnce();
+  });
+
+  it('clears pending browse state before cam:live opens and leaves later text unclaimed', async () => {
+    const { callbackQueryCallbacks, handler, messageCallbacks, open, sources } = createTestSetup();
+    const callback = callbackQueryCallbacks[0].fn;
+    await callback(ctx('cam:browse:pick-date'));
+
+    await callback(ctx('cam:live'));
+
+    const state = handler as unknown as {
+      pendingBrowseInputs: Map<number, unknown>;
+      browseLastResults: Map<number, unknown>;
+    };
+    expect(state.pendingBrowseInputs.has(100)).toBe(false);
+    expect(state.browseLastResults.has(100)).toBe(false);
+    expect((sources.cancelPending as ReturnType<typeof vi.fn>).mock.invocationCallOrder.at(-1))
+      .toBeLessThan((open.execute as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]);
+
+    vi.mocked(sources.handleText).mockResolvedValue(false);
+    const later = ctx();
+    later.message = { text: '18:00-23:00' };
+    const next = vi.fn();
+    await messageCallbacks['message:text'](later, next);
+    expect(next).toHaveBeenCalledOnce();
   });
 
   it('answers but does not open an inline or non-private callback without chat context', async () => {
@@ -513,7 +597,11 @@ describe('CameraHandler experimental live stream', () => {
 
     await commandCallbacks.camera(context);
 
-    expect(context.reply).toHaveBeenLastCalledWith(en.camera.live.expired);
+    expect(context.reply).toHaveBeenLastCalledWith(
+      en.camera.live.expired,
+      expect.objectContaining({ reply_markup: expect.anything() }),
+    );
+    expect(callbackData(lastKeyboard(context))).toEqual(['rh:a:t']);
   });
 });
 
