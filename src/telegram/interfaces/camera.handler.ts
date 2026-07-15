@@ -37,6 +37,11 @@ import { RoleMiddleware } from './role.middleware';
 import { TelegramContext } from './telegram-context';
 import { TelegramHandler } from './telegram-handler';
 import { CameraSourcesHandler } from './camera-sources.handler';
+import {
+  appendReturnHomeButton,
+  returnHomeKeyboard,
+  type ExternalWorkflowPhase,
+} from './return-home';
 
 type Subcommand =
   | 'snapshot'
@@ -109,6 +114,7 @@ export class CameraHandler implements TelegramHandler {
   register(composer: Composer<TelegramContext>): void {
     composer.command('camera', this.guard.registered, async (ctx) => {
       if (!ctx.from || !ctx.message || ctx.chat?.type !== 'private') return;
+      this.cancelPending(ctx.from.id, ctx.chat.id);
       const tokens = (ctx.match ?? '').toString().trim().split(/\s+/).filter(Boolean);
       const sub = (tokens.shift() ?? '').toLowerCase() as Subcommand | '';
       const arg = tokens.join(' ').trim();
@@ -151,7 +157,9 @@ export class CameraHandler implements TelegramHandler {
             await this.sources.handleEntry(ctx);
             return;
           default:
-            await ctx.reply(en.camera.usage);
+            await ctx.reply(en.camera.usage, {
+              reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
+            });
         }
       } catch (err) {
         await this.handleError(ctx, err, `/camera ${sub}`);
@@ -166,6 +174,13 @@ export class CameraHandler implements TelegramHandler {
       const data = (ctx.callbackQuery?.data ?? '').slice('cam:'.length).trim();
       if (!data) return;
       try {
+        if (data === 'browse' || data.startsWith('browse:')) {
+          this.sources.cancelPending(userId, ctx.chat.id);
+        } else if (data === 'sources' || data.startsWith('sources:')) {
+          this.clearAllBrowseState(ctx);
+        } else {
+          this.cancelPending(userId, ctx.chat.id);
+        }
         if (data === 'sources') {
           await this.sources.handleEntry(ctx);
           return;
@@ -197,7 +212,9 @@ export class CameraHandler implements TelegramHandler {
         }
         if (data === 'close') {
           await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => undefined);
-          await ctx.reply(en.camera.closed);
+          await ctx.reply(en.camera.closed, {
+            reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
+          });
           return;
         }
         if (data === 'browse') {
@@ -220,19 +237,39 @@ export class CameraHandler implements TelegramHandler {
           await this.handleBrowseLatest(ctx);
           return;
         }
+        if (data.startsWith('browse:event:')) {
+          await this.handleBrowseEvent(ctx, data.slice('browse:event:'.length));
+          return;
+        }
+        if (data.startsWith('browse:video:')) {
+          await this.handleBrowseVideo(ctx, data.slice('browse:video:'.length));
+          return;
+        }
+        if (data.startsWith('browse:photo:')) {
+          await this.handleBrowsePhoto(ctx, data.slice('browse:photo:'.length));
+          return;
+        }
+        if (data === 'browse:back-results') {
+          await this.handleBrowseBackResults(ctx);
+          return;
+        }
         if (data === 'browse:back') {
           await this.handleBrowseBack(ctx);
           return;
         }
         if (data === 'browse:cancel') {
-          this.clearBrowseInput(ctx);
-          await ctx.reply(en.camera.browse.cancelled);
+          this.clearAllBrowseState(ctx);
+          await ctx.reply(en.camera.browse.cancelled, {
+            reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
+          });
           return;
         }
         if (data === 'browse:close') {
           this.clearAllBrowseState(ctx);
           await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => undefined);
-          await ctx.reply(en.camera.closed);
+          await ctx.reply(en.camera.closed, {
+            reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
+          });
           return;
         }
         if (data.startsWith('video:')) {
@@ -266,7 +303,8 @@ export class CameraHandler implements TelegramHandler {
 
   async handleDashboard(ctx: TelegramContext): Promise<void> {
     const userId = ctx.from?.id;
-    if (userId) this.pendingBrowseInputs.delete(userId);
+    const chatId = ctx.chat?.type === 'private' ? ctx.chat.id : undefined;
+    if (userId !== undefined && chatId !== undefined) this.cancelPending(userId, chatId);
 
     const kb = new InlineKeyboard()
       .text(this.catalog(ctx).camera.dashboardButtons.live, 'cam:live')
@@ -278,7 +316,9 @@ export class CameraHandler implements TelegramHandler {
       .text(en.camera.dashboardButtons.status, 'cam:status')
       .row()
       .text(en.camera.dashboardButtons.close, 'cam:close');
-    await ctx.reply(en.camera.dashboardTitle, { reply_markup: kb });
+    await ctx.reply(en.camera.dashboardTitle, {
+      reply_markup: this.returnKeyboard(ctx, 'cancelPending', kb),
+    });
   }
 
   private async handleBrowseMenu(ctx: TelegramContext): Promise<void> {
@@ -294,18 +334,21 @@ export class CameraHandler implements TelegramHandler {
       .row()
       .text(en.camera.browse.buttons.back, 'cam:browse:back')
       .text(en.camera.browse.buttons.close, 'cam:browse:close');
-    await ctx.reply(en.camera.browse.menuTitle, { reply_markup: kb });
+    await ctx.reply(en.camera.browse.menuTitle, {
+      reply_markup: this.returnKeyboard(ctx, 'cancelPending', kb),
+    });
   }
 
   private async handleBrowsePickDate(ctx: TelegramContext): Promise<void> {
     const userId = ctx.from?.id;
     if (!userId) return;
+    this.clearAllBrowseState(ctx);
     this.pendingBrowseInputs.set(userId, {
       kind: 'awaiting-date',
       createdAtMs: Date.now(),
     });
     await ctx.reply(en.camera.browse.datePrompt, {
-      reply_markup: browseBackCancelKeyboard(),
+      reply_markup: this.returnKeyboard(ctx, 'cancelPending', browseBackCancelKeyboard()),
     });
   }
 
@@ -320,6 +363,7 @@ export class CameraHandler implements TelegramHandler {
     const promptLabel = mode;
     const dateLabel = formatBrowseDateLabel(selectedDate);
 
+    this.clearAllBrowseState(ctx);
     this.pendingBrowseInputs.set(userId, {
       kind: 'awaiting-range',
       selectedDate,
@@ -328,7 +372,7 @@ export class CameraHandler implements TelegramHandler {
       createdAtMs: Date.now(),
     });
     await ctx.reply(en.camera.browse.timeRangePrompt(promptLabel), {
-      reply_markup: browseBackCancelKeyboard(),
+      reply_markup: this.returnKeyboard(ctx, 'cancelPending', browseBackCancelKeyboard()),
     });
   }
 
@@ -340,15 +384,19 @@ export class CameraHandler implements TelegramHandler {
     const state = this.pendingBrowseInputs.get(userId);
     if (!state) return;
     if (Date.now() - state.createdAtMs > CAMERA_BROWSE_TTL_MS) {
-      this.pendingBrowseInputs.delete(userId);
-      await ctx.reply(en.camera.browse.expiredInput);
+      this.clearAllBrowseState(ctx);
+      await ctx.reply(en.camera.browse.expiredInput, {
+        reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
+      });
       return;
     }
 
     if (state.kind === 'awaiting-date') {
       const parsedDate = parseBrowseDateInput(text);
       if (!parsedDate.ok) {
-        await ctx.reply(en.camera.browse.invalidDate);
+        await ctx.reply(en.camera.browse.invalidDate, {
+          reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx), browseBackCancelKeyboard()),
+        });
         return;
       }
       this.pendingBrowseInputs.set(userId, {
@@ -359,7 +407,7 @@ export class CameraHandler implements TelegramHandler {
         createdAtMs: Date.now(),
       });
       await ctx.reply(en.camera.browse.timeRangePrompt(parsedDate.dateLabel), {
-        reply_markup: browseBackCancelKeyboard(),
+        reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx), browseBackCancelKeyboard()),
       });
       return;
     }
@@ -370,6 +418,7 @@ export class CameraHandler implements TelegramHandler {
         parsedRange.reason === 'order'
           ? en.camera.browse.invalidTimeOrder
           : en.camera.browse.invalidTimeRange,
+        { reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx), browseBackCancelKeyboard()) },
       );
       return;
     }
@@ -387,6 +436,7 @@ export class CameraHandler implements TelegramHandler {
   }
 
   private async handleBrowseLatest(ctx: TelegramContext): Promise<void> {
+    this.clearBrowseInput(ctx);
     const result = await this.browseEvents.latest();
     await this.replyBrowseResults(ctx, {
       kind: 'latest',
@@ -425,7 +475,9 @@ export class CameraHandler implements TelegramHandler {
           createdAtMs: Date.now(),
         });
       }
-      await ctx.reply(empty, { reply_markup: browseResultNavKeyboard() });
+      await ctx.reply(empty, {
+        reply_markup: this.returnKeyboard(ctx, 'cancelPending', browseResultNavKeyboard()),
+      });
       return;
     }
 
@@ -451,7 +503,9 @@ export class CameraHandler implements TelegramHandler {
         createdAtMs: Date.now(),
       });
     }
-    await ctx.reply(message, { reply_markup: this.browseResultsKeyboard(result.events) });
+    await ctx.reply(message, {
+      reply_markup: this.returnKeyboard(ctx, 'cancelPending', this.browseResultsKeyboard(result.events)),
+    });
   }
 
   private browseResultsKeyboard(events: BrowseMotionEvent[]): InlineKeyboard {
@@ -504,6 +558,113 @@ export class CameraHandler implements TelegramHandler {
     await this.handleDashboard(ctx);
   }
 
+  private async handleBrowseEvent(ctx: TelegramContext, arg: string): Promise<void> {
+    const id = parseEventId(arg);
+    if (id === null) {
+      await this.replyBrowseResultsExpired(ctx);
+      return;
+    }
+    const results = this.currentBrowseResults(ctx.from?.id ?? -1);
+    if (!results || results.events.length === 0) {
+      await this.replyBrowseResultsExpired(ctx);
+      return;
+    }
+    const event = results.events.find((candidate) => candidate.id === id);
+    if (!event) {
+      await this.handleError(ctx, new EventNotFoundError(id), '/camera browse event');
+      return;
+    }
+
+    const keyboard = new InlineKeyboard();
+    const hasVideo = (!!event.videoPath && !event.localDeleted) || !!event.gdriveFileId;
+    const hasPhoto = !!event.snapshotPath && !event.localDeleted;
+    if (hasVideo) keyboard.text(en.camera.browse.buttons.video, `cam:browse:video:${event.id}`);
+    if (hasPhoto) keyboard.text(en.camera.browse.buttons.photo, `cam:browse:photo:${event.id}`);
+    if (hasVideo || hasPhoto) keyboard.row();
+    keyboard
+      .text(en.camera.browse.buttons.backToResults, 'cam:browse:back-results')
+      .text(en.camera.browse.buttons.close, 'cam:browse:close');
+    await ctx.reply(en.camera.browse.actionHeader(this.toBrowseLineView(event)), {
+      reply_markup: this.returnKeyboard(ctx, 'cancelPending', keyboard),
+    });
+  }
+
+  private async handleBrowseVideo(ctx: TelegramContext, arg: string): Promise<void> {
+    const id = parseEventId(arg);
+    if (id === null || !this.currentBrowseEvent(ctx, id)) {
+      await this.replyBrowseResultsExpired(ctx);
+      return;
+    }
+    const delivery = await this.video.execute(id);
+    const keyboard = this.browseMediaKeyboard(ctx);
+    if (delivery.kind === 'drive') {
+      await ctx.reply(en.camera.driveLinkFallback(id, delivery.event.gdriveFileId), {
+        reply_markup: keyboard,
+      });
+      return;
+    }
+    await ctx.replyWithChatAction('upload_video');
+    await ctx.replyWithVideo(new InputFile(delivery.path), {
+      caption: caption(delivery, id),
+      reply_markup: keyboard,
+    });
+  }
+
+  private async handleBrowsePhoto(ctx: TelegramContext, arg: string): Promise<void> {
+    const id = parseEventId(arg);
+    if (id === null || !this.currentBrowseEvent(ctx, id)) {
+      await this.replyBrowseResultsExpired(ctx);
+      return;
+    }
+    await ctx.replyWithChatAction('upload_photo');
+    const result = await this.photo.execute(id);
+    await ctx.replyWithPhoto(new InputFile(result.path), {
+      caption: en.camera.photoCaption(
+        result.event.id,
+        result.event.startedAt,
+        result.event.cameraId ?? '—',
+      ),
+      reply_markup: this.browseMediaKeyboard(ctx),
+    });
+  }
+
+  private async handleBrowseBackResults(ctx: TelegramContext): Promise<void> {
+    const results = this.currentBrowseResults(ctx.from?.id ?? -1);
+    if (!results || results.events.length === 0) {
+      await this.replyBrowseResultsExpired(ctx);
+      return;
+    }
+    const lines = results.events.map((event) => en.camera.browse.eventLine(this.toBrowseLineView(event)));
+    await ctx.reply([results.header, '', ...lines].join('\n'), {
+      reply_markup: this.returnKeyboard(ctx, 'cancelPending', this.browseResultsKeyboard(results.events)),
+    });
+  }
+
+  private currentBrowseEvent(ctx: TelegramContext, id: number): BrowseMotionEvent | undefined {
+    return this.currentBrowseResults(ctx.from?.id ?? -1)?.events.find((event) => event.id === id);
+  }
+
+  private async replyBrowseResultsExpired(ctx: TelegramContext): Promise<void> {
+    this.clearAllBrowseState(ctx);
+    await ctx.reply(en.camera.browse.resultsExpired, {
+      reply_markup: this.returnKeyboard(
+        ctx,
+        'alreadyTerminal',
+        new InlineKeyboard().text(en.camera.dashboardButtons.browseEvents, 'cam:browse'),
+      ),
+    });
+  }
+
+  private browseMediaKeyboard(ctx: TelegramContext): InlineKeyboard {
+    return this.returnKeyboard(
+      ctx,
+      'cancelPending',
+      new InlineKeyboard()
+        .text(en.camera.browse.buttons.backToResults, 'cam:browse:back-results')
+        .text(en.camera.browse.buttons.close, 'cam:browse:close'),
+    );
+  }
+
   private clearBrowseInput(ctx: TelegramContext): void {
     const userId = ctx.from?.id;
     if (!userId) return;
@@ -521,11 +682,43 @@ export class CameraHandler implements TelegramHandler {
     this.clearBrowseResults(ctx);
   }
 
+  private currentBrowseResults(userId: number): CameraBrowseLastResults | undefined {
+    const state = this.browseLastResults.get(userId);
+    if (state && Date.now() - state.createdAtMs > CAMERA_BROWSE_TTL_MS) {
+      this.browseLastResults.delete(userId);
+      return undefined;
+    }
+    return state;
+  }
+
+  private returnKeyboard(
+    ctx: TelegramContext,
+    phase: ExternalWorkflowPhase,
+    keyboard?: InlineKeyboard,
+  ): InlineKeyboard {
+    const input = { workflow: 'camera' as const, phase };
+    return keyboard
+      ? appendReturnHomeButton(keyboard, this.catalog(ctx), input)
+      : returnHomeKeyboard(this.catalog(ctx), input);
+  }
+
+  private returnPhase(ctx: TelegramContext): ExternalWorkflowPhase {
+    const userId = ctx.from?.id;
+    const chatId = ctx.chat?.type === 'private' ? ctx.chat.id : undefined;
+    return userId !== undefined && chatId !== undefined &&
+      (this.pendingBrowseInputs.has(userId) ||
+        this.currentBrowseResults(userId) !== undefined ||
+        this.sources.hasPending(userId, chatId))
+      ? 'cancelPending'
+      : 'alreadyTerminal';
+  }
+
   private async handleSnapshot(ctx: TelegramContext, name?: string): Promise<void> {
     await ctx.replyWithChatAction('upload_photo');
     const result = await this.snapshot.execute(name);
     await ctx.replyWithPhoto(new InputFile(result.buffer, 'snapshot.jpg'), {
       caption: en.camera.snapshotCaption(result.cameraName, result.takenAt),
+      reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
     });
   }
 
@@ -534,7 +727,9 @@ export class CameraHandler implements TelegramHandler {
     if (dateArg) {
       day = parse(dateArg, 'dd.MM.yyyy', new Date());
       if (Number.isNaN(day.getTime())) {
-        await ctx.reply(en.camera.invalidDate);
+        await ctx.reply(en.camera.invalidDate, {
+          reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
+        });
         return;
       }
     } else {
@@ -543,7 +738,9 @@ export class CameraHandler implements TelegramHandler {
 
     const events = await this.listEvents.execute(day);
     if (events.length === 0) {
-      await ctx.reply(en.camera.eventsNone(day));
+      await ctx.reply(en.camera.eventsNone(day), {
+        reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
+      });
       return;
     }
 
@@ -571,33 +768,42 @@ export class CameraHandler implements TelegramHandler {
       }
       kb.row();
     }
-    await ctx.reply(message, { reply_markup: kb });
+    await ctx.reply(message, {
+      reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx), kb),
+    });
   }
 
   private async handleVideo(ctx: TelegramContext, arg: string): Promise<void> {
     const id = parseEventId(arg);
     if (id === null) {
-      await ctx.reply(en.camera.usage);
+      await ctx.reply(en.camera.usage, {
+        reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
+      });
       return;
     }
 
     const delivery = await this.video.execute(id);
     if (delivery.kind === 'drive') {
       // gdriveFileId holds the rclone remote path (not a Drive file id).
-      await ctx.reply(en.camera.driveLinkFallback(id, delivery.event.gdriveFileId));
+      await ctx.reply(en.camera.driveLinkFallback(id, delivery.event.gdriveFileId), {
+        reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
+      });
       return;
     }
 
     await ctx.replyWithChatAction('upload_video');
     await ctx.replyWithVideo(new InputFile(delivery.path), {
       caption: caption(delivery, id),
+      reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
     });
   }
 
   private async handlePhoto(ctx: TelegramContext, arg: string): Promise<void> {
     const id = parseEventId(arg);
     if (id === null) {
-      await ctx.reply(en.camera.usage);
+      await ctx.reply(en.camera.usage, {
+        reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
+      });
       return;
     }
 
@@ -609,25 +815,30 @@ export class CameraHandler implements TelegramHandler {
         result.event.startedAt,
         result.event.cameraId ?? '—',
       ),
+      reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
     });
   }
 
   private async handleEnable(ctx: TelegramContext): Promise<void> {
     if (!(await this.requireAdmin(ctx))) return;
     await this.enable.execute();
-    await ctx.reply(en.camera.motionStarted);
+    await ctx.reply(en.camera.motionStarted, {
+      reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
+    });
   }
 
   private async handleDisable(ctx: TelegramContext): Promise<void> {
     if (!(await this.requireAdmin(ctx))) return;
     await this.disable.execute();
-    await ctx.reply(en.camera.motionStopped);
+    await ctx.reply(en.camera.motionStopped, {
+      reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
+    });
   }
 
   async handleStatus(ctx: TelegramContext): Promise<void> {
     const result = await this.status.execute();
     const message = `${en.camera.statusHeader}\n\n${en.camera.statusBody(result)}`;
-    await ctx.reply(message);
+    await ctx.reply(message, { reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)) });
   }
 
   private async handleLive(
@@ -739,51 +950,55 @@ export class CameraHandler implements TelegramHandler {
 
   private async handleError(ctx: TelegramContext, err: unknown, action: string): Promise<void> {
     if (err instanceof CameraNotFoundError) {
-      await ctx.reply(en.camera.cameraNotFound(err.cameraName));
+      await this.replyWithReturnHome(ctx, en.camera.cameraNotFound(err.cameraName));
       return;
     }
     if (err instanceof NoCamerasConfiguredError) {
-      await ctx.reply(en.camera.noCameras);
+      await this.replyWithReturnHome(ctx, en.camera.noCameras);
       return;
     }
     if (err instanceof MotionNotRunningError) {
-      await ctx.reply(en.camera.motionNotRunning);
+      await this.replyWithReturnHome(ctx, en.camera.motionNotRunning);
       return;
     }
     if (err instanceof SnapshotFailedError) {
-      await ctx.reply(en.camera.snapshotFailed);
+      await this.replyWithReturnHome(ctx, en.camera.snapshotFailed);
       return;
     }
     if (err instanceof EventNotFoundError) {
-      await ctx.reply(en.camera.eventNotFound(err.eventId));
+      await this.replyWithReturnHome(ctx, en.camera.eventNotFound(err.eventId));
       return;
     }
     if (err instanceof NoSnapshotForEventError) {
-      await ctx.reply(en.camera.noSnapshotForEvent(err.eventId));
+      await this.replyWithReturnHome(ctx, en.camera.noSnapshotForEvent(err.eventId));
       return;
     }
     if (err instanceof MediaFileUnavailableError) {
-      await ctx.reply(en.camera.videoUnavailable);
+      await this.replyWithReturnHome(ctx, en.camera.videoUnavailable);
       return;
     }
     if (err instanceof MotionAlreadyRunningError) {
-      await ctx.reply(en.camera.alreadyRunning);
+      await this.replyWithReturnHome(ctx, en.camera.alreadyRunning);
       return;
     }
     if (err instanceof MotionNotInstalledError) {
-      await ctx.reply(en.camera.notInstalled);
+      await this.replyWithReturnHome(ctx, en.camera.notInstalled);
       return;
     }
     if (err instanceof MotionStartFailedError) {
-      await ctx.reply(en.camera.startFailed(err.reason));
+      await this.replyWithReturnHome(ctx, en.camera.startFailed(err.reason));
       return;
     }
     if (err instanceof MotionStopFailedError) {
-      await ctx.reply(en.camera.stopFailed(err.reason));
+      await this.replyWithReturnHome(ctx, en.camera.stopFailed(err.reason));
       return;
     }
     this.logger.error(`${action} failed: ${(err as Error).message}`, (err as Error).stack);
-    await ctx.reply(en.common.error(action, (err as Error).message));
+    await this.replyWithReturnHome(ctx, en.common.error(action, (err as Error).message));
+  }
+
+  private async replyWithReturnHome(ctx: TelegramContext, message: string): Promise<void> {
+    await ctx.reply(message, { reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)) });
   }
 }
 

@@ -14,8 +14,10 @@ import { LiveStreamExpiredError } from '../../../src/camera/domain/errors/live-s
 import { LiveStreamSourceUnavailableError } from '../../../src/camera/domain/errors/live-stream-source-unavailable.error';
 import { LiveStreamUnavailableError } from '../../../src/camera/domain/errors/live-stream-unavailable.error';
 import { MotionEvent } from '../../../src/camera/domain/motion-event.entity';
+import { catalogFor } from '../../../src/locales';
 import { en } from '../../../src/locales/en';
 import { ru } from '../../../src/locales/ru';
+import { InlineKeyboard, InputFile } from 'grammy';
 import {
   buildBrowseRange,
   CameraHandler,
@@ -133,6 +135,7 @@ function createTestSetup() {
   } as unknown as RoleMiddleware;
   const sources = {
     cancelPending: vi.fn(),
+    hasPending: vi.fn().mockReturnValue(false),
     handleEntry: vi.fn().mockResolvedValue(undefined),
     handleCallback: vi.fn().mockResolvedValue(undefined),
     handleText: vi.fn().mockResolvedValue(false),
@@ -272,14 +275,22 @@ describe('CameraHandler return-home cancellation', () => {
   });
 });
 
-function ctx(data?: string) {
+function ctx(data?: string, locale: 'en' | 'uk' = 'en') {
+  const catalog = catalogFor(locale);
   return {
     from: { id: 100 },
     chat: { id: 42, type: 'private' },
     callbackQuery: data ? { data } : undefined,
     message: data ? undefined : { text: '/camera' },
     match: '',
+    localeState: {
+      user: { telegramId: 100, name: 'User', role: 'user', locale },
+      locale,
+      catalog,
+    },
     reply: vi.fn().mockResolvedValue({ message_id: 9 }),
+    replyWithPhoto: vi.fn().mockResolvedValue({ message_id: 10 }),
+    replyWithVideo: vi.fn().mockResolvedValue({ message_id: 11 }),
     api: { deleteMessage: vi.fn().mockResolvedValue(true) },
     answerCallbackQuery: vi.fn().mockResolvedValue(true),
     editMessageReplyMarkup: vi.fn().mockResolvedValue(true),
@@ -572,7 +583,10 @@ describe('CameraHandler browse menu and input flow', () => {
     const invalid = ctx();
     invalid.message = { text: '31.02.2026' };
     await messageCallbacks['message:text'](invalid, vi.fn());
-    expect(invalid.reply).toHaveBeenCalledWith(expect.stringContaining('DD.MM.YYYY'));
+    expect(invalid.reply).toHaveBeenCalledWith(
+      expect.stringContaining('DD.MM.YYYY'),
+      expect.objectContaining({ reply_markup: expect.anything() }),
+    );
 
     const valid = ctx();
     valid.message = { text: '08.04.2026' };
@@ -590,12 +604,273 @@ describe('CameraHandler browse menu and input flow', () => {
     const malformed = ctx();
     malformed.message = { text: '8-9' };
     await messageCallbacks['message:text'](malformed, vi.fn());
-    expect(malformed.reply).toHaveBeenCalledWith(expect.stringContaining('HH:MM-HH:MM'));
+    expect(malformed.reply).toHaveBeenCalledWith(
+      expect.stringContaining('HH:MM-HH:MM'),
+      expect.objectContaining({ reply_markup: expect.anything() }),
+    );
 
     const overnight = ctx();
     overnight.message = { text: '23:00-01:00' };
     await messageCallbacks['message:text'](overnight, vi.fn());
-    expect(overnight.reply).toHaveBeenCalledWith(expect.stringContaining('Overnight ranges'));
+    expect(overnight.reply).toHaveBeenCalledWith(
+      expect.stringContaining('Overnight ranges'),
+      expect.objectContaining({ reply_markup: expect.anything() }),
+    );
     expect(browse.between).not.toHaveBeenCalled();
+  });
+});
+
+function callbackData(keyboard: InlineKeyboard): string[] {
+  return keyboard.inline_keyboard.flat().flatMap((button) =>
+    'callback_data' in button && button.callback_data ? [button.callback_data] : [],
+  );
+}
+
+function lastKeyboard(context: ReturnType<typeof ctx>): InlineKeyboard {
+  return context.reply.mock.calls.at(-1)?.[1]?.reply_markup as InlineKeyboard;
+}
+
+describe('CameraHandler browse return-home state transitions', () => {
+  it('adds cancellable localized Home to cached browse results', async () => {
+    const { callbackQueryCallbacks, browse } = createTestSetup();
+    vi.mocked(browse.latest).mockResolvedValue({ events: [event()], hasMore: false });
+    const context = ctx('cam:browse:latest', 'uk');
+
+    await callbackQueryCallbacks[0].fn(context);
+
+    const keyboard = lastKeyboard(context);
+    expect(JSON.stringify(keyboard)).toContain('cam:browse:event:42');
+    expect(JSON.stringify(keyboard)).toContain('rh:a:c');
+    expect(JSON.stringify(keyboard)).toContain('🏠 Дім');
+    expect(keyboard.inline_keyboard.at(-1)).toHaveLength(1);
+    expect(callbackData(keyboard).filter((data) => data.startsWith('rh:'))).toEqual(['rh:a:c']);
+  });
+
+  it('adds a cancellable Home row to dashboard, menu, prompts, retries, and empty results', async () => {
+    const { commandCallbacks, callbackQueryCallbacks, messageCallbacks, browse } = createTestSetup();
+    const dashboard = ctx();
+    await commandCallbacks.camera(dashboard);
+    expect(callbackData(lastKeyboard(dashboard))).toContain('rh:a:c');
+
+    const menu = ctx('cam:browse');
+    await callbackQueryCallbacks[0].fn(menu);
+    expect(callbackData(lastKeyboard(menu))).toContain('rh:a:c');
+
+    const prompt = ctx('cam:browse:pick-date');
+    await callbackQueryCallbacks[0].fn(prompt);
+    expect(callbackData(lastKeyboard(prompt))).toContain('rh:a:c');
+
+    const retry = ctx();
+    retry.message = { text: '31.02.2026' };
+    await messageCallbacks['message:text'](retry, vi.fn());
+    expect(callbackData(lastKeyboard(retry))).toContain('rh:a:c');
+
+    vi.mocked(browse.latest).mockResolvedValue({ events: [], hasMore: false });
+    const empty = ctx('cam:browse:latest');
+    await callbackQueryCallbacks[0].fn(empty);
+    expect(callbackData(lastKeyboard(empty))).toContain('rh:a:c');
+  });
+
+  it('clears a source prompt before entering browse', async () => {
+    const { callbackQueryCallbacks, messageCallbacks, sources } = createTestSetup();
+    vi.mocked(sources.hasPending).mockReturnValue(true);
+
+    await callbackQueryCallbacks[0].fn(ctx('cam:browse:pick-date'));
+
+    expect(sources.cancelPending).toHaveBeenCalledWith(100, 42);
+    vi.mocked(sources.handleText).mockResolvedValue(false);
+    const typed = ctx();
+    typed.message = { text: '08.04.2026' };
+    await messageCallbacks['message:text'](typed, vi.fn());
+    expect(typed.reply).toHaveBeenCalledWith(
+      expect.stringContaining('08.04.2026'),
+      expect.anything(),
+    );
+  });
+
+  it('clears browse state before entering source management', async () => {
+    const { callbackQueryCallbacks, messageCallbacks, sources } = createTestSetup();
+    await callbackQueryCallbacks[0].fn(ctx('cam:browse:pick-date'));
+
+    await callbackQueryCallbacks[0].fn(ctx('cam:sources:add'));
+
+    vi.mocked(sources.handleText).mockResolvedValue(false);
+    const later = ctx();
+    later.message = { text: '08.04.2026' };
+    const next = vi.fn();
+    await messageCallbacks['message:text'](later, next);
+    expect(next).toHaveBeenCalledOnce();
+  });
+
+  it('clears all interface-local camera state before root camera callbacks', async () => {
+    const { callbackQueryCallbacks, handler, snapshot, sources } = createTestSetup();
+    vi.mocked(snapshot.execute).mockResolvedValue({
+      buffer: Buffer.from('image'),
+      cameraName: 'front_door',
+      takenAt: new Date('2026-04-08T12:51:06'),
+    });
+    const callback = callbackQueryCallbacks[0].fn;
+    await callback(ctx('cam:browse:pick-date'));
+    await callback(ctx('cam:snapshot'));
+
+    const state = handler as unknown as {
+      pendingBrowseInputs: Map<number, unknown>;
+      browseLastResults: Map<number, unknown>;
+    };
+    expect(state.pendingBrowseInputs.has(100)).toBe(false);
+    expect(state.browseLastResults.has(100)).toBe(false);
+    expect(sources.cancelPending).toHaveBeenLastCalledWith(100, 42);
+    expect(snapshot.execute).toHaveBeenCalledOnce();
+  });
+
+  it('does not retain two browse states when an old date keyboard is selected', async () => {
+    const { callbackQueryCallbacks, handler } = createTestSetup();
+    const callback = callbackQueryCallbacks[0].fn;
+    await callback(ctx('cam:browse:latest'));
+    await callback(ctx('cam:browse:pick-date'));
+    await callback(ctx('cam:browse:cancel'));
+
+    const state = handler as unknown as {
+      pendingBrowseInputs: Map<number, unknown>;
+      browseLastResults: Map<number, unknown>;
+    };
+    expect(state.pendingBrowseInputs.size).toBe(0);
+    expect(state.browseLastResults.size).toBe(0);
+
+    const cancelled = ctx('cam:browse:cancel');
+    await callback(cancelled);
+    expect(callbackData(lastKeyboard(cancelled))).toEqual(['rh:a:t']);
+  });
+
+  it('clears expired typed browse input before offering terminal Home', async () => {
+    vi.useFakeTimers();
+    try {
+      const { callbackQueryCallbacks, messageCallbacks, handler } = createTestSetup();
+      await callbackQueryCallbacks[0].fn(ctx('cam:browse:pick-date'));
+      vi.advanceTimersByTime(10 * 60_000 + 1);
+      const expired = ctx();
+      expired.message = { text: '08.04.2026' };
+      await messageCallbacks['message:text'](expired, vi.fn());
+
+      const state = handler as unknown as {
+        pendingBrowseInputs: Map<number, unknown>;
+        browseLastResults: Map<number, unknown>;
+      };
+      expect(state.pendingBrowseInputs.size).toBe(0);
+      expect(state.browseLastResults.size).toBe(0);
+      expect(callbackData(lastKeyboard(expired))).toEqual(['rh:a:t']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('renders cached event actions and delivers media with Back to results', async () => {
+    const { callbackQueryCallbacks, browse, video, photo } = createTestSetup();
+    vi.mocked(browse.latest).mockResolvedValue({ events: [event()], hasMore: false });
+    vi.mocked(video.execute).mockResolvedValue({ kind: 'local', event: event(), path: '/motion/42.mp4' });
+    vi.mocked(photo.execute).mockResolvedValue({ event: event(), path: '/motion/42.jpg' });
+    const callback = callbackQueryCallbacks[0].fn;
+    await callback(ctx('cam:browse:latest'));
+
+    const action = ctx('cam:browse:event:42');
+    await callback(action);
+    expect(action.reply).toHaveBeenCalledWith(
+      expect.stringContaining('📹 Event #42'),
+      expect.objectContaining({ reply_markup: expect.anything() }),
+    );
+    expect(callbackData(lastKeyboard(action))).toEqual(expect.arrayContaining([
+      'cam:browse:video:42',
+      'cam:browse:photo:42',
+      'cam:browse:back-results',
+      'cam:browse:close',
+      'rh:a:c',
+    ]));
+
+    const videoContext = ctx('cam:browse:video:42');
+    await callback(videoContext);
+    expect(video.execute).toHaveBeenCalledWith(42);
+    expect(videoContext.replyWithVideo).toHaveBeenCalledWith(
+      expect.any(InputFile),
+      expect.objectContaining({ reply_markup: expect.anything() }),
+    );
+    expect(callbackData(videoContext.replyWithVideo.mock.calls[0][1].reply_markup)).toEqual(
+      expect.arrayContaining(['cam:browse:back-results', 'rh:a:c']),
+    );
+
+    const photoContext = ctx('cam:browse:photo:42');
+    await callback(photoContext);
+    expect(photo.execute).toHaveBeenCalledWith(42);
+    expect(photoContext.replyWithPhoto).toHaveBeenCalledWith(
+      expect.any(InputFile),
+      expect.objectContaining({ reply_markup: expect.anything() }),
+    );
+    expect(callbackData(photoContext.replyWithPhoto.mock.calls[0][1].reply_markup)).toEqual(
+      expect.arrayContaining(['cam:browse:back-results', 'rh:a:c']),
+    );
+  });
+
+  it('does not fabricate unavailable event media actions', async () => {
+    const { callbackQueryCallbacks, browse } = createTestSetup();
+    vi.mocked(browse.latest).mockResolvedValue({
+      events: [event({ videoPath: null, snapshotPath: '/motion/42.jpg', localDeleted: true })],
+      hasMore: false,
+    });
+    const callback = callbackQueryCallbacks[0].fn;
+    await callback(ctx('cam:browse:latest'));
+    const action = ctx('cam:browse:event:42');
+    await callback(action);
+
+    expect(callbackData(lastKeyboard(action))).not.toEqual(
+      expect.arrayContaining(['cam:browse:video:42', 'cam:browse:photo:42']),
+    );
+    expect(callbackData(lastKeyboard(action))).toEqual(
+      expect.arrayContaining(['cam:browse:back-results', 'cam:browse:close', 'rh:a:c']),
+    );
+  });
+
+  it('rebuilds cached results without querying again', async () => {
+    const { callbackQueryCallbacks, browse } = createTestSetup();
+    const callback = callbackQueryCallbacks[0].fn;
+    await callback(ctx('cam:browse:latest'));
+    await callback(ctx('cam:browse:back-results'));
+
+    expect(browse.latest).toHaveBeenCalledTimes(1);
+    const back = ctx('cam:browse:back-results');
+    await callback(back);
+    expect(browse.latest).toHaveBeenCalledTimes(1);
+    expect(back.reply).toHaveBeenCalledWith(
+      expect.stringContaining('Latest Motion Events'),
+      expect.objectContaining({ reply_markup: expect.anything() }),
+    );
+    expect(callbackData(lastKeyboard(back))).toContain('rh:a:c');
+  });
+
+  it('expires stale cached results before media delivery and maps missing cached events', async () => {
+    vi.useFakeTimers();
+    try {
+      const { callbackQueryCallbacks, video } = createTestSetup();
+      const callback = callbackQueryCallbacks[0].fn;
+      await callback(ctx('cam:browse:latest'));
+      vi.advanceTimersByTime(10 * 60_000 + 1);
+
+      const expired = ctx('cam:browse:video:42');
+      await callback(expired);
+      expect(expired.reply).toHaveBeenCalledWith(
+        expect.stringContaining('results list expired'),
+        expect.objectContaining({ reply_markup: expect.anything() }),
+      );
+      expect(callbackData(lastKeyboard(expired))).toEqual(expect.arrayContaining(['cam:browse', 'rh:a:t']));
+      expect(video.execute).not.toHaveBeenCalled();
+
+      await callback(ctx('cam:browse:latest'));
+      const absent = ctx('cam:browse:event:99');
+      await callback(absent);
+      expect(absent.reply).toHaveBeenCalledWith(
+        en.camera.eventNotFound(99),
+        expect.objectContaining({ reply_markup: expect.anything() }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
