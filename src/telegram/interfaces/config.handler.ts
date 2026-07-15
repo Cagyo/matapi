@@ -172,6 +172,12 @@ export class ConfigHandler implements TelegramHandler {
       : returnHomeKeyboard(catalog, input);
   }
 
+  private returnPhase(ctx: TelegramContext): ExternalWorkflowPhase {
+    return ctx.from?.id !== undefined && this.states.has(ctx.from.id)
+      ? 'cancelPending'
+      : 'alreadyTerminal';
+  }
+
   // ───────── entry point ─────────
 
   async handleSubcommand(ctx: TelegramContext, sub: string): Promise<void> {
@@ -188,7 +194,7 @@ export class ConfigHandler implements TelegramHandler {
       const sensors = await this.sensors.listEnabled();
       if (sensors.length === 0) {
         await ctx.reply(en.config.noActiveSensors, {
-          reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
+          reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
         });
         return;
       }
@@ -208,7 +214,7 @@ export class ConfigHandler implements TelegramHandler {
       const sensors = await this.sensors.listEnabled();
       if (sensors.length === 0) {
         await ctx.reply(en.config.noActiveSensors, {
-          reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
+          reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
         });
         return;
       }
@@ -248,7 +254,7 @@ export class ConfigHandler implements TelegramHandler {
       const sensor = await this.sensors.findByName(arg);
       if (sensor?.kind !== 'active') {
         await ctx.reply(en.config.notFound(arg), {
-          reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
+          reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
         });
         return;
       }
@@ -277,7 +283,7 @@ export class ConfigHandler implements TelegramHandler {
       const sensor = await this.sensors.findByName(arg);
       if (sensor?.kind !== 'active') {
         await ctx.reply(en.config.notFound(arg), {
-          reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
+          reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
         });
         return;
       }
@@ -288,7 +294,7 @@ export class ConfigHandler implements TelegramHandler {
       return;
     }
     await ctx.reply(en.config.missingArg('<add|modify|remove>'), {
-      reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
+      reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
     });
   }
 
@@ -338,7 +344,7 @@ export class ConfigHandler implements TelegramHandler {
       const sensor = await this.sensors.findByName(name);
       if (sensor?.kind !== 'active') {
         await ctx.reply(en.config.notFound(name), {
-          reply_markup: this.returnKeyboard(ctx, 'cancelPending'),
+          reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
         });
         return;
       }
@@ -364,7 +370,7 @@ export class ConfigHandler implements TelegramHandler {
       const sensor = await this.sensors.findByName(name);
       if (sensor?.kind !== 'active') {
         await ctx.reply(en.config.notFound(name), {
-          reply_markup: this.returnKeyboard(ctx, 'cancelPending'),
+          reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
         });
         return;
       }
@@ -948,10 +954,7 @@ export class ConfigHandler implements TelegramHandler {
   // ───────── errors ─────────
 
   private async replyError(ctx: TelegramContext, err: unknown): Promise<void> {
-    const phase: ExternalWorkflowPhase = ctx.from?.id && this.states.has(ctx.from.id)
-      ? 'cancelPending'
-      : 'alreadyTerminal';
-    const options = { reply_markup: this.returnKeyboard(ctx, phase) };
+    const options = { reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)) };
     if (err instanceof SensorNameExistsError) {
       await ctx.reply(en.config.nameTaken(err.sensorName), options);
       return;

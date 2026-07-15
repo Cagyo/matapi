@@ -58,6 +58,7 @@ describe('ConfigHandler', () => {
       sensors,
       addSensor,
       modifySensor,
+      removeSensor,
       commandCallbacks,
       callbackQueryCallbacks,
       messageCallbacks,
@@ -390,6 +391,127 @@ describe('ConfigHandler', () => {
 
     sensors.listEnabled.mockResolvedValueOnce([]);
     await handler.handleSubcommand({ from: { id: 606 }, reply, localeState: localeState('uk') } as never, 'remove');
+    expect(callbackData(reply)).toEqual(['rh:f:t']);
+  });
+
+  it('keeps an existing config state cancellable through empty, not-found, and usage replies', async () => {
+    const { handler, commandCallbacks, messageCallbacks, sensors } = createTestSetup();
+    const reply = vi.fn().mockResolvedValue(true);
+    const userId = 607;
+    const context = { from: { id: userId }, reply, localeState: localeState('uk') };
+
+    await handler.handleSubcommand(context as never, 'add');
+    sensors.listEnabled.mockResolvedValue([]);
+    await handler.handleSubcommand(context as never, 'modify');
+    expect(callbackData(reply)).toContain('rh:f:c');
+
+    await handler.handleSubcommand(context as never, 'remove');
+    expect(callbackData(reply)).toContain('rh:f:c');
+
+    await commandCallbacks.config({ ...context, match: 'modify missing_sensor' } as never);
+    expect(callbackData(reply)).toContain('rh:f:c');
+
+    await commandCallbacks.config({ ...context, match: 'unknown' } as never);
+    expect(callbackData(reply)).toContain('rh:f:c');
+
+    const next = vi.fn();
+    await messageCallbacks['message:text']({
+      ...context,
+      message: { text: 'still_active' },
+    } as never, next);
+    expect(next).not.toHaveBeenCalled();
+
+    await commandCallbacks.config({
+      from: { id: 608 },
+      match: 'unknown',
+      reply,
+      localeState: localeState('uk'),
+    } as never);
+    expect(callbackData(reply)).toEqual(['rh:f:t']);
+  });
+
+  it('clears modify selection and remove confirmation when Return Home cancels them', async () => {
+    const { handler, callbackQueryCallbacks, removeSensor, sensors } = createTestSetup();
+    const callback = callbackQueryCallbacks[0].fn;
+    const reply = vi.fn().mockResolvedValue(true);
+    const callbackContext = {
+      answerCallbackQuery: vi.fn().mockResolvedValue(true),
+      editMessageReplyMarkup: vi.fn().mockResolvedValue(true),
+      reply,
+      localeState: localeState('uk'),
+    };
+    sensors.findByName.mockResolvedValue({
+      kind: 'active',
+      sensor: { id: 'front-id', name: 'front_door', type: 'digital', config: { pin: 4 }, debounceMs: 100, severity: 'info' },
+    });
+
+    await handler.handleSubcommand({ ...callbackContext, from: { id: 609 } } as never, 'modify');
+    handler.cancelPending(609);
+    await callback({ ...callbackContext, from: { id: 609 }, callbackQuery: { data: 'cfg:mod:front_door' } } as never);
+    expect(callbackData(reply)).toEqual(['rh:f:t']);
+
+    await handler.handleSubcommand({ ...callbackContext, from: { id: 610 } } as never, 'remove');
+    await callback({ ...callbackContext, from: { id: 610 }, callbackQuery: { data: 'cfg:rem:front_door' } } as never);
+    expect(callbackData(reply)).toContain('cfg:rm:confirm');
+    handler.cancelPending(610);
+    await callback({ ...callbackContext, from: { id: 610 }, callbackQuery: { data: 'cfg:rm:confirm' } } as never);
+    expect(callbackData(reply)).toEqual(['rh:f:t']);
+    expect(removeSensor.execute).not.toHaveBeenCalled();
+  });
+
+  it('keeps the Home action cancellable when replyError leaves a config state active', async () => {
+    const { handler, callbackQueryCallbacks, sensors } = createTestSetup();
+    const callback = callbackQueryCallbacks[0].fn;
+    const reply = vi.fn().mockResolvedValue(true);
+    const callbackContext = {
+      from: { id: 611 },
+      answerCallbackQuery: vi.fn().mockResolvedValue(true),
+      editMessageReplyMarkup: vi.fn().mockResolvedValue(true),
+      reply,
+      localeState: localeState('uk'),
+    };
+    sensors.findByName.mockResolvedValue({
+      kind: 'active',
+      sensor: { id: 'front-id', name: 'front_door', type: 'digital', config: { pin: 4 }, debounceMs: 100, severity: 'info' },
+    });
+
+    await handler.handleSubcommand(callbackContext as never, 'modify');
+    await callback({ ...callbackContext, callbackQuery: { data: 'cfg:mod:front_door' } } as never);
+    sensors.findById.mockResolvedValue(undefined);
+    await callback({ ...callbackContext, callbackQuery: { data: 'cfg:modify:invert' } } as never);
+    expect(callbackData(reply)).toEqual(['rh:f:c']);
+
+    await callback({ ...callbackContext, callbackQuery: { data: 'cfg:modify:done' } } as never);
+    expect(callbackData(reply)).toEqual(['rh:f:t']);
+  });
+
+  it('uses terminal Home after Done, remove success, and explicit cancel', async () => {
+    const { handler, callbackQueryCallbacks, sensors } = createTestSetup();
+    const callback = callbackQueryCallbacks[0].fn;
+    const reply = vi.fn().mockResolvedValue(true);
+    const callbackContext = {
+      answerCallbackQuery: vi.fn().mockResolvedValue(true),
+      editMessageReplyMarkup: vi.fn().mockResolvedValue(true),
+      reply,
+      localeState: localeState('uk'),
+    };
+    sensors.findByName.mockResolvedValue({
+      kind: 'active',
+      sensor: { id: 'front-id', name: 'front_door', type: 'digital', config: { pin: 4 }, debounceMs: 100, severity: 'info' },
+    });
+
+    await handler.handleSubcommand({ ...callbackContext, from: { id: 612 } } as never, 'modify');
+    await callback({ ...callbackContext, from: { id: 612 }, callbackQuery: { data: 'cfg:mod:front_door' } } as never);
+    await callback({ ...callbackContext, from: { id: 612 }, callbackQuery: { data: 'cfg:modify:done' } } as never);
+    expect(callbackData(reply)).toEqual(['rh:f:t']);
+
+    await handler.handleSubcommand({ ...callbackContext, from: { id: 613 } } as never, 'remove');
+    await callback({ ...callbackContext, from: { id: 613 }, callbackQuery: { data: 'cfg:rem:front_door' } } as never);
+    await callback({ ...callbackContext, from: { id: 613 }, callbackQuery: { data: 'cfg:rm:confirm' } } as never);
+    expect(callbackData(reply)).toEqual(['rh:f:t']);
+
+    await handler.handleSubcommand({ ...callbackContext, from: { id: 614 } } as never, 'add');
+    await callback({ ...callbackContext, from: { id: 614 }, callbackQuery: { data: 'cfg:cancel' } } as never);
     expect(callbackData(reply)).toEqual(['rh:f:t']);
   });
 });
