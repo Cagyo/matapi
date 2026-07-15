@@ -791,6 +791,7 @@ const enCatalog = {
     rowTooLarge: '❌ A selected history row is too large to export.',
     fileTooLarge: '❌ The CSV file is too large to export.',
     malformedTimestamp: '❌ A selected history row has an invalid timestamp.',
+    staging: '⏳ Your CSV export is being prepared. You can return Home without cancelling it.',
     inProgress: '⏳ A CSV export from this picker is already in progress.',
     failed: '❌ Failed to export CSV.',
     caption: '📄 Sensor history CSV export.',

@@ -8,6 +8,7 @@ import {
   UserRepositoryPort,
 } from '../domain/ports/user-repository.port';
 import { RoleMiddleware } from './role.middleware';
+import { returnHomeCallback } from './return-home';
 import { TelegramHandler } from './telegram-handler';
 import { TelegramContext } from './telegram-context';
 
@@ -78,7 +79,12 @@ export class SettingsHandler implements TelegramHandler {
     return new InlineKeyboard()
       .text(catalog.language.buttons.en, 'settings:locale:en')
       .text(catalog.language.buttons.ru, 'settings:locale:ru')
-      .text(catalog.language.buttons.uk, 'settings:locale:uk');
+      .text(catalog.language.buttons.uk, 'settings:locale:uk')
+      .row()
+      .text(catalog.home.common.home, returnHomeCallback({
+        workflow: 'settings',
+        phase: 'cancelPending',
+      }));
   }
 
   private catalog(ctx: TelegramContext): LocaleCatalog {

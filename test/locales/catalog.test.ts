@@ -38,6 +38,7 @@ describe('catalogFor', () => {
     for (const catalog of [catalogs.en, catalogs.ru, catalogs.uk]) {
       expect(catalog.csv.selectTarget).toBeTruthy();
       expect(catalog.csv.caption).toBeTruthy();
+      expect(catalog.csv.staging).toBeTruthy();
       expect(catalog.menu.buttons.exportCsv).toBeTruthy();
       expect(catalog.menu.submenus.sensorsExportCsv).toBeTruthy();
     }

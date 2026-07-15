@@ -6,6 +6,26 @@ import { UserRepositoryPort } from '../../../src/telegram/domain/ports/user-repo
 import { RoleMiddleware } from '../../../src/telegram/interfaces/role.middleware';
 import { SettingsHandler } from '../../../src/telegram/interfaces/settings.handler';
 
+function callbackData(options: unknown): string[] {
+  if (!options || typeof options !== 'object') return [];
+  const keyboard = (options as {
+    reply_markup?: { inline_keyboard?: Array<Array<{ callback_data?: string }>> };
+  }).reply_markup;
+  return keyboard?.inline_keyboard?.flat()
+    .map((button) => button.callback_data)
+    .filter((data): data is string => typeof data === 'string') ?? [];
+}
+
+function keyboardText(options: unknown): string[] {
+  if (!options || typeof options !== 'object') return [];
+  const keyboard = (options as {
+    reply_markup?: { inline_keyboard?: Array<Array<{ text?: string }>> };
+  }).reply_markup;
+  return keyboard?.inline_keyboard?.flat()
+    .map((button) => button.text)
+    .filter((text): text is string => typeof text === 'string') ?? [];
+}
+
 function localeState(role: 'admin' | 'user', locale: 'en' | 'ru' | 'uk' = 'en') {
   return {
     user: {
@@ -62,8 +82,12 @@ describe('SettingsHandler', () => {
       expect.stringContaining('Choose your language'),
       expect.objectContaining({ reply_markup: expect.anything() }),
     );
-    expect(JSON.stringify(reply.mock.calls[0][1].reply_markup)).toContain('settings:locale:uk');
-    expect(JSON.stringify(reply.mock.calls[0][1].reply_markup)).not.toContain('settings:set:70');
+    expect(callbackData(reply.mock.calls[0][1])).toEqual([
+      'settings:locale:en',
+      'settings:locale:ru',
+      'settings:locale:uk',
+      'rh:s:c',
+    ]);
 
     const localeCallback = callbackQueryCallbacks.find(({ regex }) => regex.test('settings:locale:uk'))!.fn;
     const answerCallbackQuery = vi.fn().mockResolvedValue(true);
@@ -83,6 +107,13 @@ describe('SettingsHandler', () => {
       expect.stringContaining('Виберіть мову'),
       expect.objectContaining({ reply_markup: expect.anything() }),
     );
+    expect(callbackData(editMessageText.mock.calls[0][1])).toEqual([
+      'settings:locale:en',
+      'settings:locale:ru',
+      'settings:locale:uk',
+      'rh:s:c',
+    ]);
+    expect(keyboardText(editMessageText.mock.calls[0][1])).toContain('🏠 Дім');
     expect(menus.updateUserMenu).toHaveBeenCalledWith(100);
   });
 
@@ -110,9 +141,13 @@ describe('SettingsHandler', () => {
 
     expect(callbackQueryCallbacks.some(({ regex }) => regex.test('settings:set:85'))).toBe(false);
     const text = reply.mock.calls[0][0] as string;
-    const keyboard = JSON.stringify(reply.mock.calls[0][1].reply_markup);
+    const callbacks = callbackData(reply.mock.calls[0][1]);
     expect(text).not.toContain('System settings');
-    expect(keyboard).not.toContain('settings:set:');
-    expect(keyboard).not.toContain('clean:trigger');
+    expect(callbacks).toEqual([
+      'settings:locale:en',
+      'settings:locale:ru',
+      'settings:locale:uk',
+      'rh:s:c',
+    ]);
   });
 });
