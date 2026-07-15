@@ -302,7 +302,7 @@ export class HomeHandler implements TelegramHandler {
     const userId = ctx.from?.id;
     const chat = ctx.chat;
     const state = ctx.localeState;
-    if (!userId || chat?.type !== 'private' || !state || state.user.telegramId !== userId) return null;
+    if (!userId || chat?.type !== 'private' || state?.user.telegramId !== userId) return null;
     return { userId, chatId: chat.id, state };
   }
 }

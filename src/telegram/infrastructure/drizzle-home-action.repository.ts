@@ -66,7 +66,7 @@ export class DrizzleHomeActionRepository implements HomeActionRepositoryPort {
     return this.immediate((tx) => {
       const row = tx.select().from(homeActionReceipts).where(key({ ...input, kind: 'pause-confirmation' })).get();
       const receipt = row && decode(row);
-      if (!receipt || receipt.kind !== 'pause-confirmation' || receipt.id !== input.id || receipt.sessionToken !== input.token || receipt.payload.hours !== input.hours) return { kind: 'superseded' };
+      if (receipt?.kind !== 'pause-confirmation' || receipt.id !== input.id || receipt.sessionToken !== input.token || receipt.payload.hours !== input.hours) return { kind: 'superseded' };
       if (receipt.status === 'completed') return { kind: 'terminal' };
       if (receipt.expiresAt.getTime() <= input.now.getTime()) return { kind: 'expired' };
       const user = tx.select().from(users).where(eq(users.telegramId, input.userId)).get();
@@ -98,7 +98,7 @@ export class DrizzleHomeActionRepository implements HomeActionRepositoryPort {
     return this.immediate((tx) => {
       const row = tx.select().from(homeActionReceipts).where(key({ ...input, kind: 'undo-non-critical-pause' })).get();
       const receipt = row && decode(row);
-      if (!receipt || receipt.kind !== 'undo-non-critical-pause' || receipt.id !== input.id) return { kind: 'superseded' };
+      if (receipt?.kind !== 'undo-non-critical-pause' || receipt.id !== input.id) return { kind: 'superseded' };
       if (receipt.status === 'completed') return { kind: 'terminal' };
       if (receipt.expiresAt.getTime() <= input.now.getTime()) return { kind: 'expired' };
       const foundation = tx.select().from(notificationPauseReceipts).where(and(eq(notificationPauseReceipts.id, receipt.payload.foundationReceiptId), eq(notificationPauseReceipts.userId, input.userId))).get();
@@ -136,7 +136,7 @@ export class DrizzleHomeActionRepository implements HomeActionRepositoryPort {
     return this.immediate((tx) => {
       const row = tx.select().from(homeActionReceipts).where(key({ ...input, kind: 'undo-quiet-hours' })).get();
       const receipt = row && decode(row);
-      if (!receipt || receipt.kind !== 'undo-quiet-hours' || receipt.id !== input.id) return { kind: 'superseded' };
+      if (receipt?.kind !== 'undo-quiet-hours' || receipt.id !== input.id) return { kind: 'superseded' };
       if (receipt.status === 'completed') return { kind: 'terminal' };
       if (receipt.expiresAt.getTime() <= input.now.getTime()) return { kind: 'expired' };
       const updated = tx.update(users).set({ quietStart: receipt.payload.start, quietEnd: receipt.payload.end, notificationPauseRevision: receipt.payload.expectedRevision + 1 })
@@ -150,7 +150,7 @@ export class DrizzleHomeActionRepository implements HomeActionRepositoryPort {
   async findCurrentUndo(input: { userId: number; chatId: number; kind: UndoReceiptKind; now: Date }): Promise<HomeActionReceipt | null> {
     const row = this.db.select().from(homeActionReceipts).where(key(input)).get();
     const receipt = row && decode(row);
-    return receipt && receipt.status === 'pending' && receipt.expiresAt.getTime() > input.now.getTime() ? receipt : null;
+    return receipt?.status === 'pending' && receipt.expiresAt.getTime() > input.now.getTime() ? receipt : null;
   }
 
   async claimExternal(input: { userId: number; chatId: number; token: string; kind: ClaimedExternalAction['kind']; id: string; now: Date }): Promise<{ kind: 'claimed'; action: ClaimedExternalAction } | { kind: 'expired' | 'superseded' | 'executing' | 'terminal' }> {

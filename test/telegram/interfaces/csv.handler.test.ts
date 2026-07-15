@@ -54,9 +54,9 @@ function createSetup() {
 function callbackData(options: unknown): string[] {
   if (!options || typeof options !== 'object') return [];
   const replyMarkup = (options as {
-    reply_markup?: { inline_keyboard?: Array<Array<{ callback_data?: string }>> };
-    inline_keyboard?: Array<Array<{ callback_data?: string }>>;
-  }).reply_markup ?? options as { inline_keyboard?: Array<Array<{ callback_data?: string }>> };
+    reply_markup?: { inline_keyboard?: { callback_data?: string }[][] };
+    inline_keyboard?: { callback_data?: string }[][];
+  }).reply_markup ?? options;
   return replyMarkup.inline_keyboard?.flat()
     .map((button) => button.callback_data)
     .filter((data): data is string => typeof data === 'string') ?? [];
@@ -65,9 +65,9 @@ function callbackData(options: unknown): string[] {
 function keyboardText(options: unknown): string[] {
   if (!options || typeof options !== 'object') return [];
   const replyMarkup = (options as {
-    reply_markup?: { inline_keyboard?: Array<Array<{ text?: string }>> };
-    inline_keyboard?: Array<Array<{ text?: string }>>;
-  }).reply_markup ?? options as { inline_keyboard?: Array<Array<{ text?: string }>> };
+    reply_markup?: { inline_keyboard?: { text?: string }[][] };
+    inline_keyboard?: { text?: string }[][];
+  }).reply_markup ?? options;
   return replyMarkup.inline_keyboard?.flat()
     .map((button) => button.text)
     .filter((text): text is string => typeof text === 'string') ?? [];

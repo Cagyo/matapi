@@ -74,7 +74,7 @@ describe('RefreshHomeMonitoringUseCase', () => {
     vi.mocked(failedQuery.listEnabled).mockRejectedValue(new Error('database unavailable'));
     const failedQueryUseCase = new RefreshHomeMonitoringUseCase(
       failedQuery,
-      { probe: vi.fn() } as unknown as SensorHealthPort,
+      { probe: vi.fn() },
       snapshots,
       { now: () => new Date() },
     );
@@ -82,7 +82,7 @@ describe('RefreshHomeMonitoringUseCase', () => {
 
     const failedProbeUseCase = new RefreshHomeMonitoringUseCase(
       query(['door']),
-      { probe: vi.fn().mockRejectedValue(new Error('orchestration failed')) } as unknown as SensorHealthPort,
+      { probe: vi.fn().mockRejectedValue(new Error('orchestration failed')) },
       snapshots,
       { now: () => new Date() },
     );
@@ -94,7 +94,7 @@ describe('RefreshHomeMonitoringUseCase', () => {
     const probe = vi.fn(async () => []);
     const useCase = new RefreshHomeMonitoringUseCase(
       query(['door', 'window', 'door', 'window']),
-      { probe } as SensorHealthPort,
+      { probe },
       { get: () => null, set: vi.fn() },
       { now: () => new Date('2030-01-01T00:00:00.000Z') },
     );

@@ -31,8 +31,8 @@ describe('HomeNavigationUseCase', () => {
     };
     const useCase = new HomeNavigationUseCase(
       actions as never,
-      { now: () => now } as never,
-      { generate: () => '1234567890abcdef' } as never,
+      { now: () => now },
+      { generate: () => '1234567890abcdef' },
     );
 
     await expect(useCase.execute({ active, role: 'admin', view, action: { kind: 'back' } }))
@@ -44,8 +44,8 @@ describe('HomeNavigationUseCase', () => {
     const actions = { createPauseConfirmation: vi.fn(), claimExternal: vi.fn() };
     const useCase = new HomeNavigationUseCase(
       actions as never,
-      { now: () => now } as never,
-      { generate: () => '1234567890abcdef' } as never,
+      { now: () => now },
+      { generate: () => '1234567890abcdef' },
     );
 
     await expect(useCase.execute({ active, role: 'user', view: { kind: 'home', checking: false }, action: { kind: 'back' } }))
@@ -58,8 +58,8 @@ describe('HomeNavigationUseCase', () => {
     const actions = { createPauseConfirmation: vi.fn().mockResolvedValue(undefined) };
     const useCase = new HomeNavigationUseCase(
       actions as never,
-      { now: () => now } as never,
-      { generate: () => '1234567890abcdef' } as never,
+      { now: () => now },
+      { generate: () => '1234567890abcdef' },
     );
 
     const result = await useCase.execute({
@@ -82,8 +82,8 @@ describe('HomeNavigationUseCase', () => {
     const actions = { confirmPause: vi.fn() };
     const useCase = new HomeNavigationUseCase(
       actions as never,
-      { now: () => now } as never,
-      { generate: () => '1234567890abcdef' } as never,
+      { now: () => now },
+      { generate: () => '1234567890abcdef' },
     );
 
     await expect(useCase.execute({
@@ -99,8 +99,8 @@ describe('HomeNavigationUseCase', () => {
     const actions = { confirmPause: vi.fn().mockResolvedValue({ kind: 'applied', expectedRevision: 1 }) };
     const useCase = new HomeNavigationUseCase(
       actions as never,
-      { now: () => now } as never,
-      { generate: () => '1234567890abcdef' } as never,
+      { now: () => now },
+      { generate: () => '1234567890abcdef' },
     );
 
     await expect(useCase.execute({

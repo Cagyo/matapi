@@ -28,7 +28,7 @@ describe('HealthHandler', () => {
       collect: async () => ({ diskUsedBytes: 1, diskTotalBytes: 2, cpuTempC: null, memoryUsedBytes: 1, memoryTotalBytes: 2, uptimeSec: 1, dbSizeBytes: 1 }),
     };
     const runner = new BotRunnerRegistry();
-    const handler = new HealthHandler(system, query, { probe } as SensorHealthPort, runner, {} as RoleMiddleware);
+    const handler = new HealthHandler(system, query, { probe }, runner, {} as RoleMiddleware);
     const reply = vi.fn().mockResolvedValue(undefined);
 
     await handler.handleCommand({ reply } as unknown as TelegramContext);

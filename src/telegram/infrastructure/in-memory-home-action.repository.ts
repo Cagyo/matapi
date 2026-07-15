@@ -32,7 +32,7 @@ export class InMemoryHomeActionRepository implements HomeActionRepositoryPort {
 
   async confirmPause(input: { userId: number; chatId: number; token: string; id: string; hours: 1 | 4 | 8; now: Date }): Promise<{ kind: 'applied'; expectedRevision: number } | { kind: 'expired' | 'superseded' | 'terminal' }> {
     const receipt = this.receipts.get(`${input.userId}:${input.chatId}:pause-confirmation`);
-    if (!receipt || receipt.kind !== 'pause-confirmation' || receipt.id !== input.id || receipt.sessionToken !== input.token || receipt.payload.hours !== input.hours) return { kind: 'superseded' };
+    if (receipt?.kind !== 'pause-confirmation' || receipt.id !== input.id || receipt.sessionToken !== input.token || receipt.payload.hours !== input.hours) return { kind: 'superseded' };
     if (receipt.status === 'completed') return { kind: 'terminal' };
     if (receipt.expiresAt.getTime() <= input.now.getTime()) return { kind: 'expired' };
     if (!this.users) throw new Error('InMemoryHomeActionRepository requires users for notification transitions');
@@ -57,7 +57,7 @@ export class InMemoryHomeActionRepository implements HomeActionRepositoryPort {
 
   async undoPause(input: { userId: number; chatId: number; id: string; now: Date }): Promise<{ kind: 'applied' } | { kind: 'expired' | 'superseded' | 'terminal' }> {
     const receipt = this.receipts.get(`${input.userId}:${input.chatId}:undo-non-critical-pause`);
-    if (!receipt || receipt.kind !== 'undo-non-critical-pause' || receipt.id !== input.id) return { kind: 'superseded' };
+    if (receipt?.kind !== 'undo-non-critical-pause' || receipt.id !== input.id) return { kind: 'superseded' };
     if (receipt.status === 'completed') return { kind: 'terminal' };
     if (receipt.expiresAt.getTime() <= input.now.getTime()) return { kind: 'expired' };
     if (!this.users) throw new Error('InMemoryHomeActionRepository requires users for notification transitions');
@@ -90,7 +90,7 @@ export class InMemoryHomeActionRepository implements HomeActionRepositoryPort {
 
   async undoQuietHours(input: { userId: number; chatId: number; id: string; now: Date }): Promise<{ kind: 'applied' } | { kind: 'expired' | 'superseded' | 'terminal' }> {
     const receipt = this.receipts.get(`${input.userId}:${input.chatId}:undo-quiet-hours`);
-    if (!receipt || receipt.kind !== 'undo-quiet-hours' || receipt.id !== input.id) return { kind: 'superseded' };
+    if (receipt?.kind !== 'undo-quiet-hours' || receipt.id !== input.id) return { kind: 'superseded' };
     if (receipt.status === 'completed') return { kind: 'terminal' };
     if (receipt.expiresAt.getTime() <= input.now.getTime()) return { kind: 'expired' };
     if (!this.users) throw new Error('InMemoryHomeActionRepository requires users for notification transitions');
@@ -104,7 +104,7 @@ export class InMemoryHomeActionRepository implements HomeActionRepositoryPort {
 
   async findCurrentUndo(input: { userId: number; chatId: number; kind: 'undo-non-critical-pause' | 'undo-quiet-hours'; now: Date }): Promise<HomeActionReceipt | null> {
     const receipt = this.receipts.get(`${input.userId}:${input.chatId}:${input.kind}`);
-    return receipt && receipt.status === 'pending' && receipt.expiresAt.getTime() > input.now.getTime() ? clone(receipt) : null;
+    return receipt?.status === 'pending' && receipt.expiresAt.getTime() > input.now.getTime() ? clone(receipt) : null;
   }
 
   async claimExternal(input: { userId: number; chatId: number; token: string; kind: 'cleanup-confirmation' | 'restart-confirmation'; id: string; now: Date }): Promise<{ kind: 'claimed'; action: { id: string; userId: number; chatId: number; kind: 'cleanup-confirmation' | 'restart-confirmation' } } | { kind: 'expired' | 'superseded' | 'executing' | 'terminal' }> {

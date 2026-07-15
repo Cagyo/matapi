@@ -326,14 +326,14 @@ describe('ConfigHandler', () => {
       kind: 'active',
       sensor: { id: 'front-id', name: 'front_door', type: 'digital', config: { pin: 4 }, debounceMs: 100, severity: 'info' },
     });
-    await callback({ ...callbackContext, callbackQuery: { data: 'cfg:mod:front_door' } } as never);
+    await callback({ ...callbackContext, callbackQuery: { data: 'cfg:mod:front_door' } });
     expect(callbackData(reply)).toContain('cfg:modify:done');
     expect(callbackData(reply)).toContain('rh:f:c');
 
     await handler.handleSubcommand({ ...callbackContext, from: { id: 602 } } as never, 'remove');
     expect(callbackData(reply)).toContain('cfg:rem:front_door');
     expect(callbackData(reply)).toContain('rh:f:c');
-    await callback({ ...callbackContext, from: { id: 602 }, callbackQuery: { data: 'cfg:rem:front_door' } } as never);
+    await callback({ ...callbackContext, from: { id: 602 }, callbackQuery: { data: 'cfg:rem:front_door' } });
     expect(callbackData(reply)).toContain('cfg:rm:confirm');
     expect(callbackData(reply)).toContain('rh:f:c');
   });
@@ -350,7 +350,7 @@ describe('ConfigHandler', () => {
     };
 
     await handler.handleSubcommand({ ...shared, from: { id: 603 } } as never, 'add');
-    await callback({ ...shared, from: { id: 603 }, callbackQuery: { data: 'cfg:type:digital' } } as never);
+    await callback({ ...shared, from: { id: 603 }, callbackQuery: { data: 'cfg:type:digital' } });
     await messageCallbacks['message:text']({ from: { id: 603 }, message: { text: 'shed' }, reply, localeState: localeState('uk') }, vi.fn());
     await messageCallbacks['message:text']({ from: { id: 603 }, message: { text: '22' }, reply, localeState: localeState('uk') }, vi.fn());
     expect(reply).toHaveBeenCalledWith(en.config.gpioPickerOnly, expect.objectContaining({ reply_markup: expect.anything() }));
@@ -362,8 +362,8 @@ describe('ConfigHandler', () => {
     });
     sensors.findById.mockResolvedValue({ id: 'front-id', name: 'front_door', type: 'digital', config: { pin: 4 }, debounceMs: 100, severity: 'info' });
     await handler.handleSubcommand({ ...shared, from: { id: 604 } } as never, 'modify');
-    await callback({ ...shared, from: { id: 604 }, callbackQuery: { data: 'cfg:mod:front_door' } } as never);
-    await callback({ ...shared, from: { id: 604 }, callbackQuery: { data: 'cfg:modify:invert' } } as never);
+    await callback({ ...shared, from: { id: 604 }, callbackQuery: { data: 'cfg:mod:front_door' } });
+    await callback({ ...shared, from: { id: 604 }, callbackQuery: { data: 'cfg:modify:invert' } });
     expect(modifySensor.execute).toHaveBeenCalledWith(expect.objectContaining({ patch: expect.objectContaining({ config: expect.anything() }) }));
     expect(callbackData(reply)).toContain('cfg:modify:done');
     expect(callbackData(reply)).toContain('rh:f:c');
@@ -382,10 +382,10 @@ describe('ConfigHandler', () => {
     };
 
     await handler.handleSubcommand(shared as never, 'add');
-    await callback({ ...shared, callbackQuery: { data: 'cfg:type:digital' } } as never);
+    await callback({ ...shared, callbackQuery: { data: 'cfg:type:digital' } });
     await messageCallbacks['message:text']({ from: { id: 605 }, message: { text: 'quick' }, reply, localeState: localeState('uk') }, vi.fn());
-    await callback({ ...shared, callbackQuery: { data: 'cfg:pin:22' } } as never);
-    await callback({ ...shared, callbackQuery: { data: 'cfg:default:digital' } } as never);
+    await callback({ ...shared, callbackQuery: { data: 'cfg:pin:22' } });
+    await callback({ ...shared, callbackQuery: { data: 'cfg:default:digital' } });
     expect(callbackData(reply)).toEqual(['rh:f:t']);
     expect(keyboardText(reply)).toEqual(['🏠 Дім']);
 
@@ -408,17 +408,17 @@ describe('ConfigHandler', () => {
     await handler.handleSubcommand(context as never, 'remove');
     expect(callbackData(reply)).toContain('rh:f:c');
 
-    await commandCallbacks.config({ ...context, match: 'modify missing_sensor' } as never);
+    await commandCallbacks.config({ ...context, match: 'modify missing_sensor' });
     expect(callbackData(reply)).toContain('rh:f:c');
 
-    await commandCallbacks.config({ ...context, match: 'unknown' } as never);
+    await commandCallbacks.config({ ...context, match: 'unknown' });
     expect(callbackData(reply)).toContain('rh:f:c');
 
     const next = vi.fn();
     await messageCallbacks['message:text']({
       ...context,
       message: { text: 'still_active' },
-    } as never, next);
+    }, next);
     expect(next).not.toHaveBeenCalled();
 
     await commandCallbacks.config({
@@ -426,7 +426,7 @@ describe('ConfigHandler', () => {
       match: 'unknown',
       reply,
       localeState: localeState('uk'),
-    } as never);
+    });
     expect(callbackData(reply)).toEqual(['rh:f:t']);
   });
 
@@ -447,14 +447,14 @@ describe('ConfigHandler', () => {
 
     await handler.handleSubcommand({ ...callbackContext, from: { id: 609 } } as never, 'modify');
     handler.cancelPending(609);
-    await callback({ ...callbackContext, from: { id: 609 }, callbackQuery: { data: 'cfg:mod:front_door' } } as never);
+    await callback({ ...callbackContext, from: { id: 609 }, callbackQuery: { data: 'cfg:mod:front_door' } });
     expect(callbackData(reply)).toEqual(['rh:f:t']);
 
     await handler.handleSubcommand({ ...callbackContext, from: { id: 610 } } as never, 'remove');
-    await callback({ ...callbackContext, from: { id: 610 }, callbackQuery: { data: 'cfg:rem:front_door' } } as never);
+    await callback({ ...callbackContext, from: { id: 610 }, callbackQuery: { data: 'cfg:rem:front_door' } });
     expect(callbackData(reply)).toContain('cfg:rm:confirm');
     handler.cancelPending(610);
-    await callback({ ...callbackContext, from: { id: 610 }, callbackQuery: { data: 'cfg:rm:confirm' } } as never);
+    await callback({ ...callbackContext, from: { id: 610 }, callbackQuery: { data: 'cfg:rm:confirm' } });
     expect(callbackData(reply)).toEqual(['rh:f:t']);
     expect(removeSensor.execute).not.toHaveBeenCalled();
   });
@@ -476,12 +476,12 @@ describe('ConfigHandler', () => {
     });
 
     await handler.handleSubcommand(callbackContext as never, 'modify');
-    await callback({ ...callbackContext, callbackQuery: { data: 'cfg:mod:front_door' } } as never);
+    await callback({ ...callbackContext, callbackQuery: { data: 'cfg:mod:front_door' } });
     sensors.findById.mockResolvedValue(undefined);
-    await callback({ ...callbackContext, callbackQuery: { data: 'cfg:modify:invert' } } as never);
+    await callback({ ...callbackContext, callbackQuery: { data: 'cfg:modify:invert' } });
     expect(callbackData(reply)).toEqual(['rh:f:c']);
 
-    await callback({ ...callbackContext, callbackQuery: { data: 'cfg:modify:done' } } as never);
+    await callback({ ...callbackContext, callbackQuery: { data: 'cfg:modify:done' } });
     expect(callbackData(reply)).toEqual(['rh:f:t']);
   });
 
@@ -501,17 +501,17 @@ describe('ConfigHandler', () => {
     });
 
     await handler.handleSubcommand({ ...callbackContext, from: { id: 612 } } as never, 'modify');
-    await callback({ ...callbackContext, from: { id: 612 }, callbackQuery: { data: 'cfg:mod:front_door' } } as never);
-    await callback({ ...callbackContext, from: { id: 612 }, callbackQuery: { data: 'cfg:modify:done' } } as never);
+    await callback({ ...callbackContext, from: { id: 612 }, callbackQuery: { data: 'cfg:mod:front_door' } });
+    await callback({ ...callbackContext, from: { id: 612 }, callbackQuery: { data: 'cfg:modify:done' } });
     expect(callbackData(reply)).toEqual(['rh:f:t']);
 
     await handler.handleSubcommand({ ...callbackContext, from: { id: 613 } } as never, 'remove');
-    await callback({ ...callbackContext, from: { id: 613 }, callbackQuery: { data: 'cfg:rem:front_door' } } as never);
-    await callback({ ...callbackContext, from: { id: 613 }, callbackQuery: { data: 'cfg:rm:confirm' } } as never);
+    await callback({ ...callbackContext, from: { id: 613 }, callbackQuery: { data: 'cfg:rem:front_door' } });
+    await callback({ ...callbackContext, from: { id: 613 }, callbackQuery: { data: 'cfg:rm:confirm' } });
     expect(callbackData(reply)).toEqual(['rh:f:t']);
 
     await handler.handleSubcommand({ ...callbackContext, from: { id: 614 } } as never, 'add');
-    await callback({ ...callbackContext, from: { id: 614 }, callbackQuery: { data: 'cfg:cancel' } } as never);
+    await callback({ ...callbackContext, from: { id: 614 }, callbackQuery: { data: 'cfg:cancel' } });
     expect(callbackData(reply)).toEqual(['rh:f:t']);
   });
 });

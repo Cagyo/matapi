@@ -9,7 +9,7 @@ import { SettingsHandler } from '../../../src/telegram/interfaces/settings.handl
 function callbackData(options: unknown): string[] {
   if (!options || typeof options !== 'object') return [];
   const keyboard = (options as {
-    reply_markup?: { inline_keyboard?: Array<Array<{ callback_data?: string }>> };
+    reply_markup?: { inline_keyboard?: { callback_data?: string }[][] };
   }).reply_markup;
   return keyboard?.inline_keyboard?.flat()
     .map((button) => button.callback_data)
@@ -19,7 +19,7 @@ function callbackData(options: unknown): string[] {
 function keyboardText(options: unknown): string[] {
   if (!options || typeof options !== 'object') return [];
   const keyboard = (options as {
-    reply_markup?: { inline_keyboard?: Array<Array<{ text?: string }>> };
+    reply_markup?: { inline_keyboard?: { text?: string }[][] };
   }).reply_markup;
   return keyboard?.inline_keyboard?.flat()
     .map((button) => button.text)

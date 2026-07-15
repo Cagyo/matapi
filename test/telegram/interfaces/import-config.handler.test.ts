@@ -320,7 +320,7 @@ describe('ImportConfigHandler Return Home state matrix', () => {
       (context: TelegramContext) => Promise<void>
     > = {};
     const composer = {
-      command: vi.fn((name: string, ...handlers: Array<(context: TelegramContext) => Promise<void>>) => {
+      command: vi.fn((name: string, ...handlers: ((context: TelegramContext) => Promise<void>)[]) => {
         commands[name] = handlers.at(-1)!;
       }),
       callbackQuery: vi.fn(),
