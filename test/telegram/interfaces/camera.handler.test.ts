@@ -13,6 +13,17 @@ import { LiveStreamSessionService } from '../../../src/camera/application/live-s
 import { LiveStreamExpiredError } from '../../../src/camera/domain/errors/live-stream-expired.error';
 import { LiveStreamSourceUnavailableError } from '../../../src/camera/domain/errors/live-stream-source-unavailable.error';
 import { LiveStreamUnavailableError } from '../../../src/camera/domain/errors/live-stream-unavailable.error';
+import { CameraNotFoundError } from '../../../src/camera/domain/errors/camera-not-found.error';
+import { EventNotFoundError } from '../../../src/camera/domain/errors/event-not-found.error';
+import { MediaFileUnavailableError } from '../../../src/camera/domain/errors/media-file-unavailable.error';
+import { MotionAlreadyRunningError } from '../../../src/camera/domain/errors/motion-already-running.error';
+import { MotionNotInstalledError } from '../../../src/camera/domain/errors/motion-not-installed.error';
+import { MotionNotRunningError } from '../../../src/camera/domain/errors/motion-not-running.error';
+import { MotionStartFailedError } from '../../../src/camera/domain/errors/motion-start-failed.error';
+import { MotionStopFailedError } from '../../../src/camera/domain/errors/motion-stop-failed.error';
+import { NoCamerasConfiguredError } from '../../../src/camera/domain/errors/no-cameras-configured.error';
+import { NoSnapshotForEventError } from '../../../src/camera/domain/errors/no-snapshot-for-event.error';
+import { SnapshotFailedError } from '../../../src/camera/domain/errors/snapshot-failed.error';
 import { MotionEvent } from '../../../src/camera/domain/motion-event.entity';
 import { catalogFor } from '../../../src/locales';
 import { en } from '../../../src/locales/en';
@@ -898,5 +909,191 @@ describe('CameraHandler browse return-home state transitions', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('CameraHandler terminal return-home outcomes', () => {
+  it('adds terminal Home to root snapshot, photo, video, Drive fallback, and events without changing delivery', async () => {
+    const { commandCallbacks, snapshot, photo, video, listEvents } = createTestSetup();
+    vi.mocked(snapshot.execute).mockResolvedValue({
+      buffer: Buffer.from('image'),
+      cameraName: 'front_door',
+      takenAt: new Date('2026-04-08T12:51:06'),
+    });
+    vi.mocked(photo.execute).mockResolvedValue({ event: event(), path: '/motion/42.jpg' });
+    vi.mocked(video.execute)
+      .mockResolvedValueOnce({ kind: 'local', path: '/motion/42.mp4', event: event() })
+      .mockResolvedValueOnce({ kind: 'drive', event: event({ gdriveFileId: 'remote/path.mp4' }) });
+    vi.mocked(listEvents.execute).mockResolvedValue([event()]);
+
+    const snapshotContext = ctx();
+    snapshotContext.match = 'snapshot';
+    await commandCallbacks.camera(snapshotContext);
+    expect(snapshotContext.replyWithChatAction).toHaveBeenCalledWith('upload_photo');
+    expect(snapshotContext.replyWithChatAction.mock.invocationCallOrder[0]).toBeLessThan(
+      snapshotContext.replyWithPhoto.mock.invocationCallOrder[0],
+    );
+    expect(snapshotContext.replyWithPhoto).toHaveBeenCalledWith(
+      expect.any(InputFile),
+      expect.objectContaining({ caption: expect.any(String), reply_markup: expect.any(InlineKeyboard) }),
+    );
+    expect(snapshotContext.replyWithPhoto.mock.calls[0][0].filename).toBe('snapshot.jpg');
+    expect(callbackData(snapshotContext.replyWithPhoto.mock.calls[0][1].reply_markup)).toEqual(['rh:a:t']);
+
+    const photoContext = ctx();
+    photoContext.match = 'photo 42';
+    await commandCallbacks.camera(photoContext);
+    expect(photoContext.replyWithChatAction).toHaveBeenCalledWith('upload_photo');
+    expect(photoContext.replyWithPhoto).toHaveBeenCalledWith(
+      expect.any(InputFile),
+      expect.objectContaining({ caption: expect.any(String), reply_markup: expect.any(InlineKeyboard) }),
+    );
+    expect(photoContext.replyWithPhoto.mock.calls[0][0].filename).toBe('42.jpg');
+    expect(callbackData(photoContext.replyWithPhoto.mock.calls[0][1].reply_markup)).toEqual(['rh:a:t']);
+
+    const videoContext = ctx();
+    videoContext.match = 'video 42';
+    await commandCallbacks.camera(videoContext);
+    expect(videoContext.replyWithChatAction).toHaveBeenCalledWith('upload_video');
+    expect(videoContext.replyWithChatAction.mock.invocationCallOrder[0]).toBeLessThan(
+      videoContext.replyWithVideo.mock.invocationCallOrder[0],
+    );
+    expect(videoContext.replyWithVideo).toHaveBeenCalledWith(
+      expect.any(InputFile),
+      expect.objectContaining({ caption: expect.any(String), reply_markup: expect.any(InlineKeyboard) }),
+    );
+    expect(videoContext.replyWithVideo.mock.calls[0][0].filename).toBe('42.mp4');
+    expect(callbackData(videoContext.replyWithVideo.mock.calls[0][1].reply_markup)).toEqual(['rh:a:t']);
+
+    const fallbackContext = ctx();
+    fallbackContext.match = 'video 42';
+    await commandCallbacks.camera(fallbackContext);
+    expect(fallbackContext.reply).toHaveBeenCalledWith(
+      en.camera.driveLinkFallback(42, 'remote/path.mp4'),
+      expect.objectContaining({ reply_markup: expect.any(InlineKeyboard) }),
+    );
+    expect(callbackData(lastKeyboard(fallbackContext))).toEqual(['rh:a:t']);
+    expect(callbackData(lastKeyboard(fallbackContext)).join()).not.toContain('remote/path.mp4');
+
+    const eventsContext = ctx();
+    eventsContext.match = 'events';
+    await commandCallbacks.camera(eventsContext);
+    expect(callbackData(lastKeyboard(eventsContext))).toEqual(
+      expect.arrayContaining(['cam:video:42', 'cam:photo:42', 'rh:a:t']),
+    );
+    expect(lastKeyboard(eventsContext).inline_keyboard.at(-1)).toHaveLength(1);
+  });
+
+  it('adds terminal Home to root empty, control, usage, close, and role rejection responses', async () => {
+    const { commandCallbacks, callbackQueryCallbacks, listEvents, status, enable, disable, guard } = createTestSetup();
+    vi.mocked(listEvents.execute).mockResolvedValue([]);
+    vi.mocked(status.execute).mockResolvedValue({ isRunning: true, pid: 1 });
+    const callback = callbackQueryCallbacks[0].fn;
+
+    for (const match of ['events 31.02.2026', 'events', 'video nope', 'photo nope', 'status']) {
+      const context = ctx();
+      context.match = match;
+      await commandCallbacks.camera(context);
+      expect(callbackData(lastKeyboard(context))).toEqual(['rh:a:t']);
+    }
+
+    for (const match of ['enable', 'disable']) {
+      const context = ctx();
+      context.match = match;
+      context.localeState.user.role = 'admin';
+      await commandCallbacks.camera(context);
+      expect(callbackData(lastKeyboard(context))).toEqual(['rh:a:t']);
+    }
+    expect(enable.execute).toHaveBeenCalledOnce();
+    expect(disable.execute).toHaveBeenCalledOnce();
+
+    const closed = ctx('cam:close');
+    await callback(closed);
+    expect(callbackData(lastKeyboard(closed))).toEqual(['rh:a:t']);
+
+    vi.mocked(guard.resolveRole).mockResolvedValue('user');
+    const rejected = ctx();
+    rejected.match = 'enable';
+    await commandCallbacks.camera(rejected);
+    expect(rejected.reply).toHaveBeenCalledWith(
+      en.common.adminRequired,
+      expect.objectContaining({ reply_markup: expect.any(InlineKeyboard) }),
+    );
+    expect(callbackData(lastKeyboard(rejected))).toEqual(['rh:a:t']);
+  });
+
+  it.each([
+    new CameraNotFoundError('front_door'),
+    new NoCamerasConfiguredError(),
+    new MotionNotRunningError(),
+    new SnapshotFailedError('front_door', 'offline'),
+    new EventNotFoundError(42),
+    new NoSnapshotForEventError(42),
+    new MediaFileUnavailableError(42),
+    new MotionAlreadyRunningError(),
+    new MotionNotInstalledError(),
+    new MotionStartFailedError('failed'),
+    new MotionStopFailedError('failed'),
+    new Error('unexpected'),
+  ])('adds terminal Home to %s', async (error) => {
+    const { commandCallbacks, snapshot } = createTestSetup();
+    vi.mocked(snapshot.execute).mockRejectedValue(error);
+    const context = ctx();
+    context.match = 'snapshot';
+
+    await commandCallbacks.camera(context);
+
+    expect(context.reply).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ reply_markup: expect.any(InlineKeyboard) }),
+    );
+    expect(callbackData(lastKeyboard(context))).toEqual(['rh:a:t']);
+  });
+
+  it('leaves later text unclaimed after root commands clear source and browse state', async () => {
+    const { commandCallbacks, callbackQueryCallbacks, messageCallbacks, snapshot, video, status, sources } = createTestSetup();
+    vi.mocked(snapshot.execute).mockResolvedValue({
+      buffer: Buffer.from('image'),
+      cameraName: 'front_door',
+      takenAt: new Date('2026-04-08T12:51:06'),
+    });
+    vi.mocked(video.execute).mockResolvedValue({ kind: 'local', path: '/motion/42.mp4', event: event() });
+    vi.mocked(status.execute).mockResolvedValue({ isRunning: true, pid: 1 });
+    const callback = callbackQueryCallbacks[0].fn;
+
+    vi.mocked(sources.hasPending).mockImplementation(
+      () => !vi.mocked(sources.cancelPending).mock.calls.some(([userId]) => userId === 100),
+    );
+    const fromSource = ctx();
+    fromSource.match = 'status';
+    await commandCallbacks.camera(fromSource);
+    const afterSource = ctx();
+    afterSource.message = { text: 'unclaimed' };
+    const sourceNext = vi.fn();
+    await messageCallbacks['message:text'](afterSource, sourceNext);
+    expect(sourceNext).toHaveBeenCalledOnce();
+    expect(callbackData(lastKeyboard(fromSource))).toEqual(['rh:a:t']);
+
+    await callback(ctx('cam:browse:latest'));
+    const fromBrowse = ctx();
+    fromBrowse.match = 'video 42';
+    await commandCallbacks.camera(fromBrowse);
+    const afterBrowse = ctx();
+    afterBrowse.message = { text: 'unclaimed' };
+    const browseNext = vi.fn();
+    await messageCallbacks['message:text'](afterBrowse, browseNext);
+    expect(browseNext).toHaveBeenCalledOnce();
+    expect(callbackData(fromBrowse.replyWithVideo.mock.calls[0][1].reply_markup)).toEqual(['rh:a:t']);
+
+    await callback(ctx('cam:browse:pick-date'));
+    const fromPrompt = ctx();
+    fromPrompt.match = 'status';
+    await commandCallbacks.camera(fromPrompt);
+    const afterPrompt = ctx();
+    afterPrompt.message = { text: 'unclaimed' };
+    const promptNext = vi.fn();
+    await messageCallbacks['message:text'](afterPrompt, promptNext);
+    expect(promptNext).toHaveBeenCalledOnce();
+    expect(callbackData(lastKeyboard(fromPrompt))).toEqual(['rh:a:t']);
   });
 });

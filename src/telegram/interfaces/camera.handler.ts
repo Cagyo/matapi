@@ -949,7 +949,9 @@ export class CameraHandler implements TelegramHandler {
 
   private async requireAdmin(ctx: TelegramContext): Promise<boolean> {
     if (ctx.localeState?.user.role !== 'admin') {
-      await ctx.reply(en.common.adminRequired);
+      await ctx.reply(en.common.adminRequired, {
+        reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
+      });
       return false;
     }
     return true;
