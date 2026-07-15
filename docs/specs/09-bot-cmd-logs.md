@@ -45,6 +45,13 @@ If output exceeds 4096 characters (Telegram message limit):
 - Send as a `.txt` file attachment instead of inline message
 - File named: `logs_<sensor_name>_<date>.txt`
 
+## Return Home
+
+Every live logs picker and terminal logs response has the localized Home action.
+The picker uses `rh:l:c`; inline result, error, empty, and `.txt` document
+responses use `rh:l:t`. Return Home opens a fresh Home and never reuses a
+previous Home message, token, or revision.
+
 ## Error Cases
 
 | Condition | Response |

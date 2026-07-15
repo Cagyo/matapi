@@ -18,8 +18,8 @@ The feature also establishes reliable Telegram interaction semantics:
 - cached status renders without probing hardware;
 - critical sensor alarms are never intentionally suppressed by user settings;
 - consequential actions confirm before execution;
-- the Slice 4 return contract will provide external workflows a consistent
-  route to a fresh Home.
+- delivered Slice 4A gives logs, CSV, and settings a consistent route to a
+  fresh Home; later Slice 4 workflow groups remain pending.
 
 The complete experience is delivered through four implementation slices. Each
 slice receives its own detailed implementation spec and plan; this document is
@@ -430,9 +430,11 @@ jump to or reuse an older Home message.
 
 Workflow coverage is implemented in bounded groups:
 
-1. logs, CSV, settings;
-2. configuration, import, Drive, system package update;
-3. camera as a separate change because it has the largest state surface.
+1. **Slice 4A — delivered:** logs, CSV, settings.
+2. **Later Slice 4 — pending:** configuration, import, Drive, and system
+   package update.
+3. **Later Slice 4 — pending:** camera as a separate change because it has
+   the largest state surface.
 
 Post-restart messages that currently support text only are not silently claimed
 to have buttons. If Return Home is required on such a message, the messaging
@@ -559,9 +561,15 @@ intentionally not given a Return Home button until Slice 4.
 ### Slice 4 — External workflow return contract
 
 - shared terminal-navigation/Home-launcher helper;
-- logs, CSV, and settings;
-- configuration, import, Drive, and system package update;
-- camera in a separate sub-slice.
+- **Slice 4A — delivered:** logs, CSV, and settings;
+- **later Slice 4 — pending:** configuration, import, Drive, and system
+  package update;
+- **later Slice 4 — pending:** camera in a separate sub-slice.
+
+The delivered Slice 4A staging status is live and localized: its `rh:c:r`
+action opens a fresh Home while the detached CSV upload and its active lock keep
+running. It does not cancel either. Later Slice 4 scope remains explicitly
+pending.
 
 Each slice has a separate implementation spec, plan, migration where required,
 focused test suite, review, and rollback boundary. Schema fields are introduced

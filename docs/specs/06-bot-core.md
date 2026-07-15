@@ -63,10 +63,13 @@ For every private update, `GrammyBotGateway` installs
 before `sequentialize(homeUpdateConstraints)`, then locale middleware and
 handlers. The acknowledgement middleware promptly calls
 `answerCallbackQuery` for Home payloads (`h:`) and the recovery action (`ho`),
-without preventing later handling if acknowledgement fails. Sequentialization
-uses both `home:chat:<chatId>` and `home:user:<userId>` keys, so competing
-private-user/chat Home updates are processed in order before locale/role lookup
-and callback validation. Database CAS remains the authority across a restart.
+plus valid external Return Home payloads with exact grammar
+`rh:<l|c|s>:<c|r|t>`, without preventing later handling if acknowledgement
+fails. A valid external Return Home callback is therefore acknowledged before
+sequentialization; normal handling still serializes it by both
+`home:chat:<chatId>` and `home:user:<userId>` before locale/role lookup and
+the fresh `OpenHomeUseCase` call. Database CAS remains the authority across a
+restart.
 
 Normal callback data is UTF-8 bounded to Telegram's 64-byte limit and has the
 format `h:<16-character-base64url-token>:<base36-revision>:<action>[:<page>]`.
@@ -86,9 +89,24 @@ packages, restart, and automatic-cleanup thresholds). Canonical Storage status
 never emits `clean:trigger`; Home is the only Slice 3 cleanup launcher.
 
 Independent external workflows remain registered and do not reuse the Home
-session or perform Home protocol transitions. Slice 4 still owns the shared
-Return-to-Home contract, so this slice explicitly does not promise that an
-external terminal screen returns the user to Home.
+session or perform Home protocol transitions. Slice 4A delivers their shared
+Return Home contract for logs, CSV, and settings. `ReturnHomeHandler` accepts
+only `rh:<l|c|s>:<c|r|t>` and delegates to `HomeLauncher`; after normal
+serialization and locale resolution, `OpenHomeUseCase` is the only
+Home-opening authority. It always creates a new Home and never revives or
+reuses an older Home message, token, or revision.
+
+| State | Slice 4A behavior |
+|---|---|
+| Logs picker / settings dashboard | `cancelPending`; no stored pending state exists, then new Home. |
+| CSV picker | `cancelPending`; no persisted conversation or confirmation exists, then new Home. |
+| CSV staging/upload | `leaveRunning`; live localized `csv.staging` status uses `rh:c:r`, picker markup is removed, and active upload/lock is never cancelled. |
+| Logs result/error, CSV document/error/empty | `alreadyTerminal`; new Home directly. |
+| CSV page navigation and settings locale update | `continuing`; keep workflow, no launcher call. |
+
+`continuing` deliberately has no Return Home callback action. The live staging
+status is an explicit `leaveRunning` exception: opening Home does not cancel or
+wait for its detached upload.
 
 ## Role Model
 
