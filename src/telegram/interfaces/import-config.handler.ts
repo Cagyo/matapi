@@ -21,6 +21,11 @@ import {
   ConfigCodecPort,
 } from '../domain/ports/config-codec.port';
 import { RoleMiddleware } from './role.middleware';
+import {
+  appendReturnHomeButton,
+  returnHomeKeyboard,
+  type ExternalWorkflowPhase,
+} from './return-home';
 import { TelegramHandler } from './telegram-handler';
 import { TelegramContext } from './telegram-context';
 
@@ -94,11 +99,25 @@ export class ImportConfigHandler implements TelegramHandler {
     this.states.delete(userId);
   }
 
+  private returnKeyboard(
+    ctx: TelegramContext,
+    phase: ExternalWorkflowPhase,
+    keyboard?: InlineKeyboard,
+  ): InlineKeyboard {
+    const catalog = ctx.localeState?.catalog ?? en;
+    const input = { workflow: 'configImport' as const, phase };
+    return keyboard
+      ? appendReturnHomeButton(keyboard, catalog, input)
+      : returnHomeKeyboard(catalog, input);
+  }
+
   async handleCommand(ctx: TelegramContext): Promise<void> {
     const userId = ctx.from?.id;
     if (!userId) return;
     this.states.set(userId, { kind: 'awaitingFile' });
-    await ctx.reply(en.importConfig.prompt);
+    await ctx.reply(en.importConfig.prompt, {
+      reply_markup: this.returnKeyboard(ctx, 'cancelPending'),
+    });
   }
 
   private async onDocument(ctx: TelegramContext, userId: number): Promise<void> {
@@ -107,12 +126,16 @@ export class ImportConfigHandler implements TelegramHandler {
 
     const name = doc.file_name ?? '';
     if (!/\.ya?ml$/i.test(name)) {
-      await ctx.reply(en.importConfig.invalidFormat);
+      await ctx.reply(en.importConfig.invalidFormat, {
+        reply_markup: this.returnKeyboard(ctx, 'cancelPending'),
+      });
       return; // keep awaitingFile so the user can re-upload
     }
 
     if (typeof doc.file_size === 'number' && doc.file_size > MAX_FILE_BYTES) {
-      await ctx.reply(en.importConfig.tooLarge);
+      await ctx.reply(en.importConfig.tooLarge, {
+        reply_markup: this.returnKeyboard(ctx, 'cancelPending'),
+      });
       return;
     }
 
@@ -127,8 +150,10 @@ export class ImportConfigHandler implements TelegramHandler {
       text = await response.text();
     } catch (error) {
       this.logger.error('import_config download failed', error as Error);
-      await ctx.reply(en.importConfig.failed('could not download file'));
       this.states.delete(userId);
+      await ctx.reply(en.importConfig.failed('could not download file'), {
+        reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
+      });
       return;
     }
 
@@ -136,7 +161,9 @@ export class ImportConfigHandler implements TelegramHandler {
     try {
       parsed = this.codec.parse(text);
     } catch (error) {
-      await ctx.reply(en.importConfig.parseError((error as Error).message));
+      await ctx.reply(en.importConfig.parseError((error as Error).message), {
+        reply_markup: this.returnKeyboard(ctx, 'cancelPending'),
+      });
       return; // keep awaitingFile
     }
 
@@ -154,7 +181,9 @@ export class ImportConfigHandler implements TelegramHandler {
           ? []
           : [catalog.importConfig.invalidLiveSources]),
       ];
-      await ctx.reply(catalog.importConfig.validationFailed(errors));
+      await ctx.reply(catalog.importConfig.validationFailed(errors), {
+        reply_markup: this.returnKeyboard(ctx, 'cancelPending'),
+      });
       return; // keep awaitingFile
     }
 
@@ -167,8 +196,10 @@ export class ImportConfigHandler implements TelegramHandler {
       ]);
     } catch (error) {
       this.logger.error('import_config prepare failed', error as Error);
-      await ctx.reply(catalog.importConfig.applyFailed);
       this.states.delete(userId);
+      await ctx.reply(catalog.importConfig.applyFailed, {
+        reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
+      });
       return;
     }
 
@@ -179,8 +210,10 @@ export class ImportConfigHandler implements TelegramHandler {
       archived.length === 0 &&
       cameraPlan.configured.length === 0
     ) {
-      await ctx.reply(catalog.importConfig.noChanges);
       this.states.delete(userId);
+      await ctx.reply(catalog.importConfig.noChanges, {
+        reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
+      });
       return;
     }
 
@@ -198,7 +231,7 @@ export class ImportConfigHandler implements TelegramHandler {
         liveSources: [...cameraPlan.configured],
       }),
       {
-      reply_markup: keyboard,
+      reply_markup: this.returnKeyboard(ctx, 'cancelPending', keyboard),
       },
     );
   }
@@ -221,13 +254,17 @@ export class ImportConfigHandler implements TelegramHandler {
     if (!userId) return;
 
     if (data === 'imp:cancel') {
-      await ctx.reply(en.importConfig.cancelled);
+      await ctx.reply(en.importConfig.cancelled, {
+        reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
+      });
       return;
     }
 
     if (data === 'imp:apply') {
       if (!claimedState) {
-        await ctx.reply(en.common.interrupted);
+        await ctx.reply(en.common.interrupted, {
+          reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
+        });
         return;
       }
       const catalog = ctx.localeState?.catalog ?? en;
@@ -269,7 +306,9 @@ export class ImportConfigHandler implements TelegramHandler {
         });
       }
       replyText ??= catalog.importConfig.applyFailed;
-      await ctx.reply(replyText).catch(() => {
+      await ctx.reply(replyText, {
+        reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
+      }).catch(() => {
         this.logger.warn('import_config result reply failed');
       });
     }
