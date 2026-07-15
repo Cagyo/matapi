@@ -6,6 +6,7 @@ import { GdriveNotInstalledError } from '../../camera/domain/errors/gdrive-not-i
 import { GdriveStatusFailedError } from '../../camera/domain/errors/gdrive-status-failed.error';
 import { en } from '../../locales/en';
 import { RoleMiddleware } from './role.middleware';
+import { appendReturnHomeButton, returnHomeKeyboard } from './return-home';
 import { TelegramHandler } from './telegram-handler';
 import { TelegramContext } from './telegram-context';
 
@@ -26,7 +27,7 @@ export class GdriveHandler implements TelegramHandler {
     composer.command('gdrive', this.guard.adminOnly, async (ctx) => {
       const sub = (ctx.match ?? '').toString().trim().toLowerCase();
       if (sub && sub !== 'status') {
-        await ctx.reply(en.gdrive.usage);
+        await ctx.reply(en.gdrive.usage, { reply_markup: this.returnKeyboard(ctx) });
         return;
       }
       await this.handleStatus(ctx);
@@ -48,7 +49,13 @@ export class GdriveHandler implements TelegramHandler {
       const kb = new InlineKeyboard();
       if (options.includeCleanupAction !== false) kb.text(en.gdrive.cleanButton, 'clean:trigger');
       kb.text(en.gdriveAuth.button, 'gdauth:start');
-      await ctx.reply(`${en.gdrive.header}\n\n${body}`, { reply_markup: kb });
+      await ctx.reply(`${en.gdrive.header}\n\n${body}`, {
+        reply_markup: appendReturnHomeButton(
+          kb,
+          ctx.localeState?.catalog ?? en,
+          { workflow: 'drive', phase: 'alreadyTerminal' },
+        ),
+      });
     } catch (err) {
       await this.handleError(ctx, err);
     }
@@ -56,21 +63,30 @@ export class GdriveHandler implements TelegramHandler {
 
   private async handleError(ctx: TelegramContext, err: unknown): Promise<void> {
     if (err instanceof GdriveNotInstalledError) {
-      await ctx.reply(en.gdrive.notInstalled);
+      await ctx.reply(en.gdrive.notInstalled, { reply_markup: this.returnKeyboard(ctx) });
       return;
     }
     if (err instanceof GdriveNotConfiguredError) {
-      await ctx.reply(en.gdrive.notConfigured);
+      await ctx.reply(en.gdrive.notConfigured, { reply_markup: this.returnKeyboard(ctx) });
       return;
     }
     if (err instanceof GdriveStatusFailedError) {
-      await ctx.reply(en.gdrive.statusFailed(err.reason));
+      await ctx.reply(en.gdrive.statusFailed(err.reason), { reply_markup: this.returnKeyboard(ctx) });
       return;
     }
     this.logger.error(
       `/gdrive status failed: ${(err as Error).message}`,
       (err as Error).stack,
     );
-    await ctx.reply(en.common.error('/gdrive status', (err as Error).message));
+    await ctx.reply(en.common.error('/gdrive status', (err as Error).message), {
+      reply_markup: this.returnKeyboard(ctx),
+    });
+  }
+
+  private returnKeyboard(ctx: TelegramContext): InlineKeyboard {
+    return returnHomeKeyboard(ctx.localeState?.catalog ?? en, {
+      workflow: 'drive',
+      phase: 'alreadyTerminal',
+    });
   }
 }

@@ -1,11 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Composer } from 'grammy';
+import { Composer, InlineKeyboard } from 'grammy';
 import { networkInterfaces, NetworkInterfaceInfo } from 'node:os';
 import { UpdateGdriveAuthUseCase } from '../../camera/application/update-gdrive-auth.use-case';
 import { GdriveAuthFailedError } from '../../camera/domain/errors/gdrive-auth-failed.error';
 import { GdriveNotInstalledError } from '../../camera/domain/errors/gdrive-not-installed.error';
 import { en, gb } from '../../locales/en';
 import { RoleMiddleware } from './role.middleware';
+import { returnHomeKeyboard, type ExternalWorkflowPhase } from './return-home';
 import { TelegramHandler } from './telegram-handler';
 import { TelegramContext } from './telegram-context';
 
@@ -66,7 +67,9 @@ export class GdriveAuthHandler implements TelegramHandler {
       const userId = ctx.from?.id;
       if (userId && this.states.has(userId)) {
         this.states.delete(userId);
-        await ctx.reply(en.gdriveAuth.cancelled);
+        await ctx.reply(en.gdriveAuth.cancelled, {
+          reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
+        });
         return;
       }
       return next();
@@ -86,7 +89,10 @@ export class GdriveAuthHandler implements TelegramHandler {
       if (text.startsWith('/')) return next();
 
       if (!/\[gdrive\]/i.test(text)) {
-        await ctx.reply(en.gdriveAuth.invalidSnippet, { parse_mode: 'Markdown' });
+        await ctx.reply(en.gdriveAuth.invalidSnippet, {
+          parse_mode: 'Markdown',
+          reply_markup: this.returnKeyboard(ctx, 'cancelPending'),
+        });
         return;
       }
 
@@ -103,7 +109,10 @@ export class GdriveAuthHandler implements TelegramHandler {
 
       const name = doc.file_name ?? '';
       if (!/\.(conf|txt)$/i.test(name)) {
-        await ctx.reply(en.gdriveAuth.invalidSnippet, { parse_mode: 'Markdown' });
+        await ctx.reply(en.gdriveAuth.invalidSnippet, {
+          parse_mode: 'Markdown',
+          reply_markup: this.returnKeyboard(ctx, 'cancelPending'),
+        });
         return;
       }
 
@@ -123,12 +132,17 @@ export class GdriveAuthHandler implements TelegramHandler {
         const msg = redactor((error as Error).message);
         const stack = redactor((error as Error).stack ?? '');
         this.logger.error(`gdrive_auth download failed: ${msg}`, stack);
-        await ctx.reply(en.common.error('/gdrive_auth', 'could not download file'));
+        await ctx.reply(en.common.error('/gdrive_auth', 'could not download file'), {
+          reply_markup: this.returnKeyboard(ctx, 'cancelPending'),
+        });
         return;
       }
 
       if (!/\[gdrive\]/i.test(text)) {
-        await ctx.reply(en.gdriveAuth.invalidSnippet, { parse_mode: 'Markdown' });
+        await ctx.reply(en.gdriveAuth.invalidSnippet, {
+          parse_mode: 'Markdown',
+          reply_markup: this.returnKeyboard(ctx, 'cancelPending'),
+        });
         return;
       }
 
@@ -148,12 +162,15 @@ export class GdriveAuthHandler implements TelegramHandler {
     const userId = ctx.from?.id;
     if (!userId) return;
     if (this.states.has(userId)) {
-      await ctx.reply(en.gdriveAuth.alreadyInProgress);
+      await ctx.reply(en.gdriveAuth.alreadyInProgress, {
+        reply_markup: this.returnKeyboard(ctx, 'cancelPending'),
+      });
       return;
     }
     this.states.set(userId, 'awaitingConfig');
     await ctx.reply(en.gdriveAuth.prompt(resolveLocalSshHost()), {
       parse_mode: 'Markdown',
+      reply_markup: this.returnKeyboard(ctx, 'cancelPending'),
     });
   }
 
@@ -165,30 +182,50 @@ export class GdriveAuthHandler implements TelegramHandler {
     try {
       const quota = await this.updateGdriveAuth.execute(snippet);
       this.states.delete(userId);
-      await ctx.reply(en.gdriveAuth.success(gb(quota.usedBytes), gb(quota.totalBytes)));
+      await ctx.reply(en.gdriveAuth.success(gb(quota.usedBytes), gb(quota.totalBytes)), {
+        reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
+      });
     } catch (err) {
       if (err instanceof GdriveNotInstalledError) {
         this.states.delete(userId);
-        await ctx.reply(en.gdriveAuth.notInstalled);
+        await ctx.reply(en.gdriveAuth.notInstalled, {
+          reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
+        });
         return;
       }
       if (err instanceof GdriveAuthFailedError) {
         this.states.delete(userId);
-        await ctx.reply(en.gdriveAuth.failed(err.reason));
+        await ctx.reply(en.gdriveAuth.failed(err.reason), {
+          reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
+        });
         return;
       }
       this.logger.error(
         `/gdrive_auth failed: ${(err as Error).message}`,
         (err as Error).stack,
       );
-      await ctx.reply(en.common.error('/gdrive_auth', (err as Error).message));
+      await ctx.reply(en.common.error('/gdrive_auth', (err as Error).message), {
+        reply_markup: this.returnKeyboard(ctx, 'cancelPending'),
+      });
     }
   }
 
   private async requireCurrentAdmin(ctx: TelegramContext, userId: number): Promise<boolean> {
     if (ctx.localeState?.user.role === 'admin') return true;
     this.states.delete(userId);
-    await ctx.reply(en.common.adminRequired);
+    await ctx.reply(en.common.adminRequired, {
+      reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
+    });
     return false;
+  }
+
+  private returnKeyboard(
+    ctx: TelegramContext,
+    phase: ExternalWorkflowPhase,
+  ): InlineKeyboard {
+    return returnHomeKeyboard(ctx.localeState?.catalog ?? en, {
+      workflow: 'drive',
+      phase,
+    });
   }
 }
