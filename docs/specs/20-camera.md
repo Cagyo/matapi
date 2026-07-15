@@ -130,8 +130,11 @@ credentials, tunnel URLs/tokens, paths, and Drive IDs.
   state before producing terminal Home markup.
 - Live opening and its active watch message use `leaveRunning` markup. Opening
   Home never stops or revokes a live stream. A stop, inactive-stream, or
-  compensated live-open error is terminal; compensation deletes the exact watch
-  message registered for that viewer before cleanup continues.
+  compensated live-open error is terminal. If `registerMessageReference` throws,
+  the just-sent exact `(chatId, messageId)` watch message is not registered yet,
+  so compensation deletes it before viewer revocation or its stop fallback.
+  The live-session service separately deletes normal registered watch-message
+  references on stop or expiry.
 
 ## Error Handling
 

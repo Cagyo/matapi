@@ -233,5 +233,8 @@ or Drive identifier.
 - Live opening and its active watch message use `rh:a:r`. Choosing Home deletes
   neither the watch message nor the stream session and never revokes/stops the
   stream. Stop, no-active, and compensated-error outcomes use terminal markup;
-  compensation deletes the exact registered watch message before revoking the
-  viewer or stopping the shared stream when revocation fails.
+  if `registerMessageReference` throws, the just-sent exact
+  `(chatId, messageId)` watch message has not yet been registered and is deleted
+  before revoking the viewer or stopping the shared stream when revocation
+  fails. Separately, the live-session service performs normal registered
+  watch-message cleanup on stream stop or expiry.
