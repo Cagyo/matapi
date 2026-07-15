@@ -101,7 +101,7 @@ reuses an older Home message, token, or revision.
 | Logs picker / settings dashboard | `cancelPending`; no stored pending state exists, then new Home. |
 | CSV picker | `cancelPending`; no persisted conversation or confirmation exists, then new Home. |
 | CSV staging/upload | `leaveRunning`; live localized `csv.staging` status uses `rh:c:r`, picker markup is removed, and active upload/lock is never cancelled. |
-| Logs result/error, CSV document/error/empty | `alreadyTerminal`; new Home directly. |
+| Logs result/error/empty/.txt document, CSV document/error/empty | `alreadyTerminal`; new Home directly. |
 | CSV page navigation and settings locale update | `continuing`; keep workflow, no launcher call. |
 
 `continuing` deliberately has no Return Home callback action. The live staging
