@@ -115,7 +115,9 @@ import { SystemUpdateHandler } from './interfaces/system-update.handler';
 import { UnmuteHandler } from './interfaces/unmute.handler';
 import { UpdateHandler } from './interfaces/update.handler';
 import { HomeHandler } from './interfaces/home.handler';
+import { HomeLauncher } from './interfaces/home-launcher';
 import { LegacyMenuHandler } from './interfaces/legacy-menu.handler';
+import { ReturnHomeHandler } from './interfaces/return-home.handler';
 import { SettingsHandler } from './interfaces/settings.handler';
 import { CleanHandler } from './interfaces/clean.handler';
 import { BotCommandsMenuService } from './application/bot-commands-menu.service';
@@ -272,6 +274,8 @@ const mode = resolveBotMode();
     FeatureHandler,
     CsvHandler,
     HomeHandler,
+    HomeLauncher,
+    ReturnHomeHandler,
     LegacyMenuHandler,
     SettingsHandler,
     CleanHandler,

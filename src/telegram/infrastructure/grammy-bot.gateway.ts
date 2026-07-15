@@ -45,6 +45,7 @@ import { TelegramHandler } from '../interfaces/telegram-handler';
 import { UnmuteHandler } from '../interfaces/unmute.handler';
 import { UpdateHandler } from '../interfaces/update.handler';
 import { HomeHandler } from '../interfaces/home.handler';
+import { ReturnHomeHandler } from '../interfaces/return-home.handler';
 import { LegacyMenuHandler } from '../interfaces/legacy-menu.handler';
 import { SettingsHandler } from '../interfaces/settings.handler';
 import { CleanHandler } from '../interfaces/clean.handler';
@@ -172,6 +173,8 @@ export class GrammyBotGateway
     private readonly csv: CsvHandler,
     @Inject(forwardRef(() => HomeHandler))
     private readonly home: HomeHandler,
+    @Inject(forwardRef(() => ReturnHomeHandler))
+    private readonly returnHome: ReturnHomeHandler,
     @Inject(forwardRef(() => LegacyMenuHandler))
     private readonly legacyMenu: LegacyMenuHandler,
     @Inject(forwardRef(() => SettingsHandler))
@@ -351,6 +354,7 @@ export class GrammyBotGateway
       this.gdriveAuth,
       this.csv,
       this.home,
+      this.returnHome,
       this.legacyMenu,
       this.settings,
       this.clean,
