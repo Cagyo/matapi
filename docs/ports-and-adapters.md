@@ -56,12 +56,14 @@ Status legend: ✅ canonical · 🚧 in transition · 📝 planned
 ### Telegram context
 
 The syntax-validated external Return Home acknowledgement grammar is
-`rh:<l|c|s|f|i|d|u>:<c|r|t>`. `ReturnHomeHandler` is an interface-layer
+`rh:<l|c|s|f|i|d|u|a>:<c|r|t>`. `ReturnHomeHandler` is an interface-layer
 orchestrator: on a `cancelPending` action it clears only the named workflow's
-in-memory interface state before delegating to `HomeLauncher`. That cleanup is
-not an application/domain port and does not roll back a completed mutation or
-cancel detached work. `OpenHomeUseCase` remains the only authority that opens
-a fresh Home.
+in-memory interface state before delegating to `HomeLauncher`. For camera,
+`CameraHandler` coordinates its browse state with the exact private-chat source
+state owned by `CameraSourcesHandler`; this cancellation remains entirely in the
+Telegram interface layer. It is not an application/domain port, does not roll
+back a completed mutation, and never cancels a live stream. `OpenHomeUseCase`
+remains the only authority that opens a fresh Home.
 
 | Port | Adapters | Status | Source |
 |---|---|---|---|

@@ -111,6 +111,28 @@ Telegram file limit: 50MB.
 - If over 50MB: compress with ffmpeg (lower bitrate)
 - If still over: send Google Drive link instead
 
+## Telegram camera workflow UI
+
+Camera replies that can continue or terminate a workflow carry localized inline
+reply markup and an own-row Return Home button. Camera Return Home uses only
+`rh:a:<c|r|t>`: callback data remains six UTF-8 bytes and excludes RTSP URLs,
+credentials, tunnel URLs/tokens, paths, and Drive IDs.
+
+- The browse UI emits and handles event action, video, photo, and Back-to-results
+  callbacks. Its user-local result navigation cache expires after 10 minutes;
+  expiry clears the cache and produces terminal recovery markup.
+- Browse input/results and source-management UI state are mutually exclusive.
+  Source state is keyed by the exact `(userId, chatId)` private-chat pair.
+  Credentials are deleted from Telegram when possible and are never included in
+  source labels, replies, markup, or Return Home data.
+- Media replies retain their browse navigation markup. Root snapshot, event,
+  video, photo, status, and motion-control replies clear competing camera UI
+  state before producing terminal Home markup.
+- Live opening and its active watch message use `leaveRunning` markup. Opening
+  Home never stops or revokes a live stream. A stop, inactive-stream, or
+  compensated live-open error is terminal; compensation deletes the exact watch
+  message registered for that viewer before cleanup continues.
+
 ## Error Handling
 
 | Scenario | Response |

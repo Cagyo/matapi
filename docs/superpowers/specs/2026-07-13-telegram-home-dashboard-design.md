@@ -20,7 +20,9 @@ The feature also establishes reliable Telegram interaction semantics:
 - consequential actions confirm before execution;
 - delivered Slice 4A gives logs, CSV, and settings a consistent route to a
   fresh Home; delivered Slice 4B extends that contract through configuration,
-  import, Drive, and system package update; only camera remains pending.
+  import, Drive, and system package update; delivered Slice 4C completes
+  camera coverage. All planned external workflow Return Home coverage is now
+  complete.
 
 The complete experience is delivered through four implementation slices. Each
 slice receives its own detailed implementation spec and plan; this document is
@@ -434,8 +436,8 @@ Workflow coverage is implemented in bounded groups:
 1. **Slice 4A — delivered:** logs, CSV, settings.
 2. **Slice 4B — delivered:** configuration, import, Drive, and system
    package update.
-3. **Slice 4C — pending:** camera as a separate change because it has the
-   largest state surface.
+3. **Slice 4C — delivered:** camera, including browse, media, live, and
+   credential-safe source-management state.
 
 Post-restart messages that currently support text only are not silently claimed
 to have buttons. If Return Home is required on such a message, the messaging
@@ -565,7 +567,8 @@ intentionally not given a Return Home button until Slice 4.
 - **Slice 4A — delivered:** logs, CSV, and settings;
 - **Slice 4B — delivered:** configuration, import, Drive, and system package
   update;
-- **Slice 4C — pending:** camera in a separate sub-slice.
+- **Slice 4C — delivered:** camera browse/media, live stream, and source
+  management.
 
 The delivered Slice 4A staging status is live and localized: its `rh:c:r`
 action opens a fresh Home while the detached CSV upload and its active lock keep
@@ -573,7 +576,10 @@ running. It does not cancel either. Delivered Slice 4B applies the same shared
 contract to configuration, import, Drive, and system package update: pending
 workflow state is cleared locally before Home launches, completed mutations are
 not rolled back, and `rh:u:r` never stops the detached package-update script.
-Only camera navigation remains pending in Slice 4C.
+Slice 4C completes the planned external workflow rollout: camera browse and
+source state are cancelled only in the interface layer, media callbacks retain
+their navigation, and live streams remain running when Home opens. All planned
+external workflow Return Home coverage is complete.
 
 Each slice has a separate implementation spec, plan, migration where required,
 focused test suite, review, and rollback boundary. Schema fields are introduced

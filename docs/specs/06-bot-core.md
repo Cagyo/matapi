@@ -64,7 +64,7 @@ before `sequentialize(homeUpdateConstraints)`, then locale middleware and
 handlers. The acknowledgement middleware promptly calls
 `answerCallbackQuery` for Home payloads (`h:`) and the recovery action (`ho`),
 plus valid external Return Home payloads with exact grammar
-`rh:<l|c|s|f|i|d|u>:<c|r|t>`, without preventing later handling if acknowledgement
+`rh:<l|c|s|f|i|d|u|a>:<c|r|t>`, without preventing later handling if acknowledgement
 fails. A valid external Return Home callback is therefore acknowledged before
 sequentialization; normal handling still serializes it by both
 `home:chat:<chatId>` and `home:user:<userId>` before locale/role lookup and
@@ -91,7 +91,7 @@ never emits `clean:trigger`; Home is the only Slice 3 cleanup launcher.
 Independent external workflows remain registered and do not reuse the Home
 session or perform Home protocol transitions. Slice 4 delivers their shared
 Return Home contract. `ReturnHomeHandler` accepts only
-`rh:<l|c|s|f|i|d|u>:<c|r|t>`. The callback acknowledgement is attempted before
+`rh:<l|c|s|f|i|d|u|a>:<c|r|t>`. The callback acknowledgement is attempted before
 `sequentialize`; normal handling then serializes by private chat and user,
 checks that the sender is a registered user, resolves the sender's current
 locale and role, clears named pending interface state for `cancelPending`, and
@@ -120,12 +120,28 @@ reuses an older Home message, token, or revision.
 | System package update successfully spawned | `leaveRunning`; new Home without cancelling the detached script. |
 | System package terminal/no-op/failure result | `alreadyTerminal`; new Home directly. |
 
+Camera uses workflow code `a` and has the following Slice 4C coverage:
+
+| Camera state | Slice 4C behavior |
+|---|---|
+| Dashboard, browse menu, browse input/retry/results | `cancelPending`; clear browse results/input and exact source-management state, then new Home. |
+| Browse event action, browse video/photo, and Back-to-results with live cache | `cancelPending`; clear the 10-minute cached result navigation, then new Home. |
+| Missing/expired browse cache recovery | `alreadyTerminal`; cache is deleted, then new Home. |
+| Browse cancel/close/expiry | `alreadyTerminal`; state is already cleared, then new Home. |
+| Root snapshot/events/video/photo/status/motion control/usage/error | clear competing camera UI state before execution, then `alreadyTerminal`; new Home directly. |
+| Live opening and active watch message | `leaveRunning`; new Home without stopping/revoking the live stream. |
+| Live stop/no-active/error after compensation | `alreadyTerminal`; new Home directly. |
+| Source menu/prompt/selection/retry | `cancelPending`; clear exact user/private-chat source state, then new Home. |
+| Source list/stale/cancel/expiry/demotion/configure/test/remove outcome | `alreadyTerminal`; source state is already cleared, then new Home. |
+| Existing `cam:` callback or claimed camera/source text | `continuing`; remain in camera workflow. Browse and source namespaces clear the competing UI state before continuing. |
+
 `continuing` deliberately has no Return Home callback action. `cancelPending`
 is interface-local in-memory cleanup only; it does not introduce a new
 application/domain port, undo completed mutations, or stop detached work. The
 CSV staging status and successfully spawned system package update are explicit
 `leaveRunning` exceptions: opening Home does not cancel or wait for their
-detached work.
+detached work. Camera live opening and its active watch message are the camera
+equivalent: Home does not stop, revoke, or otherwise disturb the live stream.
 
 ## Role Model
 

@@ -207,3 +207,31 @@ Last event: 08.04.2026 15:22
 Local storage: 847 MB
 Events today: 12
 ```
+
+---
+
+## Slice 4C camera workflow UI and Return Home
+
+Every interactive camera reply, including dashboard, browse, media, live, and
+source-management output, carries reply markup with a localized Home button on
+its own final row. The callback is the compact, secret-free
+`rh:a:<c|r|t>` grammar; it never contains a source URL, token, filesystem path,
+or Drive identifier.
+
+- Browse restores and handles `cam:browse:event:<id>`,
+  `cam:browse:video:<id>`, `cam:browse:photo:<id>`, and
+  `cam:browse:back-results`. Result navigation is a per-user in-memory cache
+  with a 10-minute expiry. Missing or expired cache is cleared before the
+  terminal recovery reply.
+- Browse input/result state and source-management state are mutually exclusive.
+  A browse callback clears the exact source state for the same user/private chat;
+  a source callback clears browse input and results. Root camera actions clear
+  both competing interface states before execution.
+- Source-management state is keyed exactly by `(userId, chatId)`. Credential
+  text is deleted where possible and is never echoed in reply markup, output, or
+  Return Home callback data.
+- Live opening and its active watch message use `rh:a:r`. Choosing Home deletes
+  neither the watch message nor the stream session and never revokes/stops the
+  stream. Stop, no-active, and compensated-error outcomes use terminal markup;
+  compensation deletes the exact registered watch message before revoking the
+  viewer or stopping the shared stream when revocation fails.

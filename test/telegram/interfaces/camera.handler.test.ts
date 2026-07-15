@@ -37,7 +37,8 @@ import {
   parseTimeRangeInput,
 } from "../../../src/telegram/interfaces/camera.handler";
 import { RoleMiddleware } from "../../../src/telegram/interfaces/role.middleware";
-import type { CameraSourcesHandler } from "../../../src/telegram/interfaces/camera-sources.handler";
+import { CameraSourcesHandler } from "../../../src/telegram/interfaces/camera-sources.handler";
+import { parseReturnHomeCallback } from "../../../src/telegram/interfaces/return-home";
 
 describe("camera browse input parsers", () => {
   it("parses DD.MM.YYYY dates and rejects impossible dates", () => {
@@ -1370,5 +1371,137 @@ describe("CameraHandler terminal return-home outcomes", () => {
     await messageCallbacks["message:text"](afterPrompt, promptNext);
     expect(promptNext).toHaveBeenCalledOnce();
     expect(callbackData(lastKeyboard(fromPrompt))).toEqual(["rh:a:t"]);
+  });
+});
+
+describe("Camera Return Home callback invariants", () => {
+  it("keeps every emitted camera Home callback compact, parseable, and secret-free", async () => {
+    const returnHomeCallbacks = new Set<string>();
+    const browseCallbacks = new Set<string>();
+    const collect = (keyboard: InlineKeyboard) => {
+      for (const data of callbackData(keyboard)) {
+        if (data.startsWith("rh:")) returnHomeCallbacks.add(data);
+        if (data.startsWith("cam:browse:") || data === "cam:browse") {
+          browseCallbacks.add(data);
+        }
+      }
+    };
+
+    const { commandCallbacks, callbackQueryCallbacks, video, photo } =
+      createTestSetup();
+    const callback = callbackQueryCallbacks[0].fn;
+    vi.mocked(video.execute).mockResolvedValue({
+      kind: "local",
+      event: event(),
+      path: "/motion/42.mp4",
+    });
+    vi.mocked(photo.execute).mockResolvedValue({
+      event: event(),
+      path: "/motion/42.jpg",
+    });
+
+    const dashboard = ctx();
+    await commandCallbacks.camera(dashboard);
+    collect(lastKeyboard(dashboard));
+
+    const browseMenu = ctx("cam:browse");
+    await callback(browseMenu);
+    collect(lastKeyboard(browseMenu));
+
+    const browsePrompt = ctx("cam:browse:pick-date");
+    await callback(browsePrompt);
+    collect(lastKeyboard(browsePrompt));
+
+    const browseCancel = ctx("cam:browse:cancel");
+    await callback(browseCancel);
+    collect(lastKeyboard(browseCancel));
+
+    const browseResults = ctx("cam:browse:latest");
+    await callback(browseResults);
+    collect(lastKeyboard(browseResults));
+
+    const browseAction = ctx("cam:browse:event:42");
+    await callback(browseAction);
+    collect(lastKeyboard(browseAction));
+
+    const browseVideo = ctx("cam:browse:video:42");
+    await callback(browseVideo);
+    collect(browseVideo.replyWithVideo.mock.calls[0][1].reply_markup);
+
+    const browsePhoto = ctx("cam:browse:photo:42");
+    await callback(browsePhoto);
+    collect(browsePhoto.replyWithPhoto.mock.calls[0][1].reply_markup);
+
+    const live = ctx();
+    live.match = "live";
+    await commandCallbacks.camera(live);
+    collect(live.reply.mock.calls[0][1].reply_markup);
+    collect(live.reply.mock.calls[1][1].reply_markup);
+
+    const sourceHandler = new CameraSourcesHandler(
+      { execute: vi.fn().mockResolvedValue({ cameraName: "Front door" }) } as never,
+      { execute: vi.fn().mockResolvedValue([]) } as never,
+      { execute: vi.fn().mockResolvedValue(undefined) } as never,
+      { now: () => new Date() },
+    );
+    const sourceMenu = ctx();
+    sourceMenu.localeState.user.role = "admin";
+    await sourceHandler.handleEntry(sourceMenu);
+    collect(lastKeyboard(sourceMenu));
+
+    const sourcePrompt = ctx();
+    sourcePrompt.localeState.user.role = "admin";
+    await sourceHandler.handleCallback(sourcePrompt, "add");
+    collect(lastKeyboard(sourcePrompt));
+
+    const sourceName = ctx();
+    sourceName.localeState.user.role = "admin";
+    sourceName.message = { text: "Front door" };
+    await sourceHandler.handleText(sourceName);
+    collect(lastKeyboard(sourceName));
+
+    const sourceCredential = ctx();
+    sourceCredential.localeState.user.role = "admin";
+    sourceCredential.message = { message_id: 9, text: "rtsps://camera.local/live" };
+    await sourceHandler.handleText(sourceCredential);
+    collect(lastKeyboard(sourceCredential));
+
+    expect(returnHomeCallbacks).toEqual(new Set(["rh:a:c", "rh:a:r", "rh:a:t"]));
+    for (const data of returnHomeCallbacks) {
+      expect(Buffer.byteLength(data, "utf8")).toBe(6);
+      expect(parseReturnHomeCallback(data)).not.toBeNull();
+      expect(data).toMatch(/^rh:a:[crt]$/);
+      expect(data).not.toMatch(/rtsp|cloudflare|secret|motion|video|snapshot|drive/iu);
+    }
+
+    const invoked = new Set<string>();
+    for (const data of browseCallbacks) {
+      const fixture = createTestSetup();
+      const invoke = fixture.callbackQueryCallbacks[0].fn;
+      vi.mocked(fixture.video.execute).mockResolvedValue({
+        kind: "local",
+        event: event(),
+        path: "/motion/42.mp4",
+      });
+      vi.mocked(fixture.photo.execute).mockResolvedValue({
+        event: event(),
+        path: "/motion/42.jpg",
+      });
+      if (
+        data === "cam:browse:back" ||
+        data === "cam:browse:event:42" ||
+        data === "cam:browse:video:42" ||
+        data === "cam:browse:photo:42" ||
+        data === "cam:browse:back-results"
+      ) {
+        await invoke(ctx("cam:browse:latest"));
+      }
+
+      const browseContext = ctx(data);
+      await invoke(browseContext);
+      expect(browseContext.answerCallbackQuery).toHaveBeenCalledOnce();
+      invoked.add(data);
+    }
+    expect(invoked).toEqual(browseCallbacks);
   });
 });
