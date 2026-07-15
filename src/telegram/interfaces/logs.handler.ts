@@ -1,5 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Composer, InlineKeyboard, InputFile } from 'grammy';
+import { catalogFor } from '../../locales';
 import { en, TYPE_ICONS } from '../../locales/en';
 import {
   SENSOR_LOG_REPOSITORY,
@@ -11,6 +12,10 @@ import {
   SensorQueryPort,
 } from '../../sensors/domain/ports/sensor-query.port';
 import { RoleMiddleware } from './role.middleware';
+import {
+  returnHomeKeyboard,
+  type ExternalWorkflowPhase,
+} from './return-home';
 import { TelegramHandler } from './telegram-handler';
 import { TelegramContext } from './telegram-context';
 
@@ -45,7 +50,7 @@ export class LogsHandler implements TelegramHandler {
   async handleEmpty(ctx: TelegramContext): Promise<void> {
     const sensors = await this.sensors.listEnabled();
     if (sensors.length === 0) {
-      await ctx.reply(en.status.none);
+      await this.replyTerminal(ctx, en.status.none);
       return;
     }
     const kb = new InlineKeyboard();
@@ -53,6 +58,7 @@ export class LogsHandler implements TelegramHandler {
       const icon = TYPE_ICONS[s.type] ?? '•';
       kb.text(`${icon} ${s.name}`, `logs:${s.name}`).row();
     }
+    kb.append(this.keyboard(ctx, 'cancelPending'));
     await ctx.reply(en.logs.selectSensor, { reply_markup: kb });
   }
 
@@ -66,18 +72,18 @@ export class LogsHandler implements TelegramHandler {
 
       const parsed = parseArgs(raw);
       if (parsed.invalid === 'count') {
-        await ctx.reply(en.logs.invalidCount);
+        await this.replyTerminal(ctx, en.logs.invalidCount);
         return;
       }
       if (parsed.invalid === 'duration') {
-        await ctx.reply(en.logs.invalidDuration);
+        await this.replyTerminal(ctx, en.logs.invalidDuration);
         return;
       }
 
       try {
         const lookup = await this.sensors.findByName(parsed.name);
         if (!lookup) {
-          await ctx.reply(en.logs.notFound(parsed.name));
+          await this.replyTerminal(ctx, en.logs.notFound(parsed.name));
           return;
         }
 
@@ -87,7 +93,7 @@ export class LogsHandler implements TelegramHandler {
         });
 
         if (entries.length === 0) {
-          await ctx.reply(en.logs.none(parsed.name));
+          await this.replyTerminal(ctx, en.logs.none(parsed.name));
           return;
         }
 
@@ -97,7 +103,7 @@ export class LogsHandler implements TelegramHandler {
           `/logs failed: ${(err as Error).message}`,
           (err as Error).stack,
         );
-        await ctx.reply(en.logs.readFailed);
+        await this.replyTerminal(ctx, en.logs.readFailed);
       }
     });
 
@@ -113,7 +119,10 @@ export class LogsHandler implements TelegramHandler {
           ? await this.sensors.findByIdIncludingArchived(target.slice('id:'.length))
           : await this.sensors.findByName(target);
         if (!lookup) {
-          await ctx.reply(en.logs.notFound(target.startsWith('id:') ? 'selected sensor' : target));
+          await this.replyTerminal(
+            ctx,
+            en.logs.notFound(target.startsWith('id:') ? 'selected sensor' : target),
+          );
           return;
         }
         const sensor = lookup.sensor;
@@ -121,7 +130,7 @@ export class LogsHandler implements TelegramHandler {
           limit: DEFAULT_COUNT,
         });
         if (entries.length === 0) {
-          await ctx.reply(en.logs.none(sensor.name));
+          await this.replyTerminal(ctx, en.logs.none(sensor.name));
           return;
         }
         await this.deliver(ctx, sensor.name, entries);
@@ -130,8 +139,24 @@ export class LogsHandler implements TelegramHandler {
           `/logs callback failed: ${(err as Error).message}`,
           (err as Error).stack,
         );
-        await ctx.reply(en.logs.readFailed);
+        await this.replyTerminal(ctx, en.logs.readFailed);
       }
+    });
+  }
+
+  private keyboard(
+    ctx: TelegramContext,
+    phase: ExternalWorkflowPhase,
+  ): InlineKeyboard {
+    return returnHomeKeyboard(ctx.localeState?.catalog ?? catalogFor('en'), {
+      workflow: 'logs',
+      phase,
+    });
+  }
+
+  private async replyTerminal(ctx: TelegramContext, text: string): Promise<void> {
+    await ctx.reply(text, {
+      reply_markup: this.keyboard(ctx, 'alreadyTerminal'),
     });
   }
 
@@ -145,12 +170,15 @@ export class LogsHandler implements TelegramHandler {
     const message = `${header}\n\n${body}`;
 
     if (message.length <= TELEGRAM_MAX_MESSAGE) {
-      await ctx.reply(message);
+      await this.replyTerminal(ctx, message);
       return;
     }
 
     const file = new InputFile(Buffer.from(message, 'utf8'), en.logs.fileName(name));
-    await ctx.replyWithDocument(file, { caption: header });
+    await ctx.replyWithDocument(file, {
+      caption: header,
+      reply_markup: this.keyboard(ctx, 'alreadyTerminal'),
+    });
   }
 
 }
