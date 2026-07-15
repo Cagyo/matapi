@@ -1,22 +1,36 @@
-import { Inject, Injectable } from '@nestjs/common';
-import { InlineKeyboard } from 'grammy';
-import { ConfigureLiveSourceUseCase } from '../../camera/application/configure-live-source.use-case';
-import { ListLiveSourcesUseCase } from '../../camera/application/list-live-sources.use-case';
-import { RemoveLiveSourceUseCase } from '../../camera/application/remove-live-source.use-case';
-import type { RedactedLiveSource } from '../../camera/domain/ports/live-source-repository.port';
-import { CLOCK, type ClockPort } from '../../events/domain/ports/clock.port';
-import { catalogFor, type LocaleCatalog } from '../../locales';
-import { en } from '../../locales/en';
-import type { TelegramContext } from './telegram-context';
+import { Inject, Injectable } from "@nestjs/common";
+import { InlineKeyboard } from "grammy";
+import { ConfigureLiveSourceUseCase } from "../../camera/application/configure-live-source.use-case";
+import { ListLiveSourcesUseCase } from "../../camera/application/list-live-sources.use-case";
+import { RemoveLiveSourceUseCase } from "../../camera/application/remove-live-source.use-case";
+import type { RedactedLiveSource } from "../../camera/domain/ports/live-source-repository.port";
+import { CLOCK, type ClockPort } from "../../events/domain/ports/clock.port";
+import { catalogFor, type LocaleCatalog } from "../../locales";
+import { en } from "../../locales/en";
+import {
+  appendReturnHomeButton,
+  returnHomeKeyboard,
+  type ExternalWorkflowPhase,
+} from "./return-home";
+import type { TelegramContext } from "./telegram-context";
 
 const SOURCE_STATE_TTL_MS = 10 * 60_000;
 
-type SourceAction = 'add' | 'edit' | 'test' | 'remove';
+type SourceAction = "add" | "edit" | "test" | "remove";
 type SourceState =
-  | { kind: 'camera'; action: 'add'; createdAtMs: number }
-  | { kind: 'credential'; action: 'add' | 'edit' | 'test'; cameraName: string; createdAtMs: number }
-  | { kind: 'selection'; action: 'edit' | 'test' | 'remove'; createdAtMs: number }
-  | { kind: 'list'; createdAtMs: number };
+  | { kind: "camera"; action: "add"; createdAtMs: number }
+  | {
+      kind: "credential";
+      action: "add" | "edit" | "test";
+      cameraName: string;
+      createdAtMs: number;
+    }
+  | {
+      kind: "selection";
+      action: "edit" | "test" | "remove";
+      createdAtMs: number;
+    }
+  | { kind: "list"; createdAtMs: number };
 
 /** Delegated admin flow for credential-safe RTSP source management. */
 @Injectable()
@@ -53,15 +67,17 @@ export class CameraSourcesHandler {
     this.clear(ctx);
     const copy = this.copy(ctx);
     const keyboard = new InlineKeyboard()
-      .text(copy.buttons.add, 'cam:sources:add')
-      .text(copy.buttons.edit, 'cam:sources:edit')
+      .text(copy.buttons.add, "cam:sources:add")
+      .text(copy.buttons.edit, "cam:sources:edit")
       .row()
-      .text(copy.buttons.test, 'cam:sources:test')
-      .text(copy.buttons.list, 'cam:sources:list')
+      .text(copy.buttons.test, "cam:sources:test")
+      .text(copy.buttons.list, "cam:sources:list")
       .row()
-      .text(copy.buttons.remove, 'cam:sources:remove')
-      .text(copy.buttons.cancel, 'cam:sources:cancel');
-    await ctx.reply(copy.menuTitle, { reply_markup: keyboard });
+      .text(copy.buttons.remove, "cam:sources:remove")
+      .text(copy.buttons.cancel, "cam:sources:cancel");
+    await ctx.reply(copy.menuTitle, {
+      reply_markup: this.returnKeyboard(ctx, "cancelPending", keyboard),
+    });
   }
 
   async handleCallback(ctx: TelegramContext, data: string): Promise<void> {
@@ -74,84 +90,120 @@ export class CameraSourcesHandler {
     }
   }
 
-  private async handleAdminCallback(ctx: TelegramContext, data: string): Promise<void> {
+  private async handleAdminCallback(
+    ctx: TelegramContext,
+    data: string,
+  ): Promise<void> {
     const copy = this.copy(ctx);
-    if (data === 'cancel') {
+    if (data === "cancel") {
       this.clear(ctx);
-      await ctx.reply(copy.cancelled);
+      await ctx.reply(copy.cancelled, {
+        reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
+      });
       return;
     }
-    if (data === 'add') {
-      this.set(ctx, { kind: 'camera', action: 'add', createdAtMs: this.now() });
-      await ctx.reply(copy.cameraPrompt, { reply_markup: cancelKeyboard(copy) });
+    if (data === "add") {
+      this.set(ctx, { kind: "camera", action: "add", createdAtMs: this.now() });
+      await ctx.reply(copy.cameraPrompt, {
+        reply_markup: this.returnKeyboard(
+          ctx,
+          "cancelPending",
+          cancelKeyboard(copy),
+        ),
+      });
       return;
     }
-    if (data === 'list') {
-      this.set(ctx, { kind: 'list', createdAtMs: this.now() });
+    if (data === "list") {
+      this.set(ctx, { kind: "list", createdAtMs: this.now() });
       try {
-        await this.replyList(ctx, await this.list.execute());
-      } catch {
-        await ctx.reply(copy.listFailed);
-      } finally {
+        const sources = await this.list.execute();
         this.clear(ctx);
+        await this.replyList(ctx, sources);
+      } catch {
+        this.clear(ctx);
+        await ctx.reply(copy.listFailed, {
+          reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
+        });
       }
       return;
     }
-    if (data === 'edit' || data === 'test' || data === 'remove') {
+    if (data === "edit" || data === "test" || data === "remove") {
       await this.beginSelection(ctx, data);
       return;
     }
 
-    const separator = data.indexOf(':');
+    const separator = data.indexOf(":");
     if (separator < 1) {
       this.clear(ctx);
-      await ctx.reply(copy.staleSelection);
+      await ctx.reply(copy.staleSelection, {
+        reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
+      });
       return;
     }
     const action = data.slice(0, separator);
     const cameraId = decodeSelection(data.slice(separator + 1));
     if (!isSelectionAction(action) || !cameraId) {
       this.clear(ctx);
-      await ctx.reply(copy.staleSelection);
+      await ctx.reply(copy.staleSelection, {
+        reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
+      });
       return;
     }
     const state = this.getCurrent(ctx);
-    if (state?.kind !== 'selection' || state.action !== action) {
+    if (state?.kind !== "selection" || state.action !== action) {
       this.clear(ctx);
-      await ctx.reply(copy.staleSelection);
+      await ctx.reply(copy.staleSelection, {
+        reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
+      });
       return;
     }
 
     let selected: RedactedLiveSource | undefined;
     try {
-      selected = (await this.list.execute()).find((item) => item.cameraId === cameraId);
+      selected = (await this.list.execute()).find(
+        (item) => item.cameraId === cameraId,
+      );
     } catch {
       this.clear(ctx);
-      await ctx.reply(copy.listFailed);
+      await ctx.reply(copy.listFailed, {
+        reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
+      });
       return;
     }
     if (!selected) {
       this.clear(ctx);
-      await ctx.reply(copy.staleSelection);
+      await ctx.reply(copy.staleSelection, {
+        reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
+      });
       return;
     }
-    if (action === 'remove') {
+    if (action === "remove") {
       this.clear(ctx);
       try {
         await this.remove.execute(selected.cameraId);
-        await ctx.reply(copy.removed(selected.cameraName));
+        await ctx.reply(copy.removed(selected.cameraName), {
+          reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
+        });
       } catch {
-        await ctx.reply(copy.removeFailed);
+        await ctx.reply(copy.removeFailed, {
+          reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
+        });
       }
       return;
     }
     this.set(ctx, {
-      kind: 'credential',
+      kind: "credential",
       action,
       cameraName: selected.cameraName,
       createdAtMs: this.now(),
     });
-    await ctx.reply(copy.credentialPrompt, { reply_markup: cancelKeyboard(copy) });
+    await ctx.reply(copy.credentialPrompt, {
+      reply_markup: this.returnKeyboard(
+        ctx,
+        "cancelPending",
+        cancelKeyboard(copy),
+      ),
+    });
   }
 
   /** Returns true only when a source-management state claimed this message. */
@@ -177,32 +229,44 @@ export class CameraSourcesHandler {
     const copy = this.copy(ctx);
     if (this.now() - state.createdAtMs > SOURCE_STATE_TTL_MS) {
       this.states.delete(key);
-      await ctx.reply(copy.expired);
+      await ctx.reply(copy.expired, {
+        reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
+      });
       return true;
     }
 
     const text = ctx.message?.text?.trim();
     if (!text) return true;
-    if (text.toLowerCase() === 'cancel') {
+    if (text.toLowerCase() === "cancel") {
       this.states.delete(key);
-      await ctx.reply(copy.cancelled);
+      await ctx.reply(copy.cancelled, {
+        reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
+      });
       return true;
     }
-    if (state.kind === 'camera') {
+    if (state.kind === "camera") {
       if (text.length > 64 || hasControlCharacter(text)) {
-        await ctx.reply(copy.invalidCamera);
+        await ctx.reply(copy.invalidCamera, {
+          reply_markup: this.returnKeyboard(ctx, "cancelPending"),
+        });
         return true;
       }
       this.states.set(key, {
-        kind: 'credential',
-        action: 'add',
+        kind: "credential",
+        action: "add",
         cameraName: text,
         createdAtMs: this.now(),
       });
-      await ctx.reply(copy.credentialPrompt, { reply_markup: cancelKeyboard(copy) });
+      await ctx.reply(copy.credentialPrompt, {
+        reply_markup: this.returnKeyboard(
+          ctx,
+          "cancelPending",
+          cancelKeyboard(copy),
+        ),
+      });
       return true;
     }
-    if (state.kind !== 'credential') return true;
+    if (state.kind !== "credential") return true;
 
     this.states.delete(key);
     const chatId = ctx.chat?.id;
@@ -213,9 +277,9 @@ export class CameraSourcesHandler {
       configured = await this.configure.execute({
         cameraName: state.cameraName,
         url: text,
-        transport: 'tcp',
-        tlsMode: /^rtsps:\/\//iu.test(text) ? 'strict' : 'none',
-        profile: 'eco',
+        transport: "tcp",
+        tlsMode: /^rtsps:\/\//iu.test(text) ? "strict" : "none",
+        profile: "eco",
       });
     } catch {
       // The interface boundary maps every source/configuration failure to safe copy below.
@@ -230,20 +294,27 @@ export class CameraSourcesHandler {
     }
     if (configured) {
       await ctx.reply(
-        state.action === 'test'
+        state.action === "test"
           ? copy.tested(configured.cameraName)
           : copy.configured(configured.cameraName),
+        { reply_markup: this.returnKeyboard(ctx, "alreadyTerminal") },
       );
     } else {
-      await ctx.reply(copy.configureFailed);
+      await ctx.reply(copy.configureFailed, {
+        reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
+      });
     }
-    if (deletionFailed) await ctx.reply(copy.deletionFailed);
+    if (deletionFailed) {
+      await ctx.reply(copy.deletionFailed, {
+        reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
+      });
+    }
     return true;
   }
 
   private async beginSelection(
     ctx: TelegramContext,
-    action: Exclude<SourceAction, 'add'>,
+    action: Exclude<SourceAction, "add">,
   ): Promise<void> {
     const copy = this.copy(ctx);
     let sources: RedactedLiveSource[];
@@ -251,46 +322,68 @@ export class CameraSourcesHandler {
       sources = await this.list.execute();
     } catch {
       this.clear(ctx);
-      await ctx.reply(copy.listFailed);
+      await ctx.reply(copy.listFailed, {
+        reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
+      });
       return;
     }
     if (sources.length === 0) {
       this.clear(ctx);
-      await ctx.reply(copy.empty);
+      await ctx.reply(copy.empty, {
+        reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
+      });
       return;
     }
-    this.set(ctx, { kind: 'selection', action, createdAtMs: this.now() });
+    this.set(ctx, { kind: "selection", action, createdAtMs: this.now() });
     const keyboard = new InlineKeyboard();
     for (const item of sources) {
-      keyboard.text(item.cameraName, `cam:sources:${action}:${encodeURIComponent(item.cameraId)}`).row();
+      keyboard
+        .text(
+          item.cameraName,
+          `cam:sources:${action}:${encodeURIComponent(item.cameraId)}`,
+        )
+        .row();
     }
-    keyboard.text(copy.buttons.cancel, 'cam:sources:cancel');
-    await ctx.reply(copy.chooseSource(action), { reply_markup: keyboard });
+    keyboard.text(copy.buttons.cancel, "cam:sources:cancel");
+    await ctx.reply(copy.chooseSource(action), {
+      reply_markup: this.returnKeyboard(ctx, "cancelPending", keyboard),
+    });
   }
 
-  private async replyList(ctx: TelegramContext, sources: RedactedLiveSource[]): Promise<void> {
+  private async replyList(
+    ctx: TelegramContext,
+    sources: RedactedLiveSource[],
+  ): Promise<void> {
     const copy = this.copy(ctx);
     if (sources.length === 0) {
-      await ctx.reply(copy.empty);
+      await ctx.reply(copy.empty, {
+        reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
+      });
       return;
     }
-    const lines = sources.map(({ cameraId, cameraName, summary }) => copy.sourceLine({
-      cameraId,
-      cameraName,
-      scheme: summary.scheme,
-      host: summary.host,
-      transport: summary.transport,
-      tlsMode: summary.tlsMode,
-      profile: summary.profile,
-      ready: summary.ready,
-    }));
-    await ctx.reply(`${copy.listHeader}\n\n${lines.join('\n\n')}`);
+    const lines = sources.map(({ cameraId, cameraName, summary }) =>
+      copy.sourceLine({
+        cameraId,
+        cameraName,
+        scheme: summary.scheme,
+        host: summary.host,
+        transport: summary.transport,
+        tlsMode: summary.tlsMode,
+        profile: summary.profile,
+        ready: summary.ready,
+      }),
+    );
+    await ctx.reply(`${copy.listHeader}\n\n${lines.join("\n\n")}`, {
+      reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
+    });
   }
 
   private async requireAdmin(ctx: TelegramContext): Promise<boolean> {
-    if (ctx.localeState?.user.role === 'admin') return true;
+    if (ctx.localeState?.user.role === "admin") return true;
     this.clear(ctx);
-    await ctx.reply(this.catalog(ctx).common.adminRequired);
+    await ctx.reply(this.catalog(ctx).common.adminRequired, {
+      reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
+    });
     return false;
   }
 
@@ -318,11 +411,25 @@ export class CameraSourcesHandler {
   private key(ctx: TelegramContext): string | null {
     const userId = ctx.from?.id;
     const chatId = ctx.chat?.id;
-    return userId === undefined || chatId === undefined ? null : `${userId}:${chatId}`;
+    return userId === undefined || chatId === undefined
+      ? null
+      : `${userId}:${chatId}`;
   }
 
   private catalog(ctx: TelegramContext): LocaleCatalog {
-    return ctx.localeState?.catalog ?? catalogFor('en');
+    return ctx.localeState?.catalog ?? catalogFor("en");
+  }
+
+  private returnKeyboard(
+    ctx: TelegramContext,
+    phase: ExternalWorkflowPhase,
+    keyboard?: InlineKeyboard,
+  ): InlineKeyboard {
+    const catalog = this.catalog(ctx);
+    const input = { workflow: "camera" as const, phase };
+    return keyboard
+      ? appendReturnHomeButton(keyboard, catalog, input)
+      : returnHomeKeyboard(catalog, input);
   }
 
   private copy(ctx: TelegramContext): typeof en.camera.sources {
@@ -330,8 +437,8 @@ export class CameraSourcesHandler {
   }
 }
 
-function isSelectionAction(value: string): value is 'edit' | 'test' | 'remove' {
-  return value === 'edit' || value === 'test' || value === 'remove';
+function isSelectionAction(value: string): value is "edit" | "test" | "remove" {
+  return value === "edit" || value === "test" || value === "remove";
 }
 
 function decodeSelection(value: string): string | null {
@@ -343,7 +450,7 @@ function decodeSelection(value: string): string | null {
 }
 
 function cancelKeyboard(copy: typeof en.camera.sources): InlineKeyboard {
-  return new InlineKeyboard().text(copy.buttons.cancel, 'cam:sources:cancel');
+  return new InlineKeyboard().text(copy.buttons.cancel, "cam:sources:cancel");
 }
 
 function hasControlCharacter(value: string): boolean {
