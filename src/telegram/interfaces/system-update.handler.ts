@@ -38,6 +38,10 @@ export class SystemUpdateHandler implements TelegramHandler {
     );
   }
 
+  cancelPending(userId: number): void {
+    this.pending.delete(userId);
+  }
+
   async handleCommand(ctx: TelegramContext): Promise<void> {
     const userId = ctx.from?.id;
     if (!userId) return;

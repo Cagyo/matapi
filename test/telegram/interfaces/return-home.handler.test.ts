@@ -1,8 +1,12 @@
 import { Composer } from 'grammy';
 import { describe, expect, it, vi } from 'vitest';
+import { ConfigHandler } from '../../../src/telegram/interfaces/config.handler';
+import { GdriveAuthHandler } from '../../../src/telegram/interfaces/gdrive-auth.handler';
 import { HomeLauncher } from '../../../src/telegram/interfaces/home-launcher';
+import { ImportConfigHandler } from '../../../src/telegram/interfaces/import-config.handler';
 import { ReturnHomeHandler } from '../../../src/telegram/interfaces/return-home.handler';
 import { RoleMiddleware } from '../../../src/telegram/interfaces/role.middleware';
+import { SystemUpdateHandler } from '../../../src/telegram/interfaces/system-update.handler';
 import { TelegramContext } from '../../../src/telegram/interfaces/telegram-context';
 
 function callbackContext(
@@ -19,7 +23,20 @@ function callbackContext(
 function setup() {
   const launcher = { launch: vi.fn().mockResolvedValue('opened') } as unknown as HomeLauncher;
   const guard = { registered: vi.fn() } as unknown as RoleMiddleware;
-  const handler = new ReturnHomeHandler(launcher, guard);
+  const cancelers = {
+    config: { cancelPending: vi.fn() },
+    configImport: { cancelPending: vi.fn() },
+    drive: { cancelPending: vi.fn() },
+    systemUpdate: { cancelPending: vi.fn() },
+  };
+  const handler = new ReturnHomeHandler(
+    launcher,
+    guard,
+    cancelers.config as unknown as ConfigHandler,
+    cancelers.configImport as unknown as ImportConfigHandler,
+    cancelers.drive as unknown as GdriveAuthHandler,
+    cancelers.systemUpdate as unknown as SystemUpdateHandler,
+  );
   let capturedRegex!: RegExp;
   let callback!: (ctx: TelegramContext) => Promise<void>;
   const composer = {
@@ -31,7 +48,7 @@ function setup() {
 
   handler.register(composer);
 
-  return { launcher, guard, composer, capturedRegex, callback };
+  return { launcher, guard, composer, capturedRegex, callback, cancelers };
 }
 
 describe('ReturnHomeHandler', () => {
@@ -45,6 +62,7 @@ describe('ReturnHomeHandler', () => {
     );
     expect(capturedRegex.test('rh:c:t')).toBe(true);
     expect(capturedRegex.test('rh:c:x')).toBe(false);
+    expect(capturedRegex.source).toBe('^rh:[lcsfidu]:[crt]$');
   });
 
   it('does not acknowledge twice and delegates a valid return', async () => {
@@ -78,5 +96,53 @@ describe('ReturnHomeHandler', () => {
     ]);
 
     expect(launcher.launch).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ['rh:f:c', 'config'],
+    ['rh:i:c', 'configImport'],
+    ['rh:d:c', 'drive'],
+    ['rh:u:c', 'systemUpdate'],
+  ] as const)('cancels %s before opening Home', async (data, target) => {
+    const { callback, cancelers, launcher } = setup();
+    const order: string[] = [];
+    cancelers[target].cancelPending.mockImplementation(() => order.push('cancel'));
+    (launcher.launch as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      order.push('launch');
+      return 'opened';
+    });
+
+    await callback(callbackContext(data, {
+      from: { id: 42 },
+      homeCallbackAcknowledged: true,
+    }));
+
+    expect(cancelers[target].cancelPending).toHaveBeenCalledWith(42);
+    expect(order).toEqual(['cancel', 'launch']);
+  });
+
+  it.each(['rh:f:t', 'rh:i:t', 'rh:d:t', 'rh:u:r'])(
+    'does not cancel a terminal or running return %s',
+    async (data) => {
+      const { callback, cancelers, launcher } = setup();
+
+      await callback(callbackContext(data, { from: { id: 42 } }));
+
+      expect(cancelers.config.cancelPending).not.toHaveBeenCalled();
+      expect(cancelers.configImport.cancelPending).not.toHaveBeenCalled();
+      expect(cancelers.drive.cancelPending).not.toHaveBeenCalled();
+      expect(cancelers.systemUpdate.cancelPending).not.toHaveBeenCalled();
+      expect(launcher.launch).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('does not cancel without a user id but still delegates to HomeLauncher', async () => {
+    const { callback, cancelers, launcher } = setup();
+    const ctx = callbackContext('rh:f:c');
+
+    await callback(ctx);
+
+    expect(cancelers.config.cancelPending).not.toHaveBeenCalled();
+    expect(launcher.launch).toHaveBeenCalledWith(ctx);
   });
 });

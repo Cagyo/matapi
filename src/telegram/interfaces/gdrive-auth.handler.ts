@@ -136,6 +136,10 @@ export class GdriveAuthHandler implements TelegramHandler {
     });
   }
 
+  cancelPending(userId: number): void {
+    this.states.delete(userId);
+  }
+
   async handleCommand(ctx: TelegramContext): Promise<void> {
     await this.startWizard(ctx);
   }

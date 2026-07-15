@@ -1,7 +1,14 @@
 import { InlineKeyboard } from 'grammy';
 import type { LocaleCatalog } from '../../locales';
 
-export type ExternalWorkflow = 'logs' | 'csv' | 'settings';
+export type ExternalWorkflow =
+  | 'logs'
+  | 'csv'
+  | 'settings'
+  | 'config'
+  | 'configImport'
+  | 'drive'
+  | 'systemUpdate';
 export type ExternalWorkflowPhase =
   | 'cancelPending'
   | 'leaveRunning'
@@ -16,12 +23,20 @@ const workflowCode: Readonly<Record<ExternalWorkflow, string>> = {
   logs: 'l',
   csv: 'c',
   settings: 's',
+  config: 'f',
+  configImport: 'i',
+  drive: 'd',
+  systemUpdate: 'u',
 };
 
 const workflowByCode: Readonly<Record<string, ExternalWorkflow | undefined>> = {
   l: 'logs',
   c: 'csv',
   s: 'settings',
+  f: 'config',
+  i: 'configImport',
+  d: 'drive',
+  u: 'systemUpdate',
 };
 
 const phaseCode: Readonly<Record<ExternalWorkflowPhase, string>> = {
@@ -43,7 +58,7 @@ export function returnHomeCallback(input: ReturnHomeCallbackInput): string {
 export function parseReturnHomeCallback(
   data: string,
 ): ReturnHomeCallbackInput | null {
-  const match = /^rh:([lcs]):([crt])$/.exec(data);
+  const match = /^rh:([lcsfidu]):([crt])$/.exec(data);
   if (!match) return null;
 
   const workflow = workflowByCode[match[1]];
@@ -65,4 +80,14 @@ export function returnHomeKeyboard(
     catalog.home.common.home,
     returnHomeCallback(input),
   );
+}
+
+export function appendReturnHomeButton(
+  keyboard: InlineKeyboard,
+  catalog: LocaleCatalog,
+  input: ReturnHomeCallbackInput,
+): InlineKeyboard {
+  return keyboard
+    .row()
+    .text(catalog.home.common.home, returnHomeCallback(input));
 }

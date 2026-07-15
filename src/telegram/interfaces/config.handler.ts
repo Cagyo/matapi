@@ -149,6 +149,10 @@ export class ConfigHandler implements TelegramHandler {
     });
   }
 
+  cancelPending(userId: number): void {
+    this.states.delete(userId);
+  }
+
   // ───────── entry point ─────────
 
   async handleSubcommand(ctx: TelegramContext, sub: string): Promise<void> {

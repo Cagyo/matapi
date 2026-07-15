@@ -1,6 +1,8 @@
+import { InlineKeyboard } from 'grammy';
 import { describe, expect, it } from 'vitest';
 import { catalogFor } from '../../../src/locales';
 import {
+  appendReturnHomeButton,
   isReturnHomeCallback,
   parseReturnHomeCallback,
   returnHomeCallback,
@@ -8,18 +10,36 @@ import {
 } from '../../../src/telegram/interfaces/return-home';
 
 describe('return-home callback contract', () => {
-  it('round-trips the fixed CSV leave-running action', () => {
-    const data = returnHomeCallback({ workflow: 'csv', phase: 'leaveRunning' });
+  it.each([
+    ['logs', 'l'],
+    ['csv', 'c'],
+    ['settings', 's'],
+    ['config', 'f'],
+    ['configImport', 'i'],
+    ['drive', 'd'],
+    ['systemUpdate', 'u'],
+  ] as const)('round-trips %s as code %s', (workflow, code) => {
+    const data = returnHomeCallback({ workflow, phase: 'cancelPending' });
 
-    expect(data).toBe('rh:c:r');
-    expect(Buffer.byteLength(data, 'utf8')).toBeLessThanOrEqual(64);
+    expect(data).toBe(`rh:${code}:c`);
+    expect(Buffer.byteLength(data, 'utf8')).toBe(6);
     expect(parseReturnHomeCallback(data)).toEqual({
-      workflow: 'csv',
-      phase: 'leaveRunning',
+      workflow,
+      phase: 'cancelPending',
     });
   });
 
-  it.each(['rh:l', 'rh:l:x', 'rh:logs:t', 'rh:x:t', 'h:token:0:h'])(
+  it.each([
+    'rh:l',
+    'rh:l:x',
+    'rh:logs:t',
+    'rh:f',
+    'rh:i:x',
+    'rh:drive:t',
+    'rh:u:t:extra',
+    'rh:x:t',
+    'h:token:0:h',
+  ])(
     'rejects non-contract payload %s',
     (data) => expect(parseReturnHomeCallback(data)).toBeNull(),
   );
@@ -38,5 +58,22 @@ describe('return-home callback contract', () => {
 
     expect(JSON.stringify(keyboard)).toContain('🏠 Дім');
     expect(JSON.stringify(keyboard)).toContain('rh:s:c');
+  });
+
+  it('appends Home on a final row without replacing workflow actions', () => {
+    const keyboard = new InlineKeyboard()
+      .text('Apply', 'imp:apply')
+      .text('Cancel', 'imp:cancel');
+
+    appendReturnHomeButton(keyboard, catalogFor('uk'), {
+      workflow: 'configImport',
+      phase: 'cancelPending',
+    });
+
+    expect(JSON.stringify(keyboard)).toContain('imp:apply');
+    expect(JSON.stringify(keyboard)).toContain('imp:cancel');
+    expect(JSON.stringify(keyboard)).toContain('🏠 Дім');
+    expect(JSON.stringify(keyboard)).toContain('rh:i:c');
+    expect(keyboard.inline_keyboard.at(-1)).toHaveLength(1);
   });
 });
