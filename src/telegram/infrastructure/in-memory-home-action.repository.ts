@@ -1,5 +1,6 @@
-import type { HomeActionRepositoryPort } from '../application/ports/home-action-repository.port';
+import type { HomeActionRepositoryPort, WorkflowClaimResult } from '../application/ports/home-action-repository.port';
 import { isExternalReceipt, isHomeActionReceipt, type HomeActionReceipt } from '../domain/home-action-receipt';
+import type { WorkflowReturnPhase, WorkflowReturnReceipt } from '../domain/workflow-return';
 import { InMemoryUserRepository } from './in-memory-user.repository';
 import { runNotificationPreferencesTransaction } from './notification-preferences.transaction';
 
@@ -9,6 +10,10 @@ function keyOf(receipt: Pick<HomeActionReceipt, 'userId' | 'chatId' | 'kind'>): 
 
 function clone(receipt: HomeActionReceipt): HomeActionReceipt {
   return { ...receipt, expiresAt: new Date(receipt.expiresAt), payload: { ...receipt.payload } } as HomeActionReceipt;
+}
+
+function decode(receipt: unknown): HomeActionReceipt | null {
+  return isHomeActionReceipt(receipt) ? clone(receipt) : null;
 }
 
 /** Bounded test/mock implementation; replacement semantics mirror the SQLite adapter. */
@@ -122,6 +127,62 @@ export class InMemoryHomeActionRepository implements HomeActionRepositoryPort {
     const receipt = this.receipts.get(`${input.action.userId}:${input.action.chatId}:${input.action.kind}`);
     if (!receipt || !isExternalReceipt(receipt) || receipt.id !== input.action.id || receipt.status !== 'executing') return;
     this.receipts.set(keyOf(receipt), { ...receipt, status: input.outcome });
+  }
+
+  async beginWorkflowReturn(receipt: WorkflowReturnReceipt): Promise<WorkflowReturnReceipt | null> {
+    if (!isHomeActionReceipt(receipt) || receipt.kind !== 'workflow-return') {
+      throw new RangeError('Invalid workflow return receipt');
+    }
+    return this.transaction(async () => {
+      const current = decode(this.receipts.get(keyOf(receipt)));
+      this.receipts.set(keyOf(receipt), clone(receipt));
+      return current?.kind === 'workflow-return' ? current : null;
+    });
+  }
+
+  async findWorkflowReturn(input: { userId: number; chatId: number; now: Date }): Promise<WorkflowReturnReceipt | null> {
+    const receipt = decode(this.receipts.get(`${input.userId}:${input.chatId}:workflow-return`));
+    return receipt?.kind === 'workflow-return' && receipt.expiresAt.getTime() > input.now.getTime()
+      ? receipt
+      : null;
+  }
+
+  async updateWorkflowReturnPhase(input: { userId: number; chatId: number; id: string; phase: WorkflowReturnPhase; expiresAt: Date; now: Date }): Promise<'updated' | 'expired' | 'superseded' | 'terminal'> {
+    const receipt = decode(this.receipts.get(`${input.userId}:${input.chatId}:workflow-return`));
+    if (receipt?.kind !== 'workflow-return' || receipt.id !== input.id) return 'superseded';
+    if (receipt.status !== 'pending') return 'terminal';
+    if (receipt.expiresAt.getTime() <= input.now.getTime()) return 'expired';
+    const updated: WorkflowReturnReceipt = {
+      ...receipt,
+      expiresAt: new Date(input.expiresAt),
+      payload: { ...receipt.payload, phase: input.phase },
+    };
+    if (!isHomeActionReceipt(updated)) throw new RangeError('Invalid workflow return phase update');
+    this.receipts.set(keyOf(updated), updated);
+    return 'updated';
+  }
+
+  async claimWorkflowReturn(input: { userId: number; chatId: number; id: string; now: Date }): Promise<WorkflowClaimResult> {
+    const receipt = decode(this.receipts.get(`${input.userId}:${input.chatId}:workflow-return`));
+    if (receipt?.kind !== 'workflow-return' || receipt.id !== input.id) return { kind: 'superseded' };
+    if (receipt.status === 'executing') return { kind: 'resumable', receipt };
+    if (receipt.status === 'returned') return { kind: 'returned', receipt };
+    if (receipt.status === 'completed') return { kind: 'terminal' };
+    if (receipt.expiresAt.getTime() <= input.now.getTime()) return { kind: 'expired' };
+    const executing: WorkflowReturnReceipt = { ...receipt, status: 'executing' };
+    this.receipts.set(keyOf(executing), executing);
+    return { kind: 'claimed', receipt: clone(executing) as WorkflowReturnReceipt };
+  }
+
+  async finishWorkflowReturn(input: { userId: number; chatId: number; id: string; outcome: 'returned' | 'completed'; now: Date }): Promise<'finished' | 'superseded' | 'terminal'> {
+    const receipt = decode(this.receipts.get(`${input.userId}:${input.chatId}:workflow-return`));
+    if (receipt?.kind !== 'workflow-return' || receipt.id !== input.id) return 'superseded';
+    if (receipt.status === 'completed') return 'terminal';
+    if (receipt.status !== 'executing' && !(receipt.status === 'returned' && input.outcome === 'completed')) {
+      return receipt.status === 'returned' ? 'terminal' : 'superseded';
+    }
+    this.receipts.set(keyOf(receipt), { ...receipt, status: input.outcome });
+    return 'finished';
   }
 
   private async transaction<T>(operation: () => Promise<T>): Promise<T> {

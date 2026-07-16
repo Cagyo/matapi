@@ -2,7 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { and, eq } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../database/database.module';
 import { homeActionReceipts, notificationPauseReceipts, users } from '../../database/schema';
-import type { HomeActionRepositoryPort } from '../application/ports/home-action-repository.port';
+import type { HomeActionRepositoryPort, WorkflowClaimResult } from '../application/ports/home-action-repository.port';
 import {
   isExternalReceipt,
   isHomeActionReceipt,
@@ -10,6 +10,7 @@ import {
   type HomeActionReceipt,
   type UndoReceiptKind,
 } from '../domain/home-action-receipt';
+import type { WorkflowReturnPhase, WorkflowReturnReceipt } from '../domain/workflow-return';
 
 type ReceiptRow = typeof homeActionReceipts.$inferSelect;
 type ReceiptWriter = Pick<AppDatabase, 'insert' | 'select' | 'update' | 'delete'>;
@@ -176,6 +177,87 @@ export class DrizzleHomeActionRepository implements HomeActionRepositoryPort {
         .set({ status: input.outcome, updatedAt: input.now })
         .where(and(key(input.action), eq(homeActionReceipts.id, input.action.id), eq(homeActionReceipts.status, 'executing')))
         .run();
+    });
+  }
+
+  async beginWorkflowReturn(receipt: WorkflowReturnReceipt): Promise<WorkflowReturnReceipt | null> {
+    if (!isHomeActionReceipt(receipt) || receipt.kind !== 'workflow-return') {
+      throw new RangeError('Invalid workflow return receipt');
+    }
+    return this.immediate((tx) => {
+      const row = tx.select().from(homeActionReceipts).where(key(receipt)).get();
+      const current = row && decode(row);
+      this.upsert(tx, receipt);
+      return current?.kind === 'workflow-return' ? current : null;
+    });
+  }
+
+  async findWorkflowReturn(input: { userId: number; chatId: number; now: Date }): Promise<WorkflowReturnReceipt | null> {
+    const row = this.db.select().from(homeActionReceipts)
+      .where(key({ ...input, kind: 'workflow-return' }))
+      .get();
+    const receipt = row && decode(row);
+    return receipt?.kind === 'workflow-return' && receipt.expiresAt.getTime() > input.now.getTime()
+      ? receipt
+      : null;
+  }
+
+  async updateWorkflowReturnPhase(input: { userId: number; chatId: number; id: string; phase: WorkflowReturnPhase; expiresAt: Date; now: Date }): Promise<'updated' | 'expired' | 'superseded' | 'terminal'> {
+    return this.immediate((tx) => {
+      const receiptKey = key({ ...input, kind: 'workflow-return' });
+      const row = tx.select().from(homeActionReceipts).where(receiptKey).get();
+      const receipt = row && decode(row);
+      if (receipt?.kind !== 'workflow-return' || receipt.id !== input.id) return 'superseded';
+      if (receipt.status !== 'pending') return 'terminal';
+      if (receipt.expiresAt.getTime() <= input.now.getTime()) return 'expired';
+      const updated: WorkflowReturnReceipt = {
+        ...receipt,
+        expiresAt: new Date(input.expiresAt),
+        payload: { ...receipt.payload, phase: input.phase },
+      };
+      if (!isHomeActionReceipt(updated)) throw new RangeError('Invalid workflow return phase update');
+      const result = tx.update(homeActionReceipts)
+        .set({ payload: JSON.stringify(updated.payload), expiresAt: updated.expiresAt, updatedAt: input.now })
+        .where(and(receiptKey, eq(homeActionReceipts.id, input.id), eq(homeActionReceipts.status, 'pending')))
+        .run();
+      return result.changes === 1 ? 'updated' : 'superseded';
+    });
+  }
+
+  async claimWorkflowReturn(input: { userId: number; chatId: number; id: string; now: Date }): Promise<WorkflowClaimResult> {
+    return this.immediate((tx) => {
+      const receiptKey = key({ ...input, kind: 'workflow-return' });
+      const row = tx.select().from(homeActionReceipts).where(receiptKey).get();
+      const receipt = row && decode(row);
+      if (receipt?.kind !== 'workflow-return' || receipt.id !== input.id) return { kind: 'superseded' };
+      if (receipt.status === 'executing') return { kind: 'resumable', receipt };
+      if (receipt.status === 'returned') return { kind: 'returned', receipt };
+      if (receipt.status === 'completed') return { kind: 'terminal' };
+      if (receipt.expiresAt.getTime() <= input.now.getTime()) return { kind: 'expired' };
+      const result = tx.update(homeActionReceipts)
+        .set({ status: 'executing', updatedAt: input.now })
+        .where(and(receiptKey, eq(homeActionReceipts.id, input.id), eq(homeActionReceipts.status, 'pending')))
+        .run();
+      if (result.changes !== 1) return { kind: 'superseded' };
+      return { kind: 'claimed', receipt: { ...receipt, status: 'executing' } };
+    });
+  }
+
+  async finishWorkflowReturn(input: { userId: number; chatId: number; id: string; outcome: 'returned' | 'completed'; now: Date }): Promise<'finished' | 'superseded' | 'terminal'> {
+    return this.immediate((tx) => {
+      const receiptKey = key({ ...input, kind: 'workflow-return' });
+      const row = tx.select().from(homeActionReceipts).where(receiptKey).get();
+      const receipt = row && decode(row);
+      if (receipt?.kind !== 'workflow-return' || receipt.id !== input.id) return 'superseded';
+      if (receipt.status === 'completed') return 'terminal';
+      if (receipt.status !== 'executing' && !(receipt.status === 'returned' && input.outcome === 'completed')) {
+        return receipt.status === 'returned' ? 'terminal' : 'superseded';
+      }
+      const result = tx.update(homeActionReceipts)
+        .set({ status: input.outcome, updatedAt: input.now })
+        .where(and(receiptKey, eq(homeActionReceipts.id, input.id), eq(homeActionReceipts.status, receipt.status)))
+        .run();
+      return result.changes === 1 ? 'finished' : 'superseded';
     });
   }
 
