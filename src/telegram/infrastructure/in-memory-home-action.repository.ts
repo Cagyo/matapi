@@ -134,7 +134,7 @@ export class InMemoryHomeActionRepository implements HomeActionRepositoryPort {
     if (!isHomeActionReceipt(receipt) || receipt.kind !== 'workflow-return') {
       throw new RangeError('Invalid workflow return receipt');
     }
-    return this.transaction(() => {
+    return this.transactionSync(() => {
       const current = decode(this.receipts.get(keyOf(receipt)));
       this.receipts.set(keyOf(receipt), clone(receipt));
       return current?.kind === 'workflow-return' ? current : null;
@@ -186,8 +186,22 @@ export class InMemoryHomeActionRepository implements HomeActionRepositoryPort {
     return 'finished';
   }
 
-  private transaction<T>(operation: () => T): T {
-    const receipts = new Map([...this.receipts].map(([key, receipt]) => [key, clone(receipt)]));
-    try { return operation(); } catch (error) { this.receipts.clear(); for (const [key, receipt] of receipts) this.receipts.set(key, receipt); throw error; }
+  private async transaction<T>(operation: () => Promise<T>): Promise<T> {
+    const receipts = this.snapshotReceipts();
+    try { return await operation(); } catch (error) { this.restoreReceipts(receipts); throw error; }
+  }
+
+  private transactionSync<T>(operation: () => T): T {
+    const receipts = this.snapshotReceipts();
+    try { return operation(); } catch (error) { this.restoreReceipts(receipts); throw error; }
+  }
+
+  private snapshotReceipts(): Map<string, HomeActionReceipt> {
+    return new Map([...this.receipts].map(([key, receipt]) => [key, clone(receipt)]));
+  }
+
+  private restoreReceipts(receipts: Map<string, HomeActionReceipt>): void {
+    this.receipts.clear();
+    for (const [key, receipt] of receipts) this.receipts.set(key, receipt);
   }
 }

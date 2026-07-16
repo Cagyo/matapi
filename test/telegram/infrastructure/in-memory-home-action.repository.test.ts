@@ -19,18 +19,20 @@ function external(id = '1234567890abcdef'): HomeActionReceipt {
 }
 
 class FailOnceMap<K, V> extends Map<K, V> {
-  private armed = false;
+  private writesBeforeFailure: number | null = null;
 
-  arm(): void {
-    this.armed = true;
+  arm(writesBeforeFailure = 0): void {
+    this.writesBeforeFailure = writesBeforeFailure;
   }
 
   override set(key: K, value: V): this {
     super.set(key, value);
-    if (this.armed) {
-      this.armed = false;
+    if (this.writesBeforeFailure === null) return this;
+    if (this.writesBeforeFailure === 0) {
+      this.writesBeforeFailure = null;
       throw new Error('injected workflow write failure');
     }
+    this.writesBeforeFailure -= 1;
     return this;
   }
 }
@@ -372,6 +374,37 @@ describe('InMemoryHomeActionRepository workflow-return transaction isolation', (
     await expect(overlappingReplacement).resolves.toEqual(first);
     await expect(repository.findWorkflowReturn({ userId: 100, chatId: 200, now: NOW }))
       .resolves.toEqual(successful);
+  });
+
+  it('rolls back earlier receipt mutations when an async notification transaction later rejects', async () => {
+    const users = new InMemoryUserRepository([{
+      telegramId: 100, name: 'Ada', role: 'user', locale: 'en', muted: false,
+      nonCriticalPausedUntil: null, notificationPauseRevision: 0,
+      quietStart: null, quietEnd: null, createdAt: null,
+    }]);
+    const repository = new InMemoryHomeActionRepository(users);
+    const storage = new FailOnceMap<string, HomeActionReceipt>();
+    (repository as unknown as { receipts: Map<string, HomeActionReceipt> }).receipts = storage;
+    await repository.createPauseConfirmation({
+      id: '1234567890abcdef', userId: 100, chatId: 200, kind: 'pause-confirmation',
+      sessionToken: 'token-a', status: 'pending', expiresAt: LATER, payload: { hours: 4 },
+    });
+    storage.arm(1);
+
+    await expect(repository.confirmPause({
+      userId: 100, chatId: 200, token: 'token-a', id: '1234567890abcdef', hours: 4, now: NOW,
+    })).rejects.toThrow(/injected workflow write failure/);
+
+    await expect(repository.findCurrentUndo({
+      userId: 100, chatId: 200, kind: 'undo-non-critical-pause', now: NOW,
+    })).resolves.toBeNull();
+    await expect(users.getNotificationPauseState(100)).resolves.toMatchObject({
+      revision: 0,
+      nonCriticalPausedUntil: null,
+    });
+    await expect(repository.confirmPause({
+      userId: 100, chatId: 200, token: 'token-a', id: '1234567890abcdef', hours: 4, now: NOW,
+    })).resolves.toMatchObject({ kind: 'applied', expectedRevision: 1 });
   });
 });
 
