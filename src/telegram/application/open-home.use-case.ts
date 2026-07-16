@@ -86,7 +86,7 @@ export class OpenHomeUseCase {
     }
 
     if (promotion.previous) {
-      await this.stripWithoutFailing(promotion.previous.chatId, promotion.previous.messageId);
+      await this.deleteWithoutFailing(promotion.previous.chatId, promotion.previous.messageId);
     }
     return { kind: 'opened', active: promotion.active, view };
   }
@@ -104,6 +104,14 @@ export class OpenHomeUseCase {
       await this.delivery.stripKeyboard(chatId, messageId);
     } catch {
       // Superseded and previous keyboards are cleanup only.
+    }
+  }
+
+  private async deleteWithoutFailing(chatId: number, messageId: number): Promise<void> {
+    try {
+      await this.delivery.deleteMessage(chatId, messageId);
+    } catch {
+      // The replacement is already authoritative; deletion is visual cleanup only.
     }
   }
 }

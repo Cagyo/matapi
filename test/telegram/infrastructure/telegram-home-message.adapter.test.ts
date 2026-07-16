@@ -33,6 +33,7 @@ function fakeBot() {
     sendMessage: vi.fn().mockResolvedValue({ message_id: 42 }),
     editMessageText: vi.fn().mockResolvedValue(true),
     editMessageReplyMarkup: vi.fn().mockResolvedValue(true),
+    deleteMessage: vi.fn().mockResolvedValue(true),
   };
   return { api, bot: { api } as unknown as Bot };
 }
@@ -80,6 +81,18 @@ describe('TelegramHomeMessageAdapter', () => {
       reply_markup: { inline_keyboard: [] },
     });
     expect(api.editMessageText).not.toHaveBeenCalled();
+  });
+
+  it('deletes the exact prior Home message', async () => {
+    const { api, bot } = fakeBot();
+    const delivery = new TelegramHomeMessageAdapter();
+    delivery.setBot(bot);
+
+    expect('deleteMessage' in delivery).toBe(true);
+    await (delivery as unknown as { deleteMessage(chatId: number, messageId: number): Promise<void> })
+      .deleteMessage(19, 23);
+
+    expect(api.deleteMessage).toHaveBeenCalledWith(19, 23);
   });
 
   it('closes with localized copy and an empty keyboard', async () => {

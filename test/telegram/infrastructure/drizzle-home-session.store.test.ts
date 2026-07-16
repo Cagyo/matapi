@@ -170,6 +170,27 @@ describe('DrizzleHomeSessionStore', () => {
     await expect(store.validate({ ...identity(), now: NOW })).resolves.toEqual({ kind: 'accepted', active: identity(), view: HOME });
   });
 
+  it('promotes a reservation when SQLite timestamp storage truncates expiry milliseconds', async () => {
+    const now = new Date('2030-01-01T00:00:00.789Z');
+    const expiresAt = new Date(now.getTime() + 60_000);
+    const reservation = await store.reserveNew({
+      userId: 100,
+      chatId: 200,
+      token: VALID_TOKEN,
+      view: HOME,
+      now,
+      expiresAt,
+    });
+
+    expect(sqlite.prepare('SELECT pending_expires_at AS expiresAt FROM home_sessions').get())
+      .toEqual({ expiresAt: Math.floor(expiresAt.getTime() / 1_000) });
+    await expect(store.promoteNew(reservation, 300, now)).resolves.toEqual({
+      kind: 'promoted',
+      active: identity(),
+      previous: null,
+    });
+  });
+
   it('uses immediate transactions for every read-decide-write session transition', async () => {
     const transaction = vi.spyOn(db, 'transaction');
     const reservation = await store.reserveNew({ userId: 100, chatId: 200, token: VALID_TOKEN, view: HOME, now: NOW, expiresAt: later() });

@@ -8,7 +8,7 @@ import { CloseHomeUseCase } from '../../../src/telegram/application/close-home.u
 import { HomeNavigationUseCase } from '../../../src/telegram/application/home-navigation.use-case';
 import { HomeHandler } from '../../../src/telegram/interfaces/home.handler';
 import { RoleMiddleware } from '../../../src/telegram/interfaces/role.middleware';
-import { encodeHomeCallback } from '../../../src/telegram/domain/home-callback';
+import { encodeHomeCallback, OPEN_NEW_HOME_CALLBACK } from '../../../src/telegram/domain/home-callback';
 
 const identity = {
   userId: 100,
@@ -33,6 +33,7 @@ function context(data?: string) {
     callbackQuery: data ? { data, message: { message_id: 300 } } : undefined,
     localeState: localeState(),
     reply: vi.fn().mockResolvedValue({ message_id: 301 }),
+    api: { deleteMessage: vi.fn().mockResolvedValue(true) },
   };
 }
 
@@ -80,6 +81,44 @@ describe('HomeHandler', () => {
     });
     expect(refresh.execute).not.toHaveBeenCalled();
   });
+
+  it('deletes the Open-new-Home recovery prompt after the new Home opens', async () => {
+    const { callbacks, open } = setup();
+    const ctx = context(OPEN_NEW_HOME_CALLBACK);
+
+    await callbacks[0].fn(ctx);
+
+    expect(open.execute).toHaveBeenCalledOnce();
+    expect(ctx.api.deleteMessage).toHaveBeenCalledWith(200, 300);
+    expect((open.execute as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]).toBeLessThan(
+      ctx.api.deleteMessage.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('ignores recovery-prompt deletion failure after the new Home opens', async () => {
+    const { callbacks } = setup();
+    const ctx = context(OPEN_NEW_HOME_CALLBACK);
+    ctx.api.deleteMessage.mockRejectedValueOnce(new Error('message is already gone'));
+
+    await expect(callbacks[0].fn(ctx)).resolves.toBeUndefined();
+  });
+
+  it.each(['superseded', 'unavailable'] as const)(
+    'retains the Open-new-Home recovery prompt when opening is %s',
+    async (outcome) => {
+      const { callbacks, open } = setup();
+      const ctx = context(OPEN_NEW_HOME_CALLBACK);
+      if (outcome === 'superseded') {
+        (open.execute as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ kind: 'superseded' });
+      } else {
+        (open.execute as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('send failed'));
+      }
+
+      await callbacks[0].fn(ctx);
+
+      expect(ctx.api.deleteMessage).not.toHaveBeenCalled();
+    },
+  );
 
   it('recovers malformed callbacks without mutating Home state', async () => {
     const { callbacks, validate, render, refresh, close, camera } = setup();

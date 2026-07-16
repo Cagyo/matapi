@@ -72,9 +72,9 @@ export class HomeHandler implements TelegramHandler {
     });
   }
 
-  private async open(ctx: TelegramContext): Promise<void> {
+  private async open(ctx: TelegramContext): Promise<'opened' | 'not-opened'> {
     const current = this.current(ctx);
-    if (!current) return;
+    if (!current) return 'not-opened';
     try {
       const result = await this.openHome.execute({
         userId: current.userId,
@@ -83,9 +83,14 @@ export class HomeHandler implements TelegramHandler {
         role: current.state.user.role,
         view: { kind: 'home', checking: false },
       });
-      if (result.kind === 'superseded') await this.recover(ctx, 'stale');
+      if (result.kind === 'superseded') {
+        await this.recover(ctx, 'stale');
+        return 'not-opened';
+      }
+      return 'opened';
     } catch {
       await this.recover(ctx, 'unavailable');
+      return 'not-opened';
     }
   }
 
@@ -94,7 +99,8 @@ export class HomeHandler implements TelegramHandler {
     if (!current) return;
     const data = ctx.callbackQuery?.data;
     if (data === OPEN_NEW_HOME_CALLBACK) {
-      await this.open(ctx);
+      const result = await this.open(ctx);
+      if (result === 'opened') await this.deleteCallbackMessageWithoutFailing(ctx);
       return;
     }
 
@@ -296,6 +302,13 @@ export class HomeHandler implements TelegramHandler {
     await ctx.reply(catalog.home.recovery.stale, {
       reply_markup: new InlineKeyboard().text(catalog.home.recovery.openNewHome, OPEN_NEW_HOME_CALLBACK),
     });
+  }
+
+  private async deleteCallbackMessageWithoutFailing(ctx: TelegramContext): Promise<void> {
+    const chatId = ctx.chat?.type === 'private' ? ctx.chat.id : undefined;
+    const messageId = ctx.callbackQuery?.message?.message_id;
+    if (chatId === undefined || messageId === undefined) return;
+    await ctx.api.deleteMessage(chatId, messageId).catch(() => undefined);
   }
 
   private current(ctx: TelegramContext): { userId: number; chatId: number; state: LocaleState } | null {

@@ -3,6 +3,7 @@ import type { HomeMessageDeliveryPort } from '../application/ports/home-message-
 type DeliveryCall =
   | { kind: 'send'; input: Parameters<HomeMessageDeliveryPort['send']>[0] }
   | { kind: 'edit'; input: Parameters<HomeMessageDeliveryPort['edit']>[0] }
+  | { kind: 'deleteMessage'; chatId: number; messageId: number }
   | { kind: 'stripKeyboard'; chatId: number; messageId: number }
   | { kind: 'closeMessage'; chatId: number; messageId: number; locale: Parameters<HomeMessageDeliveryPort['closeMessage']>[2] };
 
@@ -13,6 +14,7 @@ export class InMemoryHomeMessageDeliveryAdapter implements HomeMessageDeliveryPo
   readonly calls: DeliveryCall[] = [];
   sendError: Error | null = null;
   editError: Error | null = null;
+  deleteMessageError: Error | null = null;
   stripKeyboardError: Error | null = null;
   closeMessageError: Error | null = null;
   onSend: (() => Promise<void> | void) | null = null;
@@ -31,6 +33,11 @@ export class InMemoryHomeMessageDeliveryAdapter implements HomeMessageDeliveryPo
     this.record({ kind: 'edit', input });
     if (this.editError) throw this.editError;
     await this.onEdit?.();
+  }
+
+  async deleteMessage(chatId: number, messageId: number): Promise<void> {
+    this.record({ kind: 'deleteMessage', chatId, messageId });
+    if (this.deleteMessageError) throw this.deleteMessageError;
   }
 
   async stripKeyboard(chatId: number, messageId: number): Promise<void> {

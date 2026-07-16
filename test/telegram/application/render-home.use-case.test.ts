@@ -160,7 +160,8 @@ describe('RenderHomeUseCase', () => {
       active: { messageId: 1, token: 'qrstuvwxyzabcdef', revision: 1 },
     });
     expect(sessions.calls).toEqual(['reserve', 'abandon']);
-    expect(delivery.calls.map(({ kind }) => kind)).toEqual(['edit', 'send', 'stripKeyboard']);
+    expect(delivery.calls.map(({ kind }) => kind)).toEqual(['edit', 'send', 'deleteMessage']);
+    expect(delivery.calls[2]).toMatchObject({ kind: 'deleteMessage', chatId: 70, messageId: 10 });
   });
 
   it('returns delivery_failed and retains the old authority when edit and reopen delivery both fail', async () => {

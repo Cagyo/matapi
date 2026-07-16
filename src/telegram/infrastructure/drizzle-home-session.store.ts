@@ -30,6 +30,11 @@ function sameView(left: HomeView, right: HomeView): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function sameStoredTimestamp(left: Date, right: Date): boolean {
+  // Drizzle's SQLite `timestamp` mode persists Unix seconds, not milliseconds.
+  return Math.floor(left.getTime() / 1_000) === Math.floor(right.getTime() / 1_000);
+}
+
 function sameReservation(left: HomeReservation, right: HomeReservation): boolean {
   return left.kind === right.kind
     && left.userId === right.userId
@@ -38,7 +43,7 @@ function sameReservation(left: HomeReservation, right: HomeReservation): boolean
     && left.token === right.token
     && left.revision === right.revision
     && sameView(left.view, right.view)
-    && left.expiresAt.getTime() === right.expiresAt.getTime();
+    && sameStoredTimestamp(left.expiresAt, right.expiresAt);
 }
 
 function pendingValues(reservation: HomeReservation) {

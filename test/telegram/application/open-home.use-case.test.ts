@@ -37,7 +37,7 @@ const clampedSensorsScreen: HomeScreen = {
   isAdmin: false,
 };
 
-type ProtocolEvent = 'reserve' | 'send' | 'promote' | 'stripKeyboard' | 'abandon';
+type ProtocolEvent = 'reserve' | 'send' | 'promote' | 'deleteMessage' | 'stripKeyboard' | 'abandon';
 
 class RecordingSessionStore extends InMemoryHomeSessionStore {
   readonly calls: string[] = [];
@@ -73,6 +73,8 @@ class RecordingSessionStore extends InMemoryHomeSessionStore {
 }
 
 class RecordingDelivery extends InMemoryHomeMessageDeliveryAdapter {
+  readonly deleteCalls: Array<{ chatId: number; messageId: number }> = [];
+
   constructor(private readonly protocolEvents: ProtocolEvent[]) {
     super();
   }
@@ -85,6 +87,12 @@ class RecordingDelivery extends InMemoryHomeMessageDeliveryAdapter {
   override async stripKeyboard(chatId: number, messageId: number): Promise<void> {
     this.protocolEvents.push('stripKeyboard');
     return super.stripKeyboard(chatId, messageId);
+  }
+
+  override async deleteMessage(chatId: number, messageId: number): Promise<void> {
+    this.protocolEvents.push('deleteMessage');
+    this.deleteCalls.push({ chatId, messageId });
+    if (this.deleteMessageError) throw this.deleteMessageError;
   }
 }
 
@@ -151,7 +159,7 @@ describe('OpenHomeUseCase', () => {
     expect(sessions.reservation?.view).toEqual({ kind: 'sensors', page: 2, checking: false });
   });
 
-  it('strips the prior keyboard only after the replacement has been promoted', async () => {
+  it('deletes the prior Home only after the replacement has been promoted', async () => {
     const { sessions, delivery, protocolEvents, useCase } = setup();
     await active(sessions);
     sessions.calls.length = 0;
@@ -162,8 +170,8 @@ describe('OpenHomeUseCase', () => {
       userId: 7, chatId: 70, locale: 'en', role: 'user',
       view: { kind: 'home', checking: false },
     })).resolves.toMatchObject({ kind: 'opened' });
-    expect(protocolEvents).toEqual(['reserve', 'send', 'promote', 'stripKeyboard']);
-    expect(delivery.calls[1]).toMatchObject({ kind: 'stripKeyboard', chatId: 70, messageId: 10 });
+    expect(protocolEvents).toEqual(['reserve', 'send', 'promote', 'deleteMessage']);
+    expect(delivery.deleteCalls).toEqual([{ chatId: 70, messageId: 10 }]);
   });
 
   it('abandons the exact pending reservation and retains the old active Home when sending fails', async () => {
@@ -226,10 +234,10 @@ describe('OpenHomeUseCase', () => {
     });
   });
 
-  it('ignores keyboard-strip failure after a successful promotion', async () => {
+  it('ignores prior-message deletion failure after a successful promotion', async () => {
     const { sessions, delivery, useCase } = setup();
     await active(sessions);
-    delivery.stripKeyboardError = new Error('strip failed');
+    delivery.deleteMessageError = new Error('delete failed');
 
     await expect(useCase.execute({
       userId: 7, chatId: 70, locale: 'en', role: 'user',

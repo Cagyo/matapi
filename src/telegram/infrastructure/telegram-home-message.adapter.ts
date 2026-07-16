@@ -33,6 +33,10 @@ export class TelegramHomeMessageAdapter implements HomeMessageDeliveryPort {
     );
   }
 
+  async deleteMessage(chatId: number, messageId: number): Promise<void> {
+    await this.requireBot().api.deleteMessage(chatId, messageId);
+  }
+
   async stripKeyboard(chatId: number, messageId: number): Promise<void> {
     await this.requireBot().api.editMessageReplyMarkup(chatId, messageId, emptyKeyboard());
   }

@@ -11,6 +11,19 @@ prompt is removed as well.
 
 ## Behavior
 
+### Reservation promotion
+
+Drizzle's SQLite `timestamp` mode stores Unix seconds. Home reservations are
+created from JavaScript `Date` values that normally include milliseconds, so
+comparing the in-memory expiry with its persisted round-trip at millisecond
+precision makes an otherwise identical reservation appear different. The
+store compares expiration values at the column's one-second storage precision;
+the token, revision, view, user, and chat identity remain exact. This prevents
+a normal `/menu` open from sending a Home and then immediately reporting it as
+superseded.
+
+### Visible-message cleanup
+
 `OpenHomeUseCase` keeps the existing reserve → send → promote ordering. Only
 after the replacement becomes authoritative does it ask the Home delivery port
 to delete the previous active Home. The deletion is best-effort: an expired,
@@ -38,6 +51,8 @@ interface-owned and is not part of Home session authority.
 
 ## Verification
 
+- A real SQLite adapter test uses nonzero milliseconds and proves the stored
+  reservation still promotes successfully.
 - Use-case tests prove deletion happens only after successful promotion and
   that deletion failure does not change the `opened` result.
 - Adapter tests prove the exact chat/message pair is passed to Telegram.
