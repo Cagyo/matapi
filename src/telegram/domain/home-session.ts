@@ -20,6 +20,7 @@ export type HomeView =
   | { kind: 'admin-sensor-setup' }
   | { kind: 'admin-storage' }
   | { kind: 'admin-system' }
+  | { kind: 'admin-cleanup-threshold' }
   | { kind: 'confirmation'; action: 'cleanup' | 'restart'; receiptId: string }
   | { kind: 'cleanup-result'; outcome: 'executed' | 'in-progress' | 'failed'; threshold: number | null };
 
@@ -51,10 +52,10 @@ export function parseHomeView(
   payload: string | null,
   checking: boolean | null,
 ): HomeView | null {
-  if (kind === 'home' && checking !== null && sensorPage === null && payload === null) {
+  if (kind === 'home' && typeof checking === 'boolean' && sensorPage === null && payload === null) {
     return { kind, checking };
   }
-  if (kind === 'sensors' && checking !== null && isPage(sensorPage) && payload === null) {
+  if (kind === 'sensors' && typeof checking === 'boolean' && isPage(sensorPage) && payload === null) {
     return { kind, page: sensorPage, checking };
   }
   if (sensorPage !== null || checking !== null || payload === null || Buffer.byteLength(payload, 'utf8') > MAX_HOME_VIEW_PAYLOAD_BYTES) return null;
@@ -83,7 +84,7 @@ function parseSliceThreeHomeView(kind: string, value: unknown): HomeView | null 
       const target = parseTarget(value.target);
       return target ? { kind, page: value.page, target } : null;
     }
-    case 'pause-duration': case 'more': case 'history': case 'admin-tools': case 'admin-sensor-setup': case 'admin-storage': case 'admin-system':
+    case 'pause-duration': case 'more': case 'history': case 'admin-tools': case 'admin-sensor-setup': case 'admin-storage': case 'admin-system': case 'admin-cleanup-threshold':
       return hasKeys(value, []) ? { kind } : null;
     case 'pause-confirmation':
       return hasKeys(value, ['hours', 'receiptId']) && (value.hours === 1 || value.hours === 4 || value.hours === 8) && isReceiptId(value.receiptId)

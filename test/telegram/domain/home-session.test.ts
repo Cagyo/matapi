@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  encodeHomeView,
   MAX_HOME_VIEW_PAYLOAD_BYTES,
   parseHomeView,
   type HomeView,
@@ -24,6 +25,7 @@ const VIEWS: readonly HomeView[] = [
   { kind: 'admin-sensor-setup' },
   { kind: 'admin-storage' },
   { kind: 'admin-system' },
+  { kind: 'admin-cleanup-threshold' },
   { kind: 'confirmation', action: 'cleanup', receiptId: '1234567890abcdef' },
   { kind: 'cleanup-result', outcome: 'executed', threshold: 42 },
 ];
@@ -50,7 +52,7 @@ describe('Home view codec', () => {
     expect(parseHomeView('pause-confirmation', null, JSON.stringify({ hours: 2, receiptId: 'short' }), null)).toBeNull();
     expect(parseHomeView('cleanup-result', null, JSON.stringify({ outcome: 'executed', threshold: '42' }), null)).toBeNull();
     expect(parseHomeView('unknown', null, '{}', null)).toBeNull();
-    expect(parseHomeView('more', null, `{\"x\":\"${'a'.repeat(MAX_HOME_VIEW_PAYLOAD_BYTES)}\"}`, null)).toBeNull();
+    expect(parseHomeView('more', null, `{"x":"${'a'.repeat(MAX_HOME_VIEW_PAYLOAD_BYTES)}"}`, null)).toBeNull();
   });
 
   it('uses zero-based pages consistently for persisted sensor and notification-target views', () => {
@@ -59,6 +61,31 @@ describe('Home view codec', () => {
       .toEqual({ kind: 'notification-targets', page: 0, targets: TARGETS });
     expect(parseHomeView('notification-target', null, JSON.stringify({ page: 0, target: TARGETS[0] }), null))
       .toEqual({ kind: 'notification-target', page: 0, target: TARGETS[0] });
+  });
+
+  it('encodes the cleanup threshold view with the canonical empty payload', () => {
+    expect(encodeHomeView({ kind: 'admin-cleanup-threshold' })).toEqual({
+      sensorPage: null,
+      payload: '{}',
+      checking: null,
+    });
+  });
+
+  it.each([
+    ['{ }', 'non-canonical JSON'],
+    ['{} ', 'trailing whitespace'],
+    ['{}\n', 'trailing newline'],
+    ['{"unknown":true}', 'unknown key'],
+  ])('rejects cleanup threshold payloads with %s', (payload) => {
+    expect(parseHomeView('admin-cleanup-threshold', null, payload, null)).toBeNull();
+  });
+
+  it('bounds persisted payloads by UTF-8 bytes rather than JavaScript characters', () => {
+    const payload = JSON.stringify({ unknown: 'é'.repeat(MAX_HOME_VIEW_PAYLOAD_BYTES / 2) });
+
+    expect(payload.length).toBeLessThan(MAX_HOME_VIEW_PAYLOAD_BYTES);
+    expect(Buffer.byteLength(payload, 'utf8')).toBeGreaterThan(MAX_HOME_VIEW_PAYLOAD_BYTES);
+    expect(parseHomeView('admin-cleanup-threshold', null, payload, null)).toBeNull();
   });
 });
 
