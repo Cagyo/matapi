@@ -11,6 +11,7 @@ import type { HomeScreen } from './home-screen';
 import { NotificationTargetDirectoryService, notificationTargetPage } from './notification-target-directory.service';
 import { NotificationTargetUnavailableError } from '../domain/errors/notification-target-unavailable.error';
 import { SetAutoCleanThresholdUseCase } from './set-auto-clean-threshold.use-case';
+import { AdminHomeViewForbiddenError } from '../domain/errors/admin-home-view-forbidden.error';
 
 export interface GetHomeScreenInput {
   userId: number;
@@ -30,6 +31,9 @@ export class GetHomeScreenUseCase {
   ) {}
 
   async execute(input: GetHomeScreenInput): Promise<HomeScreen> {
+    if (input.role !== 'admin' && isAdminHomeView(input.view)) {
+      throw new AdminHomeViewForbiddenError(input.view);
+    }
     if (input.view.kind === 'home') {
       const summary = await this.summary.execute(input.userId);
       return { kind: 'home', summary, checking: input.view.checking };
@@ -56,5 +60,15 @@ export class GetHomeScreenUseCase {
     }
     if (input.view.kind === 'confirmation') return { kind: 'confirmation', action: input.view.action, receiptId: input.view.receiptId };
     return { kind: 'cleanup-result', outcome: input.view.outcome, threshold: input.view.threshold };
+  }
+}
+
+function isAdminHomeView(view: HomeView): boolean {
+  switch (view.kind) {
+    case 'admin-tools': case 'admin-sensor-setup': case 'admin-storage': case 'admin-system':
+    case 'admin-cleanup-threshold': case 'confirmation': case 'cleanup-result':
+      return true;
+    default:
+      return false;
   }
 }

@@ -57,6 +57,24 @@ describe('TelegramHomeMessageAdapter', () => {
     expect(api.sendMessage.mock.calls[0]?.[2]).not.toHaveProperty('parse_mode');
   });
 
+  it('prepends an already-localized notice only when sending a new Home', async () => {
+    const { api, bot } = fakeBot();
+    const delivery = new TelegramHomeMessageAdapter();
+    delivery.setBot(bot);
+
+    await delivery.send({
+      chatId: identity.chatId,
+      locale: 'en',
+      identity: { ...identity, messageId: undefined } as Omit<HomeIdentity, 'messageId'>,
+      screen,
+      notice: 'Update finished.',
+    });
+    await delivery.edit({ identity, locale: 'en', screen });
+
+    expect(api.sendMessage.mock.calls[0]?.[1]).toMatch(/^Update finished\.\n\n/);
+    expect(api.editMessageText.mock.calls[0]?.[2]).not.toContain('Update finished.');
+  });
+
   it('edits the exact active chat and message without a parse mode', async () => {
     const { api, bot } = fakeBot();
     const delivery = new TelegramHomeMessageAdapter();

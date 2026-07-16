@@ -28,6 +28,7 @@ export interface OpenHomeInput {
   locale: Locale;
   role: Role;
   view: HomeView;
+  notice?: string;
 }
 
 export type OpenHomeResult =
@@ -73,6 +74,7 @@ export class OpenHomeUseCase {
           revision: reservation.revision,
         },
         screen,
+        notice: input.notice,
       });
     } catch (error) {
       await this.abandonWithoutMasking(reservation);

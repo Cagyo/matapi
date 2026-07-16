@@ -73,7 +73,7 @@ class RecordingSessionStore extends InMemoryHomeSessionStore {
 }
 
 class RecordingDelivery extends InMemoryHomeMessageDeliveryAdapter {
-  readonly deleteCalls: Array<{ chatId: number; messageId: number }> = [];
+  readonly deleteCalls: { chatId: number; messageId: number }[] = [];
 
   constructor(private readonly protocolEvents: ProtocolEvent[]) {
     super();
@@ -243,5 +243,16 @@ describe('OpenHomeUseCase', () => {
       userId: 7, chatId: 70, locale: 'en', role: 'user',
       view: { kind: 'home', checking: false },
     })).resolves.toMatchObject({ kind: 'opened' });
+  });
+
+  it('passes a transient presentation notice only to the new message delivery', async () => {
+    const { sessions, delivery, useCase } = setup();
+
+    await expect(useCase.execute({
+      userId: 7, chatId: 70, locale: 'en', role: 'user', notice: 'Update finished.',
+      view: { kind: 'home', checking: false },
+    })).resolves.toMatchObject({ kind: 'opened', view: { kind: 'home', checking: false } });
+    expect(delivery.calls[0]).toMatchObject({ kind: 'send', input: { notice: 'Update finished.' } });
+    expect(sessions.reservation?.view).toEqual({ kind: 'home', checking: false });
   });
 });

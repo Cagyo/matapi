@@ -3,6 +3,7 @@ import type { SensorDashboardPage } from '../../../src/sensors/domain/sensor-das
 import type { HomeSummary } from '../../../src/telegram/application/get-home-summary.use-case';
 import { GetHomeScreenUseCase } from '../../../src/telegram/application/get-home-screen.use-case';
 import { homeViewForScreen } from '../../../src/telegram/application/home-screen';
+import { AdminHomeViewForbiddenError } from '../../../src/telegram/domain/errors/admin-home-view-forbidden.error';
 
 const summary: HomeSummary = {
   verdict: 'normal',
@@ -116,5 +117,22 @@ describe('GetHomeScreenUseCase', () => {
     await expect(useCase.execute({ userId: 7, chatId: 70, role: 'admin', view: { kind: 'admin-cleanup-threshold' } }))
       .resolves.toEqual({ kind: 'admin-system', autoCleanThreshold: 85 });
     expect(threshold.current).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { kind: 'admin-tools' },
+    { kind: 'admin-sensor-setup' },
+    { kind: 'admin-storage' },
+    { kind: 'admin-system' },
+    { kind: 'admin-cleanup-threshold' },
+    { kind: 'confirmation', action: 'cleanup', receiptId: 'abcdefghijklmnop' },
+    { kind: 'cleanup-result', outcome: 'failed', threshold: null },
+  ] as const)('rejects direct member rendering of admin-only $kind views', async (view) => {
+    const useCase = new GetHomeScreenUseCase(
+      { execute: vi.fn() }, { listDashboardPage: vi.fn() }, { execute: vi.fn() }, { listEnabled: vi.fn() },
+    );
+
+    await expect(useCase.execute({ userId: 7, chatId: 70, role: 'user', view }))
+      .rejects.toBeInstanceOf(AdminHomeViewForbiddenError);
   });
 });

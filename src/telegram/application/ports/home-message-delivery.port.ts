@@ -10,6 +10,7 @@ export interface HomeMessageDeliveryPort {
     locale: Locale;
     identity: Omit<HomeIdentity, 'messageId'>;
     screen: HomeScreen;
+    notice?: string;
   }): Promise<{ messageId: number }>;
   edit(input: {
     identity: HomeIdentity;

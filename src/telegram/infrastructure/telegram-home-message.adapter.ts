@@ -19,7 +19,8 @@ export class TelegramHomeMessageAdapter implements HomeMessageDeliveryPort {
 
   async send(input: Parameters<HomeMessageDeliveryPort['send']>[0]): Promise<{ messageId: number }> {
     const rendered = renderHomeMessage(catalogFor(input.locale), input.identity, input.screen);
-    const message = await this.requireBot().api.sendMessage(input.chatId, rendered.text, options(rendered));
+    const text = input.notice ? `${input.notice}\n\n${rendered.text}` : rendered.text;
+    const message = await this.requireBot().api.sendMessage(input.chatId, text, options(rendered));
     return { messageId: message.message_id };
   }
 
