@@ -98,6 +98,56 @@ function describeWorkflowReturnRepositoryContract(
       await expect(harness.countRows('cleanup-confirmation')).resolves.toBe(1);
     });
 
+    it('isolates persisted workflow receipts from nested input and result mutations', async () => {
+      const originalTargetId = '123e4567-e89b-12d3-a456-426614174000';
+      const receipt = workflowReceipt(undefined, {
+        payload: {
+          workflow: 'logs',
+          phase: 'cancellable',
+          originSource: 'captured',
+          origin: {
+            kind: 'notification-targets',
+            page: 2,
+            targets: [{ kind: 'sensor', id: originalTargetId }],
+          },
+        },
+      });
+      await harness.repository.beginWorkflowReturn(receipt);
+
+      if (receipt.payload.origin.kind !== 'notification-targets') throw new Error('expected target-list origin');
+      receipt.payload.origin.targets[0].id = '223e4567-e89b-12d3-a456-426614174000';
+      (receipt.payload.origin.targets as { kind: 'sensor' | 'camera'; id: string }[]).push({
+        kind: 'camera',
+        id: '323e4567-e89b-12d3-a456-426614174000',
+      });
+
+      const returned = await harness.repository.findWorkflowReturn({ userId: 100, chatId: 200, now: NOW });
+      expect(returned).toMatchObject({
+        payload: {
+          origin: {
+            kind: 'notification-targets',
+            targets: [{ kind: 'sensor', id: originalTargetId }],
+          },
+        },
+      });
+      if (returned?.payload.origin.kind !== 'notification-targets') throw new Error('expected persisted target-list origin');
+      returned.payload.origin.targets[0].id = '423e4567-e89b-12d3-a456-426614174000';
+      (returned.payload.origin.targets as { kind: 'sensor' | 'camera'; id: string }[]).push({
+        kind: 'camera',
+        id: '523e4567-e89b-12d3-a456-426614174000',
+      });
+
+      await expect(harness.repository.findWorkflowReturn({ userId: 100, chatId: 200, now: NOW }))
+        .resolves.toMatchObject({
+          payload: {
+            origin: {
+              kind: 'notification-targets',
+              targets: [{ kind: 'sensor', id: originalTargetId }],
+            },
+          },
+        });
+    });
+
     it('fails closed on malformed rows while allowing atomic replacement', async () => {
       await harness.injectMalformedWorkflowRow();
 
@@ -297,6 +347,32 @@ describeWorkflowReturnRepositoryContract('InMemoryHomeActionRepository', () => {
     failNextWorkflowWrite: async () => storage.arm(),
     dispose: () => undefined,
   } satisfies WorkflowReturnRepositoryHarness;
+});
+
+describe('InMemoryHomeActionRepository workflow-return transaction isolation', () => {
+  it('rolls back a failed replacement before overlapping reads and replacements run', async () => {
+    const repository = new InMemoryHomeActionRepository();
+    const storage = new FailOnceMap<string, HomeActionReceipt>();
+    (repository as unknown as { receipts: Map<string, HomeActionReceipt> }).receipts = storage;
+    const first = workflowReceipt();
+    const failed = workflowReceipt('ZyXwVu9876_-tsR5');
+    const successful = workflowReceipt('LmNoPq4567_-hIj8', {
+      payload: { ...first.payload, workflow: 'camera' },
+    });
+    await repository.beginWorkflowReturn(first);
+    storage.arm();
+
+    const failure = expect(repository.beginWorkflowReturn(failed))
+      .rejects.toThrow(/injected workflow write failure/);
+    const overlappingRead = repository.findWorkflowReturn({ userId: 100, chatId: 200, now: NOW });
+    const overlappingReplacement = repository.beginWorkflowReturn(successful);
+
+    await failure;
+    await expect(overlappingRead).resolves.toEqual(first);
+    await expect(overlappingReplacement).resolves.toEqual(first);
+    await expect(repository.findWorkflowReturn({ userId: 100, chatId: 200, now: NOW }))
+      .resolves.toEqual(successful);
+  });
 });
 
 describe('InMemoryHomeActionRepository', () => {
