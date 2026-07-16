@@ -159,6 +159,31 @@ describe('workflow return receipt lifecycle use cases', () => {
     await expect(claim.execute({ userId: 7, chatId: 70, id: FIRST_ID }))
       .resolves.toMatchObject({ kind: 'returned', receipt: { id: FIRST_ID, status: 'returned' } });
   });
+
+  it('preserves executing, returned, and completed status precedence after expiry', async () => {
+    const executing = lifecycleSetup();
+    await executing.begin.execute(beginInput());
+    await executing.claim.execute({ userId: 7, chatId: 70, id: FIRST_ID });
+    executing.setNow(new Date('2030-01-02T00:00:00.000Z'));
+    await expect(executing.claim.execute({ userId: 7, chatId: 70, id: FIRST_ID }))
+      .resolves.toMatchObject({ kind: 'resumable', receipt: { status: 'executing' } });
+
+    const returned = lifecycleSetup();
+    await returned.begin.execute(beginInput());
+    await returned.claim.execute({ userId: 7, chatId: 70, id: FIRST_ID });
+    await returned.complete.execute({ userId: 7, chatId: 70, id: FIRST_ID, outcome: 'returned' });
+    returned.setNow(new Date('2030-01-02T00:00:00.000Z'));
+    await expect(returned.claim.execute({ userId: 7, chatId: 70, id: FIRST_ID }))
+      .resolves.toMatchObject({ kind: 'returned', receipt: { status: 'returned' } });
+
+    const completed = lifecycleSetup();
+    await completed.begin.execute(beginInput());
+    await completed.claim.execute({ userId: 7, chatId: 70, id: FIRST_ID });
+    await completed.complete.execute({ userId: 7, chatId: 70, id: FIRST_ID, outcome: 'completed' });
+    completed.setNow(new Date('2030-01-02T00:00:00.000Z'));
+    await expect(completed.claim.execute({ userId: 7, chatId: 70, id: FIRST_ID }))
+      .resolves.toEqual({ kind: 'terminal' });
+  });
 });
 
 const summary = {
@@ -249,6 +274,16 @@ describe('ResolveWorkflowOriginUseCase', () => {
       requested: { kind: 'notification-target', page: 12, target: { kind: 'sensor', id: MISSING_ID } },
     })).resolves.toEqual({
       kind: 'notification-targets', page: 0, targets: [{ kind: 'sensor', id: SENSOR_ID }],
+    });
+  });
+
+  it('clamps the containing-list page of a surviving notification target', async () => {
+    const { resolver } = originSetup();
+    await expect(resolver.execute({
+      userId: 7, chatId: 70, role: 'user', workflow: 'help', originSource: 'captured',
+      requested: { kind: 'notification-target', page: 12, target: { kind: 'sensor', id: SENSOR_ID } },
+    })).resolves.toEqual({
+      kind: 'notification-target', page: 0, target: { kind: 'sensor', id: SENSOR_ID },
     });
   });
 

@@ -49,7 +49,18 @@ export class ResolveWorkflowOriginUseCase {
           role: input.role,
           view: candidate,
         });
-        return homeViewForScreen(screen);
+        const resolved = homeViewForScreen(screen);
+        if (resolved.kind !== 'notification-target') return resolved;
+        const containingList = await this.screens.execute({
+          userId: input.userId,
+          chatId: input.chatId,
+          role: input.role,
+          view: { kind: 'notification-targets', page: resolved.page, targets: [] },
+        });
+        if (containingList.kind !== 'notification-targets') {
+          throw new Error('Notification target list resolution returned an unexpected screen');
+        }
+        return { ...resolved, page: containingList.page.page };
       } catch (error) {
         if (!(error instanceof AdminHomeViewForbiddenError)
           && !(error instanceof NotificationTargetUnavailableError)) throw error;
