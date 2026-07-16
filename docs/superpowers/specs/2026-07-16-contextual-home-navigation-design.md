@@ -198,16 +198,18 @@ Captured Home launches set `sessionToken` to the validated active Home token. Di
 
 ### Callback grammar
 
-New contextual return callbacks use:
+New contextual return callbacks bind both the receipt and requested destination:
 
 ```text
-wr:<16-character-receipt-id>
+wr:<16-character-receipt-id>:<o|h>
 ```
 
-The maximum encoded size is 19 UTF-8 bytes, below Telegram's 64-byte callback limit. The acknowledgement middleware recognizes only the exact grammar:
+`o` restores the authorized origin; `h` cancels only the receipt-bound draft and opens Home. The destination code is the only client-provided behavior flag. Workflow, phase, origin, user, and chat still come exclusively from the validated receipt and current update context.
+
+The maximum encoded size is 21 UTF-8 bytes, below Telegram's 64-byte callback limit. The acknowledgement middleware recognizes only the exact grammar:
 
 ```text
-^wr:[A-Za-z0-9_-]{16}$
+^wr:[A-Za-z0-9_-]{16}:[oh]$
 ```
 
 The callback does not trust workflow, phase, origin, user, or chat values from Telegram. Those values come from the validated receipt and current update context.
@@ -443,7 +445,7 @@ Copy rules:
 ### Domain unit tests
 
 - Strict `workflow-return` receipt codec: valid variants, unknown keys, malformed views, invalid statuses, expiry, payload size, and canonical encoding.
-- `wr:` callback exact grammar, UTF-8 byte bound, trailing newline rejection, and invalid-token rejection.
+- `wr:` callback exact grammar, origin/Home destination decoding, UTF-8 byte bound, trailing newline rejection, and invalid-token rejection.
 - Origin authorization and ancestor fallback for every Home view and role.
 
 ### Application/use-case tests
