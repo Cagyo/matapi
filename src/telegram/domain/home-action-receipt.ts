@@ -102,8 +102,22 @@ function isCanonicalHomeView(value: unknown): value is HomeView {
   try {
     const encoded = encodeHomeView(value as HomeView);
     const parsed = parseHomeView(value.kind, encoded.sensorPage, encoded.payload, encoded.checking);
-    return parsed !== null && JSON.stringify(parsed) === JSON.stringify(value);
+    return parsed !== null && hasExactStructure(parsed, value);
   } catch {
     return false;
   }
+}
+
+function hasExactStructure(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (typeof left !== 'object' || left === null || typeof right !== 'object' || right === null) return false;
+  if (Object.getPrototypeOf(left) !== Object.getPrototypeOf(right)) return false;
+  const leftKeys = Reflect.ownKeys(left);
+  const rightKeys = Reflect.ownKeys(right);
+  if (leftKeys.length !== rightKeys.length) return false;
+  return leftKeys.every((key, index) => key === rightKeys[index]
+    && hasExactStructure(
+      (left as Record<PropertyKey, unknown>)[key],
+      (right as Record<PropertyKey, unknown>)[key],
+    ));
 }

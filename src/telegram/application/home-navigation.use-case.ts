@@ -36,6 +36,7 @@ function parentView(view: HomeView): HomeView | null {
     case 'admin-sensor-setup':
     case 'admin-storage':
     case 'admin-system': return { kind: 'admin-tools' };
+    case 'admin-cleanup-threshold': return { kind: 'admin-system' };
     case 'confirmation': return view.action === 'cleanup' ? { kind: 'admin-storage' } : { kind: 'admin-system' };
     case 'cleanup-result': return { kind: 'admin-storage' };
   }

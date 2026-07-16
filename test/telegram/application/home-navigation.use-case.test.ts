@@ -21,6 +21,7 @@ describe('HomeNavigationUseCase', () => {
     [{ kind: 'admin-sensor-setup' }, { kind: 'admin-tools' }],
     [{ kind: 'admin-storage' }, { kind: 'admin-tools' }],
     [{ kind: 'admin-system' }, { kind: 'admin-tools' }],
+    [{ kind: 'admin-cleanup-threshold' }, { kind: 'admin-system' }],
     [{ kind: 'confirmation', action: 'cleanup', receiptId: '1234567890abcdef' }, { kind: 'admin-storage' }],
     [{ kind: 'confirmation', action: 'restart', receiptId: '1234567890abcdef' }, { kind: 'admin-system' }],
     [{ kind: 'cleanup-result', outcome: 'executed', threshold: 80 }, { kind: 'admin-storage' }],

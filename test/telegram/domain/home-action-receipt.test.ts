@@ -87,6 +87,36 @@ describe('Workflow return receipt validation', () => {
   });
 
   it.each([
+    { kind: 'history', unknown: undefined },
+    {
+      kind: 'notification-target',
+      page: 0,
+      target: {
+        kind: 'sensor',
+        id: '123e4567-e89b-12d3-a456-426614174000',
+        unknown: undefined,
+      },
+    },
+  ])('rejects Home views with structurally unknown undefined properties: %j', (origin) => {
+    expect(isHomeActionReceipt(receipt({
+      payload: { ...receipt().payload, origin } as WorkflowReturnReceipt['payload'],
+    }))).toBe(false);
+  });
+
+  it.each([
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.NEGATIVE_INFINITY,
+  ])('rejects cleanup result Home views with the non-finite threshold %s', (threshold) => {
+    expect(isHomeActionReceipt(receipt({
+      payload: {
+        ...receipt().payload,
+        origin: { kind: 'cleanup-result', outcome: 'executed', threshold },
+      },
+    }))).toBe(false);
+  });
+
+  it.each([
     { id: 'short' },
     { id: 'AbCdEf0123_-xy+9' },
     { userId: 1.5 },
