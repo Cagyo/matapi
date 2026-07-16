@@ -14,7 +14,8 @@ const mocks = vi.hoisted(() => {
   };
   const sequentializedMiddleware = vi.fn();
   const sequentialize = vi.fn(() => sequentializedMiddleware);
-  return { bot, botUse, sequentializedMiddleware, sequentialize };
+  const run = vi.fn(() => ({ isRunning: () => true }));
+  return { bot, botUse, sequentializedMiddleware, sequentialize, run };
 });
 
 vi.mock('grammy', () => ({
@@ -28,7 +29,7 @@ vi.mock('grammy', () => ({
 }));
 
 vi.mock('@grammyjs/runner', () => ({
-  run: vi.fn(() => ({ isRunning: () => true })),
+  run: mocks.run,
   sequentialize: mocks.sequentialize,
 }));
 
@@ -153,5 +154,39 @@ describe('GrammyBotGateway handler registration', () => {
     expect(clearBot).toHaveBeenCalledTimes(1);
     expect(gateway.homeMessageDelivery.clearBot).toHaveBeenCalledTimes(1);
     expect(clear).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears stale update freshness after a successful runner restart', async () => {
+    const stop = vi.fn().mockResolvedValue(undefined);
+    const gateway = Object.create(GrammyBotGateway.prototype);
+    Object.assign(gateway, {
+      bot: {},
+      runner: { isRunning: () => true, stop },
+      lastUpdateAt: new Date('2030-01-01T00:00:00.000Z'),
+      logger: { warn: vi.fn() },
+    });
+
+    await gateway.restart();
+
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(gateway.getLastUpdateAt()).toBeNull();
+  });
+
+  it('retains stale update freshness when replacement runner startup fails', async () => {
+    const stale = new Date('2030-01-01T00:00:00.000Z');
+    const gateway = Object.create(GrammyBotGateway.prototype);
+    Object.assign(gateway, {
+      bot: {},
+      runner: { isRunning: () => false },
+      lastUpdateAt: stale,
+      logger: { warn: vi.fn() },
+    });
+    mocks.run.mockImplementationOnce(() => {
+      throw new Error('runner failed');
+    });
+
+    await expect(gateway.restart()).rejects.toThrow('runner failed');
+
+    expect(gateway.getLastUpdateAt()).toBe(stale);
   });
 });

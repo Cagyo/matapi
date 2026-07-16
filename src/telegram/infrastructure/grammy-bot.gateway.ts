@@ -204,7 +204,9 @@ export class GrammyBotGateway
   async restart(): Promise<void> {
     if (!this.bot) return;
     if (this.runner?.isRunning()) await this.runner.stop();
-    this.runner = run(this.bot);
+    const replacement = run(this.bot);
+    this.runner = replacement;
+    this.lastUpdateAt = null;
     this.logger.warn('grammY runner force-restarted');
   }
 

@@ -25,10 +25,10 @@ from reaching registered handlers.
 
 ## Design
 
-`GrammyBotGateway.restart()` will clear its last-update timestamp as part of
-the runner lifecycle transition, then start the replacement runner. A fresh
-runner therefore cannot inherit the stale timestamp that caused its
-predecessor to be restarted.
+`GrammyBotGateway.restart()` will start the replacement runner, install it,
+and then clear its last-update timestamp as part of the runner lifecycle
+transition. A fresh runner therefore cannot inherit the stale timestamp that
+caused its predecessor to be restarted.
 
 The two-minute threshold, 30-second check interval, registry port, handler
 ordering, callback acknowledgement, and Home opening protocol remain
@@ -38,10 +38,10 @@ not repeat indefinitely without another update.
 
 ## Error Handling
 
-If stopping the current runner throws, the timestamp remains unchanged and
-the existing watchdog retry behavior remains available on the next tick. The
-timestamp is cleared only after a successful stop (or when no running runner
-exists) and immediately before `run(this.bot)` installs the replacement.
+If stopping the current runner or starting its replacement throws, the
+timestamp remains unchanged and the existing watchdog retry behavior remains
+available on the next tick. The timestamp is cleared only after `run(this.bot)`
+successfully creates and installs the replacement.
 
 ## Testing
 
