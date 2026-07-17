@@ -61,6 +61,13 @@ function localeState(role: 'admin' | 'user', locale: 'en' | 'ru' | 'uk' = 'en') 
   };
 }
 
+function fixturePrivateChat(ctx: any): any {
+  if (!ctx.chat && typeof ctx.from?.id === 'number') {
+    ctx.chat = { id: ctx.from.id, type: 'private' };
+  }
+  return ctx;
+}
+
 function createTestSetup(metaValue: string | null = null) {
   const meta = {
     get: vi.fn(async () => metaValue),
@@ -92,8 +99,18 @@ function createTestSetup(metaValue: string | null = null) {
   const commandCallbacks: Record<string, (...args: any[]) => any> = {};
   const callbackQueryCallbacks: { regex: RegExp; fn: (...args: any[]) => any }[] = [];
   const composer = {
-    command: vi.fn((cmd, middleware, fn) => { commandCallbacks[cmd] = fn || middleware; }),
-    callbackQuery: vi.fn((regex, middleware, fn) => { callbackQueryCallbacks.push({ regex, fn: fn || middleware }); }),
+    command: vi.fn((cmd, middleware, fn) => {
+      const callback = fn || middleware;
+      commandCallbacks[cmd] = async (ctx, ...args) => {
+        await callback(fixturePrivateChat(ctx), ...args);
+      };
+    }),
+    callbackQuery: vi.fn((regex, middleware, fn) => {
+      const callback = fn || middleware;
+      callbackQueryCallbacks.push({ regex, fn: async (ctx, ...args) => {
+        await callback(fixturePrivateChat(ctx), ...args);
+      } });
+    }),
   } as any;
   handler.register(composer);
 
@@ -171,6 +188,40 @@ describe('SettingsHandler', () => {
       localeState: localeState('user'),
       callbackQuery: { data: 'settings:locale:ZyXwVu9876_-tsR5:uk' },
       answerCallbackQuery,
+    });
+
+    expect(users.setLocale).not.toHaveBeenCalled();
+    expect(answerCallbackQuery).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects locale callbacks from a group or a different private chat', async () => {
+    const { callbackQueryCallbacks, commandCallbacks, users } = createTestSetup();
+    const localeCallback = callbackQueryCallbacks.find(({ regex }) => regex.test('settings:locale:AbCdEf0123_-xyZ9:uk'))!.fn;
+    const reply = vi.fn().mockResolvedValue(true);
+    const answerCallbackQuery = vi.fn().mockResolvedValue(true);
+
+    await commandCallbacks.settings({
+      from: { id: 100 },
+      chat: { id: 100, type: 'private' },
+      localeState: localeState('user'),
+      reply,
+    });
+
+    await localeCallback({
+      from: { id: 100 },
+      chat: { id: -100, type: 'group' },
+      localeState: localeState('user'),
+      callbackQuery: { data: 'settings:locale:AbCdEf0123_-xyZ9:uk' },
+      answerCallbackQuery,
+      reply,
+    });
+    await localeCallback({
+      from: { id: 100 },
+      chat: { id: 101, type: 'private' },
+      localeState: localeState('user'),
+      callbackQuery: { data: 'settings:locale:AbCdEf0123_-xyZ9:uk' },
+      answerCallbackQuery,
+      reply,
     });
 
     expect(users.setLocale).not.toHaveBeenCalled();

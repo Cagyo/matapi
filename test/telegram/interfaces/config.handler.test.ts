@@ -48,14 +48,22 @@ function configData(userId: number, action: string): string {
   return `cfg:${receiptFor(userId).id}:${action}`;
 }
 
+function fixturePrivateChat(ctx: any): any {
+  if (!ctx.chat && typeof ctx.from?.id === 'number') {
+    ctx.chat = { id: ctx.from.id, type: 'private' };
+  }
+  return ctx;
+}
+
 describe('ConfigHandler', () => {
   function createTestSetup() {
+    const enabledSensors = [
+      { id: 'front-id', name: 'front_door', type: 'digital', config: { pin: 4 }, debounceMs: 100, severity: 'info' },
+      { id: 'motion-id', name: 'motion', type: 'digital', config: { pin: 17 }, debounceMs: 100, severity: 'info' },
+    ];
     const sensors = {
-      listEnabled: vi.fn().mockResolvedValue([
-        { name: 'front_door', type: 'digital', config: { pin: 4 } },
-        { name: 'motion', type: 'digital', config: { pin: 17 } },
-      ]),
-      findById: vi.fn(),
+      listEnabled: vi.fn().mockResolvedValue(enabledSensors),
+      findById: vi.fn(async (id: string) => enabledSensors.find((sensor) => sensor.id === id) ?? null),
       findByName: vi.fn(),
     } as any;
     const addSensor = { execute: vi.fn().mockImplementation((arg) => Promise.resolve({ name: arg.name })) } as any;
@@ -95,13 +103,22 @@ describe('ConfigHandler', () => {
 
     const composer = {
       command: vi.fn((cmd, middleware, fn) => {
-        commandCallbacks[cmd] = fn || middleware;
+        const callback = fn || middleware;
+        commandCallbacks[cmd] = async (ctx, ...args) => {
+          await callback(fixturePrivateChat(ctx), ...args);
+        };
       }),
       callbackQuery: vi.fn((regex, middleware, fn) => {
-        callbackQueryCallbacks.push({ regex, fn: fn || middleware });
+        const callback = fn || middleware;
+        callbackQueryCallbacks.push({ regex, fn: async (ctx, ...args) => {
+          await callback(fixturePrivateChat(ctx), ...args);
+        } });
       }),
       on: vi.fn((event, middleware, fn) => {
-        messageCallbacks[event] = fn || middleware;
+        const callback = fn || middleware;
+        messageCallbacks[event] = async (ctx, ...args) => {
+          await callback(fixturePrivateChat(ctx), ...args);
+        };
       }),
     } as any;
 
@@ -293,7 +310,7 @@ describe('ConfigHandler', () => {
     await handler.handleSubcommand({ from: { id: 503 }, reply } as any, 'modify');
     await cbFn({
       from: { id: 503 },
-      callbackQuery: { data: configData(503, 'mod:front_door') },
+      callbackQuery: { data: configData(503, 'mod:0') },
       answerCallbackQuery,
       editMessageReplyMarkup,
       reply,
@@ -378,7 +395,7 @@ describe('ConfigHandler', () => {
     };
 
     await handler.handleSubcommand(callbackContext as never, 'modify');
-    expect(callbackData(reply)).toContain(configData(601, 'mod:front_door'));
+    expect(callbackData(reply)).toContain(configData(601, 'mod:0'));
     expect(callbackData(reply)).toEqual(expect.arrayContaining([
       `wr:${receiptFor(601).id}:o`,
       `wr:${receiptFor(601).id}:h`,
@@ -388,7 +405,7 @@ describe('ConfigHandler', () => {
       kind: 'active',
       sensor: { id: 'front-id', name: 'front_door', type: 'digital', config: { pin: 4 }, debounceMs: 100, severity: 'info' },
     });
-    await callback({ ...callbackContext, callbackQuery: { data: configData(601, 'mod:front_door') } });
+    await callback({ ...callbackContext, callbackQuery: { data: configData(601, 'mod:0') } });
     expect(callbackData(reply)).toContain(configData(601, 'modify:done'));
     expect(callbackData(reply)).toEqual(expect.arrayContaining([
       `wr:${receiptFor(601).id}:o`,
@@ -396,12 +413,12 @@ describe('ConfigHandler', () => {
     ]));
 
     await handler.handleSubcommand({ ...callbackContext, from: { id: 602 } } as never, 'remove');
-    expect(callbackData(reply)).toContain(configData(602, 'rem:front_door'));
+    expect(callbackData(reply)).toContain(configData(602, 'rem:0'));
     expect(callbackData(reply)).toEqual(expect.arrayContaining([
       `wr:${receiptFor(602).id}:o`,
       `wr:${receiptFor(602).id}:h`,
     ]));
-    await callback({ ...callbackContext, from: { id: 602 }, callbackQuery: { data: configData(602, 'rem:front_door') } });
+    await callback({ ...callbackContext, from: { id: 602 }, callbackQuery: { data: configData(602, 'rem:0') } });
     expect(callbackData(reply)).toContain(configData(602, 'rm:confirm'));
     expect(callbackData(reply)).toEqual(expect.arrayContaining([
       `wr:${receiptFor(602).id}:o`,
@@ -433,7 +450,7 @@ describe('ConfigHandler', () => {
     });
     sensors.findById.mockResolvedValue({ id: 'front-id', name: 'front_door', type: 'digital', config: { pin: 4 }, debounceMs: 100, severity: 'info' });
     await handler.handleSubcommand({ ...shared, from: { id: 604 } } as never, 'modify');
-    await callback({ ...shared, from: { id: 604 }, callbackQuery: { data: configData(604, 'mod:front_door') } });
+    await callback({ ...shared, from: { id: 604 }, callbackQuery: { data: configData(604, 'mod:0') } });
     await callback({ ...shared, from: { id: 604 }, callbackQuery: { data: configData(604, 'modify:invert') } });
     expect(modifySensor.execute).toHaveBeenCalledWith(expect.objectContaining({ patch: expect.objectContaining({ config: expect.anything() }) }));
     expect(callbackData(reply)).toContain(configData(604, 'modify:done'));
@@ -513,11 +530,11 @@ describe('ConfigHandler', () => {
 
     await handler.handleSubcommand({ ...callbackContext, from: { id: 609 } } as never, 'modify');
     await handler.cancelExact({ userId: 609, chatId: 609, receiptId: receiptFor(609, 'sensor-modify').id });
-    await callback({ ...callbackContext, from: { id: 609 }, callbackQuery: { data: configData(609, 'mod:front_door') } });
+    await callback({ ...callbackContext, from: { id: 609 }, callbackQuery: { data: configData(609, 'mod:0') } });
     expect(callbackContext.answerCallbackQuery).toHaveBeenCalled();
 
     await handler.handleSubcommand({ ...callbackContext, from: { id: 610 } } as never, 'remove');
-    await callback({ ...callbackContext, from: { id: 610 }, callbackQuery: { data: configData(610, 'rem:front_door') } });
+    await callback({ ...callbackContext, from: { id: 610 }, callbackQuery: { data: configData(610, 'rem:0') } });
     expect(callbackData(reply)).toContain(configData(610, 'rm:confirm'));
     await handler.cancelExact({ userId: 610, chatId: 610, receiptId: receiptFor(610, 'sensor-remove').id });
     await callback({ ...callbackContext, from: { id: 610 }, callbackQuery: { data: configData(610, 'rm:confirm') } });
@@ -541,7 +558,7 @@ describe('ConfigHandler', () => {
     });
 
     await handler.handleSubcommand(callbackContext as never, 'modify');
-    await callback({ ...callbackContext, callbackQuery: { data: configData(611, 'mod:front_door') } });
+    await callback({ ...callbackContext, callbackQuery: { data: configData(611, 'mod:0') } });
     sensors.findById.mockResolvedValue(undefined);
     await callback({ ...callbackContext, callbackQuery: { data: configData(611, 'modify:invert') } });
     expect(callbackData(reply)).toEqual([
@@ -569,7 +586,7 @@ describe('ConfigHandler', () => {
     });
 
     await handler.handleSubcommand({ ...callbackContext, from: { id: 612 } } as never, 'modify');
-    await callback({ ...callbackContext, from: { id: 612 }, callbackQuery: { data: configData(612, 'mod:front_door') } });
+    await callback({ ...callbackContext, from: { id: 612 }, callbackQuery: { data: configData(612, 'mod:0') } });
     await callback({ ...callbackContext, from: { id: 612 }, callbackQuery: { data: configData(612, 'modify:done') } });
     expect(navigation.complete).toHaveBeenCalledWith(
       expect.anything(),
@@ -578,7 +595,7 @@ describe('ConfigHandler', () => {
     );
 
     await handler.handleSubcommand({ ...callbackContext, from: { id: 613 } } as never, 'remove');
-    await callback({ ...callbackContext, from: { id: 613 }, callbackQuery: { data: configData(613, 'rem:front_door') } });
+    await callback({ ...callbackContext, from: { id: 613 }, callbackQuery: { data: configData(613, 'rem:0') } });
     await callback({ ...callbackContext, from: { id: 613 }, callbackQuery: { data: configData(613, 'rm:confirm') } });
     expect(navigation.complete).toHaveBeenCalledWith(
       expect.anything(),
@@ -640,6 +657,144 @@ describe('ConfigHandler', () => {
     expect(reply).toHaveBeenCalledWith(en.config.step2('digital'), expect.anything());
   });
 
+  it('rejects config callbacks from a group or a different private chat', async () => {
+    const { handler, callbackQueryCallbacks } = createTestSetup();
+    const callback = callbackQueryCallbacks[0].fn;
+    const reply = vi.fn().mockResolvedValue(true);
+    const answerCallbackQuery = vi.fn().mockResolvedValue(true);
+    const editMessageReplyMarkup = vi.fn().mockResolvedValue(true);
+
+    await handler.handleSubcommand({
+      from: { id: 705 },
+      chat: { id: 705, type: 'private' },
+      reply,
+    } as never, 'add');
+    const replyCount = reply.mock.calls.length;
+
+    await callback({
+      from: { id: 705 },
+      chat: { id: -100, type: 'group' },
+      callbackQuery: { data: configData(705, 'type:digital') },
+      answerCallbackQuery,
+      editMessageReplyMarkup,
+      reply,
+    });
+    await callback({
+      from: { id: 705 },
+      chat: { id: 706, type: 'private' },
+      callbackQuery: { data: configData(705, 'type:digital') },
+      answerCallbackQuery,
+      editMessageReplyMarkup,
+      reply,
+    });
+
+    expect(reply).toHaveBeenCalledTimes(replyCount);
+    expect(editMessageReplyMarkup).not.toHaveBeenCalled();
+    expect(answerCallbackQuery).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not let a group or a different private chat submit text to a config draft', async () => {
+    const { handler, callbackQueryCallbacks, messageCallbacks, sensors } = createTestSetup();
+    const callback = callbackQueryCallbacks[0].fn;
+    const onText = messageCallbacks['message:text'];
+    const reply = vi.fn().mockResolvedValue(true);
+    const privateContext = {
+      from: { id: 707 },
+      chat: { id: 707, type: 'private' },
+      reply,
+      answerCallbackQuery: vi.fn().mockResolvedValue(true),
+      editMessageReplyMarkup: vi.fn().mockResolvedValue(true),
+    };
+
+    await handler.handleSubcommand(privateContext as never, 'add');
+    await callback({
+      ...privateContext,
+      callbackQuery: { data: configData(707, 'type:digital') },
+    });
+    const replyCount = reply.mock.calls.length;
+    const groupNext = vi.fn();
+    const otherChatNext = vi.fn();
+
+    await onText({
+      from: { id: 707 },
+      chat: { id: -100, type: 'supergroup' },
+      message: { text: 'group_sensor' },
+      reply,
+    }, groupNext);
+    await onText({
+      from: { id: 707 },
+      chat: { id: 708, type: 'private' },
+      message: { text: 'other_chat_sensor' },
+      reply,
+    }, otherChatNext);
+
+    expect(groupNext).toHaveBeenCalledOnce();
+    expect(otherChatNext).toHaveBeenCalledOnce();
+    expect(sensors.listEnabled).not.toHaveBeenCalled();
+    expect(reply).toHaveBeenCalledTimes(replyCount);
+  });
+
+  it('uses compact receipt-bound selection indexes for long sensor names', async () => {
+    const { handler, callbackQueryCallbacks, sensors } = createTestSetup();
+    const callback = callbackQueryCallbacks[0].fn;
+    const reply = vi.fn().mockResolvedValue(true);
+    const sensor = {
+      id: 'sensor-long-id',
+      name: `sensor_${'x'.repeat(160)}`,
+      type: 'digital',
+      config: { pin: 4 },
+      debounceMs: 100,
+      severity: 'info',
+    };
+    sensors.listEnabled.mockResolvedValueOnce([sensor]);
+    sensors.findById.mockResolvedValue(sensor);
+    const context = {
+      from: { id: 709 },
+      chat: { id: 709, type: 'private' },
+      answerCallbackQuery: vi.fn().mockResolvedValue(true),
+      editMessageReplyMarkup: vi.fn().mockResolvedValue(true),
+      reply,
+    };
+
+    await handler.handleSubcommand(context as never, 'modify');
+    const selection = callbackData(reply).find((data) => data.includes(':mod:'));
+
+    expect(selection).toBe(configData(709, 'mod:0'));
+    expect(selection).not.toContain(sensor.name);
+    expect(Buffer.byteLength(selection ?? '', 'utf8')).toBeLessThanOrEqual(64);
+    expect(callbackData(reply).every((data) => Buffer.byteLength(data, 'utf8') <= 64)).toBe(true);
+
+    await callback({ ...context, callbackQuery: { data: selection } });
+
+    expect(sensors.findById).toHaveBeenCalledWith(sensor.id);
+    expect(reply).toHaveBeenCalledWith(
+      expect.stringContaining(sensor.name),
+      expect.objectContaining({ reply_markup: expect.anything() }),
+    );
+  });
+
+  it('ignores stale or malformed compact sensor selections without looking up a sensor', async () => {
+    const { handler, callbackQueryCallbacks, sensors } = createTestSetup();
+    const callback = callbackQueryCallbacks[0].fn;
+    const reply = vi.fn().mockResolvedValue(true);
+    const context = {
+      from: { id: 710 },
+      chat: { id: 710, type: 'private' },
+      answerCallbackQuery: vi.fn().mockResolvedValue(true),
+      editMessageReplyMarkup: vi.fn().mockResolvedValue(true),
+      reply,
+    };
+
+    await handler.handleSubcommand(context as never, 'modify');
+    const replyCount = reply.mock.calls.length;
+    await callback({ ...context, callbackQuery: { data: 'cfg:ZyXwVu9876_-tsR5:mod:0' } });
+    await callback({ ...context, callbackQuery: { data: configData(710, 'mod:not-an-index') } });
+    await callback({ ...context, callbackQuery: { data: configData(710, 'mod:99') } });
+
+    expect(sensors.findById).not.toHaveBeenCalled();
+    expect(reply).toHaveBeenCalledTimes(replyCount);
+  });
+
   it('keeps /cancel scoped to the exact Config receipt and restores without a cancellation reply', async () => {
     const { handler, commandCallbacks, navigation } = createTestSetup();
     const next = vi.fn();
@@ -672,7 +827,7 @@ describe('ConfigHandler', () => {
 
     await handler.handleSubcommand({ from: { id: 704 }, reply } as any, 'remove');
     await callback({
-      from: { id: 704 }, callbackQuery: { data: configData(704, 'rem:front_door') },
+      from: { id: 704 }, callbackQuery: { data: configData(704, 'rem:0') },
       answerCallbackQuery: vi.fn().mockResolvedValue(true), editMessageReplyMarkup: vi.fn().mockResolvedValue(true), reply,
     });
     await callback({

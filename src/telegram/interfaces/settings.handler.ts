@@ -156,8 +156,8 @@ export class SettingsHandler implements TelegramHandler, WorkflowDraftCanceller 
   private stateFor(ctx: TelegramContext): LanguageState | null {
     const userId = ctx.from?.id;
     if (typeof userId !== 'number' || !Number.isSafeInteger(userId)) return null;
-    const chatId = ctx.chat?.type === 'private' ? ctx.chat.id : userId;
-    return this.states.get(stateKey(userId, chatId)) ?? null;
+    if (ctx.chat?.type !== 'private') return null;
+    return this.states.get(stateKey(userId, ctx.chat.id)) ?? null;
   }
 
   private catalog(ctx: TelegramContext): LocaleCatalog {

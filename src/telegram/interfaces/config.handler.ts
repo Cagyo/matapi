@@ -41,6 +41,11 @@ import { WorkflowNavigationHandler } from './workflow-navigation.handler';
 type AddType = 'digital' | 'uart';
 type Pull = 'up' | 'down' | 'none';
 
+interface SensorSelection {
+  id: string;
+  name: string;
+}
+
 /** BCM pins exposed in the picker; ID EEPROM and I²C-reserved pins stay out. */
 const SELECTABLE_GPIO_PINS = [
   4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
@@ -74,8 +79,8 @@ type ConfigState =
   | { kind: 'modifyDebounce'; sensorId: string; currentName: string }
   | { kind: 'modifyStepType'; sensorId: string; currentName: string }
   | { kind: 'removeConfirm'; sensorName: string }
-  | { kind: 'selectModify' }
-  | { kind: 'selectRemove' };
+  | { kind: 'selectModify'; selections: readonly SensorSelection[] }
+  | { kind: 'selectRemove'; selections: readonly SensorSelection[] };
 
 type WorkflowBoundState<T> = T & {
   userId: number;
@@ -237,7 +242,10 @@ export class ConfigHandler implements TelegramHandler, WorkflowDraftCanceller {
     }
     const sensor = await this.sensors.findByName(arg);
     if (sensor?.kind !== 'active') {
-      const state = this.setInitialState(receipt, { kind: sub === 'modify' ? 'selectModify' : 'selectRemove' });
+      const state = this.setInitialState(receipt, {
+        kind: sub === 'modify' ? 'selectModify' : 'selectRemove',
+        selections: [],
+      });
       await this.complete(ctx, state, {
         effectStage: 'pending',
         deliver: () => this.reply(ctx, en.config.notFound(arg)),
@@ -281,6 +289,7 @@ export class ConfigHandler implements TelegramHandler, WorkflowDraftCanceller {
     const sensors = await this.sensors.listEnabled();
     const state = this.setInitialState(receipt, {
       kind: sub === 'modify' ? 'selectModify' : 'selectRemove',
+      selections: sensors.map(({ id, name }) => ({ id, name })),
     });
     if (sensors.length === 0) {
       await this.complete(ctx, state, {
@@ -291,8 +300,8 @@ export class ConfigHandler implements TelegramHandler, WorkflowDraftCanceller {
       return;
     }
     const keyboard = new InlineKeyboard();
-    for (const sensor of sensors) {
-      keyboard.text(sensor.name, `cfg:${sub === 'modify' ? 'mod' : 'rem'}:${sensor.name}`).row();
+    for (const [index, sensor] of sensors.entries()) {
+      keyboard.text(sensor.name, `cfg:${sub === 'modify' ? 'mod' : 'rem'}:${index}`).row();
     }
     await ctx.reply(sub === 'modify' ? en.config.selectModify : en.config.selectRemove, {
       reply_markup: this.workflowKeyboard(ctx, state, keyboard),
@@ -326,42 +335,44 @@ export class ConfigHandler implements TelegramHandler, WorkflowDraftCanceller {
       return;
     }
     if (action.startsWith('mod:')) {
-      const name = action.slice('mod:'.length).trim();
-      const sensor = await this.sensors.findByName(name);
-      if (sensor?.kind !== 'active') {
-        await ctx.reply(en.config.notFound(name), {
+      const selection = selectionFor(state, action, 'mod');
+      if (!selection) return;
+      const sensor = await this.sensors.findById(selection.id);
+      if (!sensor) {
+        await ctx.reply(en.config.notFound(selection.name), {
           reply_markup: this.workflowKeyboard(ctx, state),
         });
         return;
       }
       const next = this.setState(state, {
         kind: 'modifyMenu',
-        sensorId: sensor.sensor.id,
-        currentName: sensor.sensor.name,
+        sensorId: sensor.id,
+        currentName: sensor.name,
       });
       await ctx.reply(
         en.config.modifyHeader({
-          name: sensor.sensor.name,
-          type: sensor.sensor.type,
-          config: sensor.sensor.config,
-          debounceMs: sensor.sensor.debounceMs,
-          severity: sensor.sensor.severity,
+          name: sensor.name,
+          type: sensor.type,
+          config: sensor.config,
+          debounceMs: sensor.debounceMs,
+          severity: sensor.severity,
         }),
-        { reply_markup: this.workflowKeyboard(ctx, next, modifyMenu(sensor.sensor.type)) },
+        { reply_markup: this.workflowKeyboard(ctx, next, modifyMenu(sensor.type)) },
       );
       return;
     }
     if (action.startsWith('rem:')) {
-      const name = action.slice('rem:'.length).trim();
-      const sensor = await this.sensors.findByName(name);
-      if (sensor?.kind !== 'active') {
-        await ctx.reply(en.config.notFound(name), {
+      const selection = selectionFor(state, action, 'rem');
+      if (!selection) return;
+      const sensor = await this.sensors.findById(selection.id);
+      if (!sensor) {
+        await ctx.reply(en.config.notFound(selection.name), {
           reply_markup: this.workflowKeyboard(ctx, state),
         });
         return;
       }
-      const next = this.setState(state, { kind: 'removeConfirm', sensorName: sensor.sensor.name });
-      await ctx.reply(en.config.removeConfirm(sensor.sensor.name), {
+      const next = this.setState(state, { kind: 'removeConfirm', sensorName: sensor.name });
+      await ctx.reply(en.config.removeConfirm(sensor.name), {
         reply_markup: this.workflowKeyboard(ctx, next, confirmKeyboard()),
       });
       return;
@@ -946,8 +957,8 @@ export class ConfigHandler implements TelegramHandler, WorkflowDraftCanceller {
   private stateFor(ctx: TelegramContext): BoundConfigState | null {
     const userId = ctx.from?.id;
     if (typeof userId !== 'number' || !Number.isSafeInteger(userId)) return null;
-    const chatId = ctx.chat?.type === 'private' ? ctx.chat.id : userId;
-    return this.states.get(stateKey(userId, chatId)) ?? null;
+    if (ctx.chat?.type !== 'private') return null;
+    return this.states.get(stateKey(userId, ctx.chat.id)) ?? null;
   }
 
   private catalog(ctx: TelegramContext) {
@@ -1132,6 +1143,20 @@ function parseConfigCallback(data: string): { receiptId: string; action: string 
   const match = CONFIG_CALLBACK.exec(data);
   if (!match) return null;
   return { receiptId: match[1], action: match[2] };
+}
+
+function selectionFor(
+  state: BoundConfigState,
+  action: string,
+  prefix: 'mod' | 'rem',
+): SensorSelection | null {
+  const expectedKind = prefix === 'mod' ? 'selectModify' : 'selectRemove';
+  if (state.kind !== expectedKind) return null;
+  const indexValue = action.slice(`${prefix}:`.length);
+  if (!/^(0|[1-9]\d*)$/.test(indexValue)) return null;
+  const index = Number(indexValue);
+  if (!Number.isSafeInteger(index)) return null;
+  return state.selections[index] ?? null;
 }
 
 function bindConfigKeyboard(keyboard: InlineKeyboard, receiptId: string): InlineKeyboard {
