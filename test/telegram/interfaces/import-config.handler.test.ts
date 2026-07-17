@@ -14,7 +14,10 @@ const cameraPlan = { sources: [], configured: [] };
 function setup() {
   const imports = { prepare: vi.fn(), commit: vi.fn().mockResolvedValue(sensorPlan.summary) };
   const cameraImports = { prepare: vi.fn(), commit: vi.fn().mockResolvedValue(cameraPlan.configured) };
-  const workflows = { begin: vi.fn().mockResolvedValue(receipt) };
+  const workflows = {
+    begin: vi.fn().mockResolvedValue(receipt),
+    markRunning: vi.fn().mockResolvedValue(true),
+  };
   const drafts = new WorkflowDraftRegistry();
   const handler = new ImportConfigHandler(
     imports as never,
@@ -79,6 +82,37 @@ describe('ImportConfigHandler contextual workflow', () => {
 
     expect(cameraImports.commit).not.toHaveBeenCalled();
     expect(imports.commit).toHaveBeenCalledOnce();
+  });
+
+  it('marks the import receipt running before committing camera or sensor changes', async () => {
+    const { handler, imports, cameraImports, workflows, ctx } = setup();
+    const events: string[] = [];
+    (handler as unknown as { states: Map<string, unknown> }).states.set('42:42', {
+      userId: 42,
+      chatId: 42,
+      receiptId: receipt.id,
+      receipt,
+      kind: 'awaitingConfirm',
+      sensorPlan,
+      cameraPlan: { sources: [], configured: ['front-door'] },
+    });
+    ctx.callbackQuery = { data: `imp:${receipt.id}:a` };
+    workflows.markRunning.mockImplementation(async () => {
+      events.push('mark-running');
+      return true;
+    });
+    cameraImports.commit.mockImplementation(async () => {
+      events.push('camera-commit');
+      return ['front-door'];
+    });
+    imports.commit.mockImplementation(async () => {
+      events.push('sensor-commit');
+      return sensorPlan.summary;
+    });
+
+    await (handler as unknown as { onCallback(context: object): Promise<void> }).onCallback(ctx);
+
+    expect(events).toEqual(['mark-running', 'camera-commit', 'sensor-commit']);
   });
 
   it('lets /cancel continue unless this handler owns the exact private receipt', async () => {

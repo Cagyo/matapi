@@ -73,6 +73,7 @@ export class CleanHandler implements TelegramHandler {
     if (!receipt) return;
     const catalog = ctx.localeState?.catalog ?? en;
     try {
+      if (!await this.workflows.markRunning(ctx, receipt)) return;
       const res = await this.triggerClean.execute(customThreshold);
       if (!res.executed) {
         await this.complete(ctx, receipt, () => ctx.reply(catalog.clean.inProgress));

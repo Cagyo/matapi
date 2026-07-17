@@ -12,7 +12,10 @@ const receipt = {
 function setup() {
   const events: string[] = [];
   const update = { execute: vi.fn().mockResolvedValue({ usedBytes: 1, totalBytes: 2, freeBytes: 1 }) };
-  const workflows = { begin: vi.fn().mockResolvedValue(receipt) };
+  const workflows = {
+    begin: vi.fn().mockResolvedValue(receipt),
+    markRunning: vi.fn().mockResolvedValue(true),
+  };
   const drafts = new WorkflowDraftRegistry();
   const navigation = { complete: vi.fn(async (_ctx, _launch, presentation) => {
     await presentation.deliver(); events.push('restore');
@@ -68,6 +71,25 @@ describe('GdriveAuthHandler contextual workflow', () => {
     expect(update.execute).toHaveBeenCalledWith('[gdrive]\ntype = drive');
     expect(navigation.complete).toHaveBeenCalledOnce();
     expect(events).toEqual(['result', 'result', 'restore']);
+  });
+
+  it('marks the setup receipt running before writing credentials', async () => {
+    const { commands, listeners, ctx, update, workflows } = setup();
+    const events: string[] = [];
+    await commands.gdrive_auth(ctx);
+    ctx.message = { text: '[gdrive]\ntype = drive' };
+    workflows.markRunning.mockImplementation(async () => {
+      events.push('mark-running');
+      return true;
+    });
+    update.execute.mockImplementation(async () => {
+      events.push('write-credentials');
+      return { usedBytes: 1, totalBytes: 2, freeBytes: 1 };
+    });
+
+    await listeners['message:text'](ctx, vi.fn().mockResolvedValue(undefined));
+
+    expect(events).toEqual(['mark-running', 'write-credentials']);
   });
 
   it('calls next for /cancel when another workflow owns the conversation', async () => {

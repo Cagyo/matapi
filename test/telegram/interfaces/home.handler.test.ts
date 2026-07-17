@@ -113,6 +113,7 @@ function setup(overrides: {
   importConfig?: { handleCommand: ReturnType<typeof vi.fn> };
   exportConfig?: { handleCommand: ReturnType<typeof vi.fn> };
   systemUpdate?: { handleCommand: ReturnType<typeof vi.fn> };
+  workflowNavigation?: { complete: ReturnType<typeof vi.fn> };
 } = {}) {
   const guard = { registered: vi.fn() } as unknown as RoleMiddleware;
   const open = {
@@ -172,6 +173,7 @@ function setup(overrides: {
     overrides.actions, // action repository
     { now: () => new Date('2030-01-01T00:00:00.000Z') },
     overrides.workflows ?? workflowEntry,
+    overrides.workflowNavigation as never,
   );
   const commands: Record<string, (...args: any[]) => Promise<void>> = {};
   const callbacks: { regex: RegExp; fn: (...args: any[]) => Promise<void> }[] = [];
@@ -179,7 +181,7 @@ function setup(overrides: {
     command: vi.fn((name, middleware, fn) => { commands[name] = fn ?? middleware; }),
     callbackQuery: vi.fn((regex, middleware, fn) => { callbacks.push({ regex, fn: fn ?? middleware }); }),
   } as any);
-  return { commands, callbacks, open, validate, render, refresh, camera, navigation, workflowEntry: overrides.workflows ?? workflowEntry };
+  return { commands, callbacks, open, validate, render, refresh, camera, navigation, workflowEntry: overrides.workflows ?? workflowEntry, ctx: context() };
 }
 
 describe('HomeHandler', () => {
@@ -704,7 +706,82 @@ describe('HomeHandler', () => {
       'finish-restart',
       'open-fresh:admin-system',
     ]);
+    expect(workflowEntry.begin).toHaveBeenCalledWith(ctx, 'system-restart', {
+      source: 'captured',
+      view: { kind: 'admin-system' },
+      sessionToken: identity.token,
+    });
     expect(render.execute).not.toHaveBeenCalled();
+  });
+
+  it('delivers a started restart failure before shared workflow recovery restores its System origin', async () => {
+    const events: string[] = [];
+    const restart = { execute: vi.fn(async () => {
+      events.push('dispatch-restart');
+      throw new Error('service unavailable');
+    }) };
+    const actions = { finishExternal: vi.fn(async () => { events.push('finish-restart'); }) };
+    const workflowNavigation = {
+      complete: vi.fn(async (_ctx, _launch, presentation) => {
+        await presentation.deliver();
+        events.push('restore-system');
+      }),
+    };
+    const { callbacks, validate, navigation, workflowEntry, ctx } = setup({
+      restart,
+      actions,
+      workflowNavigation,
+    });
+    const receiptId = '1234567890abcdef';
+    ctx.callbackQuery = {
+      data: encodeHomeCallback(identity.token, 1, { kind: 'confirm-restart', receiptId }),
+      message: { message_id: 300 },
+    };
+    ctx.localeState = localeState('admin');
+    ctx.reply.mockImplementation(async (text: string) => {
+      if (text === ctx.localeState.catalog.ota.restartFailed('service unavailable')) {
+        events.push('terminal-error');
+      }
+    });
+    (validate.execute as ReturnType<typeof vi.fn>).mockResolvedValue({
+      kind: 'accepted',
+      active: identity,
+      view: { kind: 'confirmation', action: 'restart', receiptId },
+    });
+    (navigation.route as ReturnType<typeof vi.fn>).mockReturnValue({ kind: 'effect' });
+    (navigation.executeEffect as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      events.push('claim-restart');
+      return { kind: 'restart' };
+    });
+    (workflowEntry.leaveForHome as ReturnType<typeof vi.fn>).mockImplementation(async (_ctx, promote) => {
+      events.push('leave-workflow');
+      await promote();
+      return 'not-opened';
+    });
+    (workflowEntry.begin as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      events.push('begin-system-restart');
+      return workflowReceipt;
+    });
+    (workflowEntry.markRunning as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      events.push('mark-system-restart-running');
+      return true;
+    });
+
+    await callbacks[0].fn(ctx);
+
+    expect(workflowNavigation.complete).toHaveBeenCalledWith(ctx, { receipt: workflowReceipt }, expect.objectContaining({
+      effectStage: 'pending',
+    }));
+    expect(events).toEqual([
+      'leave-workflow',
+      'claim-restart',
+      'begin-system-restart',
+      'mark-system-restart-running',
+      'dispatch-restart',
+      'finish-restart',
+      'terminal-error',
+      'restore-system',
+    ]);
   });
 
   it('does not claim a workflow or mutate a setting after validation reports a stale callback', async () => {

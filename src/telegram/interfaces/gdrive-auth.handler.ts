@@ -215,6 +215,7 @@ export class GdriveAuthHandler implements TelegramHandler, WorkflowDraftCancelle
     // Role lookup and the filesystem writer remain separate async boundaries; making
     // role revocation and the write atomic requires a cross-context authorization redesign.
     try {
+      if (!await this.workflows.markRunning(ctx, state.receipt)) return;
       const quota = await this.updateGdriveAuth.execute(snippet);
       await this.complete(ctx, state, () => ctx.reply(this.catalog(ctx).gdriveAuth.success(gb(quota.usedBytes), gb(quota.totalBytes))));
     } catch (err) {

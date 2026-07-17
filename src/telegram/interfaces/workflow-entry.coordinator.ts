@@ -142,9 +142,10 @@ export class WorkflowEntryCoordinator {
 
   /**
    * Completes a workflow without a grammY context after process recovery.
-   * A claimed receipt is allowed one result-delivery attempt. If reopening
-   * its origin later fails, a resumable retry re-attempts only restoration;
-   * it never turns into the legacy broadcast path or sends the result twice.
+   * A claimed receipt only advances to restoration after successful result
+   * delivery. If reopening its origin later fails, a resumable retry
+   * re-attempts only restoration; it never turns into the legacy broadcast
+   * path or sends the result twice.
    */
   async completeHeadless(input: {
     identity: CurrentWorkflowIdentity;
@@ -176,13 +177,21 @@ export class WorkflowEntryCoordinator {
         await this.drafts.cancelExact(claim.receipt);
       }
       if (claim.kind === 'claimed') {
-        await input.deliver().catch(() => undefined);
+        try {
+          await input.deliver();
+        } catch {
+          return 'resumable';
+        }
       }
 
       // A user who returned while the restart ran already has a fresh Home.
       // Send the terminal result once, but do not replace that newer session.
       if (claim.kind === 'returned') {
-        await input.deliver().catch(() => undefined);
+        try {
+          await input.deliver();
+        } catch {
+          return 'resumable';
+        }
         const finish = await this.actions.finishWorkflowReturn({
           userId: identity.userId,
           chatId: identity.chatId,

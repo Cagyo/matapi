@@ -35,6 +35,7 @@ import { RoleMiddleware } from './role.middleware';
 import { TelegramContext, type LocaleState } from './telegram-context';
 import { TelegramHandler } from './telegram-handler';
 import { WorkflowEntryCoordinator, type WorkflowLaunch } from './workflow-entry.coordinator';
+import { WorkflowNavigationHandler } from './workflow-navigation.handler';
 
 type HomeEffectOutcome =
   | Extract<HomeNavigationResult, { kind: 'render' | 'restart' | 'recovery' }>
@@ -70,6 +71,7 @@ export class HomeHandler implements TelegramHandler {
     @Inject(HOME_ACTION_REPOSITORY) private readonly actions?: HomeActionRepositoryPort,
     @Inject(CLOCK) private readonly clock?: ClockPort,
     @Optional() @Inject(WorkflowEntryCoordinator) private readonly workflows?: WorkflowEntryCoordinator,
+    @Optional() private readonly workflowNavigation?: WorkflowNavigationHandler,
   ) {}
 
   register(composer: Composer<TelegramContext>): void {
@@ -208,7 +210,7 @@ export class HomeHandler implements TelegramHandler {
     const result = await this.navigation!.executeEffect(input);
     if (result.kind === 'recovery') return result;
     if (result.kind === 'restart') {
-      const status = await this.restartClaimed(ctx, input.active, input.action);
+      const status = await this.restartClaimed(ctx, input.active, input.view, input.action);
       return status === 'completed' ? result : status === 'handled' ? { kind: 'handled' } : { kind: 'unavailable' };
     }
     if (input.action.kind === 'confirm-cleanup' && result.view.kind === 'cleanup-result') {
@@ -241,13 +243,23 @@ export class HomeHandler implements TelegramHandler {
   private async restartClaimed(
     ctx: TelegramContext,
     active: Parameters<RenderHomeUseCase['execute']>[0]['active'],
+    view: HomeView,
     action: Extract<ReturnType<typeof parseHomeCallback>, { action: unknown }>['action'],
   ): Promise<'completed' | 'handled' | 'unavailable'> {
     if (action.kind !== 'confirm-restart' || !this.restart || !this.actions || !this.clock) return 'unavailable';
+    if (view.kind !== 'confirmation' || view.action !== 'restart' || view.receiptId !== action.receiptId) {
+      return 'unavailable';
+    }
+    let receipt: WorkflowLaunch['receipt'] | null = null;
     try {
-      const receipt = await this.workflows?.begin(ctx, 'system-restart', {
-        source: 'natural-parent',
-      });
+      receipt = await this.workflows?.begin(ctx, 'system-restart', {
+        source: 'captured',
+        // The accepted confirmation belongs to System. Keep its authoritative
+        // session token, but persist System as the return destination so a
+        // failed restart never reopens the already-consumed confirmation.
+        view: { kind: 'admin-system' },
+        sessionToken: active.token,
+      }) ?? null;
       if (!receipt || !await this.workflows?.markRunning(ctx, receipt)) return 'unavailable';
       await ctx.reply(ctx.localeState!.catalog.ota.restarting);
       await this.restart.execute();
@@ -255,7 +267,19 @@ export class HomeHandler implements TelegramHandler {
       return 'completed';
     } catch (error) {
       await this.actions.finishExternal({ action: { id: action.receiptId, userId: active.userId, chatId: active.chatId, kind: 'restart-confirmation' }, outcome: 'failed', now: this.clock.now() });
-      await ctx.reply(ctx.localeState!.catalog.ota.restartFailed(error instanceof Error ? error.message : 'unknown'));
+      const failure = ctx.localeState!.catalog.ota.restartFailed(error instanceof Error ? error.message : 'unknown');
+      if (receipt && this.workflowNavigation) {
+        await this.workflowNavigation.complete(ctx, { receipt }, {
+          effectStage: 'pending',
+          deliver: async () => { await ctx.reply(failure); },
+          failureNotice: ctx.localeState!.catalog.home.recovery.unavailable,
+        });
+      } else {
+        // Task 9 owns navigation registration. Until its provider is present,
+        // retain this running receipt for a safe later recovery instead of
+        // terminalizing it without restoring the captured Home origin.
+        await ctx.reply(failure);
+      }
       return 'handled';
     }
   }

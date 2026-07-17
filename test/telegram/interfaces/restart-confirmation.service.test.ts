@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { RestartConfirmationService } from '../../../src/telegram/interfaces/restart-confirmation.service';
 import { RESTART_REASON_KEY } from '../../../src/telegram/application/restart-system.use-case';
 import { en } from '../../../src/locales/en';
+import { catalogFor } from '../../../src/locales';
 import { SystemMetaRepositoryPort } from '../../../src/system/domain/ports/system-meta-repository.port';
 import { DirectMessengerPort } from '../../../src/telegram/domain/ports/direct-messenger.port';
 import { InMemoryUserRepository } from '../../../src/telegram/infrastructure/in-memory-user.repository';
@@ -175,6 +176,29 @@ describe('RestartConfirmationService', () => {
     }));
     expect(dm.send).not.toHaveBeenCalled();
     expect(await meta.get(RESTART_REASON_KEY)).toBeNull();
+  });
+
+  it('delivers a contextual restart result using the initiator current locale', async () => {
+    const meta = makeMeta({ [RESTART_REASON_KEY]: 'ota_update' });
+    const dm: DirectMessengerPort = { send: vi.fn().mockResolvedValue(undefined) };
+    const workflows = {
+      completeHeadless: vi.fn(async (input: { deliver(): Promise<void> }) => {
+        await input.deliver();
+        return 'completed' as const;
+      }),
+    } as unknown as WorkflowEntryCoordinator;
+    const restore = { execute: vi.fn().mockResolvedValue({ kind: 'opened' }) } as unknown as RestoreWorkflowOriginUseCase;
+    const service = new RestartConfirmationService(
+      meta,
+      new InMemoryUserRepository([{ ...user(7, 'Olena'), locale: 'uk' as const }]),
+      dm,
+      workflows,
+      restore,
+    );
+
+    await service.run();
+
+    expect(dm.send).toHaveBeenCalledWith(7, catalogFor('uk').ota.updateSuccess('unknown'));
   });
 
   it('does not fall back to broadcast when a contextual recovery remains resumable', async () => {

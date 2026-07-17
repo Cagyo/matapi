@@ -15,6 +15,7 @@ import {
 import { RESTART_REASON_KEY } from '../application/restart-system.use-case';
 import { RestoreWorkflowOriginUseCase } from '../application/restore-workflow-origin.use-case';
 import { catalogFor } from '../../locales';
+import type { LocaleCatalog } from '../../locales';
 import { WorkflowEntryCoordinator } from './workflow-entry.coordinator';
 
 const UPDATE_COMMIT_KEY = 'update_commit';
@@ -45,9 +46,9 @@ export class RestartConfirmationService {
     const reason = await this.meta.get(RESTART_REASON_KEY);
     if (!reason) return;
 
-    const message = await this.messageFor(reason);
+    const message = await this.messageFor(reason, en);
     if (message) {
-      const recovery = await this.completeContextualRestart(message);
+      const recovery = await this.completeContextualRestart(reason);
       if (recovery === 'resumable') return;
       if (recovery === 'no-workflow') await this.broadcastToAdmins(message);
     }
@@ -59,10 +60,13 @@ export class RestartConfirmationService {
   }
 
   private async completeContextualRestart(
-    message: string,
+    reason: string,
   ): Promise<'completed' | 'resumable' | 'no-workflow'> {
     const recipients = await this.users.listRecipients();
     for (const user of recipients) {
+      const catalog = catalogFor(user.locale);
+      const message = await this.messageFor(reason, catalog);
+      if (!message) return 'no-workflow';
       const result = await this.workflows.completeHeadless({
         identity: {
           userId: user.telegramId,
@@ -72,7 +76,7 @@ export class RestartConfirmationService {
           chatId: user.telegramId,
           locale: user.locale,
           role: user.role,
-          catalog: catalogFor(user.locale),
+          catalog,
         },
         workflow: 'system-restart',
         deliver: () => this.dm.send(user.telegramId, message),
@@ -94,22 +98,22 @@ export class RestartConfirmationService {
     return 'no-workflow';
   }
 
-  private async messageFor(reason: string): Promise<string | null> {
+  private async messageFor(reason: string, catalog: LocaleCatalog): Promise<string | null> {
     switch (reason) {
       case 'user_command':
-        return en.ota.restartComplete;
+        return catalog.ota.restartComplete;
       case 'ota_update': {
         const commit = (await this.meta.get(UPDATE_COMMIT_KEY)) ?? 'unknown';
-        return en.ota.updateSuccess(this.shortCommit(commit));
+        return catalog.ota.updateSuccess(this.shortCommit(commit));
       }
       case 'ota_update_failed':
-        return en.ota.updateFailed;
+        return catalog.ota.updateFailed;
       case 'rollback': {
         const commit = (await this.meta.get(ROLLBACK_COMMIT_KEY)) ?? 'unknown';
-        return en.ota.rollbackSuccess(this.shortCommit(commit));
+        return catalog.ota.rollbackSuccess(this.shortCommit(commit));
       }
       case 'rollback_failed':
-        return en.ota.rollbackFailed('see worker logs');
+        return catalog.ota.rollbackFailed('see worker logs');
       default:
         this.logger.warn(`Unknown restart_reason: ${reason}`);
         return null;

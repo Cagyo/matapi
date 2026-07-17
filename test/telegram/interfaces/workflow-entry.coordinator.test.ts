@@ -235,4 +235,46 @@ describe('WorkflowEntryCoordinator', () => {
       outcome: 'completed',
     }));
   });
+
+  it('keeps a recovered restart resumable when terminal result delivery fails', async () => {
+    const restartReceipt = {
+      ...receipt,
+      payload: { ...receipt.payload, workflow: 'system-restart' as const, phase: 'running' as const },
+    } satisfies WorkflowReturnReceipt;
+    const actions = {
+      findWorkflowReturn: vi.fn().mockResolvedValue(restartReceipt),
+      claimWorkflowReturn: vi.fn().mockResolvedValue({
+        kind: 'claimed',
+        receipt: { ...restartReceipt, status: 'executing' as const },
+      }),
+      finishWorkflowReturn: vi.fn().mockResolvedValue('finished'),
+    };
+    const coordinator = new WorkflowEntryCoordinator(
+      { execute: vi.fn() } as unknown as BeginWorkflowReturnUseCase,
+      new WorkflowDraftRegistry(),
+      new WorkflowOperationQueue(),
+      actions as never,
+      { now: () => new Date('2030-01-01T00:00:00.000Z') },
+    );
+    const identity = {
+      userId: 7,
+      chatId: 70,
+      locale: 'en' as const,
+      role: 'admin' as const,
+      catalog: catalogFor('en'),
+    };
+    const deliver = vi.fn().mockRejectedValue(new Error('Telegram unavailable'));
+    const restore = vi.fn().mockResolvedValue(true);
+
+    await expect(coordinator.completeHeadless({
+      identity,
+      workflow: 'system-restart',
+      deliver,
+      restore,
+    })).resolves.toBe('resumable');
+
+    expect(deliver).toHaveBeenCalledOnce();
+    expect(restore).not.toHaveBeenCalled();
+    expect(actions.finishWorkflowReturn).not.toHaveBeenCalled();
+  });
 });

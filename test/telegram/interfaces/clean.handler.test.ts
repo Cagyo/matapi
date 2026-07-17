@@ -11,7 +11,10 @@ const receipt = {
 function setup() {
   const events: string[] = [];
   const clean = { execute: vi.fn().mockResolvedValue({ executed: true, thresholdUsed: 80 }) };
-  const workflows = { begin: vi.fn().mockResolvedValue(receipt) };
+  const workflows = {
+    begin: vi.fn().mockResolvedValue(receipt),
+    markRunning: vi.fn().mockResolvedValue(true),
+  };
   const navigation = { complete: vi.fn(async (_ctx, _launch, presentation) => {
     await presentation.deliver(); events.push('restore');
   }) };
@@ -46,5 +49,22 @@ describe('CleanHandler contextual workflow', () => {
     expect(workflows.begin).not.toHaveBeenCalled();
     expect(clean.execute).not.toHaveBeenCalled();
     expect(navigation.complete).toHaveBeenCalledOnce();
+  });
+
+  it('marks the cleanup receipt running before starting the irreversible cleanup', async () => {
+    const { commands, clean, workflows, ctx } = setup();
+    const events: string[] = [];
+    (workflows as { markRunning?: ReturnType<typeof vi.fn> }).markRunning = vi.fn(async () => {
+      events.push('mark-running');
+      return true;
+    });
+    clean.execute.mockImplementation(async () => {
+      events.push('cleanup');
+      return { executed: true, thresholdUsed: 80 };
+    });
+
+    await commands.clean(ctx);
+
+    expect(events).toEqual(['mark-running', 'cleanup']);
   });
 });

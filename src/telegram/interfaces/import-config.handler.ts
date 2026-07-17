@@ -258,6 +258,7 @@ export class ImportConfigHandler implements TelegramHandler, WorkflowDraftCancel
       const claimedState = state;
       // Claim local state before any async work so a duplicate Apply callback
       // cannot start a second import while authorization is in flight.
+      if (!await this.workflows.markRunning(ctx, claimedState.receipt)) return;
       await this.cancelExact({
         userId: claimedState.userId,
         chatId: claimedState.chatId,
