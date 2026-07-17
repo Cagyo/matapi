@@ -187,10 +187,19 @@ export class WorkflowEntryCoordinator {
       let deliveryStage = receipt.payload.deliveryStage ?? 'pending';
 
       // A user who returned while the restart ran already has a fresh Home.
-      // Do not replace that newer session or attempt a previously unrecorded
-      // delivery; only a durably confirmed outcome may finish this receipt.
+      // Make at most one newly recorded direct attempt, but never replace that
+      // newer session with a recovery Home. Once an attempt is recorded, the
+      // receipt can finish without retaining restart metadata indefinitely.
       if (claim.kind === 'returned') {
-        if (deliveryStage !== 'delivered') return 'resumable';
+        if (deliveryStage === 'pending') {
+          if (!await this.persistDeliveryStage(identity, receipt, 'direct-attempted')) return 'resumable';
+          try {
+            await input.deliver();
+            await this.persistDeliveryStage(identity, receipt, 'delivered');
+          } catch {
+            // The durable direct-attempt marker prevents a second DM.
+          }
+        }
         const finish = await this.actions.finishWorkflowReturn({
           userId: identity.userId,
           chatId: identity.chatId,
@@ -204,27 +213,29 @@ export class WorkflowEntryCoordinator {
       if (deliveryStage === 'pending') {
         if (!await this.persistDeliveryStage(identity, receipt, 'direct-attempted')) return 'resumable';
         deliveryStage = 'direct-attempted';
-        let delivered = false;
+        let directDeliveryFailed = false;
         try {
           await input.deliver();
-          delivered = true;
         } catch {
-          // The result may still have reached Telegram; do not send it again.
+          directDeliveryFailed = true;
         }
-        if (delivered && await this.persistDeliveryStage(identity, receipt, 'delivered')) {
+        if (!directDeliveryFailed && await this.persistDeliveryStage(identity, receipt, 'delivered')) {
           deliveryStage = 'delivered';
+        }
+
+        if (directDeliveryFailed) {
+          return this.restoreWithNotice(identity, receipt, input);
         }
       }
 
       if (claim.kind !== 'claimed' && claim.kind !== 'resumable') return 'no-workflow';
 
-      if (deliveryStage === 'direct-attempted' || deliveryStage === 'needs-notice') {
-        if (!input.recoveryNotice) return 'resumable';
-        if (!await this.persistDeliveryStage(identity, receipt, 'notice-attempted')) return 'resumable';
-        if (!await input.restore(receipt, input.recoveryNotice)) return 'resumable';
+      if (deliveryStage === 'needs-notice') {
+        return this.restoreWithNotice(identity, receipt, input);
+      }
+      if (deliveryStage === 'direct-attempted' || deliveryStage === 'notice-attempted') {
+        if (!await input.restore(receipt, undefined)) return 'resumable';
         if (!await this.persistDeliveryStage(identity, receipt, 'delivered')) return 'resumable';
-      } else if (deliveryStage === 'notice-attempted') {
-        return 'resumable';
       } else if (!await input.restore(receipt, undefined)) {
         return 'resumable';
       }
@@ -237,6 +248,25 @@ export class WorkflowEntryCoordinator {
       });
       return finish === 'finished' ? 'completed' : 'resumable';
     });
+  }
+
+  private async restoreWithNotice(
+    identity: CurrentWorkflowIdentity,
+    receipt: WorkflowReturnReceipt,
+    input: Pick<Parameters<WorkflowEntryCoordinator['completeHeadless']>[0], 'restore' | 'recoveryNotice'>,
+  ): Promise<HeadlessWorkflowCompletionResult> {
+    if (!input.recoveryNotice) return 'resumable';
+    if (!await this.persistDeliveryStage(identity, receipt, 'notice-attempted')) return 'resumable';
+    if (!await input.restore(receipt, input.recoveryNotice)) return 'resumable';
+    if (!await this.persistDeliveryStage(identity, receipt, 'delivered')) return 'resumable';
+    const finish = await this.actions.finishWorkflowReturn({
+      userId: identity.userId,
+      chatId: identity.chatId,
+      id: receipt.id,
+      outcome: 'completed',
+      now: this.clock.now(),
+    });
+    return finish === 'finished' ? 'completed' : 'resumable';
   }
 
   private async persistDeliveryStage(
