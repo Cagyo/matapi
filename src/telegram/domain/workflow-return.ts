@@ -15,8 +15,15 @@ export type WorkflowDeliveryStage =
   /** The direct result send was rejected; an outcome notice is still required. */
   | 'direct-failed'
   | 'notice-attempted'
-  /** A silent Home restoration began after an unconfirmed direct result. */
+  /** The direct result is durably known before Home restoration starts. */
+  | 'direct-delivered'
+  /** The outcome notice was durably rendered in the restored Home. */
+  | 'notice-delivered'
+  /** A silent Home restoration began after a known direct result. */
   | 'restore-attempted'
+  /** The silent Home restoration is durably known before receipt completion. */
+  | 'restored'
+  /** Legacy generic acknowledgement stage. */
   | 'delivered'
   /** Legacy stage written before notice attempts were recorded durably. */
   | 'needs-notice';
@@ -59,8 +66,9 @@ export function isWorkflowReturnPhase(value: unknown): value is WorkflowReturnPh
 
 export function isWorkflowDeliveryStage(value: unknown): value is WorkflowDeliveryStage {
   return value === 'pending' || value === 'direct-attempted' || value === 'direct-failed'
-    || value === 'notice-attempted' || value === 'restore-attempted' || value === 'delivered'
-    || value === 'needs-notice';
+    || value === 'notice-attempted' || value === 'direct-delivered'
+    || value === 'notice-delivered' || value === 'restore-attempted'
+    || value === 'restored' || value === 'delivered' || value === 'needs-notice';
 }
 
 export function canTransitionWorkflowDeliveryStage(
@@ -69,10 +77,12 @@ export function canTransitionWorkflowDeliveryStage(
 ): boolean {
   return (from === 'pending' && to === 'direct-attempted')
     || (from === 'direct-attempted' && (
-      to === 'delivered' || to === 'direct-failed' || to === 'restore-attempted'
+      to === 'direct-delivered' || to === 'direct-failed' || to === 'restore-attempted'
     ))
-    || (from === 'direct-failed' && to === 'notice-attempted')
-    || (from === 'needs-notice' && to === 'notice-attempted')
-    || (from === 'notice-attempted' && to === 'delivered')
-    || (from === 'restore-attempted' && to === 'delivered');
+    || (from === 'direct-failed' && (to === 'notice-attempted' || to === 'direct-attempted'))
+    || (from === 'needs-notice' && (to === 'notice-attempted' || to === 'direct-attempted'))
+    || (from === 'notice-attempted' && (to === 'notice-delivered' || to === 'direct-attempted'))
+    || (from === 'direct-delivered' && to === 'restore-attempted')
+    || (from === 'delivered' && to === 'restore-attempted')
+    || (from === 'restore-attempted' && (to === 'restored' || to === 'direct-attempted'));
 }

@@ -51,7 +51,7 @@ interface WorkflowDeliveryStageUpdater {
     userId: number;
     chatId: number;
     id: string;
-    stage: 'direct-attempted' | 'direct-failed' | 'notice-attempted' | 'restore-attempted' | 'delivered' | 'needs-notice';
+    stage: 'direct-attempted' | 'direct-failed' | 'notice-attempted' | 'direct-delivered' | 'notice-delivered' | 'restore-attempted' | 'restored' | 'delivered' | 'needs-notice';
     now: Date;
   }) => Promise<'updated' | 'expired' | 'superseded' | 'terminal'>;
 }
@@ -261,14 +261,14 @@ function describeWorkflowReturnRepositoryContract(
         userId: 100, chatId: 200, id: pending.id, stage: 'notice-attempted', now: NOW,
       })).resolves.toBe('updated');
       await expect(updateStage({
-        userId: 100, chatId: 200, id: pending.id, stage: 'delivered', now: NOW,
+        userId: 100, chatId: 200, id: pending.id, stage: 'notice-delivered', now: NOW,
       })).resolves.toBe('updated');
       await expect(updateStage({
         userId: 100, chatId: 200, id: pending.id, stage: 'notice-attempted', now: NOW,
       })).resolves.toBe('terminal');
     });
 
-    it('records silent Home restoration separately after an unconfirmed direct result', async () => {
+    it('records the direct result and restored Home as separate durable effects', async () => {
       const pending = workflowReceipt();
       await harness.repository.beginWorkflowReturn(pending);
       await harness.repository.claimWorkflowReturn({ userId: 100, chatId: 200, id: pending.id, now: NOW });
@@ -283,10 +283,13 @@ function describeWorkflowReturnRepositoryContract(
         userId: 100, chatId: 200, id: pending.id, stage: 'direct-attempted', now: NOW,
       })).resolves.toBe('updated');
       await expect(updateStage({
+        userId: 100, chatId: 200, id: pending.id, stage: 'direct-delivered', now: NOW,
+      })).resolves.toBe('updated');
+      await expect(updateStage({
         userId: 100, chatId: 200, id: pending.id, stage: 'restore-attempted', now: NOW,
       })).resolves.toBe('updated');
       await expect(updateStage({
-        userId: 100, chatId: 200, id: pending.id, stage: 'delivered', now: NOW,
+        userId: 100, chatId: 200, id: pending.id, stage: 'restored', now: NOW,
       })).resolves.toBe('updated');
     });
 

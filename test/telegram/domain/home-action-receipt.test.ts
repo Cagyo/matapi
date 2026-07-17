@@ -51,7 +51,10 @@ describe('Workflow return receipt validation', () => {
     'direct-attempted',
     'direct-failed',
     'notice-attempted',
+    'direct-delivered',
+    'notice-delivered',
     'restore-attempted',
+    'restored',
     'delivered',
     'needs-notice',
   ] as const)(

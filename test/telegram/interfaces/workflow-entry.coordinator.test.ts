@@ -220,15 +220,15 @@ describe('WorkflowEntryCoordinator', () => {
         deliveryStage: 'pending',
       },
     } as unknown as WorkflowReturnReceipt;
-    const deliveredRestartReceipt = {
+    const restoreAttemptedRestartReceipt = {
       ...pendingRestartReceipt,
-      payload: { ...pendingRestartReceipt.payload, deliveryStage: 'delivered' },
+      payload: { ...pendingRestartReceipt.payload, deliveryStage: 'restore-attempted' },
     } as unknown as WorkflowReturnReceipt;
     const actions = {
       findWorkflowReturn: vi.fn().mockResolvedValue(pendingRestartReceipt),
       claimWorkflowReturn: vi.fn()
         .mockResolvedValueOnce({ kind: 'claimed', receipt: { ...pendingRestartReceipt, status: 'executing' as const } })
-        .mockResolvedValueOnce({ kind: 'resumable', receipt: { ...deliveredRestartReceipt, status: 'executing' as const } }),
+        .mockResolvedValueOnce({ kind: 'resumable', receipt: { ...restoreAttemptedRestartReceipt, status: 'executing' as const } }),
       updateWorkflowReturnDeliveryStage: vi.fn().mockResolvedValue('updated'),
       finishWorkflowReturn: vi.fn().mockResolvedValue('finished'),
     };
@@ -272,7 +272,7 @@ describe('WorkflowEntryCoordinator', () => {
     expect(deliver).toHaveBeenCalledOnce();
     expect(actions.updateWorkflowReturnDeliveryStage).toHaveBeenCalledWith(expect.objectContaining({
       id: pendingRestartReceipt.id,
-      stage: 'delivered',
+      stage: 'direct-delivered',
     }));
     expect(restore).toHaveBeenCalledTimes(2);
     expect(actions.finishWorkflowReturn).toHaveBeenCalledWith(expect.objectContaining({
@@ -363,7 +363,7 @@ describe('WorkflowEntryCoordinator', () => {
     }));
     expect(actions.updateWorkflowReturnDeliveryStage).toHaveBeenLastCalledWith(expect.objectContaining({
       id: noticeRestartReceipt.id,
-      stage: 'delivered',
+      stage: 'notice-delivered',
     }));
     expect(restore).toHaveBeenCalledOnce();
     expect(restore).toHaveBeenCalledWith(expect.objectContaining({ id: noticeRestartReceipt.id }), recoveryNotice);
@@ -413,7 +413,7 @@ describe('WorkflowEntryCoordinator', () => {
     expect(deliver).toHaveBeenCalledOnce();
     expect(actions.updateWorkflowReturnDeliveryStage).toHaveBeenCalledWith(expect.objectContaining({
       id: legacyRestartReceipt.id,
-      stage: 'delivered',
+      stage: 'direct-delivered',
     }));
     expect(restore).toHaveBeenCalledWith(expect.objectContaining({ id: legacyRestartReceipt.id }), undefined);
   });
@@ -467,7 +467,7 @@ describe('WorkflowEntryCoordinator', () => {
     }));
   });
 
-  it('keeps a returned receipt resumable when its direct delivery was rejected', async () => {
+  it('retries a legacy returned failed delivery as a result-only direct message', async () => {
     const noticeRestartReceipt = {
       ...receipt,
       status: 'returned' as const,
@@ -507,11 +507,14 @@ describe('WorkflowEntryCoordinator', () => {
       deliver,
       restore,
       recoveryNotice: catalogFor('en').ota.restartComplete,
-    })).resolves.toBe('resumable');
+    })).resolves.toBe('completed');
 
-    expect(deliver).not.toHaveBeenCalled();
+    expect(deliver).toHaveBeenCalledOnce();
     expect(restore).not.toHaveBeenCalled();
-    expect(actions.finishWorkflowReturn).not.toHaveBeenCalled();
+    expect(actions.updateWorkflowReturnDeliveryStage).toHaveBeenCalledWith(expect.objectContaining({
+      stage: 'direct-attempted',
+    }));
+    expect(actions.finishWorkflowReturn).toHaveBeenCalledOnce();
   });
 
   it('does not send, restore, or finish before a direct attempt can be persisted', async () => {
@@ -624,26 +627,22 @@ describe('WorkflowEntryCoordinator', () => {
       'direct-failed',
       'notice-attempted',
       'notice-send',
-      'delivered',
+      'notice-delivered',
     ]);
   });
 
-  it('restores Home once after a direct acknowledgement write fails', async () => {
+  it('finishes a known direct result without duplicate delivery when its stage acknowledgement fails', async () => {
     const pending = restartReceipt('pending');
-    const directAttempted = restartReceipt('direct-attempted', 'executing');
-    const restoreAttempted = restartReceipt('restore-attempted', 'executing');
     const actions = {
       findWorkflowReturn: vi.fn().mockResolvedValue(pending),
-      claimWorkflowReturn: vi.fn()
-        .mockResolvedValueOnce({ kind: 'claimed', receipt: { ...pending, status: 'executing' as const } })
-        .mockResolvedValueOnce({ kind: 'resumable', receipt: directAttempted })
-        .mockResolvedValueOnce({ kind: 'resumable', receipt: restoreAttempted }),
+      claimWorkflowReturn: vi.fn().mockResolvedValue({
+        kind: 'claimed', receipt: { ...pending, status: 'executing' as const },
+      }),
       updateWorkflowReturnDeliveryStage: vi.fn()
         .mockResolvedValueOnce('updated')
         .mockResolvedValueOnce('superseded')
         .mockResolvedValueOnce('updated')
-        .mockResolvedValueOnce('superseded')
-        .mockResolvedValueOnce('updated'),
+        .mockResolvedValueOnce('superseded'),
       finishWorkflowReturn: vi.fn().mockResolvedValue('finished'),
     };
     const deliver = vi.fn().mockResolvedValue(undefined);
@@ -661,9 +660,6 @@ describe('WorkflowEntryCoordinator', () => {
     };
     const coordinator = recoveryCoordinator(actions);
 
-    await expect(coordinator.completeHeadless(input)).resolves.toBe('resumable');
-    expect(restore).not.toHaveBeenCalled();
-    await expect(coordinator.completeHeadless(input)).resolves.toBe('resumable');
     await expect(coordinator.completeHeadless(input)).resolves.toBe('completed');
 
     expect(deliver).toHaveBeenCalledOnce();
@@ -671,20 +667,50 @@ describe('WorkflowEntryCoordinator', () => {
     expect(actions.finishWorkflowReturn).toHaveBeenCalledOnce();
   });
 
-  it('retries the outcome notice after its acknowledgement write fails', async () => {
+  it('retries a non-returned direct attempt after a crash before its effect', async () => {
+    const directAttempted = restartReceipt('direct-attempted', 'executing');
+    const actions = {
+      findWorkflowReturn: vi.fn().mockResolvedValue(directAttempted),
+      claimWorkflowReturn: vi.fn().mockResolvedValue({ kind: 'resumable', receipt: directAttempted }),
+      updateWorkflowReturnDeliveryStage: vi.fn().mockResolvedValue('updated'),
+      finishWorkflowReturn: vi.fn().mockResolvedValue('finished'),
+    };
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const restore = vi.fn().mockResolvedValue(true);
+
+    await expect(recoveryCoordinator(actions).completeHeadless({
+      identity: recoveryIdentity,
+      workflow: 'system-restart',
+      deliver,
+      restore,
+      recoveryNotice: catalogFor('en').ota.restartComplete,
+    })).resolves.toBe('completed');
+
+    expect(deliver).toHaveBeenCalledOnce();
+    expect(restore).toHaveBeenCalledWith(directAttempted, undefined);
+    expect(actions.updateWorkflowReturnDeliveryStage).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      stage: 'direct-delivered',
+    }));
+    expect(actions.updateWorkflowReturnDeliveryStage).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      stage: 'restore-attempted',
+    }));
+    expect(actions.updateWorkflowReturnDeliveryStage).toHaveBeenNthCalledWith(3, expect.objectContaining({
+      stage: 'restored',
+    }));
+  });
+
+  it('finishes a known outcome notice without rendering it a second time when its acknowledgement fails', async () => {
     const pending = restartReceipt('pending');
-    const noticeAttempted = restartReceipt('notice-attempted', 'executing');
     const actions = {
       findWorkflowReturn: vi.fn().mockResolvedValue(pending),
-      claimWorkflowReturn: vi.fn()
-        .mockResolvedValueOnce({ kind: 'claimed', receipt: { ...pending, status: 'executing' as const } })
-        .mockResolvedValueOnce({ kind: 'resumable', receipt: noticeAttempted }),
+      claimWorkflowReturn: vi.fn().mockResolvedValue({
+        kind: 'claimed', receipt: { ...pending, status: 'executing' as const },
+      }),
       updateWorkflowReturnDeliveryStage: vi.fn()
         .mockResolvedValueOnce('updated')
         .mockResolvedValueOnce('updated')
         .mockResolvedValueOnce('updated')
-        .mockResolvedValueOnce('superseded')
-        .mockResolvedValueOnce('updated'),
+        .mockResolvedValueOnce('superseded'),
       finishWorkflowReturn: vi.fn().mockResolvedValue('finished'),
     };
     const deliver = vi.fn().mockRejectedValue(new Error('Telegram unavailable'));
@@ -702,14 +728,10 @@ describe('WorkflowEntryCoordinator', () => {
     };
     const coordinator = recoveryCoordinator(actions);
 
-    await expect(coordinator.completeHeadless(input)).resolves.toBe('resumable');
     await expect(coordinator.completeHeadless(input)).resolves.toBe('completed');
 
     expect(deliver).toHaveBeenCalledOnce();
-    expect(restoredNotices).toEqual([
-      catalogFor('en').ota.restartComplete,
-      catalogFor('en').ota.restartComplete,
-    ]);
+    expect(restoredNotices).toEqual([catalogFor('en').ota.restartComplete]);
     expect(actions.finishWorkflowReturn).toHaveBeenCalledOnce();
   });
 
@@ -776,27 +798,43 @@ describe('WorkflowEntryCoordinator', () => {
 
     expect(restore).toHaveBeenNthCalledWith(1, noticeAttempted, catalogFor('en').ota.restartComplete);
     expect(restore).toHaveBeenNthCalledWith(2, noticeAttempted, catalogFor('en').ota.restartComplete);
+    expect(actions.updateWorkflowReturnDeliveryStage).toHaveBeenCalledWith(expect.objectContaining({
+      stage: 'notice-delivered',
+    }));
     expect(actions.finishWorkflowReturn).toHaveBeenCalledOnce();
   });
 
-  it('keeps a returned receipt resumable after its direct send is rejected', async () => {
+  it('retries a rejected returned direct result without replacing Home', async () => {
     const pending = restartReceipt('pending', 'returned');
+    const directFailed = restartReceipt('direct-failed', 'returned');
     const actions = {
       findWorkflowReturn: vi.fn().mockResolvedValue(pending),
-      claimWorkflowReturn: vi.fn().mockResolvedValue({ kind: 'returned', receipt: pending }),
+      claimWorkflowReturn: vi.fn()
+        .mockResolvedValueOnce({ kind: 'returned', receipt: pending })
+        .mockResolvedValueOnce({ kind: 'returned', receipt: directFailed }),
       updateWorkflowReturnDeliveryStage: vi.fn().mockResolvedValue('updated'),
       finishWorkflowReturn: vi.fn().mockResolvedValue('finished'),
     };
-    const deliver = vi.fn().mockRejectedValue(new Error('Telegram unavailable'));
+    const deliver = vi.fn()
+      .mockRejectedValueOnce(new Error('Telegram unavailable'))
+      .mockResolvedValueOnce(undefined);
     const restore = vi.fn().mockResolvedValue(true);
+    const coordinator = recoveryCoordinator(actions);
 
-    await expect(recoveryCoordinator(actions).completeHeadless({
+    await expect(coordinator.completeHeadless({
       identity: recoveryIdentity,
       workflow: 'system-restart',
       deliver,
       restore,
       recoveryNotice: catalogFor('en').ota.restartComplete,
     })).resolves.toBe('resumable');
+    await expect(coordinator.completeHeadless({
+      identity: recoveryIdentity,
+      workflow: 'system-restart',
+      deliver,
+      restore,
+      recoveryNotice: catalogFor('en').ota.restartComplete,
+    })).resolves.toBe('completed');
 
     expect(actions.updateWorkflowReturnDeliveryStage).toHaveBeenNthCalledWith(1, expect.objectContaining({
       stage: 'direct-attempted',
@@ -804,11 +842,12 @@ describe('WorkflowEntryCoordinator', () => {
     expect(actions.updateWorkflowReturnDeliveryStage).toHaveBeenNthCalledWith(2, expect.objectContaining({
       stage: 'direct-failed',
     }));
+    expect(deliver).toHaveBeenCalledTimes(2);
     expect(restore).not.toHaveBeenCalled();
-    expect(actions.finishWorkflowReturn).not.toHaveBeenCalled();
+    expect(actions.finishWorkflowReturn).toHaveBeenCalledOnce();
   });
 
-  it('keeps a returned receipt resumable after direct delivery acknowledgement is ambiguous', async () => {
+  it('uses terminal completion to acknowledge a known returned direct result', async () => {
     const pending = restartReceipt('pending', 'returned');
     const actions = {
       findWorkflowReturn: vi.fn().mockResolvedValue(pending),
@@ -827,13 +866,13 @@ describe('WorkflowEntryCoordinator', () => {
       deliver,
       restore,
       recoveryNotice: catalogFor('en').ota.restartComplete,
-    })).resolves.toBe('resumable');
+    })).resolves.toBe('completed');
 
     expect(restore).not.toHaveBeenCalled();
-    expect(actions.finishWorkflowReturn).not.toHaveBeenCalled();
+    expect(actions.finishWorkflowReturn).toHaveBeenCalledOnce();
   });
 
-  it('keeps a returned unconfirmed direct attempt resumable without replacing Home', async () => {
+  it('retries a returned direct attempt after a crash before its effect', async () => {
     const directAttempted = restartReceipt('direct-attempted', 'returned');
     const actions = {
       findWorkflowReturn: vi.fn().mockResolvedValue(directAttempted),
@@ -850,11 +889,11 @@ describe('WorkflowEntryCoordinator', () => {
       deliver,
       restore,
       recoveryNotice: catalogFor('en').ota.restartComplete,
-    })).resolves.toBe('resumable');
+    })).resolves.toBe('completed');
 
-    expect(deliver).not.toHaveBeenCalled();
+    expect(deliver).toHaveBeenCalledOnce();
     expect(restore).not.toHaveBeenCalled();
-    expect(actions.finishWorkflowReturn).not.toHaveBeenCalled();
+    expect(actions.finishWorkflowReturn).toHaveBeenCalledOnce();
   });
 
   it.each([
