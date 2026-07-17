@@ -540,21 +540,23 @@ export class CameraHandler implements TelegramHandler {
             telegramId,
             cameraName: reference,
           });
-    await this.complete(ctx, receipt, async () => {
-      const sent = await ctx.reply(live.opened(Math.max(1, Math.ceil(opened.remainingMs / 60_000))), {
-        reply_markup: new InlineKeyboard().url(live.watchButton, opened.watchUrl),
-      });
-      try {
-        await opened.registerMessageReference({
-          chatId,
-          messageId: sent.message_id,
-        });
-      } catch {
-        await ctx.api.deleteMessage(chatId, sent.message_id).catch(() => undefined);
-        await this.liveStreamSessions.revokeUser(telegramId).catch(() => this.stopLiveStream.execute(telegramId));
-        throw new Error('live message registration failed');
-      }
+    // A live session is external running work, not a terminal result. Keep
+    // this receipt in `running` so Return Home cannot revoke the stream; the
+    // eventual Home transition merely records `returned` and the watch link
+    // remains usable until its own session cleanup expires it.
+    const sent = await ctx.reply(live.opened(Math.max(1, Math.ceil(opened.remainingMs / 60_000))), {
+      reply_markup: this.withHome(receipt, new InlineKeyboard().url(live.watchButton, opened.watchUrl)),
     });
+    try {
+      await opened.registerMessageReference({
+        chatId,
+        messageId: sent.message_id,
+      });
+    } catch {
+      await ctx.api.deleteMessage(chatId, sent.message_id).catch(() => undefined);
+      await this.liveStreamSessions.revokeUser(telegramId).catch(() => this.stopLiveStream.execute(telegramId));
+      throw new Error('live message registration failed');
+    }
   }
   private async handleStopLive(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<void> {
     const id = ctx.from?.id;

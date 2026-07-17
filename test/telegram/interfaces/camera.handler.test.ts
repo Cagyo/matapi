@@ -184,8 +184,8 @@ describe('camera contextual callbacks', () => {
     expect(snapshot.execute).not.toHaveBeenCalled();
   });
 
-  it('marks live-stream work running, keeps Return Home available, and sends a result through completion', async () => {
-    const { callback, handler, navigation, workflows } = setup();
+  it('marks live-stream work running and keeps the opened watch link in the leave-running workflow', async () => {
+    const { callback, handler, navigation, open, workflows } = setup();
     const dashboard = context();
     await handler.handleDashboard(dashboard as never, { receipt });
     const live = context({ data: 'cam:abcdefghijklmnop:l' });
@@ -194,11 +194,8 @@ describe('camera contextual callbacks', () => {
 
     expect(workflows.markRunning).toHaveBeenCalledWith(live, receipt);
     expect(callbacks(live)).toContain('wr:abcdefghijklmnop:o');
-    expect(navigation.complete).toHaveBeenCalledWith(
-      live,
-      { receipt },
-      expect.objectContaining({ effectStage: 'pending' }),
-    );
+    expect(navigation.complete).not.toHaveBeenCalled();
+    expect(open.execute).toHaveBeenCalledWith({ telegramId: 7, cameraName: undefined });
   });
 
   it('routes receipt-bound source actions only after validation', async () => {
