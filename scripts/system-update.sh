@@ -4,14 +4,46 @@
 #
 # Sequence: snapshot current state -> apt upgrade (curated set) ->
 # rclone selfupdate -> print manual Node update instructions -> health check.
-# On health-check failure, notify the admin via a direct curl to the
-# Telegram API (the worker may be down) and exit non-zero.
-set -euo pipefail
+# Any failure records a terminal outcome, restarts the worker for receipt
+# recovery, then uses direct curl as a notification fallback.
+set -Eeuo pipefail
 
 INSTALL_DIR="${HOME_WORKER_INSTALL_DIR:-/opt/home-worker}"
 DEPS_FILE="${INSTALL_DIR}/config/system-deps.yml"
 SNAPSHOT="${INSTALL_DIR}/data/system-snapshot.txt"
 APT_LOCK_TIMEOUT_SECONDS=300
+
+configured_database_path() {
+  if [[ -n "${DATABASE_PATH:-}" ]]; then
+    printf '%s\n' "$DATABASE_PATH"
+    return
+  fi
+
+  local configured_path
+  configured_path="$(
+    sed -n -E 's/^[[:space:]]*DATABASE_PATH[[:space:]]*=[[:space:]]*//p' "$INSTALL_DIR/.env" 2>/dev/null |
+      tail -n 1 |
+      sed -E 's/[[:space:]]*$//' || true
+  )"
+
+  printf '%s\n' "${configured_path:-$INSTALL_DIR/data/worker.db}"
+}
+
+DB_PATH="$(configured_database_path)"
+
+# Record the terminal outcome before the final restart so the new process can
+# complete the exact running system-update receipt after its health check.
+write_meta() {
+  local key="$1"
+  local value="$2"
+  if command -v sqlite3 >/dev/null 2>&1; then
+    local esc_key=${key//"'"/"''"}
+    local esc_value=${value//"'"/"''"}
+    sqlite3 "$DB_PATH" "INSERT INTO system_meta(key, value) VALUES('$esc_key', '$esc_value') ON CONFLICT(key) DO UPDATE SET value=excluded.value;"
+  else
+    KEY="$key" VAL="$value" DBP="$DB_PATH" INST="$INSTALL_DIR" node -e "const Database=require(process.env.INST+'/node_modules/better-sqlite3');const db=new Database(process.env.DBP);db.prepare('INSERT INTO system_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(process.env.KEY,process.env.VAL);db.close();"
+  fi
+}
 
 apt_get() {
   sudo apt-get -o "DPkg::Lock::Timeout=${APT_LOCK_TIMEOUT_SECONDS}" "$@"
@@ -62,10 +94,23 @@ notify_failure() {
   if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${ADMIN_TELEGRAM_ID:-}" ]; then
     curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
       -d "chat_id=${ADMIN_TELEGRAM_ID}" \
-      -d "text=⚠️ System update failed health check. SSH in to investigate." \
+      -d "text=⚠️ System update failed. SSH in to investigate." \
       >/dev/null || true
   fi
 }
+
+report_failure() {
+  local exit_code="${1:-1}"
+  trap - ERR
+  echo "System update failed"
+  if write_meta "restart_reason" "system_update_failed" && pm2 restart worker; then
+    exit "$exit_code"
+  fi
+  notify_failure
+  exit "$exit_code"
+}
+
+trap 'report_failure $?' ERR
 
 main() {
   snapshot_current
@@ -75,10 +120,11 @@ main() {
 
   if ! health_check; then
     echo "Health check failed"
-    notify_failure
-    exit 1
+    report_failure 1
   fi
 
+  write_meta "restart_reason" "system_update"
+  pm2 restart worker
   echo "System update complete"
 }
 

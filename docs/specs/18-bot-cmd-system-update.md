@@ -71,5 +71,9 @@ natural parent. Its exact callbacks are `wr:<id>:o` and `wr:<id>:h`; the
 callback never encodes phase or authorization. A pending confirmation is
 discarded only when its receipt matches. Once the update is spawned, the
 receipt is `running`: return opens the requested menu but never stops or waits
-for the detached script. Terminal success/failure is delivered first; restart
-recovery then restores a fresh authorized menu unless the user already returned.
+for the detached script. After its health check, the script persists either
+`system_update` or `system_update_failed` in `system_meta.restart_reason` and
+performs a final worker restart. Startup completes the matching receipt with a
+localized terminal outcome, then restores a fresh authorized menu unless the
+user already returned. Any earlier script error follows the same failure
+recovery path, with the direct Telegram API notification retained as fallback.

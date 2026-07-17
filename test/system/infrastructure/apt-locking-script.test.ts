@@ -32,6 +32,15 @@ describe('APT lock handling scripts', () => {
     expect(systemUpdateScript).toContain(
       'apt_get install -y --only-upgrade motion ffmpeg mosquitto',
     );
+    expect(systemUpdateScript).toContain('write_meta "restart_reason" "system_update"');
+    expect(systemUpdateScript).toContain('write_meta "restart_reason" "system_update_failed"');
+    expect(systemUpdateScript).toContain("trap 'report_failure $?' ERR");
+    expect(systemUpdateScript).toMatch(
+      /if write_meta "restart_reason" "system_update_failed" && pm2 restart worker; then\n\s+exit "\$exit_code"\n\s+fi\n\s+notify_failure/,
+    );
+    expect(systemUpdateScript.indexOf('if ! health_check; then')).toBeLessThan(
+      systemUpdateScript.indexOf('write_meta "restart_reason" "system_update"'),
+    );
   });
 
   it('keeps the sudoers allowlist aligned with the option-bearing update commands', () => {

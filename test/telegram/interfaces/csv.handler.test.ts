@@ -133,6 +133,7 @@ describe('CsvHandler contextual navigation', () => {
       expect.arrayContaining([
         expect.stringMatching(/^csv:abcdefghijklmnop:s:0:0:[A-Za-z0-9_-]{12}$/),
         'wr:abcdefghijklmnop:o',
+        'wr:abcdefghijklmnop:h',
       ]),
     );
     expect(data.every((value) => Buffer.byteLength(value, 'utf8') <= 64)).toBe(true);
@@ -176,6 +177,9 @@ describe('CsvHandler contextual navigation', () => {
     expect(selected.reply.mock.calls[0][0]).toBe(catalogFor('en').csv.staging);
     const stagingData = selected.reply.mock.calls[0][1].reply_markup.inline_keyboard[0][0].callback_data;
     expect(stagingData).toBe('wr:abcdefghijklmnop:o');
+    const stagingExitData = selected.reply.mock.calls[0][1].reply_markup.inline_keyboard[0]
+      .map((button: { callback_data?: string }) => button.callback_data);
+    expect(stagingExitData).toEqual(['wr:abcdefghijklmnop:o', 'wr:abcdefghijklmnop:h']);
     release({
       filename: 'late.csv',
       open: vi.fn(() => Readable.from('csv')),

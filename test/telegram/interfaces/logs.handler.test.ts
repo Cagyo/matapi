@@ -155,6 +155,7 @@ describe('logs.handler contextual navigation', () => {
       expect.arrayContaining([
         expect.stringMatching(/^logs:abcdefghijklmnop:s:[A-Za-z0-9_-]{12}$/),
         'wr:abcdefghijklmnop:o',
+        'wr:abcdefghijklmnop:h',
       ]),
     );
     expect(data.every((value) => Buffer.byteLength(value, 'utf8') <= 64)).toBe(true);

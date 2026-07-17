@@ -261,16 +261,18 @@ export class CsvHandler implements TelegramHandler {
     );
     if (page.page > 0) keyboard.text(en.csv.previousPage, pageData(receipt.id, page.page - 1));
     if (page.page + 1 < page.pageCount) keyboard.text(en.csv.nextPage, pageData(receipt.id, page.page + 1));
-    keyboard.row().text(this.catalog(ctx).home.common.home, workflowReturnCallback(receipt.id, 'origin'));
+    const catalog = this.catalog(ctx);
+    keyboard.row()
+      .text(catalog.home.common.back, workflowReturnCallback(receipt.id, 'origin'))
+      .text(catalog.home.common.home, workflowReturnCallback(receipt.id, 'home'));
     return keyboard;
   }
 
   private async replyStaging(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<void> {
     await ctx.reply(this.catalog(ctx).csv.staging, {
-      reply_markup: new InlineKeyboard().text(
-        this.catalog(ctx).home.common.home,
-        workflowReturnCallback(receipt.id, 'origin'),
-      ),
+      reply_markup: new InlineKeyboard()
+        .text(this.catalog(ctx).home.common.back, workflowReturnCallback(receipt.id, 'origin'))
+        .text(this.catalog(ctx).home.common.home, workflowReturnCallback(receipt.id, 'home')),
     });
   }
 

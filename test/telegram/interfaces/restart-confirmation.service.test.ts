@@ -136,6 +136,53 @@ describe('RestartConfirmationService', () => {
     expect(dm.send).toHaveBeenCalledWith(1, en.ota.updateFailed);
   });
 
+  it('completes the matching system-update receipt after the successful post-health restart', async () => {
+    const meta = makeMeta({ [RESTART_REASON_KEY]: 'system_update' });
+    const dm: DirectMessengerPort = { send: vi.fn().mockResolvedValue(undefined) };
+    const workflows = {
+      completeHeadless: vi.fn(async (input: { deliver(): Promise<void> }) => {
+        await input.deliver();
+        return 'completed' as const;
+      }),
+    } as unknown as WorkflowEntryCoordinator;
+    const restore = { execute: vi.fn().mockResolvedValue({ kind: 'opened' }) } as unknown as RestoreWorkflowOriginUseCase;
+    const service = new RestartConfirmationService(
+      meta,
+      new InMemoryUserRepository([admin(1, 'Ada')]),
+      dm,
+      workflows,
+      restore,
+    );
+
+    await service.run();
+
+    expect(workflows.completeHeadless).toHaveBeenCalledWith(expect.objectContaining({
+      workflow: 'system-update',
+    }));
+    expect(dm.send).toHaveBeenCalledWith(1, en.systemUpdate.completed);
+    expect(await meta.get(RESTART_REASON_KEY)).toBeNull();
+  });
+
+  it('completes the matching system-update receipt after a failed health check recovers the worker', async () => {
+    const meta = makeMeta({ [RESTART_REASON_KEY]: 'system_update_failed' });
+    const dm: DirectMessengerPort = { send: vi.fn().mockResolvedValue(undefined) };
+    const { workflows, restore } = recoveryDependencies('completed');
+    const service = new RestartConfirmationService(
+      meta,
+      new InMemoryUserRepository([admin(1, 'Ada')]),
+      dm,
+      workflows,
+      restore,
+    );
+
+    await service.run();
+
+    expect(workflows.completeHeadless).toHaveBeenCalledWith(expect.objectContaining({
+      workflow: 'system-update',
+    }));
+    expect(await meta.get(RESTART_REASON_KEY)).toBeNull();
+  });
+
   it('reports a rollback completion', async () => {
     const meta = makeMeta({
       [RESTART_REASON_KEY]: 'rollback',

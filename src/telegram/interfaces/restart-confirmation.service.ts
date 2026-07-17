@@ -62,6 +62,9 @@ export class RestartConfirmationService {
   private async completeContextualRestart(
     reason: string,
   ): Promise<'completed' | 'resumable' | 'no-workflow'> {
+    const workflow = reason === 'system_update' || reason === 'system_update_failed'
+      ? 'system-update' as const
+      : 'system-restart' as const;
     const recipients = await this.users.listRecipients();
     for (const user of recipients) {
       const catalog = catalogFor(user.locale);
@@ -78,7 +81,7 @@ export class RestartConfirmationService {
           role: user.role,
           catalog,
         },
-        workflow: 'system-restart',
+        workflow,
         deliver: () => this.dm.send(user.telegramId, message),
         recoveryNotice: message,
         restore: async (receipt, notice) => {
@@ -110,6 +113,10 @@ export class RestartConfirmationService {
       }
       case 'ota_update_failed':
         return catalog.ota.updateFailed;
+      case 'system_update':
+        return catalog.systemUpdate.completed;
+      case 'system_update_failed':
+        return catalog.systemUpdate.failed;
       case 'rollback': {
         const commit = (await this.meta.get(ROLLBACK_COMMIT_KEY)) ?? 'unknown';
         return catalog.ota.rollbackSuccess(this.shortCommit(commit));

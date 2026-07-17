@@ -1102,6 +1102,8 @@ const enCatalog = {
     cancelButton: '❌ Cancel',
     applying:
       '🔄 Applying system update... I will run a health check and report back when ready.',
+    completed: '✅ System update complete.',
+    failed: '⚠️ System update failed its health check. SSH in to investigate.',
     cancelled: 'System update cancelled.',
     checkFailed: (reason: string) =>
       `❌ Failed to check for updates: ${reason}`,

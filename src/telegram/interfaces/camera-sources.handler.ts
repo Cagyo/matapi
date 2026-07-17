@@ -366,7 +366,10 @@ export class CameraSourcesHandler {
     return this.catalog(ctx).camera.sources ?? en.camera.sources;
   }
   private withHome(ctx: TelegramContext, receipt: WorkflowReturnReceipt, keyboard: InlineKeyboard): InlineKeyboard {
-    return keyboard.row().text(this.catalog(ctx).home.common.home, workflowReturnCallback(receipt.id, 'origin'));
+    const catalog = this.catalog(ctx);
+    return keyboard.row()
+      .text(catalog.home.common.back, workflowReturnCallback(receipt.id, 'origin'))
+      .text(catalog.home.common.home, workflowReturnCallback(receipt.id, 'home'));
   }
 }
 

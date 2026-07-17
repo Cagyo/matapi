@@ -78,7 +78,10 @@ export class LogsHandler implements TelegramHandler {
         targets.set(selector, sensor.id);
         keyboard.text(`${TYPE_ICONS[sensor.type] ?? '•'} ${sensor.name}`, callbackData(receipt.id, selector)).row();
       }
-      keyboard.text((ctx.localeState?.catalog ?? en).home.common.home, workflowReturnCallback(receipt.id, 'origin'));
+      const catalog = ctx.localeState?.catalog ?? en;
+      keyboard.row()
+        .text(catalog.home.common.back, workflowReturnCallback(receipt.id, 'origin'))
+        .text(catalog.home.common.home, workflowReturnCallback(receipt.id, 'home'));
       this.pickers.set(pickerKey(ctx, receipt.id), { receipt, targets });
       await ctx.reply(en.logs.selectSensor, { reply_markup: keyboard });
     } catch (error) {

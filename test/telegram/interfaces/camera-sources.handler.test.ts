@@ -105,7 +105,12 @@ describe('CameraSourcesHandler contextual state', () => {
     await handler.handleEntry(ctx as never, { receipt });
     const data = keyboardData(ctx);
 
-    expect(data).toEqual(expect.arrayContaining(['cam:abcdefghijklmnop:src:a', 'cam:abcdefghijklmnop:src:e']));
+    expect(data).toEqual(expect.arrayContaining([
+      'cam:abcdefghijklmnop:src:a',
+      'cam:abcdefghijklmnop:src:e',
+      'wr:abcdefghijklmnop:o',
+      'wr:abcdefghijklmnop:h',
+    ]));
     expect(data.every((value) => Buffer.byteLength(value, 'utf8') <= 64)).toBe(true);
     expect(JSON.stringify(data)).not.toContain('camera-with-private-id');
   });

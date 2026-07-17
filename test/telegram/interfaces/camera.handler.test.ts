@@ -173,7 +173,12 @@ describe('camera contextual callbacks', () => {
     await handler.handleDashboard(ctx as never, { receipt });
 
     expect(callbacks(ctx)).toEqual(
-      expect.arrayContaining(['cam:abcdefghijklmnop:l', 'cam:abcdefghijklmnop:b', 'wr:abcdefghijklmnop:o']),
+      expect.arrayContaining([
+        'cam:abcdefghijklmnop:l',
+        'cam:abcdefghijklmnop:b',
+        'wr:abcdefghijklmnop:o',
+        'wr:abcdefghijklmnop:h',
+      ]),
     );
     expect(callbacks(ctx).every((data) => Buffer.byteLength(data, 'utf8') <= 64)).toBe(true);
     expect(workflows.begin).not.toHaveBeenCalled();
@@ -201,7 +206,10 @@ describe('camera contextual callbacks', () => {
     await callback(live);
 
     expect(workflows.markRunning).toHaveBeenCalledWith(live, receipt);
-    expect(callbacks(live)).toContain('wr:abcdefghijklmnop:o');
+    expect(callbacks(live)).toEqual(expect.arrayContaining([
+      'wr:abcdefghijklmnop:o',
+      'wr:abcdefghijklmnop:h',
+    ]));
     expect(navigation.complete).not.toHaveBeenCalled();
     expect(open.execute).toHaveBeenCalledWith({ telegramId: 7, cameraName: undefined });
   });
@@ -214,6 +222,77 @@ describe('camera contextual callbacks', () => {
     await callback(source);
 
     expect(sources.handleCallback).toHaveBeenCalledWith(source, 'a', receipt);
+  });
+
+  it('clears browse input before a source callback can claim the next text message', async () => {
+    const { callback, handler, sources, text } = setup();
+    await handler.handleDashboard(context() as never, { receipt });
+    await callback(context({ data: 'cam:abcdefghijklmnop:bp' }));
+    await callback(context({ data: 'cam:abcdefghijklmnop:src:a' }));
+    const input = context({ text: '08.04.2026' });
+    const next = vi.fn().mockResolvedValue(undefined);
+
+    await text(input, next);
+
+    expect(sources.handleCallback).toHaveBeenCalledWith(expect.anything(), 'a', receipt);
+    expect(next).toHaveBeenCalledOnce();
+    expect(input.reply).not.toHaveBeenCalledWith(en.camera.browse.timeRangePrompt('08.04.2026'), expect.anything());
+  });
+
+  it('clears the exact source prompt when a browse callback starts', async () => {
+    const { callback, handler, sources } = setup();
+    await handler.handleDashboard(context() as never, { receipt });
+    await callback(context({ data: 'cam:abcdefghijklmnop:src:a' }));
+
+    await callback(context({ data: 'cam:abcdefghijklmnop:b' }));
+
+    expect(sources.cancelPending).toHaveBeenCalledWith(7, 11, receipt.id);
+  });
+
+  it('clears source input before invoking a root camera operation', async () => {
+    const { callback, handler, snapshot, sources } = setup();
+    await handler.handleDashboard(context() as never, { receipt });
+    await callback(context({ data: 'cam:abcdefghijklmnop:src:a' }));
+
+    await callback(context({ data: 'cam:abcdefghijklmnop:s' }));
+
+    expect(sources.cancelPending).toHaveBeenCalledWith(7, 11, receipt.id);
+    expect(sources.cancelPending.mock.invocationCallOrder[0]).toBeLessThan(
+      snapshot.execute.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('preserves browse results while navigating within the browse workflow', async () => {
+    const { callback, handler, navigation } = setup();
+    await handler.handleDashboard(context() as never, { receipt });
+    (handler as unknown as { results: Map<string, unknown> }).results.set(
+      '7:11:abcdefghijklmnop',
+      {
+        receipt,
+        events: [{
+          id: 9,
+          cameraId: 'front',
+          cameraName: 'Front door',
+          startedAt: new Date('2026-07-17T12:00:00Z'),
+          endedAt: new Date('2026-07-17T12:01:00Z'),
+          videoPath: '/tmp/9.mp4',
+          snapshotPath: null,
+          uploadedToGdrive: false,
+          gdriveFileId: null,
+          localDeleted: false,
+        }],
+        header: 'Browse results',
+        createdAtMs: Date.now(),
+      },
+    );
+    const browseBack = context({ data: 'cam:abcdefghijklmnop:br' });
+
+    await callback(browseBack);
+
+    expect(navigation.complete).not.toHaveBeenCalled();
+    expect(browseBack.reply).toHaveBeenCalledWith(expect.stringContaining('Browse results'), {
+      reply_markup: expect.anything(),
+    });
   });
 
   it('uses the active receipt browse input after a newer Camera entry replaces a stale prompt', async () => {

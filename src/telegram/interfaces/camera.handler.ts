@@ -196,6 +196,11 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
     sub: Subcommand | '',
     arg: string,
   ): Promise<void> {
+    if (sub === 'sources') {
+      this.clearBrowse(ctx, receipt.id);
+    } else {
+      this.clearCompetingState(ctx, receipt);
+    }
     switch (sub) {
       case '':
       case 'menu':
@@ -227,7 +232,17 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
   }
 
   private async dispatchCallback(ctx: TelegramContext, receipt: WorkflowReturnReceipt, action: string): Promise<void> {
-    if (action.startsWith('src:')) return this.sources.handleCallback(ctx, action.slice(4), receipt);
+    if (action.startsWith('src:')) {
+      this.clearBrowse(ctx, receipt.id);
+      return this.sources.handleCallback(ctx, action.slice(4), receipt);
+    }
+    if (action.startsWith('b')) {
+      // Browse callbacks replace source setup but retain their own receipt-bound
+      // input/results cache (for example, `br` needs the cached results).
+      this.sources.cancelPending(receipt.userId, receipt.chatId, receipt.id);
+    } else {
+      this.clearCompetingState(ctx, receipt);
+    }
     if (action === 'd') return this.handleDashboard(ctx, { receipt });
     if (action === 's') return this.handleSnapshot(ctx, receipt);
     if (action === 'e') return this.handleEvents(ctx, receipt);
@@ -651,9 +666,11 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
     await this.complete(ctx, receipt, () => ctx.reply(en.common.error(action, (error as Error).message)));
   }
   private withHome(receipt: WorkflowReturnReceipt, keyboard = new InlineKeyboard()): InlineKeyboard {
+    const catalog = this.catalogForReceipt(receipt);
     return keyboard
       .row()
-      .text(this.catalogForReceipt(receipt).home.common.home, workflowReturnCallback(receipt.id, 'origin'));
+      .text(catalog.home.common.back, workflowReturnCallback(receipt.id, 'origin'))
+      .text(catalog.home.common.home, workflowReturnCallback(receipt.id, 'home'));
   }
   private catalogForReceipt(receipt: WorkflowReturnReceipt): LocaleCatalog {
     return this.receiptCatalogs.get(`${receipt.userId}:${receipt.chatId}:${receipt.id}`) ?? catalogFor('en');
@@ -728,6 +745,10 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
     const key = this.key(ctx, receiptId);
     this.inputs.delete(key);
     this.results.delete(key);
+  }
+  private clearCompetingState(ctx: TelegramContext, receipt: WorkflowReturnReceipt): void {
+    this.clearBrowse(ctx, receipt.id);
+    this.sources.cancelPending(receipt.userId, receipt.chatId, receipt.id);
   }
   private currentResults(ctx: TelegramContext, receipt: WorkflowReturnReceipt): BrowseResults | undefined {
     const result = this.results.get(this.key(ctx, receipt.id));
