@@ -128,6 +128,29 @@ describe('WorkflowEntryCoordinator', () => {
     }));
   });
 
+  it('checks a local callback receipt without consuming or advancing it', async () => {
+    const actions = {
+      findWorkflowReturn: vi.fn().mockResolvedValue(receipt),
+    };
+    const coordinator = new WorkflowEntryCoordinator(
+      { execute: vi.fn() } as unknown as BeginWorkflowReturnUseCase,
+      new WorkflowDraftRegistry(),
+      new WorkflowOperationQueue(),
+      actions as never,
+      { now: () => new Date('2030-01-01T00:00:00.000Z') },
+    );
+
+    await expect(coordinator.validateCurrent(context(), receipt)).resolves.toBe(true);
+    expect(actions.findWorkflowReturn).toHaveBeenCalledWith({
+      userId: 7,
+      chatId: 70,
+      now: new Date('2030-01-01T00:00:00.000Z'),
+    });
+
+    actions.findWorkflowReturn.mockResolvedValueOnce({ ...receipt, status: 'returned' });
+    await expect(coordinator.validateCurrent(context(), receipt)).resolves.toBe(false);
+  });
+
   it('cleans an atomically replaced cancellable draft only after replacement', async () => {
     const replaced = { ...receipt, id: 'qrstuvwxyzabcdef' } satisfies WorkflowReturnReceipt;
     const { coordinator, registry, execute } = setup({ receipt, replaced });

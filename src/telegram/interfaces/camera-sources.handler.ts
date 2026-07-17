@@ -1,38 +1,41 @@
-import { Inject, Injectable } from "@nestjs/common";
-import { InlineKeyboard } from "grammy";
-import { ConfigureLiveSourceUseCase } from "../../camera/application/configure-live-source.use-case";
-import { ListLiveSourcesUseCase } from "../../camera/application/list-live-sources.use-case";
-import { RemoveLiveSourceUseCase } from "../../camera/application/remove-live-source.use-case";
-import type { RedactedLiveSource } from "../../camera/domain/ports/live-source-repository.port";
-import { CLOCK, type ClockPort } from "../../events/domain/ports/clock.port";
-import { catalogFor, type LocaleCatalog } from "../../locales";
-import { en } from "../../locales/en";
-import {
-  appendReturnHomeButton,
-  returnHomeKeyboard,
-  type ExternalWorkflowPhase,
-} from "./return-home";
-import type { TelegramContext } from "./telegram-context";
+import { Inject, Injectable, Optional } from '@nestjs/common';
+import { createHash } from 'node:crypto';
+import { InlineKeyboard } from 'grammy';
+import { ConfigureLiveSourceUseCase } from '../../camera/application/configure-live-source.use-case';
+import { ListLiveSourcesUseCase } from '../../camera/application/list-live-sources.use-case';
+import { RemoveLiveSourceUseCase } from '../../camera/application/remove-live-source.use-case';
+import type { RedactedLiveSource } from '../../camera/domain/ports/live-source-repository.port';
+import { CLOCK, type ClockPort } from '../../events/domain/ports/clock.port';
+import { catalogFor, type LocaleCatalog } from '../../locales';
+import { en } from '../../locales/en';
+import type { WorkflowReturnReceipt } from '../domain/workflow-return';
+import { workflowReturnCallback } from '../domain/workflow-return';
+import type { TelegramContext } from './telegram-context';
+import { WorkflowEntryCoordinator, type WorkflowLaunch } from './workflow-entry.coordinator';
+import { WorkflowNavigationHandler } from './workflow-navigation.handler';
 
 const SOURCE_STATE_TTL_MS = 10 * 60_000;
+const SELECTOR_LENGTH = 12;
+const MAX_CALLBACK_BYTES = 64;
 
-type SourceAction = "add" | "edit" | "test" | "remove";
 type SourceState =
-  | { kind: "camera"; action: "add"; createdAtMs: number }
+  | { kind: 'camera'; receipt: WorkflowReturnReceipt; createdAtMs: number }
   | {
-      kind: "credential";
-      action: "add" | "edit" | "test";
+      kind: 'credential';
+      receipt: WorkflowReturnReceipt;
+      action: 'add' | 'edit' | 'test';
       cameraName: string;
       createdAtMs: number;
     }
   | {
-      kind: "selection";
-      action: "edit" | "test" | "remove";
+      kind: 'selection';
+      receipt: WorkflowReturnReceipt;
+      action: 'edit' | 'test' | 'remove';
+      choices: ReadonlyMap<string, RedactedLiveSource>;
       createdAtMs: number;
-    }
-  | { kind: "list"; createdAtMs: number };
+    };
 
-/** Delegated admin flow for credential-safe RTSP source management. */
+/** Credential-safe source setup. CameraHandler validates `cam:<receipt>:src:*` before delegating here. */
 @Injectable()
 export class CameraSourcesHandler {
   private readonly states = new Map<string, SourceState>();
@@ -42,420 +45,317 @@ export class CameraSourcesHandler {
     private readonly list: ListLiveSourcesUseCase,
     private readonly remove: RemoveLiveSourceUseCase,
     @Inject(CLOCK) private readonly clock: ClockPort,
+    private readonly workflows: WorkflowEntryCoordinator,
+    @Optional() private readonly navigation?: WorkflowNavigationHandler,
   ) {}
 
-  private now(): number {
-    return this.clock.now().getTime();
+  cancelPending(userId: number, chatId: number, receiptId?: string): void {
+    if (receiptId) {
+      this.states.delete(`${userId}:${chatId}:${receiptId}`);
+      return;
+    }
+    for (const key of this.states.keys()) if (key.startsWith(`${userId}:${chatId}:`)) this.states.delete(key);
   }
 
-  cancelPending(userId: number, chatId: number): void {
-    this.states.delete(`${userId}:${chatId}`);
-  }
-
-  hasPending(userId: number, chatId: number): boolean {
-    const key = `${userId}:${chatId}`;
-    const state = this.states.get(key);
-    if (state && this.now() - state.createdAtMs > SOURCE_STATE_TTL_MS) {
-      this.states.delete(key);
+  hasPending(userId: number, chatId: number, receiptId?: string): boolean {
+    const state = receiptId ? this.states.get(`${userId}:${chatId}:${receiptId}`) : this.stateFor(userId, chatId);
+    if (!state) return false;
+    if (this.now() - state.createdAtMs > SOURCE_STATE_TTL_MS) {
+      this.states.delete(this.keyFor(state));
       return false;
     }
-    return state !== undefined;
+    return true;
   }
 
-  async handleEntry(ctx: TelegramContext): Promise<void> {
-    if (!(await this.requireAdmin(ctx))) return;
-    this.clear(ctx);
+  async handleEntry(ctx: TelegramContext, launch?: WorkflowLaunch): Promise<void> {
+    const receipt = launch?.receipt ?? (await this.workflows.begin(ctx, 'camera', { source: 'natural-parent' }));
+    if (!receipt || !(await this.requireAdmin(ctx, receipt))) return;
+    this.clear(ctx, receipt.id);
     const copy = this.copy(ctx);
     const keyboard = new InlineKeyboard()
-      .text(copy.buttons.add, "cam:sources:add")
-      .text(copy.buttons.edit, "cam:sources:edit")
+      .text(copy.buttons.add, data(receipt.id, 'a'))
+      .text(copy.buttons.edit, data(receipt.id, 'e'))
       .row()
-      .text(copy.buttons.test, "cam:sources:test")
-      .text(copy.buttons.list, "cam:sources:list")
+      .text(copy.buttons.test, data(receipt.id, 't'))
+      .text(copy.buttons.list, data(receipt.id, 'l'))
       .row()
-      .text(copy.buttons.remove, "cam:sources:remove")
-      .text(copy.buttons.cancel, "cam:sources:cancel");
+      .text(copy.buttons.remove, data(receipt.id, 'r'))
+      .text(copy.buttons.cancel, data(receipt.id, 'c'));
     await ctx.reply(copy.menuTitle, {
-      reply_markup: this.returnKeyboard(ctx, "cancelPending", keyboard),
+      reply_markup: this.withHome(ctx, receipt, keyboard),
     });
   }
 
-  async handleCallback(ctx: TelegramContext, data: string): Promise<void> {
-    if (!(await this.requireAdmin(ctx))) return;
-    try {
-      await this.handleAdminCallback(ctx, data);
-    } catch (error) {
-      this.clear(ctx);
-      throw error;
-    }
-  }
-
-  private async handleAdminCallback(
-    ctx: TelegramContext,
-    data: string,
-  ): Promise<void> {
+  async handleCallback(ctx: TelegramContext, action: string, receipt: WorkflowReturnReceipt): Promise<void> {
+    if (!(await this.workflows.validateCurrent(ctx, receipt))) return;
+    if (!(await this.requireAdmin(ctx, receipt))) return;
     const copy = this.copy(ctx);
-    if (data === "cancel") {
-      this.clear(ctx);
-      await ctx.reply(copy.cancelled, {
-        reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
-      });
+    if (action === 'c') {
+      this.clear(ctx, receipt.id);
+      await this.complete(ctx, receipt, () => ctx.reply(copy.cancelled));
       return;
     }
-    if (data === "add") {
-      this.set(ctx, { kind: "camera", action: "add", createdAtMs: this.now() });
+    if (action === 'a') {
+      this.set(ctx, { kind: 'camera', receipt, createdAtMs: this.now() });
       await ctx.reply(copy.cameraPrompt, {
-        reply_markup: this.returnKeyboard(
-          ctx,
-          "cancelPending",
-          cancelKeyboard(copy),
-        ),
+        reply_markup: this.withHome(ctx, receipt, cancelKeyboard(receipt.id, copy)),
       });
       return;
     }
-    if (data === "list") {
-      this.set(ctx, { kind: "list", createdAtMs: this.now() });
+    if (action === 'l') {
       try {
         const sources = await this.list.execute();
-        this.clear(ctx);
-        await this.replyList(ctx, sources);
+        await this.complete(ctx, receipt, () => this.replyList(ctx, sources));
       } catch {
-        this.clear(ctx);
-        await ctx.reply(copy.listFailed, {
-          reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
-        });
+        await this.complete(ctx, receipt, () => ctx.reply(copy.listFailed));
       }
       return;
     }
-    if (data === "edit" || data === "test" || data === "remove") {
-      await this.beginSelection(ctx, data);
+    if (action === 'e' || action === 't' || action === 'r') {
+      await this.beginSelection(ctx, receipt, action === 'e' ? 'edit' : action === 't' ? 'test' : 'remove');
       return;
     }
-
-    const separator = data.indexOf(":");
-    if (separator < 1) {
-      this.clear(ctx);
-      await ctx.reply(copy.staleSelection, {
-        reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
-      });
-      return;
-    }
-    const action = data.slice(0, separator);
-    const cameraId = decodeSelection(data.slice(separator + 1));
-    if (!isSelectionAction(action) || !cameraId) {
-      this.clear(ctx);
-      await ctx.reply(copy.staleSelection, {
-        reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
-      });
-      return;
-    }
-    const state = this.getCurrent(ctx);
-    if (state?.kind !== "selection" || state.action !== action) {
-      this.clear(ctx);
-      await ctx.reply(copy.staleSelection, {
-        reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
-      });
-      return;
-    }
-
-    let selected: RedactedLiveSource | undefined;
-    try {
-      selected = (await this.list.execute()).find(
-        (item) => item.cameraId === cameraId,
-      );
-    } catch {
-      this.clear(ctx);
-      await ctx.reply(copy.listFailed, {
-        reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
-      });
-      return;
-    }
-    if (!selected) {
-      this.clear(ctx);
-      await ctx.reply(copy.staleSelection, {
-        reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
-      });
-      return;
-    }
-    if (action === "remove") {
-      this.clear(ctx);
+    const selected = /^s:([A-Za-z0-9_-]{12})$/.exec(action);
+    if (!selected) return;
+    const state = this.getCurrent(ctx, receipt.id);
+    if (state?.kind !== 'selection') return;
+    const source = state.choices.get(selected[1]);
+    if (!source) return;
+    if (state.action === 'remove') {
+      if (!(await this.workflows.markRunning(ctx, receipt))) return;
+      this.clear(ctx, receipt.id);
       try {
-        await this.remove.execute(selected.cameraId);
-        await ctx.reply(copy.removed(selected.cameraName), {
-          reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
-        });
+        await this.remove.execute(source.cameraId);
+        await this.complete(ctx, receipt, () => ctx.reply(copy.removed(source.cameraName)));
       } catch {
-        await ctx.reply(copy.removeFailed, {
-          reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
-        });
+        await this.complete(ctx, receipt, () => ctx.reply(copy.removeFailed));
       }
       return;
     }
     this.set(ctx, {
-      kind: "credential",
-      action,
-      cameraName: selected.cameraName,
+      kind: 'credential',
+      receipt,
+      action: state.action,
+      cameraName: source.cameraName,
       createdAtMs: this.now(),
     });
     await ctx.reply(copy.credentialPrompt, {
-      reply_markup: this.returnKeyboard(
-        ctx,
-        "cancelPending",
-        cancelKeyboard(copy),
-      ),
+      reply_markup: this.withHome(ctx, receipt, cancelKeyboard(receipt.id, copy)),
     });
   }
 
-  /** Returns true only when a source-management state claimed this message. */
+  /** Claims only a current source prompt; stale source state is never consumed. */
   async handleText(ctx: TelegramContext): Promise<boolean> {
-    const key = this.key(ctx);
-    if (!key) return false;
-    const state = this.states.get(key);
-    if (!state) return false;
-    if (!(await this.requireAdmin(ctx))) return true;
-    try {
-      return await this.handleStateText(ctx, key, state);
-    } catch (error) {
-      this.states.delete(key);
-      throw error;
-    }
-  }
-
-  private async handleStateText(
-    ctx: TelegramContext,
-    key: string,
-    state: SourceState,
-  ): Promise<boolean> {
+    const userId = ctx.from?.id;
+    const chatId = ctx.chat?.id;
+    if (userId === undefined || chatId === undefined) return false;
+    const state = this.stateFor(userId, chatId);
+    if (!state || !(await this.workflows.validateCurrent(ctx, state.receipt))) return false;
+    if (!(await this.requireAdmin(ctx, state.receipt))) return true;
     const copy = this.copy(ctx);
     if (this.now() - state.createdAtMs > SOURCE_STATE_TTL_MS) {
-      this.states.delete(key);
-      await ctx.reply(copy.expired, {
-        reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
-      });
+      this.states.delete(this.keyFor(state));
+      await this.complete(ctx, state.receipt, () => ctx.reply(copy.expired));
       return true;
     }
-
     const text = ctx.message?.text?.trim();
     if (!text) return true;
-    if (text.toLowerCase() === "cancel") {
-      this.states.delete(key);
-      await ctx.reply(copy.cancelled, {
-        reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
-      });
+    if (text.toLowerCase() === 'cancel') {
+      this.clear(ctx, state.receipt.id);
+      await this.complete(ctx, state.receipt, () => ctx.reply(copy.cancelled));
       return true;
     }
-    if (state.kind === "camera") {
+    if (state.kind === 'camera') {
       if (text.length > 64 || hasControlCharacter(text)) {
         await ctx.reply(copy.invalidCamera, {
-          reply_markup: this.returnKeyboard(ctx, "cancelPending"),
+          reply_markup: this.withHome(ctx, state.receipt, cancelKeyboard(state.receipt.id, copy)),
         });
         return true;
       }
-      this.states.set(key, {
-        kind: "credential",
-        action: "add",
+      this.set(ctx, {
+        kind: 'credential',
+        receipt: state.receipt,
+        action: 'add',
         cameraName: text,
         createdAtMs: this.now(),
       });
       await ctx.reply(copy.credentialPrompt, {
-        reply_markup: this.returnKeyboard(
-          ctx,
-          "cancelPending",
-          cancelKeyboard(copy),
-        ),
+        reply_markup: this.withHome(ctx, state.receipt, cancelKeyboard(state.receipt.id, copy)),
       });
       return true;
     }
-    if (state.kind !== "credential") return true;
-
-    this.states.delete(key);
-    const chatId = ctx.chat?.id;
+    if (state.kind !== 'credential') return true;
+    if (!(await this.workflows.markRunning(ctx, state.receipt))) return true;
+    this.states.delete(this.keyFor(state));
     const messageId = ctx.message?.message_id;
-    let deletionFailed = false;
+    let deleted = false;
     let configured: RedactedLiveSource | undefined;
     try {
       configured = await this.configure.execute({
         cameraName: state.cameraName,
         url: text,
-        transport: "tcp",
-        tlsMode: /^rtsps:\/\//iu.test(text) ? "strict" : "none",
-        profile: "eco",
+        transport: 'tcp',
+        tlsMode: /^rtsps:\/\//iu.test(text) ? 'strict' : 'none',
+        profile: 'eco',
       });
     } catch {
-      // The interface boundary maps every source/configuration failure to safe copy below.
+      /* map every credential failure to safe localized copy */
     } finally {
-      if (chatId !== undefined && messageId !== undefined) {
+      if (messageId !== undefined) {
         try {
           await ctx.api.deleteMessage(chatId, messageId);
+          deleted = true;
         } catch {
-          deletionFailed = true;
+          /* safe warning below */
         }
       }
     }
-    if (configured) {
+    await this.complete(ctx, state.receipt, async () => {
       await ctx.reply(
-        state.action === "test"
-          ? copy.tested(configured.cameraName)
-          : copy.configured(configured.cameraName),
-        { reply_markup: this.returnKeyboard(ctx, "alreadyTerminal") },
+        configured
+          ? state.action === 'test'
+            ? copy.tested(configured.cameraName)
+            : copy.configured(configured.cameraName)
+          : copy.configureFailed,
       );
-    } else {
-      await ctx.reply(copy.configureFailed, {
-        reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
-      });
-    }
-    if (deletionFailed) {
-      await ctx.reply(copy.deletionFailed, {
-        reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
-      });
-    }
+      if (!deleted) await ctx.reply(copy.deletionFailed);
+    });
     return true;
   }
 
   private async beginSelection(
     ctx: TelegramContext,
-    action: Exclude<SourceAction, "add">,
+    receipt: WorkflowReturnReceipt,
+    action: 'edit' | 'test' | 'remove',
   ): Promise<void> {
     const copy = this.copy(ctx);
     let sources: RedactedLiveSource[];
     try {
       sources = await this.list.execute();
     } catch {
-      this.clear(ctx);
-      await ctx.reply(copy.listFailed, {
-        reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
-      });
+      await this.complete(ctx, receipt, () => ctx.reply(copy.listFailed));
       return;
     }
     if (sources.length === 0) {
-      this.clear(ctx);
-      await ctx.reply(copy.empty, {
-        reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
-      });
+      await this.complete(ctx, receipt, () => ctx.reply(copy.empty));
       return;
     }
-    this.set(ctx, { kind: "selection", action, createdAtMs: this.now() });
+    const choices = new Map(sources.map((source) => [selectorFor(source.cameraId), source]));
+    this.set(ctx, {
+      kind: 'selection',
+      receipt,
+      action,
+      choices,
+      createdAtMs: this.now(),
+    });
     const keyboard = new InlineKeyboard();
-    for (const item of sources) {
-      keyboard
-        .text(
-          item.cameraName,
-          `cam:sources:${action}:${encodeURIComponent(item.cameraId)}`,
-        )
-        .row();
-    }
-    keyboard.text(copy.buttons.cancel, "cam:sources:cancel");
+    for (const [selector, source] of choices) keyboard.text(source.cameraName, data(receipt.id, `s:${selector}`)).row();
+    keyboard.text(copy.buttons.cancel, data(receipt.id, 'c'));
     await ctx.reply(copy.chooseSource(action), {
-      reply_markup: this.returnKeyboard(ctx, "cancelPending", keyboard),
+      reply_markup: this.withHome(ctx, receipt, keyboard),
     });
   }
 
-  private async replyList(
-    ctx: TelegramContext,
-    sources: RedactedLiveSource[],
-  ): Promise<void> {
+  private async replyList(ctx: TelegramContext, sources: RedactedLiveSource[]): Promise<void> {
     const copy = this.copy(ctx);
     if (sources.length === 0) {
-      await ctx.reply(copy.empty, {
-        reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
-      });
+      await ctx.reply(copy.empty);
       return;
     }
-    const lines = sources.map(({ cameraId, cameraName, summary }) =>
+    const lines = sources.map((source) =>
       copy.sourceLine({
-        cameraId,
-        cameraName,
-        scheme: summary.scheme,
-        host: summary.host,
-        transport: summary.transport,
-        tlsMode: summary.tlsMode,
-        profile: summary.profile,
-        ready: summary.ready,
+        cameraId: source.cameraId,
+        cameraName: source.cameraName,
+        scheme: source.summary.scheme,
+        host: source.summary.host,
+        transport: source.summary.transport,
+        tlsMode: source.summary.tlsMode,
+        profile: source.summary.profile,
+        ready: source.summary.ready,
       }),
     );
-    await ctx.reply(`${copy.listHeader}\n\n${lines.join("\n\n")}`, {
-      reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
-    });
+    await ctx.reply(`${copy.listHeader}\n\n${lines.join('\n\n')}`);
   }
 
-  private async requireAdmin(ctx: TelegramContext): Promise<boolean> {
-    if (ctx.localeState?.user.role === "admin") return true;
-    this.clear(ctx);
-    await ctx.reply(this.catalog(ctx).common.adminRequired, {
-      reply_markup: this.returnKeyboard(ctx, "alreadyTerminal"),
-    });
+  private async requireAdmin(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<boolean> {
+    if (ctx.localeState?.user.role === 'admin') return true;
+    this.clear(ctx, receipt.id);
+    await this.complete(ctx, receipt, () => ctx.reply(this.catalog(ctx).common.adminRequired));
     return false;
   }
 
-  private getCurrent(ctx: TelegramContext): SourceState | undefined {
-    const key = this.key(ctx);
-    if (!key) return undefined;
-    const state = this.states.get(key);
+  private async complete(
+    ctx: TelegramContext,
+    receipt: WorkflowReturnReceipt,
+    deliver: () => Promise<unknown>,
+  ): Promise<void> {
+    if (this.navigation) {
+      await this.navigation.complete(
+        ctx,
+        { receipt },
+        {
+          effectStage: 'pending',
+          deliver: async () => {
+            await deliver();
+          },
+          failureNotice: this.catalog(ctx).home.recovery.unavailable,
+        },
+      );
+      return;
+    }
+    await deliver();
+  }
+
+  private now(): number {
+    return this.clock.now().getTime();
+  }
+  private set(ctx: TelegramContext, state: SourceState): void {
+    this.states.set(this.key(ctx, state.receipt.id), state);
+  }
+  private clear(ctx: TelegramContext, receiptId: string): void {
+    this.states.delete(this.key(ctx, receiptId));
+  }
+  private getCurrent(ctx: TelegramContext, receiptId: string): SourceState | undefined {
+    const state = this.states.get(this.key(ctx, receiptId));
     if (state && this.now() - state.createdAtMs > SOURCE_STATE_TTL_MS) {
-      this.states.delete(key);
+      this.states.delete(this.keyFor(state));
       return undefined;
     }
     return state;
   }
-
-  private set(ctx: TelegramContext, state: SourceState): void {
-    const key = this.key(ctx);
-    if (key) this.states.set(key, state);
+  private stateFor(userId: number, chatId: number): SourceState | undefined {
+    for (const [key, state] of this.states) if (key.startsWith(`${userId}:${chatId}:`)) return state;
+    return undefined;
   }
-
-  private clear(ctx: TelegramContext): void {
-    const key = this.key(ctx);
-    if (key) this.states.delete(key);
+  private key(ctx: TelegramContext, receiptId: string): string {
+    return `${ctx.from?.id ?? 'none'}:${ctx.chat?.id ?? 'none'}:${receiptId}`;
   }
-
-  private key(ctx: TelegramContext): string | null {
-    const userId = ctx.from?.id;
-    const chatId = ctx.chat?.id;
-    return userId === undefined || chatId === undefined
-      ? null
-      : `${userId}:${chatId}`;
+  private keyFor(state: SourceState): string {
+    return `${state.receipt.userId}:${state.receipt.chatId}:${state.receipt.id}`;
   }
-
   private catalog(ctx: TelegramContext): LocaleCatalog {
-    return ctx.localeState?.catalog ?? catalogFor("en");
+    return ctx.localeState?.catalog ?? catalogFor('en');
   }
-
-  private returnKeyboard(
-    ctx: TelegramContext,
-    phase: ExternalWorkflowPhase,
-    keyboard?: InlineKeyboard,
-  ): InlineKeyboard {
-    const catalog = this.catalog(ctx);
-    const input = { workflow: "camera" as const, phase };
-    return keyboard
-      ? appendReturnHomeButton(keyboard, catalog, input)
-      : returnHomeKeyboard(catalog, input);
-  }
-
   private copy(ctx: TelegramContext): typeof en.camera.sources {
     return this.catalog(ctx).camera.sources ?? en.camera.sources;
   }
-}
-
-function isSelectionAction(value: string): value is "edit" | "test" | "remove" {
-  return value === "edit" || value === "test" || value === "remove";
-}
-
-function decodeSelection(value: string): string | null {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return null;
+  private withHome(ctx: TelegramContext, receipt: WorkflowReturnReceipt, keyboard: InlineKeyboard): InlineKeyboard {
+    return keyboard.row().text(this.catalog(ctx).home.common.home, workflowReturnCallback(receipt.id, 'origin'));
   }
 }
 
-function cancelKeyboard(copy: typeof en.camera.sources): InlineKeyboard {
-  return new InlineKeyboard().text(copy.buttons.cancel, "cam:sources:cancel");
+function data(receiptId: string, action: string): string {
+  const callback = `cam:${receiptId}:src:${action}`;
+  if (Buffer.byteLength(callback, 'utf8') > MAX_CALLBACK_BYTES)
+    throw new RangeError('Camera source callback data exceeds Telegram limit');
+  return callback;
 }
-
+function selectorFor(value: string): string {
+  return createHash('sha256').update(value).digest('base64url').slice(0, SELECTOR_LENGTH);
+}
+function cancelKeyboard(receiptId: string, copy: typeof en.camera.sources): InlineKeyboard {
+  return new InlineKeyboard().text(copy.buttons.cancel, data(receiptId, 'c'));
+}
 function hasControlCharacter(value: string): boolean {
-  return [...value].some((character) => {
-    const codePoint = character.codePointAt(0) ?? 0;
-    return codePoint <= 31 || codePoint === 127;
-  });
+  return [...value].some((character) => (character.codePointAt(0) ?? 0) <= 31 || character.codePointAt(0) === 127);
 }

@@ -103,6 +103,8 @@ function setup(overrides: {
   thresholds?: { execute: ReturnType<typeof vi.fn> };
   actions?: { finishExternal: ReturnType<typeof vi.fn> };
   workflows?: WorkflowEntryCoordinator;
+  logs?: { handleEmpty: ReturnType<typeof vi.fn> };
+  csv?: { handleEmpty: ReturnType<typeof vi.fn> };
   settings?: { handleCommand: ReturnType<typeof vi.fn> };
   config?: { handleSubcommand: ReturnType<typeof vi.fn> };
   help?: { handleCommand: ReturnType<typeof vi.fn> };
@@ -154,8 +156,8 @@ function setup(overrides: {
   } as unknown as WorkflowEntryCoordinator;
   const handler = new HomeHandler(
     guard, open, validate, render, refresh, camera, navigation,
-    undefined, // logs
-    undefined, // csv
+    overrides.logs, // logs
+    overrides.csv, // csv
     overrides.settings, // settings
     overrides.help, // help
     overrides.config, // config
@@ -427,6 +429,35 @@ describe('HomeHandler', () => {
       sessionToken: identity.token,
     });
     expect(camera.handleDashboard).toHaveBeenCalledWith(ctx, { receipt: workflowReceipt });
+  });
+
+  it.each([
+    ['history-logs', 'logs', 'logs'],
+    ['history-csv', 'csv', 'csv'],
+  ] as const)('starts Home-launched %s with its exact captured History origin', async (actionKind, workflow, target) => {
+    const logs = { handleEmpty: vi.fn().mockResolvedValue(undefined) };
+    const csv = { handleEmpty: vi.fn().mockResolvedValue(undefined) };
+    const { callbacks, navigation, workflowEntry } = setup({ logs, csv });
+    const ctx = context(encodeHomeCallback(identity.token, 1, { kind: actionKind }));
+    (navigation.route as ReturnType<typeof vi.fn>).mockReturnValue({
+      kind: 'external', destination: actionKind,
+    });
+    (workflowEntry.begin as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...workflowReceipt,
+      payload: { ...workflowReceipt.payload, workflow },
+    });
+
+    await callbacks[0].fn(ctx);
+
+    expect(workflowEntry.begin).toHaveBeenCalledWith(ctx, workflow, {
+      source: 'captured',
+      view: { kind: 'home', checking: false },
+      sessionToken: identity.token,
+    });
+    const handler = target === 'logs' ? logs.handleEmpty : csv.handleEmpty;
+    expect(handler).toHaveBeenCalledWith(ctx, {
+      receipt: expect.objectContaining({ payload: expect.objectContaining({ workflow }) }),
+    });
   });
 
   it('starts a Home-launched sensor editor once with its captured Sensor setup origin', async () => {

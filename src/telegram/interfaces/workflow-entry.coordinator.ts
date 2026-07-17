@@ -74,6 +74,32 @@ export class WorkflowEntryCoordinator {
     });
   }
 
+  /**
+   * Checks that a local interaction still belongs to the active workflow
+   * without claiming, cancelling, or advancing that workflow. Handlers use
+   * this before reading ephemeral picker state so a button from a superseded
+   * or returned workflow cannot trigger an effect in a newer Home session.
+   */
+  async validateCurrent(
+    ctx: TelegramContext,
+    receipt: WorkflowReturnReceipt,
+  ): Promise<boolean> {
+    const identity = currentWorkflowIdentity(ctx);
+    if (!identity) return false;
+    if (receipt.userId !== identity.userId || receipt.chatId !== identity.chatId) return false;
+
+    return this.operations.run(identity.userId, identity.chatId, async () => {
+      const current = await this.actions.findWorkflowReturn({
+        userId: identity.userId,
+        chatId: identity.chatId,
+        now: this.clock.now(),
+      });
+      return current?.id === receipt.id
+        && current.payload.workflow === receipt.payload.workflow
+        && (current.status === 'pending' || current.status === 'executing');
+    });
+  }
+
   async leaveForHome(
     ctx: TelegramContext,
     promoteFreshDestination: () => Promise<boolean>,

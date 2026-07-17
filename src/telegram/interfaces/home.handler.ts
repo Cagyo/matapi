@@ -310,8 +310,16 @@ export class HomeHandler implements TelegramHandler {
         if (!launch) return this.recover(ctx, 'unavailable');
         return this.camera.handleDashboard(ctx, launch);
       }
-      case 'history-logs': return this.logs ? this.logs.handleEmpty(ctx) : this.recover(ctx, 'unavailable');
-      case 'history-csv': return this.csv ? this.csv.handleEmpty(ctx, 'menu') : this.recover(ctx, 'unavailable');
+      case 'history-logs': {
+        if (!this.logs) return this.recover(ctx, 'unavailable');
+        const launch = await this.beginWorkflow(ctx, 'logs', active, view);
+        return launch ? this.logs.handleEmpty(ctx, launch) : this.recover(ctx, 'unavailable');
+      }
+      case 'history-csv': {
+        if (!this.csv) return this.recover(ctx, 'unavailable');
+        const launch = await this.beginWorkflow(ctx, 'csv', active, view);
+        return launch ? this.csv.handleEmpty(ctx, launch) : this.recover(ctx, 'unavailable');
+      }
       case 'settings': {
         if (!this.settings) return this.recover(ctx, 'unavailable');
         const launch = await this.beginWorkflow(ctx, 'language', active, view);

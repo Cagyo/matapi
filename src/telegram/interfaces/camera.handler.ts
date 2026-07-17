@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { parse } from 'date-fns';
 import { Composer, InlineKeyboard, InputFile } from 'grammy';
 import { BrowseMotionEventsUseCase } from '../../camera/application/browse-motion-events.use-case';
@@ -6,43 +6,32 @@ import { CameraStatusUseCase } from '../../camera/application/camera-status.use-
 import { DisableMotionUseCase } from '../../camera/application/disable-motion.use-case';
 import { EnableMotionUseCase } from '../../camera/application/enable-motion.use-case';
 import { GetMotionPhotoUseCase } from '../../camera/application/get-motion-photo.use-case';
-import {
-  GetMotionVideoUseCase,
-  VideoDelivery,
-} from '../../camera/application/get-motion-video.use-case';
+import { GetMotionVideoUseCase, type VideoDelivery } from '../../camera/application/get-motion-video.use-case';
 import { GetSnapshotUseCase } from '../../camera/application/get-snapshot.use-case';
 import { ListMotionEventsUseCase } from '../../camera/application/list-motion-events.use-case';
 import { OpenLiveStreamUseCase } from '../../camera/application/open-live-stream.use-case';
 import { LiveStreamSessionService } from '../../camera/application/live-stream-session.service';
 import { StopLiveStreamUseCase } from '../../camera/application/stop-live-stream.use-case';
-import { CameraNotFoundError } from '../../camera/domain/errors/camera-not-found.error';
 import { EventNotFoundError } from '../../camera/domain/errors/event-not-found.error';
-import { MediaFileUnavailableError } from '../../camera/domain/errors/media-file-unavailable.error';
-import { MotionAlreadyRunningError } from '../../camera/domain/errors/motion-already-running.error';
-import { MotionNotInstalledError } from '../../camera/domain/errors/motion-not-installed.error';
-import { MotionNotRunningError } from '../../camera/domain/errors/motion-not-running.error';
-import { MotionStartFailedError } from '../../camera/domain/errors/motion-start-failed.error';
-import { MotionStopFailedError } from '../../camera/domain/errors/motion-stop-failed.error';
-import { NoCamerasConfiguredError } from '../../camera/domain/errors/no-cameras-configured.error';
-import { NoSnapshotForEventError } from '../../camera/domain/errors/no-snapshot-for-event.error';
 import { LiveStreamExpiredError } from '../../camera/domain/errors/live-stream-expired.error';
 import { LiveStreamSourceUnavailableError } from '../../camera/domain/errors/live-stream-source-unavailable.error';
 import { LiveStreamUnavailableError } from '../../camera/domain/errors/live-stream-unavailable.error';
-import { BrowseMotionEvent } from '../../camera/domain/ports/media-repository.port';
-import { SnapshotFailedError } from '../../camera/domain/errors/snapshot-failed.error';
-import { eventDurationSec, MotionEvent } from '../../camera/domain/motion-event.entity';
+import { type BrowseMotionEvent } from '../../camera/domain/ports/media-repository.port';
+import { eventDurationSec, type MotionEvent } from '../../camera/domain/motion-event.entity';
 import { catalogFor, type LocaleCatalog } from '../../locales';
 import { en } from '../../locales/en';
+import type { WorkflowReturnReceipt } from '../domain/workflow-return';
+import { workflowReturnCallback } from '../domain/workflow-return';
+import { CameraSourcesHandler } from './camera-sources.handler';
 import { RoleMiddleware } from './role.middleware';
 import { TelegramContext } from './telegram-context';
 import { TelegramHandler } from './telegram-handler';
-import { CameraSourcesHandler } from './camera-sources.handler';
-import type { WorkflowLaunch } from './workflow-entry.coordinator';
-import {
-  appendReturnHomeButton,
-  returnHomeKeyboard,
-  type ExternalWorkflowPhase,
-} from './return-home';
+import { WorkflowEntryCoordinator, type WorkflowLaunch } from './workflow-entry.coordinator';
+import { WorkflowNavigationHandler } from './workflow-navigation.handler';
+
+const CAMERA_BROWSE_TTL_MS = 10 * 60_000;
+const MAX_CALLBACK_BYTES = 64;
+const CAMERA_CALLBACK = /^cam:([A-Za-z0-9_-]{16}):(.+)$/;
 
 type Subcommand =
   | 'snapshot'
@@ -57,38 +46,29 @@ type Subcommand =
   | 'menu'
   | 'dashboard'
   | 'sources';
-
-const CAMERA_BROWSE_TTL_MS = 10 * 60_000;
-
-type CameraBrowsePendingInput =
-  | { kind: 'awaiting-date'; createdAtMs: number }
+type BrowseInput =
+  | { kind: 'date'; receipt: WorkflowReturnReceipt; createdAtMs: number }
   | {
-      kind: 'awaiting-range';
-      selectedDate: Date;
-      promptLabel: string;
-      dateLabel: string;
+      kind: 'range';
+      receipt: WorkflowReturnReceipt;
+      date: Date;
+      label: string;
       createdAtMs: number;
     };
-
-interface CameraBrowseLastResults {
+interface BrowseResults {
+  receipt: WorkflowReturnReceipt;
   events: BrowseMotionEvent[];
   header: string;
-  hasMore: boolean;
   createdAtMs: number;
 }
 
-/**
- * `/camera <subcommand>` — spec 14.
- *
- * Registered for any registered user; `enable`/`disable` additionally
- * require an admin role (checked inline since the command-level guard only
- * enforces registration). All domain errors are mapped to locale strings.
- */
 @Injectable()
 export class CameraHandler implements TelegramHandler {
   private readonly logger = new Logger(CameraHandler.name);
-  private readonly pendingBrowseInputs = new Map<number, CameraBrowsePendingInput>();
-  private readonly browseLastResults = new Map<number, CameraBrowseLastResults>();
+  private readonly launches = new Map<string, WorkflowReturnReceipt>();
+  private readonly receiptCatalogs = new Map<string, LocaleCatalog>();
+  private readonly inputs = new Map<string, BrowseInput>();
+  private readonly results = new Map<string, BrowseResults>();
 
   constructor(
     private readonly snapshot: GetSnapshotUseCase,
@@ -104,958 +84,631 @@ export class CameraHandler implements TelegramHandler {
     private readonly liveStreamSessions: LiveStreamSessionService,
     private readonly guard: RoleMiddleware,
     private readonly sources: CameraSourcesHandler,
+    private readonly workflows: WorkflowEntryCoordinator,
+    @Optional() private readonly navigation?: WorkflowNavigationHandler,
   ) {}
 
   cancelPending(userId: number, chatId: number): void {
-    this.pendingBrowseInputs.delete(userId);
-    this.browseLastResults.delete(userId);
+    for (const key of [...this.inputs.keys(), ...this.results.keys(), ...this.launches.keys()]) {
+      if (key.startsWith(`${userId}:${chatId}:`)) {
+        this.inputs.delete(key);
+        this.results.delete(key);
+        this.launches.delete(key);
+      }
+    }
     this.sources.cancelPending(userId, chatId);
   }
 
   register(composer: Composer<TelegramContext>): void {
     composer.command('camera', this.guard.registered, async (ctx) => {
       if (!ctx.from || !ctx.message || ctx.chat?.type !== 'private') return;
-      this.cancelPending(ctx.from.id, ctx.chat.id);
-      const tokens = (ctx.match ?? '').toString().trim().split(/\s+/).filter(Boolean);
-      const sub = (tokens.shift() ?? '').toLowerCase() as Subcommand | '';
-      const arg = tokens.join(' ').trim();
-
+      const receipt = await this.workflows.begin(ctx, 'camera', {
+        source: 'natural-parent',
+      });
+      if (!receipt) return;
+      this.remember(ctx, receipt);
+      const [subToken = '', ...rest] = (ctx.match ?? '').toString().trim().split(/\s+/).filter(Boolean);
+      const sub = subToken.toLowerCase() as Subcommand | '';
       try {
-        switch (sub) {
-          case '':
-          case 'menu':
-          case 'dashboard':
-            await this.handleDashboard(ctx);
-            return;
-          case 'snapshot':
-            await this.handleSnapshot(ctx, arg || undefined);
-            return;
-          case 'events':
-            await this.handleEvents(ctx, arg || undefined);
-            return;
-          case 'video':
-            await this.handleVideo(ctx, arg);
-            return;
-          case 'photo':
-            await this.handlePhoto(ctx, arg);
-            return;
-          case 'enable':
-            await this.handleEnable(ctx);
-            return;
-          case 'disable':
-            await this.handleDisable(ctx);
-            return;
-          case 'status':
-            await this.handleStatus(ctx);
-            return;
-          case 'live':
-            await this.handleLive(ctx, arg || undefined);
-            return;
-          case 'stop_stream':
-            await this.handleStopLive(ctx);
-            return;
-          case 'sources':
-            await this.sources.handleEntry(ctx);
-            return;
-          default:
-            await ctx.reply(en.camera.usage, {
-              reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
-            });
-        }
-      } catch (err) {
-        await this.handleError(ctx, err, `/camera ${sub}`);
+        await this.dispatch(ctx, receipt, sub, rest.join(' '));
+      } catch (error) {
+        await this.handleError(ctx, receipt, error, `/camera ${sub}`);
       }
     });
 
-    composer.callbackQuery(/^cam:/, this.guard.registered, async (ctx: TelegramContext) => {
-      const userId = ctx.from?.id;
-      if (!userId) return;
+    composer.callbackQuery(CAMERA_CALLBACK, this.guard.registered, async (ctx) => {
       await ctx.answerCallbackQuery().catch(() => undefined);
       if (ctx.chat?.type !== 'private') return;
-      const data = (ctx.callbackQuery?.data ?? '').slice('cam:'.length).trim();
-      if (!data) return;
+      const parsed = parseCameraCallback(ctx.callbackQuery?.data ?? '');
+      if (!parsed) return;
+      const receipt = this.launches.get(this.key(ctx, parsed.receiptId));
+      if (!receipt || !(await this.workflows.validateCurrent(ctx, receipt))) return;
       try {
-        if (data === 'browse' || data.startsWith('browse:')) {
-          this.sources.cancelPending(userId, ctx.chat.id);
-        } else if (data === 'sources' || data.startsWith('sources:')) {
-          this.clearAllBrowseState(ctx);
-        } else {
-          this.cancelPending(userId, ctx.chat.id);
-        }
-        if (data === 'sources') {
-          await this.sources.handleEntry(ctx);
-          return;
-        }
-        if (data.startsWith('sources:')) {
-          await this.sources.handleCallback(ctx, data.slice('sources:'.length));
-          return;
-        }
-        if (data === 'snapshot') {
-          await this.handleSnapshot(ctx);
-          return;
-        }
-        if (data === 'events') {
-          await this.handleEvents(ctx);
-          return;
-        }
-        if (data === 'status') {
-          await this.handleStatus(ctx);
-          return;
-        }
-        if (data === 'live') {
-          await this.handleLive(ctx);
-          return;
-        }
-        if (data.startsWith('live:')) {
-          const cameraId = data.slice('live:'.length).trim();
-          if (cameraId) await this.handleLive(ctx, cameraId, 'id');
-          return;
-        }
-        if (data === 'close') {
-          await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => undefined);
-          await ctx.reply(en.camera.closed, {
-            reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
-          });
-          return;
-        }
-        if (data === 'browse') {
-          await this.handleBrowseMenu(ctx);
-          return;
-        }
-        if (data === 'browse:today') {
-          await this.handleBrowseRelativeDate(ctx, 'today');
-          return;
-        }
-        if (data === 'browse:yesterday') {
-          await this.handleBrowseRelativeDate(ctx, 'yesterday');
-          return;
-        }
-        if (data === 'browse:pick-date') {
-          await this.handleBrowsePickDate(ctx);
-          return;
-        }
-        if (data === 'browse:latest') {
-          await this.handleBrowseLatest(ctx);
-          return;
-        }
-        if (data.startsWith('browse:event:')) {
-          await this.handleBrowseEvent(ctx, data.slice('browse:event:'.length));
-          return;
-        }
-        if (data.startsWith('browse:video:')) {
-          await this.handleBrowseVideo(ctx, data.slice('browse:video:'.length));
-          return;
-        }
-        if (data.startsWith('browse:photo:')) {
-          await this.handleBrowsePhoto(ctx, data.slice('browse:photo:'.length));
-          return;
-        }
-        if (data === 'browse:back-results') {
-          await this.handleBrowseBackResults(ctx);
-          return;
-        }
-        if (data === 'browse:back') {
-          await this.handleBrowseBack(ctx);
-          return;
-        }
-        if (data === 'browse:cancel') {
-          this.clearAllBrowseState(ctx);
-          await ctx.reply(en.camera.browse.cancelled, {
-            reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
-          });
-          return;
-        }
-        if (data === 'browse:close') {
-          this.clearAllBrowseState(ctx);
-          await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => undefined);
-          await ctx.reply(en.camera.closed, {
-            reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
-          });
-          return;
-        }
-        if (data.startsWith('video:')) {
-          const idStr = data.slice('video:'.length);
-          await this.handleVideo(ctx, idStr);
-          return;
-        }
-        if (data.startsWith('photo:')) {
-          const idStr = data.slice('photo:'.length);
-          await this.handlePhoto(ctx, idStr);
-          return;
-        }
-      } catch (err) {
-        await this.handleError(ctx, err, `/camera callback (${data})`);
+        await this.dispatchCallback(ctx, receipt, parsed.action);
+      } catch (error) {
+        await this.handleError(ctx, receipt, error, '/camera callback');
       }
     });
 
     composer.on('message:text', this.guard.registered, async (ctx, next) => {
-      const userId = ctx.from?.id;
-      if (!userId) return next();
       if (ctx.message?.text?.startsWith('/')) return next();
       try {
         if (await this.sources.handleText(ctx)) return;
-        if (!this.pendingBrowseInputs.has(userId)) return next();
-        await this.handleBrowseText(ctx, userId, ctx.message.text.trim());
-      } catch (err) {
-        await this.handleError(ctx, err, '/camera browse text');
+        const input = this.inputFor(ctx);
+        if (!input || !(await this.workflows.validateCurrent(ctx, input.receipt))) return next();
+        await this.handleBrowseText(ctx, input, ctx.message.text.trim());
+      } catch (error) {
+        const input = this.inputFor(ctx);
+        if (input) await this.handleError(ctx, input.receipt, error, '/camera browse text');
       }
     });
   }
 
-  async handleDashboard(ctx: TelegramContext, _launch?: WorkflowLaunch): Promise<void> {
-    const userId = ctx.from?.id;
-    const chatId = ctx.chat?.type === 'private' ? ctx.chat.id : undefined;
-    if (userId !== undefined && chatId !== undefined) this.cancelPending(userId, chatId);
-
-    const kb = new InlineKeyboard()
-      .text(this.catalog(ctx).camera.dashboardButtons.live, 'cam:live')
+  async handleDashboard(ctx: TelegramContext, launch?: WorkflowLaunch): Promise<void> {
+    const receipt = launch?.receipt ?? (await this.workflows.begin(ctx, 'camera', { source: 'natural-parent' }));
+    if (!receipt) return;
+    this.remember(ctx, receipt);
+    const keyboard = new InlineKeyboard()
+      .text(this.catalog(ctx).camera.dashboardButtons.live, callback(receipt.id, 'l'))
       .row()
-      .text(en.camera.dashboardButtons.snapshot, 'cam:snapshot')
-      .text(en.camera.dashboardButtons.browseEvents, 'cam:browse')
+      .text(en.camera.dashboardButtons.snapshot, callback(receipt.id, 's'))
+      .text(en.camera.dashboardButtons.browseEvents, callback(receipt.id, 'b'))
       .row()
-      .text(en.camera.dashboardButtons.eventsToday, 'cam:events')
-      .text(en.camera.dashboardButtons.status, 'cam:status')
+      .text(en.camera.dashboardButtons.eventsToday, callback(receipt.id, 'e'))
+      .text(en.camera.dashboardButtons.status, callback(receipt.id, 'q'))
       .row()
-      .text(en.camera.dashboardButtons.close, 'cam:close');
+      .text(en.camera.dashboardButtons.close, callback(receipt.id, 'x'));
     await ctx.reply(en.camera.dashboardTitle, {
-      reply_markup: this.returnKeyboard(ctx, 'cancelPending', kb),
+      reply_markup: this.withHome(receipt, keyboard),
     });
   }
 
-  private async handleBrowseMenu(ctx: TelegramContext): Promise<void> {
-    this.clearBrowseInput(ctx);
-    this.clearBrowseResults(ctx);
+  private async dispatch(
+    ctx: TelegramContext,
+    receipt: WorkflowReturnReceipt,
+    sub: Subcommand | '',
+    arg: string,
+  ): Promise<void> {
+    switch (sub) {
+      case '':
+      case 'menu':
+      case 'dashboard':
+        return this.handleDashboard(ctx, { receipt });
+      case 'snapshot':
+        return this.handleSnapshot(ctx, receipt, arg || undefined);
+      case 'events':
+        return this.handleEvents(ctx, receipt, arg || undefined);
+      case 'video':
+        return this.handleVideo(ctx, receipt, arg);
+      case 'photo':
+        return this.handlePhoto(ctx, receipt, arg);
+      case 'enable':
+        return this.handleEnable(ctx, receipt);
+      case 'disable':
+        return this.handleDisable(ctx, receipt);
+      case 'status':
+        return this.handleStatus(ctx, receipt);
+      case 'live':
+        return this.handleLive(ctx, receipt, arg || undefined);
+      case 'stop_stream':
+        return this.handleStopLive(ctx, receipt);
+      case 'sources':
+        return this.sources.handleEntry(ctx, { receipt });
+      default:
+        return this.complete(ctx, receipt, () => ctx.reply(en.camera.usage));
+    }
+  }
 
-    const kb = new InlineKeyboard()
-      .text(en.camera.browse.buttons.today, 'cam:browse:today')
-      .text(en.camera.browse.buttons.yesterday, 'cam:browse:yesterday')
+  private async dispatchCallback(ctx: TelegramContext, receipt: WorkflowReturnReceipt, action: string): Promise<void> {
+    if (action.startsWith('src:')) return this.sources.handleCallback(ctx, action.slice(4), receipt);
+    if (action === 'd') return this.handleDashboard(ctx, { receipt });
+    if (action === 's') return this.handleSnapshot(ctx, receipt);
+    if (action === 'e') return this.handleEvents(ctx, receipt);
+    if (action === 'q') return this.handleStatus(ctx, receipt);
+    if (action === 'l') return this.handleLive(ctx, receipt);
+    if (action.startsWith('l:')) return this.handleLive(ctx, receipt, action.slice(2), 'id');
+    if (action === 'x') return this.complete(ctx, receipt, () => ctx.reply(en.camera.closed));
+    if (action === 'b') return this.browseMenu(ctx, receipt);
+    if (action === 'bt') return this.browseRelative(ctx, receipt, 'today');
+    if (action === 'by') return this.browseRelative(ctx, receipt, 'yesterday');
+    if (action === 'bp') return this.browsePickDate(ctx, receipt);
+    if (action === 'bl') return this.browseLatest(ctx, receipt);
+    if (action === 'bb') return this.browseBack(ctx, receipt);
+    if (action === 'bc') return this.complete(ctx, receipt, () => ctx.reply(en.camera.browse.cancelled));
+    if (action === 'br') return this.browseBackResults(ctx, receipt);
+    if (action.startsWith('be:')) return this.browseEvent(ctx, receipt, action.slice(3));
+    if (action.startsWith('bv:')) return this.browseVideo(ctx, receipt, action.slice(3));
+    if (action.startsWith('bp:')) return this.browsePhoto(ctx, receipt, action.slice(3));
+    if (action.startsWith('v:')) return this.handleVideo(ctx, receipt, action.slice(2));
+    if (action.startsWith('p:')) return this.handlePhoto(ctx, receipt, action.slice(2));
+  }
+
+  private async browseMenu(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<void> {
+    this.clearBrowse(ctx, receipt.id);
+    const keyboard = new InlineKeyboard()
+      .text(en.camera.browse.buttons.today, callback(receipt.id, 'bt'))
+      .text(en.camera.browse.buttons.yesterday, callback(receipt.id, 'by'))
       .row()
-      .text(en.camera.browse.buttons.pickDate, 'cam:browse:pick-date')
-      .text(en.camera.browse.buttons.latest, 'cam:browse:latest')
+      .text(en.camera.browse.buttons.pickDate, callback(receipt.id, 'bp'))
+      .text(en.camera.browse.buttons.latest, callback(receipt.id, 'bl'))
       .row()
-      .text(en.camera.browse.buttons.back, 'cam:browse:back')
-      .text(en.camera.browse.buttons.close, 'cam:browse:close');
+      .text(en.camera.browse.buttons.back, callback(receipt.id, 'd'))
+      .text(en.camera.browse.buttons.cancel, callback(receipt.id, 'bc'));
     await ctx.reply(en.camera.browse.menuTitle, {
-      reply_markup: this.returnKeyboard(ctx, 'cancelPending', kb),
+      reply_markup: this.withHome(receipt, keyboard),
     });
   }
 
-  private async handleBrowsePickDate(ctx: TelegramContext): Promise<void> {
-    const userId = ctx.from?.id;
-    if (!userId) return;
-    this.clearAllBrowseState(ctx);
-    this.pendingBrowseInputs.set(userId, {
-      kind: 'awaiting-date',
+  private async browsePickDate(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<void> {
+    this.clearBrowse(ctx, receipt.id);
+    this.inputs.set(this.key(ctx, receipt.id), {
+      kind: 'date',
+      receipt,
       createdAtMs: Date.now(),
     });
     await ctx.reply(en.camera.browse.datePrompt, {
-      reply_markup: this.returnKeyboard(ctx, 'cancelPending', browseBackCancelKeyboard()),
+      reply_markup: this.withHome(
+        receipt,
+        new InlineKeyboard().text(en.camera.browse.buttons.cancel, callback(receipt.id, 'bc')),
+      ),
     });
   }
 
-  private async handleBrowseRelativeDate(
+  private async browseRelative(
     ctx: TelegramContext,
+    receipt: WorkflowReturnReceipt,
     mode: 'today' | 'yesterday',
   ): Promise<void> {
-    const userId = ctx.from?.id;
-    if (!userId) return;
-    const selectedDate = new Date();
-    if (mode === 'yesterday') selectedDate.setDate(selectedDate.getDate() - 1);
-    const promptLabel = mode;
-    const dateLabel = formatBrowseDateLabel(selectedDate);
-
-    this.clearAllBrowseState(ctx);
-    this.pendingBrowseInputs.set(userId, {
-      kind: 'awaiting-range',
-      selectedDate,
-      promptLabel,
-      dateLabel,
+    const date = new Date();
+    if (mode === 'yesterday') date.setDate(date.getDate() - 1);
+    this.clearBrowse(ctx, receipt.id);
+    this.inputs.set(this.key(ctx, receipt.id), {
+      kind: 'range',
+      receipt,
+      date,
+      label: formatBrowseDateLabel(date),
       createdAtMs: Date.now(),
     });
-    await ctx.reply(en.camera.browse.timeRangePrompt(promptLabel), {
-      reply_markup: this.returnKeyboard(ctx, 'cancelPending', browseBackCancelKeyboard()),
+    await ctx.reply(en.camera.browse.timeRangePrompt(mode), {
+      reply_markup: this.withHome(
+        receipt,
+        new InlineKeyboard().text(en.camera.browse.buttons.cancel, callback(receipt.id, 'bc')),
+      ),
     });
   }
 
-  private async handleBrowseText(
-    ctx: TelegramContext,
-    userId: number,
-    text: string,
-  ): Promise<void> {
-    const state = this.pendingBrowseInputs.get(userId);
-    if (!state) return;
-    if (Date.now() - state.createdAtMs > CAMERA_BROWSE_TTL_MS) {
-      this.clearAllBrowseState(ctx);
-      await ctx.reply(en.camera.browse.expiredInput, {
-        reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
-      });
+  private async handleBrowseText(ctx: TelegramContext, input: BrowseInput, text: string): Promise<void> {
+    if (Date.now() - input.createdAtMs > CAMERA_BROWSE_TTL_MS) {
+      this.clearBrowse(ctx, input.receipt.id);
+      await this.complete(ctx, input.receipt, () => ctx.reply(en.camera.browse.expiredInput));
       return;
     }
-
-    if (state.kind === 'awaiting-date') {
-      const parsedDate = parseBrowseDateInput(text);
-      if (!parsedDate.ok) {
+    if (input.kind === 'date') {
+      const parsed = parseBrowseDateInput(text);
+      if (!parsed.ok) {
         await ctx.reply(en.camera.browse.invalidDate, {
-          reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx), browseBackCancelKeyboard()),
+          reply_markup: this.withHome(input.receipt),
         });
         return;
       }
-      this.pendingBrowseInputs.set(userId, {
-        kind: 'awaiting-range',
-        selectedDate: parsedDate.date,
-        promptLabel: parsedDate.dateLabel,
-        dateLabel: parsedDate.dateLabel,
+      this.inputs.set(this.key(ctx, input.receipt.id), {
+        kind: 'range',
+        receipt: input.receipt,
+        date: parsed.date,
+        label: parsed.dateLabel,
         createdAtMs: Date.now(),
       });
-      await ctx.reply(en.camera.browse.timeRangePrompt(parsedDate.dateLabel), {
-        reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx), browseBackCancelKeyboard()),
+      await ctx.reply(en.camera.browse.timeRangePrompt(parsed.dateLabel), {
+        reply_markup: this.withHome(input.receipt),
       });
       return;
     }
-
-    const parsedRange = parseTimeRangeInput(text);
-    if (!parsedRange.ok) {
+    const range = parseTimeRangeInput(text);
+    if (!range.ok) {
       await ctx.reply(
-        parsedRange.reason === 'order'
-          ? en.camera.browse.invalidTimeOrder
-          : en.camera.browse.invalidTimeRange,
-        { reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx), browseBackCancelKeyboard()) },
+        range.reason === 'order' ? en.camera.browse.invalidTimeOrder : en.camera.browse.invalidTimeRange,
+        { reply_markup: this.withHome(input.receipt) },
       );
       return;
     }
-
-    const range = buildBrowseRange(state.selectedDate, parsedRange);
-    this.pendingBrowseInputs.delete(userId);
-    const result = await this.browseEvents.between(range.start, range.end);
-    await this.replyBrowseResults(ctx, {
-      kind: 'range',
-      events: result.events,
-      hasMore: result.hasMore,
-      dateLabel: state.dateLabel,
-      rangeLabel: range.rangeLabel,
-    });
+    const dates = buildBrowseRange(input.date, range);
+    this.inputs.delete(this.key(ctx, input.receipt.id));
+    const result = await this.browseEvents.between(dates.start, dates.end);
+    await this.replyBrowseResults(
+      ctx,
+      input.receipt,
+      result.events,
+      en.camera.browse.rangeHeader(input.label, dates.rangeLabel, result.events.length, result.hasMore),
+    );
   }
 
-  private async handleBrowseLatest(ctx: TelegramContext): Promise<void> {
-    this.clearBrowseInput(ctx);
+  private async browseLatest(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<void> {
     const result = await this.browseEvents.latest();
-    await this.replyBrowseResults(ctx, {
-      kind: 'latest',
-      events: result.events,
-      hasMore: result.hasMore,
-    });
+    await this.replyBrowseResults(ctx, receipt, result.events, en.camera.browse.latestHeader(result.events.length));
   }
 
   private async replyBrowseResults(
     ctx: TelegramContext,
-    result:
-      | {
-          kind: 'latest';
-          events: BrowseMotionEvent[];
-          hasMore: boolean;
-        }
-      | {
-          kind: 'range';
-          events: BrowseMotionEvent[];
-          hasMore: boolean;
-          dateLabel: string;
-          rangeLabel: string;
-        },
+    receipt: WorkflowReturnReceipt,
+    events: BrowseMotionEvent[],
+    header: string,
   ): Promise<void> {
-    if (result.events.length === 0) {
-      const empty =
-        result.kind === 'latest'
-          ? en.camera.browse.emptyLatest
-          : en.camera.browse.emptyRange(result.dateLabel, result.rangeLabel);
-      const userId = ctx.from?.id;
-      if (userId) {
-        this.browseLastResults.set(userId, {
-          events: [],
-          header: '',
-          hasMore: result.hasMore,
-          createdAtMs: Date.now(),
-        });
-      }
-      await ctx.reply(empty, {
-        reply_markup: this.returnKeyboard(ctx, 'cancelPending', browseResultNavKeyboard()),
+    this.results.set(this.key(ctx, receipt.id), {
+      receipt,
+      events,
+      header,
+      createdAtMs: Date.now(),
+    });
+    if (events.length === 0) {
+      await ctx.reply(en.camera.browse.emptyLatest, {
+        reply_markup: this.withHome(receipt, this.browseNavigation(receipt)),
       });
       return;
     }
-
-    const header =
-      result.kind === 'latest'
-        ? en.camera.browse.latestHeader(result.events.length)
-        : en.camera.browse.rangeHeader(
-            result.dateLabel,
-            result.rangeLabel,
-            result.events.length,
-            result.hasMore,
-          );
-    const lines = result.events.map((event) =>
-      en.camera.browse.eventLine(this.toBrowseLineView(event)),
-    );
-    const message = [header, '', ...lines].join('\n');
-    const userId = ctx.from?.id;
-    if (userId) {
-      this.browseLastResults.set(userId, {
-        events: result.events,
-        header,
-        hasMore: result.hasMore,
-        createdAtMs: Date.now(),
-      });
-    }
-    await ctx.reply(message, {
-      reply_markup: this.returnKeyboard(ctx, 'cancelPending', this.browseResultsKeyboard(result.events)),
+    const lines = events.map((event) => en.camera.browse.eventLine(this.browseLine(event)));
+    await ctx.reply([header, '', ...lines].join('\n'), {
+      reply_markup: this.withHome(receipt, this.browseResultsKeyboard(receipt, events)),
     });
   }
 
-  private browseResultsKeyboard(events: BrowseMotionEvent[]): InlineKeyboard {
-    const kb = new InlineKeyboard();
-    for (const event of events) {
-      kb.text(
-        en.camera.browse.eventButton(this.toBrowseButtonView(event)),
-        `cam:browse:event:${event.id}`,
-      ).row();
-    }
-    kb.text(en.camera.browse.buttons.back, 'cam:browse:back')
-      .text(en.camera.browse.buttons.close, 'cam:browse:close');
-    return kb;
-  }
-
-  private toBrowseLineView(event: BrowseMotionEvent) {
-    return {
-      id: event.id,
-      startedAt: event.startedAt,
-      camera: cameraName(event),
-      duration: durationLabel(event),
-      media: mediaLabel(event),
-    };
-  }
-
-  private toBrowseButtonView(event: BrowseMotionEvent) {
-    return {
-      id: event.id,
-      startedAt: event.startedAt,
-      camera: cameraName(event),
-      duration: durationLabel(event),
-    };
-  }
-
-  private async handleBrowseBack(ctx: TelegramContext): Promise<void> {
-    const userId = ctx.from?.id;
-    const hadPending = userId ? this.pendingBrowseInputs.has(userId) : false;
-    const hadCachedResults = userId ? this.browseLastResults.has(userId) : false;
-    const results = userId ? this.currentBrowseResults(userId) : undefined;
-    const hadExpiredResults = hadCachedResults && !results;
-
-    if (userId) {
-      this.pendingBrowseInputs.delete(userId);
-      this.browseLastResults.delete(userId);
-    }
-
-    if (hadExpiredResults) {
-      await this.replyBrowseResultsExpired(ctx);
-      return;
-    }
-
-    if (hadPending || results) {
-      await this.handleBrowseMenu(ctx);
-      return;
-    }
-
-    await this.handleDashboard(ctx);
-  }
-
-  private async handleBrowseEvent(ctx: TelegramContext, arg: string): Promise<void> {
-    const id = parseEventId(arg);
-    if (id === null) {
-      await this.replyBrowseResultsExpired(ctx);
-      return;
-    }
-    const results = this.currentBrowseResults(ctx.from?.id ?? -1);
-    if (!results || results.events.length === 0) {
-      await this.replyBrowseResultsExpired(ctx);
-      return;
-    }
-    const event = results.events.find((candidate) => candidate.id === id);
+  private async browseEvent(ctx: TelegramContext, receipt: WorkflowReturnReceipt, rawId: string): Promise<void> {
+    const id = parseEventId(rawId);
+    const event = id === null ? undefined : this.currentEvent(ctx, receipt, id);
     if (!event) {
-      await this.handleError(ctx, new EventNotFoundError(id), '/camera browse event');
+      await this.complete(ctx, receipt, () => ctx.reply(en.camera.browse.resultsExpired));
       return;
     }
-
     const keyboard = new InlineKeyboard();
-    const hasVideo = (!!event.videoPath && !event.localDeleted) || !!event.gdriveFileId;
-    const hasPhoto = !!event.snapshotPath && !event.localDeleted;
-    if (hasVideo) keyboard.text(en.camera.browse.buttons.video, `cam:browse:video:${event.id}`);
-    if (hasPhoto) keyboard.text(en.camera.browse.buttons.photo, `cam:browse:photo:${event.id}`);
-    if (hasVideo || hasPhoto) keyboard.row();
-    keyboard
-      .text(en.camera.browse.buttons.backToResults, 'cam:browse:back-results')
-      .text(en.camera.browse.buttons.close, 'cam:browse:close');
-    await ctx.reply(en.camera.browse.actionHeader(this.toBrowseLineView(event)), {
-      reply_markup: this.returnKeyboard(ctx, 'cancelPending', keyboard),
+    if ((!!event.videoPath && !event.localDeleted) || !!event.gdriveFileId)
+      keyboard.text(en.camera.browse.buttons.video, callback(receipt.id, `bv:${event.id}`));
+    if (!!event.snapshotPath && !event.localDeleted)
+      keyboard.text(en.camera.browse.buttons.photo, callback(receipt.id, `bp:${event.id}`));
+    keyboard.row().text(en.camera.browse.buttons.backToResults, callback(receipt.id, 'br'));
+    await ctx.reply(en.camera.browse.actionHeader(this.browseLine(event)), {
+      reply_markup: this.withHome(receipt, keyboard),
     });
   }
 
-  private async handleBrowseVideo(ctx: TelegramContext, arg: string): Promise<void> {
-    const id = parseEventId(arg);
-    if (id === null || !this.currentBrowseEvent(ctx, id)) {
-      await this.replyBrowseResultsExpired(ctx);
+  private async browseVideo(ctx: TelegramContext, receipt: WorkflowReturnReceipt, rawId: string): Promise<void> {
+    const id = parseEventId(rawId);
+    if (id === null || !this.currentEvent(ctx, receipt, id)) {
+      await this.complete(ctx, receipt, () => ctx.reply(en.camera.browse.resultsExpired));
       return;
     }
-    const delivery = await this.video.execute(id);
-    const keyboard = this.browseMediaKeyboard(ctx);
-    if (delivery.kind === 'drive') {
-      await ctx.reply(en.camera.driveLinkFallback(id, delivery.event.gdriveFileId), {
-        reply_markup: keyboard,
-      });
-      return;
-    }
-    await ctx.replyWithChatAction('upload_video');
-    await ctx.replyWithVideo(new InputFile(delivery.path), {
-      caption: caption(delivery, id),
-      reply_markup: keyboard,
-    });
+    await this.deliverVideo(ctx, receipt, id, this.browseNavigation(receipt));
   }
-
-  private async handleBrowsePhoto(ctx: TelegramContext, arg: string): Promise<void> {
-    const id = parseEventId(arg);
-    if (id === null || !this.currentBrowseEvent(ctx, id)) {
-      await this.replyBrowseResultsExpired(ctx);
+  private async browsePhoto(ctx: TelegramContext, receipt: WorkflowReturnReceipt, rawId: string): Promise<void> {
+    const id = parseEventId(rawId);
+    if (id === null || !this.currentEvent(ctx, receipt, id)) {
+      await this.complete(ctx, receipt, () => ctx.reply(en.camera.browse.resultsExpired));
       return;
     }
+    if (!(await this.workflows.markRunning(ctx, receipt))) return;
     await ctx.replyWithChatAction('upload_photo');
-    const result = await this.photo.execute(id);
-    await ctx.replyWithPhoto(new InputFile(result.path), {
-      caption: en.camera.photoCaption(
-        result.event.id,
-        result.event.startedAt,
-        result.event.cameraId ?? '—',
-      ),
-      reply_markup: this.browseMediaKeyboard(ctx),
+    const photo = await this.photo.execute(id);
+    await ctx.replyWithPhoto(new InputFile(photo.path), {
+      caption: en.camera.photoCaption(photo.event.id, photo.event.startedAt, photo.event.cameraId ?? '—'),
+      reply_markup: this.withHome(receipt, this.browseNavigation(receipt)),
     });
   }
-
-  private async handleBrowseBackResults(ctx: TelegramContext): Promise<void> {
-    const results = this.currentBrowseResults(ctx.from?.id ?? -1);
-    if (!results || results.events.length === 0) {
-      await this.replyBrowseResultsExpired(ctx);
+  private async browseBackResults(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<void> {
+    const result = this.currentResults(ctx, receipt);
+    if (!result || result.events.length === 0) {
+      await this.complete(ctx, receipt, () => ctx.reply(en.camera.browse.resultsExpired));
       return;
     }
-    const lines = results.events.map((event) => en.camera.browse.eventLine(this.toBrowseLineView(event)));
-    await ctx.reply([results.header, '', ...lines].join('\n'), {
-      reply_markup: this.returnKeyboard(ctx, 'cancelPending', this.browseResultsKeyboard(results.events)),
-    });
-  }
-
-  private currentBrowseEvent(ctx: TelegramContext, id: number): BrowseMotionEvent | undefined {
-    return this.currentBrowseResults(ctx.from?.id ?? -1)?.events.find((event) => event.id === id);
-  }
-
-  private async replyBrowseResultsExpired(ctx: TelegramContext): Promise<void> {
-    this.clearAllBrowseState(ctx);
-    await ctx.reply(en.camera.browse.resultsExpired, {
-      reply_markup: this.returnKeyboard(
-        ctx,
-        'alreadyTerminal',
-        new InlineKeyboard().text(en.camera.dashboardButtons.browseEvents, 'cam:browse'),
+    await ctx.reply(
+      [result.header, '', ...result.events.map((event) => en.camera.browse.eventLine(this.browseLine(event)))].join(
+        '\n',
       ),
-    });
-  }
-
-  private browseMediaKeyboard(ctx: TelegramContext): InlineKeyboard {
-    return this.returnKeyboard(
-      ctx,
-      'cancelPending',
-      new InlineKeyboard()
-        .text(en.camera.browse.buttons.backToResults, 'cam:browse:back-results')
-        .text(en.camera.browse.buttons.close, 'cam:browse:close'),
+      {
+        reply_markup: this.withHome(receipt, this.browseResultsKeyboard(receipt, result.events)),
+      },
     );
   }
-
-  private clearBrowseInput(ctx: TelegramContext): void {
-    const userId = ctx.from?.id;
-    if (!userId) return;
-    this.pendingBrowseInputs.delete(userId);
+  private async browseBack(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<void> {
+    this.clearBrowse(ctx, receipt.id);
+    await this.browseMenu(ctx, receipt);
   }
 
-  private clearBrowseResults(ctx: TelegramContext): void {
-    const userId = ctx.from?.id;
-    if (!userId) return;
-    this.browseLastResults.delete(userId);
-  }
-
-  private clearAllBrowseState(ctx: TelegramContext): void {
-    this.clearBrowseInput(ctx);
-    this.clearBrowseResults(ctx);
-  }
-
-  private currentBrowseResults(userId: number): CameraBrowseLastResults | undefined {
-    const state = this.browseLastResults.get(userId);
-    if (state && Date.now() - state.createdAtMs > CAMERA_BROWSE_TTL_MS) {
-      this.browseLastResults.delete(userId);
-      return undefined;
-    }
-    return state;
-  }
-
-  private returnKeyboard(
-    ctx: TelegramContext,
-    phase: ExternalWorkflowPhase,
-    keyboard?: InlineKeyboard,
-  ): InlineKeyboard {
-    const input = { workflow: 'camera' as const, phase };
-    return keyboard
-      ? appendReturnHomeButton(keyboard, this.catalog(ctx), input)
-      : returnHomeKeyboard(this.catalog(ctx), input);
-  }
-
-  private returnPhase(ctx: TelegramContext): ExternalWorkflowPhase {
-    const userId = ctx.from?.id;
-    const chatId = ctx.chat?.type === 'private' ? ctx.chat.id : undefined;
-    return userId !== undefined && chatId !== undefined &&
-      (this.pendingBrowseInputs.has(userId) ||
-        this.currentBrowseResults(userId) !== undefined ||
-        this.sources.hasPending(userId, chatId))
-      ? 'cancelPending'
-      : 'alreadyTerminal';
-  }
-
-  private async handleSnapshot(ctx: TelegramContext, name?: string): Promise<void> {
+  private async handleSnapshot(ctx: TelegramContext, receipt: WorkflowReturnReceipt, name?: string): Promise<void> {
+    if (!(await this.workflows.markRunning(ctx, receipt))) return;
     await ctx.replyWithChatAction('upload_photo');
     const result = await this.snapshot.execute(name);
-    await ctx.replyWithPhoto(new InputFile(result.buffer, 'snapshot.jpg'), {
-      caption: en.camera.snapshotCaption(result.cameraName, result.takenAt),
-      reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
-    });
-  }
-
-  private async handleEvents(ctx: TelegramContext, dateArg?: string): Promise<void> {
-    let day: Date;
-    if (dateArg) {
-      day = parse(dateArg, 'dd.MM.yyyy', new Date());
-      if (Number.isNaN(day.getTime())) {
-        await ctx.reply(en.camera.invalidDate, {
-          reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
-        });
-        return;
-      }
-    } else {
-      day = new Date();
-    }
-
-    const events = await this.listEvents.execute(day);
-    if (events.length === 0) {
-      await ctx.reply(en.camera.eventsNone(day), {
-        reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
-      });
-      return;
-    }
-
-    const lines = events.map((e) =>
-      en.camera.eventLine({
-        id: e.id,
-        startedAt: e.startedAt,
-        durationSec: eventDurationSec(e),
-        hasSnapshot: !!e.snapshotPath,
+    await this.complete(ctx, receipt, () =>
+      ctx.replyWithPhoto(new InputFile(result.buffer, 'snapshot.jpg'), {
+        caption: en.camera.snapshotCaption(result.cameraName, result.takenAt),
       }),
     );
-    const message = [
-      en.camera.eventsHeader(day),
-      ...lines,
-      '',
-      en.camera.eventsFooter(events.length),
-    ].join('\n');
-
-    const kb = new InlineKeyboard();
-    const recent = events.slice(0, 5);
-    for (const e of recent) {
-      kb.text(en.camera.eventButtons.video(e.id), `cam:video:${e.id}`);
-      if (e.snapshotPath) {
-        kb.text(en.camera.eventButtons.photo(e.id), `cam:photo:${e.id}`);
-      }
-      kb.row();
-    }
-    await ctx.reply(message, {
-      reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx), kb),
-    });
   }
-
-  private async handleVideo(ctx: TelegramContext, arg: string): Promise<void> {
-    const id = parseEventId(arg);
-    if (id === null) {
-      await ctx.reply(en.camera.usage, {
-        reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
-      });
+  private async handleEvents(ctx: TelegramContext, receipt: WorkflowReturnReceipt, dateArg?: string): Promise<void> {
+    const day = dateArg ? parse(dateArg, 'dd.MM.yyyy', new Date()) : new Date();
+    if (Number.isNaN(day.getTime())) {
+      await this.complete(ctx, receipt, () => ctx.reply(en.camera.invalidDate));
       return;
     }
-
+    const events = await this.listEvents.execute(day);
+    if (events.length === 0) {
+      await this.complete(ctx, receipt, () => ctx.reply(en.camera.eventsNone(day)));
+      return;
+    }
+    const keyboard = new InlineKeyboard();
+    for (const event of events.slice(0, 5)) {
+      keyboard.text(en.camera.eventButtons.video(event.id), callback(receipt.id, `v:${event.id}`));
+      if (event.snapshotPath)
+        keyboard.text(en.camera.eventButtons.photo(event.id), callback(receipt.id, `p:${event.id}`));
+      keyboard.row();
+    }
+    await ctx.reply(
+      [
+        en.camera.eventsHeader(day),
+        ...events.map((event) =>
+          en.camera.eventLine({
+            id: event.id,
+            startedAt: event.startedAt,
+            durationSec: eventDurationSec(event),
+            hasSnapshot: !!event.snapshotPath,
+          }),
+        ),
+        '',
+        en.camera.eventsFooter(events.length),
+      ].join('\n'),
+      { reply_markup: this.withHome(receipt, keyboard) },
+    );
+  }
+  private async handleVideo(ctx: TelegramContext, receipt: WorkflowReturnReceipt, rawId: string): Promise<void> {
+    const id = parseEventId(rawId);
+    if (id === null) {
+      await this.complete(ctx, receipt, () => ctx.reply(en.camera.usage));
+      return;
+    }
+    await this.deliverVideo(ctx, receipt, id);
+  }
+  private async deliverVideo(
+    ctx: TelegramContext,
+    receipt: WorkflowReturnReceipt,
+    id: number,
+    keyboard?: InlineKeyboard,
+  ): Promise<void> {
+    if (!(await this.workflows.markRunning(ctx, receipt))) return;
     const delivery = await this.video.execute(id);
     if (delivery.kind === 'drive') {
-      // gdriveFileId holds the rclone remote path (not a Drive file id).
-      await ctx.reply(en.camera.driveLinkFallback(id, delivery.event.gdriveFileId), {
-        reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
-      });
+      await this.complete(ctx, receipt, () =>
+        ctx.reply(
+          en.camera.driveLinkFallback(id, delivery.event.gdriveFileId),
+          keyboard ? { reply_markup: this.withHome(receipt, keyboard) } : {},
+        ),
+      );
       return;
     }
-
     await ctx.replyWithChatAction('upload_video');
-    await ctx.replyWithVideo(new InputFile(delivery.path), {
-      caption: caption(delivery, id),
-      reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
-    });
+    await this.complete(ctx, receipt, () =>
+      ctx.replyWithVideo(new InputFile(delivery.path), {
+        caption: caption(delivery, id),
+        ...(keyboard ? { reply_markup: this.withHome(receipt, keyboard) } : {}),
+      }),
+    );
   }
-
-  private async handlePhoto(ctx: TelegramContext, arg: string): Promise<void> {
-    const id = parseEventId(arg);
+  private async handlePhoto(ctx: TelegramContext, receipt: WorkflowReturnReceipt, rawId: string): Promise<void> {
+    const id = parseEventId(rawId);
     if (id === null) {
-      await ctx.reply(en.camera.usage, {
-        reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
-      });
+      await this.complete(ctx, receipt, () => ctx.reply(en.camera.usage));
       return;
     }
-
+    if (!(await this.workflows.markRunning(ctx, receipt))) return;
     await ctx.replyWithChatAction('upload_photo');
-    const result = await this.photo.execute(id);
-    await ctx.replyWithPhoto(new InputFile(result.path), {
-      caption: en.camera.photoCaption(
-        result.event.id,
-        result.event.startedAt,
-        result.event.cameraId ?? '—',
-      ),
-      reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
-    });
+    const photo = await this.photo.execute(id);
+    await this.complete(ctx, receipt, () =>
+      ctx.replyWithPhoto(new InputFile(photo.path), {
+        caption: en.camera.photoCaption(photo.event.id, photo.event.startedAt, photo.event.cameraId ?? '—'),
+      }),
+    );
   }
-
-  private async handleEnable(ctx: TelegramContext): Promise<void> {
-    if (!(await this.requireAdmin(ctx))) return;
+  private async handleEnable(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<void> {
+    if (!(await this.requireAdmin(ctx, receipt)) || !(await this.workflows.markRunning(ctx, receipt))) return;
     await this.enable.execute();
-    await ctx.reply(en.camera.motionStarted, {
-      reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
-    });
+    await this.complete(ctx, receipt, () => ctx.reply(en.camera.motionStarted));
   }
-
-  private async handleDisable(ctx: TelegramContext): Promise<void> {
-    if (!(await this.requireAdmin(ctx))) return;
+  private async handleDisable(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<void> {
+    if (!(await this.requireAdmin(ctx, receipt)) || !(await this.workflows.markRunning(ctx, receipt))) return;
     await this.disable.execute();
-    await ctx.reply(en.camera.motionStopped, {
-      reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
-    });
+    await this.complete(ctx, receipt, () => ctx.reply(en.camera.motionStopped));
   }
-
-  async handleStatus(ctx: TelegramContext): Promise<void> {
-    const result = await this.status.execute();
-    const message = `${en.camera.statusHeader}\n\n${en.camera.statusBody(result)}`;
-    await ctx.reply(message, { reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)) });
+  private async handleStatus(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<void> {
+    const status = await this.status.execute();
+    await this.complete(ctx, receipt, () => ctx.reply(`${en.camera.statusHeader}\n\n${en.camera.statusBody(status)}`));
   }
 
   private async handleLive(
     ctx: TelegramContext,
-    cameraReference?: string,
+    receipt: WorkflowReturnReceipt,
+    reference?: string,
     resolution: 'name' | 'id' = 'name',
   ): Promise<void> {
     const telegramId = ctx.from?.id;
     const chatId = ctx.chat?.id;
-    if (!telegramId || chatId === undefined || ctx.chat?.type !== 'private') return;
-    const catalog = this.catalog(ctx);
-
-    await ctx.reply(catalog.camera.live.opening, {
-      reply_markup: this.returnKeyboard(ctx, 'leaveRunning'),
-    });
-    try {
-      const opened = resolution === 'id'
+    if (!telegramId || chatId === undefined || !(await this.workflows.markRunning(ctx, receipt))) return;
+    const live = this.catalog(ctx).camera.live;
+    await ctx.reply(live.opening, { reply_markup: this.withHome(receipt) });
+    const opened =
+      resolution === 'id'
         ? await this.openLiveStream.executeById({
             telegramId,
-            cameraId: cameraReference ?? '',
+            cameraId: reference ?? '',
           })
         : await this.openLiveStream.execute({
             telegramId,
-            cameraName: cameraReference,
+            cameraName: reference,
           });
-      const keyboard = appendReturnHomeButton(
-        new InlineKeyboard().url(catalog.camera.live.watchButton, opened.watchUrl),
-        catalog,
-        { workflow: 'camera', phase: 'leaveRunning' },
-      );
-      const sent = await ctx.reply(
-        catalog.camera.live.opened(
-          Math.max(1, Math.ceil(opened.remainingMs / 60_000)),
-        ),
-        { reply_markup: keyboard },
-      );
+    await this.complete(ctx, receipt, async () => {
+      const sent = await ctx.reply(live.opened(Math.max(1, Math.ceil(opened.remainingMs / 60_000))), {
+        reply_markup: new InlineKeyboard().url(live.watchButton, opened.watchUrl),
+      });
       try {
         await opened.registerMessageReference({
           chatId,
           messageId: sent.message_id,
         });
-      } catch (error) {
-        await this.compensateFailedLiveMessage(ctx, telegramId, chatId, sent.message_id);
-        throw error;
+      } catch {
+        await ctx.api.deleteMessage(chatId, sent.message_id).catch(() => undefined);
+        await this.liveStreamSessions.revokeUser(telegramId).catch(() => this.stopLiveStream.execute(telegramId));
+        throw new Error('live message registration failed');
       }
-    } catch (error) {
-      await this.handleLiveError(ctx, error, 'open live stream');
-    }
+    });
+  }
+  private async handleStopLive(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<void> {
+    const id = ctx.from?.id;
+    if (!id || !(await this.workflows.markRunning(ctx, receipt))) return;
+    const name = await this.stopLiveStream.execute(id);
+    await this.complete(ctx, receipt, () =>
+      ctx.reply(name ? this.catalog(ctx).camera.live.stopped : this.catalog(ctx).camera.live.noActive),
+    );
   }
 
-  private async compensateFailedLiveMessage(
+  private async requireAdmin(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<boolean> {
+    if (ctx.localeState?.user.role === 'admin') return true;
+    await this.complete(ctx, receipt, () => ctx.reply(en.common.adminRequired));
+    return false;
+  }
+  private async complete(
     ctx: TelegramContext,
-    telegramId: number,
-    chatId: number,
-    messageId: number,
+    receipt: WorkflowReturnReceipt,
+    deliver: () => Promise<unknown>,
   ): Promise<void> {
-    await ctx.api.deleteMessage(chatId, messageId).catch(() => undefined);
-    try {
-      await this.liveStreamSessions.revokeUser(telegramId);
-    } catch {
-      await this.stopLiveStream.execute(telegramId);
-    }
-  }
-
-  private async handleStopLive(ctx: TelegramContext): Promise<void> {
-    const telegramId = ctx.from?.id;
-    if (!telegramId) return;
-    const catalog = this.catalog(ctx);
-    try {
-      const cameraName = await this.stopLiveStream.execute(telegramId);
-      await ctx.reply(
-        cameraName ? catalog.camera.live.stopped : catalog.camera.live.noActive,
-        { reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal') },
+    if (this.navigation) {
+      await this.navigation.complete(
+        ctx,
+        { receipt },
+        {
+          effectStage: 'pending',
+          deliver: async () => {
+            await deliver();
+          },
+          failureNotice: this.catalog(ctx).home.recovery.unavailable,
+        },
       );
-    } catch (error) {
-      await this.handleLiveError(ctx, error, 'stop live stream');
+      return;
     }
+    await deliver();
   }
-
-  private async handleLiveError(
+  private async handleError(
     ctx: TelegramContext,
+    receipt: WorkflowReturnReceipt,
     error: unknown,
     action: string,
   ): Promise<void> {
     const live = this.catalog(ctx).camera.live;
     if (error instanceof LiveStreamSourceUnavailableError) {
-      await ctx.reply(live.sourceUnavailable, {
-        reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
-      });
+      await this.complete(ctx, receipt, () => ctx.reply(live.sourceUnavailable));
       return;
     }
     if (error instanceof LiveStreamExpiredError) {
-      await ctx.reply(live.expired, {
-        reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
-      });
+      await this.complete(ctx, receipt, () => ctx.reply(live.expired));
       return;
     }
     if (error instanceof LiveStreamUnavailableError) {
-      await ctx.reply(live.unavailable, {
-        reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
-      });
+      await this.complete(ctx, receipt, () => ctx.reply(live.unavailable));
       return;
     }
-    this.logger.error(`${action} failed`);
-    await ctx.reply(live.unavailable, {
-      reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
-    });
+    if (error instanceof EventNotFoundError) {
+      await this.complete(ctx, receipt, () => ctx.reply(en.camera.eventNotFound(error.eventId)));
+      return;
+    }
+    this.logger.error(`${action} failed: ${(error as Error).message}`, (error as Error).stack);
+    await this.complete(ctx, receipt, () => ctx.reply(en.common.error(action, (error as Error).message)));
   }
-
+  private withHome(receipt: WorkflowReturnReceipt, keyboard = new InlineKeyboard()): InlineKeyboard {
+    return keyboard
+      .row()
+      .text(this.catalogForReceipt(receipt).home.common.home, workflowReturnCallback(receipt.id, 'origin'));
+  }
+  private catalogForReceipt(receipt: WorkflowReturnReceipt): LocaleCatalog {
+    return this.receiptCatalogs.get(`${receipt.userId}:${receipt.chatId}:${receipt.id}`) ?? catalogFor('en');
+  }
   private catalog(ctx: TelegramContext): LocaleCatalog {
     return ctx.localeState?.catalog ?? catalogFor('en');
   }
-
-  private async requireAdmin(ctx: TelegramContext): Promise<boolean> {
-    if (ctx.localeState?.user.role !== 'admin') {
-      await ctx.reply(en.common.adminRequired, {
-        reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
-      });
-      return false;
-    }
-    return true;
+  private remember(ctx: TelegramContext, receipt: WorkflowReturnReceipt): void {
+    this.launches.set(this.key(ctx, receipt.id), receipt);
+    this.receiptCatalogs.set(`${receipt.userId}:${receipt.chatId}:${receipt.id}`, this.catalog(ctx));
   }
-
-  private async handleError(ctx: TelegramContext, err: unknown, action: string): Promise<void> {
-    if (err instanceof CameraNotFoundError) {
-      await this.replyWithReturnHome(ctx, en.camera.cameraNotFound(err.cameraName));
-      return;
-    }
-    if (err instanceof NoCamerasConfiguredError) {
-      await this.replyWithReturnHome(ctx, en.camera.noCameras);
-      return;
-    }
-    if (err instanceof MotionNotRunningError) {
-      await this.replyWithReturnHome(ctx, en.camera.motionNotRunning);
-      return;
-    }
-    if (err instanceof SnapshotFailedError) {
-      await this.replyWithReturnHome(ctx, en.camera.snapshotFailed);
-      return;
-    }
-    if (err instanceof EventNotFoundError) {
-      await this.replyWithReturnHome(ctx, en.camera.eventNotFound(err.eventId));
-      return;
-    }
-    if (err instanceof NoSnapshotForEventError) {
-      await this.replyWithReturnHome(ctx, en.camera.noSnapshotForEvent(err.eventId));
-      return;
-    }
-    if (err instanceof MediaFileUnavailableError) {
-      await this.replyWithReturnHome(ctx, en.camera.videoUnavailable);
-      return;
-    }
-    if (err instanceof MotionAlreadyRunningError) {
-      await this.replyWithReturnHome(ctx, en.camera.alreadyRunning);
-      return;
-    }
-    if (err instanceof MotionNotInstalledError) {
-      await this.replyWithReturnHome(ctx, en.camera.notInstalled);
-      return;
-    }
-    if (err instanceof MotionStartFailedError) {
-      await this.replyWithReturnHome(ctx, en.camera.startFailed(err.reason));
-      return;
-    }
-    if (err instanceof MotionStopFailedError) {
-      await this.replyWithReturnHome(ctx, en.camera.stopFailed(err.reason));
-      return;
-    }
-    this.logger.error(`${action} failed: ${(err as Error).message}`, (err as Error).stack);
-    await this.replyWithReturnHome(ctx, en.common.error(action, (err as Error).message));
+  private key(ctx: TelegramContext, receiptId: string): string {
+    return `${ctx.from?.id ?? 'none'}:${ctx.chat?.id ?? 'none'}:${receiptId}`;
   }
-
-  private async replyWithReturnHome(ctx: TelegramContext, message: string): Promise<void> {
-    await ctx.reply(message, { reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)) });
+  private inputFor(ctx: TelegramContext): BrowseInput | undefined {
+    const prefix = `${ctx.from?.id ?? 'none'}:${ctx.chat?.id ?? 'none'}:`;
+    return [...this.inputs].find(([key]) => key.startsWith(prefix))?.[1];
+  }
+  private clearBrowse(ctx: TelegramContext, receiptId: string): void {
+    const key = this.key(ctx, receiptId);
+    this.inputs.delete(key);
+    this.results.delete(key);
+  }
+  private currentResults(ctx: TelegramContext, receipt: WorkflowReturnReceipt): BrowseResults | undefined {
+    const result = this.results.get(this.key(ctx, receipt.id));
+    if (result && Date.now() - result.createdAtMs > CAMERA_BROWSE_TTL_MS) {
+      this.results.delete(this.key(ctx, receipt.id));
+      return undefined;
+    }
+    return result;
+  }
+  private currentEvent(
+    ctx: TelegramContext,
+    receipt: WorkflowReturnReceipt,
+    id: number,
+  ): BrowseMotionEvent | undefined {
+    return this.currentResults(ctx, receipt)?.events.find((event) => event.id === id);
+  }
+  private browseNavigation(receipt: WorkflowReturnReceipt): InlineKeyboard {
+    return new InlineKeyboard()
+      .text(en.camera.browse.buttons.backToResults, callback(receipt.id, 'br'))
+      .text(en.camera.browse.buttons.cancel, callback(receipt.id, 'bc'));
+  }
+  private browseResultsKeyboard(receipt: WorkflowReturnReceipt, events: BrowseMotionEvent[]): InlineKeyboard {
+    const keyboard = new InlineKeyboard();
+    for (const event of events)
+      keyboard
+        .text(en.camera.browse.eventButton(this.browseButton(event)), callback(receipt.id, `be:${event.id}`))
+        .row();
+    return keyboard
+      .text(en.camera.browse.buttons.back, callback(receipt.id, 'bb'))
+      .text(en.camera.browse.buttons.cancel, callback(receipt.id, 'bc'));
+  }
+  private browseLine(event: BrowseMotionEvent) {
+    return {
+      id: event.id,
+      startedAt: event.startedAt,
+      camera: event.cameraName ?? event.cameraId ?? en.camera.browse.cameraFallback,
+      duration: durationLabel(event),
+      media: mediaLabel(event),
+    };
+  }
+  private browseButton(event: BrowseMotionEvent) {
+    return {
+      id: event.id,
+      startedAt: event.startedAt,
+      camera: event.cameraName ?? event.cameraId ?? en.camera.browse.cameraFallback,
+      duration: durationLabel(event),
+    };
   }
 }
 
+function callback(receiptId: string, action: string): string {
+  const data = `cam:${receiptId}:${action}`;
+  if (Buffer.byteLength(data, 'utf8') > MAX_CALLBACK_BYTES)
+    throw new RangeError('Camera callback data exceeds Telegram limit');
+  return data;
+}
+function parseCameraCallback(data: string): { receiptId: string; action: string } | null {
+  const match = CAMERA_CALLBACK.exec(data);
+  return match ? { receiptId: match[1], action: match[2] } : null;
+}
 function caption(delivery: Extract<VideoDelivery, { kind: 'local' }>, id: number): string {
-  return en.camera.videoCaption(
-    id,
-    delivery.event.startedAt,
-    delivery.event.cameraId ?? '—',
-  );
+  return en.camera.videoCaption(id, delivery.event.startedAt, delivery.event.cameraId ?? '—');
 }
-
-function browseBackCancelKeyboard(): InlineKeyboard {
-  return new InlineKeyboard()
-    .text(en.camera.browse.buttons.back, 'cam:browse:back')
-    .text(en.camera.browse.buttons.cancel, 'cam:browse:cancel');
-}
-
-function browseResultNavKeyboard(): InlineKeyboard {
-  return new InlineKeyboard()
-    .text(en.camera.browse.buttons.back, 'cam:browse:back')
-    .text(en.camera.browse.buttons.close, 'cam:browse:close');
-}
-
-function cameraName(event: BrowseMotionEvent): string {
-  return event.cameraName ?? event.cameraId ?? en.camera.browse.cameraFallback;
-}
-
 function durationLabel(event: MotionEvent): string {
-  return en.camera.browse.duration(
-    event.startedAt,
-    event.endedAt,
-    eventDurationSec(event),
-  );
+  return en.camera.browse.duration(event.startedAt, event.endedAt, eventDurationSec(event));
 }
-
 function mediaLabel(event: MotionEvent): string {
   return en.camera.browse.media({
     hasLocalVideo: !!event.videoPath && !event.localDeleted,
@@ -1063,17 +716,12 @@ function mediaLabel(event: MotionEvent): string {
     hasPhoto: !!event.snapshotPath && !event.localDeleted,
   });
 }
-
-export function parseEventId(arg: string): number | null {
-  if (!/^\d+$/.test(arg.trim())) return null;
-  const n = Number(arg.trim());
-  return Number.isInteger(n) && n > 0 ? n : null;
+export function parseEventId(value: string): number | null {
+  if (!/^\d+$/.test(value.trim())) return null;
+  const id = Number(value.trim());
+  return Number.isInteger(id) && id > 0 ? id : null;
 }
-
-export type BrowseDateParseResult =
-  | { ok: true; date: Date; dateLabel: string }
-  | { ok: false };
-
+export type BrowseDateParseResult = { ok: true; date: Date; dateLabel: string } | { ok: false };
 export type BrowseTimeRangeParseResult =
   | {
       ok: true;
@@ -1084,88 +732,41 @@ export type BrowseTimeRangeParseResult =
       label: string;
     }
   | { ok: false; reason: 'format' | 'order' };
-
 export function parseBrowseDateInput(text: string): BrowseDateParseResult {
   const match = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(text.trim());
   if (!match) return { ok: false };
-
-  const day = Number(match[1]);
-  const month = Number(match[2]);
-  const year = Number(match[3]);
-  const date = new Date(year, month - 1, day);
-
-  if (
-    date.getFullYear() !== year ||
-    date.getMonth() !== month - 1 ||
-    date.getDate() !== day
-  ) {
-    return { ok: false };
-  }
-
-  return {
-    ok: true,
-    date,
-    dateLabel: `${match[1]}.${match[2]}.${match[3]}`,
-  };
+  const date = new Date(Number(match[3]), Number(match[2]) - 1, Number(match[1]));
+  return date.getFullYear() === Number(match[3]) &&
+    date.getMonth() === Number(match[2]) - 1 &&
+    date.getDate() === Number(match[1])
+    ? { ok: true, date, dateLabel: text.trim() }
+    : { ok: false };
 }
-
 export function parseTimeRangeInput(text: string): BrowseTimeRangeParseResult {
   const match = /^(\d{2}):(\d{2})\s*-\s*(\d{2}):(\d{2})$/.exec(text.trim());
   if (!match) return { ok: false, reason: 'format' };
-
-  const startHour = Number(match[1]);
-  const startMinute = Number(match[2]);
-  const endHour = Number(match[3]);
-  const endMinute = Number(match[4]);
-
-  if (
-    startHour > 23 ||
-    endHour > 23 ||
-    startMinute > 59 ||
-    endMinute > 59
-  ) {
-    return { ok: false, reason: 'format' };
-  }
-
-  const startTotal = startHour * 60 + startMinute;
-  const endTotal = endHour * 60 + endMinute;
-  if (endTotal <= startTotal) return { ok: false, reason: 'order' };
-
+  const values = match.slice(1).map(Number);
+  if (values[0] > 23 || values[2] > 23 || values[1] > 59 || values[3] > 59) return { ok: false, reason: 'format' };
+  if (values[0] * 60 + values[1] >= values[2] * 60 + values[3]) return { ok: false, reason: 'order' };
   return {
     ok: true,
-    startHour,
-    startMinute,
-    endHour,
-    endMinute,
+    startHour: values[0],
+    startMinute: values[1],
+    endHour: values[2],
+    endMinute: values[3],
     label: `${match[1]}:${match[2]}-${match[3]}:${match[4]}`,
   };
 }
-
+export function formatBrowseDateLabel(date: Date): string {
+  return `${String(date.getDate()).padStart(2, '0')}.${String(date.getMonth() + 1).padStart(2, '0')}.${date.getFullYear()}`;
+}
 export function buildBrowseRange(
-  selectedDate: Date,
+  date: Date,
   range: Extract<BrowseTimeRangeParseResult, { ok: true }>,
 ): { start: Date; end: Date; rangeLabel: string } {
   return {
-    start: new Date(
-      selectedDate.getFullYear(),
-      selectedDate.getMonth(),
-      selectedDate.getDate(),
-      range.startHour,
-      range.startMinute,
-    ),
-    end: new Date(
-      selectedDate.getFullYear(),
-      selectedDate.getMonth(),
-      selectedDate.getDate(),
-      range.endHour,
-      range.endMinute,
-    ),
+    start: new Date(date.getFullYear(), date.getMonth(), date.getDate(), range.startHour, range.startMinute),
+    end: new Date(date.getFullYear(), date.getMonth(), date.getDate(), range.endHour, range.endMinute),
     rangeLabel: range.label,
   };
-}
-
-export function formatBrowseDateLabel(date: Date): string {
-  const day = String(date.getDate()).padStart(2, '0');
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  return `${day}.${month}.${date.getFullYear()}`;
 }

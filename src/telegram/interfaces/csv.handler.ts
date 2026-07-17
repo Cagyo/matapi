@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { Composer, InlineKeyboard, InputFile } from 'grammy';
 import { catalogFor } from '../../locales';
 import { en, TYPE_ICONS } from '../../locales/en';
@@ -8,31 +8,32 @@ import { MalformedSensorLogTimestampError } from '../../sensors/domain/errors/ma
 import { SensorLogHistoryEmptyError } from '../../sensors/domain/errors/sensor-log-history-empty.error';
 import { SensorLogExportRowTooLargeError } from '../../sensors/domain/errors/sensor-log-export-row-too-large.error';
 import { SensorNotFoundError } from '../../sensors/domain/errors/sensor-not-found.error';
-import { SensorHistoryPage, SensorHistoryTarget } from '../../sensors/domain/ports/sensor-query.port';
+import type { SensorHistoryPage, SensorHistoryTarget } from '../../sensors/domain/ports/sensor-query.port';
 import { StageCsvExportUseCase } from '../application/stage-csv-export.use-case';
-import { CsvDocumentTooLargeError, CsvTempFile } from '../application/ports/csv-temp-file.port';
+import { CsvDocumentTooLargeError, type CsvTempFile } from '../application/ports/csv-temp-file.port';
+import type { WorkflowReturnReceipt } from '../domain/workflow-return';
+import { workflowReturnCallback } from '../domain/workflow-return';
 import { RoleMiddleware } from './role.middleware';
-import { returnHomeKeyboard, type ExternalWorkflowPhase } from './return-home';
 import { TelegramHandler } from './telegram-handler';
 import { TelegramContext } from './telegram-context';
+import { WorkflowEntryCoordinator, type WorkflowLaunch } from './workflow-entry.coordinator';
+import { WorkflowNavigationHandler } from './workflow-navigation.handler';
 
 const DEFAULT_CSV_COUNT = 1000;
 const MAX_CSV_COUNT = 5000;
 const PAGE_SIZE = 20;
 const SELECTOR_LENGTH = 12;
 const MAX_CALLBACK_BYTES = 64;
-const CSV_CALLBACK = /^csv:/;
-
-type PickerOrigin = 'command' | 'menu';
+const CSV_CALLBACK = /^csv:([A-Za-z0-9_-]{16}):(p|s):(.+)$/;
 
 type PickerCallback =
-  | { readonly kind: 'page'; readonly origin: PickerOrigin; readonly page: number }
+  | { receiptId: string; kind: 'page'; page: number }
   | {
-      readonly kind: 'select';
-      readonly origin: PickerOrigin;
-      readonly page: number;
-      readonly index: number;
-      readonly selector: string;
+      receiptId: string;
+      kind: 'select';
+      page: number;
+      index: number;
+      selector: string;
     };
 
 /** Parse `/csv <sensor> [count]` while preserving the fixed 1–5000 limit. */
@@ -42,138 +43,115 @@ export function parseCsvArgs(raw: string): { name: string; count: number } | nul
   if (!countToken) return { name, count: DEFAULT_CSV_COUNT };
   if (!/^\d+$/.test(countToken)) return null;
   const count = Number(countToken);
-  return Number.isSafeInteger(count) && count >= 1 && count <= MAX_CSV_COUNT
-    ? { name, count }
-    : null;
+  return Number.isSafeInteger(count) && count >= 1 && count <= MAX_CSV_COUNT ? { name, count } : null;
 }
 
 @Injectable()
 export class CsvHandler implements TelegramHandler {
   private readonly logger = new Logger(CsvHandler.name);
-  /** A consumed picker cannot launch another active upload; no timeout by design. */
-  private readonly activeUploads = new Map<string, true>();
+  private readonly activeUploads = new Set<string>();
+  private readonly pickers = new Map<string, WorkflowReturnReceipt>();
 
   constructor(
     private readonly historyTargets: ListSensorHistoryTargetsUseCase,
     private readonly stage: StageCsvExportUseCase,
     private readonly guard: RoleMiddleware,
+    private readonly workflows: WorkflowEntryCoordinator,
+    @Optional() private readonly navigation?: WorkflowNavigationHandler,
   ) {}
 
-  async handleEmpty(
-    ctx: TelegramContext,
-    origin: PickerOrigin = 'command',
-    page = 0,
-  ): Promise<void> {
+  // The string form is a one-release call-site compatibility shim for the
+  // legacy menu. It deliberately does not change receipt origin semantics.
+  async handleEmpty(ctx: TelegramContext, launch?: WorkflowLaunch | 'menu', page = 0): Promise<void> {
+    const receipt =
+      (typeof launch === 'object' ? launch.receipt : undefined) ??
+      (await this.workflows.begin(ctx, 'csv', {
+        source: 'natural-parent',
+      }));
+    if (!receipt) return;
+    this.pickers.set(pickerKey(ctx, receipt.id), receipt);
     try {
       const historyPage = await this.loadPage(page);
-      await this.replyPicker(ctx, origin, historyPage);
+      await this.replyPicker(ctx, receipt, historyPage);
     } catch (error) {
       this.logFailure('CSV target picker', error);
-      await this.replyTerminal(ctx, en.csv.failed);
+      await this.complete(ctx, receipt, () => ctx.reply(en.csv.failed));
     }
   }
 
   register(composer: Composer<TelegramContext>): void {
-    composer.command('csv', this.guard.registered, async (ctx) => {
-      await this.handleCommand(ctx);
-    });
-    composer.command('export_csv', this.guard.registered, async (ctx) => {
-      await this.handleCommand(ctx);
-    });
-    composer.callbackQuery(CSV_CALLBACK, this.guard.registered, async (ctx) => {
-      await this.handleCallback(ctx);
-    });
+    composer.command('csv', this.guard.registered, async (ctx) => this.handleCommand(ctx));
+    composer.command('export_csv', this.guard.registered, async (ctx) => this.handleCommand(ctx));
+    composer.callbackQuery(CSV_CALLBACK, this.guard.registered, async (ctx) => this.handleCallback(ctx));
   }
 
   private async handleCommand(ctx: TelegramContext): Promise<void> {
+    const receipt = await this.workflows.begin(ctx, 'csv', {
+      source: 'natural-parent',
+    });
+    if (!receipt) return;
     const raw = (ctx.match ?? '').toString();
     if (!raw.trim()) {
-      await this.handleEmpty(ctx, 'command');
+      await this.handleEmpty(ctx, { receipt });
       return;
     }
-
     const args = parseCsvArgs(raw);
     if (!args) {
-      await this.replyTerminal(ctx, en.csv.invalidCount);
+      await this.complete(ctx, receipt, () => ctx.reply(en.csv.invalidCount));
       return;
     }
-
-    await this.startExport(ctx, { kind: 'name', name: args.name }, args.count, 'command');
+    await this.startExport(ctx, receipt, { kind: 'name', name: args.name }, args.count);
   }
 
   private async handleCallback(ctx: TelegramContext): Promise<void> {
     await ctx.answerCallbackQuery().catch(() => undefined);
     const callback = parsePickerCallback(ctx.callbackQuery?.data ?? '');
-    if (!callback) {
-      await this.replyTerminal(ctx, en.csv.invalidSelection);
-      return;
-    }
-
+    if (!callback) return;
+    const receipt = this.pickers.get(pickerKey(ctx, callback.receiptId));
+    if (receipt?.id !== callback.receiptId) return;
+    if (!(await this.workflows.validateCurrent(ctx, receipt))) return;
     if (callback.kind === 'page') {
-      await this.handlePage(ctx, callback);
+      await this.handlePage(ctx, receipt, callback.page);
       return;
     }
-
-    await this.handleSelection(ctx, callback);
+    await this.handleSelection(ctx, receipt, callback);
   }
 
-  private async handlePage(
-    ctx: TelegramContext,
-    callback: Extract<PickerCallback, { kind: 'page' }>,
-  ): Promise<void> {
+  private async handlePage(ctx: TelegramContext, receipt: WorkflowReturnReceipt, page: number): Promise<void> {
     try {
-      const historyPage = await this.loadPage(callback.page);
-      await this.editPicker(ctx, callback.origin, historyPage);
+      const historyPage = await this.loadPage(page);
+      await this.editPicker(ctx, receipt, historyPage);
     } catch (error) {
       this.logFailure('CSV picker page', error);
-      await this.replyTerminal(ctx, en.csv.failed);
+      await this.complete(ctx, receipt, () => ctx.reply(en.csv.failed));
     }
   }
 
   private async handleSelection(
     ctx: TelegramContext,
+    receipt: WorkflowReturnReceipt,
     callback: Extract<PickerCallback, { kind: 'select' }>,
   ): Promise<void> {
-    const lockKey = pickerLockKey(ctx);
-    if (!lockKey) {
-      await this.replyTerminal(ctx, en.csv.invalidSelection);
-      await this.handleEmpty(ctx, callback.origin);
-      return;
-    }
-    if (this.activeUploads.has(lockKey)) {
-      await this.replyTerminal(ctx, en.csv.inProgress);
-      return;
-    }
-
-    this.activeUploads.set(lockKey, true);
+    const lockKey = uploadKey(ctx, receipt.id);
+    if (!lockKey || this.activeUploads.has(lockKey)) return;
+    this.activeUploads.add(lockKey);
     let detached = false;
     try {
       const page = await this.loadPage(callback.page);
       const target = page.targets[callback.index];
-      if (
-        page.page !== callback.page ||
-        !target ||
-        selectorFor(target.id) !== callback.selector
-      ) {
-        await this.replyTerminal(ctx, en.csv.invalidSelection);
-        await this.handleEmpty(ctx, callback.origin);
+      if (page.page !== callback.page || !target || selectorFor(target.id) !== callback.selector) {
+        await this.complete(ctx, receipt, () => ctx.reply(en.csv.invalidSelection));
         return;
       }
-
+      if (!(await this.workflows.markRunning(ctx, receipt))) return;
+      this.pickers.delete(pickerKey(ctx, receipt.id));
       await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => undefined);
-      await this.replyStaging(ctx);
-      this.detachExport(
-        ctx,
-        { kind: 'id', id: target.id },
-        DEFAULT_CSV_COUNT,
-        callback.origin,
-        lockKey,
-      );
+      await this.replyStaging(ctx, receipt);
+      this.detachExport(ctx, receipt, { kind: 'id', id: target.id }, DEFAULT_CSV_COUNT, lockKey);
       detached = true;
     } catch (error) {
       this.logFailure('CSV selection', error);
-      await this.replyTerminal(ctx, this.errorCopy(error));
-      await this.handleEmpty(ctx, callback.origin);
+      await this.complete(ctx, receipt, () => ctx.reply(this.errorCopy(error)));
     } finally {
       if (!detached) this.activeUploads.delete(lockKey);
     }
@@ -181,33 +159,34 @@ export class CsvHandler implements TelegramHandler {
 
   private async startExport(
     ctx: TelegramContext,
+    receipt: WorkflowReturnReceipt,
     target: { readonly kind: 'name'; readonly name: string } | { readonly kind: 'id'; readonly id: string },
     count: number,
-    origin: PickerOrigin,
   ): Promise<void> {
-    await this.replyStaging(ctx);
-    this.detachExport(ctx, target, count, origin);
+    if (!(await this.workflows.markRunning(ctx, receipt))) return;
+    await this.replyStaging(ctx, receipt);
+    this.detachExport(ctx, receipt, target, count);
   }
 
   private detachExport(
     ctx: TelegramContext,
+    receipt: WorkflowReturnReceipt,
     target: { readonly kind: 'name'; readonly name: string } | { readonly kind: 'id'; readonly id: string },
     count: number,
-    origin: PickerOrigin,
     lockKey?: string,
   ): void {
-    void this.runDetachedExport(ctx, target, count, origin, lockKey);
+    void this.runDetachedExport(ctx, receipt, target, count, lockKey);
   }
 
   private async runDetachedExport(
     ctx: TelegramContext,
+    receipt: WorkflowReturnReceipt,
     target: { readonly kind: 'name'; readonly name: string } | { readonly kind: 'id'; readonly id: string },
     count: number,
-    origin: PickerOrigin,
     lockKey?: string,
   ): Promise<void> {
     try {
-      await this.stageAndUpload(ctx, target, count, origin);
+      await this.stageAndUpload(ctx, receipt, target, count);
     } catch (error) {
       this.logFailure('Detached CSV export', error);
     } finally {
@@ -217,27 +196,22 @@ export class CsvHandler implements TelegramHandler {
 
   private async stageAndUpload(
     ctx: TelegramContext,
+    receipt: WorkflowReturnReceipt,
     target: { readonly kind: 'name'; readonly name: string } | { readonly kind: 'id'; readonly id: string },
     count: number,
-    origin: PickerOrigin,
   ): Promise<void> {
     let file: CsvTempFile | undefined;
     try {
       await ctx.replyWithChatAction('upload_document');
       file = await this.stage.execute({ target, limit: count });
       const staged = file;
-      await ctx.replyWithDocument(
-        new InputFile(() => staged.open(), staged.filename),
-        {
-          caption: en.csv.caption,
-          reply_markup: this.keyboard(ctx, 'alreadyTerminal'),
-        },
+      await this.complete(ctx, receipt, () =>
+        ctx.replyWithDocument(new InputFile(() => staged.open(), staged.filename), { caption: en.csv.caption }),
       );
     } catch (error) {
       const copy = this.errorCopy(error);
       if (copy === en.csv.failed) this.logFailure('CSV export', error);
-      await this.replyTerminal(ctx, copy);
-      await this.handleEmpty(ctx, origin);
+      await this.complete(ctx, receipt, () => ctx.reply(copy));
     } finally {
       if (file) {
         try {
@@ -249,18 +223,14 @@ export class CsvHandler implements TelegramHandler {
     }
   }
 
-  private async loadPage(page: number): Promise<SensorHistoryPage> {
-    return this.historyTargets.execute({ page, pageSize: PAGE_SIZE });
-  }
-
   private async replyPicker(
     ctx: TelegramContext,
-    origin: PickerOrigin,
+    receipt: WorkflowReturnReceipt,
     page: SensorHistoryPage,
   ): Promise<void> {
-    const keyboard = this.createPicker(ctx, origin, page);
+    const keyboard = this.createPicker(ctx, receipt, page);
     if (!keyboard) {
-      await this.replyTerminal(ctx, en.csv.empty);
+      await this.complete(ctx, receipt, () => ctx.reply(en.csv.empty));
       return;
     }
     await ctx.reply(en.csv.selectTarget, { reply_markup: keyboard });
@@ -268,14 +238,12 @@ export class CsvHandler implements TelegramHandler {
 
   private async editPicker(
     ctx: TelegramContext,
-    origin: PickerOrigin,
+    receipt: WorkflowReturnReceipt,
     page: SensorHistoryPage,
   ): Promise<void> {
-    const keyboard = this.createPicker(ctx, origin, page);
+    const keyboard = this.createPicker(ctx, receipt, page);
     if (!keyboard) {
-      await ctx.editMessageText(en.csv.empty, {
-        reply_markup: this.keyboard(ctx, 'alreadyTerminal'),
-      });
+      await this.complete(ctx, receipt, () => ctx.editMessageText(en.csv.empty));
       return;
     }
     await ctx.editMessageText(en.csv.selectTarget, { reply_markup: keyboard });
@@ -283,39 +251,53 @@ export class CsvHandler implements TelegramHandler {
 
   private createPicker(
     ctx: TelegramContext,
-    origin: PickerOrigin,
+    receipt: WorkflowReturnReceipt,
     page: SensorHistoryPage,
   ): InlineKeyboard | null {
     if (page.pageCount === 0) return null;
-
     const keyboard = new InlineKeyboard();
-    page.targets.forEach((target, index) => {
-      keyboard.text(targetLabel(target), selectionData(origin, page.page, index, target.id)).row();
-    });
-    if (page.page > 0) {
-      keyboard.text(en.csv.previousPage, pageData(origin, page.page - 1));
-    }
-    if (page.page + 1 < page.pageCount) {
-      keyboard.text(en.csv.nextPage, pageData(origin, page.page + 1));
-    }
-    keyboard.append(this.keyboard(ctx, 'cancelPending'));
+    page.targets.forEach((target, index) =>
+      keyboard.text(targetLabel(target), selectionData(receipt.id, page.page, index, target.id)).row(),
+    );
+    if (page.page > 0) keyboard.text(en.csv.previousPage, pageData(receipt.id, page.page - 1));
+    if (page.page + 1 < page.pageCount) keyboard.text(en.csv.nextPage, pageData(receipt.id, page.page + 1));
+    keyboard.row().text(this.catalog(ctx).home.common.home, workflowReturnCallback(receipt.id, 'origin'));
     return keyboard;
   }
 
-  private async replyStaging(ctx: TelegramContext): Promise<void> {
+  private async replyStaging(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<void> {
     await ctx.reply(this.catalog(ctx).csv.staging, {
-      reply_markup: this.keyboard(ctx, 'leaveRunning'),
+      reply_markup: new InlineKeyboard().text(
+        this.catalog(ctx).home.common.home,
+        workflowReturnCallback(receipt.id, 'origin'),
+      ),
     });
   }
 
-  private async replyTerminal(ctx: TelegramContext, text: string): Promise<void> {
-    await ctx.reply(text, {
-      reply_markup: this.keyboard(ctx, 'alreadyTerminal'),
-    });
+  private async complete(
+    ctx: TelegramContext,
+    receipt: WorkflowReturnReceipt,
+    deliver: () => Promise<unknown>,
+  ): Promise<void> {
+    if (this.navigation) {
+      await this.navigation.complete(
+        ctx,
+        { receipt },
+        {
+          effectStage: 'pending',
+          deliver: async () => {
+            await deliver();
+          },
+          failureNotice: this.catalog(ctx).home.recovery.unavailable,
+        },
+      );
+      return;
+    }
+    await deliver();
   }
 
-  private keyboard(ctx: TelegramContext, phase: ExternalWorkflowPhase): InlineKeyboard {
-    return returnHomeKeyboard(this.catalog(ctx), { workflow: 'csv', phase });
+  private loadPage(page: number): Promise<SensorHistoryPage> {
+    return this.historyTargets.execute({ page, pageSize: PAGE_SIZE });
   }
 
   private catalog(ctx: TelegramContext) {
@@ -338,59 +320,45 @@ export class CsvHandler implements TelegramHandler {
 }
 
 function parsePickerCallback(data: string): PickerCallback | null {
-  const pageMatch = /^csv:page:(command|menu):(0|[1-9]\d*)$/.exec(data);
-  if (pageMatch) {
-    const page = safeNonNegativeInteger(pageMatch[2]);
-    return page === null ? null : { kind: 'page', origin: pageMatch[1] as PickerOrigin, page };
+  const match = CSV_CALLBACK.exec(data);
+  if (!match) return null;
+  if (match[2] === 'p' && /^(0|[1-9]\d*)$/.test(match[3])) {
+    return { receiptId: match[1], kind: 'page', page: Number(match[3]) };
   }
-
-  const selectMatch = /^csv:select:(command|menu):(0|[1-9]\d*):(0|[1-9]\d*):([A-Za-z0-9_-]{12})$/.exec(data);
-  if (!selectMatch) return null;
-  const page = safeNonNegativeInteger(selectMatch[2]);
-  const index = safeNonNegativeInteger(selectMatch[3]);
-  if (page === null || index === null) return null;
+  const selection = /^(0|[1-9]\d*):(0|[1-9]\d*):([A-Za-z0-9_-]{12})$/.exec(match[3]);
+  if (!selection || match[2] !== 's') return null;
   return {
+    receiptId: match[1],
     kind: 'select',
-    origin: selectMatch[1] as PickerOrigin,
-    page,
-    index,
-    selector: selectMatch[4],
+    page: Number(selection[1]),
+    index: Number(selection[2]),
+    selector: selection[3],
   };
-}
-
-function safeNonNegativeInteger(value: string): number | null {
-  const number = Number(value);
-  return Number.isSafeInteger(number) && number >= 0 ? number : null;
 }
 
 function selectorFor(id: string): string {
   return createHash('sha256').update(id).digest('base64url').slice(0, SELECTOR_LENGTH);
 }
-
-function selectionData(origin: PickerOrigin, page: number, index: number, id: string): string {
-  return assertCallbackBytes(`csv:select:${origin}:${page}:${index}:${selectorFor(id)}`);
+function selectionData(receiptId: string, page: number, index: number, id: string): string {
+  return assertCallbackBytes(`csv:${receiptId}:s:${page}:${index}:${selectorFor(id)}`);
 }
-
-function pageData(origin: PickerOrigin, page: number): string {
-  return assertCallbackBytes(`csv:page:${origin}:${page}`);
+function pageData(receiptId: string, page: number): string {
+  return assertCallbackBytes(`csv:${receiptId}:p:${page}`);
 }
-
 function assertCallbackBytes(data: string): string {
-  if (Buffer.byteLength(data, 'utf8') > MAX_CALLBACK_BYTES) {
+  if (Buffer.byteLength(data, 'utf8') > MAX_CALLBACK_BYTES)
     throw new RangeError('CSV callback data exceeds Telegram limit');
-  }
   return data;
 }
-
 function targetLabel(target: SensorHistoryTarget): string {
   if (target.state === 'archived') return en.csv.archivedTarget(target.name);
   if (!target.enabled) return en.csv.disabledTarget(target.name);
   return `${TYPE_ICONS[target.type]} ${target.name}`;
 }
-
-function pickerLockKey(ctx: TelegramContext): string | null {
-  const chatId = ctx.chat?.id;
-  const messageId = ctx.callbackQuery?.message?.message_id;
-  if (chatId === undefined || messageId === undefined) return null;
-  return `${chatId}:${messageId}`;
+function pickerKey(ctx: TelegramContext, receiptId: string): string {
+  return `${ctx.from?.id ?? 'none'}:${ctx.chat?.id ?? 'none'}:${receiptId}`;
+}
+function uploadKey(ctx: TelegramContext, receiptId: string): string | null {
+  if (ctx.from?.id === undefined || ctx.chat?.id === undefined) return null;
+  return `${ctx.from.id}:${ctx.chat.id}:${receiptId}`;
 }
