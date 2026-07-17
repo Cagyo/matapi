@@ -790,9 +790,11 @@ describe('ConfigHandler', () => {
     await callback({ ...context, callbackQuery: { data: 'cfg:ZyXwVu9876_-tsR5:mod:0' } });
     await callback({ ...context, callbackQuery: { data: configData(710, 'mod:not-an-index') } });
     await callback({ ...context, callbackQuery: { data: configData(710, 'mod:99') } });
+    await callback({ ...context, callbackQuery: { data: configData(710, 'rem:0') } });
 
     expect(sensors.findById).not.toHaveBeenCalled();
     expect(reply).toHaveBeenCalledTimes(replyCount);
+    expect(context.editMessageReplyMarkup).not.toHaveBeenCalled();
   });
 
   it('keeps /cancel scoped to the exact Config receipt and restores without a cancellation reply', async () => {

@@ -29,6 +29,9 @@ navigation presenter.
   within Telegram's 64-byte limit.
 - Added regressions for cross-chat callbacks/messages, long sensor names, and
   stale or malformed selection actions.
+- Malformed, wrong-kind, and out-of-range current-receipt selector callbacks now
+  keep the selector keyboard intact; their validation runs before the callback
+  message markup is cleared.
 
 ## Verification
 

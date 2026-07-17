@@ -317,6 +317,7 @@ export class ConfigHandler implements TelegramHandler, WorkflowDraftCanceller {
     const state = this.stateFor(ctx);
     if (parsed?.receiptId !== state?.receiptId) return;
     if (!parsed || !state) return;
+    if (!isValidSelectionAction(state, parsed.action)) return;
     await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => undefined);
     try {
       await this.routeCallback(ctx, state, parsed.action);
@@ -1157,6 +1158,12 @@ function selectionFor(
   const index = Number(indexValue);
   if (!Number.isSafeInteger(index)) return null;
   return state.selections[index] ?? null;
+}
+
+function isValidSelectionAction(state: BoundConfigState, action: string): boolean {
+  if (action.startsWith('mod:')) return selectionFor(state, action, 'mod') !== null;
+  if (action.startsWith('rem:')) return selectionFor(state, action, 'rem') !== null;
+  return true;
 }
 
 function bindConfigKeyboard(keyboard: InlineKeyboard, receiptId: string): InlineKeyboard {
