@@ -646,6 +646,7 @@ const enCatalog = {
       updating: 'This Home is updating. Try again in a moment.',
       unavailable: 'Home is temporarily unavailable. Use a direct command and try again.',
       openNewHome: '🏠 Open new Home',
+      retryReturn: 'Retry return',
       closed: 'Home monitoring closed.',
     },
     legacyNotifications: {

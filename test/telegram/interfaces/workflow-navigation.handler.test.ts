@@ -5,6 +5,7 @@ import type { BeginWorkflowReturnUseCase } from '../../../src/telegram/applicati
 import type { ClaimWorkflowReturnUseCase } from '../../../src/telegram/application/claim-workflow-return.use-case';
 import type { CompleteWorkflowReturnUseCase } from '../../../src/telegram/application/complete-workflow-return.use-case';
 import type { RestoreWorkflowOriginUseCase } from '../../../src/telegram/application/restore-workflow-origin.use-case';
+import type { WorkflowClaimResult } from '../../../src/telegram/application/ports/home-action-repository.port';
 import type { WorkflowReturnReceipt } from '../../../src/telegram/domain/workflow-return';
 import { WorkflowDraftRegistry } from '../../../src/telegram/interfaces/workflow-draft.registry';
 import { WorkflowEntryCoordinator, type WorkflowLaunch } from '../../../src/telegram/interfaces/workflow-entry.coordinator';
@@ -35,6 +36,50 @@ function context(data = `wr:${receipt.id}:o`, overrides: Partial<TelegramContext
 }
 
 type ClaimResult = Awaited<ReturnType<ClaimWorkflowReturnUseCase['execute']>>;
+
+class WorkflowReturnCasFake {
+  constructor(
+    private current: WorkflowReturnReceipt,
+    private readonly next: WorkflowReturnReceipt,
+  ) {}
+
+  get currentReceipt(): WorkflowReturnReceipt {
+    return this.current;
+  }
+
+  async claim(input: { id: string }): Promise<WorkflowClaimResult> {
+    if (input.id !== this.current.id) return { kind: 'superseded' };
+    if (this.current.status === 'pending') {
+      this.current = { ...this.current, status: 'executing' };
+      return { kind: 'claimed', receipt: this.current };
+    }
+    if (this.current.status === 'executing') return { kind: 'resumable', receipt: this.current };
+    if (this.current.status === 'returned') return { kind: 'returned', receipt: this.current };
+    return { kind: 'terminal' };
+  }
+
+  async begin(input: { workflow: WorkflowReturnReceipt['payload']['workflow'] }): Promise<{
+    receipt: WorkflowReturnReceipt;
+    replaced: WorkflowReturnReceipt;
+  }> {
+    const replaced = this.current;
+    this.current = {
+      ...this.next,
+      status: 'pending',
+      payload: { ...this.next.payload, workflow: input.workflow },
+    };
+    return { receipt: this.current, replaced };
+  }
+
+  async finish(input: { id: string; outcome: 'returned' | 'completed' }): Promise<'finished' | 'superseded' | 'terminal'> {
+    if (input.id !== this.current.id) return 'superseded';
+    if (this.current.status === 'completed') return 'terminal';
+    if (this.current.status !== 'executing'
+      && !(this.current.status === 'returned' && input.outcome === 'completed')) return 'terminal';
+    this.current = { ...this.current, status: input.outcome };
+    return 'finished';
+  }
+}
 
 function setup(
   claimResult: ClaimResult = { kind: 'claimed', receipt: { ...receipt, status: 'executing' } },
@@ -158,16 +203,20 @@ describe('WorkflowNavigationHandler', () => {
     expect(restore.execute).toHaveBeenCalledWith(expect.objectContaining({ notice: ctx.localeState?.catalog.common.interrupted }));
   });
 
-  it('keeps executing resumable and edits Retry return markup when restoration fails', async () => {
+  it.each(['o', 'h'] as const)('keeps executing resumable and labels the %s retry return markup correctly when restoration fails', async (destination) => {
     const { callback, complete, restore } = setup();
     restore.execute.mockResolvedValue({ kind: 'resumable' });
-    const ctx = context();
+    const ctx = context(`wr:${receipt.id}:${destination}`);
     await callback(ctx);
     expect(complete.execute).not.toHaveBeenCalled();
     expect(ctx.editMessageReplyMarkup).toHaveBeenCalledWith({
       reply_markup: expect.objectContaining({ inline_keyboard: expect.any(Array) }),
     });
-    expect(JSON.stringify((ctx.editMessageReplyMarkup as ReturnType<typeof vi.fn>).mock.calls[0][0])).toContain(`wr:${receipt.id}:o`);
+    const markup = (ctx.editMessageReplyMarkup as ReturnType<typeof vi.fn>).mock.calls[0][0].reply_markup;
+    expect(markup.inline_keyboard[0][0]).toEqual({
+      text: ctx.localeState?.catalog.home.recovery.retryReturn,
+      callback_data: `wr:${receipt.id}:${destination}`,
+    });
   });
 
   it('sends localized recovery copy when retry-markup editing also fails', async () => {
@@ -185,6 +234,7 @@ describe('WorkflowNavigationHandler', () => {
     const ctx = context();
     const failureNotice = 'Localized outcome notice';
     await handler.complete(ctx, { receipt } satisfies WorkflowLaunch, {
+      effectStage: 'pending',
       deliver: vi.fn().mockRejectedValue(new Error('send failed')),
       failureNotice,
     });
@@ -196,7 +246,7 @@ describe('WorkflowNavigationHandler', () => {
     const returned = { ...receipt, status: 'returned' as const, payload: { ...receipt.payload, phase: 'running' as const } };
     const { handler, restore, complete } = setup({ kind: 'returned', receipt: returned });
     const deliver = vi.fn().mockResolvedValue(undefined);
-    await handler.complete(context(), { receipt: returned }, { deliver, failureNotice: 'notice' });
+    await handler.complete(context(), { receipt: returned }, { effectStage: 'pending', deliver, failureNotice: 'notice' });
     expect(deliver).toHaveBeenCalledOnce();
     expect(restore.execute).not.toHaveBeenCalled();
     expect(complete.execute).toHaveBeenCalledWith({ userId: 7, chatId: 70, id: receipt.id, outcome: 'completed' });
@@ -207,28 +257,102 @@ describe('WorkflowNavigationHandler', () => {
     const { handler, restore, complete } = setup({ kind: 'superseded' });
     const deliver = vi.fn().mockResolvedValue(undefined);
 
-    await handler.complete(context(), { receipt: running }, { deliver, failureNotice: 'notice' });
+    await handler.complete(context(), { receipt: running }, { effectStage: 'pending', deliver, failureNotice: 'notice' });
 
     expect(deliver).toHaveBeenCalledOnce();
     expect(restore.execute).not.toHaveBeenCalled();
     expect(complete.execute).not.toHaveBeenCalled();
   });
 
-  it('serializes return, background completion, and a new begin so only the current claim restores Home', async () => {
+  it('delivers a pending terminal result after a failed return restoration before completing it', async () => {
+    const running = { ...receipt, status: 'pending' as const, payload: { ...receipt.payload, phase: 'running' as const } };
+    const next = { ...receipt, id: 'qrstuvwxyzabcdef' } satisfies WorkflowReturnReceipt;
+    const state = new WorkflowReturnCasFake(running, next);
+    const { callback, claim, complete, handler, restore } = setup();
+    claim.execute.mockImplementation((input) => state.claim(input));
+    complete.execute.mockImplementation((input) => state.finish(input));
+    let restores = 0;
+    restore.execute.mockImplementation(async () => (++restores === 1 ? { kind: 'resumable' } : { kind: 'opened' }));
+
+    await callback(context());
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    await handler.complete(context(), { receipt: running }, {
+      effectStage: 'pending',
+      deliver,
+      failureNotice: 'notice',
+    });
+
+    expect(deliver).toHaveBeenCalledOnce();
+    expect(restore.execute).toHaveBeenCalledTimes(2);
+    expect(complete.execute).toHaveBeenCalledWith({ userId: 7, chatId: 70, id: receipt.id, outcome: 'completed' });
+    expect(state.currentReceipt.status).toBe('completed');
+  });
+
+  it('never redelivers a terminal result that was already delivered before restoration failed', async () => {
+    const running = { ...receipt, status: 'executing' as const, payload: { ...receipt.payload, phase: 'running' as const } };
+    const next = { ...receipt, id: 'qrstuvwxyzabcdef' } satisfies WorkflowReturnReceipt;
+    const state = new WorkflowReturnCasFake(running, next);
+    const { claim, complete, handler } = setup();
+    claim.execute.mockImplementation((input) => state.claim(input));
+    complete.execute.mockImplementation((input) => state.finish(input));
+    const deliver = vi.fn().mockResolvedValue(undefined);
+
+    await handler.complete(context(), { receipt: running }, {
+      effectStage: 'already-delivered',
+      deliver,
+      failureNotice: 'notice',
+    });
+
+    expect(deliver).not.toHaveBeenCalled();
+    expect(state.currentReceipt.status).toBe('completed');
+  });
+
+  it('uses CAS-derived current-receipt state when a new begin wins before stale return and completion work', async () => {
+    const queue = new WorkflowOperationQueue();
+    const old = { ...receipt, status: 'pending' as const };
+    const next = { ...receipt, id: 'qrstuvwxyzabcdef', payload: { ...receipt.payload, workflow: 'help' as const } } satisfies WorkflowReturnReceipt;
+    const state = new WorkflowReturnCasFake(old, next);
+    const setupResult = setup({ kind: 'claimed', receipt: old }, queue);
+    setupResult.claim.execute.mockImplementation((input) => state.claim(input));
+    setupResult.complete.execute.mockImplementation((input) => state.finish(input));
+    const begin = { execute: (input: { workflow: WorkflowReturnReceipt['payload']['workflow'] }) => state.begin(input) };
+    const coordinator = new WorkflowEntryCoordinator(
+      begin as unknown as BeginWorkflowReturnUseCase,
+      new WorkflowDraftRegistry(),
+      queue,
+    );
+    const staleDeliver = vi.fn().mockResolvedValue(undefined);
+
+    await coordinator.begin(context(), 'help', { source: 'natural-parent' });
+    await Promise.all([
+      setupResult.callback(context()),
+      setupResult.handler.complete(context(), { receipt: old }, {
+        effectStage: 'pending', deliver: staleDeliver, failureNotice: 'notice',
+      }),
+    ]);
+    await setupResult.callback(context(`wr:${next.id}:o`));
+    await setupResult.callback(context(`wr:${next.id}:o`));
+
+    expect(staleDeliver).not.toHaveBeenCalled();
+    expect(setupResult.restore.execute).toHaveBeenCalledOnce();
+    expect(state.currentReceipt).toMatchObject({ id: next.id, status: 'returned' });
+  });
+
+  it('uses CAS-derived current-receipt state when completion wins before a new begin', async () => {
     let releaseRestore!: () => void;
     const restoreGate = new Promise<void>((resolve) => { releaseRestore = resolve; });
     const queue = new WorkflowOperationQueue();
-    const running = { ...receipt, status: 'executing' as const, payload: { ...receipt.payload, phase: 'running' as const } };
+    const running = { ...receipt, status: 'pending' as const, payload: { ...receipt.payload, phase: 'running' as const } };
+    const nextReceipt = { ...receipt, id: 'qrstuvwxyzabcdef', payload: { ...receipt.payload, workflow: 'help' as const } } satisfies WorkflowReturnReceipt;
+    const state = new WorkflowReturnCasFake(running, nextReceipt);
     const setupResult = setup({ kind: 'claimed', receipt: running }, queue);
-    setupResult.claim.execute
-      .mockResolvedValueOnce({ kind: 'claimed', receipt: running })
-      .mockResolvedValueOnce({ kind: 'returned', receipt: { ...running, status: 'returned' } });
+    setupResult.claim.execute.mockImplementation((input) => state.claim(input));
+    setupResult.complete.execute.mockImplementation((input) => state.finish(input));
     setupResult.restore.execute.mockImplementation(async () => {
       await restoreGate;
       return { kind: 'opened' };
     });
-    const nextReceipt = { ...receipt, id: 'qrstuvwxyzabcdef', payload: { ...receipt.payload, workflow: 'help' as const } };
-    const begin = { execute: vi.fn().mockResolvedValue({ receipt: nextReceipt, replaced: { ...running, status: 'returned' } }) };
+    const begin = { execute: (input: { workflow: WorkflowReturnReceipt['payload']['workflow'] }) => state.begin(input) };
     const coordinator = new WorkflowEntryCoordinator(
       begin as unknown as BeginWorkflowReturnUseCase,
       new WorkflowDraftRegistry(),
@@ -236,17 +360,24 @@ describe('WorkflowNavigationHandler', () => {
     );
     const deliver = vi.fn().mockResolvedValue(undefined);
 
-    const returning = setupResult.callback(context());
+    const completing = setupResult.handler.complete(context(), { receipt: running }, {
+      effectStage: 'pending', deliver, failureNotice: 'notice',
+    });
     await vi.waitFor(() => expect(setupResult.restore.execute).toHaveBeenCalledOnce());
-    const completing = setupResult.handler.complete(context(), { receipt: running }, { deliver, failureNotice: 'notice' });
     const beginning = coordinator.begin(context(), 'help', { source: 'natural-parent' });
-    expect(deliver).not.toHaveBeenCalled();
-    expect(begin.execute).not.toHaveBeenCalled();
+    const staleReturning = setupResult.callback(context());
+    expect(beginning).toBeInstanceOf(Promise);
 
     releaseRestore();
-    await Promise.all([returning, completing, beginning]);
+    await Promise.all([completing, beginning, staleReturning]);
     expect(setupResult.restore.execute).toHaveBeenCalledOnce();
     expect(deliver).toHaveBeenCalledOnce();
-    expect(begin.execute).toHaveBeenCalledOnce();
+    expect(state.currentReceipt).toMatchObject({ id: nextReceipt.id, status: 'pending' });
+
+    await setupResult.handler.complete(context(), { receipt: nextReceipt }, {
+      effectStage: 'pending', deliver: vi.fn().mockResolvedValue(undefined), failureNotice: 'notice',
+    });
+    expect(setupResult.restore.execute).toHaveBeenCalledTimes(2);
+    expect(state.currentReceipt).toMatchObject({ id: nextReceipt.id, status: 'completed' });
   });
 });

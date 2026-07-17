@@ -75,6 +75,7 @@ describe('catalogFor', () => {
         updating: expect.any(String),
         unavailable: expect.any(String),
         openNewHome: expect.any(String),
+        retryReturn: expect.any(String),
         closed: expect.any(String),
       }),
       legacyNotifications: expect.objectContaining({
@@ -86,5 +87,8 @@ describe('catalogFor', () => {
     }));
     expect(Object.keys(russian.home).sort()).toEqual(Object.keys(english.home).sort());
     expect(Object.keys(ukrainian.home).sort()).toEqual(Object.keys(english.home).sort());
+    expect(english.home.recovery.retryReturn).toBe('Retry return');
+    expect(russian.home.recovery.retryReturn).toBe('Повторить возврат');
+    expect(ukrainian.home.recovery.retryReturn).toBe('Повторити повернення');
   });
 });

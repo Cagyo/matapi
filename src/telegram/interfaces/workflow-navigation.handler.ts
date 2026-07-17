@@ -23,6 +23,7 @@ import type { TelegramHandler } from './telegram-handler';
 const WORKFLOW_RETURN_CALLBACK = /^wr:[A-Za-z0-9_-]{16}:[oh]$/;
 
 export interface WorkflowCompletionPresentation {
+  effectStage: 'pending' | 'already-delivered';
   deliver(): Promise<void>;
   failureNotice: string;
 }
@@ -92,14 +93,18 @@ export class WorkflowNavigationHandler implements TelegramHandler {
         id: launch.receipt.id,
       });
       if (claim.kind === 'superseded' && launch.receipt.payload.phase === 'running') {
-        await presentation.deliver().catch(() => undefined);
+        if (presentation.effectStage === 'pending') {
+          await presentation.deliver().catch(() => undefined);
+        }
         return;
       }
       if (claim.kind === 'returned') {
-        try {
-          await presentation.deliver();
-        } catch {
-          return;
+        if (presentation.effectStage === 'pending') {
+          try {
+            await presentation.deliver();
+          } catch {
+            return;
+          }
         }
         await this.completeWorkflow.execute({
           userId: identity.userId,
@@ -115,7 +120,7 @@ export class WorkflowNavigationHandler implements TelegramHandler {
         await this.drafts.cancelExact(claim.receipt);
       }
       let notice: string | undefined;
-      if (claim.kind === 'claimed') {
+      if (presentation.effectStage === 'pending') {
         try {
           await presentation.deliver();
         } catch {
@@ -168,7 +173,7 @@ export class WorkflowNavigationHandler implements TelegramHandler {
     destination: WorkflowReturnDestination,
   ): Promise<void> {
     const replyMarkup = this.presenter.retryReturnKeyboard(receipt, {
-      label: identity.catalog.home.recovery.openNewHome,
+      label: identity.catalog.home.recovery.retryReturn,
       destination,
     });
     try {
