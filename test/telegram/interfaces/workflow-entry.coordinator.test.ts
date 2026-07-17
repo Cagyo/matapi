@@ -640,9 +640,9 @@ describe('WorkflowEntryCoordinator', () => {
       }),
       updateWorkflowReturnDeliveryStage: vi.fn()
         .mockResolvedValueOnce('updated')
-        .mockResolvedValueOnce('superseded')
+        .mockRejectedValueOnce(new Error('injected workflow write failure'))
         .mockResolvedValueOnce('updated')
-        .mockResolvedValueOnce('superseded'),
+        .mockRejectedValueOnce(new Error('injected workflow write failure')),
       finishWorkflowReturn: vi.fn().mockResolvedValue('finished'),
     };
     const deliver = vi.fn().mockResolvedValue(undefined);
@@ -676,8 +676,8 @@ describe('WorkflowEntryCoordinator', () => {
       }),
       updateWorkflowReturnDeliveryStage: vi.fn()
         .mockResolvedValueOnce('updated')
-        .mockResolvedValueOnce('superseded')
-        .mockResolvedValueOnce('superseded'),
+        .mockRejectedValueOnce(new Error('injected workflow write failure'))
+        .mockRejectedValueOnce(new Error('injected workflow write failure')),
       finishWorkflowReturn: vi.fn().mockResolvedValue('finished'),
     };
     const deliver = vi.fn().mockResolvedValue(undefined);
@@ -695,6 +695,35 @@ describe('WorkflowEntryCoordinator', () => {
     expect(restore).toHaveBeenCalledOnce();
     expect(restore).toHaveBeenCalledWith(expect.objectContaining({ id: pending.id }), undefined);
     expect(actions.finishWorkflowReturn).toHaveBeenCalledOnce();
+  });
+
+  it('does not restore stale Home when direct delivery loses to a newer workflow', async () => {
+    const pending = restartReceipt('pending');
+    const actions = {
+      findWorkflowReturn: vi.fn().mockResolvedValue(pending),
+      claimWorkflowReturn: vi.fn().mockResolvedValue({
+        kind: 'claimed', receipt: { ...pending, status: 'executing' as const },
+      }),
+      updateWorkflowReturnDeliveryStage: vi.fn()
+        .mockResolvedValueOnce('updated')
+        .mockResolvedValueOnce('superseded')
+        .mockResolvedValueOnce('superseded'),
+      finishWorkflowReturn: vi.fn().mockResolvedValue('finished'),
+    };
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const restore = vi.fn().mockResolvedValue(true);
+
+    await expect(recoveryCoordinator(actions).completeHeadless({
+      identity: recoveryIdentity,
+      workflow: 'system-restart',
+      deliver,
+      restore,
+      recoveryNotice: catalogFor('en').ota.restartComplete,
+    })).resolves.toBe('resumable');
+
+    expect(deliver).toHaveBeenCalledOnce();
+    expect(restore).not.toHaveBeenCalled();
+    expect(actions.finishWorkflowReturn).not.toHaveBeenCalled();
   });
 
   it('retries a non-returned direct attempt after a crash before its effect', async () => {
@@ -740,7 +769,7 @@ describe('WorkflowEntryCoordinator', () => {
         .mockResolvedValueOnce('updated')
         .mockResolvedValueOnce('updated')
         .mockResolvedValueOnce('updated')
-        .mockResolvedValueOnce('superseded'),
+        .mockRejectedValueOnce(new Error('injected workflow write failure')),
       finishWorkflowReturn: vi.fn().mockResolvedValue('finished'),
     };
     const deliver = vi.fn().mockRejectedValue(new Error('Telegram unavailable'));
@@ -884,7 +913,7 @@ describe('WorkflowEntryCoordinator', () => {
       claimWorkflowReturn: vi.fn().mockResolvedValue({ kind: 'returned', receipt: pending }),
       updateWorkflowReturnDeliveryStage: vi.fn()
         .mockResolvedValueOnce('updated')
-        .mockResolvedValueOnce('superseded'),
+        .mockRejectedValueOnce(new Error('injected workflow write failure')),
       finishWorkflowReturn: vi.fn().mockResolvedValue('finished'),
     };
     const deliver = vi.fn().mockResolvedValue(undefined);

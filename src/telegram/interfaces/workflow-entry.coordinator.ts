@@ -38,6 +38,7 @@ export interface CurrentWorkflowIdentity {
 
 export type LeaveForHomeResult = 'opened' | 'no-workflow' | 'not-opened' | 'stale' | 'ignored';
 export type HeadlessWorkflowCompletionResult = 'completed' | 'resumable' | 'no-workflow' | 'ignored';
+type DeliveryStagePersistResult = 'updated' | 'stale' | 'failed';
 
 @Injectable()
 export class WorkflowEntryCoordinator {
@@ -235,7 +236,7 @@ export class WorkflowEntryCoordinator {
     input: Pick<Parameters<WorkflowEntryCoordinator['completeHeadless']>[0], 'deliver' | 'restore' | 'recoveryNotice'>,
     resultOnly: boolean,
   ): Promise<HeadlessWorkflowCompletionResult> {
-    if (!await this.persistDeliveryStage(identity, receipt, 'direct-attempted')) return 'resumable';
+    if (await this.persistDeliveryStage(identity, receipt, 'direct-attempted') !== 'updated') return 'resumable';
     return this.deliverDirect(identity, receipt, input, resultOnly);
   }
 
@@ -248,33 +249,39 @@ export class WorkflowEntryCoordinator {
     try {
       await input.deliver();
     } catch {
-      if (!await this.persistDeliveryStage(identity, receipt, 'direct-failed')) return 'resumable';
+      if (await this.persistDeliveryStage(identity, receipt, 'direct-failed') !== 'updated') return 'resumable';
       return resultOnly ? 'resumable' : this.beginOutcomeNotice(identity, receipt, input);
     }
 
+    const directDelivered = await this.persistDeliveryStage(identity, receipt, 'direct-delivered');
     if (resultOnly) {
-      if (await this.persistDeliveryStage(identity, receipt, 'direct-delivered')) {
+      if (directDelivered === 'updated') {
         return this.finishHeadlessWorkflow(identity, receipt);
       }
-      // The direct message is known to have succeeded. `finish` is an
-      // independent durable acknowledgement, preventing a duplicate result
-      // when the delivery-stage write loses a race or fails.
-      return this.finishHeadlessWorkflow(identity, receipt);
+      // The direct message is known to have succeeded. A transport failure
+      // may use the independent terminal receipt acknowledgement; a stale
+      // compare-and-set result belongs to a newer workflow and must stop.
+      return directDelivered === 'failed'
+        ? this.finishHeadlessWorkflow(identity, receipt)
+        : 'resumable';
     }
 
-    if (await this.persistDeliveryStage(identity, receipt, 'direct-delivered')) {
+    if (directDelivered === 'updated') {
       return this.beginSilentRestore(identity, receipt, input);
     }
+    if (directDelivered === 'stale') return 'resumable';
     // We know the direct result succeeded even though its effect marker was
     // not written. Record the next external effect before starting it, so a
     // later recovery retries restoration rather than the direct result.
-    if (!await this.persistDeliveryStage(identity, receipt, 'restore-attempted')) {
+    const restoreAttempted = await this.persistDeliveryStage(identity, receipt, 'restore-attempted');
+    if (restoreAttempted === 'failed') {
       // Both durable recovery markers are unavailable, but the direct result
       // is known. Restore once in-process; a failed restoration remains
       // resumable rather than terminalizing without the required Home.
       if (!await this.restore(receipt, input, undefined)) return 'resumable';
       return this.finishHeadlessWorkflow(identity, receipt);
     }
+    if (restoreAttempted === 'stale') return 'resumable';
     return this.restoreSilently(identity, receipt, input);
   }
 
@@ -284,7 +291,7 @@ export class WorkflowEntryCoordinator {
     input: Pick<Parameters<WorkflowEntryCoordinator['completeHeadless']>[0], 'restore' | 'recoveryNotice'>,
   ): Promise<HeadlessWorkflowCompletionResult> {
     if (!input.recoveryNotice) return 'resumable';
-    if (!await this.persistDeliveryStage(identity, receipt, 'notice-attempted')) return 'resumable';
+    if (await this.persistDeliveryStage(identity, receipt, 'notice-attempted') !== 'updated') return 'resumable';
     return this.deliverOutcomeNotice(identity, receipt, input);
   }
 
@@ -296,12 +303,15 @@ export class WorkflowEntryCoordinator {
     if (!input.recoveryNotice || !await this.restore(receipt, input, input.recoveryNotice)) {
       return 'resumable';
     }
-    if (await this.persistDeliveryStage(identity, receipt, 'notice-delivered')) {
+    const noticeDelivered = await this.persistDeliveryStage(identity, receipt, 'notice-delivered');
+    if (noticeDelivered === 'updated') {
       return this.finishHeadlessWorkflow(identity, receipt);
     }
     // The notice is known to have rendered. Finish directly if its effect
-    // marker was not acknowledged, rather than rendering a duplicate notice.
-    return this.finishHeadlessWorkflow(identity, receipt);
+    // marker has a transport failure, rather than rendering a duplicate notice.
+    return noticeDelivered === 'failed'
+      ? this.finishHeadlessWorkflow(identity, receipt)
+      : 'resumable';
   }
 
   private async beginSilentRestore(
@@ -309,7 +319,7 @@ export class WorkflowEntryCoordinator {
     receipt: WorkflowReturnReceipt,
     input: Pick<Parameters<WorkflowEntryCoordinator['completeHeadless']>[0], 'restore'>,
   ): Promise<HeadlessWorkflowCompletionResult> {
-    if (!await this.persistDeliveryStage(identity, receipt, 'restore-attempted')) return 'resumable';
+    if (await this.persistDeliveryStage(identity, receipt, 'restore-attempted') !== 'updated') return 'resumable';
     return this.restoreSilently(identity, receipt, input);
   }
 
@@ -319,12 +329,15 @@ export class WorkflowEntryCoordinator {
     input: Pick<Parameters<WorkflowEntryCoordinator['completeHeadless']>[0], 'restore'>,
   ): Promise<HeadlessWorkflowCompletionResult> {
     if (!await this.restore(receipt, input, undefined)) return 'resumable';
-    if (await this.persistDeliveryStage(identity, receipt, 'restored')) {
+    const restored = await this.persistDeliveryStage(identity, receipt, 'restored');
+    if (restored === 'updated') {
       return this.finishHeadlessWorkflow(identity, receipt);
     }
     // The restoration is known to have rendered. The terminal receipt write
-    // preserves that fact without opening another Home message on retry.
-    return this.finishHeadlessWorkflow(identity, receipt);
+    // preserves that fact after a transport failure without opening another Home.
+    return restored === 'failed'
+      ? this.finishHeadlessWorkflow(identity, receipt)
+      : 'resumable';
   }
 
   private async restore(
@@ -357,7 +370,7 @@ export class WorkflowEntryCoordinator {
     identity: CurrentWorkflowIdentity,
     receipt: WorkflowReturnReceipt,
     stage: Exclude<WorkflowDeliveryStage, 'pending' | 'needs-notice'>,
-  ): Promise<boolean> {
+  ): Promise<DeliveryStagePersistResult> {
     try {
       const result = await this.actions.updateWorkflowReturnDeliveryStage({
         userId: identity.userId,
@@ -366,9 +379,9 @@ export class WorkflowEntryCoordinator {
         stage,
         now: this.clock.now(),
       });
-      return result === 'updated';
+      return result === 'updated' ? 'updated' : 'stale';
     } catch {
-      return false;
+      return 'failed';
     }
   }
 }
