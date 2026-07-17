@@ -1,11 +1,15 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { Composer, InputFile } from 'grammy';
 import { en } from '../../locales/en';
 import { ExportConfigUseCase } from '../application/export-config.use-case';
 import { RoleMiddleware } from './role.middleware';
-import { returnHomeKeyboard } from './return-home';
 import { TelegramHandler } from './telegram-handler';
 import { TelegramContext } from './telegram-context';
+import {
+  WorkflowEntryCoordinator,
+  type WorkflowLaunch,
+} from './workflow-entry.coordinator';
+import { WorkflowNavigationHandler } from './workflow-navigation.handler';
 
 /**
  * `/export_config` — spec 16. Admin-only. Snapshots the current sensors,
@@ -19,6 +23,8 @@ export class ExportConfigHandler implements TelegramHandler {
   constructor(
     private readonly exportConfig: ExportConfigUseCase,
     private readonly guard: RoleMiddleware,
+    private readonly workflows: WorkflowEntryCoordinator,
+    @Optional() private readonly navigation?: WorkflowNavigationHandler,
   ) {}
 
   register(composer: Composer<TelegramContext>): void {
@@ -27,27 +33,38 @@ export class ExportConfigHandler implements TelegramHandler {
     );
   }
 
-  async handleCommand(ctx: TelegramContext): Promise<void> {
+  async handleCommand(ctx: TelegramContext, launch?: WorkflowLaunch): Promise<void> {
+    const receipt = launch?.receipt ?? await this.workflows.begin(ctx, 'sensor-export', {
+      source: 'natural-parent',
+    });
+    if (!receipt) return;
+    const catalog = ctx.localeState?.catalog ?? en;
     try {
       const { yaml, filename } = await this.exportConfig.execute();
       const file = new InputFile(Buffer.from(yaml, 'utf8'), filename);
-      const catalog = ctx.localeState?.catalog ?? en;
-      await ctx.replyWithDocument(file, {
-        caption: en.exportConfig.caption,
-        reply_markup: returnHomeKeyboard(catalog, {
-          workflow: 'config',
-          phase: 'alreadyTerminal',
-        }),
-      });
+      await this.complete(ctx, receipt, () => ctx.replyWithDocument(file, {
+        caption: catalog.exportConfig.caption,
+      }));
     } catch (error) {
       this.logger.error('export_config failed', error as Error);
-      const catalog = ctx.localeState?.catalog ?? en;
-      await ctx.reply(en.exportConfig.failed, {
-        reply_markup: returnHomeKeyboard(catalog, {
-          workflow: 'config',
-          phase: 'alreadyTerminal',
-        }),
-      });
+      await this.complete(ctx, receipt, () => ctx.reply(catalog.exportConfig.failed));
     }
+  }
+
+  private async complete(
+    ctx: TelegramContext,
+    receipt: WorkflowLaunch['receipt'],
+    deliver: () => Promise<unknown>,
+  ): Promise<void> {
+    const catalog = ctx.localeState?.catalog ?? en;
+    if (this.navigation) {
+      await this.navigation.complete(ctx, { receipt }, {
+        effectStage: 'pending',
+        deliver: async () => { await deliver(); },
+        failureNotice: catalog.home.recovery.unavailable,
+      });
+      return;
+    }
+    await deliver();
   }
 }

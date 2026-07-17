@@ -178,4 +178,61 @@ describe('WorkflowEntryCoordinator', () => {
 
     expect(actions.finishWorkflowReturn).not.toHaveBeenCalled();
   });
+
+  it('delivers a recovered restart result once and retries only its origin restoration', async () => {
+    const restartReceipt = {
+      ...receipt,
+      payload: { ...receipt.payload, workflow: 'system-restart' as const, phase: 'running' as const },
+    } satisfies WorkflowReturnReceipt;
+    const actions = {
+      findWorkflowReturn: vi.fn().mockResolvedValue(restartReceipt),
+      claimWorkflowReturn: vi.fn()
+        .mockResolvedValueOnce({ kind: 'claimed', receipt: { ...restartReceipt, status: 'executing' as const } })
+        .mockResolvedValueOnce({ kind: 'resumable', receipt: { ...restartReceipt, status: 'executing' as const } }),
+      finishWorkflowReturn: vi.fn().mockResolvedValue('finished'),
+    };
+    const coordinator = new WorkflowEntryCoordinator(
+      { execute: vi.fn() } as unknown as BeginWorkflowReturnUseCase,
+      new WorkflowDraftRegistry(),
+      new WorkflowOperationQueue(),
+      actions as never,
+      { now: () => new Date('2030-01-01T00:00:00.000Z') },
+    );
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const restore = vi.fn()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    const identity = {
+      userId: 7,
+      chatId: 70,
+      locale: 'en' as const,
+      role: 'admin' as const,
+      catalog: catalogFor('en'),
+    };
+
+    await expect((coordinator as unknown as {
+      completeHeadless(input: {
+        identity: typeof identity;
+        workflow: 'system-restart';
+        deliver(): Promise<void>;
+        restore(receipt: WorkflowReturnReceipt): Promise<boolean>;
+      }): Promise<string>;
+    }).completeHeadless({ identity, workflow: 'system-restart', deliver, restore })).resolves.toBe('resumable');
+
+    await expect((coordinator as unknown as {
+      completeHeadless(input: {
+        identity: typeof identity;
+        workflow: 'system-restart';
+        deliver(): Promise<void>;
+        restore(receipt: WorkflowReturnReceipt): Promise<boolean>;
+      }): Promise<string>;
+    }).completeHeadless({ identity, workflow: 'system-restart', deliver, restore })).resolves.toBe('completed');
+
+    expect(deliver).toHaveBeenCalledOnce();
+    expect(restore).toHaveBeenCalledTimes(2);
+    expect(actions.finishWorkflowReturn).toHaveBeenCalledWith(expect.objectContaining({
+      id: restartReceipt.id,
+      outcome: 'completed',
+    }));
+  });
 });

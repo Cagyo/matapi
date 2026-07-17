@@ -17,7 +17,7 @@ import { EventProcessorService } from '../../events/application/event-processor.
 import { RecipientDirectoryService } from '../../events/application/recipient-directory.service';
 import { BotRunnerRegistry } from '../../network/application/bot-runner.registry';
 import { BotRunnerPort } from '../../network/domain/ports/bot-runner.port';
-import { RestartConfirmationService } from '../application/restart-confirmation.service';
+import { RestartConfirmationService } from '../interfaces/restart-confirmation.service';
 import { SystemOnlineNotifier } from '../application/system-online-notifier.service';
 import { ClaimAdminHandler } from '../interfaces/claim-admin.handler';
 import { CameraHandler } from '../interfaces/camera.handler';

@@ -1,65 +1,56 @@
 import { describe, expect, it, vi } from 'vitest';
-import { InputFile } from 'grammy';
 import { catalogFor } from '../../../src/locales';
-import { en } from '../../../src/locales/en';
 import { ExportConfigHandler } from '../../../src/telegram/interfaces/export-config.handler';
 
-function createSetup() {
-  const exportConfig = { execute: vi.fn() };
-  const guard = { adminOnly: vi.fn() };
-  const handler = new ExportConfigHandler(exportConfig as never, guard as never);
-  const commands: Record<string, (ctx: Record<string, unknown>) => Promise<void>> = {};
-  handler.register({
-    command: vi.fn((name: string, _guard: unknown, command: (ctx: Record<string, unknown>) => Promise<void>) => {
-      commands[name] = command;
-    }),
-  } as never);
-  return { commands, exportConfig };
-}
+const receipt = {
+  id: 'abcdefghijklmnop', userId: 42, chatId: 42, kind: 'workflow-return',
+  sessionToken: null, status: 'pending', expiresAt: new Date('2030-01-02T00:00:00.000Z'),
+  payload: { workflow: 'sensor-export', phase: 'cancellable', originSource: 'natural-parent', origin: { kind: 'admin-sensor-setup' } },
+};
 
-function ctxFor(locale: 'en' | 'uk') {
-  return {
-    localeState: { catalog: catalogFor(locale) },
-    reply: vi.fn().mockResolvedValue(true),
-    replyWithDocument: vi.fn().mockResolvedValue(true),
+function setup() {
+  const events: string[] = [];
+  const exportConfig = { execute: vi.fn() };
+  const workflows = { begin: vi.fn(async () => receipt) };
+  const navigation = {
+    complete: vi.fn(async (_ctx, _launch, presentation) => {
+      await presentation.deliver();
+      events.push('restore-after-result');
+    }),
   };
+  const handler = new ExportConfigHandler(exportConfig as never, {} as never, workflows as never, navigation as never);
+  const commands: Record<string, (ctx: object) => Promise<void>> = {};
+  handler.register({ command: vi.fn((name, _guard, fn) => { commands[name] = fn; }) } as never);
+  const ctx = {
+    from: { id: 42 }, chat: { id: 42, type: 'private' },
+    localeState: { locale: 'en', catalog: catalogFor('en'), user: { telegramId: 42, role: 'admin' } },
+    reply: vi.fn().mockResolvedValue(undefined),
+    replyWithDocument: vi.fn(async () => { events.push('result'); }),
+  };
+  return { commands, ctx, exportConfig, workflows, navigation, events, handler };
 }
 
 describe('ExportConfigHandler', () => {
-  it('adds terminal Home to the exported document', async () => {
-    const { commands, exportConfig } = createSetup();
-    const command = commands.export_config;
-    const ctx = ctxFor('uk');
-    exportConfig.execute.mockResolvedValue({
-      yaml: 'sensors: []\n',
-      filename: 'home-worker-config.yml',
-    });
-
-    await command(ctx);
-
-    expect(ctx.replyWithDocument).toHaveBeenCalledWith(
-      expect.any(InputFile),
-      expect.objectContaining({
-        caption: en.exportConfig.caption,
-        reply_markup: expect.anything(),
-      }),
-    );
-    expect(JSON.stringify(ctx.replyWithDocument.mock.calls[0][1].reply_markup)).toContain('rh:f:t');
-    expect(JSON.stringify(ctx.replyWithDocument.mock.calls[0][1].reply_markup)).toContain('🏠 Дім');
-  });
-
-  it('adds terminal Home to export failures', async () => {
-    const { commands, exportConfig } = createSetup();
-    const ctx = ctxFor('uk');
-    exportConfig.execute.mockRejectedValueOnce(new Error('disk unavailable'));
+  it('begins the direct Sensor setup workflow and sends the document before restoration', async () => {
+    const { commands, ctx, exportConfig, workflows, events } = setup();
+    exportConfig.execute.mockResolvedValue({ yaml: 'sensors: []\n', filename: 'home-worker-config.yml' });
 
     await commands.export_config(ctx);
 
-    expect(ctx.reply).toHaveBeenCalledWith(
-      en.exportConfig.failed,
-      expect.objectContaining({ reply_markup: expect.anything() }),
-    );
-    expect(JSON.stringify(ctx.reply.mock.calls[0][1].reply_markup)).toContain('rh:f:t');
-    expect(JSON.stringify(ctx.reply.mock.calls[0][1].reply_markup)).toContain('🏠 Дім');
+    expect(workflows.begin).toHaveBeenCalledWith(ctx, 'sensor-export', { source: 'natural-parent' });
+    expect(ctx.replyWithDocument).toHaveBeenCalledOnce();
+    expect(events).toEqual(['result', 'restore-after-result']);
+  });
+
+  it('uses the captured receipt without starting a second workflow and delivers a failure first', async () => {
+    const { ctx, exportConfig, workflows, navigation, events, handler } = setup();
+    exportConfig.execute.mockRejectedValue(new Error('disk unavailable'));
+
+    await handler.handleCommand(ctx as never, { receipt } as never);
+
+    expect(workflows.begin).not.toHaveBeenCalled();
+    expect(ctx.reply).toHaveBeenCalledWith(catalogFor('en').exportConfig.failed);
+    expect(navigation.complete).toHaveBeenCalledOnce();
+    expect(events).toEqual(['restore-after-result']);
   });
 });

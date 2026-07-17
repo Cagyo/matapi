@@ -105,6 +105,14 @@ function setup(overrides: {
   workflows?: WorkflowEntryCoordinator;
   settings?: { handleCommand: ReturnType<typeof vi.fn> };
   config?: { handleSubcommand: ReturnType<typeof vi.fn> };
+  help?: { handleCommand: ReturnType<typeof vi.fn> };
+  drive?: { handleStatus: ReturnType<typeof vi.fn> };
+  driveAuth?: { handleCommand: ReturnType<typeof vi.fn> };
+  health?: { handleCommand: ReturnType<typeof vi.fn> };
+  invite?: { handleCommand: ReturnType<typeof vi.fn> };
+  importConfig?: { handleCommand: ReturnType<typeof vi.fn> };
+  exportConfig?: { handleCommand: ReturnType<typeof vi.fn> };
+  systemUpdate?: { handleCommand: ReturnType<typeof vi.fn> };
 } = {}) {
   const guard = { registered: vi.fn() } as unknown as RoleMiddleware;
   const open = {
@@ -140,6 +148,7 @@ function setup(overrides: {
   } as unknown as HomeNavigationUseCase;
   const workflowEntry = {
     begin: vi.fn().mockResolvedValue(workflowReceipt),
+    markRunning: vi.fn().mockResolvedValue(true),
     leaveForHome: vi.fn().mockResolvedValue('no-workflow'),
   } as unknown as WorkflowEntryCoordinator;
   const handler = new HomeHandler(
@@ -147,15 +156,15 @@ function setup(overrides: {
     undefined, // logs
     undefined, // csv
     overrides.settings, // settings
-    undefined, // help
+    overrides.help, // help
     overrides.config, // config
-    undefined, // drive
-    undefined, // drive auth
-    undefined, // health
-    undefined, // invite
-    undefined, // import config
-    undefined, // export config
-    undefined, // system update
+    overrides.drive, // drive
+    overrides.driveAuth, // drive auth
+    overrides.health, // health
+    overrides.invite, // invite
+    overrides.importConfig, // import config
+    overrides.exportConfig, // export config
+    overrides.systemUpdate, // system update
     overrides.clean, // clean
     overrides.restart, // restart
     overrides.thresholds, // thresholds
@@ -460,6 +469,41 @@ describe('HomeHandler', () => {
     expect(settings.handleCommand).toHaveBeenCalledWith(ctx, { receipt: workflowReceipt });
   });
 
+  it.each([
+    ['config-import', 'sensor-import', 'importConfig', 'handleCommand'],
+    ['config-export', 'sensor-export', 'exportConfig', 'handleCommand'],
+    ['drive-status', 'drive-status', 'drive', 'handleStatus'],
+    ['drive-connect', 'drive-setup', 'driveAuth', 'handleCommand'],
+    ['system-health', 'health', 'health', 'handleCommand'],
+    ['system-packages', 'system-update', 'systemUpdate', 'handleCommand'],
+    ['invite', 'invite', 'invite', 'handleCommand'],
+    ['help', 'help', 'help', 'handleCommand'],
+  ] as const)('begins %s exactly once from its captured Admin/Home origin', async (destination, workflow, dependency, method) => {
+    const target = { [method]: vi.fn().mockResolvedValue(undefined) };
+    const { callbacks, validate, navigation, workflowEntry } = setup({ [dependency]: target });
+    const ctx = context(encodeHomeCallback(identity.token, 1, { kind: destination }));
+    const origin = destination === 'help' ? { kind: 'more' } : destination === 'invite'
+      ? { kind: 'admin-tools' }
+      : destination.startsWith('config-') ? { kind: 'admin-sensor-setup' }
+        : destination.startsWith('drive-') ? { kind: 'admin-storage' }
+          : { kind: 'admin-system' };
+    (validate.execute as ReturnType<typeof vi.fn>).mockResolvedValue({
+      kind: 'accepted', active: identity, view: origin,
+    });
+    (navigation.route as ReturnType<typeof vi.fn>).mockReturnValue({ kind: 'external', destination });
+
+    await callbacks[0].fn(ctx);
+
+    expect(workflowEntry.begin).toHaveBeenCalledWith(ctx, workflow, {
+      source: 'captured', view: origin, sessionToken: identity.token,
+    });
+    if (destination === 'drive-status') {
+      expect(target.handleStatus).toHaveBeenCalledWith(ctx, { includeCleanupAction: false }, { receipt: workflowReceipt });
+    } else {
+      expect(target[method]).toHaveBeenCalledWith(ctx, { receipt: workflowReceipt });
+    }
+  });
+
   it('opens a validated Home destination freshly at the bottom after workflow leave succeeds', async () => {
     const { callbacks, open, render, workflowEntry } = setup();
     const ctx = context(encodeHomeCallback(identity.token, 1, { kind: 'sensors', page: 2 }));
@@ -636,6 +680,14 @@ describe('HomeHandler', () => {
       await promote();
       return 'opened';
     });
+    (workflowEntry.begin as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      events.push('begin-system-restart');
+      return workflowReceipt;
+    });
+    (workflowEntry.markRunning as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      events.push('mark-system-restart-running');
+      return true;
+    });
     (open.execute as ReturnType<typeof vi.fn>).mockImplementation(async (input) => {
       events.push(`open-fresh:${input.view.kind}`);
       return { kind: 'opened' };
@@ -643,7 +695,15 @@ describe('HomeHandler', () => {
 
     await callbacks[0].fn(ctx);
 
-    expect(events).toEqual(['leave-workflow', 'claim-restart', 'dispatch-restart', 'finish-restart', 'open-fresh:admin-system']);
+    expect(events).toEqual([
+      'leave-workflow',
+      'claim-restart',
+      'begin-system-restart',
+      'mark-system-restart-running',
+      'dispatch-restart',
+      'finish-restart',
+      'open-fresh:admin-system',
+    ]);
     expect(render.execute).not.toHaveBeenCalled();
   });
 

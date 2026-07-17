@@ -1,128 +1,50 @@
 import { describe, expect, it, vi } from 'vitest';
-import { TriggerCleanUseCase } from '../../../src/camera/application/trigger-clean.use-case';
+import { catalogFor } from '../../../src/locales';
 import { CleanHandler } from '../../../src/telegram/interfaces/clean.handler';
-import { RoleMiddleware } from '../../../src/telegram/interfaces/role.middleware';
 
-function createTestSetup(executed = true, thresholdUsed = 80) {
-  const triggerClean = {
-    execute: vi.fn(async (thresh?: number) => ({
-      executed,
-      thresholdUsed: thresh ?? thresholdUsed,
-    })),
-  } as unknown as TriggerCleanUseCase;
+const receipt = {
+  id: 'abcdefghijklmnop', userId: 42, chatId: 42, kind: 'workflow-return',
+  sessionToken: null, status: 'pending', expiresAt: new Date('2030-01-02T00:00:00.000Z'),
+  payload: { workflow: 'storage-cleanup', phase: 'cancellable', originSource: 'natural-parent', origin: { kind: 'admin-storage' } },
+};
 
-  const guard = {
-    adminOnly: vi.fn(),
-  } as unknown as RoleMiddleware;
-
-  const handler = new CleanHandler(triggerClean, guard);
-
-  const commandCallbacks: Record<string, (...args: any[]) => any> = {};
-  const callbackQueryCallbacks: { regex: RegExp; fn: (...args: any[]) => any }[] = [];
-
-  const composer = {
-    command: vi.fn((cmd, middleware, fn) => {
-      commandCallbacks[cmd] = fn || middleware;
-    }),
-    callbackQuery: vi.fn((regex, middleware, fn) => {
-      callbackQueryCallbacks.push({ regex, fn: fn || middleware });
-    }),
-  } as any;
-
-  handler.register(composer);
-
-  return {
-    handler,
-    triggerClean,
-    guard,
-    composer,
-    commandCallbacks,
-    callbackQueryCallbacks,
+function setup() {
+  const events: string[] = [];
+  const clean = { execute: vi.fn().mockResolvedValue({ executed: true, thresholdUsed: 80 }) };
+  const workflows = { begin: vi.fn().mockResolvedValue(receipt) };
+  const navigation = { complete: vi.fn(async (_ctx, _launch, presentation) => {
+    await presentation.deliver(); events.push('restore');
+  }) };
+  const handler = new CleanHandler(clean as never, {} as never, workflows as never, navigation as never);
+  const commands: Record<string, (ctx: object) => Promise<void>> = {};
+  handler.register({ command: vi.fn((name, _guard, fn) => { commands[name] = fn; }), callbackQuery: vi.fn() } as never);
+  const ctx = {
+    from: { id: 42 }, chat: { id: 42, type: 'private' }, match: '75',
+    localeState: { locale: 'en', catalog: catalogFor('en'), user: { telegramId: 42, role: 'admin' } },
+    reply: vi.fn(async () => { events.push('result'); }),
   };
+  return { handler, commands, clean, workflows, navigation, ctx, events };
 }
 
-describe('CleanHandler', () => {
-  it('registers /clean command and clean:trigger/legacy-menu:clean callback queries', () => {
-    const { composer } = createTestSetup();
-    expect(composer.command).toHaveBeenCalledWith('clean', expect.anything(), expect.anything());
-    expect(composer.callbackQuery).toHaveBeenCalledWith(expect.any(RegExp), expect.anything(), expect.anything());
+describe('CleanHandler contextual workflow', () => {
+  it('begins a direct Storage cleanup receipt and restores after the result', async () => {
+    const { commands, clean, workflows, ctx, events } = setup();
+
+    await commands.clean(ctx);
+
+    expect(workflows.begin).toHaveBeenCalledWith(ctx, 'storage-cleanup', { source: 'natural-parent' });
+    expect(clean.execute).toHaveBeenCalledWith(75);
+    expect(events).toEqual(['result', 'restore']);
   });
 
-  it('accepts the explicit legacy cleanup alias', async () => {
-    const { callbackQueryCallbacks, triggerClean } = createTestSetup(true, 80);
-    const callback = callbackQueryCallbacks[0];
-    expect(callback.regex.test('legacy-menu:clean')).toBe(true);
-    expect(callback.regex.test('menu:clean')).toBe(false);
+  it('uses a captured launch exactly once for validation failures', async () => {
+    const { handler, workflows, ctx, clean, navigation } = setup();
+    ctx.match = '101';
 
-    await callback.fn({ answerCallbackQuery: vi.fn().mockResolvedValue(true), reply: vi.fn(), match: ['legacy-menu:clean'] });
-    expect(triggerClean.execute).toHaveBeenCalledWith(undefined);
-  });
+    await handler.handleCommand(ctx as never, { receipt } as never);
 
-  it('executes cleanup without arguments on /clean command', async () => {
-    const { commandCallbacks, triggerClean } = createTestSetup(true, 80);
-    const reply = vi.fn().mockResolvedValue(true);
-    const ctx = { reply, match: '' };
-
-    await commandCallbacks.clean(ctx);
-
-    expect(triggerClean.execute).toHaveBeenCalledWith(undefined);
-    expect(reply).toHaveBeenCalledWith(
-      expect.stringContaining('threshold used: *80%*'),
-      expect.objectContaining({ parse_mode: 'Markdown' }),
-    );
-  });
-
-  it('executes cleanup with custom threshold argument on /clean command', async () => {
-    const { commandCallbacks, triggerClean } = createTestSetup(true, 75);
-    const reply = vi.fn().mockResolvedValue(true);
-    const ctx = { reply, match: '75' };
-
-    await commandCallbacks.clean(ctx);
-
-    expect(triggerClean.execute).toHaveBeenCalledWith(75);
-    expect(reply).toHaveBeenCalledWith(
-      expect.stringContaining('threshold used: *75%*'),
-      expect.objectContaining({ parse_mode: 'Markdown' }),
-    );
-  });
-
-  it('rejects invalid threshold argument', async () => {
-    const { commandCallbacks, triggerClean } = createTestSetup();
-    const reply = vi.fn().mockResolvedValue(true);
-    const ctx = { reply, match: '150' };
-
-    await commandCallbacks.clean(ctx);
-
-    expect(triggerClean.execute).not.toHaveBeenCalled();
-    expect(reply).toHaveBeenCalledWith(expect.stringContaining('Invalid threshold'));
-  });
-
-  it('reports in-progress when cleanup lock is held', async () => {
-    const { commandCallbacks, triggerClean } = createTestSetup(false, 80);
-    const reply = vi.fn().mockResolvedValue(true);
-    const ctx = { reply, match: '' };
-
-    await commandCallbacks.clean(ctx);
-
-    expect(triggerClean.execute).toHaveBeenCalled();
-    expect(reply).toHaveBeenCalledWith(expect.stringContaining('already in progress'));
-  });
-
-  it('executes cleanup on clean:trigger callback query', async () => {
-    const { callbackQueryCallbacks, triggerClean } = createTestSetup(true, 80);
-    const cbFn = callbackQueryCallbacks[0].fn;
-
-    const answerCallbackQuery = vi.fn().mockResolvedValue(true);
-    const reply = vi.fn().mockResolvedValue(true);
-    const ctx = { answerCallbackQuery, reply, match: ['clean:trigger'] };
-
-    await cbFn(ctx);
-
-    expect(answerCallbackQuery).toHaveBeenCalled();
-    expect(triggerClean.execute).toHaveBeenCalledWith(undefined);
-    expect(reply).toHaveBeenCalledWith(
-      expect.stringContaining('threshold used: *80%*'),
-      expect.objectContaining({ parse_mode: 'Markdown' }),
-    );
+    expect(workflows.begin).not.toHaveBeenCalled();
+    expect(clean.execute).not.toHaveBeenCalled();
+    expect(navigation.complete).toHaveBeenCalledOnce();
   });
 });

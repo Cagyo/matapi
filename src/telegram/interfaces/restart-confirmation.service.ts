@@ -12,7 +12,10 @@ import {
   USER_REPOSITORY,
   UserRepositoryPort,
 } from '../domain/ports/user-repository.port';
-import { RESTART_REASON_KEY } from './restart-system.use-case';
+import { RESTART_REASON_KEY } from '../application/restart-system.use-case';
+import { RestoreWorkflowOriginUseCase } from '../application/restore-workflow-origin.use-case';
+import { catalogFor } from '../../locales';
+import { WorkflowEntryCoordinator } from './workflow-entry.coordinator';
 
 const UPDATE_COMMIT_KEY = 'update_commit';
 const UPDATE_STATUS_KEY = 'update_status';
@@ -20,9 +23,10 @@ const ROLLBACK_COMMIT_KEY = 'rollback_commit';
 
 /**
  * Runs once after the bot is online. Reads `system_meta.restart_reason`
- * set by `/restart`, the OTA scripts, or rollback, broadcasts a confirmation
- * to all admins, and clears the flag. Idempotent — a fresh boot with no
- * flag is a no-op.
+ * set by `/restart`, the OTA scripts, or rollback. It completes the matching
+ * contextual restart workflow first, falling back to an admin broadcast when
+ * none exists, then clears the flag. Idempotent — a fresh boot with no flag
+ * is a no-op.
  */
 @Injectable()
 export class RestartConfirmationService {
@@ -33,6 +37,8 @@ export class RestartConfirmationService {
     private readonly meta: SystemMetaRepositoryPort,
     @Inject(USER_REPOSITORY) private readonly users: UserRepositoryPort,
     @Inject(DIRECT_MESSENGER) private readonly dm: DirectMessengerPort,
+    private readonly workflows: WorkflowEntryCoordinator,
+    private readonly restoreWorkflow: RestoreWorkflowOriginUseCase,
   ) {}
 
   async run(): Promise<void> {
@@ -40,12 +46,52 @@ export class RestartConfirmationService {
     if (!reason) return;
 
     const message = await this.messageFor(reason);
-    if (message) await this.broadcastToAdmins(message);
+    if (message) {
+      const recovery = await this.completeContextualRestart(message);
+      if (recovery === 'resumable') return;
+      if (recovery === 'no-workflow') await this.broadcastToAdmins(message);
+    }
 
     await this.meta.delete(RESTART_REASON_KEY);
     await this.meta.delete(UPDATE_COMMIT_KEY);
     await this.meta.delete(UPDATE_STATUS_KEY);
     await this.meta.delete(ROLLBACK_COMMIT_KEY);
+  }
+
+  private async completeContextualRestart(
+    message: string,
+  ): Promise<'completed' | 'resumable' | 'no-workflow'> {
+    const recipients = await this.users.listRecipients();
+    for (const user of recipients) {
+      const result = await this.workflows.completeHeadless({
+        identity: {
+          userId: user.telegramId,
+          // Telegram's private-chat ID is the sender's user ID. Every
+          // contextual workflow is private-chat-only, so this is the durable
+          // identity used when the process comes back after a restart.
+          chatId: user.telegramId,
+          locale: user.locale,
+          role: user.role,
+          catalog: catalogFor(user.locale),
+        },
+        workflow: 'system-restart',
+        deliver: () => this.dm.send(user.telegramId, message),
+        restore: async (receipt) => {
+          const restored = await this.restoreWorkflow.execute({
+            userId: user.telegramId,
+            chatId: user.telegramId,
+            locale: user.locale,
+            role: user.role,
+            workflow: receipt.payload.workflow,
+            requested: { kind: 'admin-system' },
+            originSource: 'natural-parent',
+          });
+          return restored.kind === 'opened';
+        },
+      });
+      if (result !== 'no-workflow' && result !== 'ignored') return result;
+    }
+    return 'no-workflow';
   }
 
   private async messageFor(reason: string): Promise<string | null> {

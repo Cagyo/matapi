@@ -245,6 +245,10 @@ export class HomeHandler implements TelegramHandler {
   ): Promise<'completed' | 'handled' | 'unavailable'> {
     if (action.kind !== 'confirm-restart' || !this.restart || !this.actions || !this.clock) return 'unavailable';
     try {
+      const receipt = await this.workflows?.begin(ctx, 'system-restart', {
+        source: 'natural-parent',
+      });
+      if (!receipt || !await this.workflows?.markRunning(ctx, receipt)) return 'unavailable';
       await ctx.reply(ctx.localeState!.catalog.ota.restarting);
       await this.restart.execute();
       await this.actions.finishExternal({ action: { id: action.receiptId, userId: active.userId, chatId: active.chatId, kind: 'restart-confirmation' }, outcome: 'completed', now: this.clock.now() });
@@ -289,10 +293,11 @@ export class HomeHandler implements TelegramHandler {
         const launch = await this.beginWorkflow(ctx, 'language', active, view);
         return launch ? this.settings.handleCommand(ctx, launch) : this.recover(ctx, 'unavailable');
       }
-      case 'help':
+      case 'help': {
         if (!this.help) return this.recover(ctx, 'unavailable');
-        await ctx.reply(ctx.localeState!.user.role === 'admin' ? ctx.localeState!.catalog.help.admin : ctx.localeState!.catalog.help.user);
-        return;
+        const launch = await this.beginWorkflow(ctx, 'help', active, view);
+        return launch ? this.help.handleCommand(ctx, launch) : this.recover(ctx, 'unavailable');
+      }
       case 'config-add': case 'config-modify': case 'config-remove': {
         if (!this.config) return this.recover(ctx, 'unavailable');
         const subcommand = destination.slice('config-'.length);
@@ -306,13 +311,43 @@ export class HomeHandler implements TelegramHandler {
           ? this.config.handleSubcommand(ctx, subcommand, launch)
           : this.recover(ctx, 'unavailable');
       }
-      case 'config-import': return this.importConfig ? this.importConfig.handleCommand(ctx) : this.recover(ctx, 'unavailable');
-      case 'config-export': return this.exportConfig ? this.exportConfig.handleCommand(ctx) : this.recover(ctx, 'unavailable');
-      case 'drive-status': return this.drive ? this.drive.handleStatus(ctx, { includeCleanupAction: false }) : this.recover(ctx, 'unavailable');
-      case 'drive-connect': return this.driveAuth ? this.driveAuth.handleCommand(ctx) : this.recover(ctx, 'unavailable');
-      case 'system-health': return this.health ? this.health.handleCommand(ctx) : this.recover(ctx, 'unavailable');
-      case 'system-packages': return this.systemUpdate ? this.systemUpdate.handleCommand(ctx) : this.recover(ctx, 'unavailable');
-      case 'invite': return this.invite ? this.invite.handleCommand(ctx) : this.recover(ctx, 'unavailable');
+      case 'config-import': {
+        if (!this.importConfig) return this.recover(ctx, 'unavailable');
+        const launch = await this.beginWorkflow(ctx, 'sensor-import', active, view);
+        return launch ? this.importConfig.handleCommand(ctx, launch) : this.recover(ctx, 'unavailable');
+      }
+      case 'config-export': {
+        if (!this.exportConfig) return this.recover(ctx, 'unavailable');
+        const launch = await this.beginWorkflow(ctx, 'sensor-export', active, view);
+        return launch ? this.exportConfig.handleCommand(ctx, launch) : this.recover(ctx, 'unavailable');
+      }
+      case 'drive-status': {
+        if (!this.drive) return this.recover(ctx, 'unavailable');
+        const launch = await this.beginWorkflow(ctx, 'drive-status', active, view);
+        return launch
+          ? this.drive.handleStatus(ctx, { includeCleanupAction: false }, launch)
+          : this.recover(ctx, 'unavailable');
+      }
+      case 'drive-connect': {
+        if (!this.driveAuth) return this.recover(ctx, 'unavailable');
+        const launch = await this.beginWorkflow(ctx, 'drive-setup', active, view);
+        return launch ? this.driveAuth.handleCommand(ctx, launch) : this.recover(ctx, 'unavailable');
+      }
+      case 'system-health': {
+        if (!this.health) return this.recover(ctx, 'unavailable');
+        const launch = await this.beginWorkflow(ctx, 'health', active, view);
+        return launch ? this.health.handleCommand(ctx, launch) : this.recover(ctx, 'unavailable');
+      }
+      case 'system-packages': {
+        if (!this.systemUpdate) return this.recover(ctx, 'unavailable');
+        const launch = await this.beginWorkflow(ctx, 'system-update', active, view);
+        return launch ? this.systemUpdate.handleCommand(ctx, launch) : this.recover(ctx, 'unavailable');
+      }
+      case 'invite': {
+        if (!this.invite) return this.recover(ctx, 'unavailable');
+        const launch = await this.beginWorkflow(ctx, 'invite', active, view);
+        return launch ? this.invite.handleCommand(ctx, launch) : this.recover(ctx, 'unavailable');
+      }
       default: return this.recover(ctx, 'unavailable');
     }
   }

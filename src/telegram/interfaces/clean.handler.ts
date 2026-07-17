@@ -1,10 +1,15 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { Composer } from 'grammy';
 import { TriggerCleanUseCase } from '../../camera/application/trigger-clean.use-case';
 import { en } from '../../locales/en';
 import { RoleMiddleware } from './role.middleware';
 import { TelegramHandler } from './telegram-handler';
 import { TelegramContext } from './telegram-context';
+import {
+  WorkflowEntryCoordinator,
+  type WorkflowLaunch,
+} from './workflow-entry.coordinator';
+import { WorkflowNavigationHandler } from './workflow-navigation.handler';
 
 /**
  * `/clean` & callback triggers — spec 15. Admin-only. Manually triggers a
@@ -18,6 +23,8 @@ export class CleanHandler implements TelegramHandler {
   constructor(
     private readonly triggerClean: TriggerCleanUseCase,
     private readonly guard: RoleMiddleware,
+    private readonly workflows: WorkflowEntryCoordinator,
+    @Optional() private readonly navigation?: WorkflowNavigationHandler,
   ) {}
 
   register(composer: Composer<TelegramContext>): void {
@@ -35,35 +42,65 @@ export class CleanHandler implements TelegramHandler {
     );
   }
 
-  async handleCommand(ctx: TelegramContext): Promise<void> {
+  async handleCommand(ctx: TelegramContext, launch?: WorkflowLaunch): Promise<void> {
+    const receipt = launch?.receipt ?? await this.workflows.begin(ctx, 'storage-cleanup', {
+      source: 'natural-parent',
+    });
+    if (!receipt) return;
     const arg = (ctx.match ?? '').toString().trim();
     let customThreshold: number | undefined;
 
     if (arg) {
       const val = Number(arg);
       if (!Number.isFinite(val) || val < 10 || val > 99 || !Number.isInteger(val)) {
-        await ctx.reply(en.clean.invalidThreshold);
+        await this.complete(ctx, receipt, () => ctx.reply((ctx.localeState?.catalog ?? en).clean.invalidThreshold));
         return;
       }
       customThreshold = val;
     }
 
-    await this.executeCleanup(ctx, customThreshold);
+    await this.executeCleanup(ctx, customThreshold, { receipt });
   }
 
-  private async executeCleanup(ctx: TelegramContext, customThreshold?: number): Promise<void> {
+  private async executeCleanup(
+    ctx: TelegramContext,
+    customThreshold?: number,
+    launch?: WorkflowLaunch,
+  ): Promise<void> {
+    const receipt = launch?.receipt ?? await this.workflows.begin(ctx, 'storage-cleanup', {
+      source: 'natural-parent',
+    });
+    if (!receipt) return;
+    const catalog = ctx.localeState?.catalog ?? en;
     try {
       const res = await this.triggerClean.execute(customThreshold);
       if (!res.executed) {
-        await ctx.reply(en.clean.inProgress);
+        await this.complete(ctx, receipt, () => ctx.reply(catalog.clean.inProgress));
         return;
       }
-      await ctx.reply(en.clean.triggered(res.thresholdUsed), {
+      await this.complete(ctx, receipt, () => ctx.reply(catalog.clean.triggered(res.thresholdUsed), {
         parse_mode: 'Markdown',
-      });
+      }));
     } catch (err) {
       this.logger.error(`Manual clean failed: ${(err as Error).message}`, (err as Error).stack);
-      await ctx.reply(en.common.error('trigger cleanup', (err as Error).message));
+      await this.complete(ctx, receipt, () => ctx.reply(catalog.common.error('trigger cleanup', (err as Error).message)));
     }
+  }
+
+  private async complete(
+    ctx: TelegramContext,
+    receipt: WorkflowLaunch['receipt'],
+    deliver: () => Promise<unknown>,
+  ): Promise<void> {
+    const catalog = ctx.localeState?.catalog ?? en;
+    if (this.navigation) {
+      await this.navigation.complete(ctx, { receipt }, {
+        effectStage: 'pending',
+        deliver: async () => { await deliver(); },
+        failureNotice: catalog.home.recovery.unavailable,
+      });
+      return;
+    }
+    await deliver();
   }
 }

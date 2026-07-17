@@ -22,7 +22,7 @@ import { UndoNonCriticalPauseUseCase } from './application/undo-non-critical-pau
 import { PromoteUserUseCase } from './application/promote-user.use-case';
 import { ResolveUserTargetUseCase } from './application/resolve-user-target.use-case';
 import { RegisterUserUseCase } from './application/register-user.use-case';
-import { RestartConfirmationService } from './application/restart-confirmation.service';
+import { RestartConfirmationService } from './interfaces/restart-confirmation.service';
 import { SystemOnlineNotifier } from './application/system-online-notifier.service';
 import { RefreshHomeMonitoringUseCase } from './application/refresh-home-monitoring.use-case';
 import { GetHomeSummaryUseCase } from './application/get-home-summary.use-case';
@@ -40,6 +40,8 @@ import { CompareAndSetQuietHoursUseCase } from './application/compare-and-set-qu
 import { SetAutoCleanThresholdUseCase } from './application/set-auto-clean-threshold.use-case';
 import { HomeNavigationUseCase } from './application/home-navigation.use-case';
 import { BeginWorkflowReturnUseCase } from './application/begin-workflow-return.use-case';
+import { ResolveWorkflowOriginUseCase } from './application/resolve-workflow-origin.use-case';
+import { RestoreWorkflowOriginUseCase } from './application/restore-workflow-origin.use-case';
 import { SystemUpdateUseCase } from './application/system-update.use-case';
 import { UnmuteSensorUseCase } from './application/unmute-sensor.use-case';
 import { UpdateSystemUseCase } from './application/update-system.use-case';
@@ -226,6 +228,8 @@ const mode = resolveBotMode();
     SetAutoCleanThresholdUseCase,
     HomeNavigationUseCase,
     BeginWorkflowReturnUseCase,
+    ResolveWorkflowOriginUseCase,
+    RestoreWorkflowOriginUseCase,
     UpdateSystemUseCase,
     SystemUpdateUseCase,
     RollbackSystemUseCase,

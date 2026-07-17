@@ -1,39 +1,39 @@
 import { describe, expect, it, vi } from 'vitest';
-import { SENSOR_HEALTH_PROBE_TIMEOUT_MS, SensorHealthPort } from '../../../src/sensors/application/ports/sensor-health.port';
-import { SensorQueryPort } from '../../../src/sensors/domain/ports/sensor-query.port';
-import { Sensor } from '../../../src/sensors/domain/sensor';
-import { BotRunnerRegistry } from '../../../src/network/application/bot-runner.registry';
-import { SystemHealthPort } from '../../../src/system/domain/ports/system-health.port';
+import { catalogFor } from '../../../src/locales';
 import { HealthHandler } from '../../../src/telegram/interfaces/health.handler';
-import { RoleMiddleware } from '../../../src/telegram/interfaces/role.middleware';
-import { TelegramContext } from '../../../src/telegram/interfaces/telegram-context';
 
-function sensor(id: string): Sensor {
-  return { id, name: id, type: 'digital', config: {}, enabled: true, debounceMs: 0, severity: 'info', lastValue: null, lastValueAt: null };
-}
+const receipt = {
+  id: 'abcdefghijklmnop', userId: 42, chatId: 42, kind: 'workflow-return',
+  sessionToken: null, status: 'pending', expiresAt: new Date('2030-01-02T00:00:00.000Z'),
+  payload: { workflow: 'health', phase: 'cancellable', originSource: 'natural-parent', origin: { kind: 'admin-system' } },
+};
 
-describe('HealthHandler', () => {
-  it('uses the runner registry seam and counts only online probe results', async () => {
-    const query: SensorQueryPort = {
-      listEnabled: async () => [sensor('door'), sensor('co2')],
-      listDashboardPage: async (input) => ({ sensors: [], requestedPage: input.page, page: input.page, pageCount: 0, total: 0, clamped: false }),
-      findById: async () => null, findByIdIncludingArchived: async () => null, findByName: async () => null,
-      listHistoryTargets: async () => ({ targets: [], page: 0, pageCount: 0 }),
+describe('HealthHandler contextual workflow', () => {
+  it('uses the direct System parent and sends a health result before completion', async () => {
+    const events: string[] = [];
+    const workflows = { begin: vi.fn().mockResolvedValue(receipt) };
+    const navigation = { complete: vi.fn(async (_ctx, _launch, presentation) => {
+      await presentation.deliver();
+      events.push('restore');
+    }) };
+    const handler = new HealthHandler(
+      { collect: vi.fn().mockResolvedValue({ diskUsedBytes: 1, diskTotalBytes: 2, cpuTempC: null, memoryUsedBytes: 1, memoryTotalBytes: 2, uptimeSec: 1, dbSizeBytes: 1 }) },
+      { listEnabled: vi.fn().mockResolvedValue([]) },
+      { probe: vi.fn().mockResolvedValue([]) },
+      { getLastUpdateAt: vi.fn().mockReturnValue(null) },
+      {} as never,
+      workflows as never,
+      navigation as never,
+    );
+    const ctx = {
+      from: { id: 42 }, chat: { id: 42, type: 'private' },
+      localeState: { locale: 'en', catalog: catalogFor('en'), user: { telegramId: 42, role: 'admin' } },
+      reply: vi.fn(async () => { events.push('result'); }),
     };
-    const probe = vi.fn(async () => [
-      { sensorId: 'door', status: 'online' as const },
-      { sensorId: 'co2', status: 'failed' as const },
-    ]);
-    const system: SystemHealthPort = {
-      collect: async () => ({ diskUsedBytes: 1, diskTotalBytes: 2, cpuTempC: null, memoryUsedBytes: 1, memoryTotalBytes: 2, uptimeSec: 1, dbSizeBytes: 1 }),
-    };
-    const runner = new BotRunnerRegistry();
-    const handler = new HealthHandler(system, query, { probe }, runner, {} as RoleMiddleware);
-    const reply = vi.fn().mockResolvedValue(undefined);
 
-    await handler.handleCommand({ reply } as unknown as TelegramContext);
+    await handler.handleCommand(ctx as never);
 
-    expect(probe).toHaveBeenCalledWith(['door', 'co2'], SENSOR_HEALTH_PROBE_TIMEOUT_MS);
-    expect(reply).toHaveBeenCalledWith(expect.stringContaining('Sensors: 1/2 online'));
+    expect(workflows.begin).toHaveBeenCalledWith(ctx, 'health', { source: 'natural-parent' });
+    expect(events).toEqual(['result', 'restore']);
   });
 });

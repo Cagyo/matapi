@@ -2,6 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { CLOCK, type ClockPort } from '../../events/domain/ports/clock.port';
 import type { LocaleCatalog } from '../../locales';
 import { BeginWorkflowReturnUseCase } from '../application/begin-workflow-return.use-case';
+import { WORKFLOW_RETURN_TTL_MS } from '../application/begin-workflow-return.use-case';
 import {
   HOME_ACTION_REPOSITORY,
   type HomeActionRepositoryPort,
@@ -32,6 +33,7 @@ export interface CurrentWorkflowIdentity {
 }
 
 export type LeaveForHomeResult = 'opened' | 'no-workflow' | 'not-opened' | 'stale' | 'ignored';
+export type HeadlessWorkflowCompletionResult = 'completed' | 'resumable' | 'no-workflow' | 'ignored';
 
 @Injectable()
 export class WorkflowEntryCoordinator {
@@ -107,6 +109,101 @@ export class WorkflowEntryCoordinator {
         now: this.clock.now(),
       });
       return 'opened';
+    });
+  }
+
+  /**
+   * Advances a receipt before an irreversible operation starts.  Keeping this
+   * at the coordinator boundary makes a callback replay unable to start the
+   * operation after the durable receipt has already left its cancellable
+   * phase.
+   */
+  async markRunning(
+    ctx: TelegramContext,
+    receipt: WorkflowReturnReceipt,
+  ): Promise<boolean> {
+    const identity = currentWorkflowIdentity(ctx);
+    if (!identity) return false;
+    if (receipt.userId !== identity.userId || receipt.chatId !== identity.chatId) return false;
+
+    return this.operations.run(identity.userId, identity.chatId, async () => {
+      const now = this.clock.now();
+      const result = await this.actions.updateWorkflowReturnPhase({
+        userId: identity.userId,
+        chatId: identity.chatId,
+        id: receipt.id,
+        phase: 'running',
+        now,
+        expiresAt: new Date(now.getTime() + WORKFLOW_RETURN_TTL_MS),
+      });
+      return result === 'updated';
+    });
+  }
+
+  /**
+   * Completes a workflow without a grammY context after process recovery.
+   * A claimed receipt is allowed one result-delivery attempt. If reopening
+   * its origin later fails, a resumable retry re-attempts only restoration;
+   * it never turns into the legacy broadcast path or sends the result twice.
+   */
+  async completeHeadless(input: {
+    identity: CurrentWorkflowIdentity;
+    workflow: ExternalWorkflow;
+    deliver(): Promise<void>;
+    restore(receipt: WorkflowReturnReceipt): Promise<boolean>;
+  }): Promise<HeadlessWorkflowCompletionResult> {
+    const { identity } = input;
+    return this.operations.run(identity.userId, identity.chatId, async () => {
+      const current = await this.actions.findWorkflowReturn({
+        userId: identity.userId,
+        chatId: identity.chatId,
+        now: this.clock.now(),
+      });
+      if (!current) return 'no-workflow';
+      if (current.payload.workflow !== input.workflow) return 'no-workflow';
+
+      const claim = await this.actions.claimWorkflowReturn({
+        userId: identity.userId,
+        chatId: identity.chatId,
+        id: current.id,
+        now: this.clock.now(),
+      });
+      if (claim.kind === 'expired' || claim.kind === 'superseded' || claim.kind === 'terminal') {
+        return 'no-workflow';
+      }
+
+      if (claim.kind === 'claimed' && claim.receipt.payload.phase === 'cancellable') {
+        await this.drafts.cancelExact(claim.receipt);
+      }
+      if (claim.kind === 'claimed') {
+        await input.deliver().catch(() => undefined);
+      }
+
+      // A user who returned while the restart ran already has a fresh Home.
+      // Send the terminal result once, but do not replace that newer session.
+      if (claim.kind === 'returned') {
+        await input.deliver().catch(() => undefined);
+        const finish = await this.actions.finishWorkflowReturn({
+          userId: identity.userId,
+          chatId: identity.chatId,
+          id: claim.receipt.id,
+          outcome: 'completed',
+          now: this.clock.now(),
+        });
+        return finish === 'finished' ? 'completed' : 'resumable';
+      }
+
+      if (claim.kind !== 'claimed' && claim.kind !== 'resumable') return 'no-workflow';
+
+      if (!await input.restore(claim.receipt)) return 'resumable';
+      const finish = await this.actions.finishWorkflowReturn({
+        userId: identity.userId,
+        chatId: identity.chatId,
+        id: claim.receipt.id,
+        outcome: 'completed',
+        now: this.clock.now(),
+      });
+      return finish === 'finished' ? 'completed' : 'resumable';
     });
   }
 }

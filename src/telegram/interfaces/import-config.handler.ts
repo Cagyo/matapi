@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { CallbackQueryContext, Composer, InlineKeyboard } from 'grammy';
 import { en } from '../../locales/en';
 import {
@@ -21,13 +21,19 @@ import {
   ConfigCodecPort,
 } from '../domain/ports/config-codec.port';
 import { RoleMiddleware } from './role.middleware';
-import {
-  appendReturnHomeButton,
-  returnHomeKeyboard,
-  type ExternalWorkflowPhase,
-} from './return-home';
 import { TelegramHandler } from './telegram-handler';
 import { TelegramContext } from './telegram-context';
+import type { WorkflowReturnReceipt } from '../domain/workflow-return';
+import { workflowReturnCallback } from '../domain/workflow-return';
+import {
+  WorkflowEntryCoordinator,
+  type WorkflowLaunch,
+} from './workflow-entry.coordinator';
+import {
+  WorkflowDraftRegistry,
+  type WorkflowDraftCanceller,
+} from './workflow-draft.registry';
+import { WorkflowNavigationHandler } from './workflow-navigation.handler';
 
 /** Max accepted upload size (spec 16 — guard against huge documents). */
 const MAX_FILE_BYTES = 1_000_000;
@@ -36,13 +42,22 @@ const MAX_FILE_BYTES = 1_000_000;
  * Per-user `/import_config` state (spec 16). In-memory only — lost on restart.
  * State only ever exists for admins, since the command is admin-gated.
  */
-type ImportState =
+type ImportStep =
   | { kind: 'awaitingFile' }
   | {
       kind: 'awaitingConfirm';
       sensorPlan: ImportPlan;
-      cameraPlan: CameraLiveSourceImportPlan;
-    };
+    cameraPlan: CameraLiveSourceImportPlan;
+  };
+
+type ImportState = ImportStep & {
+  userId: number;
+  chatId: number;
+  receiptId: string;
+  receipt: WorkflowReturnReceipt;
+};
+
+const IMPORT_CALLBACK = /^imp:([A-Za-z0-9_-]{16}):(a|c)$/;
 
 /**
  * `/import_config` — spec 16. Admin-only, two-step FSM:
@@ -55,9 +70,9 @@ type ImportState =
  * if the second phase cannot run or fails.
  */
 @Injectable()
-export class ImportConfigHandler implements TelegramHandler {
+export class ImportConfigHandler implements TelegramHandler, WorkflowDraftCanceller {
   private readonly logger = new Logger(ImportConfigHandler.name);
-  private readonly states = new Map<number, ImportState>();
+  private readonly states = new Map<string, ImportState>();
   private readonly botToken = process.env.TELEGRAM_BOT_TOKEN ?? '';
 
   constructor(
@@ -66,22 +81,21 @@ export class ImportConfigHandler implements TelegramHandler {
     @Inject(CONFIG_CODEC) private readonly codec: ConfigCodecPort,
     private readonly guard: RoleMiddleware,
     @Inject(USER_REPOSITORY) private readonly users: UserRepositoryPort,
-  ) {}
+    private readonly workflows: WorkflowEntryCoordinator,
+    private readonly drafts: WorkflowDraftRegistry,
+    @Optional() private readonly navigation?: WorkflowNavigationHandler,
+  ) {
+    this.drafts.register('sensor-import', this);
+  }
 
   register(composer: Composer<TelegramContext>): void {
     composer.command('import_config', this.guard.adminOnly, (ctx) =>
       this.handleCommand(ctx),
     );
-    composer.command('cancel', this.guard.adminOnly, async (ctx) => {
-      const userId = ctx.from?.id;
-      if (userId && this.states.has(userId)) {
-        this.states.delete(userId);
-        await ctx.reply(en.importConfig.cancelled, {
-          reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
-        });
-      } else {
-        await ctx.reply(en.common.noActiveWizard);
-      }
+    composer.command('cancel', this.guard.adminOnly, async (ctx, next) => {
+      const state = this.stateFor(ctx);
+      if (!state) return next();
+      await this.complete(ctx, state, () => ctx.reply(this.catalog(ctx).importConfig.cancelled));
     });
     composer.callbackQuery(/^imp:/, this.guard.adminOnly, (ctx) =>
       this.onCallback(ctx),
@@ -89,54 +103,52 @@ export class ImportConfigHandler implements TelegramHandler {
     // Document listener: NOT admin-gated, so non-admins sending unrelated
     // files aren't told "admin required". We only act if this user is mid-import.
     composer.on('message:document', async (ctx, next) => {
-      const userId = ctx.from?.id;
-      if (!userId || this.states.get(userId)?.kind !== 'awaitingFile') {
+      const state = this.stateFor(ctx);
+      if (state?.kind !== 'awaitingFile') {
         return next();
       }
-      await this.onDocument(ctx, userId);
+      await this.onDocument(ctx, state);
     });
   }
 
-  cancelPending(userId: number): void {
-    this.states.delete(userId);
+  async cancelExact(input: {
+    userId: number;
+    chatId: number;
+    receiptId: string;
+  }): Promise<'cancelled' | 'missing' | 'superseded'> {
+    const state = this.states.get(stateKey(input.userId, input.chatId));
+    if (!state) return 'missing';
+    if (state.receiptId !== input.receiptId) return 'superseded';
+    this.states.delete(stateKey(input.userId, input.chatId));
+    return 'cancelled';
   }
 
-  private returnKeyboard(
-    ctx: TelegramContext,
-    phase: ExternalWorkflowPhase,
-    keyboard?: InlineKeyboard,
-  ): InlineKeyboard {
-    const catalog = ctx.localeState?.catalog ?? en;
-    const input = { workflow: 'configImport' as const, phase };
-    return keyboard
-      ? appendReturnHomeButton(keyboard, catalog, input)
-      : returnHomeKeyboard(catalog, input);
-  }
-
-  async handleCommand(ctx: TelegramContext): Promise<void> {
-    const userId = ctx.from?.id;
-    if (!userId) return;
-    this.states.set(userId, { kind: 'awaitingFile' });
-    await ctx.reply(en.importConfig.prompt, {
-      reply_markup: this.returnKeyboard(ctx, 'cancelPending'),
+  async handleCommand(ctx: TelegramContext, launch?: WorkflowLaunch): Promise<void> {
+    const receipt = launch?.receipt ?? await this.workflows.begin(ctx, 'sensor-import', {
+      source: 'natural-parent',
+    });
+    if (!receipt) return;
+    const state = this.setState(receipt, { kind: 'awaitingFile' });
+    await ctx.reply(this.catalog(ctx).importConfig.prompt, {
+      reply_markup: this.keyboard(ctx, state),
     });
   }
 
-  private async onDocument(ctx: TelegramContext, userId: number): Promise<void> {
+  private async onDocument(ctx: TelegramContext, state: ImportState): Promise<void> {
     const doc = ctx.message?.document;
     if (!doc) return;
 
     const name = doc.file_name ?? '';
     if (!/\.ya?ml$/i.test(name)) {
-      await ctx.reply(en.importConfig.invalidFormat, {
-        reply_markup: this.returnKeyboard(ctx, 'cancelPending'),
+      await ctx.reply(this.catalog(ctx).importConfig.invalidFormat, {
+        reply_markup: this.keyboard(ctx, state),
       });
       return; // keep awaitingFile so the user can re-upload
     }
 
     if (typeof doc.file_size === 'number' && doc.file_size > MAX_FILE_BYTES) {
-      await ctx.reply(en.importConfig.tooLarge, {
-        reply_markup: this.returnKeyboard(ctx, 'cancelPending'),
+      await ctx.reply(this.catalog(ctx).importConfig.tooLarge, {
+        reply_markup: this.keyboard(ctx, state),
       });
       return;
     }
@@ -152,10 +164,7 @@ export class ImportConfigHandler implements TelegramHandler {
       text = await response.text();
     } catch (error) {
       this.logger.error('import_config download failed', error as Error);
-      this.states.delete(userId);
-      await ctx.reply(en.importConfig.failed('could not download file'), {
-        reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
-      });
+      await this.complete(ctx, state, () => ctx.reply(this.catalog(ctx).importConfig.failed('could not download file')));
       return;
     }
 
@@ -163,8 +172,8 @@ export class ImportConfigHandler implements TelegramHandler {
     try {
       parsed = this.codec.parse(text);
     } catch (error) {
-      await ctx.reply(en.importConfig.parseError((error as Error).message), {
-        reply_markup: this.returnKeyboard(ctx, 'cancelPending'),
+      await ctx.reply(this.catalog(ctx).importConfig.parseError((error as Error).message), {
+        reply_markup: this.keyboard(ctx, state),
       });
       return; // keep awaitingFile
     }
@@ -184,7 +193,7 @@ export class ImportConfigHandler implements TelegramHandler {
           : [catalog.importConfig.invalidLiveSources]),
       ];
       await ctx.reply(catalog.importConfig.validationFailed(errors), {
-        reply_markup: this.returnKeyboard(ctx, 'cancelPending'),
+        reply_markup: this.keyboard(ctx, state),
       });
       return; // keep awaitingFile
     }
@@ -198,10 +207,7 @@ export class ImportConfigHandler implements TelegramHandler {
       ]);
     } catch (error) {
       this.logger.error('import_config prepare failed', error as Error);
-      this.states.delete(userId);
-      await ctx.reply(catalog.importConfig.applyFailed, {
-        reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
-      });
+      await this.complete(ctx, state, () => ctx.reply(catalog.importConfig.applyFailed));
       return;
     }
 
@@ -212,70 +218,58 @@ export class ImportConfigHandler implements TelegramHandler {
       archived.length === 0 &&
       cameraPlan.configured.length === 0
     ) {
-      this.states.delete(userId);
-      await ctx.reply(catalog.importConfig.noChanges, {
-        reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
-      });
+      await this.complete(ctx, state, () => ctx.reply(catalog.importConfig.noChanges));
       return;
     }
 
-    this.states.set(userId, {
+    const confirmation = this.setState(state.receipt, {
       kind: 'awaitingConfirm',
       sensorPlan,
       cameraPlan,
     });
     const keyboard = new InlineKeyboard()
-      .text(en.importConfig.applyButton, 'imp:apply')
-      .text(en.importConfig.cancelButton, 'imp:cancel');
+      .text(catalog.importConfig.applyButton, importCallback(confirmation.receiptId, 'a'))
+      .text(catalog.importConfig.cancelButton, importCallback(confirmation.receiptId, 'c'));
     await ctx.reply(
       catalog.importConfig.summary({
         ...sensorPlan.summary,
         liveSources: [...cameraPlan.configured],
       }),
       {
-      reply_markup: this.returnKeyboard(ctx, 'cancelPending', keyboard),
+      reply_markup: this.keyboard(ctx, confirmation, keyboard),
       },
     );
   }
 
   private async onCallback(ctx: CallbackQueryContext<TelegramContext>): Promise<void> {
-    const userId = ctx.from?.id;
-    const data = ctx.callbackQuery.data;
-    const state = userId ? this.states.get(userId) : undefined;
-    const claimedState =
-      data === 'imp:apply' && state?.kind === 'awaitingConfirm'
-        ? state
-        : undefined;
-    if (userId && (claimedState || data === 'imp:cancel')) {
-      this.states.delete(userId);
-    }
-
+    const parsed = parseImportCallback(ctx.callbackQuery.data ?? '');
     await ctx.answerCallbackQuery().catch(() => undefined);
+    const state = this.stateFor(ctx);
+    if (!parsed || !state) return;
+    if (parsed.receiptId !== state.receiptId || state.kind !== 'awaitingConfirm') return;
     await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => undefined);
 
-    if (!userId) return;
-
-    if (data === 'imp:cancel') {
-      await ctx.reply(en.importConfig.cancelled, {
-        reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
-      });
+    if (parsed.action === 'c') {
+      await this.complete(ctx, state, () => ctx.reply(this.catalog(ctx).importConfig.cancelled));
       return;
     }
 
-    if (data === 'imp:apply') {
-      if (!claimedState) {
-        await ctx.reply(en.common.interrupted, {
-          reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
-        });
-        return;
-      }
+    if (parsed.action === 'a') {
+      const claimedState = state;
+      // Claim local state before any async work so a duplicate Apply callback
+      // cannot start a second import while authorization is in flight.
+      await this.cancelExact({
+        userId: claimedState.userId,
+        chatId: claimedState.chatId,
+        receiptId: claimedState.receiptId,
+      });
       const catalog = ctx.localeState?.catalog ?? en;
       let cameraApplied = false;
       let phase: 'camera' | 'sensor' = 'camera';
       let summary: ImportSummary | undefined;
       let replyText: string | undefined;
       try {
-        if (!(await this.isCurrentAdmin(userId))) {
+        if (!(await this.isCurrentAdmin(claimedState.userId))) {
           replyText = catalog.common.adminRequired;
         } else {
           if (claimedState.cameraPlan.configured.length > 0) {
@@ -283,7 +277,7 @@ export class ImportConfigHandler implements TelegramHandler {
             cameraApplied = true;
           }
 
-          if (!(await this.isCurrentAdmin(userId))) {
+          if (!(await this.isCurrentAdmin(claimedState.userId))) {
             replyText = cameraApplied
               ? catalog.importConfig.partialRoleChanged
               : catalog.common.adminRequired;
@@ -308,9 +302,7 @@ export class ImportConfigHandler implements TelegramHandler {
         });
       }
       replyText ??= catalog.importConfig.applyFailed;
-      await ctx.reply(replyText, {
-        reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
-      }).catch(() => {
+      await this.complete(ctx, claimedState, () => ctx.reply(replyText)).catch(() => {
         this.logger.warn('import_config result reply failed');
       });
     }
@@ -319,4 +311,71 @@ export class ImportConfigHandler implements TelegramHandler {
   private async isCurrentAdmin(telegramId: number): Promise<boolean> {
     return (await this.users.findByTelegramId(telegramId))?.role === 'admin';
   }
+
+  private setState(receipt: WorkflowReturnReceipt, step: ImportStep): ImportState {
+    const state: ImportState = {
+      ...step,
+      userId: receipt.userId,
+      chatId: receipt.chatId,
+      receiptId: receipt.id,
+      receipt,
+    };
+    this.states.set(stateKey(state.userId, state.chatId), state);
+    return state;
+  }
+
+  private stateFor(ctx: TelegramContext): ImportState | null {
+    const userId = ctx.from?.id;
+    if (typeof userId !== 'number' || !Number.isSafeInteger(userId) || ctx.chat?.type !== 'private') return null;
+    return this.states.get(stateKey(userId, ctx.chat.id)) ?? null;
+  }
+
+  private catalog(ctx: TelegramContext) {
+    return ctx.localeState?.catalog ?? en;
+  }
+
+  private keyboard(
+    ctx: TelegramContext,
+    state: ImportState,
+    keyboard = new InlineKeyboard(),
+  ): InlineKeyboard {
+    const catalog = this.catalog(ctx);
+    return keyboard.row()
+      .text(catalog.importConfig.cancelButton, importCallback(state.receiptId, 'c'))
+      .text(catalog.home.common.home, workflowReturnCallback(state.receiptId, 'home'));
+  }
+
+  private async complete(
+    ctx: TelegramContext,
+    state: ImportState,
+    deliver: () => Promise<unknown>,
+  ): Promise<void> {
+    if (this.navigation) {
+      await this.navigation.complete(ctx, { receipt: state.receipt }, {
+        effectStage: 'pending',
+        deliver: async () => { await deliver(); },
+        failureNotice: this.catalog(ctx).home.recovery.unavailable,
+      });
+      return;
+    }
+    await deliver();
+    await this.cancelExact({
+      userId: state.userId,
+      chatId: state.chatId,
+      receiptId: state.receiptId,
+    });
+  }
+}
+
+function stateKey(userId: number, chatId: number): string {
+  return `${userId}:${chatId}`;
+}
+
+function importCallback(receiptId: string, action: 'a' | 'c'): string {
+  return `imp:${receiptId}:${action}`;
+}
+
+function parseImportCallback(data: string): { receiptId: string; action: 'a' | 'c' } | null {
+  const match = IMPORT_CALLBACK.exec(data);
+  return match ? { receiptId: match[1], action: match[2] as 'a' | 'c' } : null;
 }

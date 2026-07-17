@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { Composer } from 'grammy';
 import { en } from '../../locales/en';
 import {
@@ -18,6 +18,11 @@ import { BotRunnerRegistry } from '../../network/application/bot-runner.registry
 import { RoleMiddleware } from './role.middleware';
 import { TelegramHandler } from './telegram-handler';
 import { TelegramContext } from './telegram-context';
+import {
+  WorkflowEntryCoordinator,
+  type WorkflowLaunch,
+} from './workflow-entry.coordinator';
+import { WorkflowNavigationHandler } from './workflow-navigation.handler';
 
 /**
  * `/health` — admin-only system snapshot (spec 08).
@@ -37,6 +42,8 @@ export class HealthHandler implements TelegramHandler {
     @Inject(SENSOR_HEALTH) private readonly sensorHealth: SensorHealthPort,
     private readonly botRunner: BotRunnerRegistry,
     private readonly guard: RoleMiddleware,
+    private readonly workflows: WorkflowEntryCoordinator,
+    @Optional() private readonly navigation?: WorkflowNavigationHandler,
   ) {}
 
   register(composer: Composer<TelegramContext>): void {
@@ -45,7 +52,12 @@ export class HealthHandler implements TelegramHandler {
     );
   }
 
-  async handleCommand(ctx: TelegramContext): Promise<void> {
+  async handleCommand(ctx: TelegramContext, launch?: WorkflowLaunch): Promise<void> {
+    const receipt = launch?.receipt ?? await this.workflows.begin(ctx, 'health', {
+      source: 'natural-parent',
+    });
+    if (!receipt) return;
+    const catalog = ctx.localeState?.catalog ?? en;
     try {
       const [snap, enabled] = await Promise.all([
         this.system.collect(),
@@ -62,7 +74,7 @@ export class HealthHandler implements TelegramHandler {
         ? Math.max(0, Math.round((Date.now() - lastUpdate.getTime()) / 1000))
         : null;
 
-      const body = en.health.body({
+      const body = catalog.health.body({
         diskUsedBytes: snap.diskUsedBytes,
         diskTotalBytes: snap.diskTotalBytes,
         cpuTempC: snap.cpuTempC,
@@ -75,13 +87,30 @@ export class HealthHandler implements TelegramHandler {
         sensorsTotal: enabled.length,
       });
 
-      await ctx.reply(`${en.health.header}\n\n${body}`);
+      await this.complete(ctx, receipt, () => ctx.reply(`${catalog.health.header}\n\n${body}`));
     } catch (err) {
       this.logger.error(
         `/health failed: ${(err as Error).message}`,
         (err as Error).stack,
       );
-      await ctx.reply(en.health.collectFailed);
+      await this.complete(ctx, receipt, () => ctx.reply(catalog.health.collectFailed));
     }
+  }
+
+  private async complete(
+    ctx: TelegramContext,
+    receipt: WorkflowLaunch['receipt'],
+    deliver: () => Promise<unknown>,
+  ): Promise<void> {
+    const catalog = ctx.localeState?.catalog ?? en;
+    if (this.navigation) {
+      await this.navigation.complete(ctx, { receipt }, {
+        effectStage: 'pending',
+        deliver: async () => { await deliver(); },
+        failureNotice: catalog.home.recovery.unavailable,
+      });
+      return;
+    }
+    await deliver();
   }
 }
