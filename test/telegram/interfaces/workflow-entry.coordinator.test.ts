@@ -667,7 +667,7 @@ describe('WorkflowEntryCoordinator', () => {
     expect(actions.finishWorkflowReturn).toHaveBeenCalledOnce();
   });
 
-  it('finishes a known direct result when both recovery stage writes fail', async () => {
+  it('restores Home once for a known direct result when both recovery stage writes fail', async () => {
     const pending = restartReceipt('pending');
     const actions = {
       findWorkflowReturn: vi.fn().mockResolvedValue(pending),
@@ -692,7 +692,8 @@ describe('WorkflowEntryCoordinator', () => {
     })).resolves.toBe('completed');
 
     expect(deliver).toHaveBeenCalledOnce();
-    expect(restore).not.toHaveBeenCalled();
+    expect(restore).toHaveBeenCalledOnce();
+    expect(restore).toHaveBeenCalledWith(expect.objectContaining({ id: pending.id }), undefined);
     expect(actions.finishWorkflowReturn).toHaveBeenCalledOnce();
   });
 

@@ -269,8 +269,10 @@ export class WorkflowEntryCoordinator {
     // not written. Record the next external effect before starting it, so a
     // later recovery retries restoration rather than the direct result.
     if (!await this.persistDeliveryStage(identity, receipt, 'restore-attempted')) {
-      // Do not turn a known direct result into a duplicate on the next boot
-      // merely because both optional recovery markers were unavailable.
+      // Both durable recovery markers are unavailable, but the direct result
+      // is known. Restore once in-process; a failed restoration remains
+      // resumable rather than terminalizing without the required Home.
+      if (!await this.restore(receipt, input, undefined)) return 'resumable';
       return this.finishHeadlessWorkflow(identity, receipt);
     }
     return this.restoreSilently(identity, receipt, input);
