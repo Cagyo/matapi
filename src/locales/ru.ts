@@ -474,6 +474,10 @@ const ruCatalog = {
     prompt: 'Выберите язык:',
     current: (language: string) => `Текущий язык: ${language}`,
     updated: (language: string) => `✅ Язык изменён: ${language}.`,
+    updateFailed: 'Не удалось изменить язык. Попробуйте ещё раз.',
+    retryLanguageChange: 'Повторить смену языка',
+    returnToMore: '« Ещё',
+    restoreMoreFailed: 'Язык изменён, но раздел «Ещё» не удалось открыть.',
     buttons: {
       en: 'Английский',
       ru: 'Русский',
@@ -917,6 +921,7 @@ const ruCatalog = {
     selectModify: '✏️ *Выберите датчик для изменения*\n\nВыберите активный датчик для редактирования:',
     selectRemove: '🗑️ *Выберите датчик для удаления*\n\nВыберите активный датчик для удаления:',
     noActiveSensors: 'ℹ️ Нет активных настроенных датчиков.',
+    cancelSensorSetup: 'Отменить настройку датчиков',
     step1: 'Шаг 1 из 5 — Какой тип датчика?',
     step2: (type: string) => `Шаг 2 из 5 (${type})\n\nИмя датчика?`,
     step3Digital: (name: string, usedPins?: string) =>

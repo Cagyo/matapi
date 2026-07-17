@@ -474,6 +474,10 @@ const ukCatalog = {
     prompt: 'Виберіть мову:',
     current: (language: string) => `Поточна мова: ${language}`,
     updated: (language: string) => `✅ Мову змінено: ${language}.`,
+    updateFailed: 'Не вдалося змінити мову. Спробуйте ще раз.',
+    retryLanguageChange: 'Повторити зміну мови',
+    returnToMore: '« Більше',
+    restoreMoreFailed: 'Мову змінено, але розділ «Більше» не вдалося відкрити.',
     buttons: {
       en: 'Англійська',
       ru: 'Російська',
@@ -913,6 +917,7 @@ const ukCatalog = {
     selectModify: '✏️ *Виберіть датчик для зміни*\n\nВиберіть активний датчик, щоб змінити його налаштування:',
     selectRemove: '🗑️ *Виберіть датчик для видалення*\n\nВиберіть активний датчик, який слід видалити:',
     noActiveSensors: 'ℹ️ Активних датчиків не налаштовано.',
+    cancelSensorSetup: 'Скасувати налаштування датчиків',
     step1: 'Крок 1 із 5 — який тип датчика?',
     step2: (type: string) => `Крок 2 із 5 (${type})\n\nНазва датчика?`,
     step3Digital: (name: string, usedPins?: string) =>

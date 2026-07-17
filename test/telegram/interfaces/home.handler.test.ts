@@ -103,6 +103,8 @@ function setup(overrides: {
   thresholds?: { execute: ReturnType<typeof vi.fn> };
   actions?: { finishExternal: ReturnType<typeof vi.fn> };
   workflows?: WorkflowEntryCoordinator;
+  settings?: { handleCommand: ReturnType<typeof vi.fn> };
+  config?: { handleSubcommand: ReturnType<typeof vi.fn> };
 } = {}) {
   const guard = { registered: vi.fn() } as unknown as RoleMiddleware;
   const open = {
@@ -144,9 +146,9 @@ function setup(overrides: {
     guard, open, validate, render, refresh, camera, navigation,
     undefined, // logs
     undefined, // csv
-    undefined, // settings
+    overrides.settings, // settings
     undefined, // help
-    undefined, // config
+    overrides.config, // config
     undefined, // drive
     undefined, // drive auth
     undefined, // health
@@ -414,6 +416,48 @@ describe('HomeHandler', () => {
       sessionToken: identity.token,
     });
     expect(camera.handleDashboard).toHaveBeenCalledWith(ctx, { receipt: workflowReceipt });
+  });
+
+  it('starts a Home-launched sensor editor once with its captured Sensor setup origin', async () => {
+    const config = { handleSubcommand: vi.fn().mockResolvedValue(undefined) };
+    const { callbacks, validate, navigation, workflowEntry } = setup({ config });
+    const ctx = context(encodeHomeCallback(identity.token, 1, { kind: 'config-modify' }));
+    (validate.execute as ReturnType<typeof vi.fn>).mockResolvedValue({
+      kind: 'accepted', active: identity, view: { kind: 'admin-sensor-setup' },
+    });
+    (navigation.route as ReturnType<typeof vi.fn>).mockReturnValue({
+      kind: 'external', destination: 'config-modify',
+    });
+
+    await callbacks[0].fn(ctx);
+
+    expect(workflowEntry.begin).toHaveBeenCalledWith(ctx, 'sensor-modify', {
+      source: 'captured',
+      view: { kind: 'admin-sensor-setup' },
+      sessionToken: identity.token,
+    });
+    expect(config.handleSubcommand).toHaveBeenCalledWith(ctx, 'modify', { receipt: workflowReceipt });
+  });
+
+  it('starts a Home-launched language selector once with its captured More origin', async () => {
+    const settings = { handleCommand: vi.fn().mockResolvedValue(undefined) };
+    const { callbacks, validate, navigation, workflowEntry } = setup({ settings });
+    const ctx = context(encodeHomeCallback(identity.token, 1, { kind: 'settings' }));
+    (validate.execute as ReturnType<typeof vi.fn>).mockResolvedValue({
+      kind: 'accepted', active: identity, view: { kind: 'more' },
+    });
+    (navigation.route as ReturnType<typeof vi.fn>).mockReturnValue({
+      kind: 'external', destination: 'settings',
+    });
+
+    await callbacks[0].fn(ctx);
+
+    expect(workflowEntry.begin).toHaveBeenCalledWith(ctx, 'language', {
+      source: 'captured',
+      view: { kind: 'more' },
+      sessionToken: identity.token,
+    });
+    expect(settings.handleCommand).toHaveBeenCalledWith(ctx, { receipt: workflowReceipt });
   });
 
   it('opens a validated Home destination freshly at the bottom after workflow leave succeeds', async () => {

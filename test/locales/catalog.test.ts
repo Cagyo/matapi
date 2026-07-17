@@ -44,6 +44,16 @@ describe('catalogFor', () => {
     }
   });
 
+  it('provides contextual sensor cancellation and language-return copy in every locale', () => {
+    for (const catalog of [catalogs.en, catalogs.ru, catalogs.uk]) {
+      expect(catalog.config.cancelSensorSetup).toBeTruthy();
+      expect(catalog.language.updateFailed).toBeTruthy();
+      expect(catalog.language.retryLanguageChange).toBeTruthy();
+      expect(catalog.language.returnToMore).toBeTruthy();
+      expect(catalog.language.restoreMoreFailed).toBeTruthy();
+    }
+  });
+
   it('provides the complete Home rendering catalog with equal shapes in every locale', () => {
     const [english, russian, ukrainian] = [catalogs.en, catalogs.ru, catalogs.uk];
 

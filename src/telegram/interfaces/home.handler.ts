@@ -284,12 +284,28 @@ export class HomeHandler implements TelegramHandler {
       }
       case 'history-logs': return this.logs ? this.logs.handleEmpty(ctx) : this.recover(ctx, 'unavailable');
       case 'history-csv': return this.csv ? this.csv.handleEmpty(ctx, 'menu') : this.recover(ctx, 'unavailable');
-      case 'settings': return this.settings ? this.settings.handleCommand(ctx) : this.recover(ctx, 'unavailable');
+      case 'settings': {
+        if (!this.settings) return this.recover(ctx, 'unavailable');
+        const launch = await this.beginWorkflow(ctx, 'language', active, view);
+        return launch ? this.settings.handleCommand(ctx, launch) : this.recover(ctx, 'unavailable');
+      }
       case 'help':
         if (!this.help) return this.recover(ctx, 'unavailable');
         await ctx.reply(ctx.localeState!.user.role === 'admin' ? ctx.localeState!.catalog.help.admin : ctx.localeState!.catalog.help.user);
         return;
-      case 'config-add': case 'config-modify': case 'config-remove': return this.config ? this.config.handleSubcommand(ctx, destination.slice('config-'.length)) : this.recover(ctx, 'unavailable');
+      case 'config-add': case 'config-modify': case 'config-remove': {
+        if (!this.config) return this.recover(ctx, 'unavailable');
+        const subcommand = destination.slice('config-'.length);
+        const workflow = subcommand === 'add'
+          ? 'sensor-add'
+          : subcommand === 'modify'
+            ? 'sensor-modify'
+            : 'sensor-remove';
+        const launch = await this.beginWorkflow(ctx, workflow, active, view);
+        return launch
+          ? this.config.handleSubcommand(ctx, subcommand, launch)
+          : this.recover(ctx, 'unavailable');
+      }
       case 'config-import': return this.importConfig ? this.importConfig.handleCommand(ctx) : this.recover(ctx, 'unavailable');
       case 'config-export': return this.exportConfig ? this.exportConfig.handleCommand(ctx) : this.recover(ctx, 'unavailable');
       case 'drive-status': return this.drive ? this.drive.handleStatus(ctx, { includeCleanupAction: false }) : this.recover(ctx, 'unavailable');
@@ -396,8 +412,17 @@ export class HomeHandler implements TelegramHandler {
     active: Parameters<RenderHomeUseCase['execute']>[0]['active'],
     view: HomeView,
   ): Promise<WorkflowLaunch | null> {
+    return this.beginWorkflow(ctx, 'camera', active, view);
+  }
+
+  private async beginWorkflow(
+    ctx: TelegramContext,
+    workflow: WorkflowLaunch['receipt']['payload']['workflow'],
+    active: Parameters<RenderHomeUseCase['execute']>[0]['active'],
+    view: HomeView,
+  ): Promise<WorkflowLaunch | null> {
     if (!this.workflows) return null;
-    const receipt = await this.workflows.begin(ctx, 'camera', {
+    const receipt = await this.workflows.begin(ctx, workflow, {
       source: 'captured',
       view,
       sessionToken: active.token,

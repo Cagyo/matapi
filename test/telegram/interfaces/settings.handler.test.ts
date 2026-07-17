@@ -5,6 +5,24 @@ import { BotCommandsMenuService } from '../../../src/telegram/application/bot-co
 import { UserRepositoryPort } from '../../../src/telegram/domain/ports/user-repository.port';
 import { RoleMiddleware } from '../../../src/telegram/interfaces/role.middleware';
 import { SettingsHandler } from '../../../src/telegram/interfaces/settings.handler';
+import { WorkflowDraftRegistry } from '../../../src/telegram/interfaces/workflow-draft.registry';
+import type { WorkflowReturnReceipt } from '../../../src/telegram/domain/workflow-return';
+
+const languageReceipt = {
+  id: 'AbCdEf0123_-xyZ9',
+  userId: 100,
+  chatId: 100,
+  kind: 'workflow-return',
+  sessionToken: null,
+  status: 'pending',
+  expiresAt: new Date('2030-01-02T00:00:00.000Z'),
+  payload: {
+    workflow: 'language',
+    phase: 'cancellable',
+    originSource: 'natural-parent',
+    origin: { kind: 'more' },
+  },
+} satisfies WorkflowReturnReceipt;
 
 function callbackData(options: unknown): string[] {
   if (!options || typeof options !== 'object') return [];
@@ -57,7 +75,19 @@ function createTestSetup(metaValue: string | null = null) {
   } as unknown as UserRepositoryPort;
   const menus = { updateUserMenu: vi.fn().mockResolvedValue(undefined) } as unknown as BotCommandsMenuService;
   const guard = { registered: vi.fn(), adminOnly: vi.fn() } as unknown as RoleMiddleware;
-  const handler = new SettingsHandler(users, menus, guard);
+  const workflows = { begin: vi.fn().mockResolvedValue(languageReceipt) };
+  const drafts = new WorkflowDraftRegistry();
+  const navigation = {
+    complete: vi.fn(async (
+      _ctx: unknown,
+      launch: { receipt: WorkflowReturnReceipt },
+      presentation: { effectStage: 'pending' | 'already-delivered'; deliver(): Promise<void> },
+    ) => {
+      if (presentation.effectStage === 'pending') await presentation.deliver();
+      await drafts.cancelExact(launch.receipt);
+    }),
+  };
+  const handler = new SettingsHandler(users, menus, guard, workflows as never, drafts, navigation as never);
 
   const commandCallbacks: Record<string, (...args: any[]) => any> = {};
   const callbackQueryCallbacks: { regex: RegExp; fn: (...args: any[]) => any }[] = [];
@@ -67,12 +97,12 @@ function createTestSetup(metaValue: string | null = null) {
   } as any;
   handler.register(composer);
 
-  return { meta, users, menus, guard, composer, commandCallbacks, callbackQueryCallbacks };
+  return { meta, users, menus, guard, composer, commandCallbacks, callbackQueryCallbacks, workflows, drafts, navigation };
 }
 
 describe('SettingsHandler', () => {
-  it('lets a registered non-admin change locale before queuing a refreshed menu', async () => {
-    const { commandCallbacks, callbackQueryCallbacks, users, menus, composer } = createTestSetup('75');
+  it('binds direct language selection to More and restores it in the selected locale', async () => {
+    const { commandCallbacks, callbackQueryCallbacks, users, menus, composer, workflows, navigation } = createTestSetup('75');
     const reply = vi.fn().mockResolvedValue(true);
     const ctx = { from: { id: 100 }, localeState: localeState('user'), reply } as any;
 
@@ -83,54 +113,68 @@ describe('SettingsHandler', () => {
       expect.objectContaining({ reply_markup: expect.anything() }),
     );
     expect(callbackData(reply.mock.calls[0][1])).toEqual([
-      'settings:locale:en',
-      'settings:locale:ru',
-      'settings:locale:uk',
-      'rh:s:c',
+      'settings:locale:AbCdEf0123_-xyZ9:en',
+      'settings:locale:AbCdEf0123_-xyZ9:ru',
+      'settings:locale:AbCdEf0123_-xyZ9:uk',
+      'wr:AbCdEf0123_-xyZ9:o',
+      'wr:AbCdEf0123_-xyZ9:h',
     ]);
+    expect(workflows.begin).toHaveBeenCalledWith(ctx, 'language', { source: 'natural-parent' });
 
-    const localeCallback = callbackQueryCallbacks.find(({ regex }) => regex.test('settings:locale:uk'))!.fn;
+    const localeCallback = callbackQueryCallbacks.find(({ regex }) => regex.test('settings:locale:AbCdEf0123_-xyZ9:uk'))!.fn;
     const answerCallbackQuery = vi.fn().mockResolvedValue(true);
-    const editMessageText = vi.fn().mockResolvedValue(true);
-    await localeCallback({
+    const localeContext = {
       from: { id: 100 },
-      match: ['settings:locale:uk', 'uk'],
       localeState: localeState('user'),
       answerCallbackQuery,
-      editMessageText,
-      callbackQuery: { message: { message_id: 123 } },
-    });
+      reply,
+      callbackQuery: { data: 'settings:locale:AbCdEf0123_-xyZ9:uk', message: { message_id: 123 } },
+    } as any;
+    await localeCallback(localeContext);
 
     expect(users.setLocale).toHaveBeenCalledWith(100, 'uk');
     expect(answerCallbackQuery).toHaveBeenCalledWith(expect.stringContaining('Мову змінено'));
-    expect(editMessageText).toHaveBeenCalledWith(
-      expect.stringContaining('Виберіть мову'),
-      expect.objectContaining({ reply_markup: expect.anything() }),
+    expect(reply).toHaveBeenCalledWith(
+      expect.stringContaining('Мову змінено'),
     );
-    expect(callbackData(editMessageText.mock.calls[0][1])).toEqual([
-      'settings:locale:en',
-      'settings:locale:ru',
-      'settings:locale:uk',
-      'rh:s:c',
-    ]);
-    expect(keyboardText(editMessageText.mock.calls[0][1])).toContain('🏠 Дім');
+    expect(navigation.complete).toHaveBeenCalledWith(
+      expect.anything(),
+      { receipt: languageReceipt },
+      expect.objectContaining({ effectStage: 'pending' }),
+    );
+    expect(localeContext.localeState).toEqual(expect.objectContaining({
+      locale: 'uk',
+      catalog: catalogFor('uk'),
+    }));
     expect(menus.updateUserMenu).toHaveBeenCalledWith(100);
   });
 
-  it('rejects invalid locale callback data without persisting', async () => {
-    const { callbackQueryCallbacks, users } = createTestSetup();
-    const localeCallback = callbackQueryCallbacks.find(({ regex }) => regex.test('settings:locale:uk'))!.fn;
+  it('rejects an invalid or stale locale callback before persisting', async () => {
+    const { callbackQueryCallbacks, commandCallbacks, users } = createTestSetup();
+    const localeCallback = callbackQueryCallbacks.find(({ regex }) => regex.test('settings:locale:AbCdEf0123_-xyZ9:uk'))!.fn;
     const answerCallbackQuery = vi.fn().mockResolvedValue(true);
+    await commandCallbacks.settings({
+      from: { id: 100 },
+      localeState: localeState('user'),
+      reply: vi.fn().mockResolvedValue(true),
+    });
 
     await localeCallback({
       from: { id: 100 },
-      match: ['settings:locale:de', 'de'],
       localeState: localeState('user'),
+      callbackQuery: { data: 'settings:locale:AbCdEf0123_-xyZ9:de' },
+      answerCallbackQuery,
+    });
+
+    await localeCallback({
+      from: { id: 100 },
+      localeState: localeState('user'),
+      callbackQuery: { data: 'settings:locale:ZyXwVu9876_-tsR5:uk' },
       answerCallbackQuery,
     });
 
     expect(users.setLocale).not.toHaveBeenCalled();
-    expect(answerCallbackQuery).toHaveBeenCalledWith(expect.objectContaining({ show_alert: true }));
+    expect(answerCallbackQuery).toHaveBeenCalledTimes(2);
   });
 
   it.each(['user', 'admin'] as const)('renders only personal locale settings for %s', async (role) => {
@@ -144,10 +188,34 @@ describe('SettingsHandler', () => {
     const callbacks = callbackData(reply.mock.calls[0][1]);
     expect(text).not.toContain('System settings');
     expect(callbacks).toEqual([
-      'settings:locale:en',
-      'settings:locale:ru',
-      'settings:locale:uk',
-      'rh:s:c',
+      'settings:locale:AbCdEf0123_-xyZ9:en',
+      'settings:locale:AbCdEf0123_-xyZ9:ru',
+      'settings:locale:AbCdEf0123_-xyZ9:uk',
+      'wr:AbCdEf0123_-xyZ9:o',
+      'wr:AbCdEf0123_-xyZ9:h',
     ]);
+  });
+
+  it('retains a receipt-bound retry when language persistence fails', async () => {
+    const { commandCallbacks, callbackQueryCallbacks, users } = createTestSetup();
+    const reply = vi.fn().mockResolvedValue(true);
+    await commandCallbacks.settings({ from: { id: 100 }, localeState: localeState('user'), reply });
+    (users.setLocale as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('disk unavailable'));
+    const callback = callbackQueryCallbacks[0].fn;
+
+    await callback({
+      from: { id: 100 },
+      localeState: localeState('user'),
+      callbackQuery: { data: 'settings:locale:AbCdEf0123_-xyZ9:uk' },
+      answerCallbackQuery: vi.fn().mockResolvedValue(true),
+      reply,
+    });
+
+    expect(reply).toHaveBeenCalledWith(
+      catalogFor('en').language.updateFailed,
+      expect.objectContaining({ reply_markup: expect.anything() }),
+    );
+    expect(callbackData(reply.mock.calls[1][1])).toContain('settings:locale:AbCdEf0123_-xyZ9:uk');
+    expect(keyboardText(reply.mock.calls[1][1])).toContain(catalogFor('en').language.retryLanguageChange);
   });
 });

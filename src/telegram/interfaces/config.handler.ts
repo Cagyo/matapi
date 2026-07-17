@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import {
   CallbackQueryContext,
   CommandContext,
@@ -23,15 +23,20 @@ import {
   SENSOR_QUERY,
   SensorQueryPort,
 } from '../../sensors/domain/ports/sensor-query.port';
-import { Inject } from '@nestjs/common';
 import { RoleMiddleware } from './role.middleware';
-import {
-  appendReturnHomeButton,
-  returnHomeKeyboard,
-  type ExternalWorkflowPhase,
-} from './return-home';
+import type { WorkflowReturnReceipt } from '../domain/workflow-return';
+import { workflowReturnCallback } from '../domain/workflow-return';
 import { TelegramHandler } from './telegram-handler';
 import { TelegramContext } from './telegram-context';
+import {
+  WorkflowEntryCoordinator,
+  type WorkflowLaunch,
+} from './workflow-entry.coordinator';
+import {
+  WorkflowDraftRegistry,
+  type WorkflowDraftCanceller,
+} from './workflow-draft.registry';
+import { WorkflowNavigationHandler } from './workflow-navigation.handler';
 
 type AddType = 'digital' | 'uart';
 type Pull = 'up' | 'down' | 'none';
@@ -72,6 +77,17 @@ type ConfigState =
   | { kind: 'selectModify' }
   | { kind: 'selectRemove' };
 
+type WorkflowBoundState<T> = T & {
+  userId: number;
+  chatId: number;
+  receiptId: string;
+  receipt: WorkflowReturnReceipt;
+};
+
+type BoundConfigState = WorkflowBoundState<ConfigState>;
+
+type ConfigSubcommand = 'add' | 'modify' | 'remove';
+
 interface DigitalDefaults {
   debounceMs: number;
   severity: SensorSeverity;
@@ -96,9 +112,9 @@ interface UartDefaults {
  * restart (spec 06 § Interrupted Conversations).
  */
 @Injectable()
-export class ConfigHandler implements TelegramHandler {
+export class ConfigHandler implements TelegramHandler, WorkflowDraftCanceller {
   private readonly logger = new Logger(ConfigHandler.name);
-  private readonly states = new Map<number, ConfigState>();
+  private readonly states = new Map<string, BoundConfigState>();
   private readonly digitalDefaults: DigitalDefaults;
   private readonly uartDefaults: UartDefaults;
 
@@ -108,6 +124,9 @@ export class ConfigHandler implements TelegramHandler {
     private readonly modifySensor: ModifySensorUseCase,
     private readonly removeSensor: RemoveSensorUseCase,
     private readonly guard: RoleMiddleware,
+    private readonly workflows: WorkflowEntryCoordinator,
+    private readonly drafts: WorkflowDraftRegistry,
+    @Optional() private readonly navigation?: WorkflowNavigationHandler,
   ) {
     const defaults = loadDefaults().sensor_defaults;
     this.digitalDefaults = {
@@ -124,16 +143,20 @@ export class ConfigHandler implements TelegramHandler {
       readIntervalMs: numberOr(defaults?.uart?.read_interval_ms, 5_000),
       flushIntervalMs: numberOr(defaults?.uart?.flush_interval_ms, 60_000),
     };
+    this.drafts.register('sensor-add', this);
+    this.drafts.register('sensor-modify', this);
+    this.drafts.register('sensor-remove', this);
   }
 
   register(composer: Composer<TelegramContext>): void {
     composer.command('config', this.guard.adminOnly, (ctx) => this.onCommand(ctx));
     composer.command('cancel', this.guard.adminOnly, async (ctx, next) => {
-      const userId = ctx.from?.id;
-      if (userId && this.states.has(userId)) {
-        this.states.delete(userId);
-        await ctx.reply(en.config.cancelled, {
-          reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
+      const state = this.stateFor(ctx);
+      if (state) {
+        await this.complete(ctx, state, {
+          effectStage: 'already-delivered',
+          deliver: async () => undefined,
+          failureNotice: this.catalog(ctx).home.recovery.unavailable,
         });
         return;
       }
@@ -144,8 +167,7 @@ export class ConfigHandler implements TelegramHandler {
     );
     // Text fallback — only fires if this user is mid-flow.
     composer.on('message:text', this.guard.adminOnly, async (ctx, next) => {
-      const userId = ctx.from?.id;
-      if (!userId || !this.states.has(userId)) return next();
+      if (!this.stateFor(ctx)) return next();
       // Ignore commands so /cancel etc. don't pollute text inputs.
       if (ctx.message?.text?.startsWith('/')) return next();
       try {
@@ -156,113 +178,77 @@ export class ConfigHandler implements TelegramHandler {
     });
   }
 
-  cancelPending(userId: number): void {
-    this.states.delete(userId);
+  async cancelExact(input: {
+    userId: number;
+    chatId: number;
+    receiptId: string;
+  }): Promise<'cancelled' | 'missing' | 'superseded'> {
+    const key = stateKey(input.userId, input.chatId);
+    const state = this.states.get(key);
+    if (!state) return 'missing';
+    if (state.receiptId !== input.receiptId) return 'superseded';
+    this.states.delete(key);
+    return 'cancelled';
   }
 
-  private returnKeyboard(
+  private workflowKeyboard(
     ctx: TelegramContext,
-    phase: ExternalWorkflowPhase,
-    keyboard?: InlineKeyboard,
+    state: BoundConfigState,
+    keyboard = new InlineKeyboard(),
   ): InlineKeyboard {
-    const catalog = ctx.localeState?.catalog ?? en;
-    const input = { workflow: 'config' as const, phase };
-    return keyboard
-      ? appendReturnHomeButton(keyboard, catalog, input)
-      : returnHomeKeyboard(catalog, input);
-  }
-
-  private returnPhase(ctx: TelegramContext): ExternalWorkflowPhase {
-    return ctx.from?.id !== undefined && this.states.has(ctx.from.id)
-      ? 'cancelPending'
-      : 'alreadyTerminal';
+    const catalog = this.catalog(ctx);
+    const bound = bindConfigKeyboard(keyboard, state.receiptId);
+    return bound.row()
+      .text(catalog.config.cancelSensorSetup, workflowReturnCallback(state.receiptId, 'origin'))
+      .text(catalog.home.common.home, workflowReturnCallback(state.receiptId, 'home'));
   }
 
   // ───────── entry point ─────────
 
-  async handleSubcommand(ctx: TelegramContext, sub: string): Promise<void> {
-    const userId = ctx.from?.id;
-    if (!userId) return;
-    if (sub === 'add') {
-      this.states.set(userId, { kind: 'addType' });
-      await ctx.reply(en.config.step1, {
-        reply_markup: this.returnKeyboard(ctx, 'cancelPending', typeKeyboard()),
-      });
-      return;
-    }
-    if (sub === 'modify') {
-      const sensors = await this.sensors.listEnabled();
-      if (sensors.length === 0) {
-        await ctx.reply(en.config.noActiveSensors, {
-          reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
-        });
-        return;
-      }
-      this.states.set(userId, { kind: 'selectModify' });
-      const kb = new InlineKeyboard();
-      for (const s of sensors) {
-        kb.text(s.name, `cfg:mod:${s.name}`).row();
-      }
-      kb.text(en.common.cancelButton, 'cfg:cancel');
-      await ctx.reply(en.config.selectModify, {
-        reply_markup: this.returnKeyboard(ctx, 'cancelPending', kb),
-        parse_mode: 'Markdown',
-      });
-      return;
-    }
-    if (sub === 'remove') {
-      const sensors = await this.sensors.listEnabled();
-      if (sensors.length === 0) {
-        await ctx.reply(en.config.noActiveSensors, {
-          reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
-        });
-        return;
-      }
-      this.states.set(userId, { kind: 'selectRemove' });
-      const kb = new InlineKeyboard();
-      for (const s of sensors) {
-        kb.text(s.name, `cfg:rem:${s.name}`).row();
-      }
-      kb.text(en.common.cancelButton, 'cfg:cancel');
-      await ctx.reply(en.config.selectRemove, {
-        reply_markup: this.returnKeyboard(ctx, 'cancelPending', kb),
-        parse_mode: 'Markdown',
-      });
-      return;
-    }
+  async handleSubcommand(
+    ctx: TelegramContext,
+    sub: string,
+    launch?: WorkflowLaunch,
+  ): Promise<void> {
+    if (!isConfigSubcommand(sub)) return;
+    const receipt = launch?.receipt ?? await this.workflows.begin(ctx, workflowFor(sub), {
+      source: 'natural-parent',
+    });
+    if (!receipt) return;
+    await this.presentSubcommand(ctx, sub, receipt);
   }
 
   private async onCommand(ctx: CommandContext<TelegramContext>): Promise<void> {
-    const userId = ctx.from?.id;
-    if (!userId) return;
     const raw = (ctx.match ?? '').toString().trim();
     const [sub, ...rest] = raw.split(/\s+/);
     const arg = rest.join(' ').trim();
 
-    if (sub === 'add') {
-      this.states.set(userId, { kind: 'addType' });
-      await ctx.reply(en.config.step1, {
-        reply_markup: this.returnKeyboard(ctx, 'cancelPending', typeKeyboard()),
+    if (!isConfigSubcommand(sub)) {
+      await ctx.reply(en.config.missingArg('<add|modify|remove>'));
+      return;
+    }
+    const receipt = await this.workflows.begin(ctx, workflowFor(sub), {
+      source: 'natural-parent',
+    });
+    if (!receipt) return;
+    if (sub === 'add' || !arg) {
+      await this.presentSubcommand(ctx, sub, receipt);
+      return;
+    }
+    const sensor = await this.sensors.findByName(arg);
+    if (sensor?.kind !== 'active') {
+      const state = this.setInitialState(receipt, { kind: sub === 'modify' ? 'selectModify' : 'selectRemove' });
+      await this.complete(ctx, state, {
+        effectStage: 'pending',
+        deliver: () => this.reply(ctx, en.config.notFound(arg)),
+        failureNotice: this.catalog(ctx).home.recovery.unavailable,
       });
       return;
     }
+    const state = this.setInitialState(receipt, sub === 'modify'
+      ? { kind: 'modifyMenu', sensorId: sensor.sensor.id, currentName: sensor.sensor.name }
+      : { kind: 'removeConfirm', sensorName: sensor.sensor.name });
     if (sub === 'modify') {
-      if (!arg) {
-        await this.handleSubcommand(ctx, 'modify');
-        return;
-      }
-      const sensor = await this.sensors.findByName(arg);
-      if (sensor?.kind !== 'active') {
-        await ctx.reply(en.config.notFound(arg), {
-          reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
-        });
-        return;
-      }
-      this.states.set(userId, {
-        kind: 'modifyMenu',
-        sensorId: sensor.sensor.id,
-        currentName: sensor.sensor.name,
-      });
       await ctx.reply(
         en.config.modifyHeader({
           name: sensor.sensor.name,
@@ -271,51 +257,60 @@ export class ConfigHandler implements TelegramHandler {
           debounceMs: sensor.sensor.debounceMs,
           severity: sensor.sensor.severity,
         }),
-        { reply_markup: this.returnKeyboard(ctx, 'cancelPending', modifyMenu(sensor.sensor.type)) },
+        { reply_markup: this.workflowKeyboard(ctx, state, modifyMenu(sensor.sensor.type)) },
       );
       return;
     }
-    if (sub === 'remove') {
-      if (!arg) {
-        await this.handleSubcommand(ctx, 'remove');
-        return;
-      }
-      const sensor = await this.sensors.findByName(arg);
-      if (sensor?.kind !== 'active') {
-        await ctx.reply(en.config.notFound(arg), {
-          reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
-        });
-        return;
-      }
-      this.states.set(userId, { kind: 'removeConfirm', sensorName: sensor.sensor.name });
-      await ctx.reply(en.config.removeConfirm(sensor.sensor.name), {
-        reply_markup: this.returnKeyboard(ctx, 'cancelPending', confirmKeyboard()),
+    await ctx.reply(en.config.removeConfirm(sensor.sensor.name), {
+      reply_markup: this.workflowKeyboard(ctx, state, confirmKeyboard()),
+    });
+  }
+
+  private async presentSubcommand(
+    ctx: TelegramContext,
+    sub: ConfigSubcommand,
+    receipt: WorkflowReturnReceipt,
+  ): Promise<void> {
+    if (sub === 'add') {
+      const state = this.setInitialState(receipt, { kind: 'addType' });
+      await ctx.reply(en.config.step1, {
+        reply_markup: this.workflowKeyboard(ctx, state, typeKeyboard()),
       });
       return;
     }
-    await ctx.reply(en.config.missingArg('<add|modify|remove>'), {
-      reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
+    const sensors = await this.sensors.listEnabled();
+    const state = this.setInitialState(receipt, {
+      kind: sub === 'modify' ? 'selectModify' : 'selectRemove',
+    });
+    if (sensors.length === 0) {
+      await this.complete(ctx, state, {
+        effectStage: 'pending',
+        deliver: () => this.reply(ctx, en.config.noActiveSensors),
+        failureNotice: this.catalog(ctx).home.recovery.unavailable,
+      });
+      return;
+    }
+    const keyboard = new InlineKeyboard();
+    for (const sensor of sensors) {
+      keyboard.text(sensor.name, `cfg:${sub === 'modify' ? 'mod' : 'rem'}:${sensor.name}`).row();
+    }
+    await ctx.reply(sub === 'modify' ? en.config.selectModify : en.config.selectRemove, {
+      reply_markup: this.workflowKeyboard(ctx, state, keyboard),
+      parse_mode: 'Markdown',
     });
   }
 
   // ───────── callback queries ─────────
 
   private async onCallback(ctx: CallbackQueryContext<TelegramContext>): Promise<void> {
-    const userId = ctx.from?.id;
-    if (!userId) return;
-    const data = ctx.callbackQuery.data ?? '';
-    const state = this.states.get(userId);
-    // Always ack so the spinner stops, even if we ignore.
+    const parsed = parseConfigCallback(ctx.callbackQuery.data ?? '');
     await ctx.answerCallbackQuery().catch(() => undefined);
+    const state = this.stateFor(ctx);
+    if (parsed?.receiptId !== state?.receiptId) return;
+    if (!parsed || !state) return;
     await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => undefined);
-    if (!state) {
-      await ctx.reply(en.common.interrupted, {
-        reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
-      });
-      return;
-    }
     try {
-      await this.routeCallback(ctx, userId, state, data);
+      await this.routeCallback(ctx, state, parsed.action);
     } catch (err) {
       await this.replyError(ctx, err);
     }
@@ -323,32 +318,23 @@ export class ConfigHandler implements TelegramHandler {
 
   private async routeCallback(
     ctx: TelegramContext,
-    userId: number,
-    state: ConfigState,
-    data: string,
+    state: BoundConfigState,
+    action: string,
   ): Promise<void> {
-    if (data === 'cfg:cancel') {
-      this.states.delete(userId);
-      await ctx.reply(en.config.cancelled, {
-        reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
-      });
+    if (action.startsWith('back:')) {
+      await this.handleBack(ctx, state, action.slice('back:'.length));
       return;
     }
-    if (data.startsWith('cfg:back:')) {
-      const backTarget = data.slice('cfg:back:'.length);
-      await this.handleBack(ctx, userId, state, backTarget);
-      return;
-    }
-    if (data.startsWith('cfg:mod:')) {
-      const name = data.slice('cfg:mod:'.length).trim();
+    if (action.startsWith('mod:')) {
+      const name = action.slice('mod:'.length).trim();
       const sensor = await this.sensors.findByName(name);
       if (sensor?.kind !== 'active') {
         await ctx.reply(en.config.notFound(name), {
-          reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
+          reply_markup: this.workflowKeyboard(ctx, state),
         });
         return;
       }
-      this.states.set(userId, {
+      const next = this.setState(state, {
         kind: 'modifyMenu',
         sensorId: sensor.sensor.id,
         currentName: sensor.sensor.name,
@@ -361,55 +347,52 @@ export class ConfigHandler implements TelegramHandler {
           debounceMs: sensor.sensor.debounceMs,
           severity: sensor.sensor.severity,
         }),
-        { reply_markup: this.returnKeyboard(ctx, 'cancelPending', modifyMenu(sensor.sensor.type)) },
+        { reply_markup: this.workflowKeyboard(ctx, next, modifyMenu(sensor.sensor.type)) },
       );
       return;
     }
-    if (data.startsWith('cfg:rem:')) {
-      const name = data.slice('cfg:rem:'.length).trim();
+    if (action.startsWith('rem:')) {
+      const name = action.slice('rem:'.length).trim();
       const sensor = await this.sensors.findByName(name);
       if (sensor?.kind !== 'active') {
         await ctx.reply(en.config.notFound(name), {
-          reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)),
+          reply_markup: this.workflowKeyboard(ctx, state),
         });
         return;
       }
-      this.states.set(userId, { kind: 'removeConfirm', sensorName: sensor.sensor.name });
+      const next = this.setState(state, { kind: 'removeConfirm', sensorName: sensor.sensor.name });
       await ctx.reply(en.config.removeConfirm(sensor.sensor.name), {
-        reply_markup: this.returnKeyboard(ctx, 'cancelPending', confirmKeyboard()),
+        reply_markup: this.workflowKeyboard(ctx, next, confirmKeyboard()),
       });
       return;
     }
-    // cfg:type:<digital|uart>
-    if (state.kind === 'addType' && data.startsWith('cfg:type:')) {
-      const type = data.slice('cfg:type:'.length) as AddType;
+    if (state.kind === 'addType' && action.startsWith('type:')) {
+      const type = action.slice('type:'.length) as AddType;
       if (type !== 'digital' && type !== 'uart') return;
-      this.states.set(userId, { kind: 'addName', type });
+      const next = this.setState(state, { kind: 'addName', type });
       await ctx.reply(en.config.step2(type), {
-        reply_markup: this.returnKeyboard(ctx, 'cancelPending', backCancelKeyboard('addType')),
+        reply_markup: this.workflowKeyboard(ctx, next, backCancelKeyboard('addType')),
       });
       return;
     }
-    // cfg:pin:<BCM pin> during digital add
-    if (state.kind === 'addDigitalPin' && data.startsWith('cfg:pin:')) {
-      const pin = parseIntStrict(data.slice('cfg:pin:'.length));
+    if (state.kind === 'addDigitalPin' && action.startsWith('pin:')) {
+      const pin = parseIntStrict(action.slice('pin:'.length));
       if (pin === null || !isSelectableGpioPin(pin)) return;
       const owner = await this.findPinOwner(pin);
       if (owner) {
         await ctx.reply(en.config.pinTaken(pin, owner), {
-          reply_markup: this.returnKeyboard(ctx, 'cancelPending'),
+          reply_markup: this.workflowKeyboard(ctx, state),
         });
         await this.showDigitalPinPicker(ctx, state.name);
         return;
       }
-      this.states.set(userId, { kind: 'addDigitalStepType', name: state.name, pin });
+      const next = this.setState(state, { kind: 'addDigitalStepType', name: state.name, pin });
       await ctx.reply(en.config.step4Digital(state.name, pin), {
-        reply_markup: this.returnKeyboard(ctx, 'cancelPending', stepTypeKeyboard('addDigitalPin')),
+        reply_markup: this.workflowKeyboard(ctx, next, stepTypeKeyboard('addDigitalPin')),
       });
       return;
     }
-    // cfg:default:digital
-    if (state.kind === 'addDigitalStepType' && data === 'cfg:default:digital') {
+    if (state.kind === 'addDigitalStepType' && action === 'default:digital') {
       const created = await this.addSensor.execute({
         name: state.name,
         type: 'digital',
@@ -423,35 +406,33 @@ export class ConfigHandler implements TelegramHandler {
         debounceMs: this.digitalDefaults.debounceMs,
         severity: this.digitalDefaults.severity,
       });
-      this.states.delete(userId);
-      await ctx.reply(
-        en.config.addedDigital(
+      await this.complete(ctx, state, {
+        effectStage: 'pending',
+        deliver: () => this.reply(ctx, en.config.addedDigital(
           created.name,
           state.pin,
           'contact',
           this.digitalDefaults.severity,
-        ),
-        { reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal') },
-      );
+        )),
+        failureNotice: this.catalog(ctx).home.recovery.unavailable,
+      });
       return;
     }
-    // cfg:st:<stepType> during add
-    if (state.kind === 'addDigitalStepType' && data.startsWith('cfg:st:')) {
-      const stepType = data.slice('cfg:st:'.length);
-      this.states.set(userId, {
+    if (state.kind === 'addDigitalStepType' && action.startsWith('st:')) {
+      const stepType = action.slice('st:'.length);
+      const next = this.setState(state, {
         kind: 'addDigitalSeverity',
         name: state.name,
         pin: state.pin,
         stepType,
       });
       await ctx.reply(en.config.step5Digital(state.name, state.pin, stepType), {
-        reply_markup: this.returnKeyboard(ctx, 'cancelPending', severityKeyboard()),
+        reply_markup: this.workflowKeyboard(ctx, next, severityKeyboard()),
       });
       return;
     }
-    // cfg:sev:<info|warning|critical>
-    if (state.kind === 'addDigitalSeverity' && data.startsWith('cfg:sev:')) {
-      const severity = data.slice('cfg:sev:'.length) as SensorSeverity;
+    if (state.kind === 'addDigitalSeverity' && action.startsWith('sev:')) {
+      const severity = action.slice('sev:'.length) as SensorSeverity;
       if (!isSeverity(severity)) return;
       const created = await this.addSensor.execute({
         name: state.name,
@@ -466,42 +447,38 @@ export class ConfigHandler implements TelegramHandler {
         debounceMs: this.digitalDefaults.debounceMs,
         severity,
       });
-      this.states.delete(userId);
-      await ctx.reply(
-        en.config.addedDigital(
+      await this.complete(ctx, state, {
+        effectStage: 'pending',
+        deliver: () => this.reply(ctx, en.config.addedDigital(
           created.name,
           state.pin,
           state.stepType,
           severity,
-        ),
-        { reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal') },
-      );
+        )),
+        failureNotice: this.catalog(ctx).home.recovery.unavailable,
+      });
       return;
     }
-    // cfg:baud:<9600|115200>
-    if (state.kind === 'addUartBaud' && data.startsWith('cfg:baud:')) {
-      const baud = Number(data.slice('cfg:baud:'.length));
+    if (state.kind === 'addUartBaud' && action.startsWith('baud:')) {
+      const baud = Number(action.slice('baud:'.length));
       if (!Number.isFinite(baud) || baud <= 0) return;
-      this.states.set(userId, {
+      const next = this.setState(state, {
         kind: 'addUartWarning',
         name: state.name,
         port: state.port,
         baud,
       });
       await ctx.reply(en.config.step5Uart(state.name, state.port, baud), {
-        reply_markup: this.returnKeyboard(ctx, 'cancelPending'),
+        reply_markup: this.workflowKeyboard(ctx, next),
       });
       return;
     }
-    // cfg:modify:<field|done>
-    if (state.kind === 'modifyMenu' && data.startsWith('cfg:modify:')) {
-      const field = data.slice('cfg:modify:'.length);
-      await this.modifyFieldPrompt(ctx, userId, state, field);
+    if (state.kind === 'modifyMenu' && action.startsWith('modify:')) {
+      await this.modifyFieldPrompt(ctx, state, action.slice('modify:'.length));
       return;
     }
-    // cfg:st:<stepType> during modify
-    if (state.kind === 'modifyStepType' && data.startsWith('cfg:st:')) {
-      const stepType = data.slice('cfg:st:'.length);
+    if (state.kind === 'modifyStepType' && action.startsWith('st:')) {
+      const stepType = action.slice('st:'.length);
       const current = await this.sensors.findById(state.sensorId);
       if (!current) throw new SensorNotFoundError(state.currentName);
       const nextConfig = { ...current.config, stepType };
@@ -509,48 +486,40 @@ export class ConfigHandler implements TelegramHandler {
         currentName: state.currentName,
         patch: { config: nextConfig },
       });
-      this.states.set(userId, {
+      const next = this.setState(state, {
         kind: 'modifyMenu',
         sensorId: state.sensorId,
         currentName: state.currentName,
       });
       await ctx.reply(en.config.modifiedField('Step Type'), {
-        reply_markup: this.returnKeyboard(ctx, 'cancelPending', modifyMenu(current.type)),
+        reply_markup: this.workflowKeyboard(ctx, next, modifyMenu(current.type)),
       });
       return;
     }
-    // cfg:msev:<severity>  — modify a sensor's severity in one step
-    if (data.startsWith('cfg:msev:') && isModifyState(state)) {
-      const severity = data.slice('cfg:msev:'.length) as SensorSeverity;
+    if (action.startsWith('msev:') && isModifyState(state)) {
+      const severity = action.slice('msev:'.length) as SensorSeverity;
       if (!isSeverity(severity)) return;
       await this.modifySensor.execute({
         currentName: state.currentName,
         patch: { severity },
       });
-      this.states.set(userId, {
+      const next = this.setState(state, {
         kind: 'modifyMenu',
         sensorId: state.sensorId,
         currentName: state.currentName,
       });
       await ctx.reply(en.config.modifiedField('Severity'), {
-        reply_markup: this.returnKeyboard(ctx, 'cancelPending', modifyMenu(await this.lookupType(state.sensorId))),
+        reply_markup: this.workflowKeyboard(ctx, next, modifyMenu(await this.lookupType(state.sensorId))),
       });
       return;
     }
-    // cfg:rm:<confirm|cancel>
-    if (state.kind === 'removeConfirm' && data.startsWith('cfg:rm:')) {
-      if (data === 'cfg:rm:confirm') {
-        await this.removeSensor.execute(state.sensorName);
-        this.states.delete(userId);
-        await ctx.reply(en.config.removed(state.sensorName), {
-          reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
-        });
-      } else {
-        this.states.delete(userId);
-        await ctx.reply(en.config.cancelled, {
-          reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
-        });
-      }
+    if (state.kind === 'removeConfirm' && action === 'rm:confirm') {
+      await this.removeSensor.execute(state.sensorName);
+      await this.complete(ctx, state, {
+        effectStage: 'pending',
+        deliver: () => this.reply(ctx, en.config.removed(state.sensorName)),
+        failureNotice: this.catalog(ctx).home.recovery.unavailable,
+      });
       return;
     }
   }
@@ -558,38 +527,38 @@ export class ConfigHandler implements TelegramHandler {
   // ───────── text inputs ─────────
 
   private async onText(ctx: TelegramContext, text: string): Promise<void> {
-    const userId = ctx.from!.id;
-    const state = this.states.get(userId)!;
+    const state = this.stateFor(ctx);
+    if (!state) return;
 
     switch (state.kind) {
       case 'addName': {
         if (state.type === 'digital') {
-          this.states.set(userId, { kind: 'addDigitalPin', name: text });
+          this.setState(state, { kind: 'addDigitalPin', name: text });
           await this.showDigitalPinPicker(ctx, text);
         } else {
-          this.states.set(userId, { kind: 'addUartPort', name: text });
+          const next = this.setState(state, { kind: 'addUartPort', name: text });
           await ctx.reply(en.config.step3Uart(text), {
-            reply_markup: this.returnKeyboard(ctx, 'cancelPending', backCancelKeyboard('addName')),
+            reply_markup: this.workflowKeyboard(ctx, next, backCancelKeyboard('addName')),
           });
         }
         return;
       }
       case 'addDigitalPin': {
         await ctx.reply(en.config.gpioPickerOnly, {
-          reply_markup: this.returnKeyboard(ctx, 'cancelPending'),
+          reply_markup: this.workflowKeyboard(ctx, state),
         });
         return;
       }
       case 'addUartPort': {
         if (!text) {
           await ctx.reply(en.config.invalidPortPath, {
-            reply_markup: this.returnKeyboard(ctx, 'cancelPending'),
+            reply_markup: this.workflowKeyboard(ctx, state),
           });
           return;
         }
-        this.states.set(userId, { kind: 'addUartBaud', name: state.name, port: text });
+        const next = this.setState(state, { kind: 'addUartBaud', name: state.name, port: text });
         await ctx.reply(en.config.step4Uart(state.name, text), {
-          reply_markup: this.returnKeyboard(ctx, 'cancelPending', baudKeyboard()),
+          reply_markup: this.workflowKeyboard(ctx, next, baudKeyboard()),
         });
         return;
       }
@@ -597,11 +566,11 @@ export class ConfigHandler implements TelegramHandler {
         const warning = parseIntStrict(text);
         if (warning === null || warning <= 0) {
           await ctx.reply(en.config.invalidNumber, {
-            reply_markup: this.returnKeyboard(ctx, 'cancelPending'),
+            reply_markup: this.workflowKeyboard(ctx, state),
           });
           return;
         }
-        this.states.set(userId, {
+        const next = this.setState(state, {
           kind: 'addUartCritical',
           name: state.name,
           port: state.port,
@@ -609,7 +578,7 @@ export class ConfigHandler implements TelegramHandler {
           warning,
         });
         await ctx.reply(en.config.criticalQuestion, {
-          reply_markup: this.returnKeyboard(ctx, 'cancelPending', backCancelKeyboard('addUartWarning')),
+          reply_markup: this.workflowKeyboard(ctx, next, backCancelKeyboard('addUartWarning')),
         });
         return;
       }
@@ -617,13 +586,13 @@ export class ConfigHandler implements TelegramHandler {
         const critical = parseIntStrict(text);
         if (critical === null || critical <= 0) {
           await ctx.reply(en.config.invalidNumber, {
-            reply_markup: this.returnKeyboard(ctx, 'cancelPending'),
+            reply_markup: this.workflowKeyboard(ctx, state),
           });
           return;
         }
         if (critical <= state.warning) {
           await ctx.reply(en.config.invalidThresholdOrder(state.warning), {
-            reply_markup: this.returnKeyboard(ctx, 'cancelPending'),
+            reply_markup: this.workflowKeyboard(ctx, state),
           });
           return;
         }
@@ -640,11 +609,11 @@ export class ConfigHandler implements TelegramHandler {
           debounceMs: this.uartDefaults.debounceMs,
           severity: this.uartDefaults.severity,
         });
-        this.states.delete(userId);
-        await ctx.reply(
-          en.config.addedUart(state.name, state.port, state.baud, state.warning, critical),
-          { reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal') },
-        );
+        await this.complete(ctx, state, {
+          effectStage: 'pending',
+          deliver: () => this.reply(ctx, en.config.addedUart(state.name, state.port, state.baud, state.warning, critical)),
+          failureNotice: this.catalog(ctx).home.recovery.unavailable,
+        });
         return;
       }
       case 'modifyName': {
@@ -652,13 +621,13 @@ export class ConfigHandler implements TelegramHandler {
           currentName: state.currentName,
           patch: { name: text },
         });
-        this.states.set(userId, {
+        const next = this.setState(state, {
           kind: 'modifyMenu',
           sensorId: state.sensorId,
           currentName: text,
         });
         await ctx.reply(en.config.modifiedField('Name'), {
-          reply_markup: this.returnKeyboard(ctx, 'cancelPending', modifyMenu(await this.lookupType(state.sensorId))),
+          reply_markup: this.workflowKeyboard(ctx, next, modifyMenu(await this.lookupType(state.sensorId))),
         });
         return;
       }
@@ -666,7 +635,7 @@ export class ConfigHandler implements TelegramHandler {
         const pin = parseIntStrict(text);
         if (pin === null || pin < 0 || pin > 27) {
           await ctx.reply(en.config.invalidPinRange, {
-            reply_markup: this.returnKeyboard(ctx, 'cancelPending'),
+            reply_markup: this.workflowKeyboard(ctx, state),
           });
           return;
         }
@@ -677,13 +646,13 @@ export class ConfigHandler implements TelegramHandler {
           currentName: state.currentName,
           patch: { config: nextConfig },
         });
-        this.states.set(userId, {
+        const next = this.setState(state, {
           kind: 'modifyMenu',
           sensorId: state.sensorId,
           currentName: state.currentName,
         });
         await ctx.reply(en.config.modifiedField('Pin'), {
-          reply_markup: this.returnKeyboard(ctx, 'cancelPending', modifyMenu(current.type)),
+          reply_markup: this.workflowKeyboard(ctx, next, modifyMenu(current.type)),
         });
         return;
       }
@@ -691,7 +660,7 @@ export class ConfigHandler implements TelegramHandler {
         const ms = parseIntStrict(text);
         if (ms === null || ms < 0) {
           await ctx.reply(en.config.invalidDebounce, {
-            reply_markup: this.returnKeyboard(ctx, 'cancelPending'),
+            reply_markup: this.workflowKeyboard(ctx, state),
           });
           return;
         }
@@ -699,13 +668,13 @@ export class ConfigHandler implements TelegramHandler {
           currentName: state.currentName,
           patch: { debounceMs: ms },
         });
-        this.states.set(userId, {
+        const next = this.setState(state, {
           kind: 'modifyMenu',
           sensorId: state.sensorId,
           currentName: state.currentName,
         });
         await ctx.reply(en.config.modifiedField('Debounce'), {
-          reply_markup: this.returnKeyboard(ctx, 'cancelPending', modifyMenu(await this.lookupType(state.sensorId))),
+          reply_markup: this.workflowKeyboard(ctx, next, modifyMenu(await this.lookupType(state.sensorId))),
         });
         return;
       }
@@ -716,37 +685,37 @@ export class ConfigHandler implements TelegramHandler {
 
   private async modifyFieldPrompt(
     ctx: TelegramContext,
-    userId: number,
-    state: Extract<ConfigState, { kind: 'modifyMenu' }>,
+    state: Extract<BoundConfigState, { kind: 'modifyMenu' }>,
     field: string,
   ): Promise<void> {
     if (field === 'done') {
-      this.states.delete(userId);
-      await ctx.reply(en.config.modifyDone(state.currentName), {
-        reply_markup: this.returnKeyboard(ctx, 'alreadyTerminal'),
+      await this.complete(ctx, state, {
+        effectStage: 'pending',
+        deliver: () => this.reply(ctx, en.config.modifyDone(state.currentName)),
+        failureNotice: this.catalog(ctx).home.recovery.unavailable,
       });
       return;
     }
     if (field === 'name') {
-      this.states.set(userId, {
+      const next = this.setState(state, {
         kind: 'modifyName',
         sensorId: state.sensorId,
         currentName: state.currentName,
       });
       await ctx.reply(en.config.nameQuestion, {
-        reply_markup: this.returnKeyboard(ctx, 'cancelPending', backCancelKeyboard('modifyMenu')),
+        reply_markup: this.workflowKeyboard(ctx, next, backCancelKeyboard('modifyMenu')),
       });
       return;
     }
     if (field === 'pin') {
-      this.states.set(userId, {
+      const next = this.setState(state, {
         kind: 'modifyPin',
         sensorId: state.sensorId,
         currentName: state.currentName,
       });
       const used = await this.getUsedPinsText();
       await ctx.reply(en.config.pinQuestion(used), {
-        reply_markup: this.returnKeyboard(ctx, 'cancelPending', backCancelKeyboard('modifyMenu')),
+        reply_markup: this.workflowKeyboard(ctx, next, backCancelKeyboard('modifyMenu')),
         parse_mode: 'HTML',
       });
       return;
@@ -763,36 +732,36 @@ export class ConfigHandler implements TelegramHandler {
       });
       const stateStr = newInvert ? 'Inverted (Active Low)' : 'Direct (Active High)';
       await ctx.reply(en.config.invertToggleSuccess(state.currentName, stateStr), {
-        reply_markup: this.returnKeyboard(ctx, 'cancelPending', modifyMenu(current.type)),
+        reply_markup: this.workflowKeyboard(ctx, state, modifyMenu(current.type)),
       });
       return;
     }
     if (field === 'steptype') {
-      this.states.set(userId, {
+      const next = this.setState(state, {
         kind: 'modifyStepType',
         sensorId: state.sensorId,
         currentName: state.currentName,
       });
       await ctx.reply(en.config.stepTypeQuestion, {
-        reply_markup: this.returnKeyboard(ctx, 'cancelPending', stepTypeKeyboard('modifyMenu')),
+        reply_markup: this.workflowKeyboard(ctx, next, stepTypeKeyboard('modifyMenu')),
       });
       return;
     }
     if (field === 'debounce') {
-      this.states.set(userId, {
+      const next = this.setState(state, {
         kind: 'modifyDebounce',
         sensorId: state.sensorId,
         currentName: state.currentName,
       });
       await ctx.reply(en.config.debouncePrompt, {
-        reply_markup: this.returnKeyboard(ctx, 'cancelPending', backCancelKeyboard('modifyMenu')),
+        reply_markup: this.workflowKeyboard(ctx, next, backCancelKeyboard('modifyMenu')),
       });
       return;
     }
     if (field === 'severity') {
       // Stay in modifyMenu state shape — severity callback short-circuits.
       await ctx.reply(en.config.severityQuestion, {
-        reply_markup: this.returnKeyboard(ctx, 'cancelPending', modifySeverityKeyboard()),
+        reply_markup: this.workflowKeyboard(ctx, state, modifySeverityKeyboard()),
       });
       return;
     }
@@ -818,6 +787,8 @@ export class ConfigHandler implements TelegramHandler {
   }
 
   private async showDigitalPinPicker(ctx: TelegramContext, name: string): Promise<void> {
+    const state = this.stateFor(ctx);
+    if (!state) return;
     const sensors = await this.sensors.listEnabled();
     const usedPins = new Set(
       sensors
@@ -831,7 +802,7 @@ export class ConfigHandler implements TelegramHandler {
         ? en.config.step3Digital(name, usedText)
         : en.config.noAvailableGpioPins,
       {
-        reply_markup: this.returnKeyboard(ctx, 'cancelPending', digitalPinKeyboard(availablePins)),
+        reply_markup: this.workflowKeyboard(ctx, state, digitalPinKeyboard(availablePins)),
         parse_mode: 'HTML',
       },
     );
@@ -839,15 +810,14 @@ export class ConfigHandler implements TelegramHandler {
 
   private async handleBack(
     ctx: TelegramContext,
-    userId: number,
-    state: ConfigState,
+    state: BoundConfigState,
     target: string,
   ): Promise<void> {
     switch (target) {
       case 'addType': {
-        this.states.set(userId, { kind: 'addType' });
+        const next = this.setState(state, { kind: 'addType' });
         await ctx.reply(en.config.step1, {
-          reply_markup: this.returnKeyboard(ctx, 'cancelPending', typeKeyboard()),
+          reply_markup: this.workflowKeyboard(ctx, next, typeKeyboard()),
         });
         break;
       }
@@ -858,71 +828,71 @@ export class ConfigHandler implements TelegramHandler {
           state.kind === 'addDigitalSeverity'
             ? 'digital'
             : 'uart';
-        this.states.set(userId, { kind: 'addName', type });
+        const next = this.setState(state, { kind: 'addName', type });
         await ctx.reply(en.config.step2(type), {
-          reply_markup: this.returnKeyboard(ctx, 'cancelPending', backCancelKeyboard('addType')),
+          reply_markup: this.workflowKeyboard(ctx, next, backCancelKeyboard('addType')),
         });
         break;
       }
       case 'addDigitalPin': {
         if ('name' in state) {
-          this.states.set(userId, { kind: 'addDigitalPin', name: state.name });
+          this.setState(state, { kind: 'addDigitalPin', name: state.name });
           await this.showDigitalPinPicker(ctx, state.name);
         }
         break;
       }
       case 'addDigitalStepType': {
         if ('name' in state && 'pin' in state) {
-          this.states.set(userId, {
+          const next = this.setState(state, {
             kind: 'addDigitalStepType',
             name: state.name,
             pin: state.pin,
           });
           await ctx.reply(en.config.step4Digital(state.name, state.pin), {
-            reply_markup: this.returnKeyboard(ctx, 'cancelPending', stepTypeKeyboard('addDigitalPin')),
+            reply_markup: this.workflowKeyboard(ctx, next, stepTypeKeyboard('addDigitalPin')),
           });
         }
         break;
       }
       case 'addUartPort': {
         if ('name' in state) {
-          this.states.set(userId, { kind: 'addUartPort', name: state.name });
+          const next = this.setState(state, { kind: 'addUartPort', name: state.name });
           await ctx.reply(en.config.step3Uart(state.name), {
-            reply_markup: this.returnKeyboard(ctx, 'cancelPending', backCancelKeyboard('addName')),
+            reply_markup: this.workflowKeyboard(ctx, next, backCancelKeyboard('addName')),
           });
         }
         break;
       }
       case 'addUartBaud': {
         if ('name' in state && 'port' in state) {
-          this.states.set(userId, {
+          const next = this.setState(state, {
             kind: 'addUartBaud',
             name: state.name,
             port: state.port,
           });
           await ctx.reply(en.config.step4Uart(state.name, state.port), {
-            reply_markup: this.returnKeyboard(ctx, 'cancelPending', baudKeyboard()),
+            reply_markup: this.workflowKeyboard(ctx, next, baudKeyboard()),
           });
         }
         break;
       }
       case 'addUartWarning': {
         if ('name' in state && 'port' in state && 'baud' in state) {
-          this.states.set(userId, {
+          const next = this.setState(state, {
             kind: 'addUartWarning',
             name: state.name,
             port: state.port,
             baud: state.baud,
           });
           await ctx.reply(en.config.step5Uart(state.name, state.port, state.baud), {
-            reply_markup: this.returnKeyboard(ctx, 'cancelPending', backCancelKeyboard('addUartBaud')),
+            reply_markup: this.workflowKeyboard(ctx, next, backCancelKeyboard('addUartBaud')),
           });
         }
         break;
       }
       case 'modifyMenu': {
         if (isModifyState(state)) {
-          this.states.set(userId, {
+          const next = this.setState(state, {
             kind: 'modifyMenu',
             sensorId: state.sensorId,
             currentName: state.currentName,
@@ -937,7 +907,7 @@ export class ConfigHandler implements TelegramHandler {
                 debounceMs: sensor.debounceMs,
                 severity: sensor.severity,
               }),
-              { reply_markup: this.returnKeyboard(ctx, 'cancelPending', modifyMenu(sensor.type)) },
+              { reply_markup: this.workflowKeyboard(ctx, next, modifyMenu(sensor.type)) },
             );
           }
         }
@@ -951,10 +921,69 @@ export class ConfigHandler implements TelegramHandler {
     return sensor?.type ?? 'digital';
   }
 
+  private setInitialState<T extends ConfigState>(
+    receipt: WorkflowReturnReceipt,
+    next: T,
+  ): WorkflowBoundState<T> {
+    const state = {
+      ...next,
+      userId: receipt.userId,
+      chatId: receipt.chatId,
+      receiptId: receipt.id,
+      receipt,
+    } as WorkflowBoundState<T>;
+    this.states.set(stateKey(state.userId, state.chatId), state);
+    return state;
+  }
+
+  private setState<T extends ConfigState>(
+    state: BoundConfigState,
+    next: T,
+  ): WorkflowBoundState<T> {
+    return this.setInitialState(state.receipt, next);
+  }
+
+  private stateFor(ctx: TelegramContext): BoundConfigState | null {
+    const userId = ctx.from?.id;
+    if (typeof userId !== 'number' || !Number.isSafeInteger(userId)) return null;
+    const chatId = ctx.chat?.type === 'private' ? ctx.chat.id : userId;
+    return this.states.get(stateKey(userId, chatId)) ?? null;
+  }
+
+  private catalog(ctx: TelegramContext) {
+    return ctx.localeState?.catalog ?? en;
+  }
+
+  private async reply(ctx: TelegramContext, text: string): Promise<void> {
+    await ctx.reply(text);
+  }
+
+  private async complete(
+    ctx: TelegramContext,
+    state: BoundConfigState,
+    presentation: {
+      effectStage: 'pending' | 'already-delivered';
+      deliver(): Promise<void>;
+      failureNotice: string;
+    },
+  ): Promise<void> {
+    if (this.navigation) {
+      await this.navigation.complete(ctx, { receipt: state.receipt }, presentation);
+      return;
+    }
+    if (presentation.effectStage === 'pending') await presentation.deliver();
+    await this.cancelExact({
+      userId: state.userId,
+      chatId: state.chatId,
+      receiptId: state.receiptId,
+    });
+  }
+
   // ───────── errors ─────────
 
   private async replyError(ctx: TelegramContext, err: unknown): Promise<void> {
-    const options = { reply_markup: this.returnKeyboard(ctx, this.returnPhase(ctx)) };
+    const state = this.stateFor(ctx);
+    const options = state ? { reply_markup: this.workflowKeyboard(ctx, state) } : undefined;
     if (err instanceof SensorNameExistsError) {
       await ctx.reply(en.config.nameTaken(err.sensorName), options);
       return;
@@ -984,7 +1013,16 @@ export class ConfigHandler implements TelegramHandler {
       return;
     }
     this.logger.error(`/config failed: ${(err as Error).message}`, (err as Error).stack);
-    await ctx.reply(en.common.error('process /config', 'internal error'), options);
+    const message = en.common.error('process /config', 'internal error');
+    if (state) {
+      await this.complete(ctx, state, {
+        effectStage: 'pending',
+        deliver: () => this.reply(ctx, message),
+        failureNotice: this.catalog(ctx).home.recovery.unavailable,
+      });
+      return;
+    }
+    await ctx.reply(message, options);
   }
 }
 
@@ -993,15 +1031,11 @@ export class ConfigHandler implements TelegramHandler {
 function typeKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text('Digital', 'cfg:type:digital')
-    .text('UART', 'cfg:type:uart')
-    .row()
-    .text(en.common.cancelButton, 'cfg:cancel');
+    .text('UART', 'cfg:type:uart');
 }
 
 function backCancelKeyboard(backTarget: string): InlineKeyboard {
-  return new InlineKeyboard()
-    .text(en.common.backButton, `cfg:back:${backTarget}`)
-    .text(en.common.cancelButton, 'cfg:cancel');
+  return new InlineKeyboard().text(en.common.backButton, `cfg:back:${backTarget}`);
 }
 
 function digitalPinKeyboard(pins: readonly number[]): InlineKeyboard {
@@ -1011,9 +1045,7 @@ function digitalPinKeyboard(pins: readonly number[]): InlineKeyboard {
     if ((index + 1) % 3 === 0) kb.row();
   });
   if (pins.length % 3 !== 0) kb.row();
-  return kb
-    .text(en.common.backButton, 'cfg:back:addName')
-    .text(en.common.cancelButton, 'cfg:cancel');
+  return kb.text(en.common.backButton, 'cfg:back:addName');
 }
 
 function stepTypeKeyboard(backTarget: string): InlineKeyboard {
@@ -1029,8 +1061,7 @@ function stepTypeKeyboard(backTarget: string): InlineKeyboard {
   if (backTarget !== 'modifyMenu') {
     kb.text(en.config.defaultButton, 'cfg:default:digital').row();
   }
-  kb.text(en.common.backButton, `cfg:back:${backTarget}`)
-    .text(en.common.cancelButton, 'cfg:cancel');
+  kb.text(en.common.backButton, `cfg:back:${backTarget}`);
   return kb;
 }
 
@@ -1040,8 +1071,7 @@ function severityKeyboard(): InlineKeyboard {
     .text('Warning', 'cfg:sev:warning')
     .text('Critical', 'cfg:sev:critical')
     .row()
-    .text(en.common.backButton, 'cfg:back:addDigitalStepType')
-    .text(en.common.cancelButton, 'cfg:cancel');
+    .text(en.common.backButton, 'cfg:back:addDigitalStepType');
 }
 
 function modifySeverityKeyboard(): InlineKeyboard {
@@ -1050,8 +1080,7 @@ function modifySeverityKeyboard(): InlineKeyboard {
     .text('Warning', 'cfg:msev:warning')
     .text('Critical', 'cfg:msev:critical')
     .row()
-    .text(en.common.backButton, 'cfg:back:modifyMenu')
-    .text(en.common.cancelButton, 'cfg:cancel');
+    .text(en.common.backButton, 'cfg:back:modifyMenu');
 }
 
 function baudKeyboard(): InlineKeyboard {
@@ -1059,14 +1088,11 @@ function baudKeyboard(): InlineKeyboard {
     .text('9600', 'cfg:baud:9600')
     .text('115200', 'cfg:baud:115200')
     .row()
-    .text(en.common.backButton, 'cfg:back:addUartPort')
-    .text(en.common.cancelButton, 'cfg:cancel');
+    .text(en.common.backButton, 'cfg:back:addUartPort');
 }
 
 function confirmKeyboard(): InlineKeyboard {
-  return new InlineKeyboard()
-    .text('Confirm', 'cfg:rm:confirm')
-    .text(en.common.cancelButton, 'cfg:rm:cancel');
+  return new InlineKeyboard().text('Confirm', 'cfg:rm:confirm');
 }
 
 function modifyMenu(type: SensorType): InlineKeyboard {
@@ -1079,11 +1105,46 @@ function modifyMenu(type: SensorType): InlineKeyboard {
   }
   kb.text('Debounce', 'cfg:modify:debounce').text('Severity', 'cfg:modify:severity').row();
   kb.text('Done', 'cfg:modify:done').row();
-  kb.text(en.common.cancelButton, 'cfg:cancel');
   return kb;
 }
 
 // ───────── helpers ─────────
+
+const CONFIG_CALLBACK = /^cfg:([A-Za-z0-9_-]{16}):(.+)$/;
+
+function stateKey(userId: number, chatId: number): string {
+  return `${userId}:${chatId}`;
+}
+
+function workflowFor(sub: ConfigSubcommand): 'sensor-add' | 'sensor-modify' | 'sensor-remove' {
+  switch (sub) {
+    case 'add': return 'sensor-add';
+    case 'modify': return 'sensor-modify';
+    case 'remove': return 'sensor-remove';
+  }
+}
+
+function isConfigSubcommand(value: string): value is ConfigSubcommand {
+  return value === 'add' || value === 'modify' || value === 'remove';
+}
+
+function parseConfigCallback(data: string): { receiptId: string; action: string } | null {
+  const match = CONFIG_CALLBACK.exec(data);
+  if (!match) return null;
+  return { receiptId: match[1], action: match[2] };
+}
+
+function bindConfigKeyboard(keyboard: InlineKeyboard, receiptId: string): InlineKeyboard {
+  for (const row of keyboard.inline_keyboard) {
+    for (const button of row) {
+      if ('callback_data' in button && typeof button.callback_data === 'string'
+        && button.callback_data.startsWith('cfg:')) {
+        button.callback_data = `cfg:${receiptId}:${button.callback_data.slice('cfg:'.length)}`;
+      }
+    }
+  }
+  return keyboard;
+}
 
 function parseIntStrict(input: string): number | null {
   if (!/^-?\d+$/.test(input)) return null;
@@ -1100,8 +1161,8 @@ function isSeverity(value: string): value is SensorSeverity {
 }
 
 function isModifyState(
-  state: ConfigState,
-): state is Extract<ConfigState, { kind: 'modifyMenu' | 'modifyName' | 'modifyPin' | 'modifyDebounce' | 'modifyStepType' }> {
+  state: BoundConfigState,
+): state is Extract<BoundConfigState, { kind: 'modifyMenu' | 'modifyName' | 'modifyPin' | 'modifyDebounce' | 'modifyStepType' }> {
   return (
     state.kind === 'modifyMenu' ||
     state.kind === 'modifyName' ||

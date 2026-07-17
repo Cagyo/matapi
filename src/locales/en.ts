@@ -469,6 +469,10 @@ const enCatalog = {
     prompt: 'Choose your language:',
     current: (language: string) => `Current language: ${language}`,
     updated: (language: string) => `✅ Language changed to ${language}.`,
+    updateFailed: 'Could not change the language. Try again.',
+    retryLanguageChange: 'Retry language change',
+    returnToMore: '« More',
+    restoreMoreFailed: 'Language changed, but More could not be restored.',
     buttons: {
       en: 'English',
       ru: 'Русский',
@@ -912,6 +916,7 @@ const enCatalog = {
     selectModify: '✏️ *Select Sensor to Modify*\n\nChoose an active sensor to edit its configuration:',
     selectRemove: '🗑️ *Select Sensor to Remove*\n\nChoose an active sensor to delete:',
     noActiveSensors: 'ℹ️ No active sensors configured.',
+    cancelSensorSetup: 'Cancel sensor setup',
     step1: 'Step 1 of 5 — What type of sensor?',
     step2: (type: string) => `Step 2 of 5 (${type})\n\nSensor name?`,
     step3Digital: (name: string, usedPins?: string) =>
