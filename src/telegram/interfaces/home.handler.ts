@@ -1,6 +1,5 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { Composer, InlineKeyboard } from 'grammy';
-import { CloseHomeUseCase } from '../application/close-home.use-case';
 import { HomeNavigationUseCase } from '../application/home-navigation.use-case';
 import { OpenHomeUseCase } from '../application/open-home.use-case';
 import { RefreshHomeMonitoringUseCase } from '../application/refresh-home-monitoring.use-case';
@@ -31,6 +30,7 @@ import { CLOCK, type ClockPort } from '../../events/domain/ports/clock.port';
 import { RoleMiddleware } from './role.middleware';
 import { TelegramContext, type LocaleState } from './telegram-context';
 import { TelegramHandler } from './telegram-handler';
+import { WorkflowEntryCoordinator, type WorkflowLaunch } from './workflow-entry.coordinator';
 
 @Injectable()
 export class HomeHandler implements TelegramHandler {
@@ -40,7 +40,6 @@ export class HomeHandler implements TelegramHandler {
     private readonly validateCallback: ValidateHomeCallbackUseCase,
     private readonly renderHome: RenderHomeUseCase,
     private readonly refreshMonitoring: RefreshHomeMonitoringUseCase,
-    private readonly closeHome: CloseHomeUseCase,
     private readonly camera: CameraHandler,
     private readonly navigation?: HomeNavigationUseCase,
     private readonly logs?: LogsHandler,
@@ -61,6 +60,7 @@ export class HomeHandler implements TelegramHandler {
     private readonly targetMute?: SetNotificationTargetMutedUseCase,
     @Inject(HOME_ACTION_REPOSITORY) private readonly actions?: HomeActionRepositoryPort,
     @Inject(CLOCK) private readonly clock?: ClockPort,
+    @Optional() private readonly workflows?: WorkflowEntryCoordinator,
   ) {}
 
   register(composer: Composer<TelegramContext>): void {
@@ -75,19 +75,13 @@ export class HomeHandler implements TelegramHandler {
   private async open(ctx: TelegramContext): Promise<'opened' | 'not-opened'> {
     const current = this.current(ctx);
     if (!current) return 'not-opened';
+    const destination: HomeView = { kind: 'home', checking: false };
     try {
-      const result = await this.openHome.execute({
-        userId: current.userId,
-        chatId: current.chatId,
-        locale: current.state.locale,
-        role: current.state.user.role,
-        view: { kind: 'home', checking: false },
-      });
-      if (result.kind === 'superseded') {
-        await this.recover(ctx, 'stale');
-        return 'not-opened';
-      }
-      return 'opened';
+      const leave = await this.leaveForHome(ctx, () => this.openFresh(current, destination));
+      if (leave === 'opened') return 'opened';
+      if (leave === 'no-workflow') return await this.openFresh(current, destination) ? 'opened' : 'not-opened';
+      await this.recover(ctx, leave === 'stale' ? 'stale' : 'unavailable');
+      return 'not-opened';
     } catch {
       await this.recover(ctx, 'unavailable');
       return 'not-opened';
@@ -133,17 +127,6 @@ export class HomeHandler implements TelegramHandler {
     }
 
     try {
-      if (parsed.action.kind === 'camera') {
-        if (verdict.view.kind !== 'home' && verdict.view.kind !== 'sensors') await this.recover(ctx, 'stale');
-        else await this.camera.handleDashboard(ctx);
-        return;
-      }
-      if (parsed.action.kind === 'close') {
-        if (verdict.view.kind !== 'more') { await this.recover(ctx, 'stale'); return; }
-        const closed = await this.closeHome.execute({ identity: verdict.active, locale: current.state.locale });
-        if (closed === 'stale') await this.recover(ctx, 'stale');
-        return;
-      }
       if (parsed.action.kind === 'check') { await this.check(ctx, verdict.active, verdict.view); return; }
       await this.navigate(ctx, verdict.active, verdict.view, parsed.action);
     } catch {
@@ -170,14 +153,20 @@ export class HomeHandler implements TelegramHandler {
       } else await this.recover(ctx, 'stale');
       return;
     }
-    if (result.kind === 'external') { await this.external(ctx, result.destination); return; }
+    if (result.kind === 'external') { await this.external(ctx, result.destination, active, view); return; }
     if (result.kind === 'restart') { await this.restartClaimed(ctx, active, action); return; }
     if (action.kind === 'confirm-cleanup' && result.view.kind === 'cleanup-result') { await this.cleanupClaimed(ctx, active, action.receiptId); return; }
     if (action.kind === 'auto-clean-threshold' && this.thresholds) await this.thresholds.execute(action.value);
     if ((action.kind === 'notification-target-mute' || action.kind === 'notification-target-unmute') && view.kind === 'notification-target' && this.targetMute) {
       await this.targetMute.execute(active.userId, view.target, action.kind === 'notification-target-mute');
     }
-    await this.render(ctx, active, result.view);
+    const leave = await this.leaveForHome(ctx, () => this.openFreshFromContext(ctx, result.view));
+    if (leave === 'opened') return;
+    if (leave === 'no-workflow') {
+      await this.render(ctx, active, result.view);
+      return;
+    }
+    await this.recover(ctx, leave === 'stale' ? 'stale' : 'unavailable');
   }
 
   private async cleanupClaimed(ctx: TelegramContext, active: Parameters<RenderHomeUseCase['execute']>[0]['active'], id: string): Promise<void> {
@@ -204,8 +193,18 @@ export class HomeHandler implements TelegramHandler {
     }
   }
 
-  private async external(ctx: TelegramContext, destination: Extract<Awaited<ReturnType<HomeNavigationUseCase['execute']>>, { kind: 'external' }>['destination']): Promise<void> {
+  private async external(
+    ctx: TelegramContext,
+    destination: Extract<Awaited<ReturnType<HomeNavigationUseCase['execute']>>, { kind: 'external' }>['destination'],
+    active: Parameters<RenderHomeUseCase['execute']>[0]['active'],
+    view: HomeView,
+  ): Promise<void> {
     switch (destination) {
+      case 'camera': {
+        const launch = await this.beginCameraWorkflow(ctx, active, view);
+        if (!launch) return this.recover(ctx, 'unavailable');
+        return this.camera.handleDashboard(ctx, launch);
+      }
       case 'history-logs': return this.logs ? this.logs.handleEmpty(ctx) : this.recover(ctx, 'unavailable');
       case 'history-csv': return this.csv ? this.csv.handleEmpty(ctx, 'menu') : this.recover(ctx, 'unavailable');
       case 'settings': return this.settings ? this.settings.handleCommand(ctx) : this.recover(ctx, 'unavailable');
@@ -270,6 +269,48 @@ export class HomeHandler implements TelegramHandler {
   ): Promise<void> {
     const result = await this.renderHome.execute({ active, ...this.renderOptions(ctx), view });
     if (!this.isRendered(result)) await this.recoverRenderFailure(ctx, result);
+  }
+
+  private async leaveForHome(
+    ctx: TelegramContext,
+    promote: () => Promise<boolean>,
+  ): Promise<'opened' | 'no-workflow' | 'not-opened' | 'stale'> {
+    if (!this.workflows) return 'no-workflow';
+    const result = await this.workflows.leaveForHome(ctx, promote);
+    return result === 'ignored' ? 'not-opened' : result;
+  }
+
+  private async beginCameraWorkflow(
+    ctx: TelegramContext,
+    active: Parameters<RenderHomeUseCase['execute']>[0]['active'],
+    view: HomeView,
+  ): Promise<WorkflowLaunch | null> {
+    if (!this.workflows) return null;
+    const receipt = await this.workflows.begin(ctx, 'camera', {
+      source: 'captured',
+      view,
+      sessionToken: active.token,
+    });
+    return receipt ? { receipt } : null;
+  }
+
+  private async openFresh(
+    current: NonNullable<ReturnType<HomeHandler['current']>>,
+    view: HomeView,
+  ): Promise<boolean> {
+    const result = await this.openHome.execute({
+      userId: current.userId,
+      chatId: current.chatId,
+      locale: current.state.locale,
+      role: current.state.user.role,
+      view,
+    });
+    return result.kind === 'opened';
+  }
+
+  private async openFreshFromContext(ctx: TelegramContext, view: HomeView): Promise<boolean> {
+    const current = this.current(ctx);
+    return current ? this.openFresh(current, view) : false;
   }
 
   private renderOptions(ctx: TelegramContext): Pick<Parameters<RenderHomeUseCase['execute']>[0], 'locale' | 'role'> {

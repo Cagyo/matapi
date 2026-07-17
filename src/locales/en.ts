@@ -589,6 +589,18 @@ const enCatalog = {
       back: '« Back',
       home: '🏠 Home',
     },
+    navigation: {
+      backTo: {
+        notifications: '« Notifications',
+        'notification-targets': '« Notification targets',
+        'pause-duration': '« Notifications',
+        history: '« More',
+        more: '« More',
+        'admin-tools': '« Admin tools',
+        'admin-storage': '« Storage & backup',
+        'admin-system': '« System',
+      },
+    },
     history: {
       title: '🗂 History',
       logs: '📜 Logs',
@@ -599,7 +611,6 @@ const enCatalog = {
       history: '🗂 History',
       settings: '⚙️ My settings',
       help: '❓ Help',
-      close: '✕ Close Home',
       adminTools: '🛠 Admin tools',
     },
     adminTools: {
@@ -628,6 +639,10 @@ const enCatalog = {
       health: '❤️ Health',
       packages: '📦 System packages',
       restart: '🔄 Restart worker',
+      cleanupThreshold: '🧹 Cleanup threshold',
+    },
+    adminCleanupThreshold: {
+      title: '🧹 Cleanup threshold',
       threshold: (value: number, current: number) => `${value}%${value === current ? ' ✓' : ''}`,
     },
     confirmation: {

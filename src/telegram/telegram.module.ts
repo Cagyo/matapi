@@ -32,7 +32,6 @@ import { NotificationTargetDirectoryService } from './application/notification-t
 import { SetNotificationTargetMutedUseCase } from './application/set-notification-target-muted.use-case';
 import { OpenHomeUseCase } from './application/open-home.use-case';
 import { RenderHomeUseCase } from './application/render-home.use-case';
-import { CloseHomeUseCase } from './application/close-home.use-case';
 import { ValidateHomeCallbackUseCase } from './application/validate-home-callback.use-case';
 import { RestartSystemUseCase } from './application/restart-system.use-case';
 import { RollbackSystemUseCase } from './application/rollback-system.use-case';
@@ -237,7 +236,6 @@ const mode = resolveBotMode();
     ValidateHomeCallbackUseCase,
     OpenHomeUseCase,
     RenderHomeUseCase,
-    CloseHomeUseCase,
     BotCommandsMenuService,
     ExportConfigUseCase,
     ImportCameraLiveSourcesUseCase,

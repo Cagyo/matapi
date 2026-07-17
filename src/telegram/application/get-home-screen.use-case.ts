@@ -55,8 +55,9 @@ export class GetHomeScreenUseCase {
     if (input.view.kind === 'pause-duration' || input.view.kind === 'history' || input.view.kind === 'admin-tools' || input.view.kind === 'admin-sensor-setup' || input.view.kind === 'admin-storage') return { kind: input.view.kind };
     if (input.view.kind === 'pause-confirmation') return { kind: input.view.kind, hours: input.view.hours, receiptId: input.view.receiptId };
     if (input.view.kind === 'more') return { kind: 'more', isAdmin: input.role === 'admin' };
-    if (input.view.kind === 'admin-system' || input.view.kind === 'admin-cleanup-threshold') {
-      return { kind: 'admin-system', autoCleanThreshold: this.autoClean ? await this.autoClean.current() : 80 };
+    if (input.view.kind === 'admin-system') return { kind: 'admin-system' };
+    if (input.view.kind === 'admin-cleanup-threshold') {
+      return { kind: 'admin-cleanup-threshold', autoCleanThreshold: this.autoClean ? await this.autoClean.current() : 80 };
     }
     if (input.view.kind === 'confirmation') return { kind: 'confirmation', action: input.view.action, receiptId: input.view.receiptId };
     return { kind: 'cleanup-result', outcome: input.view.outcome, threshold: input.view.threshold };

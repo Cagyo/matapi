@@ -4,11 +4,12 @@ import { OpenHomeUseCase } from '../../../src/telegram/application/open-home.use
 import { RenderHomeUseCase } from '../../../src/telegram/application/render-home.use-case';
 import { RefreshHomeMonitoringUseCase } from '../../../src/telegram/application/refresh-home-monitoring.use-case';
 import { ValidateHomeCallbackUseCase } from '../../../src/telegram/application/validate-home-callback.use-case';
-import { CloseHomeUseCase } from '../../../src/telegram/application/close-home.use-case';
 import { HomeNavigationUseCase } from '../../../src/telegram/application/home-navigation.use-case';
 import { HomeHandler } from '../../../src/telegram/interfaces/home.handler';
 import { RoleMiddleware } from '../../../src/telegram/interfaces/role.middleware';
 import { encodeHomeCallback, OPEN_NEW_HOME_CALLBACK } from '../../../src/telegram/domain/home-callback';
+import { WorkflowEntryCoordinator } from '../../../src/telegram/interfaces/workflow-entry.coordinator';
+import type { WorkflowReturnReceipt } from '../../../src/telegram/domain/workflow-return';
 
 const identity = {
   userId: 100,
@@ -17,6 +18,21 @@ const identity = {
   token: 'AbCdEfGhIjKlMn_-',
   revision: 1,
 };
+const workflowReceipt = {
+  id: 'qrstuvwxyzabcdef',
+  userId: 100,
+  chatId: 200,
+  kind: 'workflow-return',
+  sessionToken: identity.token,
+  status: 'pending',
+  expiresAt: new Date('2030-01-02T00:00:00.000Z'),
+  payload: {
+    workflow: 'camera',
+    phase: 'cancellable',
+    originSource: 'captured',
+    origin: { kind: 'home', checking: false },
+  },
+} satisfies WorkflowReturnReceipt;
 
 function localeState(role: 'admin' | 'user' = 'user', locale: 'en' | 'uk' = 'en') {
   return {
@@ -49,29 +65,54 @@ function setup() {
     }),
   } as unknown as RenderHomeUseCase;
   const refresh = { execute: vi.fn().mockResolvedValue({ kind: 'refreshed' }) } as unknown as RefreshHomeMonitoringUseCase;
-  const close = { execute: vi.fn().mockResolvedValue('closed') } as unknown as CloseHomeUseCase;
   const camera = { handleDashboard: vi.fn().mockResolvedValue(undefined) } as any;
   const navigation = { execute: vi.fn().mockImplementation(({ action }: any) => Promise.resolve({
-    kind: 'render',
+    kind: action.kind === 'camera' ? 'external' : 'render',
+    destination: action.kind === 'camera' ? 'camera' : undefined,
     view: action.kind === 'sensors'
       ? { kind: 'sensors', page: action.page, checking: false }
       : action.kind === 'home'
         ? { kind: 'home', checking: false }
         : { kind: 'notifications' },
   })) } as unknown as HomeNavigationUseCase;
-  const handler = new HomeHandler(guard, open, validate, render, refresh, close, camera, navigation, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, { now: () => new Date('2030-01-01T00:00:00.000Z') } as never);
+  const workflowEntry = {
+    begin: vi.fn().mockResolvedValue(workflowReceipt),
+    leaveForHome: vi.fn().mockResolvedValue('no-workflow'),
+  } as unknown as WorkflowEntryCoordinator;
+  const handler = new HomeHandler(
+    guard, open, validate, render, refresh, camera, navigation,
+    undefined, // logs
+    undefined, // csv
+    undefined, // settings
+    undefined, // help
+    undefined, // config
+    undefined, // drive
+    undefined, // drive auth
+    undefined, // health
+    undefined, // invite
+    undefined, // import config
+    undefined, // export config
+    undefined, // system update
+    undefined, // clean
+    undefined, // restart
+    undefined, // thresholds
+    undefined, // target mute
+    undefined, // action repository
+    { now: () => new Date('2030-01-01T00:00:00.000Z') },
+    workflowEntry,
+  );
   const commands: Record<string, (...args: any[]) => Promise<void>> = {};
   const callbacks: { regex: RegExp; fn: (...args: any[]) => Promise<void> }[] = [];
   handler.register({
     command: vi.fn((name, middleware, fn) => { commands[name] = fn ?? middleware; }),
     callbackQuery: vi.fn((regex, middleware, fn) => { callbacks.push({ regex, fn: fn ?? middleware }); }),
   } as any);
-  return { commands, callbacks, open, validate, render, refresh, close, camera, navigation };
+  return { commands, callbacks, open, validate, render, refresh, camera, navigation, workflowEntry };
 }
 
 describe('HomeHandler', () => {
   it('opens Home from /menu for the current registered private user without probing health', async () => {
-    const { commands, open, refresh } = setup();
+    const { commands, open, refresh, workflowEntry } = setup();
     const ctx = context();
 
     await commands.menu(ctx);
@@ -79,6 +120,7 @@ describe('HomeHandler', () => {
     expect(open.execute).toHaveBeenCalledWith({
       userId: 100, chatId: 200, locale: 'en', role: 'user', view: { kind: 'home', checking: false },
     });
+    expect(workflowEntry.leaveForHome).toHaveBeenCalledWith(ctx, expect.any(Function));
     expect(refresh.execute).not.toHaveBeenCalled();
   });
 
@@ -121,7 +163,7 @@ describe('HomeHandler', () => {
   );
 
   it('recovers malformed callbacks without mutating Home state', async () => {
-    const { callbacks, validate, render, refresh, close, camera } = setup();
+    const { callbacks, validate, render, refresh, camera, workflowEntry } = setup();
     const ctx = context('h:not-a-token:1:k');
 
     await callbacks[0].fn(ctx);
@@ -129,8 +171,8 @@ describe('HomeHandler', () => {
     expect(validate.execute).not.toHaveBeenCalled();
     expect(render.execute).not.toHaveBeenCalled();
     expect(refresh.execute).not.toHaveBeenCalled();
-    expect(close.execute).not.toHaveBeenCalled();
     expect(camera.handleDashboard).not.toHaveBeenCalled();
+    expect(workflowEntry.leaveForHome).not.toHaveBeenCalled();
     expect(ctx.reply).toHaveBeenCalledWith(
       ctx.localeState.catalog.home.recovery.stale,
       expect.objectContaining({ reply_markup: expect.anything() }),
@@ -222,15 +264,47 @@ describe('HomeHandler', () => {
     expect(render.execute).toHaveBeenCalledWith(expect.objectContaining({ view: { kind: 'notifications' } }));
   });
 
-  it('delegates camera to its separate workflow without rendering Home', async () => {
-    const { callbacks, render, camera } = setup();
+  it('starts Camera exactly once with the validated Home origin and existing workflow receipt', async () => {
+    const { callbacks, render, camera, navigation, workflowEntry } = setup();
     const action = { kind: 'camera' } as const;
     const ctx = context(encodeHomeCallback(identity.token, 1, action));
 
     await callbacks[0].fn(ctx);
 
     expect(render.execute).not.toHaveBeenCalled();
-    expect(camera.handleDashboard).toHaveBeenCalledWith(ctx);
+    expect(navigation.execute).toHaveBeenCalledWith(expect.objectContaining({ action }));
+    expect(workflowEntry.begin).toHaveBeenCalledWith(ctx, 'camera', {
+      source: 'captured',
+      view: { kind: 'home', checking: false },
+      sessionToken: identity.token,
+    });
+    expect(camera.handleDashboard).toHaveBeenCalledWith(ctx, { receipt: workflowReceipt });
+  });
+
+  it('opens a validated Home destination freshly at the bottom after workflow leave succeeds', async () => {
+    const { callbacks, open, render, workflowEntry } = setup();
+    const ctx = context(encodeHomeCallback(identity.token, 1, { kind: 'sensors', page: 2 }));
+    (workflowEntry.leaveForHome as ReturnType<typeof vi.fn>).mockImplementation(async (_ctx, promote) => {
+      await promote();
+      return 'opened';
+    });
+
+    await callbacks[0].fn(ctx);
+
+    expect(render.execute).not.toHaveBeenCalled();
+    expect(open.execute).toHaveBeenCalledWith(expect.objectContaining({
+      view: { kind: 'sensors', page: 2, checking: false },
+    }));
+  });
+
+  it('does not leave a workflow or promote a fresh Home for an invalid callback', async () => {
+    const { callbacks, open, workflowEntry } = setup();
+    const ctx = context('h:not-a-token:1:s:2');
+
+    await callbacks[0].fn(ctx);
+
+    expect(workflowEntry.leaveForHome).not.toHaveBeenCalled();
+    expect(open.execute).not.toHaveBeenCalled();
   });
 
   it('renders the localized in-progress recovery for a repeated claimed cleanup', async () => {

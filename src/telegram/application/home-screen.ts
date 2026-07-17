@@ -23,7 +23,8 @@ export type HomeScreen =
   | { kind: 'admin-tools' }
   | { kind: 'admin-sensor-setup' }
   | { kind: 'admin-storage' }
-  | { kind: 'admin-system'; autoCleanThreshold: number }
+  | { kind: 'admin-system' }
+  | { kind: 'admin-cleanup-threshold'; autoCleanThreshold: number }
   | { kind: 'confirmation'; action: 'cleanup' | 'restart'; receiptId: string }
   | { kind: 'cleanup-result'; outcome: 'executed' | 'in-progress' | 'failed'; threshold: number | null };
 
@@ -35,6 +36,7 @@ export function homeViewForScreen(screen: HomeScreen): HomeView {
     case 'notification-targets': return { kind: 'notification-targets', page: screen.page.page, targets: screen.page.targets.map(({ ref }) => ref) };
     case 'notification-target': return { kind: 'notification-target', page: screen.page, target: screen.target.ref };
     case 'notifications': case 'pause-duration': case 'more': case 'history': case 'admin-tools': case 'admin-sensor-setup': case 'admin-storage': case 'admin-system': return { kind: screen.kind };
+    case 'admin-cleanup-threshold': return { kind: screen.kind };
     case 'pause-confirmation': return { kind: screen.kind, hours: screen.hours, receiptId: screen.receiptId };
     case 'confirmation': return { kind: screen.kind, action: screen.action, receiptId: screen.receiptId };
     case 'cleanup-result': return { kind: screen.kind, outcome: screen.outcome, threshold: screen.threshold };

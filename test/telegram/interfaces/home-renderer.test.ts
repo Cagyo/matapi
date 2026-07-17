@@ -163,7 +163,7 @@ describe('renderHomeMessage', () => {
     expect(rendered.rows.map((row) => row.map((button) => button.text))).toEqual([
       [catalogs.en.home.sensors.previous, catalogs.en.home.sensors.next],
       [catalogs.en.home.buttons.checkNow],
-      [catalogs.en.home.sensors.back, catalogs.en.home.sensors.home],
+      [catalogs.en.home.sensors.home],
     ]);
   });
 
@@ -191,10 +191,7 @@ describe('renderHomeMessage', () => {
     expect(admin.text).toContain(catalogs.en.home.sensors.setupSensors);
     expect(member.rows).toEqual([
       [{ text: catalogs.en.home.buttons.checkNow, callbackData: expect.any(String) }],
-      [
-        { text: catalogs.en.home.sensors.back, callbackData: expect.any(String) },
-        { text: catalogs.en.home.sensors.home, callbackData: expect.any(String) },
-      ],
+      [{ text: catalogs.en.home.sensors.home, callbackData: expect.any(String) }],
     ]);
   });
 
@@ -209,7 +206,7 @@ describe('renderHomeMessage', () => {
   });
 
   it('keeps the Slice 3 locale object shapes identical', () => {
-    for (const key of ['notifications', 'history', 'more', 'adminTools', 'adminSensorSetup', 'adminStorage', 'adminSystem', 'confirmation', 'cleanupResult'] as const) {
+    for (const key of ['notifications', 'history', 'more', 'adminTools', 'adminSensorSetup', 'adminStorage', 'adminSystem', 'adminCleanupThreshold', 'confirmation', 'cleanupResult'] as const) {
       expect(shapeOf(catalogs.ru.home[key])).toEqual(shapeOf(catalogs.en.home[key]));
       expect(shapeOf(catalogs.uk.home[key])).toEqual(shapeOf(catalogs.en.home[key]));
     }
@@ -234,14 +231,14 @@ describe('renderHomeMessage', () => {
       [catalogs.en.home.notifications.targetSettings],
       [catalogs.en.home.notifications.resume],
       [catalogs.en.home.notifications.undoQuietHours],
-      [catalogs.en.home.common.back, catalogs.en.home.common.home],
+      [catalogs.en.home.common.home],
     ]);
     expect(rowActions(rendered)).toEqual([
       [{ kind: 'quiet-hours', preset: '22-07' }, { kind: 'quiet-hours', preset: '23-06' }, { kind: 'quiet-hours', preset: '00-08' }, { kind: 'quiet-hours', preset: 'off' }],
       [{ kind: 'notification-targets', page: 0 }],
       [{ kind: 'undo-pause', receiptId }],
       [{ kind: 'undo-quiet-hours', receiptId }],
-      [{ kind: 'back' }, { kind: 'home' }],
+      [{ kind: 'home' }],
     ]);
   });
 
@@ -306,14 +303,14 @@ describe('renderHomeMessage', () => {
     ]);
     expect(rowActions(memberMore)).toEqual([
       [{ kind: 'history' }, { kind: 'settings' }],
-      [{ kind: 'help' }, { kind: 'close' }],
-      [{ kind: 'back' }, { kind: 'home' }],
+      [{ kind: 'help' }],
+      [{ kind: 'home' }],
     ]);
     expect(rowActions(adminMore)).toEqual([
       [{ kind: 'history' }, { kind: 'settings' }],
-      [{ kind: 'help' }, { kind: 'close' }],
+      [{ kind: 'help' }],
       [{ kind: 'admin-tools' }],
-      [{ kind: 'back' }, { kind: 'home' }],
+      [{ kind: 'home' }],
     ]);
     expect(rowActions(adminTools)).toEqual([
       [{ kind: 'admin-sensor-setup' }, { kind: 'admin-storage' }],
@@ -325,13 +322,15 @@ describe('renderHomeMessage', () => {
   it('renders exact administration action destinations and receipt-backed confirmations without Markdown', () => {
     const setup = renderHomeMessage(catalogs.en, identity, { kind: 'admin-sensor-setup' });
     const storage = renderHomeMessage(catalogs.en, identity, { kind: 'admin-storage' });
-    const system = renderHomeMessage(catalogs.en, identity, { kind: 'admin-system', autoCleanThreshold: 80 });
+    const system = renderHomeMessage(catalogs.en, identity, { kind: 'admin-system' });
+    const threshold = renderHomeMessage(catalogs.en, identity, { kind: 'admin-cleanup-threshold', autoCleanThreshold: 80 });
     const cleanup = renderHomeMessage(catalogs.en, identity, { kind: 'confirmation', action: 'cleanup', receiptId: 'QrStUvWxYz012345' });
     const restart = renderHomeMessage(catalogs.en, identity, { kind: 'confirmation', action: 'restart', receiptId: 'QrStUvWxYz012345' });
 
     expect(rowActions(setup)).toEqual([
       [{ kind: 'config-add' }, { kind: 'config-modify' }],
-      [{ kind: 'config-remove' }, { kind: 'config-import' }, { kind: 'config-export' }],
+      [{ kind: 'config-remove' }, { kind: 'config-import' }],
+      [{ kind: 'config-export' }],
       [{ kind: 'back' }, { kind: 'home' }],
     ]);
     expect(rowActions(storage)).toEqual([
@@ -342,6 +341,10 @@ describe('renderHomeMessage', () => {
     expect(rowActions(system)).toEqual([
       [{ kind: 'system-health' }, { kind: 'system-packages' }],
       [{ kind: 'restart' }],
+      [{ kind: 'admin-cleanup-threshold' }],
+      [{ kind: 'back' }, { kind: 'home' }],
+    ]);
+    expect(rowActions(threshold)).toEqual([
       [{ kind: 'auto-clean-threshold', value: 70 }, { kind: 'auto-clean-threshold', value: 75 }, { kind: 'auto-clean-threshold', value: 80 }],
       [{ kind: 'auto-clean-threshold', value: 85 }, { kind: 'auto-clean-threshold', value: 90 }],
       [{ kind: 'back' }, { kind: 'home' }],
@@ -350,6 +353,41 @@ describe('renderHomeMessage', () => {
     expect(rowActions(restart)[0]).toEqual([{ kind: 'confirm-restart', receiptId: 'QrStUvWxYz012345' }]);
     expect(cleanup).not.toHaveProperty('parseMode');
     expect(restart).not.toHaveProperty('parseMode');
+  });
+
+  it('uses dedicated parent labels and never renders Close Home', () => {
+    const screens: HomeScreen[] = [
+      { kind: 'history' },
+      { kind: 'admin-tools' },
+      { kind: 'admin-sensor-setup' },
+      { kind: 'admin-storage' },
+      { kind: 'admin-system' },
+      { kind: 'admin-cleanup-threshold', autoCleanThreshold: 80 },
+    ];
+
+    for (const screen of screens) {
+      const rendered = renderHomeMessage(catalogs.en, identity, screen);
+      const navigation = rendered.rows.at(-1)!;
+      const parent = screen.kind === 'history' || screen.kind === 'admin-tools'
+        ? 'more'
+        : screen.kind === 'admin-sensor-setup' || screen.kind === 'admin-storage' || screen.kind === 'admin-system'
+          ? 'admin-tools'
+          : 'admin-system';
+      expect(navigation.map(({ text }) => text)).toEqual([
+        catalogs.en.home.navigation.backTo[parent],
+        catalogs.en.home.common.home,
+      ]);
+      expect(navigation[0]?.callbackData).not.toEqual(navigation[1]?.callbackData);
+      expect(rendered.rows.flat().map(({ text }) => text)).not.toContain('✕ Close Home');
+    }
+  });
+
+  it.each([
+    sensorsScreen(),
+    { kind: 'notifications', settings: notificationSettings() },
+    { kind: 'more', isAdmin: false },
+  ] satisfies HomeScreen[])('renders only Home navigation for a direct Home child: $kind', (screen) => {
+    expect(rowActions(renderHomeMessage(catalogs.en, identity, screen)).at(-1)).toEqual([{ kind: 'home' }]);
   });
 
   it.each([

@@ -95,7 +95,7 @@ describe('GetHomeScreenUseCase', () => {
     expect(getSummary.execute).not.toHaveBeenCalled();
   });
 
-  it('uses the strict threshold use case for the Home admin system screen', async () => {
+  it('does not load cleanup thresholds on the System navigation screen', async () => {
     const threshold = { current: vi.fn().mockResolvedValue(85) };
     const useCase = new GetHomeScreenUseCase(
       { execute: vi.fn() }, { listDashboardPage: vi.fn() }, { execute: vi.fn() }, { listEnabled: vi.fn() },
@@ -103,11 +103,11 @@ describe('GetHomeScreenUseCase', () => {
     );
 
     await expect(useCase.execute({ userId: 7, chatId: 70, role: 'admin', view: { kind: 'admin-system' } }))
-      .resolves.toEqual({ kind: 'admin-system', autoCleanThreshold: 85 });
-    expect(threshold.current).toHaveBeenCalledOnce();
+      .resolves.toEqual({ kind: 'admin-system' });
+    expect(threshold.current).not.toHaveBeenCalled();
   });
 
-  it('renders the cleanup threshold view through its admin system parent screen', async () => {
+  it('renders the cleanup threshold as its own admin-only screen', async () => {
     const threshold = { current: vi.fn().mockResolvedValue(85) };
     const useCase = new GetHomeScreenUseCase(
       { execute: vi.fn() }, { listDashboardPage: vi.fn() }, { execute: vi.fn() }, { listEnabled: vi.fn() },
@@ -115,7 +115,7 @@ describe('GetHomeScreenUseCase', () => {
     );
 
     await expect(useCase.execute({ userId: 7, chatId: 70, role: 'admin', view: { kind: 'admin-cleanup-threshold' } }))
-      .resolves.toEqual({ kind: 'admin-system', autoCleanThreshold: 85 });
+      .resolves.toEqual({ kind: 'admin-cleanup-threshold', autoCleanThreshold: 85 });
     expect(threshold.current).toHaveBeenCalledOnce();
   });
 

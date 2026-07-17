@@ -3,7 +3,7 @@ import type { Sensor } from '../../sensors/domain/sensor';
 import type { HomeScreen } from '../application/home-screen';
 import type { HomeSummary } from '../application/get-home-summary.use-case';
 import { encodeHomeCallback, type HomeAction } from '../domain/home-callback';
-import type { HomeIdentity } from '../domain/home-session';
+import type { HomeIdentity, HomeView } from '../domain/home-session';
 
 export interface HomeRenderedMessage {
   text: string;
@@ -47,7 +47,9 @@ export function renderHomeMessage(
     case 'admin-storage':
       return renderAdminStorage(catalog, identity);
     case 'admin-system':
-      return renderAdminSystem(catalog, identity, screen);
+      return renderAdminSystem(catalog, identity);
+    case 'admin-cleanup-threshold':
+      return renderAdminCleanupThreshold(catalog, identity, screen);
     case 'confirmation':
       return renderConfirmation(catalog, identity, screen);
     case 'cleanup-result':
@@ -169,10 +171,7 @@ function sensorRows(
     if (paging.length > 0) rows.push(paging);
   }
   rows.push([button(catalog.home.buttons.checkNow, identity, { kind: 'check' })]);
-  rows.push([
-    button(catalog.home.sensors.back, identity, { kind: 'back' }),
-    button(catalog.home.sensors.home, identity, { kind: 'home' }),
-  ]);
+  rows.push(...navigationRows(catalog, identity, 'home'));
   return rows;
 }
 
@@ -206,7 +205,7 @@ function renderNotifications(
   if (settings.undoQuietHours) {
     rows.push([button(catalog.home.notifications.undoQuietHours, identity, { kind: 'undo-quiet-hours', receiptId: settings.undoQuietHours.id })]);
   }
-  rows.push(...backHomeRows(catalog, identity));
+  rows.push(...navigationRows(catalog, identity, 'home'));
   return { text: lines.join('\n'), rows };
 }
 
@@ -232,7 +231,7 @@ function renderNotificationTargets(
     if (page.page < page.pageCount - 1) paging.push(button(catalog.home.sensors.next, identity, { kind: 'notification-targets', page: page.page + 1 }));
     if (paging.length > 0) rows.push(paging);
   }
-  rows.push(...backHomeRows(catalog, identity));
+  rows.push(...navigationRows(catalog, identity, 'notifications'));
   return { text: lines.join('\n'), rows };
 }
 
@@ -248,7 +247,7 @@ function renderNotificationTarget(
       [target.muted
         ? button(catalog.home.notifications.unmute, identity, { kind: 'notification-target-unmute' })
         : button(catalog.home.notifications.mute, identity, { kind: 'notification-target-mute' })],
-      ...backHomeRows(catalog, identity),
+      ...navigationRows(catalog, identity, 'notification-targets'),
     ],
   };
 }
@@ -258,7 +257,7 @@ function renderPauseDuration(catalog: LocaleCatalog, identity: PendingHomeIdenti
     text: [catalog.home.notifications.pauseTitle, '', catalog.home.notifications.pausePrompt].join('\n'),
     rows: [
       [1, 4, 8].map((hours) => button(catalog.home.notifications.pauseHours(hours), identity, { kind: 'pause-hours', hours: hours as 1 | 4 | 8 })),
-      ...backHomeRows(catalog, identity),
+      ...navigationRows(catalog, identity, 'notifications'),
     ],
   };
 }
@@ -272,7 +271,7 @@ function renderPauseConfirmation(
     text: catalog.home.notifications.pauseConfirmation(screen.hours),
     rows: [
       [button(catalog.home.notifications.confirmPause, identity, { kind: 'confirm-pause', receiptId: screen.receiptId })],
-      ...backHomeRows(catalog, identity),
+      ...navigationRows(catalog, identity, 'pause-duration'),
     ],
   };
 }
@@ -282,7 +281,7 @@ function renderHistory(catalog: LocaleCatalog, identity: PendingHomeIdentity): H
     text: catalog.home.history.title,
     rows: [
       [button(catalog.home.history.logs, identity, { kind: 'history-logs' }), button(catalog.home.history.exportCsv, identity, { kind: 'history-csv' })],
-      ...backHomeRows(catalog, identity),
+      ...navigationRows(catalog, identity, 'more'),
     ],
   };
 }
@@ -294,10 +293,10 @@ function renderMore(
 ): HomeRenderedMessage {
   const rows: HomeButton[][] = [
     [button(catalog.home.more.history, identity, { kind: 'history' }), button(catalog.home.more.settings, identity, { kind: 'settings' })],
-    [button(catalog.home.more.help, identity, { kind: 'help' }), button(catalog.home.more.close, identity, { kind: 'close' })],
+    [button(catalog.home.more.help, identity, { kind: 'help' })],
   ];
   if (screen.isAdmin) rows.push([button(catalog.home.more.adminTools, identity, { kind: 'admin-tools' })]);
-  rows.push(...backHomeRows(catalog, identity));
+  rows.push(...navigationRows(catalog, identity, 'home'));
   return { text: catalog.home.more.title, rows };
 }
 
@@ -307,7 +306,7 @@ function renderAdminTools(catalog: LocaleCatalog, identity: PendingHomeIdentity)
     rows: [
       [button(catalog.home.adminTools.sensorSetup, identity, { kind: 'admin-sensor-setup' }), button(catalog.home.adminTools.storage, identity, { kind: 'admin-storage' })],
       [button(catalog.home.adminTools.system, identity, { kind: 'admin-system' }), button(catalog.home.adminTools.invite, identity, { kind: 'invite' })],
-      ...backHomeRows(catalog, identity),
+      ...navigationRows(catalog, identity, 'more'),
     ],
   };
 }
@@ -317,8 +316,9 @@ function renderAdminSensorSetup(catalog: LocaleCatalog, identity: PendingHomeIde
     text: catalog.home.adminSensorSetup.title,
     rows: [
       [button(catalog.home.adminSensorSetup.add, identity, { kind: 'config-add' }), button(catalog.home.adminSensorSetup.modify, identity, { kind: 'config-modify' })],
-      [button(catalog.home.adminSensorSetup.remove, identity, { kind: 'config-remove' }), button(catalog.home.adminSensorSetup.import, identity, { kind: 'config-import' }), button(catalog.home.adminSensorSetup.export, identity, { kind: 'config-export' })],
-      ...backHomeRows(catalog, identity),
+      [button(catalog.home.adminSensorSetup.remove, identity, { kind: 'config-remove' }), button(catalog.home.adminSensorSetup.import, identity, { kind: 'config-import' })],
+      [button(catalog.home.adminSensorSetup.export, identity, { kind: 'config-export' })],
+      ...navigationRows(catalog, identity, 'admin-tools'),
     ],
   };
 }
@@ -329,7 +329,7 @@ function renderAdminStorage(catalog: LocaleCatalog, identity: PendingHomeIdentit
     rows: [
       [button(catalog.home.adminStorage.driveStatus, identity, { kind: 'drive-status' }), button(catalog.home.adminStorage.connectDrive, identity, { kind: 'drive-connect' })],
       [button(catalog.home.adminStorage.cleanup, identity, { kind: 'cleanup' })],
-      ...backHomeRows(catalog, identity),
+      ...navigationRows(catalog, identity, 'admin-tools'),
     ],
   };
 }
@@ -337,19 +337,29 @@ function renderAdminStorage(catalog: LocaleCatalog, identity: PendingHomeIdentit
 function renderAdminSystem(
   catalog: LocaleCatalog,
   identity: PendingHomeIdentity,
-  screen: Extract<HomeScreen, { kind: 'admin-system' }>,
 ): HomeRenderedMessage {
-  const thresholdRows: HomeButton[][] = [[70, 75, 80], [85, 90]].map((values) => values.map((value) => button(
-    catalog.home.adminSystem.threshold(value, screen.autoCleanThreshold), identity, { kind: 'auto-clean-threshold', value: value as 70 | 75 | 80 | 85 | 90 },
-  )));
   return {
     text: catalog.home.adminSystem.title,
     rows: [
       [button(catalog.home.adminSystem.health, identity, { kind: 'system-health' }), button(catalog.home.adminSystem.packages, identity, { kind: 'system-packages' })],
       [button(catalog.home.adminSystem.restart, identity, { kind: 'restart' })],
-      ...thresholdRows,
-      ...backHomeRows(catalog, identity),
+      [button(catalog.home.adminSystem.cleanupThreshold, identity, { kind: 'admin-cleanup-threshold' })],
+      ...navigationRows(catalog, identity, 'admin-tools'),
     ],
+  };
+}
+
+function renderAdminCleanupThreshold(
+  catalog: LocaleCatalog,
+  identity: PendingHomeIdentity,
+  screen: Extract<HomeScreen, { kind: 'admin-cleanup-threshold' }>,
+): HomeRenderedMessage {
+  const thresholdRows: HomeButton[][] = [[70, 75, 80], [85, 90]].map((values) => values.map((value) => button(
+    catalog.home.adminCleanupThreshold.threshold(value, screen.autoCleanThreshold), identity, { kind: 'auto-clean-threshold', value: value as 70 | 75 | 80 | 85 | 90 },
+  )));
+  return {
+    text: catalog.home.adminCleanupThreshold.title,
+    rows: [...thresholdRows, ...navigationRows(catalog, identity, 'admin-system')],
   };
 }
 
@@ -365,7 +375,7 @@ function renderConfirmation(
       [isCleanup
         ? button(catalog.home.confirmation.confirmCleanup, identity, { kind: 'confirm-cleanup', receiptId: screen.receiptId })
         : button(catalog.home.confirmation.confirmRestart, identity, { kind: 'confirm-restart', receiptId: screen.receiptId })],
-      ...backHomeRows(catalog, identity),
+      ...navigationRows(catalog, identity, isCleanup ? 'admin-storage' : 'admin-system'),
     ],
   };
 }
@@ -380,12 +390,27 @@ function renderCleanupResult(
     : screen.outcome === 'in-progress'
       ? catalog.home.cleanupResult.inProgress
       : catalog.home.cleanupResult.failed;
-  return { text, rows: backHomeRows(catalog, identity) };
+  return { text, rows: navigationRows(catalog, identity, 'admin-storage') };
 }
 
-function backHomeRows(catalog: LocaleCatalog, identity: PendingHomeIdentity): HomeButton[][] {
+type NavigationParent = Extract<HomeView['kind'],
+  | 'notifications'
+  | 'notification-targets'
+  | 'pause-duration'
+  | 'more'
+  | 'admin-tools'
+  | 'admin-storage'
+  | 'admin-system'
+> | 'home';
+
+function navigationRows(
+  catalog: LocaleCatalog,
+  identity: PendingHomeIdentity,
+  parent: NavigationParent,
+): HomeButton[][] {
+  if (parent === 'home') return [[button(catalog.home.common.home, identity, { kind: 'home' })]];
   return [[
-    button(catalog.home.common.back, identity, { kind: 'back' }),
+    button(catalog.home.navigation.backTo[parent], identity, { kind: 'back' }),
     button(catalog.home.common.home, identity, { kind: 'home' }),
   ]];
 }

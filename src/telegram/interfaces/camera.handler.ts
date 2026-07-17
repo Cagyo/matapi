@@ -37,6 +37,7 @@ import { RoleMiddleware } from './role.middleware';
 import { TelegramContext } from './telegram-context';
 import { TelegramHandler } from './telegram-handler';
 import { CameraSourcesHandler } from './camera-sources.handler';
+import type { WorkflowLaunch } from './workflow-entry.coordinator';
 import {
   appendReturnHomeButton,
   returnHomeKeyboard,
@@ -301,7 +302,7 @@ export class CameraHandler implements TelegramHandler {
     });
   }
 
-  async handleDashboard(ctx: TelegramContext): Promise<void> {
+  async handleDashboard(ctx: TelegramContext, _launch?: WorkflowLaunch): Promise<void> {
     const userId = ctx.from?.id;
     const chatId = ctx.chat?.type === 'private' ? ctx.chat.id : undefined;
     if (userId !== undefined && chatId !== undefined) this.cancelPending(userId, chatId);

@@ -42,19 +42,6 @@ export class TelegramHomeMessageAdapter implements HomeMessageDeliveryPort {
     await this.requireBot().api.editMessageReplyMarkup(chatId, messageId, emptyKeyboard());
   }
 
-  async closeMessage(
-    chatId: number,
-    messageId: number,
-    locale: Parameters<HomeMessageDeliveryPort['closeMessage']>[2],
-  ): Promise<void> {
-    await this.requireBot().api.editMessageText(
-      chatId,
-      messageId,
-      catalogFor(locale).home.recovery.closed,
-      emptyKeyboard(),
-    );
-  }
-
   private requireBot(): Bot<TelegramContext> {
     if (!this.bot) throw new Error('Telegram bot is not ready');
     return this.bot;

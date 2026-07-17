@@ -78,6 +78,13 @@ describe('catalogFor', () => {
         retryReturn: expect.any(String),
         closed: expect.any(String),
       }),
+      navigation: expect.objectContaining({
+        backTo: expect.objectContaining({
+          history: expect.any(String),
+          more: expect.any(String),
+          'admin-system': expect.any(String),
+        }),
+      }),
       legacyNotifications: expect.objectContaining({
         title: expect.any(String),
         muteSensors: expect.any(String),
@@ -90,5 +97,7 @@ describe('catalogFor', () => {
     expect(english.home.recovery.retryReturn).toBe('Retry return');
     expect(russian.home.recovery.retryReturn).toBe('Повторить возврат');
     expect(ukrainian.home.recovery.retryReturn).toBe('Повторити повернення');
+    expect(english.home.adminSystem.cleanupThreshold).toBeTruthy();
+    expect(english.home.adminCleanupThreshold.title).toBeTruthy();
   });
 });

@@ -19,5 +19,4 @@ export interface HomeMessageDeliveryPort {
   }): Promise<void>;
   deleteMessage(chatId: number, messageId: number): Promise<void>;
   stripKeyboard(chatId: number, messageId: number): Promise<void>;
-  closeMessage(chatId: number, messageId: number, locale: Locale): Promise<void>;
 }

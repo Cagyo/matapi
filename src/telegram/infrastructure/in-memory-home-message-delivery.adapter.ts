@@ -4,8 +4,7 @@ type DeliveryCall =
   | { kind: 'send'; input: Parameters<HomeMessageDeliveryPort['send']>[0] }
   | { kind: 'edit'; input: Parameters<HomeMessageDeliveryPort['edit']>[0] }
   | { kind: 'deleteMessage'; chatId: number; messageId: number }
-  | { kind: 'stripKeyboard'; chatId: number; messageId: number }
-  | { kind: 'closeMessage'; chatId: number; messageId: number; locale: Parameters<HomeMessageDeliveryPort['closeMessage']>[2] };
+  | { kind: 'stripKeyboard'; chatId: number; messageId: number };
 
 const MAX_RECORDED_CALLS = 100;
 
@@ -16,10 +15,8 @@ export class InMemoryHomeMessageDeliveryAdapter implements HomeMessageDeliveryPo
   editError: Error | null = null;
   deleteMessageError: Error | null = null;
   stripKeyboardError: Error | null = null;
-  closeMessageError: Error | null = null;
   onSend: (() => Promise<void> | void) | null = null;
   onEdit: (() => Promise<void> | void) | null = null;
-  onCloseMessage: (() => Promise<void> | void) | null = null;
   private nextMessageId = 1;
 
   async send(input: Parameters<HomeMessageDeliveryPort['send']>[0]): Promise<{ messageId: number }> {
@@ -43,16 +40,6 @@ export class InMemoryHomeMessageDeliveryAdapter implements HomeMessageDeliveryPo
   async stripKeyboard(chatId: number, messageId: number): Promise<void> {
     this.record({ kind: 'stripKeyboard', chatId, messageId });
     if (this.stripKeyboardError) throw this.stripKeyboardError;
-  }
-
-  async closeMessage(
-    chatId: number,
-    messageId: number,
-    locale: Parameters<HomeMessageDeliveryPort['closeMessage']>[2],
-  ): Promise<void> {
-    this.record({ kind: 'closeMessage', chatId, messageId, locale });
-    if (this.closeMessageError) throw this.closeMessageError;
-    await this.onCloseMessage?.();
   }
 
   private record(call: DeliveryCall): void {

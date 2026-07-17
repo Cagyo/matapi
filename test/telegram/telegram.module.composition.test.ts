@@ -45,6 +45,7 @@ async function telegramProviders(mode: 'mock' | 'real') {
     homeSessionStore: providerFor(HOME_SESSION_STORE)?.useClass,
     homeTokenGenerator: providerFor(HOME_TOKEN_GENERATOR)?.useClass,
     homeMessageDelivery: providerFor(HOME_MESSAGE_DELIVERY)?.useClass,
+    providerClasses: providers.map((provider) => provider.useClass).filter(Boolean),
   };
 }
 
@@ -107,6 +108,12 @@ describe('TelegramModule bot-mode composition', () => {
       homeTokenGenerator: expect.objectContaining({ name: 'CryptoHomeTokenGenerator' }),
       homeMessageDelivery: expect.objectContaining({ name: 'TelegramHomeMessageAdapter' }),
     });
+  });
+
+  it('does not register the removed Close Home use case', async () => {
+    const providers = await telegramProviders('mock');
+
+    expect(providers.providerClasses).not.toContainEqual(expect.objectContaining({ name: 'CloseHomeUseCase' }));
   });
 
   it.each(['mock', 'real'] as const)('resolves GetHomeSummaryUseCase at runtime in %s mode', async (mode) => {

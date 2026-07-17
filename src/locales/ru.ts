@@ -594,6 +594,18 @@ const ruCatalog = {
       back: '« Назад',
       home: '🏠 Дом',
     },
+    navigation: {
+      backTo: {
+        notifications: '« Уведомления',
+        'notification-targets': '« Настройки целей',
+        'pause-duration': '« Уведомления',
+        history: '« Ещё',
+        more: '« Ещё',
+        'admin-tools': '« Инструменты администратора',
+        'admin-storage': '« Хранилище и резервные копии',
+        'admin-system': '« Система',
+      },
+    },
     history: {
       title: '🗂 История',
       logs: '📜 Журналы',
@@ -604,7 +616,6 @@ const ruCatalog = {
       history: '🗂 История',
       settings: '⚙️ Мои настройки',
       help: '❓ Справка',
-      close: '✕ Закрыть Дом',
       adminTools: '🛠 Инструменты администратора',
     },
     adminTools: {
@@ -633,6 +644,10 @@ const ruCatalog = {
       health: '❤️ Состояние',
       packages: '📦 Системные пакеты',
       restart: '🔄 Перезапустить worker',
+      cleanupThreshold: '🧹 Порог очистки',
+    },
+    adminCleanupThreshold: {
+      title: '🧹 Порог очистки',
       threshold: (value: number, current: number) => `${value}%${value === current ? ' ✓' : ''}`,
     },
     confirmation: {

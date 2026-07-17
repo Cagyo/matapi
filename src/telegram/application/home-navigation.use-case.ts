@@ -8,7 +8,7 @@ import { HOME_ACTION_REPOSITORY, type HomeActionRepositoryPort } from './ports/h
 
 export type HomeNavigationResult =
   | { kind: 'render'; view: HomeView }
-  | { kind: 'external'; destination: 'history-logs' | 'history-csv' | 'settings' | 'help' | 'config-add' | 'config-modify' | 'config-remove' | 'config-import' | 'config-export' | 'drive-status' | 'drive-connect' | 'system-health' | 'system-packages' | 'invite' }
+  | { kind: 'external'; destination: 'camera' | 'history-logs' | 'history-csv' | 'settings' | 'help' | 'config-add' | 'config-modify' | 'config-remove' | 'config-import' | 'config-export' | 'drive-status' | 'drive-connect' | 'system-health' | 'system-packages' | 'invite' }
   | { kind: 'restart' }
   | { kind: 'recovery'; reason: 'expired' | 'superseded' | 'executing' | 'terminal' | 'target-unavailable' | 'admin-required' };
 
@@ -52,6 +52,7 @@ export class HomeNavigationUseCase {
 
   async execute(input: HomeNavigationInput): Promise<HomeNavigationResult> {
     const { action, view } = input;
+    if (action.kind === 'refresh') return { kind: 'render', view };
     if (action.kind === 'back') {
       const parent = parentView(view);
       return parent ? { kind: 'render', view: parent } : { kind: 'recovery', reason: 'superseded' };
@@ -127,6 +128,7 @@ export class HomeNavigationUseCase {
     if (action.kind === 'admin-sensor-setup' && view.kind === 'admin-tools' && input.role === 'admin') return { kind: 'render', view: { kind: 'admin-sensor-setup' } };
     if (action.kind === 'admin-storage' && view.kind === 'admin-tools' && input.role === 'admin') return { kind: 'render', view: { kind: 'admin-storage' } };
     if (action.kind === 'admin-system' && view.kind === 'admin-tools' && input.role === 'admin') return { kind: 'render', view: { kind: 'admin-system' } };
+    if (action.kind === 'admin-cleanup-threshold' && view.kind === 'admin-system' && input.role === 'admin') return { kind: 'render', view: { kind: 'admin-cleanup-threshold' } };
     if (action.kind === 'pause-duration' && view.kind === 'notifications') return { kind: 'render', view: { kind: 'pause-duration' } };
     if (action.kind === 'notification-targets' && view.kind === 'notifications') return { kind: 'render', view: { kind: 'notification-targets', page: action.page, targets: [] } };
     if (action.kind === 'notification-target' && view.kind === 'notification-targets' && action.index < view.targets.length) return { kind: 'render', view: { kind: 'notification-target', page: view.page, target: view.targets[action.index] } };
@@ -144,7 +146,8 @@ export class HomeNavigationUseCase {
       const expectedView = action.kind.startsWith('config-') ? 'admin-sensor-setup' : action.kind.startsWith('drive-') ? 'admin-storage' : 'admin-system';
       if (view.kind === expectedView) return { kind: 'external', destination: adminExternal[action.kind] };
     }
-    if (action.kind === 'auto-clean-threshold' && view.kind === 'admin-system' && input.role === 'admin') return { kind: 'render', view };
+    if (action.kind === 'auto-clean-threshold' && view.kind === 'admin-cleanup-threshold' && input.role === 'admin') return { kind: 'render', view };
+    if (action.kind === 'camera' && view.kind === 'home') return { kind: 'external', destination: 'camera' };
     if (action.kind === 'home') return { kind: 'render', view: { kind: 'home', checking: false } };
     if (action.kind === 'sensors' && (view.kind === 'home' || view.kind === 'sensors')) return { kind: 'render', view: { kind: 'sensors', page: action.page, checking: false } };
     if (action.kind === 'check' && (view.kind === 'home' || view.kind === 'sensors')) return { kind: 'render', view: { ...view, checking: true } };

@@ -33,8 +33,34 @@ function setup(result: { receipt: WorkflowReturnReceipt; replaced: WorkflowRetur
     { execute } as unknown as BeginWorkflowReturnUseCase,
     registry,
     new WorkflowOperationQueue(),
+    {} as never,
+    { now: () => new Date('2030-01-01T00:00:00.000Z') },
   );
   return { coordinator, execute, registry, cancelExact };
+}
+
+function leaveSetup({
+  current = receipt,
+  claim = { kind: 'claimed' as const, receipt },
+}: {
+  current?: WorkflowReturnReceipt | null;
+  claim?: { kind: 'claimed' | 'resumable' | 'returned'; receipt: WorkflowReturnReceipt } | { kind: 'expired' | 'superseded' | 'terminal' };
+} = {}) {
+  const actions = {
+    findWorkflowReturn: vi.fn().mockResolvedValue(current),
+    claimWorkflowReturn: vi.fn().mockResolvedValue(claim),
+    finishWorkflowReturn: vi.fn().mockResolvedValue('finished'),
+  };
+  const registry = new WorkflowDraftRegistry();
+  const cancelExact = vi.spyOn(registry, 'cancelExact').mockResolvedValue('cancelled');
+  const coordinator = new WorkflowEntryCoordinator(
+    { execute: vi.fn() } as unknown as BeginWorkflowReturnUseCase,
+    registry,
+    new WorkflowOperationQueue(),
+    actions as never,
+    { now: () => new Date('2030-01-01T00:00:00.000Z') },
+  );
+  return { coordinator, actions, cancelExact };
 }
 
 describe('WorkflowEntryCoordinator', () => {
@@ -88,5 +114,68 @@ describe('WorkflowEntryCoordinator', () => {
 
     await coordinator.begin(context(), 'camera', { source: 'natural-parent' });
     expect(cancelExact).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['cancellable', receipt, true],
+    ['running', { ...receipt, payload: { ...receipt.payload, phase: 'running' as const } }, false],
+  ] as const)('leaves a claimed %s workflow before promoting the requested fresh Home destination', async (_phase, current, cancelsDraft) => {
+    const { coordinator, actions, cancelExact } = leaveSetup({
+      current,
+      claim: { kind: 'claimed', receipt: current },
+    });
+    const promote = vi.fn().mockResolvedValue(true);
+
+    await expect(coordinator.leaveForHome(context(), promote)).resolves.toBe('opened');
+
+    expect(actions.claimWorkflowReturn).toHaveBeenCalledWith({ userId: 7, chatId: 70, id: current.id, now: new Date('2030-01-01T00:00:00.000Z') });
+    expect(cancelExact).toHaveBeenCalledTimes(cancelsDraft ? 1 : 0);
+    expect(promote).toHaveBeenCalledOnce();
+    expect(actions.finishWorkflowReturn).toHaveBeenCalledWith({
+      userId: 7,
+      chatId: 70,
+      id: current.id,
+      outcome: 'returned',
+      now: new Date('2030-01-01T00:00:00.000Z'),
+    });
+  });
+
+  it('does not clean, promote, or finish when the current receipt becomes stale before claim', async () => {
+    const { coordinator, actions, cancelExact } = leaveSetup({ claim: { kind: 'superseded' } });
+    const promote = vi.fn().mockResolvedValue(true);
+
+    await expect(coordinator.leaveForHome(context(), promote)).resolves.toBe('stale');
+
+    expect(cancelExact).not.toHaveBeenCalled();
+    expect(promote).not.toHaveBeenCalled();
+    expect(actions.finishWorkflowReturn).not.toHaveBeenCalled();
+  });
+
+  it('treats a previously returned running workflow as inactive without repeating cleanup or promotion', async () => {
+    const returned = {
+      ...receipt,
+      status: 'returned' as const,
+      payload: { ...receipt.payload, phase: 'running' as const },
+    } satisfies WorkflowReturnReceipt;
+    const { coordinator, actions, cancelExact } = leaveSetup({
+      current: returned,
+      claim: { kind: 'returned', receipt: returned },
+    });
+    const promote = vi.fn().mockResolvedValue(true);
+
+    await expect(coordinator.leaveForHome(context(), promote)).resolves.toBe('no-workflow');
+
+    expect(cancelExact).not.toHaveBeenCalled();
+    expect(promote).not.toHaveBeenCalled();
+    expect(actions.finishWorkflowReturn).not.toHaveBeenCalled();
+  });
+
+  it('keeps a claimed receipt resumable when fresh Home promotion fails', async () => {
+    const { coordinator, actions } = leaveSetup();
+    const promote = vi.fn().mockResolvedValue(false);
+
+    await expect(coordinator.leaveForHome(context(), promote)).resolves.toBe('not-opened');
+
+    expect(actions.finishWorkflowReturn).not.toHaveBeenCalled();
   });
 });

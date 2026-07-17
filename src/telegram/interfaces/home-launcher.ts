@@ -2,13 +2,22 @@ import { Injectable } from '@nestjs/common';
 import { InlineKeyboard } from 'grammy';
 import { OpenHomeUseCase } from '../application/open-home.use-case';
 import { OPEN_NEW_HOME_CALLBACK } from '../domain/home-callback';
+import type { HomeView } from '../domain/home-session';
 import type { TelegramContext } from './telegram-context';
+
+export interface HomeLaunchOptions {
+  view?: HomeView;
+  notice?: string;
+}
 
 @Injectable()
 export class HomeLauncher {
   constructor(private readonly openHome: OpenHomeUseCase) {}
 
-  async launch(ctx: TelegramContext): Promise<'opened' | 'superseded' | 'unavailable' | 'ignored'> {
+  async launch(
+    ctx: TelegramContext,
+    options: HomeLaunchOptions = {},
+  ): Promise<'opened' | 'superseded' | 'unavailable' | 'ignored'> {
     const state = currentPrivateLocaleState(ctx);
     if (!state) return 'ignored';
 
@@ -18,7 +27,8 @@ export class HomeLauncher {
         chatId: state.chatId,
         locale: state.locale,
         role: state.role,
-        view: { kind: 'home', checking: false },
+        view: options.view ?? { kind: 'home', checking: false },
+        ...(options.notice === undefined ? {} : { notice: options.notice }),
       });
       if (result.kind === 'opened') return 'opened';
     } catch {

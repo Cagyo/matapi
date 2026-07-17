@@ -54,6 +54,22 @@ describe('HomeLauncher', () => {
     expect(ctx.editMessageText).not.toHaveBeenCalled();
   });
 
+  it('opens an explicit destination with a transient notice', async () => {
+    const openHome = { execute: vi.fn().mockResolvedValue({ kind: 'opened' }) };
+    const launcher = new HomeLauncher(openHome as unknown as OpenHomeUseCase);
+    const ctx = privateContext({ role: 'admin' });
+
+    await expect(launcher.launch(ctx, {
+      view: { kind: 'admin-sensor-setup' },
+      notice: 'Setup expired.',
+    })).resolves.toBe('opened');
+
+    expect(openHome.execute).toHaveBeenCalledWith(expect.objectContaining({
+      view: { kind: 'admin-sensor-setup' },
+      notice: 'Setup expired.',
+    }));
+  });
+
   it('uses stale recovery after promotion loss and unavailable recovery after send failure', async () => {
     const openHome = { execute: vi.fn() };
     const launcher = new HomeLauncher(openHome as unknown as OpenHomeUseCase);

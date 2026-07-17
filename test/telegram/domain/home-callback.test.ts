@@ -16,7 +16,6 @@ describe('Home callback codec', () => {
       { kind: 'notifications' },
       { kind: 'more' },
       { kind: 'check' },
-      { kind: 'close' },
       { kind: 'back' },
       { kind: 'notification-targets', page: 0 },
       { kind: 'notification-target', index: 0 },
@@ -44,6 +43,7 @@ describe('Home callback codec', () => {
       { kind: 'admin-sensor-setup' },
       { kind: 'admin-storage' },
       { kind: 'admin-system' },
+      { kind: 'admin-cleanup-threshold' },
       { kind: 'config-add' },
       { kind: 'config-modify' },
       { kind: 'config-remove' },
@@ -93,6 +93,15 @@ describe('Home callback codec', () => {
 
     expect(new Set(receiptActions.map((action) => encodeHomeCallback(token, 1, action))).size)
       .toBe(receiptActions.length);
+  });
+
+  it('decodes the one-release legacy close action as a non-destructive refresh', () => {
+    expect(parseHomeCallback(`h:${token}:1:x`)).toEqual({
+      token,
+      revision: 1,
+      action: { kind: 'refresh' },
+    });
+    expect(() => encodeHomeCallback(token, 1, { kind: 'refresh' })).toThrow(RangeError);
   });
 
   it.each([

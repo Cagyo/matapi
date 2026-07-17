@@ -55,6 +55,67 @@ describe('HomeNavigationUseCase', () => {
     expect(actions.claimExternal).not.toHaveBeenCalled();
   });
 
+  it('opens Cleanup threshold only from System and applies threshold values only on that submenu', async () => {
+    const actions = { createPauseConfirmation: vi.fn(), claimExternal: vi.fn() };
+    const useCase = new HomeNavigationUseCase(
+      actions as never,
+      { now: () => now },
+      { generate: () => '1234567890abcdef' },
+    );
+
+    await expect(useCase.execute({
+      active,
+      role: 'admin',
+      view: { kind: 'admin-system' },
+      action: { kind: 'admin-cleanup-threshold' },
+    })).resolves.toEqual({ kind: 'render', view: { kind: 'admin-cleanup-threshold' } });
+    await expect(useCase.execute({
+      active,
+      role: 'admin',
+      view: { kind: 'admin-system' },
+      action: { kind: 'auto-clean-threshold', value: 80 },
+    })).resolves.toEqual({ kind: 'recovery', reason: 'superseded' });
+    await expect(useCase.execute({
+      active,
+      role: 'admin',
+      view: { kind: 'admin-cleanup-threshold' },
+      action: { kind: 'auto-clean-threshold', value: 80 },
+    })).resolves.toEqual({ kind: 'render', view: { kind: 'admin-cleanup-threshold' } });
+  });
+
+  it('starts the Camera external workflow only from a validated Home view', async () => {
+    const useCase = new HomeNavigationUseCase(
+      {} as never,
+      { now: () => now },
+      { generate: () => '1234567890abcdef' },
+    );
+
+    await expect(useCase.execute({
+      active,
+      role: 'user',
+      view: { kind: 'home', checking: false },
+      action: { kind: 'camera' },
+    })).resolves.toEqual({ kind: 'external', destination: 'camera' });
+    await expect(useCase.execute({
+      active,
+      role: 'user',
+      view: { kind: 'more' },
+      action: { kind: 'camera' },
+    })).resolves.toEqual({ kind: 'recovery', reason: 'superseded' });
+  });
+
+  it('refreshes the already validated legacy view without changing its destination', async () => {
+    const useCase = new HomeNavigationUseCase(
+      {} as never,
+      { now: () => now },
+      { generate: () => '1234567890abcdef' },
+    );
+    const view: HomeView = { kind: 'sensors', page: 2, checking: false };
+
+    await expect(useCase.execute({ active, role: 'user', view, action: { kind: 'refresh' } }))
+      .resolves.toEqual({ kind: 'render', view });
+  });
+
   it.each([119_999, 120_000])('makes a pause confirmation live only before its exact two-minute expiry (%ims)', async (elapsed) => {
     const actions = { createPauseConfirmation: vi.fn().mockResolvedValue(undefined) };
     const useCase = new HomeNavigationUseCase(

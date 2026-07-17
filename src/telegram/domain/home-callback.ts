@@ -9,7 +9,8 @@ export type HomeAction =
   | { kind: 'notifications' }
   | { kind: 'more' }
   | { kind: 'check' }
-  | { kind: 'close' }
+  /** One-release compatibility for legacy `x` buttons; never encode it. */
+  | { kind: 'refresh' }
   | { kind: 'back' }
   | { kind: 'notification-targets'; page: number }
   | { kind: 'notification-target'; index: number }
@@ -32,6 +33,7 @@ export type HomeAction =
   | { kind: 'admin-sensor-setup' }
   | { kind: 'admin-storage' }
   | { kind: 'admin-system' }
+  | { kind: 'admin-cleanup-threshold' }
   | { kind: 'config-add' }
   | { kind: 'config-modify' }
   | { kind: 'config-remove' }
@@ -90,8 +92,8 @@ function actionParts(action: HomeAction): string[] {
       return ['m'];
     case 'check':
       return ['k'];
-    case 'close':
-      return ['x'];
+    case 'refresh':
+      throw new RangeError('Legacy Home refresh actions are decode-only');
     case 'back':
       return ['b'];
     case 'notification-targets':
@@ -145,6 +147,8 @@ function actionParts(action: HomeAction): string[] {
       return ['ab'];
     case 'admin-system':
       return ['ay'];
+    case 'admin-cleanup-threshold':
+      return ['atc'];
     case 'config-add':
       return ['ca'];
     case 'config-modify':
@@ -232,7 +236,7 @@ export function parseHomeCallback(data: string): ParsedHomeCallback | null {
       case 'k':
         return parts.length === 4 ? { token, revision, action: { kind: 'check' } } : null;
       case 'x':
-        return parts.length === 4 ? { token, revision, action: { kind: 'close' } } : null;
+        return parts.length === 4 ? { token, revision, action: { kind: 'refresh' } } : null;
       case 'b':
         return parts.length === 4 ? { token, revision, action: { kind: 'back' } } : null;
       case 'nt': {
@@ -271,6 +275,7 @@ export function parseHomeCallback(data: string): ParsedHomeCallback | null {
       case 'as': return parts.length === 4 ? { token, revision, action: { kind: 'admin-sensor-setup' } } : null;
       case 'ab': return parts.length === 4 ? { token, revision, action: { kind: 'admin-storage' } } : null;
       case 'ay': return parts.length === 4 ? { token, revision, action: { kind: 'admin-system' } } : null;
+      case 'atc': return parts.length === 4 ? { token, revision, action: { kind: 'admin-cleanup-threshold' } } : null;
       case 'ca': return parts.length === 4 ? { token, revision, action: { kind: 'config-add' } } : null;
       case 'cm': return parts.length === 4 ? { token, revision, action: { kind: 'config-modify' } } : null;
       case 'cx': return parts.length === 4 ? { token, revision, action: { kind: 'config-remove' } } : null;

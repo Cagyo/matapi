@@ -1,6 +1,11 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
+import { CLOCK, type ClockPort } from '../../events/domain/ports/clock.port';
 import type { LocaleCatalog } from '../../locales';
 import { BeginWorkflowReturnUseCase } from '../application/begin-workflow-return.use-case';
+import {
+  HOME_ACTION_REPOSITORY,
+  type HomeActionRepositoryPort,
+} from '../application/ports/home-action-repository.port';
 import { naturalWorkflowOrigin } from '../application/resolve-workflow-origin.use-case';
 import type { HomeView } from '../domain/home-session';
 import type { Locale } from '../domain/locale';
@@ -26,12 +31,16 @@ export interface CurrentWorkflowIdentity {
   catalog: LocaleCatalog;
 }
 
+export type LeaveForHomeResult = 'opened' | 'no-workflow' | 'not-opened' | 'stale' | 'ignored';
+
 @Injectable()
 export class WorkflowEntryCoordinator {
   constructor(
     private readonly beginWorkflow: BeginWorkflowReturnUseCase,
     private readonly drafts: WorkflowDraftRegistry,
     private readonly operations: WorkflowOperationQueue,
+    @Inject(HOME_ACTION_REPOSITORY) private readonly actions: HomeActionRepositoryPort,
+    @Inject(CLOCK) private readonly clock: ClockPort,
   ) {}
 
   async begin(
@@ -55,6 +64,49 @@ export class WorkflowEntryCoordinator {
         await this.drafts.cancelExact(result.replaced);
       }
       return result.receipt;
+    });
+  }
+
+  async leaveForHome(
+    ctx: TelegramContext,
+    promoteFreshDestination: () => Promise<boolean>,
+  ): Promise<LeaveForHomeResult> {
+    const identity = currentWorkflowIdentity(ctx);
+    if (!identity) return 'ignored';
+
+    return this.operations.run(identity.userId, identity.chatId, async () => {
+      const now = this.clock.now();
+      const current = await this.actions.findWorkflowReturn({
+        userId: identity.userId,
+        chatId: identity.chatId,
+        now,
+      });
+      if (!current) return 'no-workflow';
+
+      const claim = await this.actions.claimWorkflowReturn({
+        userId: identity.userId,
+        chatId: identity.chatId,
+        id: current.id,
+        now,
+      });
+      if (claim.kind === 'expired' || claim.kind === 'superseded') return 'stale';
+      if (claim.kind === 'returned' || claim.kind === 'terminal') return 'no-workflow';
+      if (claim.kind !== 'claimed' && claim.kind !== 'resumable') return 'stale';
+      const receipt = claim.receipt;
+
+      if (claim.kind === 'claimed' && receipt.payload.phase === 'cancellable') {
+        await this.drafts.cancelExact(receipt);
+      }
+      if (!await promoteFreshDestination()) return 'not-opened';
+
+      await this.actions.finishWorkflowReturn({
+        userId: identity.userId,
+        chatId: identity.chatId,
+        id: receipt.id,
+        outcome: 'returned',
+        now: this.clock.now(),
+      });
+      return 'opened';
     });
   }
 }

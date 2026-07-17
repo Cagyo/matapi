@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Bot } from 'grammy';
-import { catalogs } from '../../../src/locales/catalog';
 import type { HomeScreen } from '../../../src/telegram/application/home-screen';
 import type { HomeSummary } from '../../../src/telegram/application/get-home-summary.use-case';
 import type { HomeIdentity } from '../../../src/telegram/domain/home-session';
@@ -113,19 +112,6 @@ describe('TelegramHomeMessageAdapter', () => {
     expect(api.deleteMessage).toHaveBeenCalledWith(19, 23);
   });
 
-  it('closes with localized copy and an empty keyboard', async () => {
-    const { api, bot } = fakeBot();
-    const delivery = new TelegramHomeMessageAdapter();
-    delivery.setBot(bot);
-
-    await delivery.closeMessage(19, 23, 'uk');
-
-    expect(api.editMessageText).toHaveBeenCalledWith(19, 23, catalogs.uk.home.recovery.closed, {
-      reply_markup: { inline_keyboard: [] },
-    });
-    expect(api.editMessageText.mock.calls[0]?.[3]).not.toHaveProperty('parse_mode');
-  });
-
   it('propagates Telegram API failures to the use case', async () => {
     const { api, bot } = fakeBot();
     const failure = new Error('network unavailable');
@@ -142,6 +128,6 @@ describe('TelegramHomeMessageAdapter', () => {
     delivery.setBot(bot);
     delivery.clearBot();
 
-    await expect(delivery.closeMessage(1, 2, 'en')).rejects.toThrow('Telegram bot is not ready');
+    await expect(delivery.deleteMessage(1, 2)).rejects.toThrow('Telegram bot is not ready');
   });
 });

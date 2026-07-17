@@ -594,6 +594,18 @@ const ukCatalog = {
       back: '« Назад',
       home: '🏠 Дім',
     },
+    navigation: {
+      backTo: {
+        notifications: '« Сповіщення',
+        'notification-targets': '« Налаштування цілей',
+        'pause-duration': '« Сповіщення',
+        history: '« Більше',
+        more: '« Більше',
+        'admin-tools': '« Інструменти адміністратора',
+        'admin-storage': '« Сховище та резервні копії',
+        'admin-system': '« Система',
+      },
+    },
     history: {
       title: '🗂 Історія',
       logs: '📜 Журнали',
@@ -604,7 +616,6 @@ const ukCatalog = {
       history: '🗂 Історія',
       settings: '⚙️ Мої налаштування',
       help: '❓ Довідка',
-      close: '✕ Закрити Дім',
       adminTools: '🛠 Інструменти адміністратора',
     },
     adminTools: {
@@ -633,6 +644,10 @@ const ukCatalog = {
       health: '❤️ Стан',
       packages: '📦 Системні пакети',
       restart: '🔄 Перезапустити worker',
+      cleanupThreshold: '🧹 Поріг очищення',
+    },
+    adminCleanupThreshold: {
+      title: '🧹 Поріг очищення',
       threshold: (value: number, current: number) => `${value}%${value === current ? ' ✓' : ''}`,
     },
     confirmation: {
