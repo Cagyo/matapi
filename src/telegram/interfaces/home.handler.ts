@@ -5,7 +5,7 @@ import {
   type HomeNavigationResult,
   type HomeNavigationRoute,
 } from '../application/home-navigation.use-case';
-import { OpenHomeUseCase } from '../application/open-home.use-case';
+import { OpenHomeUseCase, type OpenHomeResult } from '../application/open-home.use-case';
 import { RefreshHomeMonitoringUseCase } from '../application/refresh-home-monitoring.use-case';
 import { RenderHomeUseCase, type RenderHomeResult } from '../application/render-home.use-case';
 import { ValidateHomeCallbackUseCase } from '../application/validate-home-callback.use-case';
@@ -306,10 +306,44 @@ export class HomeHandler implements TelegramHandler {
     active: Parameters<RenderHomeUseCase['execute']>[0]['active'],
     acceptedView: HomeView,
   ): Promise<void> {
-    if (acceptedView.kind !== 'home' && acceptedView.kind !== 'sensors') {
+    if (!isCheckableHomeView(acceptedView)) {
       await this.recover(ctx, 'stale');
       return;
     }
+    const destination = { ...acceptedView, checking: false };
+    const current = this.current(ctx);
+    if (!current) {
+      await this.recover(ctx, 'unavailable');
+      return;
+    }
+
+    const promotion: { fresh: Extract<OpenHomeResult, { kind: 'opened' }> | null } = { fresh: null };
+    const leave = await this.leaveForHome(ctx, async () => {
+      promotion.fresh = await this.openFreshResult(current, destination);
+      return promotion.fresh !== null;
+    });
+    if (leave === 'opened') {
+      if (!promotion.fresh || !isCheckableHomeView(promotion.fresh.view)) {
+        await this.recover(ctx, 'unavailable');
+        return;
+      }
+      await this.runCheckCycle(ctx, promotion.fresh.active, promotion.fresh.view);
+      return;
+    }
+    if (leave === 'no-workflow') {
+      // No workflow existed to leave, so preserve the in-place monitoring
+      // refresh behavior for the already accepted authoritative Home.
+      await this.runCheckCycle(ctx, active, destination);
+      return;
+    }
+    await this.recover(ctx, leave === 'stale' ? 'stale' : 'unavailable');
+  }
+
+  private async runCheckCycle(
+    ctx: TelegramContext,
+    active: Parameters<RenderHomeUseCase['execute']>[0]['active'],
+    acceptedView: Extract<HomeView, { kind: 'home' | 'sensors' }>,
+  ): Promise<void> {
     const checking = await this.renderHome.execute({
       active,
       ...this.renderOptions(ctx),
@@ -319,7 +353,7 @@ export class HomeHandler implements TelegramHandler {
       await this.recoverRenderFailure(ctx, checking);
       return;
     }
-    if (checking.view.kind !== 'home' && checking.view.kind !== 'sensors') {
+    if (!isCheckableHomeView(checking.view)) {
       await this.recover(ctx, 'unavailable');
       return;
     }
@@ -375,6 +409,13 @@ export class HomeHandler implements TelegramHandler {
     current: NonNullable<ReturnType<HomeHandler['current']>>,
     view: HomeView,
   ): Promise<boolean> {
+    return (await this.openFreshResult(current, view)) !== null;
+  }
+
+  private async openFreshResult(
+    current: NonNullable<ReturnType<HomeHandler['current']>>,
+    view: HomeView,
+  ): Promise<Extract<OpenHomeResult, { kind: 'opened' }> | null> {
     const result = await this.openHome.execute({
       userId: current.userId,
       chatId: current.chatId,
@@ -382,7 +423,7 @@ export class HomeHandler implements TelegramHandler {
       role: current.state.user.role,
       view,
     });
-    return result.kind === 'opened';
+    return result.kind === 'opened' ? result : null;
   }
 
   private async openFreshFromContext(ctx: TelegramContext, view: HomeView): Promise<boolean> {
@@ -436,4 +477,10 @@ export class HomeHandler implements TelegramHandler {
     if (!userId || chat?.type !== 'private' || state?.user.telegramId !== userId) return null;
     return { userId, chatId: chat.id, state };
   }
+}
+
+function isCheckableHomeView(
+  view: HomeView,
+): view is Extract<HomeView, { kind: 'home' | 'sensors' }> {
+  return view.kind === 'home' || view.kind === 'sensors';
 }

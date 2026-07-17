@@ -9,6 +9,9 @@ import { HomeHandler } from '../../../src/telegram/interfaces/home.handler';
 import { RoleMiddleware } from '../../../src/telegram/interfaces/role.middleware';
 import { encodeHomeCallback, OPEN_NEW_HOME_CALLBACK } from '../../../src/telegram/domain/home-callback';
 import { WorkflowEntryCoordinator } from '../../../src/telegram/interfaces/workflow-entry.coordinator';
+import { WorkflowDraftRegistry } from '../../../src/telegram/interfaces/workflow-draft.registry';
+import { WorkflowOperationQueue } from '../../../src/telegram/interfaces/workflow-operation.queue';
+import type { BeginWorkflowReturnUseCase } from '../../../src/telegram/application/begin-workflow-return.use-case';
 import type { WorkflowReturnReceipt } from '../../../src/telegram/domain/workflow-return';
 
 const identity = {
@@ -53,11 +56,53 @@ function context(data?: string) {
   };
 }
 
+function activeCheckCoordinator(
+  phase: 'cancellable' | 'running',
+  events: string[],
+) {
+  const receipt = {
+    ...workflowReceipt,
+    payload: { ...workflowReceipt.payload, phase },
+  } satisfies WorkflowReturnReceipt;
+  const actions = {
+    findWorkflowReturn: vi.fn().mockImplementation(async () => {
+      events.push('find-workflow');
+      return receipt;
+    }),
+    claimWorkflowReturn: vi.fn().mockImplementation(async () => {
+      events.push('claim-workflow');
+      return { kind: 'claimed' as const, receipt };
+    }),
+    finishWorkflowReturn: vi.fn().mockImplementation(async () => {
+      events.push('finish-workflow');
+      return 'finished' as const;
+    }),
+  };
+  const drafts = new WorkflowDraftRegistry();
+  drafts.register('camera', {
+    cancelExact: async () => {
+      events.push('cancel-draft');
+      return 'cancelled';
+    },
+  });
+  return {
+    actions,
+    coordinator: new WorkflowEntryCoordinator(
+      { execute: vi.fn() } as unknown as BeginWorkflowReturnUseCase,
+      drafts,
+      new WorkflowOperationQueue(),
+      actions as never,
+      { now: () => new Date('2030-01-01T00:00:00.000Z') },
+    ),
+  };
+}
+
 function setup(overrides: {
   clean?: { execute: ReturnType<typeof vi.fn> };
   restart?: { execute: ReturnType<typeof vi.fn> };
   thresholds?: { execute: ReturnType<typeof vi.fn> };
   actions?: { finishExternal: ReturnType<typeof vi.fn> };
+  workflows?: WorkflowEntryCoordinator;
 } = {}) {
   const guard = { registered: vi.fn() } as unknown as RoleMiddleware;
   const open = {
@@ -115,7 +160,7 @@ function setup(overrides: {
     undefined, // target mute
     overrides.actions, // action repository
     { now: () => new Date('2030-01-01T00:00:00.000Z') },
-    workflowEntry,
+    overrides.workflows ?? workflowEntry,
   );
   const commands: Record<string, (...args: any[]) => Promise<void>> = {};
   const callbacks: { regex: RegExp; fn: (...args: any[]) => Promise<void> }[] = [];
@@ -123,7 +168,7 @@ function setup(overrides: {
     command: vi.fn((name, middleware, fn) => { commands[name] = fn ?? middleware; }),
     callbackQuery: vi.fn((regex, middleware, fn) => { callbacks.push({ regex, fn: fn ?? middleware }); }),
   } as any);
-  return { commands, callbacks, open, validate, render, refresh, camera, navigation, workflowEntry };
+  return { commands, callbacks, open, validate, render, refresh, camera, navigation, workflowEntry: overrides.workflows ?? workflowEntry };
 }
 
 describe('HomeHandler', () => {
@@ -245,6 +290,80 @@ describe('HomeHandler', () => {
     expect(render.execute).toHaveBeenLastCalledWith(expect.objectContaining({
       view: { kind: 'home', checking: false },
     }));
+  });
+
+  it.each([
+    ['cancellable', true],
+    ['running', false],
+  ] as const)('leaves an active %s workflow before Check renders and refreshes a fresh Home identity', async (phase, cancelsDraft) => {
+    const events: string[] = [];
+    const { coordinator } = activeCheckCoordinator(phase, events);
+    const { callbacks, validate, open, render, refresh } = setup({ workflows: coordinator });
+    const fresh = { ...identity, messageId: 901, token: 'QrStUvWxYz012345', revision: 8 };
+    const checking = { ...fresh, revision: 9 };
+    const ctx = context(encodeHomeCallback(identity.token, 1, { kind: 'check' }));
+    (validate.execute as ReturnType<typeof vi.fn>).mockResolvedValue({
+      kind: 'accepted', active: identity, view: { kind: 'sensors', page: 3, checking: false },
+    });
+    (open.execute as ReturnType<typeof vi.fn>).mockImplementation(async (input) => {
+      events.push(`open-fresh:${input.view.kind}:${input.view.checking}`);
+      return { kind: 'opened', active: fresh, view: input.view };
+    });
+    (render.execute as ReturnType<typeof vi.fn>).mockImplementation(async (input) => {
+      events.push(`render:${input.active.messageId}:${input.active.revision}:${input.view.checking}`);
+      return { kind: 'rendered', active: input.view.checking ? checking : { ...fresh, revision: 10 }, view: input.view };
+    });
+    (refresh.execute as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      events.push('refresh-monitoring');
+      return { kind: 'refreshed' };
+    });
+
+    await callbacks[0].fn(ctx);
+
+    const expected = [
+      'find-workflow',
+      'claim-workflow',
+      ...(cancelsDraft ? ['cancel-draft'] : []),
+      'open-fresh:sensors:false',
+      'finish-workflow',
+      'render:901:8:true',
+      'refresh-monitoring',
+      'render:901:9:false',
+    ];
+    expect(events).toEqual(expected);
+    expect(render.execute).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      active: fresh,
+      view: { kind: 'sensors', page: 3, checking: true },
+    }));
+    expect(render.execute).not.toHaveBeenCalledWith(expect.objectContaining({ active: identity }));
+  });
+
+  it('keeps the active workflow resumable and does not refresh when fresh Check promotion fails', async () => {
+    const events: string[] = [];
+    const { coordinator, actions } = activeCheckCoordinator('cancellable', events);
+    const { callbacks, open, render, refresh } = setup({ workflows: coordinator });
+    const ctx = context(encodeHomeCallback(identity.token, 1, { kind: 'check' }));
+    (open.execute as ReturnType<typeof vi.fn>).mockResolvedValue({ kind: 'superseded' });
+
+    await callbacks[0].fn(ctx);
+
+    expect(events).toEqual(['find-workflow', 'claim-workflow', 'cancel-draft']);
+    expect(actions.finishWorkflowReturn).not.toHaveBeenCalled();
+    expect(render.execute).not.toHaveBeenCalled();
+    expect(refresh.execute).not.toHaveBeenCalled();
+  });
+
+  it('does not claim or refresh for a stale Check callback', async () => {
+    const { callbacks, validate, workflowEntry, open, render, refresh } = setup();
+    const ctx = context(encodeHomeCallback(identity.token, 1, { kind: 'check' }));
+    (validate.execute as ReturnType<typeof vi.fn>).mockResolvedValue({ kind: 'stale' });
+
+    await callbacks[0].fn(ctx);
+
+    expect(workflowEntry.leaveForHome).not.toHaveBeenCalled();
+    expect(open.execute).not.toHaveBeenCalled();
+    expect(render.execute).not.toHaveBeenCalled();
+    expect(refresh.execute).not.toHaveBeenCalled();
   });
 
   it.each([
