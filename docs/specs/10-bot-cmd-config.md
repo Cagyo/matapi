@@ -137,21 +137,16 @@ Bot: ✅ Sensor "old_door" archived.
 
 ---
 
-## Return Home behavior
+## Contextual workflow return
 
-Config uses the shared `rh:f:<c|t>` workflow code from
-[06-bot-core.md](06-bot-core.md#authoritative-home-callback-pipeline). The
-handler keeps `ConfigState` only in interface-local in-memory state.
-
-| Workflow state | Return Home behavior |
-|---|---|
-| Add/modify/remove picker, prompt, retry, or confirmation | `rh:f:c` (`cancelPending`); delete the current `ConfigState`, then open a new Home. |
-| Incremental modify result | `rh:f:c` (`cancelPending`); preserve the completed field mutation and delete only the remaining modify-menu state, then open a new Home. |
-| Terminal config result/error with no live state | `rh:f:t` (`alreadyTerminal`); open a new Home directly. |
-
-This cleanup does not roll back any completed mutation. Return Home remains
-available to a registered user whose current role has changed; the new Home is
-rendered for that current role.
+Add, modify, and remove each begin their own receipt-bound workflow
+(`sensor-add`, `sensor-modify`, or `sensor-remove`) with Sensor setup as the
+natural parent. The only navigation callbacks are exact `wr:<id>:o` and
+`wr:<id>:h`. Cancellation deletes only the draft keyed by that exact receipt;
+it never rolls back completed mutations or changes a newer workflow. Current
+role and the stored origin are re-authorized when returning, so a demoted admin
+falls back safely. If the process restart lost the draft, the durable receipt
+still restores the authorized origin with localized interruption copy.
 
 ---
 

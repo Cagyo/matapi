@@ -55,28 +55,28 @@ Status legend: ✅ canonical · 🚧 in transition · 📝 planned
 
 ### Telegram context
 
-The syntax-validated external Return Home acknowledgement grammar is
-`rh:<l|c|s|f|i|d|u|a>:<c|r|t>`. `ReturnHomeHandler` is an interface-layer
-orchestrator: on a `cancelPending` action it clears only the named workflow's
-in-memory interface state before delegating to `HomeLauncher`. For camera,
-`CameraHandler` coordinates its browse state with the exact private-chat source
-state owned by `CameraSourcesHandler`; this cancellation remains entirely in the
-Telegram interface layer. It is not an application/domain port, does not roll
-back a completed mutation, and never cancels a live stream. `OpenHomeUseCase`
-remains the only authority that opens a fresh Home.
+Interactive external workflows use a durable `workflow-return` receipt and the
+strict callback grammar `wr:<16-character-base64url-id>:[oh]`: `o` restores the
+authorized origin and `h` opens Home. `WorkflowNavigationHandler` is registered
+before broad workflow callback handlers. It claims the exact receipt, cancels
+only the matching cancellable in-memory draft, and asks
+`RestoreWorkflowOriginUseCase` to re-authorize the captured view against the
+current role and dynamic data. Running work is never cancelled. The one-release
+legacy `rh:<l|c|s|f|i|d|u|a>:<c|r|t>` grammar is acknowledged but non-mutating
+and directs the user to localized `/menu` usage only.
 
 | Port | Adapters | Status | Source |
 |---|---|---|---|
-| `BotGateway` | `GrammyBotGateway` | ✅ single intentional gateway; do not abstract grammY itself further. It acknowledges syntax-validated external Return Home callbacks before grammY `sequentialize` constraints for private chat and user, then runs locale resolution and handlers. `ReturnHomeHandler` may perform the workflow-specific interface-local cleanup above before delegating only to `HomeLauncher`, whose `OpenHomeUseCase` is the only Home-opening authority and always creates fresh Home authority. | [grammy-bot.gateway.ts](../src/telegram/infrastructure/grammy-bot.gateway.ts) |
+| `BotGateway` | `GrammyBotGateway` | ✅ single intentional gateway; do not abstract grammY itself further. It acknowledges exact `wr:` and one-release legacy `rh:` callbacks before grammY `sequentialize` constraints for private chat and user, then resolves locale and runs handlers. `WorkflowNavigationHandler` is registered deterministically before broad workflow handlers; `OpenHomeUseCase` remains the only Home-opening authority and always creates fresh Home authority. | [grammy-bot.gateway.ts](../src/telegram/infrastructure/grammy-bot.gateway.ts) |
 | `UserRepositoryPort` (`USER_REPOSITORY`) | `DrizzleUserRepository`, `InMemoryUserRepository` (mock/dev/tests) | ✅ canonical — `findByName` is case-insensitive and strips a leading `@`; first-admin claims and final-admin demotion protection are atomic. | [user-repository.port.ts](../src/telegram/domain/ports/user-repository.port.ts) |
 | `AdminClaimCredentialPort` (`ADMIN_CLAIM_CREDENTIAL`) | `EnvAdminClaimCredentialAdapter` | ✅ canonical — verifies the setup-generated `CLAIM_ADMIN_TOKEN` without exposing its value. | [admin-claim-credential.port.ts](../src/telegram/domain/ports/admin-claim-credential.port.ts) |
 | `InviteCodeRepositoryPort` (`INVITE_CODE_REPOSITORY`) | `DrizzleInviteCodeRepository`, `InMemoryInviteCodeRepository` (mock/tests) | ✅ canonical | [invite-code-repository.port.ts](../src/telegram/domain/ports/invite-code-repository.port.ts) |
 | `DirectMessengerPort` (`DIRECT_MESSENGER`) | `TelegramDirectMessenger` (logs in mock mode when no bot is bound) | ✅ canonical — used by `/start`, `/promote`, `/demote` for one-off notifications. | [direct-messenger.port.ts](../src/telegram/domain/ports/direct-messenger.port.ts) |
 | `CsvTempFilePort` (`CSV_TEMP_FILE`) | `NodeCsvTempFileAdapter` | ✅ canonical — bounded, worker-owned CSV staging files with explicit disposal and stale-file cleanup. | [csv-temp-file.port.ts](../src/telegram/application/ports/csv-temp-file.port.ts) |
 | `HomeSessionStorePort` (`HOME_SESSION_STORE`) | `DrizzleHomeSessionStore` (real), `InMemoryHomeSessionStore` (mock/tests) | ✅ canonical — one durable authority row per `(userId, chatId)`, with active and pending identities. Reservations, promotion, validation, expiry, and close are CAS transitions; a pending reservation expires after 60 seconds. `BOT_MODE=mock` selects the in-memory adapter, otherwise Drizzle. | [home-session-store.port.ts](../src/telegram/domain/ports/home-session-store.port.ts) |
-| `HomeActionRepositoryPort` (`HOME_ACTION_REPOSITORY`) | `DrizzleHomeActionRepository` (real), `InMemoryHomeActionRepository` (mock/tests) | ✅ canonical — one bounded current receipt per `(userId, chatId, kind)`, with `pending` → `executing` → `completed`/`failed` external claims; expiry/replacement makes stale callbacks harmless and the claim/finish protocol enforces at-most-once cleanup or restart. | [home-action-repository.port.ts](../src/telegram/application/ports/home-action-repository.port.ts) |
+| `HomeActionRepositoryPort` (`HOME_ACTION_REPOSITORY`) | `DrizzleHomeActionRepository` (real), `InMemoryHomeActionRepository` (mock/tests) | ✅ canonical — one bounded current receipt per `(userId, chatId, kind)`. `workflow-return` uses semantic CAS: replacement is atomic; an exact ID may move `pending` → `executing` → `returned`/`completed`, while `claimed`, `resumable`, `returned`, `expired`, `superseded`, and `terminal` distinguish retry/no-op outcomes. Expiry and replacement make stale callbacks harmless. The existing text-backed receipt table is reused; no schema migration is generated. | [home-action-repository.port.ts](../src/telegram/application/ports/home-action-repository.port.ts) |
 | `HomeTokenGeneratorPort` (`HOME_TOKEN_GENERATOR`) | `CryptoHomeTokenGenerator` | ✅ canonical — creates a 96-bit (12-byte) base64url token, exactly 16 characters, for every new Home authority. | [home-token-generator.port.ts](../src/telegram/domain/ports/home-token-generator.port.ts) |
-| `HomeMessageDeliveryPort` (`HOME_MESSAGE_DELIVERY`) | `TelegramHomeMessageAdapter` (real), `InMemoryHomeMessageDeliveryAdapter` (mock/tests) | ✅ canonical — owns Home send, edit, best-effort deletion of a replaced Home, keyboard stripping for a promotion loser, and Close copy. `BOT_MODE=mock` selects the in-memory adapter; real mode renders through grammY. | [home-message-delivery.port.ts](../src/telegram/application/ports/home-message-delivery.port.ts) |
+| `HomeMessageDeliveryPort` (`HOME_MESSAGE_DELIVERY`) | `TelegramHomeMessageAdapter` (real), `InMemoryHomeMessageDeliveryAdapter` (mock/tests) | ✅ canonical — owns Home send, edit, best-effort deletion of a replaced Home, keyboard stripping for a promotion loser, and transient outcome notices. `BOT_MODE=mock` selects the in-memory adapter; real mode renders through grammY. | [home-message-delivery.port.ts](../src/telegram/application/ports/home-message-delivery.port.ts) |
 | `HomeHealthSnapshotPort` (`HOME_HEALTH_SNAPSHOT`) | `InMemoryHomeHealthSnapshotAdapter` (all modes/tests) | ✅ canonical — bounded process-local cache for reporting-health snapshots only; persisted sensor state is always reread. A complete snapshot is fresh for two minutes, and changing enabled IDs makes it insufficient for a normal verdict. | [home-health-snapshot.port.ts](../src/telegram/application/ports/home-health-snapshot.port.ts) |
 | `RolePort` | `DrizzleRoleRepository` | 📝 | [role.guard.ts](../src/telegram/guards/role.guard.ts) |
 

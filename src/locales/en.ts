@@ -593,6 +593,16 @@ const enCatalog = {
       back: '« Back',
       home: '🏠 Home',
     },
+    workflow: {
+      backTo: (destination: string) => `Back to ${destination}`,
+      cancel: (workflow: string) => `Cancel ${workflow}`,
+      home: 'Home',
+      workContinues: (work: string) => `${work} · work continues`,
+      unfinishedSetupExpired: 'Your unfinished setup expired after the restart.',
+      retryReturn: 'Retry return',
+      returnUnavailable: 'Return is temporarily unavailable.',
+      outcomeNotice: (outcome: string) => outcome,
+    },
     navigation: {
       backTo: {
         notifications: '« Notifications',

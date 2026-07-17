@@ -4,10 +4,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-interface Provider {
+interface ProviderDefinition {
   provide?: unknown;
   useClass?: unknown;
   useValue?: unknown;
+}
+
+type Provider = ProviderDefinition | { readonly name: string };
+
+function isProviderDefinition(provider: Provider): provider is ProviderDefinition {
+  return typeof provider === 'object' && provider !== null;
 }
 
 async function telegramProviders(mode: 'mock' | 'real') {
@@ -36,7 +42,9 @@ async function telegramProviders(mode: 'mock' | 'real') {
   } = await import('../../src/telegram/application/ports/home-message-delivery.port');
   const providers = Reflect.getMetadata('providers', TelegramModule) as Provider[];
 
-  const providerFor = (token: unknown) => providers.find((provider) => provider.provide === token);
+  const providerFor = (token: unknown) => providers.find(
+    (provider): provider is ProviderDefinition => isProviderDefinition(provider) && provider.provide === token,
+  );
   return {
     mode: providerFor(BOT_MODE)?.useValue,
     userRepository: providerFor(USER_REPOSITORY)?.useClass,
@@ -45,7 +53,8 @@ async function telegramProviders(mode: 'mock' | 'real') {
     homeSessionStore: providerFor(HOME_SESSION_STORE)?.useClass,
     homeTokenGenerator: providerFor(HOME_TOKEN_GENERATOR)?.useClass,
     homeMessageDelivery: providerFor(HOME_MESSAGE_DELIVERY)?.useClass,
-    providerClasses: providers.map((provider) => provider.useClass).filter(Boolean),
+    providerClasses: providers.map((provider) => isProviderDefinition(provider) ? provider.useClass : provider)
+      .filter(Boolean),
   };
 }
 
@@ -65,6 +74,8 @@ async function resolveHomeSummaryFromApplication(mode: 'mock' | 'real') {
   const { NotificationTargetDirectoryService } = await import('../../src/telegram/application/notification-target-directory.service');
   const { HomeHandler } = await import('../../src/telegram/interfaces/home.handler');
   const { WorkflowEntryCoordinator } = await import('../../src/telegram/interfaces/workflow-entry.coordinator');
+  const { WorkflowNavigationHandler } = await import('../../src/telegram/interfaces/workflow-navigation.handler');
+  const { WorkflowNavigationPresenter } = await import('../../src/telegram/interfaces/workflow-navigation.presenter');
   let app: Awaited<ReturnType<typeof NestFactory.createApplicationContext>> | undefined;
   try {
     app = await NestFactory.createApplicationContext(AppModule, { logger: false });
@@ -73,6 +84,8 @@ async function resolveHomeSummaryFromApplication(mode: 'mock' | 'real') {
       targets: app.get(NotificationTargetDirectoryService),
       homeHandler: app.get(HomeHandler),
       workflowCoordinator: app.get(WorkflowEntryCoordinator),
+      workflowNavigation: app.get(WorkflowNavigationHandler),
+      workflowPresenter: app.get(WorkflowNavigationPresenter),
     };
   } finally {
     await app?.close();
@@ -120,9 +133,38 @@ describe('TelegramModule bot-mode composition', () => {
     expect(providers.providerClasses).not.toContainEqual(expect.objectContaining({ name: 'CloseHomeUseCase' }));
   });
 
+  it('registers the complete contextual workflow navigation provider graph', async () => {
+    const providers = await telegramProviders('mock');
+
+    expect(providers.providerClasses).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'BeginWorkflowReturnUseCase' }),
+      expect.objectContaining({ name: 'UpdateWorkflowReturnUseCase' }),
+      expect.objectContaining({ name: 'ClaimWorkflowReturnUseCase' }),
+      expect.objectContaining({ name: 'CompleteWorkflowReturnUseCase' }),
+      expect.objectContaining({ name: 'ResolveWorkflowOriginUseCase' }),
+      expect.objectContaining({ name: 'RestoreWorkflowOriginUseCase' }),
+      expect.objectContaining({ name: 'WorkflowDraftRegistry' }),
+      expect.objectContaining({ name: 'WorkflowOperationQueue' }),
+      expect.objectContaining({ name: 'WorkflowEntryCoordinator' }),
+      expect.objectContaining({ name: 'WorkflowNavigationPresenter' }),
+      expect.objectContaining({ name: 'WorkflowNavigationHandler' }),
+    ]));
+  });
+
   it.each(['mock', 'real'] as const)('resolves HomeHandler with workflow coordination at runtime in %s mode', async (mode) => {
-    const { summary, targets, homeHandler, workflowCoordinator } = await resolveHomeSummaryFromApplication(mode);
+    const {
+      summary,
+      targets,
+      homeHandler,
+      workflowCoordinator,
+      workflowNavigation,
+      workflowPresenter,
+    } = await resolveHomeSummaryFromApplication(mode);
     expect((summary as unknown as { notificationTargets: unknown }).notificationTargets === targets).toBe(true);
     expect((homeHandler as unknown as { workflows?: unknown }).workflows).toBe(workflowCoordinator);
+    expect((homeHandler as unknown as { workflowNavigation?: unknown }).workflowNavigation)
+      .toBe(workflowNavigation);
+    expect(workflowNavigation).toBeTruthy();
+    expect(workflowPresenter).toBeTruthy();
   });
 });

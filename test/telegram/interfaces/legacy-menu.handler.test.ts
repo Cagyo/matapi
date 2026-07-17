@@ -38,19 +38,41 @@ function setup() {
 }
 
 describe('LegacyMenuHandler', () => {
-  it('registers only explicit legacy-menu callbacks, never /menu', () => {
+  it('registers explicit legacy-menu and one-release legacy workflow-return callbacks, never /menu', () => {
     const { composer, callbacks } = setup();
     expect(composer.command).not.toHaveBeenCalled();
-    expect(callbacks).toHaveLength(1);
-    expect(callbacks[0].regex.test('legacy-menu:status')).toBe(true);
-    expect(callbacks[0].regex.test('menu:status')).toBe(false);
+    expect(callbacks).toHaveLength(2);
+    const legacyMenu = callbacks.find(({ regex }) => regex.test('legacy-menu:status'));
+    const legacyWorkflowReturn = callbacks.find(({ regex }) => regex.test('rh:a:c'));
+    expect(legacyMenu?.regex.test('menu:status')).toBe(false);
+    expect(legacyWorkflowReturn?.regex.test('rh:a:c')).toBe(true);
+    expect(legacyWorkflowReturn?.regex.test('rh:a:c\n')).toBe(false);
+  });
+
+  it('acknowledges a legacy workflow return without mutating work and directs the user to localized /menu usage', async () => {
+    const { callbacks } = setup();
+    const callback = callbacks.find(({ regex }) => regex.test('rh:a:c'))?.fn;
+    const answerCallbackQuery = vi.fn().mockResolvedValue(undefined);
+    const reply = vi.fn().mockResolvedValue(undefined);
+    const catalog = catalogFor('uk');
+
+    await callback?.({
+      callbackQuery: { data: 'rh:a:c' },
+      localeState: state('user', 'uk'),
+      homeCallbackAcknowledged: true,
+      answerCallbackQuery,
+      reply,
+    });
+
+    expect(answerCallbackQuery).not.toHaveBeenCalled();
+    expect(reply).toHaveBeenCalledWith(catalog.commands.find((command) => command.command === 'menu')?.usage);
   });
 
   it('does not expose transitional Home panels or a top-level notifications route', async () => {
     const { handler, callbacks } = setup();
     const reply = vi.fn().mockResolvedValue(undefined);
     const editMessageText = vi.fn().mockResolvedValue(undefined);
-    const callback = callbacks[0].fn;
+    const callback = callbacks.find(({ regex }) => regex.test('legacy-menu:top'))!.fn;
 
     expect('openDashboard' in handler).toBe(false);
     expect('openNotifications' in handler).toBe(false);
@@ -75,7 +97,7 @@ describe('LegacyMenuHandler', () => {
 
   it('delegates legacy notification actions through the current handlers', async () => {
     const { callbacks, mute, unmute, quiet } = setup();
-    const callback = callbacks[0].fn;
+    const callback = callbacks.find(({ regex }) => regex.test('legacy-menu:act:mute'))!.fn;
     const base = { localeState: state(), answerCallbackQuery: vi.fn().mockResolvedValue(undefined), reply: vi.fn(), editMessageText: vi.fn() };
     await callback({ ...base, match: ['legacy-menu:act:mute', 'act:mute'] });
     await callback({ ...base, match: ['legacy-menu:act:unmute', 'act:unmute'] });

@@ -62,19 +62,20 @@ For every private update, `GrammyBotGateway` installs
 [`homeCallbackAckMiddleware`](../../src/telegram/interfaces/home-callback-ack.middleware.ts)
 before `sequentialize(homeUpdateConstraints)`, then locale middleware and
 handlers. The acknowledgement middleware promptly calls
-`answerCallbackQuery` for Home payloads (`h:`) and the recovery action (`ho`),
-plus valid external Return Home payloads with exact grammar
-`rh:<l|c|s|f|i|d|u|a>:<c|r|t>`, without preventing later handling if acknowledgement
-fails. A valid external Return Home callback is therefore acknowledged before
-sequentialization; normal handling still serializes it by both
-`home:chat:<chatId>` and `home:user:<userId>` before locale/role lookup and
-the fresh `OpenHomeUseCase` call. Database CAS remains the authority across a
-restart.
+`answerCallbackQuery` for Home payloads (`h:`), the recovery action (`ho`),
+and exact workflow-return callbacks (`wr:<16-character-base64url-id>:[oh]`),
+without preventing later handling if acknowledgement fails. A valid callback is
+therefore acknowledged before sequentialization; normal handling still
+serializes it by both `home:chat:<chatId>` and `home:user:<userId>` before
+locale/role lookup. The one-release legacy
+`rh:<l|c|s|f|i|d|u|a>:<c|r|t>` grammar is also acknowledged, but is
+non-mutating and only replies with localized `/menu` usage. Database CAS remains
+the authority across a restart.
 
 Normal callback data is UTF-8 bounded to Telegram's 64-byte limit and has the
 format `h:<16-character-base64url-token>:<base36-revision>:<action>[:<page>]`.
 The action codes are `h` (Home), `s` (Sensors page), `c` (camera), `n`
-(notifications), `m` (More), `k` (Check now), and `x` (Close); `ho` is the
+(notifications), `m` (More), and `k` (Check now); `ho` is the
 stateless Open-new-Home recovery action. The handler acknowledges first, parses
 the bounded value, loads current locale/role, validates user/chat/message/token/
 revision, then renders or executes. A stale, closed, or unavailable authority
@@ -88,60 +89,28 @@ five Sensor Setup destinations (add, edit, remove, import, export), Storage
 packages, restart, and automatic-cleanup thresholds). Canonical Storage status
 never emits `clean:trigger`; Home is the only Slice 3 cleanup launcher.
 
-Independent external workflows remain registered and do not reuse the Home
-session or perform Home protocol transitions. Slice 4 delivers their shared
-Return Home contract. `ReturnHomeHandler` accepts only
-`rh:<l|c|s|f|i|d|u|a>:<c|r|t>`. The callback acknowledgement is attempted before
-`sequentialize`; normal handling then serializes by private chat and user,
-checks that the sender is a registered user, resolves the sender's current
-locale and role, clears named pending interface state for `cancelPending`, and
-delegates to `HomeLauncher`. Registration is the eligibility rule for Return
-Home: an administrator demoted while a workflow is open receives the fresh
-member Home determined by the current role. `OpenHomeUseCase` is the only
-Home-opening authority. It always creates a new Home and never revives or
-reuses an older Home message, token, or revision.
+External workflows use one durable `workflow-return` receipt per user/private
+chat. `WorkflowNavigationHandler` registers before broad workflow handlers and
+accepts only `wr:<16-character-base64url-id>:[oh]`. It never trusts workflow,
+role, origin, or phase from callback data: it claims the exact receipt and
+re-authorizes the persisted origin using the current role and live data.
 
-| Workflow state | Return Home behavior |
-|---|---|
-| Logs picker / settings dashboard | `cancelPending`; no stored pending state exists, then new Home. |
-| CSV picker | `cancelPending`; no persisted conversation or confirmation exists, then new Home. |
-| CSV staging/upload | `leaveRunning`; live localized `csv.staging` status uses `rh:c:r`, picker markup is removed, and active upload/lock is never cancelled. |
-| Logs result/error/empty/.txt document, CSV document/error/empty | `alreadyTerminal`; new Home directly. |
-| CSV page navigation and settings locale update | `continuing`; keep workflow, no launcher call. |
-| Config add/modify/remove picker, prompt, retry, or confirmation | `cancelPending`; delete current `ConfigState`, then new Home. |
-| Config incremental modify result | `cancelPending`; keep completed mutation, delete only the remaining menu state, then new Home. |
-| Config/export terminal result or error with no live state | `alreadyTerminal`; new Home directly. |
-| Import upload prompt/retry or Apply confirmation | `cancelPending`; delete current import state, then new Home. |
-| Import applied/cancelled/no-change/failure/partial/uncertain result | `alreadyTerminal`; new Home directly. |
-| Drive status/error | `alreadyTerminal`; new Home directly. |
-| Drive auth prompt/retry with `awaitingConfig` | `cancelPending`; delete only the pending auth input state, then new Home. |
-| Drive auth success/typed terminal failure/demotion | `alreadyTerminal`; new Home directly. |
-| System package checking or Apply confirmation | `cancelPending`; clear any confirmation present when the serialized return runs, then new Home. |
-| System package update successfully spawned | `leaveRunning`; new Home without cancelling the detached script. |
-| System package terminal/no-op/failure result | `alreadyTerminal`; new Home directly. |
+Workflow-local Back controls preserve a wizard draft. Receipt navigation is an
+exit: `wr:<id>:o` discards only that exact cancellable receipt draft before
+returning to the authorized origin (the same origin-restoring outcome as
+Cancel), and `wr:<id>:h` discards that exact draft before opening Home. Running
+work continues. Stale, duplicated, expired, superseded, and terminal callbacks
+are harmless. A failed restore receives an exact receipt-bound retry control.
+Terminal success/failure is delivered before a fresh authorized menu; if the
+user already returned from running work, only the terminal result is sent.
 
-Camera uses workflow code `a` and has the following Slice 4C coverage:
-
-| Camera state | Slice 4C behavior |
-|---|---|
-| Dashboard, browse menu, browse input/retry/results | `cancelPending`; clear browse results/input and exact source-management state, then new Home. |
-| Browse event action, browse video/photo, and Back-to-results with live cache | `cancelPending`; clear the 10-minute cached result navigation, then new Home. |
-| Missing/expired browse cache recovery | `alreadyTerminal`; cache is deleted, then new Home. |
-| Browse cancel/close/expiry | `alreadyTerminal`; state is already cleared, then new Home. |
-| Root snapshot/events/video/photo/status/motion control/usage/error | clear competing camera UI state before execution, then `alreadyTerminal`; new Home directly. |
-| Live opening and active watch message | `leaveRunning`; new Home without stopping/revoking the live stream. |
-| Live stop/no-active/error after compensation | `alreadyTerminal`; new Home directly. |
-| Source menu/prompt/selection/retry | `cancelPending`; clear exact user/private-chat source state, then new Home. |
-| Source list/stale/cancel/expiry/demotion/configure/test/remove outcome | `alreadyTerminal`; source state is already cleared, then new Home. |
-| Existing `cam:` callback or claimed camera/source text | `continuing`; remain in camera workflow. Browse and source namespaces clear the competing UI state before continuing. |
-
-`continuing` deliberately has no Return Home callback action. `cancelPending`
-is interface-local in-memory cleanup only; it does not introduce a new
-application/domain port, undo completed mutations, or stop detached work. The
-CSV staging status and successfully spawned system package update are explicit
-`leaveRunning` exceptions: opening Home does not cancel or wait for their
-detached work. Camera live opening and its active watch message are the camera
-equivalent: Home does not stop, revoke, or otherwise disturb the live stream.
+Direct-command origins are deterministic: logs/CSV → History; language/help →
+More; sensor add/modify/remove/import/export → Sensor setup; Drive status/setup
+and storage cleanup → Storage & backup; health/system update/restart → System;
+invite → Admin tools; camera → Home. Lost in-memory setup state after restart
+does not cancel newer work: its durable receipt restores the authorized origin
+with localized interruption copy. The existing text-backed receipt table is
+reused; no schema migration is generated.
 
 ## Role Model
 

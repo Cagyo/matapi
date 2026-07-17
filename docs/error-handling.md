@@ -93,6 +93,22 @@ try {
 - Log levels: `error` for an unexpected failure, `warn` for a translated/recovered domain failure that the user already saw, `log` for state transitions, `debug` for high-volume detail behind `LOG_LEVEL`.
 - **Never** log: `TELEGRAM_BOT_TOKEN`, full chat IDs in `info`/`error`, `.env` values, raw sensor payloads if they could contain secrets, full file paths under `data/`.
 
+## Contextual workflow navigation
+
+Workflow-return CAS outcomes are expected control flow, not exceptions.
+`expired`, `superseded`, and `terminal` callbacks are acknowledged and then make
+no mutation; `resumable` leaves the exact receipt available for its retry
+control. A restore delivery failure is compensated with receipt-bound retry
+markup and a localized unavailable reply. The receipt is completed only after
+the required terminal delivery/restore stage succeeds.
+
+An in-memory draft can be missing after a process restart. Returning its exact
+cancellable receipt still re-authorizes and restores the origin, with the
+localized interrupted/expired-setup notice; it must not recreate or mutate a
+newer draft. Running work continues through restart recovery: terminal output
+is delivered first, then a fresh authorized Home is restored only if the user
+has not already returned.
+
 ## Crash policy
 
 - **Do not** add top-level `try/catch` to suppress crashes "just in case". PM2 restarts on crash; that is the contract.

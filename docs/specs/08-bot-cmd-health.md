@@ -51,3 +51,12 @@ Gather system metrics and report:
 
 ## Error Cases
 - Any metric fails to collect → show that line as "N/A", don't fail entire command
+
+## Contextual workflow return
+
+`/health` begins a receipt-bound `health` workflow with System as its natural
+parent. Every workflow-local action is tied to the current 16-character receipt
+ID. `wr:<id>:o` restores the current authorized System view; `wr:<id>:h` opens
+Home. A return from cancellable setup clears only that receipt's draft; a
+running check is allowed to finish and its terminal result is sent before a
+fresh menu is restored. No migration is required.

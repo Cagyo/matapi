@@ -88,6 +88,16 @@ describe('catalogFor', () => {
         retryReturn: expect.any(String),
         closed: expect.any(String),
       }),
+      workflow: expect.objectContaining({
+        backTo: expect.any(Function),
+        cancel: expect.any(Function),
+        home: expect.any(String),
+        workContinues: expect.any(Function),
+        unfinishedSetupExpired: expect.any(String),
+        retryReturn: expect.any(String),
+        returnUnavailable: expect.any(String),
+        outcomeNotice: expect.any(Function),
+      }),
       navigation: expect.objectContaining({
         backTo: expect.objectContaining({
           history: expect.any(String),
@@ -109,5 +119,12 @@ describe('catalogFor', () => {
     expect(ukrainian.home.recovery.retryReturn).toBe('Повторити повернення');
     expect(english.home.adminSystem.cleanupThreshold).toBeTruthy();
     expect(english.home.adminCleanupThreshold.title).toBeTruthy();
+    expect(english.home.workflow.backTo('History')).toBe('Back to History');
+    expect(english.home.workflow.cancel('sensor setup')).toBe('Cancel sensor setup');
+    expect(english.home.workflow.workContinues('CSV export')).toBe('CSV export · work continues');
+    expect(english.home.workflow.unfinishedSetupExpired).toContain('expired');
+    expect(english.home.workflow.retryReturn).toBe('Retry return');
+    expect(english.home.workflow.returnUnavailable).toContain('temporarily unavailable');
+    expect(english.home.workflow.outcomeNotice('Restart complete.')).toBe('Restart complete.');
   });
 });

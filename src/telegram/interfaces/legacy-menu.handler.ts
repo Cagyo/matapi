@@ -22,6 +22,7 @@ import { SettingsHandler } from './settings.handler';
 import { CleanHandler } from './clean.handler';
 import { GdriveAuthHandler } from './gdrive-auth.handler';
 import { CsvHandler } from './csv.handler';
+import { LEGACY_WORKFLOW_RETURN_CALLBACK } from './home-callback-ack.middleware';
 
 @Injectable()
 export class LegacyMenuHandler implements TelegramHandler {
@@ -48,6 +49,15 @@ export class LegacyMenuHandler implements TelegramHandler {
   ) {}
 
   register(composer: Composer<TelegramContext>): void {
+    composer.callbackQuery(
+      LEGACY_WORKFLOW_RETURN_CALLBACK,
+      this.guard.registered,
+      async (ctx) => {
+        await this.acknowledgeOnce(ctx);
+        const menu = this.catalog(ctx).commands.find((command) => command.command === 'menu');
+        if (menu) await ctx.reply(menu.usage);
+      },
+    );
     composer.callbackQuery(
       /^legacy-menu:(.+)$/,
       this.guard.registered,
@@ -297,5 +307,11 @@ export class LegacyMenuHandler implements TelegramHandler {
 
   private catalog(ctx: TelegramContext): LocaleCatalog {
     return ctx.localeState?.catalog ?? catalogFor('en');
+  }
+
+  private async acknowledgeOnce(ctx: TelegramContext): Promise<void> {
+    if (ctx.homeCallbackAcknowledged) return;
+    await ctx.answerCallbackQuery().catch(() => undefined);
+    ctx.homeCallbackAcknowledged = true;
   }
 }

@@ -598,6 +598,16 @@ const ukCatalog = {
       back: '« Назад',
       home: '🏠 Дім',
     },
+    workflow: {
+      backTo: (destination: string) => `Назад до ${destination}`,
+      cancel: (workflow: string) => `Скасувати ${workflow}`,
+      home: 'Дім',
+      workContinues: (work: string) => `${work} · робота триває`,
+      unfinishedSetupExpired: 'Незавершене налаштування втратило чинність після перезапуску.',
+      retryReturn: 'Повторити повернення',
+      returnUnavailable: 'Повернення тимчасово недоступне.',
+      outcomeNotice: (outcome: string) => outcome,
+    },
     navigation: {
       backTo: {
         notifications: '« Сповіщення',

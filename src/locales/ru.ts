@@ -598,6 +598,16 @@ const ruCatalog = {
       back: '« Назад',
       home: '🏠 Дом',
     },
+    workflow: {
+      backTo: (destination: string) => `Назад к ${destination}`,
+      cancel: (workflow: string) => `Отменить ${workflow}`,
+      home: 'Дом',
+      workContinues: (work: string) => `${work} · работа продолжается`,
+      unfinishedSetupExpired: 'Незавершённая настройка истекла после перезапуска.',
+      retryReturn: 'Повторить возврат',
+      returnUnavailable: 'Возврат временно недоступен.',
+      outcomeNotice: (outcome: string) => outcome,
+    },
     navigation: {
       backTo: {
         notifications: '« Уведомления',

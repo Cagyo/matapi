@@ -64,16 +64,12 @@ mosquitto: "latest"
 | Update script fails | Direct curl notification to admin |
 | Node major version mismatch | "⚠️ Node.js major version change detected (20→22). This requires manual intervention." |
 
-## Return Home behavior
+## Contextual workflow return
 
-System package update uses the shared `rh:u:<c|r|t>` workflow code from
-[06-bot-core.md](06-bot-core.md#authoritative-home-callback-pipeline). Its
-pending confirmation is interface-local in-memory state.
-
-| Workflow state | Return Home behavior |
-|---|---|
-| Checking packages or Apply confirmation | `rh:u:c` (`cancelPending`); clear any confirmation present when the serialized return runs, then open a new Home. |
-| Update successfully spawned | `rh:u:r` (`leaveRunning`); open a new Home without cancelling the detached script. |
-| Terminal, no-op, or failure result | `rh:u:t` (`alreadyTerminal`); open a new Home directly. |
-
-Return Home never stops a successfully detached package-update script.
+System update uses a receipt-bound `system-update` workflow with System as its
+natural parent. Its exact callbacks are `wr:<id>:o` and `wr:<id>:h`; the
+callback never encodes phase or authorization. A pending confirmation is
+discarded only when its receipt matches. Once the update is spawned, the
+receipt is `running`: return opens the requested menu but never stops or waits
+for the detached script. Terminal success/failure is delivered first; restart
+recovery then restores a fresh authorized menu unless the user already returned.

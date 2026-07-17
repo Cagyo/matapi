@@ -66,13 +66,13 @@ describe('GrammyBotGateway handler registration', () => {
       status: handler, ping: handler, help: handler, logs: handler, health: handler,
       config: handler, invite: handler, promote: handler, demote: handler, camera: handler,
       gdrive: handler, exportConfig: handler, importConfig: handler, feature: handler,
-      gdriveAuth: handler, csv: handler, home: handler, returnHome: handler, legacyMenu: handler, settings: handler, clean: handler,
+      gdriveAuth: handler, csv: handler, home: handler, workflowNavigation: handler, legacyMenu: handler, settings: handler, clean: handler,
     });
 
     await gateway.onApplicationBootstrap();
 
     expect(mocks.sequentialize).toHaveBeenCalledWith(homeUpdateConstraints);
-    expect(mocks.botUse.mock.calls.map(([middleware]) => middleware)).toEqual([
+    expect(mocks.botUse.mock.calls.map((call) => call[0] as unknown)).toEqual([
       expect.any(Function),
       expect.any(Function),
       homeCallbackAckMiddleware,
@@ -82,30 +82,35 @@ describe('GrammyBotGateway handler registration', () => {
     expect(gateway.homeMessageDelivery.setBot).toHaveBeenCalledWith(mocks.bot);
   });
 
-  it('registers external returns once between Home and the transitional LegacyMenuHandler', () => {
+  it('registers exact workflow navigation before broad workflow callback handlers', () => {
     const gateway = Object.create(GrammyBotGateway.prototype) as {
       handlers(): TelegramHandler[];
       [key: string]: unknown;
     };
+    const workflowNavigation = {} as TelegramHandler;
     const csv = {} as TelegramHandler;
+    const config = {} as TelegramHandler;
+    const settings = {} as TelegramHandler;
+    const camera = {} as TelegramHandler;
+    const gdrive = {} as TelegramHandler;
     const home = {} as TelegramHandler;
-    const returnHome = {} as TelegramHandler;
     const legacyMenu = {} as TelegramHandler;
     Object.assign(gateway, {
       claim: {}, mute: {}, unmute: {}, quietHours: {}, update: {}, systemUpdate: {},
       rollback: {}, restartHandler: {}, start: {}, status: {}, ping: {}, help: {},
-      logs: {}, health: {}, config: {}, invite: {}, promote: {}, demote: {}, camera: {},
-      gdrive: {}, exportConfig: {}, importConfig: {}, feature: {}, gdriveAuth: {},
-      csv, home, returnHome, legacyMenu, settings: {}, clean: {},
+      logs: {}, health: {}, config, invite: {}, promote: {}, demote: {}, camera,
+      gdrive, exportConfig: {}, importConfig: {}, feature: {}, gdriveAuth: {},
+      csv, home, workflowNavigation, legacyMenu, settings, clean: {},
     });
 
     const handlers = gateway.handlers();
 
+    expect(handlers.filter((handler) => handler === workflowNavigation)).toHaveLength(1);
+    for (const broadWorkflowHandler of [config, settings, camera, gdrive, csv, home]) {
+      expect(handlers.indexOf(workflowNavigation)).toBeLessThan(handlers.indexOf(broadWorkflowHandler));
+    }
     expect(handlers.filter((handler) => handler === csv)).toHaveLength(1);
-    expect(handlers.indexOf(home)).toBeLessThan(handlers.indexOf(legacyMenu));
-    expect(handlers.filter((handler) => handler === returnHome)).toHaveLength(1);
-    expect(handlers.indexOf(home)).toBeLessThan(handlers.indexOf(returnHome));
-    expect(handlers.indexOf(returnHome)).toBeLessThan(handlers.indexOf(legacyMenu));
+    expect(handlers.indexOf(workflowNavigation)).toBeLessThan(handlers.indexOf(legacyMenu));
   });
 
   it('registers the Telegram live-message cleanup seam at bootstrap in mock mode', async () => {

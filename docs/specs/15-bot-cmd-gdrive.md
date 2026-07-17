@@ -47,17 +47,13 @@ If sync is failing:
 | rclone not configured | "❌ Google Drive not configured. Run rclone config." |
 | rclone about fails | "❌ Failed to check Drive status: [error]" |
 
-## Return Home behavior
+## Contextual workflow return
 
-Drive uses the shared `rh:d:<c|t>` workflow code from
-[06-bot-core.md](06-bot-core.md#authoritative-home-callback-pipeline).
-
-| Workflow state | Return Home behavior |
-|---|---|
-| Drive status or error | `rh:d:t` (`alreadyTerminal`); open a new Home directly. |
-| Drive-auth prompt or retry while `awaitingConfig` | `rh:d:c` (`cancelPending`); delete only the pending auth input state, then open a new Home. |
-| Drive-auth success, typed terminal failure, or demotion | `rh:d:t` (`alreadyTerminal`); open a new Home directly. |
-
-Drive-auth continuation messages resolve the current role before accepting
-input; demotion clears the pending auth state. Return Home does not expose or
-carry the submitted Drive configuration.
+Drive status and setup use receipt-bound `drive-status` and `drive-setup`
+workflows, both with Storage & backup as the natural parent. `wr:<id>:o`
+restores that authorized parent; `wr:<id>:h` opens Home. The callback contains
+only the receipt ID and destination, never submitted Drive configuration.
+Drive-auth input is cancelled only when its receipt matches. Demotion or a
+deleted dynamic origin re-authorizes through the parent fallback, and restart
+loss of in-memory auth input yields localized interruption copy rather than a
+mutation of newer work.

@@ -210,31 +210,36 @@ Events today: 12
 
 ---
 
-## Slice 4C camera workflow UI and Return Home
+## Contextual camera workflow navigation
 
 Every interactive camera reply, including dashboard, browse, media, live, and
-source-management output, carries reply markup with a localized Home button on
-its own final row. The callback is the compact, secret-free
-`rh:a:<c|r|t>` grammar; it never contains a source URL, token, filesystem path,
-or Drive identifier.
+source-management output, carries receipt-bound navigation controls. The only
+workflow-return callback grammar is compact and secret-free `wr:<id>:[oh]`;
+it never contains a source URL, token, filesystem path, or Drive identifier.
 
-- Browse restores and handles `cam:browse:event:<id>`,
-  `cam:browse:video:<id>`, `cam:browse:photo:<id>`, and
-  `cam:browse:back-results`. Result navigation is a per-user in-memory cache
-  with a 10-minute expiry. Missing or expired cache is cleared before the
-  terminal recovery reply.
+- Browse actions use `cam:<receipt-id>:...`: `be:<event-id>` selects an
+  event, `bv:<event-id>` and `bp:<event-id>` request its video or photo, and
+  `br` returns to the cached results. Result navigation is a per-user,
+  receipt-bound in-memory cache with a 10-minute expiry. Missing or expired
+  cache is cleared before the terminal recovery reply.
 - Browse input/result state and source-management state are mutually exclusive.
   A browse callback clears the exact source state for the same user/private chat;
   a source callback clears browse input and results. Root camera actions clear
   both competing interface states before execution.
-- Source-management state is keyed exactly by `(userId, chatId)`. Credential
-  text is deleted where possible and is never echoed in reply markup, output, or
-  Return Home callback data.
-- Live opening and its active watch message use `rh:a:r`. Choosing Home deletes
-  neither the watch message nor the stream session and never revokes/stops the
-  stream. Stop, no-active, and compensated-error outcomes use terminal markup;
+- Source-management callbacks use `cam:<receipt-id>:src:<action>` and state is
+  keyed exactly by `(userId, chatId, receiptId)`. Credential text is deleted
+  where possible and is never echoed in reply markup, output, or workflow-return
+  callback data.
+- Live opening marks its receipt `running`. Choosing Home deletes neither the
+  watch message nor the stream session and never revokes/stops the stream.
+  Stop, no-active, and compensated-error outcomes use terminal markup;
   if `registerMessageReference` throws, the just-sent exact
   `(chatId, messageId)` watch message has not yet been registered and is deleted
   before revoking the viewer or stopping the shared stream when revocation
   fails. Separately, the live-session service performs normal registered
   watch-message cleanup on stream stop or expiry.
+
+Camera's natural direct-command parent is Home. Cancellable browse/source
+drafts are cancelled only when their receipt ID matches; stale callbacks and
+text never inspect or mutate a newer workflow. A completed live result after a
+user has returned is delivered without replacing that newer Home.

@@ -206,7 +206,7 @@ describe('renderHomeMessage', () => {
   });
 
   it('keeps the Slice 3 locale object shapes identical', () => {
-    for (const key of ['notifications', 'history', 'more', 'adminTools', 'adminSensorSetup', 'adminStorage', 'adminSystem', 'adminCleanupThreshold', 'confirmation', 'cleanupResult'] as const) {
+    for (const key of ['notifications', 'history', 'more', 'adminTools', 'adminSensorSetup', 'adminStorage', 'adminSystem', 'adminCleanupThreshold', 'confirmation', 'cleanupResult', 'workflow'] as const) {
       expect(shapeOf(catalogs.ru.home[key])).toEqual(shapeOf(catalogs.en.home[key]));
       expect(shapeOf(catalogs.uk.home[key])).toEqual(shapeOf(catalogs.en.home[key]));
     }

@@ -13,14 +13,6 @@ describe('homeCallbackAckMiddleware', () => {
   it.each([
     'ho',
     'h:AbCdEfGhIjKlMn_-:1:h',
-    'rh:l:t',
-    'rh:f:c',
-    'rh:i:t',
-    'rh:d:c',
-    'rh:u:r',
-    'rh:a:c',
-    'rh:a:r',
-    'rh:a:t',
     'wr:abcdefghijklmnop:o',
     'wr:abcdefghijklmnop:h',
   ])('acknowledges Home callback %s before continuing', async (data) => {
@@ -51,6 +43,19 @@ describe('homeCallbackAckMiddleware', () => {
 
     expect(ctx.homeCallbackAcknowledged).toBe(true);
     expect(next).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    'rh:l:c', 'rh:c:r', 'rh:s:t', 'rh:f:c',
+    'rh:i:r', 'rh:d:t', 'rh:u:c', 'rh:a:r',
+  ])('acknowledges only complete legacy workflow-return callback %s', async (data) => {
+    const answerCallbackQuery = vi.fn().mockResolvedValue(true);
+    const ctx = callbackContext(data, answerCallbackQuery);
+
+    await homeCallbackAckMiddleware(ctx, vi.fn().mockResolvedValue(undefined));
+
+    expect(answerCallbackQuery).toHaveBeenCalledOnce();
+    expect(ctx.homeCallbackAcknowledged).toBe(true);
   });
 
   it.each([

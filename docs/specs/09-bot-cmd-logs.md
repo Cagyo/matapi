@@ -45,12 +45,16 @@ If output exceeds 4096 characters (Telegram message limit):
 - Send as a `.txt` file attachment instead of inline message
 - File named: `logs_<sensor_name>_<date>.txt`
 
-## Return Home
+## Contextual workflow return
 
-Every live logs picker and terminal logs response has the localized Home action.
-The picker uses `rh:l:c`; inline result, error, empty, and `.txt` document
-responses use `rh:l:t`. Return Home opens a fresh Home and never reuses a
-previous Home message, token, or revision.
+Logs begins a receipt-bound `logs` workflow whose direct-command natural parent
+is History. Sensor-picker selections use `logs:<receipt-id>:s:<selector>`;
+the selector is opaque and never exposes the sensor identifier. `wr:<id>:o`
+and `wr:<id>:h` are the separate Origin and Home navigation controls. The exact
+receipt ID prevents stale picker buttons from affecting a later logs workflow.
+Origin return discards only the matching cancellable picker draft; Home does the
+same while opening Home. Result delivery comes before restoration, and an
+already returned running job sends its result without moving the newer Home.
 
 ## Error Cases
 

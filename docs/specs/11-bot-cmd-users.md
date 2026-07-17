@@ -180,3 +180,11 @@ candidates with their IDs and instructs the admin to retry with
 Self-demotion is allowed only while another admin remains. The repository
 performs this check and role update atomically so concurrent demotions cannot
 leave the worker without an admin and reactivate the one-use claim token.
+
+## Contextual workflow return
+
+`/invite` begins a receipt-bound `invite` workflow with Admin tools as its
+natural parent. Its navigation controls use exact `wr:<id>:o` and `wr:<id>:h`;
+the callback supplies no role or origin data. On return, the current role is
+used to authorize the parent view, so a user demoted while the workflow was open
+cannot restore an admin-only view.

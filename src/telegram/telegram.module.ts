@@ -40,8 +40,11 @@ import { CompareAndSetQuietHoursUseCase } from './application/compare-and-set-qu
 import { SetAutoCleanThresholdUseCase } from './application/set-auto-clean-threshold.use-case';
 import { HomeNavigationUseCase } from './application/home-navigation.use-case';
 import { BeginWorkflowReturnUseCase } from './application/begin-workflow-return.use-case';
+import { ClaimWorkflowReturnUseCase } from './application/claim-workflow-return.use-case';
+import { CompleteWorkflowReturnUseCase } from './application/complete-workflow-return.use-case';
 import { ResolveWorkflowOriginUseCase } from './application/resolve-workflow-origin.use-case';
 import { RestoreWorkflowOriginUseCase } from './application/restore-workflow-origin.use-case';
+import { UpdateWorkflowReturnUseCase } from './application/update-workflow-return.use-case';
 import { SystemUpdateUseCase } from './application/system-update.use-case';
 import { UnmuteSensorUseCase } from './application/unmute-sensor.use-case';
 import { UpdateSystemUseCase } from './application/update-system.use-case';
@@ -119,13 +122,14 @@ import { UpdateHandler } from './interfaces/update.handler';
 import { HomeHandler } from './interfaces/home.handler';
 import { HomeLauncher } from './interfaces/home-launcher';
 import { LegacyMenuHandler } from './interfaces/legacy-menu.handler';
-import { ReturnHomeHandler } from './interfaces/return-home.handler';
 import { SettingsHandler } from './interfaces/settings.handler';
 import { CleanHandler } from './interfaces/clean.handler';
 import { BotCommandsMenuService } from './application/bot-commands-menu.service';
 import { WorkflowDraftRegistry } from './interfaces/workflow-draft.registry';
 import { WorkflowOperationQueue } from './interfaces/workflow-operation.queue';
 import { WorkflowEntryCoordinator } from './interfaces/workflow-entry.coordinator';
+import { WorkflowNavigationHandler } from './interfaces/workflow-navigation.handler';
+import { WorkflowNavigationPresenter } from './interfaces/workflow-navigation.presenter';
 
 function resolveBotMode(): BotMode {
   if (process.env.BOT_MODE === 'mock') return 'mock';
@@ -228,6 +232,9 @@ const mode = resolveBotMode();
     SetAutoCleanThresholdUseCase,
     HomeNavigationUseCase,
     BeginWorkflowReturnUseCase,
+    UpdateWorkflowReturnUseCase,
+    ClaimWorkflowReturnUseCase,
+    CompleteWorkflowReturnUseCase,
     ResolveWorkflowOriginUseCase,
     RestoreWorkflowOriginUseCase,
     UpdateSystemUseCase,
@@ -284,8 +291,9 @@ const mode = resolveBotMode();
     WorkflowDraftRegistry,
     WorkflowOperationQueue,
     WorkflowEntryCoordinator,
+    WorkflowNavigationPresenter,
+    WorkflowNavigationHandler,
     HomeLauncher,
-    ReturnHomeHandler,
     LegacyMenuHandler,
     SettingsHandler,
     CleanHandler,
