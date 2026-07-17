@@ -184,69 +184,61 @@ export class WorkflowEntryCoordinator {
       if (claim.kind === 'claimed' && receipt.payload.phase === 'cancellable') {
         await this.drafts.cancelExact(receipt);
       }
-      let deliveryStage = receipt.payload.deliveryStage ?? 'pending';
+      const deliveryStage = receipt.payload.deliveryStage ?? 'pending';
 
       // A user who returned while the restart ran already has a fresh Home.
-      // Make at most one newly recorded direct attempt, but never replace that
-      // newer session with a recovery Home. Once an attempt is recorded, the
-      // receipt can finish without retaining restart metadata indefinitely.
+      // The receipt may finish only after an acknowledged direct result; Home
+      // recovery would replace the user's newer session and is never a fallback.
       if (claim.kind === 'returned') {
-        if (deliveryStage === 'pending') {
-          if (!await this.persistDeliveryStage(identity, receipt, 'direct-attempted')) return 'resumable';
-          try {
-            await input.deliver();
-            await this.persistDeliveryStage(identity, receipt, 'delivered');
-          } catch {
-            // The durable direct-attempt marker prevents a second DM.
-          }
-        }
-        const finish = await this.actions.finishWorkflowReturn({
-          userId: identity.userId,
-          chatId: identity.chatId,
-          id: receipt.id,
-          outcome: 'completed',
-          now: this.clock.now(),
-        });
-        return finish === 'finished' ? 'completed' : 'resumable';
-      }
-
-      if (deliveryStage === 'pending') {
+        if (deliveryStage === 'delivered') return this.finishHeadlessWorkflow(identity, receipt);
+        if (deliveryStage !== 'pending') return 'resumable';
         if (!await this.persistDeliveryStage(identity, receipt, 'direct-attempted')) return 'resumable';
-        deliveryStage = 'direct-attempted';
-        let directDeliveryFailed = false;
         try {
           await input.deliver();
         } catch {
-          directDeliveryFailed = true;
+          await this.persistDeliveryStage(identity, receipt, 'direct-failed');
+          return 'resumable';
         }
-        if (!directDeliveryFailed && await this.persistDeliveryStage(identity, receipt, 'delivered')) {
-          deliveryStage = 'delivered';
-        }
-
-        if (directDeliveryFailed) {
-          return this.restoreWithNotice(identity, receipt, input);
-        }
+        if (!await this.persistDeliveryStage(identity, receipt, 'delivered')) return 'resumable';
+        return this.finishHeadlessWorkflow(identity, receipt);
       }
 
       if (claim.kind !== 'claimed' && claim.kind !== 'resumable') return 'no-workflow';
 
-      if (deliveryStage === 'needs-notice') {
-        return this.restoreWithNotice(identity, receipt, input);
+      if (deliveryStage === 'pending') {
+        if (!await this.persistDeliveryStage(identity, receipt, 'direct-attempted')) return 'resumable';
+        try {
+          await input.deliver();
+        } catch {
+          if (!await this.persistDeliveryStage(identity, receipt, 'direct-failed')) return 'resumable';
+          return this.restoreWithNotice(identity, receipt, input, true);
+        }
+        // A direct send that might have succeeded must be recovered before
+        // rendering Home. This avoids repeated Home messages after its durable
+        // acknowledgement write fails.
+        if (!await this.persistDeliveryStage(identity, receipt, 'delivered')) return 'resumable';
+        if (!await input.restore(receipt, undefined)) return 'resumable';
+        return this.finishHeadlessWorkflow(identity, receipt);
       }
-      if (deliveryStage === 'direct-attempted' || deliveryStage === 'notice-attempted') {
+
+      if (deliveryStage === 'direct-failed' || deliveryStage === 'needs-notice') {
+        return this.restoreWithNotice(identity, receipt, input, true);
+      }
+      if (deliveryStage === 'notice-attempted') {
+        return this.restoreWithNotice(identity, receipt, input, false);
+      }
+      if (deliveryStage === 'direct-attempted') {
+        if (!await this.persistDeliveryStage(identity, receipt, 'restore-attempted')) return 'resumable';
         if (!await input.restore(receipt, undefined)) return 'resumable';
         if (!await this.persistDeliveryStage(identity, receipt, 'delivered')) return 'resumable';
-      } else if (!await input.restore(receipt, undefined)) {
-        return 'resumable';
+        return this.finishHeadlessWorkflow(identity, receipt);
       }
-      const finish = await this.actions.finishWorkflowReturn({
-        userId: identity.userId,
-        chatId: identity.chatId,
-        id: receipt.id,
-        outcome: 'completed',
-        now: this.clock.now(),
-      });
-      return finish === 'finished' ? 'completed' : 'resumable';
+      if (deliveryStage === 'restore-attempted') {
+        if (!await this.persistDeliveryStage(identity, receipt, 'delivered')) return 'resumable';
+        return this.finishHeadlessWorkflow(identity, receipt);
+      }
+      if (!await input.restore(receipt, undefined)) return 'resumable';
+      return this.finishHeadlessWorkflow(identity, receipt);
     });
   }
 
@@ -254,11 +246,20 @@ export class WorkflowEntryCoordinator {
     identity: CurrentWorkflowIdentity,
     receipt: WorkflowReturnReceipt,
     input: Pick<Parameters<WorkflowEntryCoordinator['completeHeadless']>[0], 'restore' | 'recoveryNotice'>,
+    claimNoticeAttempt: boolean,
   ): Promise<HeadlessWorkflowCompletionResult> {
     if (!input.recoveryNotice) return 'resumable';
-    if (!await this.persistDeliveryStage(identity, receipt, 'notice-attempted')) return 'resumable';
+    if (claimNoticeAttempt
+      && !await this.persistDeliveryStage(identity, receipt, 'notice-attempted')) return 'resumable';
     if (!await input.restore(receipt, input.recoveryNotice)) return 'resumable';
     if (!await this.persistDeliveryStage(identity, receipt, 'delivered')) return 'resumable';
+    return this.finishHeadlessWorkflow(identity, receipt);
+  }
+
+  private async finishHeadlessWorkflow(
+    identity: CurrentWorkflowIdentity,
+    receipt: WorkflowReturnReceipt,
+  ): Promise<HeadlessWorkflowCompletionResult> {
     const finish = await this.actions.finishWorkflowReturn({
       userId: identity.userId,
       chatId: identity.chatId,
@@ -272,7 +273,7 @@ export class WorkflowEntryCoordinator {
   private async persistDeliveryStage(
     identity: CurrentWorkflowIdentity,
     receipt: WorkflowReturnReceipt,
-    stage: 'direct-attempted' | 'notice-attempted' | 'delivered',
+    stage: 'direct-attempted' | 'direct-failed' | 'notice-attempted' | 'restore-attempted' | 'delivered',
   ): Promise<boolean> {
     try {
       const result = await this.actions.updateWorkflowReturnDeliveryStage({

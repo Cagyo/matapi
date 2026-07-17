@@ -12,7 +12,11 @@ export type WorkflowReturnDestination = 'origin' | 'home';
 export type WorkflowDeliveryStage =
   | 'pending'
   | 'direct-attempted'
+  /** The direct result send was rejected; an outcome notice is still required. */
+  | 'direct-failed'
   | 'notice-attempted'
+  /** A silent Home restoration began after an unconfirmed direct result. */
+  | 'restore-attempted'
   | 'delivered'
   /** Legacy stage written before notice attempts were recorded durably. */
   | 'needs-notice';
@@ -54,8 +58,9 @@ export function isWorkflowReturnPhase(value: unknown): value is WorkflowReturnPh
 }
 
 export function isWorkflowDeliveryStage(value: unknown): value is WorkflowDeliveryStage {
-  return value === 'pending' || value === 'direct-attempted' || value === 'notice-attempted'
-    || value === 'delivered' || value === 'needs-notice';
+  return value === 'pending' || value === 'direct-attempted' || value === 'direct-failed'
+    || value === 'notice-attempted' || value === 'restore-attempted' || value === 'delivered'
+    || value === 'needs-notice';
 }
 
 export function canTransitionWorkflowDeliveryStage(
@@ -63,7 +68,11 @@ export function canTransitionWorkflowDeliveryStage(
   to: Exclude<WorkflowDeliveryStage, 'pending'>,
 ): boolean {
   return (from === 'pending' && to === 'direct-attempted')
-    || (from === 'direct-attempted' && (to === 'delivered' || to === 'notice-attempted'))
+    || (from === 'direct-attempted' && (
+      to === 'delivered' || to === 'direct-failed' || to === 'restore-attempted'
+    ))
+    || (from === 'direct-failed' && to === 'notice-attempted')
     || (from === 'needs-notice' && to === 'notice-attempted')
-    || (from === 'notice-attempted' && to === 'delivered');
+    || (from === 'notice-attempted' && to === 'delivered')
+    || (from === 'restore-attempted' && to === 'delivered');
 }

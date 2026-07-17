@@ -51,7 +51,7 @@ interface WorkflowDeliveryStageUpdater {
     userId: number;
     chatId: number;
     id: string;
-    stage: 'direct-attempted' | 'notice-attempted' | 'delivered' | 'needs-notice';
+    stage: 'direct-attempted' | 'direct-failed' | 'notice-attempted' | 'restore-attempted' | 'delivered' | 'needs-notice';
     now: Date;
   }) => Promise<'updated' | 'expired' | 'superseded' | 'terminal'>;
 }
@@ -240,7 +240,7 @@ function describeWorkflowReturnRepositoryContract(
       })).resolves.toBe('superseded');
     });
 
-    it('allows exactly one notice attempt after an unconfirmed direct attempt', async () => {
+    it('records a rejected direct attempt before it can begin outcome notice recovery', async () => {
       const pending = workflowReceipt();
       await harness.repository.beginWorkflowReturn(pending);
       await harness.repository.claimWorkflowReturn({ userId: 100, chatId: 200, id: pending.id, now: NOW });
@@ -255,6 +255,9 @@ function describeWorkflowReturnRepositoryContract(
         userId: 100, chatId: 200, id: pending.id, stage: 'direct-attempted', now: NOW,
       })).resolves.toBe('updated');
       await expect(updateStage({
+        userId: 100, chatId: 200, id: pending.id, stage: 'direct-failed', now: NOW,
+      })).resolves.toBe('updated');
+      await expect(updateStage({
         userId: 100, chatId: 200, id: pending.id, stage: 'notice-attempted', now: NOW,
       })).resolves.toBe('updated');
       await expect(updateStage({
@@ -263,6 +266,28 @@ function describeWorkflowReturnRepositoryContract(
       await expect(updateStage({
         userId: 100, chatId: 200, id: pending.id, stage: 'notice-attempted', now: NOW,
       })).resolves.toBe('terminal');
+    });
+
+    it('records silent Home restoration separately after an unconfirmed direct result', async () => {
+      const pending = workflowReceipt();
+      await harness.repository.beginWorkflowReturn(pending);
+      await harness.repository.claimWorkflowReturn({ userId: 100, chatId: 200, id: pending.id, now: NOW });
+      const update = (harness.repository as unknown as WorkflowDeliveryStageUpdater)
+        .updateWorkflowReturnDeliveryStage;
+
+      expect(update).toBeTypeOf('function');
+      if (!update) return;
+      const updateStage = update.bind(harness.repository);
+
+      await expect(updateStage({
+        userId: 100, chatId: 200, id: pending.id, stage: 'direct-attempted', now: NOW,
+      })).resolves.toBe('updated');
+      await expect(updateStage({
+        userId: 100, chatId: 200, id: pending.id, stage: 'restore-attempted', now: NOW,
+      })).resolves.toBe('updated');
+      await expect(updateStage({
+        userId: 100, chatId: 200, id: pending.id, stage: 'delivered', now: NOW,
+      })).resolves.toBe('updated');
     });
 
     it('maps legacy needs-notice receipts to a single notice attempt', async () => {

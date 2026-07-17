@@ -46,7 +46,15 @@ describe('Workflow return receipt validation', () => {
     expect(isHomeActionReceipt(receipt({ payload: { ...receipt().payload, phase } }))).toBe(true);
   });
 
-  it.each(['pending', 'direct-attempted', 'notice-attempted', 'delivered', 'needs-notice'] as const)(
+  it.each([
+    'pending',
+    'direct-attempted',
+    'direct-failed',
+    'notice-attempted',
+    'restore-attempted',
+    'delivered',
+    'needs-notice',
+  ] as const)(
     'accepts the %s durable delivery stage while retaining legacy stage-less receipts',
     (deliveryStage) => {
       const staged = {
