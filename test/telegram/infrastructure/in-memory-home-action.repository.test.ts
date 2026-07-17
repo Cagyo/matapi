@@ -51,7 +51,7 @@ interface WorkflowDeliveryStageUpdater {
     userId: number;
     chatId: number;
     id: string;
-    stage: 'delivered' | 'needs-notice';
+    stage: 'direct-attempted' | 'notice-attempted' | 'delivered' | 'needs-notice';
     now: Date;
   }) => Promise<'updated' | 'expired' | 'superseded' | 'terminal'>;
 }
@@ -216,7 +216,7 @@ function describeWorkflowReturnRepositoryContract(
       })).resolves.toEqual({ kind: 'resumable', receipt: { ...pending, status: 'executing' } });
     });
 
-    it('persists an exact receipt delivery stage once and retains legacy stage-less payloads as pending', async () => {
+    it('CAS-transitions a stage-less receipt through its durable direct attempt', async () => {
       const pending = workflowReceipt();
       await harness.repository.beginWorkflowReturn(pending);
       await harness.repository.claimWorkflowReturn({ userId: 100, chatId: 200, id: pending.id, now: NOW });
@@ -228,19 +228,19 @@ function describeWorkflowReturnRepositoryContract(
       const updateStage = update.bind(harness.repository);
 
       await expect(updateStage({
-        userId: 100, chatId: 200, id: pending.id, stage: 'delivered', now: NOW,
+        userId: 100, chatId: 200, id: pending.id, stage: 'direct-attempted', now: NOW,
       })).resolves.toBe('updated');
       await expect(harness.repository.findWorkflowReturn({ userId: 100, chatId: 200, now: NOW }))
-        .resolves.toMatchObject({ payload: { deliveryStage: 'delivered' } });
+        .resolves.toMatchObject({ payload: { deliveryStage: 'direct-attempted' } });
       await expect(updateStage({
-        userId: 100, chatId: 200, id: pending.id, stage: 'needs-notice', now: NOW,
+        userId: 100, chatId: 200, id: pending.id, stage: 'direct-attempted', now: NOW,
       })).resolves.toBe('terminal');
       await expect(updateStage({
         userId: 100, chatId: 200, id: 'qrstuvwxyzabcdef', stage: 'needs-notice', now: NOW,
       })).resolves.toBe('superseded');
     });
 
-    it('promotes a restored outcome notice to delivered without allowing another notice', async () => {
+    it('allows exactly one notice attempt after an unconfirmed direct attempt', async () => {
       const pending = workflowReceipt();
       await harness.repository.beginWorkflowReturn(pending);
       await harness.repository.claimWorkflowReturn({ userId: 100, chatId: 200, id: pending.id, now: NOW });
@@ -252,14 +252,34 @@ function describeWorkflowReturnRepositoryContract(
       const updateStage = update.bind(harness.repository);
 
       await expect(updateStage({
-        userId: 100, chatId: 200, id: pending.id, stage: 'needs-notice', now: NOW,
+        userId: 100, chatId: 200, id: pending.id, stage: 'direct-attempted', now: NOW,
+      })).resolves.toBe('updated');
+      await expect(updateStage({
+        userId: 100, chatId: 200, id: pending.id, stage: 'notice-attempted', now: NOW,
       })).resolves.toBe('updated');
       await expect(updateStage({
         userId: 100, chatId: 200, id: pending.id, stage: 'delivered', now: NOW,
       })).resolves.toBe('updated');
       await expect(updateStage({
-        userId: 100, chatId: 200, id: pending.id, stage: 'needs-notice', now: NOW,
+        userId: 100, chatId: 200, id: pending.id, stage: 'notice-attempted', now: NOW,
       })).resolves.toBe('terminal');
+    });
+
+    it('maps legacy needs-notice receipts to a single notice attempt', async () => {
+      const pending = workflowReceipt(undefined, {
+        payload: { ...workflowReceipt().payload, deliveryStage: 'needs-notice' },
+      });
+      await harness.repository.beginWorkflowReturn(pending);
+      await harness.repository.claimWorkflowReturn({ userId: 100, chatId: 200, id: pending.id, now: NOW });
+      const update = (harness.repository as unknown as WorkflowDeliveryStageUpdater)
+        .updateWorkflowReturnDeliveryStage;
+
+      expect(update).toBeTypeOf('function');
+      if (!update) return;
+
+      await expect(update.bind(harness.repository)({
+        userId: 100, chatId: 200, id: pending.id, stage: 'notice-attempted', now: NOW,
+      })).resolves.toBe('updated');
     });
 
     it('keeps returned observable until completion and treats completed as terminal', async () => {

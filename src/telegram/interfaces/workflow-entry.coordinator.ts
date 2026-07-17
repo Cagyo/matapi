@@ -142,8 +142,8 @@ export class WorkflowEntryCoordinator {
 
   /**
    * Completes a workflow without a grammY context after process recovery.
-   * Delivery progress is stored in the receipt before its origin is restored,
-   * so a recovery retry cannot repeat a successful direct result delivery.
+   * Each external delivery attempt is recorded before it starts, so recovery
+   * can prefer an unfinished compensation over repeating a DM or Home notice.
    */
   async completeHeadless(input: {
     identity: CurrentWorkflowIdentity;
@@ -185,38 +185,46 @@ export class WorkflowEntryCoordinator {
         await this.drafts.cancelExact(receipt);
       }
       let deliveryStage = receipt.payload.deliveryStage ?? 'pending';
-      if (deliveryStage === 'pending') {
-        try {
-          await input.deliver();
-          deliveryStage = 'delivered';
-        } catch {
-          deliveryStage = 'needs-notice';
-        }
-        if (!await this.persistDeliveryStage(identity, receipt, deliveryStage)) return 'resumable';
-      }
 
       // A user who returned while the restart ran already has a fresh Home.
-      // Do not replace that newer session. If direct delivery already failed,
-      // there is no safe place to render its notice, so finish without another
-      // delivery attempt rather than leaving restart recovery stuck forever.
+      // Do not replace that newer session or attempt a previously unrecorded
+      // delivery; only a durably confirmed outcome may finish this receipt.
       if (claim.kind === 'returned') {
+        if (deliveryStage !== 'delivered') return 'resumable';
         const finish = await this.actions.finishWorkflowReturn({
           userId: identity.userId,
           chatId: identity.chatId,
-          id: claim.receipt.id,
+          id: receipt.id,
           outcome: 'completed',
           now: this.clock.now(),
         });
         return finish === 'finished' ? 'completed' : 'resumable';
       }
 
+      if (deliveryStage === 'pending') {
+        if (!await this.persistDeliveryStage(identity, receipt, 'direct-attempted')) return 'resumable';
+        deliveryStage = 'direct-attempted';
+        let delivered = false;
+        try {
+          await input.deliver();
+          delivered = true;
+        } catch {
+          // The result may still have reached Telegram; do not send it again.
+        }
+        if (delivered && await this.persistDeliveryStage(identity, receipt, 'delivered')) {
+          deliveryStage = 'delivered';
+        }
+      }
+
       if (claim.kind !== 'claimed' && claim.kind !== 'resumable') return 'no-workflow';
 
-      if (deliveryStage === 'needs-notice') {
-        if (!input.recoveryNotice || !await input.restore(receipt, input.recoveryNotice)) return 'resumable';
-        // The localized notice is now the durable outcome delivery. Mark it
-        // before completion so a failed final write cannot show it twice.
+      if (deliveryStage === 'direct-attempted' || deliveryStage === 'needs-notice') {
+        if (!input.recoveryNotice) return 'resumable';
+        if (!await this.persistDeliveryStage(identity, receipt, 'notice-attempted')) return 'resumable';
+        if (!await input.restore(receipt, input.recoveryNotice)) return 'resumable';
         if (!await this.persistDeliveryStage(identity, receipt, 'delivered')) return 'resumable';
+      } else if (deliveryStage === 'notice-attempted') {
+        return 'resumable';
       } else if (!await input.restore(receipt, undefined)) {
         return 'resumable';
       }
@@ -234,7 +242,7 @@ export class WorkflowEntryCoordinator {
   private async persistDeliveryStage(
     identity: CurrentWorkflowIdentity,
     receipt: WorkflowReturnReceipt,
-    stage: 'delivered' | 'needs-notice',
+    stage: 'direct-attempted' | 'notice-attempted' | 'delivered',
   ): Promise<boolean> {
     try {
       const result = await this.actions.updateWorkflowReturnDeliveryStage({

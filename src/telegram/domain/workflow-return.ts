@@ -9,7 +9,13 @@ export type ExternalWorkflow =
 export type WorkflowReturnPhase = 'cancellable' | 'running';
 export type WorkflowReturnDestination = 'origin' | 'home';
 /** Durable outcome-delivery progress for process-recovered workflows. */
-export type WorkflowDeliveryStage = 'pending' | 'delivered' | 'needs-notice';
+export type WorkflowDeliveryStage =
+  | 'pending'
+  | 'direct-attempted'
+  | 'notice-attempted'
+  | 'delivered'
+  /** Legacy stage written before notice attempts were recorded durably. */
+  | 'needs-notice';
 export type WorkflowReturnReceipt = Extract<HomeActionReceipt, { kind: 'workflow-return' }>;
 
 const RECEIPT_ID = /^[A-Za-z0-9_-]{16}$/;
@@ -48,5 +54,16 @@ export function isWorkflowReturnPhase(value: unknown): value is WorkflowReturnPh
 }
 
 export function isWorkflowDeliveryStage(value: unknown): value is WorkflowDeliveryStage {
-  return value === 'pending' || value === 'delivered' || value === 'needs-notice';
+  return value === 'pending' || value === 'direct-attempted' || value === 'notice-attempted'
+    || value === 'delivered' || value === 'needs-notice';
+}
+
+export function canTransitionWorkflowDeliveryStage(
+  from: WorkflowDeliveryStage,
+  to: Exclude<WorkflowDeliveryStage, 'pending'>,
+): boolean {
+  return (from === 'pending' && to === 'direct-attempted')
+    || (from === 'direct-attempted' && (to === 'delivered' || to === 'notice-attempted'))
+    || (from === 'needs-notice' && to === 'notice-attempted')
+    || (from === 'notice-attempted' && to === 'delivered');
 }

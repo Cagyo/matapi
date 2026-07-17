@@ -10,7 +10,12 @@ import {
   type HomeActionReceipt,
   type UndoReceiptKind,
 } from '../domain/home-action-receipt';
-import type { WorkflowDeliveryStage, WorkflowReturnPhase, WorkflowReturnReceipt } from '../domain/workflow-return';
+import {
+  canTransitionWorkflowDeliveryStage,
+  type WorkflowDeliveryStage,
+  type WorkflowReturnPhase,
+  type WorkflowReturnReceipt,
+} from '../domain/workflow-return';
 
 type ReceiptRow = typeof homeActionReceipts.$inferSelect;
 type ReceiptWriter = Pick<AppDatabase, 'insert' | 'select' | 'update' | 'delete'>;
@@ -233,9 +238,7 @@ export class DrizzleHomeActionRepository implements HomeActionRepositoryPort {
       if (receipt.status !== 'executing' && receipt.status !== 'returned') return 'terminal';
       if (receipt.expiresAt.getTime() <= input.now.getTime()) return 'expired';
       const currentStage = receipt.payload.deliveryStage ?? 'pending';
-      if (currentStage === 'delivered' || (currentStage === 'needs-notice' && input.stage !== 'delivered')) {
-        return 'terminal';
-      }
+      if (!canTransitionWorkflowDeliveryStage(currentStage, input.stage)) return 'terminal';
       const updated: WorkflowReturnReceipt = {
         ...receipt,
         payload: { ...receipt.payload, deliveryStage: input.stage },
