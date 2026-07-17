@@ -667,6 +667,35 @@ describe('WorkflowEntryCoordinator', () => {
     expect(actions.finishWorkflowReturn).toHaveBeenCalledOnce();
   });
 
+  it('finishes a known direct result when both recovery stage writes fail', async () => {
+    const pending = restartReceipt('pending');
+    const actions = {
+      findWorkflowReturn: vi.fn().mockResolvedValue(pending),
+      claimWorkflowReturn: vi.fn().mockResolvedValue({
+        kind: 'claimed', receipt: { ...pending, status: 'executing' as const },
+      }),
+      updateWorkflowReturnDeliveryStage: vi.fn()
+        .mockResolvedValueOnce('updated')
+        .mockResolvedValueOnce('superseded')
+        .mockResolvedValueOnce('superseded'),
+      finishWorkflowReturn: vi.fn().mockResolvedValue('finished'),
+    };
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const restore = vi.fn().mockResolvedValue(true);
+
+    await expect(recoveryCoordinator(actions).completeHeadless({
+      identity: recoveryIdentity,
+      workflow: 'system-restart',
+      deliver,
+      restore,
+      recoveryNotice: catalogFor('en').ota.restartComplete,
+    })).resolves.toBe('completed');
+
+    expect(deliver).toHaveBeenCalledOnce();
+    expect(restore).not.toHaveBeenCalled();
+    expect(actions.finishWorkflowReturn).toHaveBeenCalledOnce();
+  });
+
   it('retries a non-returned direct attempt after a crash before its effect', async () => {
     const directAttempted = restartReceipt('direct-attempted', 'executing');
     const actions = {

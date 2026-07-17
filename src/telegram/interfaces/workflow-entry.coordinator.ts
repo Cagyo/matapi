@@ -268,7 +268,11 @@ export class WorkflowEntryCoordinator {
     // We know the direct result succeeded even though its effect marker was
     // not written. Record the next external effect before starting it, so a
     // later recovery retries restoration rather than the direct result.
-    if (!await this.persistDeliveryStage(identity, receipt, 'restore-attempted')) return 'resumable';
+    if (!await this.persistDeliveryStage(identity, receipt, 'restore-attempted')) {
+      // Do not turn a known direct result into a duplicate on the next boot
+      // merely because both optional recovery markers were unavailable.
+      return this.finishHeadlessWorkflow(identity, receipt);
+    }
     return this.restoreSilently(identity, receipt, input);
   }
 
