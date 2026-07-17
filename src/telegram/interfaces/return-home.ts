@@ -1,6 +1,8 @@
 import { InlineKeyboard } from 'grammy';
 import type { LocaleCatalog } from '../../locales';
 
+// One-release compatibility for messages emitted before receipt-bound `wr:` navigation.
+
 export type ExternalWorkflow =
   | 'logs'
   | 'csv'

@@ -21,6 +21,8 @@ describe('homeCallbackAckMiddleware', () => {
     'rh:a:c',
     'rh:a:r',
     'rh:a:t',
+    'wr:abcdefghijklmnop:o',
+    'wr:abcdefghijklmnop:h',
   ])('acknowledges Home callback %s before continuing', async (data) => {
     let resolveAcknowledgement!: () => void;
     const acknowledgement = new Promise<void>((resolve) => { resolveAcknowledgement = resolve; });
@@ -64,6 +66,11 @@ describe('homeCallbackAckMiddleware', () => {
     'rh:a:x',
     'rh:camera:t',
     'rh:a:t:extra',
+    'wr:abcdefghijklmnop',
+    'wr:abcdefghijklmnop:x',
+    'wr:abcdefghijklmno:o',
+    'wr:abcdefghijklmnop:o:extra',
+    'wr:abcdefghijklmnop:o\n',
   ])('does not acknowledge unrelated or malformed callbacks: %s', async (data) => {
     const answerCallbackQuery = vi.fn().mockResolvedValue(true);
     const ctx = callbackContext(data, answerCallbackQuery);
