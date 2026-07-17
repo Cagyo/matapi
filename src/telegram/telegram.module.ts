@@ -39,6 +39,7 @@ import { SetQuietHoursUseCase } from './application/set-quiet-hours.use-case';
 import { CompareAndSetQuietHoursUseCase } from './application/compare-and-set-quiet-hours.use-case';
 import { SetAutoCleanThresholdUseCase } from './application/set-auto-clean-threshold.use-case';
 import { HomeNavigationUseCase } from './application/home-navigation.use-case';
+import { BeginWorkflowReturnUseCase } from './application/begin-workflow-return.use-case';
 import { SystemUpdateUseCase } from './application/system-update.use-case';
 import { UnmuteSensorUseCase } from './application/unmute-sensor.use-case';
 import { UpdateSystemUseCase } from './application/update-system.use-case';
@@ -120,6 +121,9 @@ import { ReturnHomeHandler } from './interfaces/return-home.handler';
 import { SettingsHandler } from './interfaces/settings.handler';
 import { CleanHandler } from './interfaces/clean.handler';
 import { BotCommandsMenuService } from './application/bot-commands-menu.service';
+import { WorkflowDraftRegistry } from './interfaces/workflow-draft.registry';
+import { WorkflowOperationQueue } from './interfaces/workflow-operation.queue';
+import { WorkflowEntryCoordinator } from './interfaces/workflow-entry.coordinator';
 
 function resolveBotMode(): BotMode {
   if (process.env.BOT_MODE === 'mock') return 'mock';
@@ -221,6 +225,7 @@ const mode = resolveBotMode();
     CompareAndSetQuietHoursUseCase,
     SetAutoCleanThresholdUseCase,
     HomeNavigationUseCase,
+    BeginWorkflowReturnUseCase,
     UpdateSystemUseCase,
     SystemUpdateUseCase,
     RollbackSystemUseCase,
@@ -272,6 +277,9 @@ const mode = resolveBotMode();
     FeatureHandler,
     CsvHandler,
     HomeHandler,
+    WorkflowDraftRegistry,
+    WorkflowOperationQueue,
+    WorkflowEntryCoordinator,
     HomeLauncher,
     ReturnHomeHandler,
     LegacyMenuHandler,

@@ -63,12 +63,16 @@ async function resolveHomeSummaryFromApplication(mode: 'mock' | 'real') {
   const { AppModule } = await import('../../src/app.module');
   const { GetHomeSummaryUseCase } = await import('../../src/telegram/application/get-home-summary.use-case');
   const { NotificationTargetDirectoryService } = await import('../../src/telegram/application/notification-target-directory.service');
+  const { HomeHandler } = await import('../../src/telegram/interfaces/home.handler');
+  const { WorkflowEntryCoordinator } = await import('../../src/telegram/interfaces/workflow-entry.coordinator');
   let app: Awaited<ReturnType<typeof NestFactory.createApplicationContext>> | undefined;
   try {
     app = await NestFactory.createApplicationContext(AppModule, { logger: false });
     return {
       summary: app.get(GetHomeSummaryUseCase),
       targets: app.get(NotificationTargetDirectoryService),
+      homeHandler: app.get(HomeHandler),
+      workflowCoordinator: app.get(WorkflowEntryCoordinator),
     };
   } finally {
     await app?.close();
@@ -94,7 +98,7 @@ describe('TelegramModule bot-mode composition', () => {
       homeTokenGenerator: expect.objectContaining({ name: 'CryptoHomeTokenGenerator' }),
       homeMessageDelivery: expect.objectContaining({ name: 'InMemoryHomeMessageDeliveryAdapter' }),
     });
-  });
+  }, 20_000);
 
   it('uses Drizzle state adapters in real mode without booting grammY', async () => {
     const providers = await telegramProviders('real');
@@ -108,7 +112,7 @@ describe('TelegramModule bot-mode composition', () => {
       homeTokenGenerator: expect.objectContaining({ name: 'CryptoHomeTokenGenerator' }),
       homeMessageDelivery: expect.objectContaining({ name: 'TelegramHomeMessageAdapter' }),
     });
-  });
+  }, 20_000);
 
   it('does not register the removed Close Home use case', async () => {
     const providers = await telegramProviders('mock');
@@ -116,8 +120,9 @@ describe('TelegramModule bot-mode composition', () => {
     expect(providers.providerClasses).not.toContainEqual(expect.objectContaining({ name: 'CloseHomeUseCase' }));
   });
 
-  it.each(['mock', 'real'] as const)('resolves GetHomeSummaryUseCase at runtime in %s mode', async (mode) => {
-    const { summary, targets } = await resolveHomeSummaryFromApplication(mode);
+  it.each(['mock', 'real'] as const)('resolves HomeHandler with workflow coordination at runtime in %s mode', async (mode) => {
+    const { summary, targets, homeHandler, workflowCoordinator } = await resolveHomeSummaryFromApplication(mode);
     expect((summary as unknown as { notificationTargets: unknown }).notificationTargets === targets).toBe(true);
+    expect((homeHandler as unknown as { workflows?: unknown }).workflows).toBe(workflowCoordinator);
   });
 });

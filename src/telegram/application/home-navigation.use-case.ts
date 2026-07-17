@@ -6,11 +6,47 @@ import { HOME_TOKEN_GENERATOR, type HomeTokenGeneratorPort } from '../domain/por
 import type { Role } from '../domain/role';
 import { HOME_ACTION_REPOSITORY, type HomeActionRepositoryPort } from './ports/home-action-repository.port';
 
+type HomeExternalDestination =
+  | 'camera'
+  | 'history-logs'
+  | 'history-csv'
+  | 'settings'
+  | 'help'
+  | 'config-add'
+  | 'config-modify'
+  | 'config-remove'
+  | 'config-import'
+  | 'config-export'
+  | 'drive-status'
+  | 'drive-connect'
+  | 'system-health'
+  | 'system-packages'
+  | 'invite';
+
+type HomeRecoveryReason =
+  | 'expired'
+  | 'superseded'
+  | 'executing'
+  | 'terminal'
+  | 'target-unavailable'
+  | 'admin-required';
+
 export type HomeNavigationResult =
   | { kind: 'render'; view: HomeView }
-  | { kind: 'external'; destination: 'camera' | 'history-logs' | 'history-csv' | 'settings' | 'help' | 'config-add' | 'config-modify' | 'config-remove' | 'config-import' | 'config-export' | 'drive-status' | 'drive-connect' | 'system-health' | 'system-packages' | 'invite' }
+  | { kind: 'external'; destination: HomeExternalDestination }
   | { kind: 'restart' }
-  | { kind: 'recovery'; reason: 'expired' | 'superseded' | 'executing' | 'terminal' | 'target-unavailable' | 'admin-required' };
+  | { kind: 'recovery'; reason: HomeRecoveryReason };
+
+export type HomeNavigationEffectResult = Exclude<HomeNavigationResult, { kind: 'external' }>;
+
+/**
+ * A callback that is eligible to run, but whose mutation has intentionally
+ * not run yet. The Home interface uses this boundary to leave any active
+ * workflow before executing the effect.
+ */
+export type HomeNavigationRoute =
+  | Exclude<HomeNavigationResult, { kind: 'restart' }>
+  | { kind: 'effect' };
 
 export interface HomeNavigationInput {
   active: HomeIdentity;
@@ -50,77 +86,48 @@ export class HomeNavigationUseCase {
     @Inject(HOME_TOKEN_GENERATOR) private readonly tokens: HomeTokenGeneratorPort,
   ) {}
 
-  async execute(input: HomeNavigationInput): Promise<HomeNavigationResult> {
+  /**
+   * Validates the callback's information architecture and authorization
+   * without touching state. Callers can safely leave a workflow after this
+   * step and before calling executeEffect().
+   */
+  route(input: HomeNavigationInput): HomeNavigationRoute {
     const { action, view } = input;
     if (action.kind === 'refresh') return { kind: 'render', view };
     if (action.kind === 'back') {
       const parent = parentView(view);
       return parent ? { kind: 'render', view: parent } : { kind: 'recovery', reason: 'superseded' };
     }
+
     if (action.kind === 'confirm-pause') {
-      if (view.kind !== 'pause-confirmation' || view.receiptId !== action.receiptId) return { kind: 'recovery', reason: 'superseded' };
-      const result = await this.actions.confirmPause({
-        userId: input.active.userId, chatId: input.active.chatId, token: input.active.token,
-        id: action.receiptId, hours: view.hours, now: this.clock.now(),
-      });
-      return result.kind === 'applied' ? { kind: 'render', view: { kind: 'notifications' } } : { kind: 'recovery', reason: result.kind };
+      return view.kind === 'pause-confirmation' && view.receiptId === action.receiptId
+        ? { kind: 'effect' }
+        : { kind: 'recovery', reason: 'superseded' };
     }
-    if (action.kind === 'undo-pause') {
-      if (view.kind !== 'notifications') return { kind: 'recovery', reason: 'superseded' };
-      const result = await this.actions.undoPause({ userId: input.active.userId, chatId: input.active.chatId, id: action.receiptId, now: this.clock.now() });
-      return result.kind === 'applied' ? { kind: 'render', view: { kind: 'notifications' } } : { kind: 'recovery', reason: result.kind };
-    }
-    if (action.kind === 'quiet-hours') {
-      if (view.kind !== 'notifications') return { kind: 'recovery', reason: 'superseded' };
-      const ranges = { '22-07': ['22:00', '07:00'], '23-06': ['23:00', '06:00'], '00-08': ['00:00', '08:00'], off: [null, null] } as const;
-      const [start, end] = ranges[action.preset];
-      const now = this.clock.now();
-      const result = await this.actions.setQuietHours({
-        userId: input.active.userId, chatId: input.active.chatId, start, end, id: this.tokens.generate(),
-        expiresAt: new Date(now.getTime() + 600_000), now,
-      });
-      return result.kind === 'applied' ? { kind: 'render', view: { kind: 'notifications' } } : { kind: 'recovery', reason: 'superseded' };
-    }
-    if (action.kind === 'undo-quiet-hours') {
-      if (view.kind !== 'notifications') return { kind: 'recovery', reason: 'superseded' };
-      const result = await this.actions.undoQuietHours({ userId: input.active.userId, chatId: input.active.chatId, id: action.receiptId, now: this.clock.now() });
-      return result.kind === 'applied' ? { kind: 'render', view: { kind: 'notifications' } } : { kind: 'recovery', reason: result.kind };
+    if (action.kind === 'undo-pause' || action.kind === 'quiet-hours' || action.kind === 'undo-quiet-hours') {
+      return view.kind === 'notifications'
+        ? { kind: 'effect' }
+        : { kind: 'recovery', reason: 'superseded' };
     }
     if (action.kind === 'pause-hours') {
-      if (view.kind !== 'pause-duration') return { kind: 'recovery', reason: 'superseded' };
-      const now = this.clock.now();
-      const id = this.tokens.generate();
-      await this.actions.createPauseConfirmation({
-        id, userId: input.active.userId, chatId: input.active.chatId,
-        kind: 'pause-confirmation', sessionToken: input.active.token, status: 'pending',
-        payload: { hours: action.hours }, expiresAt: new Date(now.getTime() + CONFIRMATION_TTL_MS),
-      });
-      return { kind: 'render', view: { kind: 'pause-confirmation', hours: action.hours, receiptId: id } };
+      return view.kind === 'pause-duration'
+        ? { kind: 'effect' }
+        : { kind: 'recovery', reason: 'superseded' };
     }
     if (action.kind === 'cleanup' || action.kind === 'restart') {
       if (input.role !== 'admin') return { kind: 'recovery', reason: 'admin-required' };
       const requiredView = action.kind === 'cleanup' ? 'admin-storage' : 'admin-system';
-      if (view.kind !== requiredView) return { kind: 'recovery', reason: 'superseded' };
-      const now = this.clock.now();
-      const id = this.tokens.generate();
-      const kind = action.kind === 'cleanup' ? 'cleanup-confirmation' as const : 'restart-confirmation' as const;
-      await this.actions.createExternalConfirmation({
-        id, userId: input.active.userId, chatId: input.active.chatId, kind,
-        sessionToken: input.active.token, status: 'pending', payload: {},
-        expiresAt: new Date(now.getTime() + CONFIRMATION_TTL_MS),
-      });
-      return { kind: 'render', view: { kind: 'confirmation', action: action.kind, receiptId: id } };
+      return view.kind === requiredView
+        ? { kind: 'effect' }
+        : { kind: 'recovery', reason: 'superseded' };
     }
     if (action.kind === 'confirm-cleanup' || action.kind === 'confirm-restart') {
       const expected = action.kind === 'confirm-cleanup' ? 'cleanup' : 'restart';
-      const kind = action.kind === 'confirm-cleanup' ? 'cleanup-confirmation' as const : 'restart-confirmation' as const;
-      if (view.kind !== 'confirmation' || view.action !== expected || view.receiptId !== action.receiptId) return { kind: 'recovery', reason: 'superseded' };
-      const result = await this.actions.claimExternal({ userId: input.active.userId, chatId: input.active.chatId, token: input.active.token, kind, id: action.receiptId, now: this.clock.now() });
-      if (result.kind !== 'claimed') return { kind: 'recovery', reason: result.kind };
-      return expected === 'restart'
-        ? { kind: 'restart' }
-        : { kind: 'render', view: { kind: 'cleanup-result', outcome: 'in-progress', threshold: null } };
+      return view.kind === 'confirmation' && view.action === expected && view.receiptId === action.receiptId
+        ? { kind: 'effect' }
+        : { kind: 'recovery', reason: 'superseded' };
     }
+
     if (action.kind === 'notifications' && view.kind === 'home') return { kind: 'render', view: { kind: 'notifications' } };
     if (action.kind === 'more' && view.kind === 'home') return { kind: 'render', view: { kind: 'more' } };
     if (action.kind === 'history' && view.kind === 'more') return { kind: 'render', view: { kind: 'history' } };
@@ -132,13 +139,14 @@ export class HomeNavigationUseCase {
     if (action.kind === 'pause-duration' && view.kind === 'notifications') return { kind: 'render', view: { kind: 'pause-duration' } };
     if (action.kind === 'notification-targets' && view.kind === 'notifications') return { kind: 'render', view: { kind: 'notification-targets', page: action.page, targets: [] } };
     if (action.kind === 'notification-target' && view.kind === 'notification-targets' && action.index < view.targets.length) return { kind: 'render', view: { kind: 'notification-target', page: view.page, target: view.targets[action.index] } };
-    if ((action.kind === 'notification-target-mute' || action.kind === 'notification-target-unmute') && view.kind === 'notification-target') return { kind: 'render', view };
+    if ((action.kind === 'notification-target-mute' || action.kind === 'notification-target-unmute') && view.kind === 'notification-target') return { kind: 'effect' };
     if (action.kind === 'history-logs' && view.kind === 'history') return { kind: 'external', destination: 'history-logs' };
     if (action.kind === 'history-csv' && view.kind === 'history') return { kind: 'external', destination: 'history-csv' };
     if (action.kind === 'settings' && view.kind === 'more') return { kind: 'external', destination: 'settings' };
     if (action.kind === 'help' && view.kind === 'more') return { kind: 'external', destination: 'help' };
     if (action.kind === 'invite' && view.kind === 'admin-tools' && input.role === 'admin') return { kind: 'external', destination: 'invite' };
-    const adminExternal: Record<string, 'config-add' | 'config-modify' | 'config-remove' | 'config-import' | 'config-export' | 'drive-status' | 'drive-connect' | 'system-health' | 'system-packages'> = {
+
+    const adminExternal: Record<string, Exclude<HomeExternalDestination, 'camera' | 'history-logs' | 'history-csv' | 'settings' | 'help' | 'invite'>> = {
       'config-add': 'config-add', 'config-modify': 'config-modify', 'config-remove': 'config-remove', 'config-import': 'config-import', 'config-export': 'config-export',
       'drive-status': 'drive-status', 'drive-connect': 'drive-connect', 'system-health': 'system-health', 'system-packages': 'system-packages',
     };
@@ -146,11 +154,86 @@ export class HomeNavigationUseCase {
       const expectedView = action.kind.startsWith('config-') ? 'admin-sensor-setup' : action.kind.startsWith('drive-') ? 'admin-storage' : 'admin-system';
       if (view.kind === expectedView) return { kind: 'external', destination: adminExternal[action.kind] };
     }
-    if (action.kind === 'auto-clean-threshold' && view.kind === 'admin-cleanup-threshold' && input.role === 'admin') return { kind: 'render', view };
+    if (action.kind === 'auto-clean-threshold' && view.kind === 'admin-cleanup-threshold' && input.role === 'admin') return { kind: 'effect' };
     if (action.kind === 'camera' && view.kind === 'home') return { kind: 'external', destination: 'camera' };
     if (action.kind === 'home') return { kind: 'render', view: { kind: 'home', checking: false } };
     if (action.kind === 'sensors' && (view.kind === 'home' || view.kind === 'sensors')) return { kind: 'render', view: { kind: 'sensors', page: action.page, checking: false } };
     if (action.kind === 'check' && (view.kind === 'home' || view.kind === 'sensors')) return { kind: 'render', view: { ...view, checking: true } };
     return { kind: 'recovery', reason: 'superseded' };
+  }
+
+  /**
+   * Runs only a route that was already found eligible. It repeats the pure
+   * route check so a direct caller cannot turn an invalid callback into a
+   * state change.
+   */
+  async executeEffect(input: HomeNavigationInput): Promise<HomeNavigationEffectResult> {
+    if (this.route(input).kind !== 'effect') return { kind: 'recovery', reason: 'superseded' };
+
+    const { action, view } = input;
+    if (action.kind === 'confirm-pause' && view.kind === 'pause-confirmation') {
+      const result = await this.actions.confirmPause({
+        userId: input.active.userId, chatId: input.active.chatId, token: input.active.token,
+        id: action.receiptId, hours: view.hours, now: this.clock.now(),
+      });
+      return result.kind === 'applied' ? { kind: 'render', view: { kind: 'notifications' } } : { kind: 'recovery', reason: result.kind };
+    }
+    if (action.kind === 'undo-pause') {
+      const result = await this.actions.undoPause({ userId: input.active.userId, chatId: input.active.chatId, id: action.receiptId, now: this.clock.now() });
+      return result.kind === 'applied' ? { kind: 'render', view: { kind: 'notifications' } } : { kind: 'recovery', reason: result.kind };
+    }
+    if (action.kind === 'quiet-hours') {
+      const ranges = { '22-07': ['22:00', '07:00'], '23-06': ['23:00', '06:00'], '00-08': ['00:00', '08:00'], off: [null, null] } as const;
+      const [start, end] = ranges[action.preset];
+      const now = this.clock.now();
+      const result = await this.actions.setQuietHours({
+        userId: input.active.userId, chatId: input.active.chatId, start, end, id: this.tokens.generate(),
+        expiresAt: new Date(now.getTime() + 600_000), now,
+      });
+      return result.kind === 'applied' ? { kind: 'render', view: { kind: 'notifications' } } : { kind: 'recovery', reason: 'superseded' };
+    }
+    if (action.kind === 'undo-quiet-hours') {
+      const result = await this.actions.undoQuietHours({ userId: input.active.userId, chatId: input.active.chatId, id: action.receiptId, now: this.clock.now() });
+      return result.kind === 'applied' ? { kind: 'render', view: { kind: 'notifications' } } : { kind: 'recovery', reason: result.kind };
+    }
+    if (action.kind === 'pause-hours') {
+      const now = this.clock.now();
+      const id = this.tokens.generate();
+      await this.actions.createPauseConfirmation({
+        id, userId: input.active.userId, chatId: input.active.chatId,
+        kind: 'pause-confirmation', sessionToken: input.active.token, status: 'pending',
+        payload: { hours: action.hours }, expiresAt: new Date(now.getTime() + CONFIRMATION_TTL_MS),
+      });
+      return { kind: 'render', view: { kind: 'pause-confirmation', hours: action.hours, receiptId: id } };
+    }
+    if (action.kind === 'cleanup' || action.kind === 'restart') {
+      const now = this.clock.now();
+      const id = this.tokens.generate();
+      const kind = action.kind === 'cleanup' ? 'cleanup-confirmation' as const : 'restart-confirmation' as const;
+      await this.actions.createExternalConfirmation({
+        id, userId: input.active.userId, chatId: input.active.chatId, kind,
+        sessionToken: input.active.token, status: 'pending', payload: {},
+        expiresAt: new Date(now.getTime() + CONFIRMATION_TTL_MS),
+      });
+      return { kind: 'render', view: { kind: 'confirmation', action: action.kind, receiptId: id } };
+    }
+    if (action.kind === 'confirm-cleanup' || action.kind === 'confirm-restart') {
+      const kind = action.kind === 'confirm-cleanup' ? 'cleanup-confirmation' as const : 'restart-confirmation' as const;
+      const result = await this.actions.claimExternal({ userId: input.active.userId, chatId: input.active.chatId, token: input.active.token, kind, id: action.receiptId, now: this.clock.now() });
+      if (result.kind !== 'claimed') return { kind: 'recovery', reason: result.kind };
+      return action.kind === 'confirm-restart'
+        ? { kind: 'restart' }
+        : { kind: 'render', view: { kind: 'cleanup-result', outcome: 'in-progress', threshold: null } };
+    }
+    if (action.kind === 'notification-target-mute' || action.kind === 'notification-target-unmute' || action.kind === 'auto-clean-threshold') {
+      return { kind: 'render', view };
+    }
+    return { kind: 'recovery', reason: 'superseded' };
+  }
+
+  /** Backward-compatible one-shot entry point for direct application callers. */
+  async execute(input: HomeNavigationInput): Promise<HomeNavigationResult> {
+    const route = this.route(input);
+    return route.kind === 'effect' ? this.executeEffect(input) : route;
   }
 }

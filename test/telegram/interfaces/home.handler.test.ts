@@ -53,7 +53,12 @@ function context(data?: string) {
   };
 }
 
-function setup() {
+function setup(overrides: {
+  clean?: { execute: ReturnType<typeof vi.fn> };
+  restart?: { execute: ReturnType<typeof vi.fn> };
+  thresholds?: { execute: ReturnType<typeof vi.fn> };
+  actions?: { finishExternal: ReturnType<typeof vi.fn> };
+} = {}) {
   const guard = { registered: vi.fn() } as unknown as RoleMiddleware;
   const open = {
     execute: vi.fn().mockResolvedValue({ kind: 'opened', active: identity, view: { kind: 'home', checking: false } }),
@@ -66,7 +71,17 @@ function setup() {
   } as unknown as RenderHomeUseCase;
   const refresh = { execute: vi.fn().mockResolvedValue({ kind: 'refreshed' }) } as unknown as RefreshHomeMonitoringUseCase;
   const camera = { handleDashboard: vi.fn().mockResolvedValue(undefined) } as any;
-  const navigation = { execute: vi.fn().mockImplementation(({ action }: any) => Promise.resolve({
+  const navigation = {
+    route: vi.fn().mockImplementation(({ action }: any) => ({
+      kind: action.kind === 'camera' ? 'external' : ['confirm-pause', 'auto-clean-threshold', 'confirm-cleanup'].includes(action.kind) ? 'effect' : 'render',
+      destination: action.kind === 'camera' ? 'camera' : undefined,
+      view: action.kind === 'sensors'
+        ? { kind: 'sensors', page: action.page, checking: false }
+        : action.kind === 'home'
+          ? { kind: 'home', checking: false }
+          : { kind: 'notifications' },
+    })),
+    executeEffect: vi.fn().mockImplementation(({ action }: any) => Promise.resolve({
     kind: action.kind === 'camera' ? 'external' : 'render',
     destination: action.kind === 'camera' ? 'camera' : undefined,
     view: action.kind === 'sensors'
@@ -74,7 +89,8 @@ function setup() {
       : action.kind === 'home'
         ? { kind: 'home', checking: false }
         : { kind: 'notifications' },
-  })) } as unknown as HomeNavigationUseCase;
+    })),
+  } as unknown as HomeNavigationUseCase;
   const workflowEntry = {
     begin: vi.fn().mockResolvedValue(workflowReceipt),
     leaveForHome: vi.fn().mockResolvedValue('no-workflow'),
@@ -93,11 +109,11 @@ function setup() {
     undefined, // import config
     undefined, // export config
     undefined, // system update
-    undefined, // clean
-    undefined, // restart
-    undefined, // thresholds
+    overrides.clean, // clean
+    overrides.restart, // restart
+    overrides.thresholds, // thresholds
     undefined, // target mute
-    undefined, // action repository
+    overrides.actions, // action repository
     { now: () => new Date('2030-01-01T00:00:00.000Z') },
     workflowEntry,
   );
@@ -260,7 +276,7 @@ describe('HomeHandler', () => {
 
     await callbacks[0].fn(ctx);
 
-    expect(navigation.execute).toHaveBeenCalledWith(expect.objectContaining({ action: { kind: 'notifications' } }));
+    expect(navigation.route).toHaveBeenCalledWith(expect.objectContaining({ action: { kind: 'notifications' } }));
     expect(render.execute).toHaveBeenCalledWith(expect.objectContaining({ view: { kind: 'notifications' } }));
   });
 
@@ -272,7 +288,7 @@ describe('HomeHandler', () => {
     await callbacks[0].fn(ctx);
 
     expect(render.execute).not.toHaveBeenCalled();
-    expect(navigation.execute).toHaveBeenCalledWith(expect.objectContaining({ action }));
+    expect(navigation.route).toHaveBeenCalledWith(expect.objectContaining({ action }));
     expect(workflowEntry.begin).toHaveBeenCalledWith(ctx, 'camera', {
       source: 'captured',
       view: { kind: 'home', checking: false },
@@ -313,11 +329,173 @@ describe('HomeHandler', () => {
       kind: 'accepted', active: identity,
       view: { kind: 'confirmation', action: 'cleanup', receiptId: '1234567890abcdef' },
     });
-    (navigation.execute as any).mockResolvedValue({ kind: 'recovery', reason: 'executing' });
+    (navigation.route as any).mockReturnValue({ kind: 'recovery', reason: 'executing' });
     const ctx = context(encodeHomeCallback(identity.token, 1, { kind: 'confirm-cleanup', receiptId: '1234567890abcdef' }));
 
     await callbacks[0].fn(ctx);
 
     expect(ctx.reply).toHaveBeenCalledWith(ctx.localeState.catalog.home.cleanupResult.inProgress);
+  });
+
+  it('renders a validated legacy refresh in place without touching the active workflow', async () => {
+    const { callbacks, render, navigation, workflowEntry, open, camera } = setup();
+    const ctx = context(`h:${identity.token}:1:x`);
+    (workflowEntry.leaveForHome as ReturnType<typeof vi.fn>).mockResolvedValue('opened');
+
+    await callbacks[0].fn(ctx);
+
+    expect(render.execute).toHaveBeenCalledWith(expect.objectContaining({
+      active: identity,
+      view: { kind: 'home', checking: false },
+    }));
+    expect(navigation.route).not.toHaveBeenCalled();
+    expect(navigation.executeEffect).not.toHaveBeenCalled();
+    expect(workflowEntry.leaveForHome).not.toHaveBeenCalled();
+    expect(workflowEntry.begin).not.toHaveBeenCalled();
+    expect(open.execute).not.toHaveBeenCalled();
+    expect(camera.handleDashboard).not.toHaveBeenCalled();
+  });
+
+  it('leaves an active workflow before confirming a validated pause and freshly promotes the result', async () => {
+    const events: string[] = [];
+    const { callbacks, validate, navigation, workflowEntry, open, render } = setup();
+    const ctx = context(encodeHomeCallback(identity.token, 1, { kind: 'confirm-pause', receiptId: '1234567890abcdef' }));
+    (validate.execute as ReturnType<typeof vi.fn>).mockResolvedValue({
+      kind: 'accepted', active: identity,
+      view: { kind: 'pause-confirmation', hours: 4, receiptId: '1234567890abcdef' },
+    });
+    (navigation.route as ReturnType<typeof vi.fn>).mockImplementation(() => ({ kind: 'effect' }));
+    (navigation.executeEffect as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      events.push('confirm-pause');
+      return { kind: 'render', view: { kind: 'notifications' } };
+    });
+    (workflowEntry.leaveForHome as ReturnType<typeof vi.fn>).mockImplementation(async (_ctx, promote) => {
+      events.push('leave-workflow');
+      await promote();
+      return 'opened';
+    });
+    (open.execute as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      events.push('open-fresh');
+      return { kind: 'opened' };
+    });
+
+    await callbacks[0].fn(ctx);
+
+    expect(events).toEqual(['leave-workflow', 'confirm-pause', 'open-fresh']);
+    expect(render.execute).not.toHaveBeenCalled();
+  });
+
+  it('leaves an active workflow before applying a cleanup threshold and freshly promotes the result', async () => {
+    const events: string[] = [];
+    const thresholds = { execute: vi.fn().mockImplementation(async () => { events.push('set-threshold'); }) };
+    const { callbacks, validate, navigation, workflowEntry, open, render } = setup({ thresholds });
+    const ctx = context(encodeHomeCallback(identity.token, 1, { kind: 'auto-clean-threshold', value: 80 }));
+    ctx.localeState = localeState('admin');
+    (validate.execute as ReturnType<typeof vi.fn>).mockResolvedValue({
+      kind: 'accepted', active: identity, view: { kind: 'admin-cleanup-threshold' },
+    });
+    (navigation.route as ReturnType<typeof vi.fn>).mockImplementation(() => ({ kind: 'effect' }));
+    (navigation.executeEffect as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      events.push('validate-threshold-effect');
+      return { kind: 'render', view: { kind: 'admin-cleanup-threshold' } };
+    });
+    (workflowEntry.leaveForHome as ReturnType<typeof vi.fn>).mockImplementation(async (_ctx, promote) => {
+      events.push('leave-workflow');
+      await promote();
+      return 'opened';
+    });
+    (open.execute as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      events.push('open-fresh');
+      return { kind: 'opened' };
+    });
+
+    await callbacks[0].fn(ctx);
+
+    expect(events).toEqual(['leave-workflow', 'validate-threshold-effect', 'set-threshold', 'open-fresh']);
+    expect(render.execute).not.toHaveBeenCalled();
+  });
+
+  it('leaves an active workflow before dispatching a confirmed cleanup and freshly promotes its result', async () => {
+    const events: string[] = [];
+    const clean = { execute: vi.fn().mockImplementation(async () => {
+      events.push('dispatch-cleanup');
+      return { executed: true, thresholdUsed: 80 };
+    }) };
+    const actions = { finishExternal: vi.fn().mockImplementation(async () => { events.push('finish-cleanup'); }) };
+    const { callbacks, validate, navigation, workflowEntry, open, render } = setup({ clean, actions });
+    const receiptId = '1234567890abcdef';
+    const ctx = context(encodeHomeCallback(identity.token, 1, { kind: 'confirm-cleanup', receiptId }));
+    ctx.localeState = localeState('admin');
+    (validate.execute as ReturnType<typeof vi.fn>).mockResolvedValue({
+      kind: 'accepted', active: identity,
+      view: { kind: 'confirmation', action: 'cleanup', receiptId },
+    });
+    (navigation.route as ReturnType<typeof vi.fn>).mockImplementation(() => ({ kind: 'effect' }));
+    (navigation.executeEffect as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      events.push('claim-cleanup');
+      return { kind: 'render', view: { kind: 'cleanup-result', outcome: 'in-progress', threshold: null } };
+    });
+    (workflowEntry.leaveForHome as ReturnType<typeof vi.fn>).mockImplementation(async (_ctx, promote) => {
+      events.push('leave-workflow');
+      await promote();
+      return 'opened';
+    });
+    (open.execute as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      events.push('open-fresh');
+      return { kind: 'opened' };
+    });
+
+    await callbacks[0].fn(ctx);
+
+    expect(events).toEqual(['leave-workflow', 'claim-cleanup', 'dispatch-cleanup', 'finish-cleanup', 'open-fresh']);
+    expect(render.execute).not.toHaveBeenCalled();
+  });
+
+  it('leaves an active workflow before dispatching a confirmed restart and freshly promotes System', async () => {
+    const events: string[] = [];
+    const restart = { execute: vi.fn().mockImplementation(async () => { events.push('dispatch-restart'); }) };
+    const actions = { finishExternal: vi.fn().mockImplementation(async () => { events.push('finish-restart'); }) };
+    const { callbacks, validate, navigation, workflowEntry, open, render } = setup({ restart, actions });
+    const receiptId = '1234567890abcdef';
+    const ctx = context(encodeHomeCallback(identity.token, 1, { kind: 'confirm-restart', receiptId }));
+    ctx.localeState = localeState('admin');
+    (validate.execute as ReturnType<typeof vi.fn>).mockResolvedValue({
+      kind: 'accepted', active: identity,
+      view: { kind: 'confirmation', action: 'restart', receiptId },
+    });
+    (navigation.route as ReturnType<typeof vi.fn>).mockImplementation(() => ({ kind: 'effect' }));
+    (navigation.executeEffect as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      events.push('claim-restart');
+      return { kind: 'restart' };
+    });
+    (workflowEntry.leaveForHome as ReturnType<typeof vi.fn>).mockImplementation(async (_ctx, promote) => {
+      events.push('leave-workflow');
+      await promote();
+      return 'opened';
+    });
+    (open.execute as ReturnType<typeof vi.fn>).mockImplementation(async (input) => {
+      events.push(`open-fresh:${input.view.kind}`);
+      return { kind: 'opened' };
+    });
+
+    await callbacks[0].fn(ctx);
+
+    expect(events).toEqual(['leave-workflow', 'claim-restart', 'dispatch-restart', 'finish-restart', 'open-fresh:admin-system']);
+    expect(render.execute).not.toHaveBeenCalled();
+  });
+
+  it('does not claim a workflow or mutate a setting after validation reports a stale callback', async () => {
+    const thresholds = { execute: vi.fn() };
+    const { callbacks, validate, navigation, workflowEntry } = setup({ thresholds });
+    const ctx = context(encodeHomeCallback(identity.token, 1, { kind: 'auto-clean-threshold', value: 80 }));
+    ctx.localeState = localeState('admin');
+    (validate.execute as ReturnType<typeof vi.fn>).mockResolvedValue({ kind: 'stale' });
+
+    await callbacks[0].fn(ctx);
+
+    expect(navigation.route).not.toHaveBeenCalled();
+    expect(navigation.executeEffect).not.toHaveBeenCalled();
+    expect(workflowEntry.leaveForHome).not.toHaveBeenCalled();
+    expect(thresholds.execute).not.toHaveBeenCalled();
   });
 });

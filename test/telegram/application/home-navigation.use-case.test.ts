@@ -175,4 +175,25 @@ describe('HomeNavigationUseCase', () => {
       userId: 1, chatId: 2, token: active.token, id: '1234567890abcdef', hours: 4, now,
     });
   });
+
+  it('keeps a validated mutation effect-free until the workflow boundary explicitly executes it', async () => {
+    const actions = { confirmPause: vi.fn().mockResolvedValue({ kind: 'applied', expectedRevision: 1 }) };
+    const useCase = new HomeNavigationUseCase(
+      actions as never,
+      { now: () => now },
+      { generate: () => '1234567890abcdef' },
+    );
+    const input = {
+      active,
+      role: 'user' as const,
+      view: { kind: 'pause-confirmation', hours: 4 as const, receiptId: '1234567890abcdef' },
+      action: { kind: 'confirm-pause' as const, receiptId: '1234567890abcdef' },
+    };
+
+    expect(useCase.route(input)).toEqual({ kind: 'effect' });
+    expect(actions.confirmPause).not.toHaveBeenCalled();
+
+    await expect(useCase.executeEffect(input)).resolves.toEqual({ kind: 'render', view: { kind: 'notifications' } });
+    expect(actions.confirmPause).toHaveBeenCalledOnce();
+  });
 });

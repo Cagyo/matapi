@@ -36,9 +36,9 @@ export type LeaveForHomeResult = 'opened' | 'no-workflow' | 'not-opened' | 'stal
 @Injectable()
 export class WorkflowEntryCoordinator {
   constructor(
-    private readonly beginWorkflow: BeginWorkflowReturnUseCase,
-    private readonly drafts: WorkflowDraftRegistry,
-    private readonly operations: WorkflowOperationQueue,
+    @Inject(BeginWorkflowReturnUseCase) private readonly beginWorkflow: BeginWorkflowReturnUseCase,
+    @Inject(WorkflowDraftRegistry) private readonly drafts: WorkflowDraftRegistry,
+    @Inject(WorkflowOperationQueue) private readonly operations: WorkflowOperationQueue,
     @Inject(HOME_ACTION_REPOSITORY) private readonly actions: HomeActionRepositoryPort,
     @Inject(CLOCK) private readonly clock: ClockPort,
   ) {}

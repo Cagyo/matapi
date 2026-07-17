@@ -1,6 +1,10 @@
 import { Injectable, Optional } from '@nestjs/common';
 import { Composer, InlineKeyboard } from 'grammy';
-import { HomeNavigationUseCase } from '../application/home-navigation.use-case';
+import {
+  HomeNavigationUseCase,
+  type HomeNavigationResult,
+  type HomeNavigationRoute,
+} from '../application/home-navigation.use-case';
 import { OpenHomeUseCase } from '../application/open-home.use-case';
 import { RefreshHomeMonitoringUseCase } from '../application/refresh-home-monitoring.use-case';
 import { RenderHomeUseCase, type RenderHomeResult } from '../application/render-home.use-case';
@@ -32,6 +36,11 @@ import { TelegramContext, type LocaleState } from './telegram-context';
 import { TelegramHandler } from './telegram-handler';
 import { WorkflowEntryCoordinator, type WorkflowLaunch } from './workflow-entry.coordinator';
 
+type HomeEffectOutcome =
+  | Extract<HomeNavigationResult, { kind: 'render' | 'restart' | 'recovery' }>
+  | { kind: 'handled' }
+  | { kind: 'unavailable' };
+
 @Injectable()
 export class HomeHandler implements TelegramHandler {
   constructor(
@@ -60,7 +69,7 @@ export class HomeHandler implements TelegramHandler {
     private readonly targetMute?: SetNotificationTargetMutedUseCase,
     @Inject(HOME_ACTION_REPOSITORY) private readonly actions?: HomeActionRepositoryPort,
     @Inject(CLOCK) private readonly clock?: ClockPort,
-    @Optional() private readonly workflows?: WorkflowEntryCoordinator,
+    @Optional() @Inject(WorkflowEntryCoordinator) private readonly workflows?: WorkflowEntryCoordinator,
   ) {}
 
   register(composer: Composer<TelegramContext>): void {
@@ -127,6 +136,12 @@ export class HomeHandler implements TelegramHandler {
     }
 
     try {
+      // Legacy close callbacks decode as refresh. They retain the validated
+      // message and must not alter any active external workflow.
+      if (parsed.action.kind === 'refresh') {
+        await this.render(ctx, verdict.active, verdict.view);
+        return;
+      }
       if (parsed.action.kind === 'check') { await this.check(ctx, verdict.active, verdict.view); return; }
       await this.navigate(ctx, verdict.active, verdict.view, parsed.action);
     } catch {
@@ -144,53 +159,115 @@ export class HomeHandler implements TelegramHandler {
       await this.recover(ctx, 'unavailable');
       return;
     }
-    const result = await this.navigation.execute({ active, role: ctx.localeState!.user.role, view, action });
-    if (result.kind === 'recovery') {
-      if (result.reason === 'executing') {
-        await ctx.reply(action.kind === 'confirm-restart'
-          ? ctx.localeState!.catalog.ota.restarting
-          : ctx.localeState!.catalog.home.cleanupResult.inProgress);
-      } else await this.recover(ctx, 'stale');
+    const input = { active, role: ctx.localeState!.user.role, view, action };
+    const route = this.navigation.route(input);
+    if (route.kind === 'recovery') {
+      await this.recoverNavigation(ctx, action, route);
       return;
     }
-    if (result.kind === 'external') { await this.external(ctx, result.destination, active, view); return; }
-    if (result.kind === 'restart') { await this.restartClaimed(ctx, active, action); return; }
-    if (action.kind === 'confirm-cleanup' && result.view.kind === 'cleanup-result') { await this.cleanupClaimed(ctx, active, action.receiptId); return; }
-    if (action.kind === 'auto-clean-threshold' && this.thresholds) await this.thresholds.execute(action.value);
-    if ((action.kind === 'notification-target-mute' || action.kind === 'notification-target-unmute') && view.kind === 'notification-target' && this.targetMute) {
-      await this.targetMute.execute(active.userId, view.target, action.kind === 'notification-target-mute');
-    }
-    const leave = await this.leaveForHome(ctx, () => this.openFreshFromContext(ctx, result.view));
+    if (route.kind === 'external') { await this.external(ctx, route.destination, active, view); return; }
+
+    let outcome: HomeEffectOutcome | undefined;
+    const leave = await this.leaveForHome(ctx, async () => {
+      outcome = route.kind === 'effect'
+        ? await this.executeHomeEffect(ctx, input)
+        : route;
+      if (outcome.kind === 'render') return this.openFreshFromContext(ctx, outcome.view);
+      if (outcome.kind === 'restart') return this.openFreshFromContext(ctx, { kind: 'admin-system' });
+      return false;
+    });
     if (leave === 'opened') return;
     if (leave === 'no-workflow') {
-      await this.render(ctx, active, result.view);
+      outcome = route.kind === 'effect'
+        ? await this.executeHomeEffect(ctx, input)
+        : route;
+      if (outcome.kind === 'render') {
+        await this.render(ctx, active, outcome.view);
+        return;
+      }
+      if (outcome.kind === 'restart' || outcome.kind === 'handled') return;
+      if (outcome.kind === 'recovery') {
+        await this.recoverNavigation(ctx, action, outcome);
+        return;
+      }
+      await this.recover(ctx, 'unavailable');
+      return;
+    }
+    if (outcome?.kind === 'handled') return;
+    if (outcome?.kind === 'recovery') {
+      await this.recoverNavigation(ctx, action, outcome);
       return;
     }
     await this.recover(ctx, leave === 'stale' ? 'stale' : 'unavailable');
   }
 
-  private async cleanupClaimed(ctx: TelegramContext, active: Parameters<RenderHomeUseCase['execute']>[0]['active'], id: string): Promise<void> {
-    if (!this.clean || !this.actions) { await this.recover(ctx, 'unavailable'); return; }
+  private async executeHomeEffect(
+    ctx: TelegramContext,
+    input: Parameters<HomeNavigationUseCase['executeEffect']>[0],
+  ): Promise<HomeEffectOutcome> {
+    const result = await this.navigation!.executeEffect(input);
+    if (result.kind === 'recovery') return result;
+    if (result.kind === 'restart') {
+      const status = await this.restartClaimed(ctx, input.active, input.action);
+      return status === 'completed' ? result : status === 'handled' ? { kind: 'handled' } : { kind: 'unavailable' };
+    }
+    if (input.action.kind === 'confirm-cleanup' && result.view.kind === 'cleanup-result') {
+      const view = await this.cleanupClaimed(input.active, input.action.receiptId);
+      return view ? { kind: 'render', view } : { kind: 'unavailable' };
+    }
+    if (input.action.kind === 'auto-clean-threshold' && this.thresholds) await this.thresholds.execute(input.action.value);
+    if ((input.action.kind === 'notification-target-mute' || input.action.kind === 'notification-target-unmute')
+      && input.view.kind === 'notification-target' && this.targetMute) {
+      await this.targetMute.execute(input.active.userId, input.view.target, input.action.kind === 'notification-target-mute');
+    }
+    return result;
+  }
+
+  private async cleanupClaimed(
+    active: Parameters<RenderHomeUseCase['execute']>[0]['active'],
+    id: string,
+  ): Promise<HomeView | null> {
+    if (!this.clean || !this.actions || !this.clock) return null;
     try {
       const outcome = await this.clean.execute();
-      await this.actions.finishExternal({ action: { id, userId: active.userId, chatId: active.chatId, kind: 'cleanup-confirmation' }, outcome: 'completed', now: this.clock!.now() });
-      await this.render(ctx, active, { kind: 'cleanup-result', outcome: outcome.executed ? 'executed' : 'in-progress', threshold: outcome.thresholdUsed || null });
+      await this.actions.finishExternal({ action: { id, userId: active.userId, chatId: active.chatId, kind: 'cleanup-confirmation' }, outcome: 'completed', now: this.clock.now() });
+      return { kind: 'cleanup-result', outcome: outcome.executed ? 'executed' : 'in-progress', threshold: outcome.thresholdUsed || null };
     } catch {
-      await this.actions.finishExternal({ action: { id, userId: active.userId, chatId: active.chatId, kind: 'cleanup-confirmation' }, outcome: 'failed', now: this.clock!.now() });
-      await this.render(ctx, active, { kind: 'cleanup-result', outcome: 'failed', threshold: null });
+      await this.actions.finishExternal({ action: { id, userId: active.userId, chatId: active.chatId, kind: 'cleanup-confirmation' }, outcome: 'failed', now: this.clock.now() });
+      return { kind: 'cleanup-result', outcome: 'failed', threshold: null };
     }
   }
 
-  private async restartClaimed(ctx: TelegramContext, active: Parameters<RenderHomeUseCase['execute']>[0]['active'], action: Extract<ReturnType<typeof parseHomeCallback>, { action: unknown }>['action']): Promise<void> {
-    if (action.kind !== 'confirm-restart' || !this.restart || !this.actions) { await this.recover(ctx, 'unavailable'); return; }
+  private async restartClaimed(
+    ctx: TelegramContext,
+    active: Parameters<RenderHomeUseCase['execute']>[0]['active'],
+    action: Extract<ReturnType<typeof parseHomeCallback>, { action: unknown }>['action'],
+  ): Promise<'completed' | 'handled' | 'unavailable'> {
+    if (action.kind !== 'confirm-restart' || !this.restart || !this.actions || !this.clock) return 'unavailable';
     try {
       await ctx.reply(ctx.localeState!.catalog.ota.restarting);
       await this.restart.execute();
-      await this.actions.finishExternal({ action: { id: action.receiptId, userId: active.userId, chatId: active.chatId, kind: 'restart-confirmation' }, outcome: 'completed', now: this.clock!.now() });
+      await this.actions.finishExternal({ action: { id: action.receiptId, userId: active.userId, chatId: active.chatId, kind: 'restart-confirmation' }, outcome: 'completed', now: this.clock.now() });
+      return 'completed';
     } catch (error) {
-      await this.actions.finishExternal({ action: { id: action.receiptId, userId: active.userId, chatId: active.chatId, kind: 'restart-confirmation' }, outcome: 'failed', now: this.clock!.now() });
+      await this.actions.finishExternal({ action: { id: action.receiptId, userId: active.userId, chatId: active.chatId, kind: 'restart-confirmation' }, outcome: 'failed', now: this.clock.now() });
       await ctx.reply(ctx.localeState!.catalog.ota.restartFailed(error instanceof Error ? error.message : 'unknown'));
+      return 'handled';
     }
+  }
+
+  private async recoverNavigation(
+    ctx: TelegramContext,
+    action: Extract<ReturnType<typeof parseHomeCallback>, { action: unknown }>['action'],
+    result: Extract<HomeNavigationRoute | HomeEffectOutcome, { kind: 'recovery' }>,
+  ): Promise<void> {
+    if (result.reason === 'executing') {
+      await ctx.reply(action.kind === 'confirm-restart'
+        ? ctx.localeState!.catalog.ota.restarting
+        : ctx.localeState!.catalog.home.cleanupResult.inProgress);
+      return;
+    }
+    await this.recover(ctx, 'stale');
   }
 
   private async external(
