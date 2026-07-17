@@ -80,7 +80,8 @@ export class RestartConfirmationService {
         },
         workflow: 'system-restart',
         deliver: () => this.dm.send(user.telegramId, message),
-        restore: async (receipt) => {
+        recoveryNotice: message,
+        restore: async (receipt, notice) => {
           const restored = await this.restoreWorkflow.execute({
             userId: user.telegramId,
             chatId: user.telegramId,
@@ -89,6 +90,7 @@ export class RestartConfirmationService {
             workflow: receipt.payload.workflow,
             requested: { kind: 'admin-system' },
             originSource: 'natural-parent',
+            notice,
           });
           return restored.kind === 'opened';
         },

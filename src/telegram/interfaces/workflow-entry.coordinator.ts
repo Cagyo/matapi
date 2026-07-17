@@ -151,7 +151,13 @@ export class WorkflowEntryCoordinator {
     identity: CurrentWorkflowIdentity;
     workflow: ExternalWorkflow;
     deliver(): Promise<void>;
-    restore(receipt: WorkflowReturnReceipt): Promise<boolean>;
+    /**
+     * A resumable receipt may have lost its one direct delivery attempt.
+     * The supplied notice preserves that terminal outcome in the restored
+     * Home without retrying the direct message.
+     */
+    restore(receipt: WorkflowReturnReceipt, notice?: string): Promise<boolean>;
+    recoveryNotice?: string;
   }): Promise<HeadlessWorkflowCompletionResult> {
     const { identity } = input;
     return this.operations.run(identity.userId, identity.chatId, async () => {
@@ -204,7 +210,8 @@ export class WorkflowEntryCoordinator {
 
       if (claim.kind !== 'claimed' && claim.kind !== 'resumable') return 'no-workflow';
 
-      if (!await input.restore(claim.receipt)) return 'resumable';
+      const notice = claim.kind === 'resumable' ? input.recoveryNotice : undefined;
+      if (!await input.restore(claim.receipt, notice)) return 'resumable';
       const finish = await this.actions.finishWorkflowReturn({
         userId: identity.userId,
         chatId: identity.chatId,

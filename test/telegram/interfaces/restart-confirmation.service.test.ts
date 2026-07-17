@@ -201,6 +201,38 @@ describe('RestartConfirmationService', () => {
     expect(dm.send).toHaveBeenCalledWith(7, catalogFor('uk').ota.updateSuccess('unknown'));
   });
 
+  it('passes the localized recovery outcome into the restored Home notice', async () => {
+    const meta = makeMeta({ [RESTART_REASON_KEY]: 'user_command' });
+    const dm: DirectMessengerPort = { send: vi.fn().mockResolvedValue(undefined) };
+    const notice = catalogFor('uk').ota.restartComplete;
+    const workflows = {
+      completeHeadless: vi.fn(async (input: {
+        restore(receipt: { payload: { workflow: 'system-restart' } }, notice: string): Promise<boolean>;
+      }) => {
+        await input.restore({ payload: { workflow: 'system-restart' } }, notice);
+        return 'completed' as const;
+      }),
+    } as unknown as WorkflowEntryCoordinator;
+    const restore = { execute: vi.fn().mockResolvedValue({ kind: 'opened' }) } as unknown as RestoreWorkflowOriginUseCase;
+    const service = new RestartConfirmationService(
+      meta,
+      new InMemoryUserRepository([{ ...admin(7, 'Olena'), locale: 'uk' as const }]),
+      dm,
+      workflows,
+      restore,
+    );
+
+    await service.run();
+
+    expect(restore.execute).toHaveBeenCalledWith(expect.objectContaining({
+      userId: 7,
+      locale: 'uk',
+      requested: { kind: 'admin-system' },
+      notice,
+    }));
+    expect(dm.send).not.toHaveBeenCalled();
+  });
+
   it('does not fall back to broadcast when a contextual recovery remains resumable', async () => {
     const meta = makeMeta({ [RESTART_REASON_KEY]: 'user_command' });
     const dm: DirectMessengerPort = { send: vi.fn().mockResolvedValue(undefined) };
