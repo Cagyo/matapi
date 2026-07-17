@@ -46,6 +46,19 @@ describe('Workflow return receipt validation', () => {
     expect(isHomeActionReceipt(receipt({ payload: { ...receipt().payload, phase } }))).toBe(true);
   });
 
+  it.each(['pending', 'delivered', 'needs-notice'] as const)(
+    'accepts the %s durable delivery stage while retaining legacy stage-less receipts',
+    (deliveryStage) => {
+      const staged = {
+        ...receipt(),
+        payload: { ...receipt().payload, deliveryStage },
+      };
+
+      expect(isHomeActionReceipt(staged)).toBe(true);
+      expect(isHomeActionReceipt(receipt())).toBe(true);
+    },
+  );
+
   it.each(STATUSES)('accepts the %s status', (status) => {
     expect(isHomeActionReceipt(receipt({ status }))).toBe(true);
   });

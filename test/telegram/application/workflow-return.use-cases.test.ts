@@ -72,6 +72,7 @@ describe('workflow return receipt lifecycle use cases', () => {
           phase: 'cancellable',
           originSource: 'captured',
           origin: { kind: 'home', checking: false },
+          deliveryStage: 'pending',
         },
       },
       replaced: null,

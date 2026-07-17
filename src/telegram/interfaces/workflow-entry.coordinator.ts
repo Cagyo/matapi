@@ -142,10 +142,8 @@ export class WorkflowEntryCoordinator {
 
   /**
    * Completes a workflow without a grammY context after process recovery.
-   * A claimed receipt only advances to restoration after successful result
-   * delivery. If reopening its origin later fails, a resumable retry
-   * re-attempts only restoration; it never turns into the legacy broadcast
-   * path or sends the result twice.
+   * Delivery progress is stored in the receipt before its origin is restored,
+   * so a recovery retry cannot repeat a successful direct result delivery.
    */
   async completeHeadless(input: {
     identity: CurrentWorkflowIdentity;
@@ -178,26 +176,30 @@ export class WorkflowEntryCoordinator {
       if (claim.kind === 'expired' || claim.kind === 'superseded' || claim.kind === 'terminal') {
         return 'no-workflow';
       }
-
-      if (claim.kind === 'claimed' && claim.receipt.payload.phase === 'cancellable') {
-        await this.drafts.cancelExact(claim.receipt);
+      if (claim.kind !== 'claimed' && claim.kind !== 'resumable' && claim.kind !== 'returned') {
+        return 'no-workflow';
       }
-      if (claim.kind === 'claimed') {
+      const receipt = claim.receipt;
+
+      if (claim.kind === 'claimed' && receipt.payload.phase === 'cancellable') {
+        await this.drafts.cancelExact(receipt);
+      }
+      let deliveryStage = receipt.payload.deliveryStage ?? 'pending';
+      if (deliveryStage === 'pending') {
         try {
           await input.deliver();
+          deliveryStage = 'delivered';
         } catch {
-          return 'resumable';
+          deliveryStage = 'needs-notice';
         }
+        if (!await this.persistDeliveryStage(identity, receipt, deliveryStage)) return 'resumable';
       }
 
       // A user who returned while the restart ran already has a fresh Home.
-      // Send the terminal result once, but do not replace that newer session.
+      // Do not replace that newer session. If direct delivery already failed,
+      // there is no safe place to render its notice, so finish without another
+      // delivery attempt rather than leaving restart recovery stuck forever.
       if (claim.kind === 'returned') {
-        try {
-          await input.deliver();
-        } catch {
-          return 'resumable';
-        }
         const finish = await this.actions.finishWorkflowReturn({
           userId: identity.userId,
           chatId: identity.chatId,
@@ -210,17 +212,42 @@ export class WorkflowEntryCoordinator {
 
       if (claim.kind !== 'claimed' && claim.kind !== 'resumable') return 'no-workflow';
 
-      const notice = claim.kind === 'resumable' ? input.recoveryNotice : undefined;
-      if (!await input.restore(claim.receipt, notice)) return 'resumable';
+      if (deliveryStage === 'needs-notice') {
+        if (!input.recoveryNotice || !await input.restore(receipt, input.recoveryNotice)) return 'resumable';
+        // The localized notice is now the durable outcome delivery. Mark it
+        // before completion so a failed final write cannot show it twice.
+        if (!await this.persistDeliveryStage(identity, receipt, 'delivered')) return 'resumable';
+      } else if (!await input.restore(receipt, undefined)) {
+        return 'resumable';
+      }
       const finish = await this.actions.finishWorkflowReturn({
         userId: identity.userId,
         chatId: identity.chatId,
-        id: claim.receipt.id,
+        id: receipt.id,
         outcome: 'completed',
         now: this.clock.now(),
       });
       return finish === 'finished' ? 'completed' : 'resumable';
     });
+  }
+
+  private async persistDeliveryStage(
+    identity: CurrentWorkflowIdentity,
+    receipt: WorkflowReturnReceipt,
+    stage: 'delivered' | 'needs-notice',
+  ): Promise<boolean> {
+    try {
+      const result = await this.actions.updateWorkflowReturnDeliveryStage({
+        userId: identity.userId,
+        chatId: identity.chatId,
+        id: receipt.id,
+        stage,
+        now: this.clock.now(),
+      });
+      return result === 'updated';
+    } catch {
+      return false;
+    }
   }
 }
 

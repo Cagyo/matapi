@@ -1,6 +1,6 @@
 import type { HomeActionRepositoryPort, WorkflowClaimResult } from '../application/ports/home-action-repository.port';
 import { isExternalReceipt, isHomeActionReceipt, type HomeActionReceipt } from '../domain/home-action-receipt';
-import type { WorkflowReturnPhase, WorkflowReturnReceipt } from '../domain/workflow-return';
+import type { WorkflowDeliveryStage, WorkflowReturnPhase, WorkflowReturnReceipt } from '../domain/workflow-return';
 import { InMemoryUserRepository } from './in-memory-user.repository';
 import { runNotificationPreferencesTransaction } from './notification-preferences.transaction';
 
@@ -159,6 +159,24 @@ export class InMemoryHomeActionRepository implements HomeActionRepositoryPort {
       payload: { ...receipt.payload, phase: input.phase },
     };
     if (!isHomeActionReceipt(updated)) throw new RangeError('Invalid workflow return phase update');
+    this.receipts.set(keyOf(updated), updated);
+    return 'updated';
+  }
+
+  async updateWorkflowReturnDeliveryStage(input: { userId: number; chatId: number; id: string; stage: Exclude<WorkflowDeliveryStage, 'pending'>; now: Date }): Promise<'updated' | 'expired' | 'superseded' | 'terminal'> {
+    const receipt = decode(this.receipts.get(`${input.userId}:${input.chatId}:workflow-return`));
+    if (receipt?.kind !== 'workflow-return' || receipt.id !== input.id) return 'superseded';
+    if (receipt.status !== 'executing' && receipt.status !== 'returned') return 'terminal';
+    if (receipt.expiresAt.getTime() <= input.now.getTime()) return 'expired';
+    const currentStage = receipt.payload.deliveryStage ?? 'pending';
+    if (currentStage === 'delivered' || (currentStage === 'needs-notice' && input.stage !== 'delivered')) {
+      return 'terminal';
+    }
+    const updated: WorkflowReturnReceipt = {
+      ...receipt,
+      payload: { ...receipt.payload, deliveryStage: input.stage },
+    };
+    if (!isHomeActionReceipt(updated)) throw new RangeError('Invalid workflow return delivery stage update');
     this.receipts.set(keyOf(updated), updated);
     return 'updated';
   }

@@ -10,7 +10,7 @@ import {
   type HomeActionReceipt,
   type UndoReceiptKind,
 } from '../domain/home-action-receipt';
-import type { WorkflowReturnPhase, WorkflowReturnReceipt } from '../domain/workflow-return';
+import type { WorkflowDeliveryStage, WorkflowReturnPhase, WorkflowReturnReceipt } from '../domain/workflow-return';
 
 type ReceiptRow = typeof homeActionReceipts.$inferSelect;
 type ReceiptWriter = Pick<AppDatabase, 'insert' | 'select' | 'update' | 'delete'>;
@@ -219,6 +219,31 @@ export class DrizzleHomeActionRepository implements HomeActionRepositoryPort {
       const result = tx.update(homeActionReceipts)
         .set({ payload: JSON.stringify(updated.payload), expiresAt: updated.expiresAt, updatedAt: input.now })
         .where(and(receiptKey, eq(homeActionReceipts.id, input.id), eq(homeActionReceipts.status, 'pending')))
+        .run();
+      return result.changes === 1 ? 'updated' : 'superseded';
+    });
+  }
+
+  async updateWorkflowReturnDeliveryStage(input: { userId: number; chatId: number; id: string; stage: Exclude<WorkflowDeliveryStage, 'pending'>; now: Date }): Promise<'updated' | 'expired' | 'superseded' | 'terminal'> {
+    return this.immediate((tx) => {
+      const receiptKey = key({ ...input, kind: 'workflow-return' });
+      const row = tx.select().from(homeActionReceipts).where(receiptKey).get();
+      const receipt = row && decode(row);
+      if (receipt?.kind !== 'workflow-return' || receipt.id !== input.id) return 'superseded';
+      if (receipt.status !== 'executing' && receipt.status !== 'returned') return 'terminal';
+      if (receipt.expiresAt.getTime() <= input.now.getTime()) return 'expired';
+      const currentStage = receipt.payload.deliveryStage ?? 'pending';
+      if (currentStage === 'delivered' || (currentStage === 'needs-notice' && input.stage !== 'delivered')) {
+        return 'terminal';
+      }
+      const updated: WorkflowReturnReceipt = {
+        ...receipt,
+        payload: { ...receipt.payload, deliveryStage: input.stage },
+      };
+      if (!isHomeActionReceipt(updated)) throw new RangeError('Invalid workflow return delivery stage update');
+      const result = tx.update(homeActionReceipts)
+        .set({ payload: JSON.stringify(updated.payload), updatedAt: input.now })
+        .where(and(receiptKey, eq(homeActionReceipts.id, input.id), eq(homeActionReceipts.status, receipt.status)))
         .run();
       return result.changes === 1 ? 'updated' : 'superseded';
     });

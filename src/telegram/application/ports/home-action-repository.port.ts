@@ -1,5 +1,5 @@
 import type { ClaimedExternalAction, HomeActionReceipt, UndoReceiptKind } from '../../domain/home-action-receipt';
-import type { WorkflowReturnPhase, WorkflowReturnReceipt } from '../../domain/workflow-return';
+import type { WorkflowDeliveryStage, WorkflowReturnPhase, WorkflowReturnReceipt } from '../../domain/workflow-return';
 
 export const HOME_ACTION_REPOSITORY = Symbol('HOME_ACTION_REPOSITORY');
 
@@ -22,6 +22,7 @@ export interface HomeActionRepositoryPort {
   beginWorkflowReturn(receipt: WorkflowReturnReceipt): Promise<WorkflowReturnReceipt | null>;
   findWorkflowReturn(input: { userId: number; chatId: number; now: Date }): Promise<WorkflowReturnReceipt | null>;
   updateWorkflowReturnPhase(input: { userId: number; chatId: number; id: string; phase: WorkflowReturnPhase; expiresAt: Date; now: Date }): Promise<'updated' | 'expired' | 'superseded' | 'terminal'>;
+  updateWorkflowReturnDeliveryStage(input: { userId: number; chatId: number; id: string; stage: Exclude<WorkflowDeliveryStage, 'pending'>; now: Date }): Promise<'updated' | 'expired' | 'superseded' | 'terminal'>;
   claimWorkflowReturn(input: { userId: number; chatId: number; id: string; now: Date }): Promise<WorkflowClaimResult>;
   finishWorkflowReturn(input: { userId: number; chatId: number; id: string; outcome: 'returned' | 'completed'; now: Date }): Promise<'finished' | 'superseded' | 'terminal'>;
 }

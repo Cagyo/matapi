@@ -50,6 +50,7 @@ export class BeginWorkflowReturnUseCase {
         phase: 'cancellable',
         originSource: input.originSource,
         origin: input.origin,
+        deliveryStage: 'pending',
       },
     };
     const replaced = await this.actions.beginWorkflowReturn(receipt);

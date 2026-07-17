@@ -46,6 +46,16 @@ interface WorkflowReturnRepositoryHarness {
   dispose(): void;
 }
 
+interface WorkflowDeliveryStageUpdater {
+  updateWorkflowReturnDeliveryStage?: (input: {
+    userId: number;
+    chatId: number;
+    id: string;
+    stage: 'delivered' | 'needs-notice';
+    now: Date;
+  }) => Promise<'updated' | 'expired' | 'superseded' | 'terminal'>;
+}
+
 function workflowReceipt(
   id = 'AbCdEf0123_-xyZ9',
   overrides: Partial<WorkflowReturnReceipt> = {},
@@ -204,6 +214,52 @@ function describeWorkflowReturnRepositoryContract(
       await expect(harness.repository.claimWorkflowReturn({
         userId: 100, chatId: 200, id: pending.id, now: NOW,
       })).resolves.toEqual({ kind: 'resumable', receipt: { ...pending, status: 'executing' } });
+    });
+
+    it('persists an exact receipt delivery stage once and retains legacy stage-less payloads as pending', async () => {
+      const pending = workflowReceipt();
+      await harness.repository.beginWorkflowReturn(pending);
+      await harness.repository.claimWorkflowReturn({ userId: 100, chatId: 200, id: pending.id, now: NOW });
+      const update = (harness.repository as unknown as WorkflowDeliveryStageUpdater)
+        .updateWorkflowReturnDeliveryStage;
+
+      expect(update).toBeTypeOf('function');
+      if (!update) return;
+      const updateStage = update.bind(harness.repository);
+
+      await expect(updateStage({
+        userId: 100, chatId: 200, id: pending.id, stage: 'delivered', now: NOW,
+      })).resolves.toBe('updated');
+      await expect(harness.repository.findWorkflowReturn({ userId: 100, chatId: 200, now: NOW }))
+        .resolves.toMatchObject({ payload: { deliveryStage: 'delivered' } });
+      await expect(updateStage({
+        userId: 100, chatId: 200, id: pending.id, stage: 'needs-notice', now: NOW,
+      })).resolves.toBe('terminal');
+      await expect(updateStage({
+        userId: 100, chatId: 200, id: 'qrstuvwxyzabcdef', stage: 'needs-notice', now: NOW,
+      })).resolves.toBe('superseded');
+    });
+
+    it('promotes a restored outcome notice to delivered without allowing another notice', async () => {
+      const pending = workflowReceipt();
+      await harness.repository.beginWorkflowReturn(pending);
+      await harness.repository.claimWorkflowReturn({ userId: 100, chatId: 200, id: pending.id, now: NOW });
+      const update = (harness.repository as unknown as WorkflowDeliveryStageUpdater)
+        .updateWorkflowReturnDeliveryStage;
+
+      expect(update).toBeTypeOf('function');
+      if (!update) return;
+      const updateStage = update.bind(harness.repository);
+
+      await expect(updateStage({
+        userId: 100, chatId: 200, id: pending.id, stage: 'needs-notice', now: NOW,
+      })).resolves.toBe('updated');
+      await expect(updateStage({
+        userId: 100, chatId: 200, id: pending.id, stage: 'delivered', now: NOW,
+      })).resolves.toBe('updated');
+      await expect(updateStage({
+        userId: 100, chatId: 200, id: pending.id, stage: 'needs-notice', now: NOW,
+      })).resolves.toBe('terminal');
     });
 
     it('keeps returned observable until completion and treats completed as terminal', async () => {

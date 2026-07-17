@@ -1,8 +1,10 @@
 import { encodeHomeView, parseHomeView, type HomeView } from './home-session';
 import {
   isExternalWorkflow,
+  isWorkflowDeliveryStage,
   isWorkflowReturnPhase,
   type ExternalWorkflow,
+  type WorkflowDeliveryStage,
   type WorkflowReturnPhase,
 } from './workflow-return';
 
@@ -24,6 +26,8 @@ export type HomeActionReceipt =
       phase: WorkflowReturnPhase;
       originSource: 'captured' | 'natural-parent';
       origin: HomeView;
+      /** Absent on receipts written before durable outcome delivery existed. */
+      deliveryStage?: WorkflowDeliveryStage;
     };
   };
 
@@ -46,9 +50,10 @@ export function isHomeActionReceipt(value: unknown): value is HomeActionReceipt 
     return hasOnlyKeys(value, ['id', 'userId', 'chatId', 'kind', 'sessionToken', 'status', 'expiresAt', 'payload'])
       && (typeof value.sessionToken === 'string' || value.sessionToken === null)
       && (value.status === 'pending' || value.status === 'executing' || value.status === 'returned' || value.status === 'completed')
-      && hasKeys(value.payload, ['workflow', 'phase', 'originSource', 'origin'])
+      && hasWorkflowReturnPayloadKeys(value.payload)
       && isExternalWorkflow(value.payload.workflow)
       && isWorkflowReturnPhase(value.payload.phase)
+      && (value.payload.deliveryStage === undefined || isWorkflowDeliveryStage(value.payload.deliveryStage))
       && (value.payload.originSource === 'captured' || value.payload.originSource === 'natural-parent')
       && isCanonicalHomeView(value.payload.origin);
   }
@@ -87,6 +92,11 @@ function hasKeys(value: Record<string, unknown>, keys: readonly string[]): boole
 function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
   const actual = Object.keys(value);
   return actual.length === keys.length && actual.every((key) => keys.includes(key));
+}
+
+function hasWorkflowReturnPayloadKeys(value: Record<string, unknown>): boolean {
+  return hasKeys(value, ['workflow', 'phase', 'originSource', 'origin'])
+    || hasKeys(value, ['workflow', 'phase', 'originSource', 'origin', 'deliveryStage']);
 }
 
 function isSafeInteger(value: unknown): value is number {

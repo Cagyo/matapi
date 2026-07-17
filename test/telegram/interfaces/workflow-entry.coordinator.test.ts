@@ -180,15 +180,25 @@ describe('WorkflowEntryCoordinator', () => {
   });
 
   it('delivers a recovered restart result once and retries only its origin restoration', async () => {
-    const restartReceipt = {
+    const pendingRestartReceipt = {
       ...receipt,
-      payload: { ...receipt.payload, workflow: 'system-restart' as const, phase: 'running' as const },
-    } satisfies WorkflowReturnReceipt;
+      payload: {
+        ...receipt.payload,
+        workflow: 'system-restart' as const,
+        phase: 'running' as const,
+        deliveryStage: 'pending',
+      },
+    } as unknown as WorkflowReturnReceipt;
+    const deliveredRestartReceipt = {
+      ...pendingRestartReceipt,
+      payload: { ...pendingRestartReceipt.payload, deliveryStage: 'delivered' },
+    } as unknown as WorkflowReturnReceipt;
     const actions = {
-      findWorkflowReturn: vi.fn().mockResolvedValue(restartReceipt),
+      findWorkflowReturn: vi.fn().mockResolvedValue(pendingRestartReceipt),
       claimWorkflowReturn: vi.fn()
-        .mockResolvedValueOnce({ kind: 'claimed', receipt: { ...restartReceipt, status: 'executing' as const } })
-        .mockResolvedValueOnce({ kind: 'resumable', receipt: { ...restartReceipt, status: 'executing' as const } }),
+        .mockResolvedValueOnce({ kind: 'claimed', receipt: { ...pendingRestartReceipt, status: 'executing' as const } })
+        .mockResolvedValueOnce({ kind: 'resumable', receipt: { ...deliveredRestartReceipt, status: 'executing' as const } }),
+      updateWorkflowReturnDeliveryStage: vi.fn().mockResolvedValue('updated'),
       finishWorkflowReturn: vi.fn().mockResolvedValue('finished'),
     };
     const coordinator = new WorkflowEntryCoordinator(
@@ -229,9 +239,13 @@ describe('WorkflowEntryCoordinator', () => {
     }).completeHeadless({ identity, workflow: 'system-restart', deliver, restore })).resolves.toBe('completed');
 
     expect(deliver).toHaveBeenCalledOnce();
+    expect(actions.updateWorkflowReturnDeliveryStage).toHaveBeenCalledWith(expect.objectContaining({
+      id: pendingRestartReceipt.id,
+      stage: 'delivered',
+    }));
     expect(restore).toHaveBeenCalledTimes(2);
     expect(actions.finishWorkflowReturn).toHaveBeenCalledWith(expect.objectContaining({
-      id: restartReceipt.id,
+      id: pendingRestartReceipt.id,
       outcome: 'completed',
     }));
   });
@@ -247,6 +261,7 @@ describe('WorkflowEntryCoordinator', () => {
         kind: 'claimed',
         receipt: { ...restartReceipt, status: 'executing' as const },
       }),
+      updateWorkflowReturnDeliveryStage: vi.fn().mockResolvedValue('updated'),
       finishWorkflowReturn: vi.fn().mockResolvedValue('finished'),
     };
     const coordinator = new WorkflowEntryCoordinator(
@@ -274,20 +289,34 @@ describe('WorkflowEntryCoordinator', () => {
     })).resolves.toBe('resumable');
 
     expect(deliver).toHaveBeenCalledOnce();
+    expect(actions.updateWorkflowReturnDeliveryStage).toHaveBeenCalledWith(expect.objectContaining({
+      id: restartReceipt.id,
+      stage: 'needs-notice',
+    }));
     expect(restore).not.toHaveBeenCalled();
     expect(actions.finishWorkflowReturn).not.toHaveBeenCalled();
   });
 
   it('restores a localized outcome notice after a failed first delivery without retrying direct delivery', async () => {
-    const restartReceipt = {
+    const pendingRestartReceipt = {
       ...receipt,
-      payload: { ...receipt.payload, workflow: 'system-restart' as const, phase: 'running' as const },
-    } satisfies WorkflowReturnReceipt;
+      payload: {
+        ...receipt.payload,
+        workflow: 'system-restart' as const,
+        phase: 'running' as const,
+        deliveryStage: 'pending',
+      },
+    } as unknown as WorkflowReturnReceipt;
+    const noticeRestartReceipt = {
+      ...pendingRestartReceipt,
+      payload: { ...pendingRestartReceipt.payload, deliveryStage: 'needs-notice' },
+    } as unknown as WorkflowReturnReceipt;
     const actions = {
-      findWorkflowReturn: vi.fn().mockResolvedValue(restartReceipt),
+      findWorkflowReturn: vi.fn().mockResolvedValue(pendingRestartReceipt),
       claimWorkflowReturn: vi.fn()
-        .mockResolvedValueOnce({ kind: 'claimed', receipt: { ...restartReceipt, status: 'executing' as const } })
-        .mockResolvedValueOnce({ kind: 'resumable', receipt: { ...restartReceipt, status: 'executing' as const } }),
+        .mockResolvedValueOnce({ kind: 'claimed', receipt: { ...pendingRestartReceipt, status: 'executing' as const } })
+        .mockResolvedValueOnce({ kind: 'resumable', receipt: { ...noticeRestartReceipt, status: 'executing' as const } }),
+      updateWorkflowReturnDeliveryStage: vi.fn().mockResolvedValue('updated'),
       finishWorkflowReturn: vi.fn().mockResolvedValue('finished'),
     };
     const coordinator = new WorkflowEntryCoordinator(
@@ -305,7 +334,9 @@ describe('WorkflowEntryCoordinator', () => {
       catalog: catalogFor('uk'),
     };
     const deliver = vi.fn().mockRejectedValue(new Error('Telegram unavailable'));
-    const restore = vi.fn().mockResolvedValue(true);
+    const restore = vi.fn()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
     const recoveryNotice = catalogFor('uk').ota.restartComplete;
 
     await expect(coordinator.completeHeadless({
@@ -325,10 +356,210 @@ describe('WorkflowEntryCoordinator', () => {
     } as never)).resolves.toBe('completed');
 
     expect(deliver).toHaveBeenCalledOnce();
-    expect(restore).toHaveBeenCalledWith(expect.objectContaining({ id: restartReceipt.id }), recoveryNotice);
+    expect(actions.updateWorkflowReturnDeliveryStage).toHaveBeenCalledWith(expect.objectContaining({
+      id: pendingRestartReceipt.id,
+      stage: 'needs-notice',
+    }));
+    expect(actions.updateWorkflowReturnDeliveryStage).toHaveBeenLastCalledWith(expect.objectContaining({
+      id: pendingRestartReceipt.id,
+      stage: 'delivered',
+    }));
+    expect(restore).toHaveBeenCalledTimes(2);
+    expect(restore).toHaveBeenCalledWith(expect.objectContaining({ id: pendingRestartReceipt.id }), recoveryNotice);
     expect(actions.finishWorkflowReturn).toHaveBeenCalledWith(expect.objectContaining({
-      id: restartReceipt.id,
+      id: pendingRestartReceipt.id,
       outcome: 'completed',
     }));
+  });
+
+  it('delivers and marks a legacy resumable receipt before restoring it', async () => {
+    const legacyRestartReceipt = {
+      ...receipt,
+      payload: { ...receipt.payload, workflow: 'system-restart' as const, phase: 'running' as const },
+    } satisfies WorkflowReturnReceipt;
+    const actions = {
+      findWorkflowReturn: vi.fn().mockResolvedValue(legacyRestartReceipt),
+      claimWorkflowReturn: vi.fn().mockResolvedValue({
+        kind: 'resumable', receipt: { ...legacyRestartReceipt, status: 'executing' as const },
+      }),
+      updateWorkflowReturnDeliveryStage: vi.fn().mockResolvedValue('updated'),
+      finishWorkflowReturn: vi.fn().mockResolvedValue('finished'),
+    };
+    const coordinator = new WorkflowEntryCoordinator(
+      { execute: vi.fn() } as unknown as BeginWorkflowReturnUseCase,
+      new WorkflowDraftRegistry(),
+      new WorkflowOperationQueue(),
+      actions as never,
+      { now: () => new Date('2030-01-01T00:00:00.000Z') },
+    );
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const restore = vi.fn().mockResolvedValue(true);
+    const identity = {
+      userId: 7,
+      chatId: 70,
+      locale: 'en' as const,
+      role: 'admin' as const,
+      catalog: catalogFor('en'),
+    };
+
+    await expect(coordinator.completeHeadless({
+      identity,
+      workflow: 'system-restart',
+      deliver,
+      restore,
+    })).resolves.toBe('completed');
+
+    expect(deliver).toHaveBeenCalledOnce();
+    expect(actions.updateWorkflowReturnDeliveryStage).toHaveBeenCalledWith(expect.objectContaining({
+      id: legacyRestartReceipt.id,
+      stage: 'delivered',
+    }));
+    expect(restore).toHaveBeenCalledWith(expect.objectContaining({ id: legacyRestartReceipt.id }), undefined);
+  });
+
+  it('never repeats a known delivered result after the user already returned Home', async () => {
+    const deliveredRestartReceipt = {
+      ...receipt,
+      status: 'returned' as const,
+      payload: {
+        ...receipt.payload,
+        workflow: 'system-restart' as const,
+        phase: 'running' as const,
+        deliveryStage: 'delivered',
+      },
+    } as unknown as WorkflowReturnReceipt;
+    const actions = {
+      findWorkflowReturn: vi.fn().mockResolvedValue(deliveredRestartReceipt),
+      claimWorkflowReturn: vi.fn().mockResolvedValue({ kind: 'returned', receipt: deliveredRestartReceipt }),
+      updateWorkflowReturnDeliveryStage: vi.fn().mockResolvedValue('updated'),
+      finishWorkflowReturn: vi.fn().mockResolvedValue('finished'),
+    };
+    const coordinator = new WorkflowEntryCoordinator(
+      { execute: vi.fn() } as unknown as BeginWorkflowReturnUseCase,
+      new WorkflowDraftRegistry(),
+      new WorkflowOperationQueue(),
+      actions as never,
+      { now: () => new Date('2030-01-01T00:00:00.000Z') },
+    );
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const restore = vi.fn().mockResolvedValue(true);
+    const identity = {
+      userId: 7,
+      chatId: 70,
+      locale: 'en' as const,
+      role: 'admin' as const,
+      catalog: catalogFor('en'),
+    };
+
+    await expect(coordinator.completeHeadless({
+      identity,
+      workflow: 'system-restart',
+      deliver,
+      restore,
+    })).resolves.toBe('completed');
+
+    expect(deliver).not.toHaveBeenCalled();
+    expect(restore).not.toHaveBeenCalled();
+    expect(actions.finishWorkflowReturn).toHaveBeenCalledWith(expect.objectContaining({
+      id: deliveredRestartReceipt.id,
+      outcome: 'completed',
+    }));
+  });
+
+  it('finishes a returned receipt with a failed direct delivery without replacing its newer Home', async () => {
+    const noticeRestartReceipt = {
+      ...receipt,
+      status: 'returned' as const,
+      payload: {
+        ...receipt.payload,
+        workflow: 'system-restart' as const,
+        phase: 'running' as const,
+        deliveryStage: 'needs-notice',
+      },
+    } as unknown as WorkflowReturnReceipt;
+    const actions = {
+      findWorkflowReturn: vi.fn().mockResolvedValue(noticeRestartReceipt),
+      claimWorkflowReturn: vi.fn().mockResolvedValue({ kind: 'returned', receipt: noticeRestartReceipt }),
+      updateWorkflowReturnDeliveryStage: vi.fn().mockResolvedValue('updated'),
+      finishWorkflowReturn: vi.fn().mockResolvedValue('finished'),
+    };
+    const coordinator = new WorkflowEntryCoordinator(
+      { execute: vi.fn() } as unknown as BeginWorkflowReturnUseCase,
+      new WorkflowDraftRegistry(),
+      new WorkflowOperationQueue(),
+      actions as never,
+      { now: () => new Date('2030-01-01T00:00:00.000Z') },
+    );
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const restore = vi.fn().mockResolvedValue(true);
+    const identity = {
+      userId: 7,
+      chatId: 70,
+      locale: 'en' as const,
+      role: 'admin' as const,
+      catalog: catalogFor('en'),
+    };
+
+    await expect(coordinator.completeHeadless({
+      identity,
+      workflow: 'system-restart',
+      deliver,
+      restore,
+      recoveryNotice: catalogFor('en').ota.restartComplete,
+    })).resolves.toBe('completed');
+
+    expect(deliver).not.toHaveBeenCalled();
+    expect(restore).not.toHaveBeenCalled();
+    expect(actions.finishWorkflowReturn).toHaveBeenCalledWith(expect.objectContaining({
+      id: noticeRestartReceipt.id,
+      outcome: 'completed',
+    }));
+  });
+
+  it('does not restore or finish when a direct-delivery outcome cannot be persisted', async () => {
+    const restartReceipt = {
+      ...receipt,
+      payload: {
+        ...receipt.payload,
+        workflow: 'system-restart' as const,
+        phase: 'running' as const,
+        deliveryStage: 'pending',
+      },
+    } as unknown as WorkflowReturnReceipt;
+    const actions = {
+      findWorkflowReturn: vi.fn().mockResolvedValue(restartReceipt),
+      claimWorkflowReturn: vi.fn().mockResolvedValue({
+        kind: 'claimed', receipt: { ...restartReceipt, status: 'executing' as const },
+      }),
+      updateWorkflowReturnDeliveryStage: vi.fn().mockResolvedValue('superseded'),
+      finishWorkflowReturn: vi.fn().mockResolvedValue('finished'),
+    };
+    const coordinator = new WorkflowEntryCoordinator(
+      { execute: vi.fn() } as unknown as BeginWorkflowReturnUseCase,
+      new WorkflowDraftRegistry(),
+      new WorkflowOperationQueue(),
+      actions as never,
+      { now: () => new Date('2030-01-01T00:00:00.000Z') },
+    );
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const restore = vi.fn().mockResolvedValue(true);
+    const identity = {
+      userId: 7,
+      chatId: 70,
+      locale: 'en' as const,
+      role: 'admin' as const,
+      catalog: catalogFor('en'),
+    };
+
+    await expect(coordinator.completeHeadless({
+      identity,
+      workflow: 'system-restart',
+      deliver,
+      restore,
+    })).resolves.toBe('resumable');
+
+    expect(deliver).toHaveBeenCalledOnce();
+    expect(restore).not.toHaveBeenCalled();
+    expect(actions.finishWorkflowReturn).not.toHaveBeenCalled();
   });
 });

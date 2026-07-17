@@ -207,9 +207,10 @@ describe('RestartConfirmationService', () => {
     const notice = catalogFor('uk').ota.restartComplete;
     const workflows = {
       completeHeadless: vi.fn(async (input: {
+        recoveryNotice?: string;
         restore(receipt: { payload: { workflow: 'system-restart' } }, notice: string): Promise<boolean>;
       }) => {
-        await input.restore({ payload: { workflow: 'system-restart' } }, notice);
+        await input.restore({ payload: { workflow: 'system-restart' } }, input.recoveryNotice!);
         return 'completed' as const;
       }),
     } as unknown as WorkflowEntryCoordinator;
