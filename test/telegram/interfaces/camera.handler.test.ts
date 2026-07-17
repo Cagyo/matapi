@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { catalogFor } from '../../../src/locales';
+import { en } from '../../../src/locales/en';
 import type { WorkflowReturnReceipt } from '../../../src/telegram/domain/workflow-return';
 import {
   buildBrowseRange,
@@ -27,6 +28,10 @@ const receipt = {
     originSource: 'captured',
     origin: { kind: 'sensors', page: 2 },
   },
+} satisfies WorkflowReturnReceipt;
+const activeReceipt = {
+  ...receipt,
+  id: 'qrstuvwxyzabcdef',
 } satisfies WorkflowReturnReceipt;
 
 type Handler = (ctx: Record<string, unknown>, next?: () => Promise<void>) => Promise<void>;
@@ -70,6 +75,7 @@ function setup() {
     validateCurrent: vi.fn().mockResolvedValue(true),
     markRunning: vi.fn().mockResolvedValue(true),
   };
+  const drafts = { register: vi.fn() };
   const navigation = {
     complete: vi.fn(async (_ctx, _launch, presentation) => {
       await presentation.deliver();
@@ -90,6 +96,7 @@ function setup() {
     { registered: vi.fn() } as unknown as RoleMiddleware,
     sources as unknown as CameraSourcesHandler,
     workflows as unknown as WorkflowEntryCoordinator,
+    drafts as never,
     navigation as unknown as WorkflowNavigationHandler,
   );
   const commands = new Map<string, Handler>();
@@ -107,6 +114,7 @@ function setup() {
   return {
     callback: callback!,
     commands,
+    drafts,
     handler,
     navigation,
     open,
@@ -206,6 +214,36 @@ describe('camera contextual callbacks', () => {
     await callback(source);
 
     expect(sources.handleCallback).toHaveBeenCalledWith(source, 'a', receipt);
+  });
+
+  it('uses the active receipt browse input after a newer Camera entry replaces a stale prompt', async () => {
+    const { callback, handler, sources, text, workflows } = setup();
+    await handler.handleDashboard(context() as never, { receipt });
+    await callback(context({ data: 'cam:abcdefghijklmnop:bp' }));
+    await handler.handleDashboard(context() as never, { receipt: activeReceipt });
+    await callback(context({ data: 'cam:qrstuvwxyzabcdef:bp' }));
+    workflows.validateCurrent.mockImplementation(async (_ctx, candidate) => candidate.id === activeReceipt.id);
+    const input = context({ text: '08.04.2026' });
+    const next = vi.fn().mockResolvedValue(undefined);
+
+    await text(input, next);
+
+    expect(sources.handleText).toHaveBeenCalledWith(input);
+    expect(workflows.validateCurrent).toHaveBeenLastCalledWith(input, activeReceipt);
+    expect(input.reply).toHaveBeenCalledWith(en.camera.browse.timeRangePrompt('08.04.2026'), {
+      reply_markup: expect.anything(),
+    });
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it('registers an exact Camera draft canceller for returned source and browse state', async () => {
+    const { drafts, handler, sources } = setup();
+    await handler.handleDashboard(context() as never, { receipt });
+
+    await expect(handler.cancelExact({ userId: 7, chatId: 11, receiptId: receipt.id })).resolves.toBe('cancelled');
+
+    expect(drafts.register).toHaveBeenCalledWith('camera', handler);
+    expect(sources.cancelPending).toHaveBeenCalledWith(7, 11, receipt.id);
   });
 });
 

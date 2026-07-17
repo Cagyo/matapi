@@ -20,6 +20,10 @@ const receipt = {
     origin: { kind: 'sensors', page: 1 },
   },
 } satisfies WorkflowReturnReceipt;
+const activeReceipt = {
+  ...receipt,
+  id: 'qrstuvwxyzabcdef',
+} satisfies WorkflowReturnReceipt;
 const source = {
   cameraId: 'camera-with-private-id',
   cameraName: 'Front door',
@@ -117,6 +121,21 @@ describe('CameraSourcesHandler contextual state', () => {
     expect(configure.execute).not.toHaveBeenCalled();
     expect(credential.api.deleteMessage).not.toHaveBeenCalled();
     expect(JSON.stringify(credential.reply.mock.calls)).not.toContain('user:pass');
+  });
+
+  it('uses the active source prompt after a newer Camera entry replaces stale state', async () => {
+    const { handler, workflows } = setup();
+    await handler.handleCallback(context() as never, 'a', receipt);
+    await handler.handleCallback(context() as never, 'a', activeReceipt);
+    workflows.validateCurrent.mockImplementation(async (_ctx, candidate) => candidate.id === activeReceipt.id);
+    const camera = context({ text: 'Garden' });
+
+    await expect(handler.handleText(camera as never)).resolves.toBe(true);
+
+    expect(workflows.validateCurrent).toHaveBeenLastCalledWith(camera, activeReceipt);
+    expect(camera.reply).toHaveBeenCalledWith(catalogFor('en').camera.sources.credentialPrompt, {
+      reply_markup: expect.anything(),
+    });
   });
 
   it('keys selection by receipt and resolves only opaque source selectors', async () => {

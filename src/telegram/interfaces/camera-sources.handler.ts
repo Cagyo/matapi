@@ -58,7 +58,9 @@ export class CameraSourcesHandler {
   }
 
   hasPending(userId: number, chatId: number, receiptId?: string): boolean {
-    const state = receiptId ? this.states.get(`${userId}:${chatId}:${receiptId}`) : this.stateFor(userId, chatId);
+    const state = receiptId
+      ? this.states.get(`${userId}:${chatId}:${receiptId}`)
+      : this.statesFor(userId, chatId).at(0);
     if (!state) return false;
     if (this.now() - state.createdAtMs > SOURCE_STATE_TTL_MS) {
       this.states.delete(this.keyFor(state));
@@ -149,8 +151,8 @@ export class CameraSourcesHandler {
     const userId = ctx.from?.id;
     const chatId = ctx.chat?.id;
     if (userId === undefined || chatId === undefined) return false;
-    const state = this.stateFor(userId, chatId);
-    if (!state || !(await this.workflows.validateCurrent(ctx, state.receipt))) return false;
+    const state = await this.activeStateFor(ctx);
+    if (!state) return false;
     if (!(await this.requireAdmin(ctx, state.receipt))) return true;
     const copy = this.copy(ctx);
     if (this.now() - state.createdAtMs > SOURCE_STATE_TTL_MS) {
@@ -289,27 +291,40 @@ export class CameraSourcesHandler {
     receipt: WorkflowReturnReceipt,
     deliver: () => Promise<unknown>,
   ): Promise<void> {
-    if (this.navigation) {
-      await this.navigation.complete(
-        ctx,
-        { receipt },
-        {
-          effectStage: 'pending',
-          deliver: async () => {
-            await deliver();
+    try {
+      if (this.navigation) {
+        await this.navigation.complete(
+          ctx,
+          { receipt },
+          {
+            effectStage: 'pending',
+            deliver: async () => {
+              await deliver();
+            },
+            failureNotice: this.catalog(ctx).home.recovery.unavailable,
           },
-          failureNotice: this.catalog(ctx).home.recovery.unavailable,
-        },
-      );
-      return;
+        );
+        return;
+      }
+      await deliver();
+    } finally {
+      this.clear(ctx, receipt.id);
     }
-    await deliver();
   }
 
   private now(): number {
     return this.clock.now().getTime();
   }
   private set(ctx: TelegramContext, state: SourceState): void {
+    for (const [key, existing] of this.states) {
+      if (
+        existing.receipt.userId === state.receipt.userId
+        && existing.receipt.chatId === state.receipt.chatId
+        && existing.receipt.id !== state.receipt.id
+      ) {
+        this.states.delete(key);
+      }
+    }
     this.states.set(this.key(ctx, state.receipt.id), state);
   }
   private clear(ctx: TelegramContext, receiptId: string): void {
@@ -323,9 +338,20 @@ export class CameraSourcesHandler {
     }
     return state;
   }
-  private stateFor(userId: number, chatId: number): SourceState | undefined {
-    for (const [key, state] of this.states) if (key.startsWith(`${userId}:${chatId}:`)) return state;
+  private async activeStateFor(ctx: TelegramContext): Promise<SourceState | undefined> {
+    const userId = ctx.from?.id;
+    const chatId = ctx.chat?.id;
+    if (userId === undefined || chatId === undefined) return undefined;
+    for (const state of this.statesFor(userId, chatId)) {
+      if (await this.workflows.validateCurrent(ctx, state.receipt)) return state;
+      this.states.delete(this.keyFor(state));
+    }
     return undefined;
+  }
+  private statesFor(userId: number, chatId: number): SourceState[] {
+    return [...this.states.values()]
+      .filter((state) => state.receipt.userId === userId && state.receipt.chatId === chatId)
+      .sort((left, right) => right.createdAtMs - left.createdAtMs);
   }
   private key(ctx: TelegramContext, receiptId: string): string {
     return `${ctx.from?.id ?? 'none'}:${ctx.chat?.id ?? 'none'}:${receiptId}`;
