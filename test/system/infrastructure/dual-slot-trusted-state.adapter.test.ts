@@ -2,10 +2,13 @@ import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import {
+  chmodSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { resolve } from "node:path";
@@ -232,6 +235,8 @@ describe("DualSlotTrustedStateAdapter", () => {
 
     expect(signal).toBe("SIGKILL");
     expect((await baseline.load()).generation).toBe(1);
+    await baseline.commit(state(3));
+    expect((await baseline.load()).generation).toBe(3);
   });
 
   it("refuses non-advancing generations and maintenance reseeding", async () => {
@@ -243,7 +248,7 @@ describe("DualSlotTrustedStateAdapter", () => {
     await expect(store.seed(state(2))).rejects.toThrow(/seed/i);
   });
 
-  it("serializes concurrent commits so an older writer cannot overwrite a newer generation", async () => {
+  it("serializes concurrent commits across adapters sharing a state directory", async () => {
     const root = directory();
     let releaseGenerationTwo!: () => void;
     const generationTwoBlocked = new Promise<void>((resolveBlocked) => {
@@ -253,7 +258,7 @@ describe("DualSlotTrustedStateAdapter", () => {
     const reachedGenerationTwo = new Promise<void>((resolveReached) => {
       generationTwoReached = resolveReached;
     });
-    const store = new DualSlotTrustedStateAdapter(root, {
+    const olderWriter = new DualSlotTrustedStateAdapter(root, {
       afterTempFileSync: async (path) => {
         const generation = JSON.parse(readFileSync(path, "utf8")).generation;
         if (generation === 2) {
@@ -262,16 +267,17 @@ describe("DualSlotTrustedStateAdapter", () => {
         }
       },
     });
-    await store.seed(state(1));
+    const newerWriter = new DualSlotTrustedStateAdapter(root);
+    await olderWriter.seed(state(1));
 
-    const generationTwo = store.commit(state(2));
+    const generationTwo = olderWriter.commit(state(2));
     await reachedGenerationTwo;
-    const generationThree = store.commit(state(3));
+    const generationThree = newerWriter.commit(state(3));
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
     releaseGenerationTwo();
     await Promise.all([generationTwo, generationThree]);
 
-    expect((await store.load()).generation).toBe(3);
+    expect((await newerWriter.load()).generation).toBe(3);
   });
 
   it("preserves metadata, ledger, and trusted-time anti-rollback floors on commit", async () => {
@@ -315,6 +321,80 @@ describe("DualSlotTrustedStateAdapter", () => {
     writeFileSync(slot(root, "a"), JSON.stringify(checksummed(state(2, 41))));
 
     expect((await store.load()).generation).toBe(1);
+  });
+
+  it("rejects same-boot monotonic and affine trusted-time regression", async () => {
+    const root = directory();
+    const store = new DualSlotTrustedStateAdapter(root);
+    await store.seed(state(1));
+
+    const monotonicRegression = state(2);
+    monotonicRegression.timeAnchor.monotonicMs -= 1;
+    await expect(store.commit(monotonicRegression)).rejects.toThrow(
+      /monotonic|time/i,
+    );
+
+    const affineRegression = state(2);
+    affineRegression.timeAnchor.monotonicMs += 1;
+    await expect(store.commit(affineRegression)).rejects.toThrow(
+      /affine|time/i,
+    );
+  });
+
+  it.each(["EIO", "EMFILE", "EACCES"])(
+    "propagates unexpected slot read error %s",
+    async (code) => {
+      const root = directory();
+      const baseline = new DualSlotTrustedStateAdapter(root);
+      await baseline.seed(state(1));
+      const failure = Object.assign(new Error(`injected ${code}`), { code });
+      const failing = new DualSlotTrustedStateAdapter(root, {
+        beforeSlotRead: () => {
+          throw failure;
+        },
+      });
+
+      await expect(failing.load()).rejects.toBe(failure);
+    },
+  );
+
+  it("refuses to write through a symlink state directory", async () => {
+    const parent = directory();
+    const target = resolve(parent, "target");
+    const linked = resolve(parent, "linked");
+    mkdirSync(target, { mode: 0o700 });
+    symlinkSync(target, linked, "dir");
+
+    await expect(
+      new DualSlotTrustedStateAdapter(linked).seed(state(1)),
+    ).rejects.toThrow(/directory/i);
+    expect(statSync(target).isDirectory()).toBe(true);
+    expect(() => statSync(resolve(target, "trusted-state-a.json"))).toThrow();
+  });
+
+  it("refuses to write into a permissive pre-existing state directory", async () => {
+    const root = directory();
+    chmodSync(root, 0o755);
+
+    await expect(
+      new DualSlotTrustedStateAdapter(root).seed(state(1)),
+    ).rejects.toThrow(/0700|permission|directory/i);
+    expect(() => statSync(slot(root, "a"))).toThrow();
+  });
+
+  it("revalidates directory mode after temp sync and before rename", async () => {
+    const root = directory();
+    const baseline = new DualSlotTrustedStateAdapter(root);
+    await baseline.seed(state(1));
+    const writer = new DualSlotTrustedStateAdapter(root, {
+      afterTempFileSync: () => chmodSync(root, 0o755),
+    });
+
+    await expect(writer.commit(state(2))).rejects.toThrow(
+      /0700|permission|directory/i,
+    );
+    chmodSync(root, 0o700);
+    expect((await baseline.load()).generation).toBe(1);
   });
 
   it("creates the state directory and durable slots with owner-only permissions", async () => {

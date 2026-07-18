@@ -5,6 +5,7 @@ import {
   mkdir,
   open,
   rename,
+  stat,
   unlink,
   type FileHandle,
 } from "node:fs/promises";
@@ -19,6 +20,11 @@ import { parseOuterEnvelope } from "../domain/signed-manifest";
 import { parseStrictJson } from "../domain/strict-json";
 
 const MAX_SLOT_BYTES = 2 * 1024 * 1024;
+const MAX_LOCK_BYTES = 256;
+const LOCK_RETRY_MS = 10;
+const LOCK_TIMEOUT_MS = 10_000;
+const MALFORMED_LOCK_GRACE_MS = 1_000;
+const LOCK_NAME = ".trusted-state.lock";
 const SLOT_NAMES = {
   a: "trusted-state-a.json",
   b: "trusted-state-b.json",
@@ -33,8 +39,11 @@ interface LoadedSlot {
 }
 
 export interface TrustedStateFaultHooks {
+  beforeSlotRead?(path: string): void | Promise<void>;
   afterTempFileSync?(path: string): void | Promise<void>;
 }
+
+class CorruptTrustedStateSlotError extends Error {}
 
 function asRecord(value: unknown, label: string): JsonRecord {
   if (value === null || typeof value !== "object" || Array.isArray(value))
@@ -192,6 +201,17 @@ function validateStateTransition(
   ) {
     throw new Error("trusted-state time floor regressed");
   }
+  if (next.timeAnchor.bootId === current.timeAnchor.bootId) {
+    if (next.timeAnchor.monotonicMs < current.timeAnchor.monotonicMs) {
+      throw new Error("trusted-state same-boot monotonic time regressed");
+    }
+    const currentAffineFloor =
+      current.timeAnchor.wallMs - current.timeAnchor.monotonicMs;
+    const nextAffineFloor =
+      next.timeAnchor.wallMs - next.timeAnchor.monotonicMs;
+    if (nextAffineFloor < currentAffineFloor)
+      throw new Error("trusted-state same-boot affine time floor regressed");
+  }
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -206,7 +226,9 @@ async function pathExists(path: string): Promise<boolean> {
 async function readBounded(handle: FileHandle): Promise<Buffer> {
   const stat = await handle.stat();
   if (!stat.isFile() || stat.size > MAX_SLOT_BYTES)
-    throw new Error("trusted-state slot is invalid or oversized");
+    throw new CorruptTrustedStateSlotError(
+      "trusted-state slot is invalid or oversized",
+    );
   const buffer = Buffer.allocUnsafe(MAX_SLOT_BYTES + 1);
   let offset = 0;
   while (offset < buffer.byteLength) {
@@ -220,13 +242,32 @@ async function readBounded(handle: FileHandle): Promise<Buffer> {
     offset += bytesRead;
   }
   if (offset > MAX_SLOT_BYTES)
-    throw new Error("trusted-state slot exceeds 2 MiB");
+    throw new CorruptTrustedStateSlotError("trusted-state slot exceeds 2 MiB");
   return buffer.subarray(0, offset);
 }
 
-export class DualSlotTrustedStateAdapter implements TrustedStatePort {
-  private mutationTail: Promise<void> = Promise.resolve();
+function errno(error: unknown): string | undefined {
+  return (error as NodeJS.ErrnoException).code;
+}
 
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (errno(error) === "ESRCH") return false;
+    if (errno(error) === "EPERM") return true;
+    throw error;
+  }
+}
+
+async function delay(milliseconds: number): Promise<void> {
+  await new Promise<void>((resolveDelay) =>
+    setTimeout(resolveDelay, milliseconds),
+  );
+}
+
+export class DualSlotTrustedStateAdapter implements TrustedStatePort {
   constructor(
     private readonly directory: string,
     private readonly hooks: TrustedStateFaultHooks = {},
@@ -237,7 +278,8 @@ export class DualSlotTrustedStateAdapter implements TrustedStatePort {
   }
 
   async commit(state: TrustedStateCommit): Promise<TrustedState> {
-    return this.serializeMutation(() => this.commitExclusive(state));
+    await this.validateStateDirectory(false);
+    return this.withDirectoryLock(() => this.commitExclusive(state));
   }
 
   private async commitExclusive(
@@ -254,13 +296,13 @@ export class DualSlotTrustedStateAdapter implements TrustedStatePort {
 
   /** Maintenance/bootstrap only. It never overwrites existing state. */
   async seed(state: TrustedStateCommit): Promise<TrustedState> {
-    return this.serializeMutation(() => this.seedExclusive(state));
+    await this.validateStateDirectory(true);
+    return this.withDirectoryLock(() => this.seedExclusive(state));
   }
 
   private async seedExclusive(
     state: TrustedStateCommit,
   ): Promise<TrustedState> {
-    await mkdir(this.directory, { recursive: true, mode: 0o700 });
     if (
       (await pathExists(this.slotPath("a"))) ||
       (await pathExists(this.slotPath("b")))
@@ -274,13 +316,100 @@ export class DualSlotTrustedStateAdapter implements TrustedStatePort {
     return baseline;
   }
 
-  private serializeMutation<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.mutationTail.then(operation, operation);
-    this.mutationTail = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    return result;
+  private async validateStateDirectory(create: boolean): Promise<void> {
+    if (create) await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    const directory = await lstat(this.directory);
+    const expectedUid = process.getuid?.();
+    if (
+      directory.isSymbolicLink() ||
+      !directory.isDirectory() ||
+      (directory.mode & 0o777) !== 0o700 ||
+      (expectedUid !== undefined && directory.uid !== expectedUid)
+    ) {
+      throw new Error(
+        "trusted-state directory must be owned, non-symlink, and mode 0700",
+      );
+    }
+  }
+
+  private async withDirectoryLock<T>(operation: () => Promise<T>): Promise<T> {
+    const release = await this.acquireDirectoryLock();
+    try {
+      return await operation();
+    } finally {
+      await release();
+    }
+  }
+
+  private async acquireDirectoryLock(): Promise<() => Promise<void>> {
+    const lockPath = resolve(this.directory, LOCK_NAME);
+    const token = `${process.pid}:${randomBytes(16).toString("hex")}`;
+    const deadline = Date.now() + LOCK_TIMEOUT_MS;
+    while (true) {
+      await this.validateStateDirectory(false);
+      let handle: FileHandle | undefined;
+      try {
+        handle = await open(
+          lockPath,
+          constants.O_WRONLY |
+            constants.O_CREAT |
+            constants.O_EXCL |
+            constants.O_NOFOLLOW,
+          0o600,
+        );
+        await handle.writeFile(token, "utf8");
+        await handle.sync();
+        await handle.close();
+        handle = undefined;
+        return async () => {
+          const owner = await this.readLockOwner(lockPath);
+          if (owner === token) await unlink(lockPath);
+        };
+      } catch (error) {
+        await handle?.close();
+        if (errno(error) !== "EEXIST") throw error;
+        await this.removeStaleLock(lockPath);
+        if (Date.now() >= deadline)
+          throw new Error("trusted-state directory lock timed out");
+        await delay(LOCK_RETRY_MS);
+      }
+    }
+  }
+
+  private async readLockOwner(lockPath: string): Promise<string | null> {
+    let handle: FileHandle | undefined;
+    try {
+      handle = await open(lockPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+      const lockStat = await handle.stat();
+      if (!lockStat.isFile() || lockStat.size > MAX_LOCK_BYTES) return null;
+      return (await handle.readFile({ encoding: "utf8" })).trim();
+    } catch (error) {
+      if (errno(error) === "ENOENT") return null;
+      throw error;
+    } finally {
+      await handle?.close();
+    }
+  }
+
+  private async removeStaleLock(lockPath: string): Promise<void> {
+    const owner = await this.readLockOwner(lockPath);
+    const match = /^(\d+):[0-9a-f]{32}$/.exec(owner ?? "");
+    const ownerPid = match === null ? null : Number(match[1]);
+    const validOwnerPid =
+      ownerPid !== null && Number.isSafeInteger(ownerPid) && ownerPid > 0;
+    if (validOwnerPid && processIsAlive(ownerPid)) return;
+    if (!validOwnerPid) {
+      try {
+        const lockStat = await stat(lockPath);
+        if (Date.now() - lockStat.mtimeMs < MALFORMED_LOCK_GRACE_MS) return;
+      } catch (error) {
+        if (errno(error) === "ENOENT") return;
+        throw error;
+      }
+    }
+    await unlink(lockPath).catch((error: unknown) => {
+      if (errno(error) !== "ENOENT") throw error;
+    });
   }
 
   private slotPath(name: SlotName): string {
@@ -288,19 +417,32 @@ export class DualSlotTrustedStateAdapter implements TrustedStatePort {
   }
 
   private async readSlot(name: SlotName): Promise<LoadedSlot | null> {
-    let handle: FileHandle | undefined;
+    let handle: FileHandle;
     try {
+      await this.hooks.beforeSlotRead?.(this.slotPath(name));
       handle = await open(
         this.slotPath(name),
         constants.O_RDONLY | constants.O_NOFOLLOW,
       );
-      const state = parseTrustedState(await readBounded(handle));
+    } catch (error) {
+      if (errno(error) === "ENOENT" || errno(error) === "ELOOP") return null;
+      throw error;
+    }
+    let bytes: Buffer;
+    try {
+      bytes = await readBounded(handle);
+    } catch (error) {
+      if (error instanceof CorruptTrustedStateSlotError) return null;
+      throw error;
+    } finally {
+      await handle.close();
+    }
+    try {
+      const state = parseTrustedState(bytes);
       validateEnvelopeRelationship(state);
       return { name, state };
     } catch {
       return null;
-    } finally {
-      await handle?.close();
     }
   }
 
@@ -335,7 +477,7 @@ export class DualSlotTrustedStateAdapter implements TrustedStatePort {
   }
 
   private async writeSlot(name: SlotName, state: TrustedState): Promise<void> {
-    await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    await this.validateStateDirectory(false);
     const target = this.slotPath(name);
     const temporary = resolve(
       this.directory,
@@ -357,6 +499,7 @@ export class DualSlotTrustedStateAdapter implements TrustedStatePort {
       await this.hooks.afterTempFileSync?.(temporary);
       await handle.close();
       handle = undefined;
+      await this.validateStateDirectory(false);
       await rename(temporary, target);
       renamed = true;
 
