@@ -22,10 +22,16 @@ const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 type JsonRecord = Record<string, unknown>;
 
+export const OTA_KEY_SCOPE: unique symbol = Symbol("OTA_KEY_SCOPE");
+
 export interface ActiveKey {
   keyId: string;
   publicKey: KeyObject;
 }
+
+export type FeedVerificationKey = ActiveKey & {
+  readonly [OTA_KEY_SCOPE]?: "active";
+};
 
 export interface ManifestPolicy {
   feedUrl: string;
@@ -507,7 +513,7 @@ function checkedRelease(
 
 export function verifySignedEnvelope(
   bytes: Uint8Array,
-  activeKeys: readonly ActiveKey[],
+  activeKeys: readonly FeedVerificationKey[],
   policy: ManifestPolicy,
   checkTime: Date,
 ): VerifiedEnvelope {
@@ -519,6 +525,10 @@ export function verifySignedEnvelope(
 
   const activeById = new Map<string, KeyObject>();
   for (const activeKey of activeKeys) {
+    const scope = (activeKey as { readonly [OTA_KEY_SCOPE]?: unknown })[
+      OTA_KEY_SCOPE
+    ];
+    if (scope !== undefined && scope !== "active") continue;
     const derivedId = publicKeyId(activeKey.publicKey);
     if (
       derivedId === null ||

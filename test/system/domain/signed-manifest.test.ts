@@ -326,6 +326,30 @@ describe("signed manifest validation", () => {
     });
   });
 
+  it.each(["1.0000000000000001", "9007199254740991.1"])(
+    "rejects exact non-integer metadataVersion lexeme %s before Number rounding",
+    (lexeme) => {
+      const pair = generateKeyPairSync("ed25519");
+      const payload = Buffer.from(
+        JSON.stringify(validManifest()).replace(
+          '"metadataVersion":42',
+          `"metadataVersion":${lexeme}`,
+        ),
+      );
+      const key = activeKey(pair.publicKey);
+      const bytes = envelopeBytes(payload, [
+        {
+          keyId: key.keyId,
+          signature: sign(null, payload, pair.privateKey),
+        },
+      ]);
+
+      expect(() =>
+        verifySignedEnvelope(bytes, [key], policy, CHECK_TIME),
+      ).toThrow(/integer/i);
+    },
+  );
+
   it.each([
     ["unknown top-level key", "extra", 1],
     ["unknown schema", "schemaVersion", 2],

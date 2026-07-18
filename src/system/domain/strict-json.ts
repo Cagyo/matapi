@@ -1,6 +1,7 @@
 const JSON_WHITESPACE = new Set([" ", "\t", "\n", "\r"]);
 const CANONICAL_BASE64 =
   /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const MAX_SAFE_INTEGER = BigInt(Number.MAX_SAFE_INTEGER);
 
 function invalid(message: string): never {
   throw new Error(`invalid strict JSON: ${message}`);
@@ -131,12 +132,7 @@ class StrictJsonParser {
     )?.[0];
     if (!token) return invalid("malformed number");
     this.index += token.length;
-    const value = Number(token);
-    if (!Number.isFinite(value)) invalid("number is not finite");
-    if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
-      invalid("unsafe integer literal");
-    }
-    return value;
+    return parseExactSafeInteger(token);
   }
 
   private parseLiteral<T>(token: string, value: T): T {
@@ -161,6 +157,55 @@ class StrictJsonParser {
     if (this.depth >= 64) invalid("nesting exceeds 64 levels");
     this.depth += 1;
   }
+}
+
+function parseExactSafeInteger(token: string): number {
+  const parts = /^(-?)(0|[1-9]\d*)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(token);
+  if (parts === null) return invalid("malformed number");
+
+  const fraction = parts[3] ?? "";
+  const coefficient = `${parts[2]}${fraction}`.replace(/^0+/, "") || "0";
+  if (coefficient === "0") return Number(token);
+
+  const exponentText = parts[4] ?? "0";
+  const exponentSign = exponentText.startsWith("-") ? -1 : 1;
+  const exponentMagnitude = exponentText
+    .replace(/^[+-]/, "")
+    .replace(/^0+/, "");
+  if (exponentMagnitude.length > 6) {
+    return invalid(
+      exponentSign < 0
+        ? "numeric literal is not an exact integer"
+        : "numeric integer literal exceeds the safe range",
+    );
+  }
+  const exponent =
+    exponentSign *
+    Number(exponentMagnitude.length === 0 ? "0" : exponentMagnitude);
+  const decimalPlaces = fraction.length - exponent;
+
+  let integerDigits: string;
+  if (decimalPlaces > 0) {
+    if (
+      decimalPlaces > coefficient.length ||
+      !coefficient.endsWith("0".repeat(decimalPlaces))
+    ) {
+      return invalid("numeric literal is not an exact integer");
+    }
+    integerDigits = coefficient.slice(0, coefficient.length - decimalPlaces);
+  } else {
+    const appendedZeros = -decimalPlaces;
+    if (coefficient.length + appendedZeros > 16) {
+      return invalid("numeric integer literal exceeds the safe range");
+    }
+    integerDigits = coefficient + "0".repeat(appendedZeros);
+  }
+
+  const magnitude = BigInt(integerDigits || "0");
+  if (magnitude > MAX_SAFE_INTEGER) {
+    return invalid("numeric integer literal exceeds the safe range");
+  }
+  return Number(token);
 }
 
 function isDigit(character: string | undefined): boolean {

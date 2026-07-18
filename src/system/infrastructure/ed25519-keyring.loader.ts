@@ -1,7 +1,11 @@
 import { createHash, createPublicKey, type KeyObject } from "node:crypto";
 import { lstatSync, readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
-import type { ActiveKey } from "../domain/signed-manifest";
+import { OTA_KEY_SCOPE, type ActiveKey } from "../domain/signed-manifest";
+
+export interface RetiredKey extends ActiveKey {
+  readonly [OTA_KEY_SCOPE]: "retired";
+}
 
 function loadKeys(directory: string): ActiveKey[] {
   let names: string[];
@@ -44,6 +48,9 @@ export function loadActiveKeys(trustDirectory: string): ActiveKey[] {
   return loadKeys(resolve(trustDirectory, "active"));
 }
 
-export function loadRetiredKeys(trustDirectory: string): ActiveKey[] {
-  return loadKeys(resolve(trustDirectory, "retired"));
+export function loadRetiredKeys(trustDirectory: string): RetiredKey[] {
+  return loadKeys(resolve(trustDirectory, "retired")).map((key) => ({
+    ...key,
+    [OTA_KEY_SCOPE]: "retired",
+  }));
 }

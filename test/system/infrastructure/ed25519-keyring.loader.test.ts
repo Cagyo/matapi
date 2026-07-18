@@ -1,4 +1,9 @@
-import { createHash, generateKeyPairSync, type KeyObject } from "node:crypto";
+import {
+  createHash,
+  generateKeyPairSync,
+  sign,
+  type KeyObject,
+} from "node:crypto";
 import {
   mkdirSync,
   mkdtempSync,
@@ -7,7 +12,11 @@ import {
   writeFileSync,
 } from "node:fs";
 import { resolve } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, expectTypeOf, it } from "vitest";
+import {
+  verifySignedEnvelope,
+  type ManifestPolicy,
+} from "../../../src/system/domain/signed-manifest";
 import {
   loadActiveKeys,
   loadRetiredKeys,
@@ -81,6 +90,37 @@ describe("Ed25519 keyring loader", () => {
     expect(loadRetiredKeys(root).map((key) => key.keyId)).toEqual([
       id(retired),
     ]);
+  });
+
+  it("does not expose retired-loader output as public feed verification keys", () => {
+    const root = trustDirectory();
+    const pair = generateKeyPairSync("ed25519");
+    writeFileSync(resolve(root, "retired/retired.pem"), pem(pair.publicKey));
+    const retiredKeys = loadRetiredKeys(root);
+    const payload = Buffer.from("{}");
+    const bytes = Buffer.from(
+      JSON.stringify({
+        payload: payload.toString("base64"),
+        signatures: [
+          {
+            keyId: id(pair.publicKey),
+            signature: sign(null, payload, pair.privateKey).toString("base64"),
+          },
+        ],
+      }),
+    );
+
+    expectTypeOf(retiredKeys).not.toMatchTypeOf<
+      Parameters<typeof verifySignedEnvelope>[1]
+    >();
+    expect(() =>
+      verifySignedEnvelope(
+        bytes,
+        retiredKeys as unknown as Parameters<typeof verifySignedEnvelope>[1],
+        {} as ManifestPolicy,
+        new Date("2030-01-01T00:00:00.000Z"),
+      ),
+    ).toThrow(/signature/i);
   });
 
   it("returns an empty keyring when the selected directory is missing", () => {
