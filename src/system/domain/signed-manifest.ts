@@ -10,6 +10,8 @@ const MAX_ENVELOPE_BYTES = 96 * 1024;
 const MAX_PAYLOAD_BYTES = 64 * 1024;
 const MAX_ARTIFACT_BYTES = 100 * 1024 * 1024;
 const MAX_EXPANDED_BYTES = 512 * 1024 * 1024;
+const MAX_PREPARED_BYTES = 1024 * 1024 * 1024;
+const MAX_PREPARED_FILES = 200_000;
 const MAX_FILES = 20_000;
 const MAX_VALIDITY_MS = 31 * 24 * 60 * 60 * 1000;
 const MAX_FUTURE_SKEW_MS = 5 * 60 * 1000;
@@ -411,13 +413,13 @@ function parseManifest(
     artifactValue.maxPreparedSize,
     "artifact.maxPreparedSize",
     policy.limits.maxPreparedBytes,
-    MAX_EXPANDED_BYTES,
+    MAX_PREPARED_BYTES,
   );
   const maxPreparedFiles = boundedInteger(
     artifactValue.maxPreparedFiles,
     "artifact.maxPreparedFiles",
     policy.limits.maxPreparedFiles,
-    MAX_FILES,
+    MAX_PREPARED_FILES,
   );
   const fileCount = boundedInteger(
     artifactValue.fileCount,

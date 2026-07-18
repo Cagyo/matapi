@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+  artifactLedgerIdentitySha256,
   parseArtifactIdentity,
   parseArtifactMarker,
   parseCheckedReleaseIdentity,
@@ -18,6 +19,7 @@ import {
   parseTrustedState,
   canTransitionOperationState,
   preservesOperationImmutables,
+  type ArtifactIdentity,
 } from "../../../src/system/domain/ota-contracts";
 
 interface Vector {
@@ -94,7 +96,185 @@ function checksummed<T extends Record<string, unknown>>(value: T): T {
   };
 }
 
+const ARTIFACT_IDENTITY: ArtifactIdentity = {
+  version: "1.4.2",
+  commit: "0123456789abcdef0123456789abcdef01234567",
+  targetName: "linux-arm",
+  target: {
+    platform: "linux",
+    arch: "arm",
+    libc: "glibc",
+    libcMinVersion: "2.28",
+    nodeModulesAbi: "115",
+  },
+  url: "https://updates.example.test/home-worker-1.4.2.tar.gz",
+  format: "tar.gz",
+  size: 10,
+  expandedSize: 20,
+  maxPreparedSize: 30,
+  maxPreparedFiles: 40,
+  fileCount: 2,
+  sha256: "a".repeat(64),
+};
+
 describe("OTA schema-v1 contracts", () => {
+  it("matches the canonical full-artifact ledger identity golden vector", () => {
+    expect(artifactLedgerIdentitySha256("stable", ARTIFACT_IDENTITY)).toBe(
+      "afa2d2456774cdd640e7e05d849c1a019cefe6111e6df2396e96789b2e26a2ab",
+    );
+  });
+
+  it.each([
+    ["channel", (artifact: ArtifactIdentity) => ["candidate", artifact]],
+    [
+      "targetName",
+      (artifact: ArtifactIdentity) => [
+        "stable",
+        { ...artifact, targetName: "linux-arm-v2" },
+      ],
+    ],
+    [
+      "version",
+      (artifact: ArtifactIdentity) => [
+        "stable",
+        { ...artifact, version: "1.4.3" },
+      ],
+    ],
+    [
+      "commit",
+      (artifact: ArtifactIdentity) => [
+        "stable",
+        { ...artifact, commit: "f".repeat(40) },
+      ],
+    ],
+    [
+      "target.platform",
+      (artifact: ArtifactIdentity) => [
+        "stable",
+        {
+          ...artifact,
+          target: { ...artifact.target, platform: "linux-v2" },
+        },
+      ],
+    ],
+    [
+      "target.arch",
+      (artifact: ArtifactIdentity) => [
+        "stable",
+        { ...artifact, target: { ...artifact.target, arch: "arm64" } },
+      ],
+    ],
+    [
+      "target.libc",
+      (artifact: ArtifactIdentity) => [
+        "stable",
+        { ...artifact, target: { ...artifact.target, libc: "musl" } },
+      ],
+    ],
+    [
+      "target.libcMinVersion",
+      (artifact: ArtifactIdentity) => [
+        "stable",
+        {
+          ...artifact,
+          target: { ...artifact.target, libcMinVersion: "2.29" },
+        },
+      ],
+    ],
+    [
+      "target.nodeModulesAbi",
+      (artifact: ArtifactIdentity) => [
+        "stable",
+        {
+          ...artifact,
+          target: { ...artifact.target, nodeModulesAbi: "127" },
+        },
+      ],
+    ],
+    [
+      "url",
+      (artifact: ArtifactIdentity) => [
+        "stable",
+        { ...artifact, url: `${artifact.url}?mirror=1` },
+      ],
+    ],
+    [
+      "format",
+      (artifact: ArtifactIdentity) => [
+        "stable",
+        { ...artifact, format: "tar" },
+      ],
+    ],
+    [
+      "size",
+      (artifact: ArtifactIdentity) => [
+        "stable",
+        { ...artifact, size: artifact.size + 1 },
+      ],
+    ],
+    [
+      "expandedSize",
+      (artifact: ArtifactIdentity) => [
+        "stable",
+        { ...artifact, expandedSize: artifact.expandedSize + 1 },
+      ],
+    ],
+    [
+      "maxPreparedSize",
+      (artifact: ArtifactIdentity) => [
+        "stable",
+        { ...artifact, maxPreparedSize: artifact.maxPreparedSize + 1 },
+      ],
+    ],
+    [
+      "maxPreparedFiles",
+      (artifact: ArtifactIdentity) => [
+        "stable",
+        { ...artifact, maxPreparedFiles: artifact.maxPreparedFiles + 1 },
+      ],
+    ],
+    [
+      "fileCount",
+      (artifact: ArtifactIdentity) => [
+        "stable",
+        { ...artifact, fileCount: artifact.fileCount + 1 },
+      ],
+    ],
+    [
+      "sha256",
+      (artifact: ArtifactIdentity) => [
+        "stable",
+        { ...artifact, sha256: "f".repeat(64) },
+      ],
+    ],
+  ] as const)("binds %s into the artifact ledger identity", (_field, mutate) => {
+    const [channel, artifact] = mutate(structuredClone(ARTIFACT_IDENTITY));
+    expect(
+      artifactLedgerIdentitySha256(
+        channel as "stable",
+        artifact as ArtifactIdentity,
+      ),
+    ).not.toBe(
+      artifactLedgerIdentitySha256("stable", ARTIFACT_IDENTITY),
+    );
+  });
+
+  it("rejects the legacy three-key trusted artifact schema", () => {
+    const trusted = structuredClone(
+      vectors.valid.find((vector) => vector.parser === "trusted-state")
+        ?.value,
+    ) as Record<string, unknown>;
+    trusted.artifacts = [
+      {
+        version: "1.4.2",
+        artifactSha256: "a".repeat(64),
+        firstMetadataSha256: "b".repeat(64),
+      },
+    ];
+
+    expect(() => parseTrustedState(checksummed(trusted))).toThrow(/artifact/i);
+  });
+
   it.each(["unknown", "prepared_v2", "../shared"])(
     "rejects hostile operation state %s",
     (phase) => {

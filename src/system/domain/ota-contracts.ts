@@ -35,6 +35,36 @@ export interface ArtifactIdentity {
   sha256: string;
 }
 
+export function artifactLedgerIdentitySha256(
+  channel: "stable",
+  artifact: ArtifactIdentity,
+): string {
+  const canonicalIdentity = {
+    channel,
+    targetName: artifact.targetName,
+    version: artifact.version,
+    commit: artifact.commit,
+    target: {
+      platform: artifact.target.platform,
+      arch: artifact.target.arch,
+      libc: artifact.target.libc,
+      libcMinVersion: artifact.target.libcMinVersion,
+      nodeModulesAbi: artifact.target.nodeModulesAbi,
+    },
+    url: artifact.url,
+    format: artifact.format,
+    size: artifact.size,
+    expandedSize: artifact.expandedSize,
+    maxPreparedSize: artifact.maxPreparedSize,
+    maxPreparedFiles: artifact.maxPreparedFiles,
+    fileCount: artifact.fileCount,
+    sha256: artifact.sha256,
+  };
+  return createHash("sha256")
+    .update(JSON.stringify(canonicalIdentity), "utf8")
+    .digest("hex");
+}
+
 export interface MetadataIdentity {
   metadataVersion: number;
   channel: "stable";
@@ -106,7 +136,10 @@ export interface TimeAnchor {
 }
 
 export interface TrustedArtifact {
+  channel: "stable";
+  targetName: string;
   version: string;
+  artifactIdentitySha256: string;
   artifactSha256: string;
   firstMetadataSha256: string;
 }
@@ -577,15 +610,36 @@ function parseTrustedArtifact(value: unknown): TrustedArtifact {
   const artifact = asRecord(value, "trusted artifact");
   expectFixedKeys(
     artifact,
-    ["version", "artifactSha256", "firstMetadataSha256"],
+    [
+      "channel",
+      "targetName",
+      "version",
+      "artifactIdentitySha256",
+      "artifactSha256",
+      "firstMetadataSha256",
+    ],
     "trusted artifact",
     true,
   );
+  if (artifact.channel !== "stable")
+    invalid("trusted artifact.channel must be stable");
+  const targetName = asString(
+    artifact.targetName,
+    "trusted artifact.targetName",
+  );
+  if (targetName.length === 0)
+    invalid("trusted artifact.targetName cannot be empty");
   const version = asString(artifact.version, "trusted artifact.version");
   if (!isCanonicalVersion(version))
     invalid("trusted artifact.version is not canonical semver");
   return {
+    channel: "stable",
+    targetName,
     version,
+    artifactIdentitySha256: asSha256(
+      artifact.artifactIdentitySha256,
+      "trusted artifact.artifactIdentitySha256",
+    ),
     artifactSha256: asSha256(
       artifact.artifactSha256,
       "trusted artifact.artifactSha256",

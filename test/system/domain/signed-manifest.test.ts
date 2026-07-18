@@ -32,8 +32,8 @@ const policy: ManifestPolicy = {
   limits: {
     maxArtifactBytes: 100 * 1024 * 1024,
     maxExpandedBytes: 512 * 1024 * 1024,
-    maxPreparedBytes: 512 * 1024 * 1024,
-    maxPreparedFiles: 20_000,
+    maxPreparedBytes: 1024 * 1024 * 1024,
+    maxPreparedFiles: 200_000,
     maxFiles: 20_000,
   },
 };
@@ -305,6 +305,84 @@ describe("signed OTA envelope", () => {
 });
 
 describe("signed manifest validation", () => {
+  it("accepts prepared-tree declarations at the separate hard ceilings", () => {
+    const manifest = mutate(
+      mutate(
+        validManifest(),
+        "artifact.maxPreparedSize",
+        1024 * 1024 * 1024,
+      ),
+      "artifact.maxPreparedFiles",
+      200_000,
+    );
+    const release = signed(manifest);
+
+    expect(() =>
+      verifySignedEnvelope(release.bytes, release.keys, policy, CHECK_TIME),
+    ).not.toThrow();
+  });
+
+  it.each([
+    ["prepared bytes", "artifact.maxPreparedSize", 1024 * 1024 * 1024 + 1],
+    ["prepared files", "artifact.maxPreparedFiles", 200_001],
+    ["expanded bytes", "artifact.expandedSize", 512 * 1024 * 1024 + 1],
+    ["archive files", "artifact.fileCount", 20_001],
+  ])("rejects %s one above its hard ceiling", (_name, path, value) => {
+    const release = signed(mutate(validManifest(), path, value));
+
+    expect(() =>
+      verifySignedEnvelope(release.bytes, release.keys, policy, CHECK_TIME),
+    ).toThrow();
+  });
+
+  it.each([
+    ["maxArtifactBytes", 100 * 1024 * 1024 + 1],
+    ["maxExpandedBytes", 512 * 1024 * 1024 + 1],
+    ["maxPreparedBytes", 1024 * 1024 * 1024 + 1],
+    ["maxPreparedFiles", 200_001],
+    ["maxFiles", 20_001],
+  ] as const)(
+    "rejects policy %s above its hard ceiling",
+    (limit, configuredMaximum) => {
+      const overCeilingPolicy = structuredClone(policy);
+      overCeilingPolicy.limits[limit] = configuredMaximum;
+      const release = signed();
+
+      expect(() =>
+        verifySignedEnvelope(
+          release.bytes,
+          release.keys,
+          overCeilingPolicy,
+          CHECK_TIME,
+        ),
+      ).toThrow(/policy|ceiling/i);
+    },
+  );
+
+  it.each([
+    ["maxArtifactBytes", 50 * 1024 * 1024 - 1],
+    ["maxExpandedBytes", 200 * 1024 * 1024 - 1],
+    ["maxPreparedBytes", 300 * 1024 * 1024 - 1],
+    ["maxPreparedFiles", 9_999],
+    ["maxFiles", 8_499],
+  ] as const)(
+    "enforces a lower configured policy %s",
+    (limit, configuredMaximum) => {
+      const lowerPolicy = structuredClone(policy);
+      lowerPolicy.limits[limit] = configuredMaximum;
+      const release = signed();
+
+      expect(() =>
+        verifySignedEnvelope(
+          release.bytes,
+          release.keys,
+          lowerPolicy,
+          CHECK_TIME,
+        ),
+      ).toThrow(/configured maximum/i);
+    },
+  );
+
   it("maps a valid manifest to a checked release identity", () => {
     const release = signed();
     const verified = verifySignedEnvelope(
@@ -394,9 +472,9 @@ describe("signed manifest validation", () => {
     [
       "oversized prepared tree",
       "artifact.maxPreparedSize",
-      512 * 1024 * 1024 + 1,
+      1024 * 1024 * 1024 + 1,
     ],
-    ["too many prepared files", "artifact.maxPreparedFiles", 20_001],
+    ["too many prepared files", "artifact.maxPreparedFiles", 200_001],
     ["too many archive files", "artifact.fileCount", 20_001],
     ["non-lowercase digest", "artifact.sha256", "A".repeat(64)],
   ])("rejects %s", (_name, path, value) => {

@@ -10,7 +10,14 @@ import {
   type FileHandle,
 } from "node:fs/promises";
 import { basename, resolve } from "node:path";
-import { parseTrustedState, type TrustedState } from "../domain/ota-contracts";
+import {
+  artifactLedgerIdentitySha256,
+  parseArtifactIdentity,
+  parseTrustedState,
+  type ArtifactIdentity,
+  type TrustedArtifact,
+  type TrustedState,
+} from "../domain/ota-contracts";
 import {
   TrustedStateLostError,
   type TrustedStateCommit,
@@ -75,7 +82,10 @@ function canonicalPayload(state: TrustedStateCommit): TrustedStateCommit {
       persistedAtMs: state.timeAnchor.persistedAtMs,
     },
     artifacts: state.artifacts.map((artifact) => ({
+      channel: artifact.channel,
+      targetName: artifact.targetName,
       version: artifact.version,
+      artifactIdentitySha256: artifact.artifactIdentitySha256,
       artifactSha256: artifact.artifactSha256,
       firstMetadataSha256: artifact.firstMetadataSha256,
     })),
@@ -124,41 +134,77 @@ function validateEnvelopeRelationship(state: TrustedState): void {
   }
   if (typeof manifest.version !== "string")
     throw new Error("trusted-state envelope version is malformed");
-  const artifact = asRecord(
+  if (manifest.channel !== "stable")
+    throw new Error("trusted-state envelope channel is malformed");
+  const manifestArtifact = asRecord(
     manifest.artifact,
     "trusted-state envelope artifact",
   );
-  if (typeof artifact.sha256 !== "string")
-    throw new Error("trusted-state envelope artifact digest is malformed");
 
-  const ledger = new Map<string, string>();
+  const ledger = new Map<string, TrustedArtifact>();
   for (const entry of state.artifacts) {
-    if (ledger.has(entry.version))
+    const key = artifactLedgerKey(entry);
+    if (ledger.has(key))
       throw new Error("trusted-state artifact ledger contains duplicates");
-    ledger.set(entry.version, entry.artifactSha256);
+    ledger.set(key, entry);
   }
-  if (ledger.get(manifest.version) !== artifact.sha256) {
+
+  const highestReleaseIsBound = state.artifacts
+    .filter(
+      (entry) =>
+        entry.channel === manifest.channel && entry.version === manifest.version,
+    )
+    .some((entry) => {
+      const identity: ArtifactIdentity = parseArtifactIdentity({
+        version: manifest.version,
+        commit: manifest.commit,
+        targetName: entry.targetName,
+        target: manifest.target,
+        url: manifestArtifact.url,
+        format: manifestArtifact.format,
+        size: manifestArtifact.size,
+        expandedSize: manifestArtifact.expandedSize,
+        maxPreparedSize: manifestArtifact.maxPreparedSize,
+        maxPreparedFiles: manifestArtifact.maxPreparedFiles,
+        fileCount: manifestArtifact.fileCount,
+        sha256: manifestArtifact.sha256,
+      });
+      return (
+        entry.artifactSha256 === identity.sha256 &&
+        entry.artifactIdentitySha256 ===
+          artifactLedgerIdentitySha256(entry.channel, identity)
+      );
+    });
+  if (!highestReleaseIsBound) {
     throw new Error("trusted-state envelope is absent from artifact ledger");
   }
   if (
     state.lastNotification !== null &&
-    ledger.get(state.lastNotification.version) !==
-      state.lastNotification.artifactSha256
+    !state.artifacts.some(
+      (entry) =>
+        entry.version === state.lastNotification?.version &&
+        entry.artifactSha256 === state.lastNotification.artifactSha256,
+    )
   ) {
     throw new Error("trusted-state last notification is absent from ledger");
   }
 }
 
+function artifactLedgerKey(artifact: TrustedArtifact): string {
+  return JSON.stringify([
+    artifact.channel,
+    artifact.targetName,
+    artifact.version,
+  ]);
+}
+
 function artifactLedger(
   state: TrustedState,
-): Map<string, { artifactSha256: string; firstMetadataSha256: string }> {
+): Map<string, TrustedArtifact> {
   return new Map(
     state.artifacts.map((artifact) => [
-      artifact.version,
-      {
-        artifactSha256: artifact.artifactSha256,
-        firstMetadataSha256: artifact.firstMetadataSha256,
-      },
+      artifactLedgerKey(artifact),
+      artifact,
     ]),
   );
 }
@@ -188,7 +234,11 @@ function validateStateTransition(
   for (const [version, identity] of currentLedger) {
     const retained = nextLedger.get(version);
     if (
-      retained?.artifactSha256 !== identity.artifactSha256 ||
+      retained?.channel !== identity.channel ||
+      retained.targetName !== identity.targetName ||
+      retained.version !== identity.version ||
+      retained.artifactIdentitySha256 !== identity.artifactIdentitySha256 ||
+      retained.artifactSha256 !== identity.artifactSha256 ||
       retained?.firstMetadataSha256 !== identity.firstMetadataSha256
     ) {
       throw new Error("trusted-state artifact ledger history changed");
