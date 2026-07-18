@@ -16,7 +16,7 @@ import {
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import type { Socket } from "node:net";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   DownloadArtifactRequest,
   FetchEnvelopeRequest,
@@ -97,6 +97,22 @@ const DEFAULT_TIMEOUTS = {
   idleMs: 500,
   totalMs: 2_000,
 };
+
+function ioError(code: string): Error & { code: string } {
+  return Object.assign(new Error(code), { code });
+}
+
+function resetResponse(headers: Record<string, string>): Response {
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(Buffer.from("partial"));
+        controller.error(new TypeError("connection reset"));
+      },
+    }),
+    { status: 200, headers },
+  );
+}
 
 describe("NodeReleaseFeedTransportAdapter", () => {
   let server: LoopbackServer;
@@ -211,6 +227,21 @@ describe("NodeReleaseFeedTransportAdapter", () => {
         etag === undefined ? {} : { etag },
         Buffer.from("body"),
       );
+
+      await expect(transport.fetchEnvelope(request())).rejects.toMatchObject({
+        code: "archive-integrity",
+      });
+    },
+  );
+
+  it.each([
+    ["control", '"release\t42"'],
+    ["space", '"release 42"'],
+    ["backslash", String.raw`"release\42"`],
+  ])(
+    "rejects a strong ETag containing a forbidden %s byte",
+    async (_name, etag) => {
+      server.respond(200, { etag }, Buffer.from("body"));
 
       await expect(transport.fetchEnvelope(request())).rejects.toMatchObject({
         code: "archive-integrity",
@@ -429,5 +460,195 @@ describe("NodeReleaseFeedTransportAdapter", () => {
 
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
     await expect(access(destination)).rejects.toThrow();
+  });
+
+  it("maps a post-header envelope stream reset to network-unavailable", async () => {
+    const resetTransport = new NodeReleaseFeedTransportAdapter({
+      allowInsecureLoopback: true,
+      fetch: async () => resetResponse({ etag: '"release-42"' }),
+    });
+
+    await expect(resetTransport.fetchEnvelope(request())).rejects.toMatchObject(
+      { code: "network-unavailable" },
+    );
+  });
+
+  it("maps a post-header artifact stream reset and removes its partial file", async () => {
+    const resetTransport = new NodeReleaseFeedTransportAdapter({
+      allowInsecureLoopback: true,
+      fetch: async () => resetResponse({ "content-length": "10" }),
+    });
+
+    await expect(
+      resetTransport.downloadArtifact(downloadRequest()),
+    ).rejects.toMatchObject({ code: "network-unavailable" });
+    await expect(access(destination)).rejects.toThrow();
+  });
+
+  it("preserves the primary transfer failure after cleanup proves absence", async () => {
+    server.respond(200, {}, Buffer.alloc(9));
+    const writer = {
+      chmodPrivate: vi.fn().mockResolvedValue(undefined),
+      write: vi.fn().mockResolvedValue(undefined),
+      sync: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      destroy: vi.fn().mockResolvedValue(undefined),
+    };
+    const fileSystem = {
+      openExclusive: vi.fn().mockResolvedValue(writer),
+      unlink: vi.fn().mockResolvedValue(undefined),
+      lstat: vi.fn().mockRejectedValue(ioError("ENOENT")),
+    };
+    const injectedTransport = new NodeReleaseFeedTransportAdapter({
+      allowInsecureLoopback: true,
+      fileSystem,
+    });
+
+    await expect(
+      injectedTransport.downloadArtifact(downloadRequest()),
+    ).rejects.toMatchObject({ code: "archive-integrity" });
+    expect(writer.close).toHaveBeenCalled();
+    expect(writer.destroy).toHaveBeenCalled();
+    expect(fileSystem.unlink).toHaveBeenCalledWith(destination);
+    expect(fileSystem.lstat).toHaveBeenCalledWith(destination);
+  });
+
+  it("overrides a primary failure when cleanup cannot prove pathname absence", async () => {
+    server.respond(200, {}, Buffer.alloc(9));
+    const writer = {
+      chmodPrivate: vi.fn().mockResolvedValue(undefined),
+      write: vi.fn().mockResolvedValue(undefined),
+      sync: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      destroy: vi.fn().mockResolvedValue(undefined),
+    };
+    const fileSystem = {
+      openExclusive: vi.fn().mockResolvedValue(writer),
+      unlink: vi.fn().mockRejectedValue(ioError("EACCES")),
+      lstat: vi.fn().mockRejectedValue(ioError("EACCES")),
+    };
+    const injectedTransport = new NodeReleaseFeedTransportAdapter({
+      allowInsecureLoopback: true,
+      fileSystem,
+    });
+
+    await expect(
+      injectedTransport.downloadArtifact(downloadRequest()),
+    ).rejects.toMatchObject({ code: "maintenance-required" });
+    expect(fileSystem.unlink).toHaveBeenCalledTimes(2);
+    expect(fileSystem.lstat).toHaveBeenCalledTimes(2);
+  });
+
+  it("maps local writer failures to disk-resource after proven cleanup", async () => {
+    server.respond(200, {}, Buffer.alloc(10));
+    const writer = {
+      chmodPrivate: vi.fn().mockResolvedValue(undefined),
+      write: vi.fn().mockRejectedValue(ioError("EIO")),
+      sync: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      destroy: vi.fn().mockResolvedValue(undefined),
+    };
+    const fileSystem = {
+      openExclusive: vi.fn().mockResolvedValue(writer),
+      unlink: vi.fn().mockResolvedValue(undefined),
+      lstat: vi.fn().mockRejectedValue(ioError("ENOENT")),
+    };
+    const injectedTransport = new NodeReleaseFeedTransportAdapter({
+      allowInsecureLoopback: true,
+      fileSystem,
+    });
+
+    await expect(
+      injectedTransport.downloadArtifact(downloadRequest()),
+    ).rejects.toMatchObject({ code: "disk-resource" });
+    expect(writer.destroy).toHaveBeenCalled();
+    expect(fileSystem.unlink).toHaveBeenCalledWith(destination);
+  });
+
+  it("maps an exclusive-open EEXIST failure to maintenance-required", async () => {
+    server.respond(200, {}, Buffer.alloc(10));
+    const fileSystem = {
+      openExclusive: vi.fn().mockRejectedValue(ioError("EEXIST")),
+      unlink: vi.fn(),
+      lstat: vi.fn(),
+    };
+    const injectedTransport = new NodeReleaseFeedTransportAdapter({
+      allowInsecureLoopback: true,
+      fileSystem,
+    });
+
+    await expect(
+      injectedTransport.downloadArtifact(downloadRequest()),
+    ).rejects.toMatchObject({ code: "maintenance-required" });
+    expect(fileSystem.unlink).not.toHaveBeenCalled();
+  });
+
+  it("maps close failure to disk-resource when unlink and lstat prove absence", async () => {
+    server.respond(200, {}, Buffer.alloc(10));
+    const writer = {
+      chmodPrivate: vi.fn().mockResolvedValue(undefined),
+      write: vi.fn().mockResolvedValue(undefined),
+      sync: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockRejectedValue(ioError("EIO")),
+      destroy: vi.fn().mockResolvedValue(undefined),
+    };
+    const fileSystem = {
+      openExclusive: vi.fn().mockResolvedValue(writer),
+      unlink: vi.fn().mockResolvedValue(undefined),
+      lstat: vi.fn().mockRejectedValue(ioError("ENOENT")),
+    };
+    const injectedTransport = new NodeReleaseFeedTransportAdapter({
+      allowInsecureLoopback: true,
+      fileSystem,
+    });
+
+    await expect(
+      injectedTransport.downloadArtifact(downloadRequest()),
+    ).rejects.toMatchObject({ code: "disk-resource" });
+    expect(fileSystem.unlink).toHaveBeenCalledWith(destination);
+  });
+
+  it("does not let caller cancellation race a final clean EOF", async () => {
+    const controller = new AbortController();
+    let pullCount = 0;
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull(streamController) {
+          if (pullCount++ === 0) {
+            streamController.enqueue(Buffer.from("body"));
+            return;
+          }
+          controller.abort();
+          streamController.close();
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    const raceTransport = new NodeReleaseFeedTransportAdapter({
+      allowInsecureLoopback: true,
+      fetch: async () =>
+        new Response(body, { status: 200, headers: { etag: '"release-42"' } }),
+    });
+
+    await expect(
+      raceTransport.fetchEnvelope(request({ signal: controller.signal })),
+    ).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("does not let caller cancellation race a 304 success", async () => {
+    const controller = new AbortController();
+    const raceTransport = new NodeReleaseFeedTransportAdapter({
+      allowInsecureLoopback: true,
+      fetch: async () => {
+        controller.abort();
+        return new Response(null, { status: 304 });
+      },
+    });
+
+    await expect(
+      raceTransport.fetchEnvelope(
+        request({ etag: '"release-41"', signal: controller.signal }),
+      ),
+    ).rejects.toMatchObject({ name: "AbortError" });
   });
 });

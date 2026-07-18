@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { open, unlink, type FileHandle } from "node:fs/promises";
+import {
+  lstat as nodeLstat,
+  open,
+  unlink as nodeUnlink,
+  type FileHandle,
+} from "node:fs/promises";
 import {
   ReleaseFeedTransportError,
   type DownloadArtifactRequest,
@@ -18,6 +23,24 @@ const LOOPBACK_HOSTS = new Set(["127.0.0.1", "[::1]", "localhost"]);
 export interface NodeReleaseFeedTransportOptions {
   /** Test-only escape hatch. Production construction must keep this disabled. */
   allowInsecureLoopback?: boolean;
+  /** Test seam for deterministic transport failures and terminal races. */
+  fetch?: typeof globalThis.fetch;
+  /** Test seam for deterministic local cleanup and writer failures. */
+  fileSystem?: ReleaseFeedFileSystem;
+}
+
+export interface ReleaseArtifactWriter {
+  chmodPrivate(): Promise<void>;
+  write(bytes: Uint8Array): Promise<void>;
+  sync(): Promise<void>;
+  close(): Promise<void>;
+  destroy?(): void | Promise<void>;
+}
+
+export interface ReleaseFeedFileSystem {
+  openExclusive(path: string): Promise<ReleaseArtifactWriter>;
+  unlink(path: string): Promise<void>;
+  lstat(path: string): Promise<unknown>;
 }
 
 type AbortReason = "caller" | "timeout" | null;
@@ -27,6 +50,13 @@ interface OperationState {
   reason: AbortReason;
   abortForTimeout(): void;
   finish(): void;
+}
+
+class LocalResourceError extends Error {
+  constructor() {
+    super("disk-resource");
+    this.name = "LocalResourceError";
+  }
 }
 
 function transportError(
@@ -39,6 +69,26 @@ function callerAbortError(): Error {
   const error = new Error("The operation was aborted");
   error.name = "AbortError";
   return error;
+}
+
+function errorCode(error: unknown): string | undefined {
+  if (
+    error !== null &&
+    typeof error === "object" &&
+    "code" in error &&
+    typeof error.code === "string"
+  ) {
+    return error.code;
+  }
+  return undefined;
+}
+
+async function localResource<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch {
+    throw new LocalResourceError();
+  }
 }
 
 function assertPositiveSafeInteger(value: number, label: string): void {
@@ -127,7 +177,18 @@ function assertIdentityEncoding(response: Response): void {
 }
 
 function isStrongEtag(value: string | null): value is string {
-  return value !== null && /^"[^"\r\n]*"$/.test(value);
+  if (value === null || value.length < 2) return false;
+  if (!value.startsWith('"') || !value.endsWith('"')) return false;
+  for (let index = 1; index < value.length - 1; index += 1) {
+    const code = value.charCodeAt(index);
+    const isEtagCharacter =
+      code === 0x21 ||
+      (code >= 0x23 && code <= 0x5b) ||
+      (code >= 0x5d && code <= 0x7e) ||
+      (code >= 0x80 && code <= 0xff);
+    if (!isEtagCharacter) return false;
+  }
+  return true;
 }
 
 async function cancelResponse(response: Response): Promise<void> {
@@ -158,10 +219,18 @@ async function consumeBody(
     while (true) {
       const timeoutMs = firstRead ? timeouts.firstByteMs : timeouts.idleMs;
       const result = await withStageTimeout(
-        () => reader.read(),
+        async () => {
+          try {
+            return await reader.read();
+          } catch {
+            if (state.reason !== null) throwAbort(state);
+            throw transportError("network-unavailable");
+          }
+        },
         timeoutMs,
         state,
       );
+      if (state.reason !== null) throwAbort(state);
       if (result.done) break;
       firstRead = false;
       size += result.value.byteLength;
@@ -193,6 +262,67 @@ async function writeFully(file: FileHandle, bytes: Uint8Array): Promise<void> {
   }
 }
 
+const NODE_RELEASE_FEED_FILE_SYSTEM: ReleaseFeedFileSystem = {
+  async openExclusive(path): Promise<ReleaseArtifactWriter> {
+    const file = await open(
+      path,
+      constants.O_WRONLY |
+        constants.O_CREAT |
+        constants.O_EXCL |
+        constants.O_NOFOLLOW,
+      0o600,
+    );
+    return {
+      chmodPrivate: () => file.chmod(0o600),
+      write: (bytes) => writeFully(file, bytes),
+      sync: () => file.sync(),
+      close: () => file.close(),
+      destroy: () => file.close(),
+    };
+  },
+  unlink: (path) => nodeUnlink(path),
+  lstat: (path) => nodeLstat(path),
+};
+
+async function pathnameIsAbsent(
+  fileSystem: ReleaseFeedFileSystem,
+  destination: string,
+): Promise<boolean> {
+  try {
+    await fileSystem.lstat(destination);
+    return false;
+  } catch (error) {
+    return errorCode(error) === "ENOENT";
+  }
+}
+
+async function cleanupPartialArtifact(
+  fileSystem: ReleaseFeedFileSystem,
+  destination: string,
+  writer: ReleaseArtifactWriter,
+): Promise<boolean> {
+  try {
+    await writer.close();
+  } catch {
+    // Pathname absence, checked below, is the authoritative cleanup proof.
+  }
+  try {
+    await writer.destroy?.();
+  } catch {
+    // A second close failure does not matter if pathname absence is proven.
+  }
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await fileSystem.unlink(destination);
+    } catch {
+      // ENOENT and unlink failures are both resolved by the no-follow lstat.
+    }
+    if (await pathnameIsAbsent(fileSystem, destination)) return true;
+  }
+  return false;
+}
+
 export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort {
   constructor(private readonly options: NodeReleaseFeedTransportOptions = {}) {}
 
@@ -215,15 +345,18 @@ export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort
 
       if (response.status === 304) {
         await cancelResponse(response);
+        if (state.reason !== null) throwAbort(state);
         if (request.etag === undefined) throw transportError("http-status");
         return { kind: "not-modified" };
       }
       if (response.status === 206) {
         await cancelResponse(response);
+        if (state.reason !== null) throwAbort(state);
         throw transportError("archive-integrity");
       }
       if (response.status !== 200) {
         await cancelResponse(response);
+        if (state.reason !== null) throwAbort(state);
         throw transportError("http-status");
       }
 
@@ -244,6 +377,7 @@ export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort
             throw transportError("envelope-too-large");
           chunks.push(Buffer.from(chunk));
         });
+        if (state.reason !== null) throwAbort(state);
         return { kind: "ok", bytes: Buffer.concat(chunks), etag };
       } catch (error) {
         await cancelResponse(response);
@@ -264,10 +398,12 @@ export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort
       throw transportError("archive-integrity");
 
     const state = startOperation(request.timeouts, request.signal);
-    let file: FileHandle | undefined;
+    const fileSystem = this.options.fileSystem ?? NODE_RELEASE_FEED_FILE_SYSTEM;
+    let writer: ReleaseArtifactWriter | undefined;
     let createdDestination = false;
+    let response: Response | undefined;
     try {
-      const response = await this.fetchWithRedirects(
+      response = await this.fetchWithRedirects(
         request.url,
         { "accept-encoding": "identity" },
         state,
@@ -275,10 +411,12 @@ export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort
       );
       if (response.status === 206) {
         await cancelResponse(response);
+        if (state.reason !== null) throwAbort(state);
         throw transportError("archive-integrity");
       }
       if (response.status !== 200) {
         await cancelResponse(response);
+        if (state.reason !== null) throwAbort(state);
         throw transportError("http-status");
       }
 
@@ -293,16 +431,17 @@ export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort
           throw transportError("archive-integrity");
         }
 
-        file = await open(
-          request.destination,
-          constants.O_WRONLY |
-            constants.O_CREAT |
-            constants.O_EXCL |
-            constants.O_NOFOLLOW,
-          0o600,
-        );
+        try {
+          writer = await fileSystem.openExclusive(request.destination);
+        } catch (error) {
+          if (errorCode(error) === "EEXIST")
+            throw transportError("maintenance-required");
+          if (!(await pathnameIsAbsent(fileSystem, request.destination)))
+            throw transportError("maintenance-required");
+          throw new LocalResourceError();
+        }
         createdDestination = true;
-        await file.chmod(0o600);
+        await localResource(() => writer!.chmodPrivate());
 
         const hash = createHash("sha256");
         let receivedSize = 0;
@@ -315,15 +454,16 @@ export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort
             throw transportError("archive-integrity");
           }
           hash.update(chunk);
-          await writeFully(file!, chunk);
+          await localResource(() => writer!.write(chunk));
         });
         if (receivedSize !== request.expectedSize)
           throw transportError("archive-integrity");
 
-        await file.sync();
+        await localResource(() => writer!.sync());
         if (state.reason !== null) throwAbort(state);
-        await file.close();
-        file = undefined;
+        await localResource(() => writer!.close());
+        if (state.reason !== null) throwAbort(state);
+        createdDestination = false;
         return {
           size: receivedSize,
           sha256: hash.digest("hex"),
@@ -331,12 +471,35 @@ export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort
       } catch (error) {
         await cancelResponse(response);
         if (state.reason !== null) throwAbort(state);
+        if (error instanceof LocalResourceError)
+          throw transportError("disk-resource");
         throw error;
       }
+    } catch (error) {
+      await (response === undefined
+        ? Promise.resolve()
+        : cancelResponse(response));
+      let failure: unknown = error;
+      if (state.reason !== null) {
+        try {
+          throwAbort(state);
+        } catch (abortFailure) {
+          failure = abortFailure;
+        }
+      } else if (error instanceof LocalResourceError) {
+        failure = transportError("disk-resource");
+      }
+
+      if (
+        createdDestination &&
+        writer !== undefined &&
+        !(await cleanupPartialArtifact(fileSystem, request.destination, writer))
+      ) {
+        throw transportError("maintenance-required");
+      }
+      if (state.reason !== null) throwAbort(state);
+      throw failure;
     } finally {
-      await file?.close().catch(() => undefined);
-      if (createdDestination && file !== undefined)
-        await unlink(request.destination).catch(() => undefined);
       state.finish();
     }
   }
@@ -347,6 +510,7 @@ export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort
     state: OperationState,
     connectTimeoutMs: number,
   ): Promise<Response> {
+    if (state.reason !== null) throwAbort(state);
     let current = this.parseAllowedUrl(rawUrl);
     const configuredOrigin = current.origin;
     let redirects = 0;
@@ -354,9 +518,10 @@ export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort
     while (true) {
       let response: Response;
       try {
+        const fetchImplementation = this.options.fetch ?? globalThis.fetch;
         response = await withStageTimeout(
           () =>
-            fetch(current, {
+            fetchImplementation(current, {
               redirect: "manual",
               headers,
               signal: state.controller.signal,
@@ -374,6 +539,7 @@ export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort
       const location = response.headers.get("location");
       if (location === null || redirects >= MAX_REDIRECTS) {
         await cancelResponse(response);
+        if (state.reason !== null) throwAbort(state);
         throw transportError("redirect-rejected");
       }
 
@@ -382,14 +548,17 @@ export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort
         next = this.parseAllowedUrl(new URL(location, current).href);
       } catch {
         await cancelResponse(response);
+        if (state.reason !== null) throwAbort(state);
         throw transportError("redirect-rejected");
       }
       if (next.origin !== configuredOrigin) {
         await cancelResponse(response);
+        if (state.reason !== null) throwAbort(state);
         throw transportError("redirect-rejected");
       }
 
       await cancelResponse(response);
+      if (state.reason !== null) throwAbort(state);
       redirects += 1;
       current = next;
     }

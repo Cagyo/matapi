@@ -38,7 +38,9 @@ export type ReleaseFeedTransportFailureCode =
   | "redirect-rejected"
   | "http-status"
   | "envelope-too-large"
-  | "archive-integrity";
+  | "archive-integrity"
+  | "disk-resource"
+  | "maintenance-required";
 
 export class ReleaseFeedTransportError extends Error {
   constructor(readonly code: ReleaseFeedTransportFailureCode) {
