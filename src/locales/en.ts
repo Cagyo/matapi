@@ -1057,8 +1057,8 @@ const enCatalog = {
   },
   ota: {
     checking: '🔄 Checking for updates...',
-    releaseAvailable: (version: string, commit: string) =>
-      `⬆️ Application update ${version} is available (commit ${commit}). Send /update to review and install it.`,
+    releaseAvailable: (version: string, targetName: string, commit: string) =>
+      `⬆️ Application update ${version} for ${targetName} is available (commit ${commit}). Send /update to review and install it.`,
     discoveryFailure: (code: string) =>
       `⚠️ Update discovery requires attention (${code}). The installed release was not changed.`,
     upToDate: 'ℹ️ Already up to date.',

@@ -17,6 +17,7 @@ import { EventProcessorService } from '../../events/application/event-processor.
 import { RecipientDirectoryService } from '../../events/application/recipient-directory.service';
 import { BotRunnerRegistry } from '../../network/application/bot-runner.registry';
 import { BotRunnerPort } from '../../network/domain/ports/bot-runner.port';
+import { OtaAdminNotificationService } from '../../system/application/ota-admin-notification.service';
 import { RestartConfirmationService } from '../interfaces/restart-confirmation.service';
 import { SystemOnlineNotifier } from '../application/system-online-notifier.service';
 import { ClaimAdminHandler } from '../interfaces/claim-admin.handler';
@@ -61,6 +62,7 @@ import {
 } from '../application/ports/home-message-delivery.port';
 import { ConsoleNotifierAdapter } from './console-notifier.adapter';
 import { TelegramAdminAlertAdapter } from './telegram-admin-alert.adapter';
+import { TelegramOtaAdminNotificationAdapter } from './telegram-ota-admin-notification.adapter';
 import { TelegramLiveStreamMessageCleanupAdapter } from './telegram-live-stream-message-cleanup.adapter';
 import { TelegramDirectMessenger } from './telegram-direct-messenger.adapter';
 import { TelegramNotifierAdapter } from './telegram-notifier.adapter';
@@ -113,6 +115,10 @@ export class GrammyBotGateway
     private readonly adminAlertService: AdminAlertService,
     @Inject(forwardRef(() => TelegramAdminAlertAdapter))
     private readonly telegramAdminAlert: TelegramAdminAlertAdapter,
+    @Inject(forwardRef(() => OtaAdminNotificationService))
+    private readonly otaAdminNotifications: OtaAdminNotificationService,
+    @Inject(forwardRef(() => TelegramOtaAdminNotificationAdapter))
+    private readonly telegramOtaAdminNotifications: TelegramOtaAdminNotificationAdapter,
     @Inject(forwardRef(() => LiveStreamMessageCleanupService))
     private readonly liveStreamMessageCleanup: LiveStreamMessageCleanupService,
     @Inject(forwardRef(() => TelegramLiveStreamMessageCleanupAdapter))
@@ -221,6 +227,7 @@ export class GrammyBotGateway
       this.eventNotifier.register(this.consoleNotifier);
       this.recipientDirectory.register(this.telegramRecipients);
       this.adminAlertService.register(this.telegramAdminAlert);
+      this.otaAdminNotifications.register(this.telegramOtaAdminNotifications);
       void this.eventProcessor.drain();
       return;
     }
@@ -279,6 +286,7 @@ export class GrammyBotGateway
     this.eventNotifier.register(this.telegramNotifier);
     this.recipientDirectory.register(this.telegramRecipients);
     this.adminAlertService.register(this.telegramAdminAlert);
+    this.otaAdminNotifications.register(this.telegramOtaAdminNotifications);
 
     this.bot = bot;
     this.runner = run(bot);
@@ -323,6 +331,7 @@ export class GrammyBotGateway
     this.eventNotifier.clear();
     this.recipientDirectory.clear();
     this.adminAlertService.clear();
+    this.otaAdminNotifications.clear();
     this.liveStreamMessageCleanup.clear();
     this.bot = undefined;
     this.runner = undefined;

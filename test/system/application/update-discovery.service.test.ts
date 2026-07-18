@@ -1,14 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 import type { CheckForUpdatesUseCase } from "../../../src/system/application/check-for-updates.use-case";
+import type { UpdateDiscoveryClockPort } from "../../../src/system/application/ports/update-discovery-clock.port";
+import type { UpdateDiscoveryRandomPort } from "../../../src/system/application/ports/update-discovery-random.port";
+import type { UpdateDiscoveryTimerPort } from "../../../src/system/application/ports/update-discovery-timer.port";
 import { UpdateDiscoveryService } from "../../../src/system/application/update-discovery.service";
+import type {
+  OtaAdminNotificationPort,
+  OtaAdminNotice,
+} from "../../../src/system/domain/ports/ota-admin-notification.port";
 import type {
   CheckedReleaseIdentity,
   UpdateCheck,
 } from "../../../src/system/domain/ota-contracts";
-import type { NotifierPort } from "../../../src/events/domain/ports/notifier.port";
-import type { UpdateDiscoveryClockPort } from "../../../src/system/application/ports/update-discovery-clock.port";
-import type { UpdateDiscoveryRandomPort } from "../../../src/system/application/ports/update-discovery-random.port";
-import type { UpdateDiscoveryTimerPort } from "../../../src/system/application/ports/update-discovery-timer.port";
 
 const available: CheckedReleaseIdentity = {
   artifact: {
@@ -49,15 +52,18 @@ function harness(
   const startUpdate = vi.fn();
   const check = {
     execute: vi.fn().mockResolvedValue(result),
-    claimAvailableNotification: vi.fn().mockResolvedValue(true),
-    claimFailureNotification: vi.fn().mockResolvedValue(true),
+    isAvailableNotificationDue: vi.fn().mockResolvedValue(true),
+    acknowledgeAvailableNotification: vi.fn().mockResolvedValue(undefined),
+    isFailureNotificationDue: vi.fn().mockResolvedValue(true),
+    acknowledgeFailureNotification: vi.fn().mockResolvedValue(undefined),
     startUpdate,
   } as unknown as CheckForUpdatesUseCase;
-  const notifier: NotifierPort = {
-    isReady: vi.fn().mockReturnValue(true),
-    notify: vi.fn().mockResolvedValue(undefined),
-    notifyUser: vi.fn(),
-    notifyUserPhoto: vi.fn(),
+  const deliveredNotices: OtaAdminNotice[] = [];
+  const notifications: OtaAdminNotificationPort = {
+    deliver: vi.fn(async (notice) => {
+      deliveredNotices.push(notice);
+      return { delivered: 1 };
+    }),
   };
   const timeouts: { callback: () => void; delay: number }[] = [];
   const intervals: { callback: () => void; delay: number }[] = [];
@@ -79,7 +85,7 @@ function harness(
   const random: UpdateDiscoveryRandomPort = { next: vi.fn(() => 1) };
   const service = new UpdateDiscoveryService(
     check,
-    notifier,
+    notifications,
     clock,
     timer,
     random,
@@ -88,7 +94,16 @@ function harness(
       startupJitterMaxMs: 300_000,
     },
   );
-  return { service, check, notifier, timer, timeouts, intervals, startUpdate };
+  return {
+    service,
+    check,
+    notifications,
+    deliveredNotices,
+    timer,
+    timeouts,
+    intervals,
+    startUpdate,
+  };
 }
 
 describe("UpdateDiscoveryService", () => {
@@ -102,7 +117,7 @@ describe("UpdateDiscoveryService", () => {
     expect(h.intervals[0].delay).toBe(60 * 60 * 1000);
   });
 
-  it("coalesces concurrent checks and never starts an update", async () => {
+  it("coalesces concurrent checks, emits a typed notice, and never starts an update", async () => {
     const h = harness({
       kind: "available",
       installed: available.artifact,
@@ -126,7 +141,14 @@ describe("UpdateDiscoveryService", () => {
 
     expect(h.check.execute).toHaveBeenCalledTimes(1);
     expect(h.startUpdate).not.toHaveBeenCalled();
-    expect(h.notifier.notify).toHaveBeenCalledTimes(1);
+    expect(h.deliveredNotices).toEqual([
+      {
+        kind: "release-available",
+        version: "1.4.3",
+        targetName: "linux-armv7-glibc",
+        commit: available.artifact.commit,
+      },
+    ]);
   });
 
   it("keeps routine pre-expiry network failures silent", async () => {
@@ -137,52 +159,84 @@ describe("UpdateDiscoveryService", () => {
 
     await h.service.checkNow();
 
-    expect(h.check.claimFailureNotification).not.toHaveBeenCalled();
-    expect(h.notifier.notify).not.toHaveBeenCalled();
+    expect(h.check.isFailureNotificationDue).not.toHaveBeenCalled();
+    expect(h.notifications.deliver).not.toHaveBeenCalled();
   });
 
-  it("notifies once per available artifact and distinct failure per UTC day", async () => {
+  it("acknowledges an available notice only after at least one delivery", async () => {
     const h = harness({
       kind: "available",
       installed: available.artifact,
       available,
     });
-    vi.mocked(h.check.claimAvailableNotification)
-      .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce(false);
-    await h.service.checkNow();
-    await h.service.checkNow();
-    expect(h.notifier.notify).toHaveBeenCalledTimes(1);
-
-    vi.mocked(h.check.execute).mockResolvedValue({
-      kind: "failure",
-      failure: { code: "signature-invalid" },
+    const order: string[] = [];
+    vi.mocked(h.notifications.deliver).mockImplementation(async () => {
+      order.push("deliver");
+      return { delivered: 1 };
     });
-    vi.mocked(h.check.claimFailureNotification)
-      .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce(false);
+    vi.mocked(h.check.acknowledgeAvailableNotification).mockImplementation(
+      async () => {
+        order.push("acknowledge");
+      },
+    );
+
     await h.service.checkNow();
+
+    expect(order).toEqual(["deliver", "acknowledge"]);
+    expect(h.check.acknowledgeAvailableNotification).toHaveBeenCalledWith(
+      available,
+      new Date("2030-01-15T12:00:00.000Z"),
+    );
+  });
+
+  it("leaves the available-notice allowance unconsumed when delivery reaches nobody", async () => {
+    const h = harness({
+      kind: "available",
+      installed: available.artifact,
+      available,
+    });
+    vi.mocked(h.notifications.deliver).mockResolvedValue({ delivered: 0 });
+
     await h.service.checkNow();
-    expect(h.notifier.notify).toHaveBeenCalledTimes(2);
-    expect(h.check.claimFailureNotification).toHaveBeenNthCalledWith(
-      1,
+
+    expect(h.check.acknowledgeAvailableNotification).not.toHaveBeenCalled();
+  });
+
+  it("acknowledges a non-routine failure only after delivery", async () => {
+    const h = harness();
+
+    await h.service.checkNow();
+
+    expect(h.deliveredNotices).toEqual([
+      { kind: "discovery-failure", code: "signature-invalid" },
+    ]);
+    expect(h.check.acknowledgeFailureNotification).toHaveBeenCalledWith(
       "signature-invalid",
       new Date("2030-01-15T12:00:00.000Z"),
     );
   });
 
-  it("rate-limits trust-state failures in memory when the durable ledger is unavailable", async () => {
-    const h = harness({
-      kind: "failure",
-      failure: { code: "trust-state-lost" },
-    });
-    vi.mocked(h.check.claimFailureNotification).mockRejectedValue(
+  it("leaves the failure allowance unconsumed after zero or failed delivery", async () => {
+    const h = harness();
+    vi.mocked(h.notifications.deliver)
+      .mockResolvedValueOnce({ delivered: 0 })
+      .mockRejectedValueOnce(new Error("telegram unavailable"));
+
+    await h.service.checkNow();
+    await expect(h.service.checkNow()).rejects.toThrow("telegram unavailable");
+
+    expect(h.check.acknowledgeFailureNotification).not.toHaveBeenCalled();
+  });
+
+  it("suppresses an in-process duplicate after delivery if durable acknowledgement fails", async () => {
+    const h = harness();
+    vi.mocked(h.check.acknowledgeFailureNotification).mockRejectedValue(
       new Error("trust-state-lost"),
     );
 
-    await h.service.checkNow();
+    await expect(h.service.checkNow()).rejects.toThrow("trust-state-lost");
     await h.service.checkNow();
 
-    expect(h.notifier.notify).toHaveBeenCalledTimes(1);
+    expect(h.notifications.deliver).toHaveBeenCalledTimes(1);
   });
 });

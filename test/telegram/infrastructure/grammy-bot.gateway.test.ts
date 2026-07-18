@@ -51,12 +51,14 @@ describe('GrammyBotGateway handler registration', () => {
       eventNotifier: { register: vi.fn() },
       recipientDirectory: { register: vi.fn() },
       adminAlertService: { register: vi.fn() },
+      otaAdminNotifications: { register: vi.fn() },
       eventProcessor: { drain: vi.fn() },
       telegramNotifier: { setBot: vi.fn() },
       directMessenger: { setBot: vi.fn() },
       botCommandsMenu: { setBot: vi.fn(), syncAllUsers: vi.fn().mockResolvedValue(undefined) },
       telegramRecipients: {},
       telegramAdminAlert: {},
+      telegramOtaAdminNotifications: {},
       botRunnerRegistry: { register: vi.fn() },
       restartConfirmation: { run: vi.fn().mockResolvedValue(undefined) },
       systemOnline: { run: vi.fn().mockResolvedValue(undefined) },
@@ -80,6 +82,9 @@ describe('GrammyBotGateway handler registration', () => {
       resolveOptional,
     ]);
     expect(gateway.homeMessageDelivery.setBot).toHaveBeenCalledWith(mocks.bot);
+    expect(gateway.otaAdminNotifications.register).toHaveBeenCalledWith(
+      gateway.telegramOtaAdminNotifications,
+    );
   });
 
   it('registers exact workflow navigation before broad workflow callback handlers', () => {
@@ -124,10 +129,12 @@ describe('GrammyBotGateway handler registration', () => {
       eventNotifier: { register: vi.fn() },
       recipientDirectory: { register: vi.fn() },
       adminAlertService: { register: vi.fn() },
+      otaAdminNotifications: { register: vi.fn() },
       eventProcessor: { drain: vi.fn() },
       consoleNotifier: {},
       telegramRecipients: {},
       telegramAdminAlert: {},
+      telegramOtaAdminNotifications: {},
       liveStreamMessageCleanup: { register },
       telegramLiveStreamMessageCleanup: telegramCleanup,
     });
@@ -135,6 +142,9 @@ describe('GrammyBotGateway handler registration', () => {
     await gateway.onApplicationBootstrap();
 
     expect(register).toHaveBeenCalledWith(telegramCleanup);
+    expect(gateway.otaAdminNotifications.register).toHaveBeenCalledWith(
+      gateway.telegramOtaAdminNotifications,
+    );
   });
 
   it('clears the Telegram live-message cleanup seam on shutdown', async () => {
@@ -151,6 +161,7 @@ describe('GrammyBotGateway handler registration', () => {
       eventNotifier: { clear: vi.fn() },
       recipientDirectory: { clear: vi.fn() },
       adminAlertService: { clear: vi.fn() },
+      otaAdminNotifications: { clear: vi.fn() },
       liveStreamMessageCleanup: { clear },
     });
 
@@ -159,6 +170,7 @@ describe('GrammyBotGateway handler registration', () => {
     expect(clearBot).toHaveBeenCalledTimes(1);
     expect(gateway.homeMessageDelivery.clearBot).toHaveBeenCalledTimes(1);
     expect(clear).toHaveBeenCalledTimes(1);
+    expect(gateway.otaAdminNotifications.clear).toHaveBeenCalledTimes(1);
   });
 
   it('clears stale update freshness after a successful runner restart', async () => {

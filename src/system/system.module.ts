@@ -3,18 +3,13 @@ import { EventModule } from "../events/event.module";
 import { BootRecoveryService } from "./application/boot-recovery.service";
 import { CheckForUpdatesUseCase } from "./application/check-for-updates.use-case";
 import { GracefulShutdownService } from "./application/graceful-shutdown.service";
-import {
-  UPDATE_CHECK_OPTIONS,
-  type UpdateCheckOptions,
-} from "./application/ports/update-check-options.port";
+import { OtaAdminNotificationService } from "./application/ota-admin-notification.service";
+import { UPDATE_CHECK_OPTIONS } from "./application/ports/update-check-options.port";
 import {
   UPDATE_DISCOVERY_CLOCK,
   type UpdateDiscoveryClockPort,
 } from "./application/ports/update-discovery-clock.port";
-import {
-  UPDATE_DISCOVERY_OPTIONS,
-  type UpdateDiscoveryOptions,
-} from "./application/ports/update-discovery-options.port";
+import { UPDATE_DISCOVERY_OPTIONS } from "./application/ports/update-discovery-options.port";
 import {
   UPDATE_DISCOVERY_RANDOM,
   type UpdateDiscoveryRandomPort,
@@ -27,6 +22,7 @@ import { UPDATE_MANIFEST_POLICY } from "./application/ports/update-manifest-poli
 import { UpdateDiscoveryService } from "./application/update-discovery.service";
 import { CLOCK_SYNC_PROBE } from "./domain/ports/clock-sync.port";
 import { INSTALLED_RELEASE } from "./domain/ports/installed-release.port";
+import { OTA_ADMIN_NOTIFICATIONS } from "./domain/ports/ota-admin-notification.port";
 import { OTA_CLOCK } from "./domain/ports/ota-clock.port";
 import { OTA } from "./domain/ports/ota.port";
 import { PROCESS_RESTARTER } from "./domain/ports/process-restarter.port";
@@ -36,13 +32,12 @@ import { SYSTEM_DEPS } from "./domain/ports/system-deps.port";
 import { SYSTEM_META_REPOSITORY } from "./domain/ports/system-meta-repository.port";
 import { SYSTEM_HEALTH } from "./domain/ports/system-health.port";
 import { TRUSTED_STATE } from "./domain/ports/trusted-state.port";
-import { updateTargetName } from "./domain/ota-contracts";
-import type { ManifestPolicy } from "./domain/signed-manifest";
 import { DrizzleSystemMetaRepository } from "./infrastructure/drizzle-system-meta.repository";
 import { DualSlotTrustedStateAdapter } from "./infrastructure/dual-slot-trusted-state.adapter";
 import { Ed25519EnvelopeVerifierAdapter } from "./infrastructure/ed25519-envelope-verifier.adapter";
 import { FsInstalledReleaseAdapter } from "./infrastructure/fs-installed-release.adapter";
 import { NodeReleaseFeedTransportAdapter } from "./infrastructure/node-release-feed-transport.adapter";
+import { loadOtaDiscoveryConfig } from "./infrastructure/ota-discovery-config.loader";
 import { OsSystemHealthAdapter } from "./infrastructure/os-system-health.adapter";
 import { Pm2ProcessRestarter } from "./infrastructure/pm2-process-restarter.adapter";
 import { ProcOtaClockAdapter } from "./infrastructure/proc-ota-clock.adapter";
@@ -64,69 +59,13 @@ export function resolveSystemMode(): SystemMode {
 }
 
 const mode = resolveSystemMode();
-
-function boundedInteger(
-  value: string | undefined,
-  fallback: number,
-  minimum: number,
-  maximum: number,
-  label: string,
-): number {
-  const parsed = value === undefined ? fallback : Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum)
-    throw new Error(`${label} is invalid`);
-  return parsed;
-}
-
-function updateFeedUrl(): string {
-  const configured = process.env.HOME_WORKER_UPDATE_FEED_URL;
-  if (configured !== undefined) return configured;
-  if (mode === "real")
-    throw new Error("HOME_WORKER_UPDATE_FEED_URL is required");
-  return "https://updates.invalid/home-worker/stable/update-envelope.json";
-}
-
-function manifestPolicy(): ManifestPolicy {
-  const arch = process.arch === "arm" ? "arm" : "arm64";
-  return {
-    feedUrl: updateFeedUrl(),
-    channel: "stable",
-    target: {
-      targetName: updateTargetName({ platform: "linux", arch, libc: "glibc" }),
-      platform: "linux",
-      arch,
-      libc: "glibc",
-      libcVersion: process.env.HOME_WORKER_GLIBC_VERSION ?? "2.28",
-      nodeModulesAbi: process.versions.modules,
-    },
-    runtime: { nodeMajor: 20, packageManager: "yarn@4.13.0" },
-    limits: {
-      maxArtifactBytes: boundedInteger(
-        process.env.HOME_WORKER_UPDATE_MAX_ARTIFACT_BYTES,
-        100 * 1024 * 1024,
-        1,
-        100 * 1024 * 1024,
-        "HOME_WORKER_UPDATE_MAX_ARTIFACT_BYTES",
-      ),
-      maxExpandedBytes: boundedInteger(
-        process.env.HOME_WORKER_UPDATE_MAX_EXPANDED_BYTES,
-        512 * 1024 * 1024,
-        1,
-        512 * 1024 * 1024,
-        "HOME_WORKER_UPDATE_MAX_EXPANDED_BYTES",
-      ),
-      maxPreparedBytes: 1024 * 1024 * 1024,
-      maxPreparedFiles: 200_000,
-      maxFiles: boundedInteger(
-        process.env.HOME_WORKER_UPDATE_MAX_FILES,
-        20_000,
-        1,
-        20_000,
-        "HOME_WORKER_UPDATE_MAX_FILES",
-      ),
-    },
-  };
-}
+const otaDiscoveryConfig = loadOtaDiscoveryConfig({
+  mode,
+  env: process.env,
+  platform: process.platform,
+  architecture: process.arch,
+  nodeModulesAbi: process.versions.modules,
+});
 
 const timer: UpdateDiscoveryTimerPort = {
   setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
@@ -149,7 +88,12 @@ const timer: UpdateDiscoveryTimerPort = {
     BootRecoveryService,
     CheckForUpdatesUseCase,
     GracefulShutdownService,
+    OtaAdminNotificationService,
     UpdateDiscoveryService,
+    {
+      provide: OTA_ADMIN_NOTIFICATIONS,
+      useExisting: OtaAdminNotificationService,
+    },
     { provide: SYSTEM_HEALTH, useClass: OsSystemHealthAdapter },
     { provide: SYSTEM_META_REPOSITORY, useClass: DrizzleSystemMetaRepository },
     {
@@ -194,27 +138,15 @@ const timer: UpdateDiscoveryTimerPort = {
     {
       provide: SIGNED_ENVELOPE_VERIFIER,
       useFactory: () =>
-        new Ed25519EnvelopeVerifierAdapter(
-          process.env.HOME_WORKER_UPDATE_TRUST_DIR ??
-            "/etc/home-worker/update-keys",
-        ),
+        new Ed25519EnvelopeVerifierAdapter(otaDiscoveryConfig.trustDirectory),
     },
     {
       provide: UPDATE_MANIFEST_POLICY,
-      useFactory: (): ManifestPolicy => manifestPolicy(),
+      useValue: otaDiscoveryConfig.policy,
     },
     {
       provide: UPDATE_CHECK_OPTIONS,
-      useFactory: (): UpdateCheckOptions => ({
-        feedUrl: updateFeedUrl(),
-        maxEnvelopeBytes: 96 * 1024,
-        timeouts: {
-          connectMs: 10_000,
-          firstByteMs: 10_000,
-          idleMs: 15_000,
-          totalMs: 60_000,
-        },
-      }),
+      useValue: otaDiscoveryConfig.checkOptions,
     },
     {
       provide: UPDATE_DISCOVERY_CLOCK,
@@ -231,19 +163,7 @@ const timer: UpdateDiscoveryTimerPort = {
     },
     {
       provide: UPDATE_DISCOVERY_OPTIONS,
-      useFactory: (): UpdateDiscoveryOptions => ({
-        pollIntervalMs:
-          boundedInteger(
-            process.env.HOME_WORKER_UPDATE_POLL_MINUTES,
-            60,
-            1,
-            24 * 60,
-            "HOME_WORKER_UPDATE_POLL_MINUTES",
-          ) *
-          60 *
-          1000,
-        startupJitterMaxMs: 300_000,
-      }),
+      useValue: otaDiscoveryConfig.discoveryOptions,
     },
   ],
   exports: [
@@ -256,6 +176,7 @@ const timer: UpdateDiscoveryTimerPort = {
     BootRecoveryService,
     GracefulShutdownService,
     CheckForUpdatesUseCase,
+    OtaAdminNotificationService,
   ],
 })
 export class SystemModule {}

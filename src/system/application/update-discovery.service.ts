@@ -4,13 +4,12 @@ import {
   type OnModuleDestroy,
   type OnModuleInit,
 } from "@nestjs/common";
-import {
-  NOTIFIER,
-  type NotifierPort,
-} from "../../events/domain/ports/notifier.port";
-import { en } from "../../locales/en";
 import type { UpdateCheck } from "../domain/ota-contracts";
 import type { OtaFailureCode } from "../domain/ota-failure";
+import {
+  OTA_ADMIN_NOTIFICATIONS,
+  type OtaAdminNotificationPort,
+} from "../domain/ports/ota-admin-notification.port";
 import { CheckForUpdatesUseCase } from "./check-for-updates.use-case";
 import {
   UPDATE_DISCOVERY_CLOCK,
@@ -56,11 +55,12 @@ export class UpdateDiscoveryService implements OnModuleInit, OnModuleDestroy {
   private startupTimer: UpdateDiscoveryTimerHandle | null = null;
   private intervalTimer: UpdateDiscoveryTimerHandle | null = null;
   private inFlight: Promise<void> | null = null;
-  private readonly volatileFailureClaims = new Set<string>();
+  private readonly volatileAcknowledgements = new Set<string>();
 
   constructor(
     private readonly check: CheckForUpdatesUseCase,
-    @Inject(NOTIFIER) private readonly notifier: NotifierPort,
+    @Inject(OTA_ADMIN_NOTIFICATIONS)
+    private readonly notifications: OtaAdminNotificationPort,
     @Inject(UPDATE_DISCOVERY_CLOCK)
     private readonly clock: UpdateDiscoveryClockPort,
     @Inject(UPDATE_DISCOVERY_TIMER)
@@ -116,18 +116,9 @@ export class UpdateDiscoveryService implements OnModuleInit, OnModuleDestroy {
 
   private async runCheck(): Promise<void> {
     const result = await this.check.execute();
-    if (!this.notifier.isReady()) return;
     const now = this.clock.now();
     if (result.kind === "available") {
-      if (await this.check.claimAvailableNotification(result.available, now)) {
-        await this.notifier.notify({
-          text: en.ota.releaseAvailable(
-            result.available.artifact.version,
-            result.available.artifact.commit.slice(0, 7),
-          ),
-          asFile: false,
-        });
-      }
+      await this.notifyAvailable(result.available, now);
       return;
     }
     if (
@@ -138,26 +129,45 @@ export class UpdateDiscoveryService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private async notifyAvailable(
+    release: Extract<UpdateCheck, { kind: "available" }>["available"],
+    now: Date,
+  ): Promise<void> {
+    const key = `release:${release.artifact.version}:${release.artifact.sha256}`;
+    if (this.volatileAcknowledgements.has(key)) return;
+    if (!(await this.check.isAvailableNotificationDue(release))) return;
+    const outcome = await this.notifications.deliver({
+      kind: "release-available",
+      version: release.artifact.version,
+      targetName: release.artifact.targetName,
+      commit: release.artifact.commit,
+    });
+    if (outcome.delivered <= 0) return;
+    this.volatileAcknowledgements.add(key);
+    await this.check.acknowledgeAvailableNotification(release, now);
+    this.volatileAcknowledgements.delete(key);
+  }
+
   private async notifyFailure(
     result: Extract<UpdateCheck, { kind: "failure" }>,
     now: Date,
   ): Promise<void> {
-    let claimed: boolean;
+    const key = `failure:${now.toISOString().slice(0, 10)}:${result.failure.code}`;
+    if (this.volatileAcknowledgements.has(key)) return;
+    let due: boolean;
     try {
-      claimed = await this.check.claimFailureNotification(
-        result.failure.code,
-        now,
-      );
+      due = await this.check.isFailureNotificationDue(result.failure.code, now);
     } catch {
-      const key = `${now.toISOString().slice(0, 10)}:${result.failure.code}`;
-      claimed = !this.volatileFailureClaims.has(key);
-      this.volatileFailureClaims.add(key);
+      due = true;
     }
-    if (claimed) {
-      await this.notifier.notify({
-        text: en.ota.discoveryFailure(result.failure.code),
-        asFile: false,
-      });
-    }
+    if (!due) return;
+    const outcome = await this.notifications.deliver({
+      kind: "discovery-failure",
+      code: result.failure.code,
+    });
+    if (outcome.delivered <= 0) return;
+    this.volatileAcknowledgements.add(key);
+    await this.check.acknowledgeFailureNotification(result.failure.code, now);
+    this.volatileAcknowledgements.delete(key);
   }
 }

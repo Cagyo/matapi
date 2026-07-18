@@ -197,9 +197,8 @@ export class CheckForUpdatesUseCase {
     return flight;
   }
 
-  claimAvailableNotification(
+  isAvailableNotificationDue(
     release: CheckedReleaseIdentity,
-    at: Date,
   ): Promise<boolean> {
     return this.serialize(async () => {
       const current = parseTrustedState(await this.state.load());
@@ -215,6 +214,27 @@ export class CheckForUpdatesUseCase {
       ) {
         return false;
       }
+      return true;
+    });
+  }
+
+  acknowledgeAvailableNotification(
+    release: CheckedReleaseIdentity,
+    at: Date,
+  ): Promise<void> {
+    return this.serialize(async () => {
+      const current = parseTrustedState(await this.state.load());
+      const expected = selectedLedgerEntry(release);
+      const ledger = current.artifacts.find(
+        (entry) => artifactCoordinates(entry) === artifactCoordinates(expected),
+      );
+      if (ledger === undefined || !sameLedgerIdentity(ledger, expected)) return;
+      if (
+        current.lastNotification?.version === release.artifact.version &&
+        current.lastNotification.artifactSha256 === release.artifact.sha256
+      ) {
+        return;
+      }
       await this.state.commit({
         ...trustedCommit(current),
         generation: current.generation + 1,
@@ -224,16 +244,27 @@ export class CheckForUpdatesUseCase {
           artifactSha256: release.artifact.sha256,
         },
       });
-      return true;
     });
   }
 
-  claimFailureNotification(code: OtaFailureCode, at: Date): Promise<boolean> {
+  isFailureNotificationDue(code: OtaFailureCode, at: Date): Promise<boolean> {
     return this.serialize(async () => {
       const current = parseTrustedState(await this.state.load());
       const day = at.toISOString().slice(0, 10);
       const existing = current.failureDays.find((entry) => entry.day === day);
-      if (existing?.codes.includes(code)) return false;
+      return !existing?.codes.includes(code);
+    });
+  }
+
+  acknowledgeFailureNotification(
+    code: OtaFailureCode,
+    at: Date,
+  ): Promise<void> {
+    return this.serialize(async () => {
+      const current = parseTrustedState(await this.state.load());
+      const day = at.toISOString().slice(0, 10);
+      const existing = current.failureDays.find((entry) => entry.day === day);
+      if (existing?.codes.includes(code)) return;
       const failureDays = current.failureDays
         .filter((entry) => entry.day !== day)
         .map((entry) => ({ day: entry.day, codes: [...entry.codes] }));
@@ -245,7 +276,6 @@ export class CheckForUpdatesUseCase {
         writtenAt: at.toISOString(),
         failureDays: failureDays.slice(-31),
       });
-      return true;
     });
   }
 

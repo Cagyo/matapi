@@ -532,43 +532,49 @@ describe("CheckForUpdatesUseCase", () => {
     expect(h.installed.loadCurrent).toHaveBeenCalledTimes(1);
   });
 
-  it("durably claims each release and each distinct failure once", async () => {
+  it("reports notification eligibility separately from durable acknowledgement", async () => {
     const h = harness();
     const available = checked("1.4.3", 43, B, "c".repeat(64));
     verifyFreshAs(h.verifier, available);
     const result = await h.useCase.execute();
     if (result.kind !== "available") throw new Error("expected available");
 
+    expect(await h.useCase.isAvailableNotificationDue(result.available)).toBe(
+      true,
+    );
+    await h.useCase.acknowledgeAvailableNotification(
+      result.available,
+      new Date(CHECK_MS),
+    );
+    expect(await h.useCase.isAvailableNotificationDue(result.available)).toBe(
+      false,
+    );
     expect(
-      await h.useCase.claimAvailableNotification(
-        result.available,
-        new Date(CHECK_MS),
-      ),
-    ).toBe(true);
-    expect(
-      await h.useCase.claimAvailableNotification(
-        result.available,
-        new Date(CHECK_MS),
-      ),
-    ).toBe(false);
-    expect(
-      await h.useCase.claimFailureNotification(
+      await h.useCase.isFailureNotificationDue(
         "signature-invalid",
         new Date(CHECK_MS),
       ),
     ).toBe(true);
+    await h.useCase.acknowledgeFailureNotification(
+      "signature-invalid",
+      new Date(CHECK_MS),
+    );
     expect(
-      await h.useCase.claimFailureNotification(
+      await h.useCase.isFailureNotificationDue(
         "signature-invalid",
         new Date(CHECK_MS),
       ),
     ).toBe(false);
     expect(
-      await h.useCase.claimFailureNotification(
+      await h.useCase.isFailureNotificationDue(
         "metadata-rollback",
         new Date(CHECK_MS),
       ),
     ).toBe(true);
+    await h.useCase.acknowledgeFailureNotification(
+      "metadata-rollback",
+      new Date(CHECK_MS),
+    );
     expect(h.current().lastNotification).toEqual({
       version: "1.4.3",
       artifactSha256: B,
