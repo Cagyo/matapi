@@ -9,7 +9,7 @@
   },
   "canonicalChecksums": {
     "trusted-state": "f9f95e21d9b30cf89a2abc8dcde1c442f3bf375fc94e2e412582c5ca35a3ff30",
-    "operation-journal": "7ca79fa30ebf0258ab1a7eeda8fb4827b06d8ca230008d47469e9885e4d1f1c2"
+    "operation-journal": "678d4f4f004ae078646848830ef26e6f9c0a3ba5c25bf1244657c576f3eb295a"
   },
   "bounds": {
     "trustedStateBytes": 2097152,
@@ -48,6 +48,9 @@
     "operationId",
     "kind",
     "expected",
+    "acceptedAt",
+    "requestSha256",
+    "receiptGeneration",
     "priorCurrent",
     "priorPrevious",
     "candidate"
@@ -253,13 +256,16 @@
         "kind": "update",
         "phase": "preparing",
         "expected": null,
+        "acceptedAt": "2030-01-01T00:00:00.000Z",
+        "requestSha256": "9999999999999999999999999999999999999999999999999999999999999999",
+        "receiptGeneration": 1,
         "priorCurrent": "1.4.1-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
         "priorPrevious": null,
         "candidate": "1.4.2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "preparedTreeSha256": null,
         "diagnostics": { "code": null, "notes": [] },
         "updatedAt": "2030-01-01T00:00:00.000Z",
-        "checksum": "7ca79fa30ebf0258ab1a7eeda8fb4827b06d8ca230008d47469e9885e4d1f1c2"
+        "checksum": "678d4f4f004ae078646848830ef26e6f9c0a3ba5c25bf1244657c576f3eb295a"
       }
     }
   ],
@@ -445,6 +451,9 @@
         "kind": "update",
         "phase": "prepared_v2",
         "expected": null,
+        "acceptedAt": "2030-01-01T00:00:00.000Z",
+        "requestSha256": "9999999999999999999999999999999999999999999999999999999999999999",
+        "receiptGeneration": 1,
         "priorCurrent": null,
         "priorPrevious": null,
         "candidate": null,

@@ -197,6 +197,9 @@ export interface OperationJournal extends OperationState {
   operationId: string;
   kind: "update" | "rollback";
   expected: CheckedReleaseIdentity | null;
+  acceptedAt: string;
+  requestSha256: string;
+  receiptGeneration: number;
   priorCurrent: string | null;
   priorPrevious: string | null;
   candidate: string | null;
@@ -971,6 +974,9 @@ const OPERATION_JOURNAL_KEYS = [
   "kind",
   "phase",
   "expected",
+  "acceptedAt",
+  "requestSha256",
+  "receiptGeneration",
   "priorCurrent",
   "priorPrevious",
   "candidate",
@@ -996,6 +1002,13 @@ export function parseOperationJournal(value: DocumentInput): OperationJournal {
       journal.expected === null
         ? null
         : parseCheckedReleaseIdentity(journal.expected, true),
+    acceptedAt: asTimestamp(journal.acceptedAt, "acceptedAt"),
+    requestSha256: asSha256(journal.requestSha256, "requestSha256"),
+    receiptGeneration: asSafeInteger(
+      journal.receiptGeneration,
+      "receiptGeneration",
+      1,
+    ),
     priorCurrent: asNullableReleaseName(journal.priorCurrent, "priorCurrent"),
     priorPrevious: asNullableReleaseName(
       journal.priorPrevious,
@@ -1026,6 +1039,9 @@ export function preservesOperationImmutables(
     previous.operationId === next.operationId &&
     previous.kind === next.kind &&
     JSON.stringify(previous.expected) === JSON.stringify(next.expected) &&
+    previous.acceptedAt === next.acceptedAt &&
+    previous.requestSha256 === next.requestSha256 &&
+    previous.receiptGeneration === next.receiptGeneration &&
     previous.priorCurrent === next.priorCurrent &&
     previous.priorPrevious === next.priorPrevious &&
     previous.candidate === next.candidate

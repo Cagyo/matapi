@@ -48,7 +48,7 @@ function dependencies() {
     flockPath: "/usr/bin/flock",
     nodeExecutable: "/usr/bin/node",
     updaterEntry:
-      "/opt/home-worker/current/dist/system/infrastructure/ota-updater.js",
+      "/opt/home-worker/current/dist/system/infrastructure/ota-updater.entry.js",
     sourceEnvironment: {
       PATH: "/usr/bin:/bin",
       NODE_ENV: "production",
@@ -120,7 +120,7 @@ describe("runOtaLockAcquiredShim", () => {
       2,
       "/usr/bin/node",
       [
-        "/opt/home-worker/current/dist/system/infrastructure/ota-updater.js",
+        "/opt/home-worker/current/dist/system/infrastructure/ota-updater.entry.js",
         "--operation-id",
         OPERATION_ID,
         "--handshake-fd",

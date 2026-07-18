@@ -203,7 +203,7 @@ describe("loadOtaDiscoveryConfig", () => {
       },
     ]);
     expect(config.launcher.updaterEntry).toEqual(
-      expect.stringMatching(/system\/infrastructure\/ota-updater\.js$/),
+      expect.stringMatching(/system\/infrastructure\/ota-updater\.entry\.js$/),
     );
   });
 

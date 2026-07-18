@@ -103,7 +103,7 @@ function config(): OtaConfig {
       lockPath: "/run/home-worker/ota.lock",
       requestDirectory: "/run/home-worker/requests",
       updaterEntry:
-        "/opt/home-worker/current/dist/system/infrastructure/ota-updater.js",
+        "/opt/home-worker/current/dist/system/infrastructure/ota-updater.entry.js",
       lockAcquiredShimEntry:
         "/opt/home-worker/current/dist/system/infrastructure/ota-lock-acquired-shim.js",
       handshakeTimeoutMs: 10_000,
@@ -192,7 +192,7 @@ function fileSystemFake(): FileSystemFake {
       if (path.endsWith("/infrastructure")) {
         return "/opt/home-worker/releases/42/dist/system/infrastructure";
       }
-      return "/opt/home-worker/releases/42/dist/system/infrastructure/ota-updater.js";
+      return "/opt/home-worker/releases/42/dist/system/infrastructure/ota-updater.entry.js";
     },
     currentUid: () => 1000,
     async open(path, flags, mode) {
@@ -389,7 +389,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
       `lstat:${config().launcher.updaterEntry}`,
       `realpath:${config().launcher.updaterEntry}`,
       "realpath:/opt/home-worker/current/dist/system/infrastructure",
-      "lstat:/opt/home-worker/releases/42/dist/system/infrastructure/ota-updater.js",
+      "lstat:/opt/home-worker/releases/42/dist/system/infrastructure/ota-updater.entry.js",
       "open-temp",
       "write",
       "sync-file",

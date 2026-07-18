@@ -77,7 +77,7 @@ const defaultDependencies: OtaLockAcquiredShimDependencies = {
   spawn: (file, args, options) => nodeSpawn(file, [...args], options),
   flockPath: "/usr/bin/flock",
   nodeExecutable: process.execPath,
-  updaterEntry: resolve(__dirname, "ota-updater.js"),
+  updaterEntry: resolve(__dirname, "ota-updater.entry.js"),
   sourceEnvironment: process.env,
   onSignal: (signal, listener) => process.on(signal, listener),
   removeSignal: (signal, listener) => process.off(signal, listener),

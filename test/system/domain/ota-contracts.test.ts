@@ -129,9 +129,9 @@ describe("OTA schema-v1 contracts", () => {
     ["arm", "linux-armv7-glibc"],
     ["arm64", "linux-arm64-glibc"],
   ] as const)("maps linux/%s/glibc to %s", (arch, targetName) => {
-    expect(
-      updateTargetName({ platform: "linux", arch, libc: "glibc" }),
-    ).toBe(targetName);
+    expect(updateTargetName({ platform: "linux", arch, libc: "glibc" })).toBe(
+      targetName,
+    );
   });
 
   it("rejects target-name aliases and tuple mismatches", () => {
@@ -272,22 +272,22 @@ describe("OTA schema-v1 contracts", () => {
         { ...artifact, sha256: "f".repeat(64) },
       ],
     ],
-  ] as const)("binds %s into the artifact ledger identity", (_field, mutate) => {
-    const [channel, artifact] = mutate(structuredClone(ARTIFACT_IDENTITY));
-    expect(
-      artifactLedgerIdentitySha256(
-        channel as "stable",
-        artifact as ArtifactIdentity,
-      ),
-    ).not.toBe(
-      artifactLedgerIdentitySha256("stable", ARTIFACT_IDENTITY),
-    );
-  });
+  ] as const)(
+    "binds %s into the artifact ledger identity",
+    (_field, mutate) => {
+      const [channel, artifact] = mutate(structuredClone(ARTIFACT_IDENTITY));
+      expect(
+        artifactLedgerIdentitySha256(
+          channel as "stable",
+          artifact as ArtifactIdentity,
+        ),
+      ).not.toBe(artifactLedgerIdentitySha256("stable", ARTIFACT_IDENTITY));
+    },
+  );
 
   it("rejects the legacy three-key trusted artifact schema", () => {
     const trusted = structuredClone(
-      vectors.valid.find((vector) => vector.parser === "trusted-state")
-        ?.value,
+      vectors.valid.find((vector) => vector.parser === "trusted-state")?.value,
     ) as Record<string, unknown>;
     trusted.artifacts = [
       {
@@ -302,8 +302,7 @@ describe("OTA schema-v1 contracts", () => {
 
   it("rejects a trusted-artifact target-name alias at runtime", () => {
     const trusted = structuredClone(
-      vectors.valid.find((vector) => vector.parser === "trusted-state")
-        ?.value,
+      vectors.valid.find((vector) => vector.parser === "trusted-state")?.value,
     ) as Record<string, unknown>;
     const artifacts = trusted.artifacts as Record<string, unknown>[];
     artifacts[0].targetName = "linux-arm";
@@ -429,6 +428,9 @@ describe("OTA schema-v1 contracts", () => {
           expiresAt: "2030-01-02T00:00:00.000Z",
         },
       },
+      acceptedAt: "2030-01-02T00:00:00.000Z",
+      requestSha256: "8".repeat(64),
+      receiptGeneration: 2,
       priorCurrent: `1.5.0-${"a".repeat(64)}`,
       priorPrevious: `1.5.0-${"a".repeat(64)}`,
       candidate: `1.5.0-${"a".repeat(64)}`,

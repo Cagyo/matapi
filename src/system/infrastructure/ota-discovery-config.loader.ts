@@ -301,7 +301,7 @@ export function loadOtaConfig(input: OtaDiscoveryConfigInput): OtaConfig {
     ...OTA_FIXED_PATHS,
     nodeExecutable: input.nodeExecutable ?? process.execPath,
     lockAcquiredShimEntry: resolve(__dirname, "ota-lock-acquired-shim.js"),
-    updaterEntry: resolve(__dirname, "ota-updater.js"),
+    updaterEntry: resolve(__dirname, "ota-updater.entry.js"),
   };
   if (input.mode === "real") {
     (input.validateFixedPaths ?? defaultValidateFixedPaths)({
