@@ -367,7 +367,8 @@ export class CheckForUpdatesUseCase {
         } catch (error) {
           if (
             error instanceof ReleaseFeedTransportError &&
-            error.code === "http-status"
+            error.failure.code === "http-status" &&
+            error.failure.reason === "unconditional-not-modified"
           ) {
             return failure("http-status");
           }

@@ -294,7 +294,12 @@ describe("CheckForUpdatesUseCase", () => {
     const h = harness();
     vi.mocked(h.transport.fetchEnvelope)
       .mockResolvedValueOnce({ kind: "not-modified" })
-      .mockRejectedValueOnce(new ReleaseFeedTransportError("http-status"));
+      .mockRejectedValueOnce(
+        new ReleaseFeedTransportError({
+          code: "http-status",
+          reason: "unconditional-not-modified",
+        }),
+      );
     vi.mocked(h.verifier.verify).mockImplementation(() => {
       throw new SignedEnvelopeVerificationError("signature-invalid");
     });
@@ -310,12 +315,63 @@ describe("CheckForUpdatesUseCase", () => {
     expect(h.state.commit).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { cachedCode: "signature-invalid" as const, status: 500 },
+    { cachedCode: "signature-invalid" as const, status: 404 },
+    { cachedCode: "signature-invalid" as const, status: 206 },
+    { cachedCode: "metadata-expired" as const, status: 500 },
+    { cachedCode: "metadata-expired" as const, status: 404 },
+    { cachedCode: "metadata-expired" as const, status: 206 },
+  ])(
+    "preserves $cachedCode classification when fallback receives ordinary HTTP $status",
+    async ({ cachedCode }) => {
+      const h = harness();
+      vi.mocked(h.transport.fetchEnvelope)
+        .mockResolvedValueOnce({ kind: "not-modified" })
+        .mockRejectedValueOnce(
+          new ReleaseFeedTransportError({
+            code: "http-status",
+            reason: "response-status",
+          }),
+        );
+      vi.mocked(h.verifier.verify).mockImplementation(() => {
+        throw new SignedEnvelopeVerificationError(cachedCode);
+      });
+
+      expect(await h.useCase.execute()).toEqual({
+        kind: "failure",
+        failure: {
+          code:
+            cachedCode === "metadata-expired"
+              ? "metadata-freeze"
+              : "signature-invalid",
+        },
+      });
+      expect(h.state.commit).not.toHaveBeenCalled();
+    },
+  );
+
+  it("maps an ordinary initial response-status failure to public http-status", async () => {
+    const h = harness();
+    vi.mocked(h.transport.fetchEnvelope).mockRejectedValue(
+      new ReleaseFeedTransportError({
+        code: "http-status",
+        reason: "response-status",
+      }),
+    );
+
+    expect(await h.useCase.execute()).toEqual({
+      kind: "failure",
+      failure: { code: "http-status" },
+    });
+  });
+
   it("keeps expired-cache fallback network failure classified as metadata freeze", async () => {
     const h = harness();
     vi.mocked(h.transport.fetchEnvelope)
       .mockResolvedValueOnce({ kind: "not-modified" })
       .mockRejectedValueOnce(
-        new ReleaseFeedTransportError("network-unavailable"),
+        new ReleaseFeedTransportError({ code: "network-unavailable" }),
       );
     vi.mocked(h.verifier.verify).mockImplementation(() => {
       throw new SignedEnvelopeVerificationError("metadata-expired");

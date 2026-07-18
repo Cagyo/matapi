@@ -42,10 +42,22 @@ export type ReleaseFeedTransportFailureCode =
   | "disk-resource"
   | "maintenance-required";
 
+export type ReleaseFeedTransportFailure =
+  | {
+      code: "http-status";
+      reason: "response-status" | "unconditional-not-modified";
+    }
+  | {
+      code: Exclude<ReleaseFeedTransportFailureCode, "http-status">;
+    };
+
 export class ReleaseFeedTransportError extends Error {
-  constructor(readonly code: ReleaseFeedTransportFailureCode) {
-    super(code);
+  readonly code: ReleaseFeedTransportFailureCode;
+
+  constructor(readonly failure: ReleaseFeedTransportFailure) {
+    super(failure.code);
     this.name = "ReleaseFeedTransportError";
+    this.code = failure.code;
   }
 }
 

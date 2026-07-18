@@ -14,6 +14,7 @@ import {
   type FetchEnvelopeRequest,
   type FetchEnvelopeResult,
   type ReleaseFeedTimeouts,
+  type ReleaseFeedTransportFailure,
   type ReleaseFeedTransportPort,
 } from "../domain/ports/release-feed-transport.port";
 
@@ -64,9 +65,9 @@ class LocalResourceError extends Error {
 }
 
 function transportError(
-  code: ConstructorParameters<typeof ReleaseFeedTransportError>[0],
+  failure: ReleaseFeedTransportFailure,
 ): ReleaseFeedTransportError {
-  return new ReleaseFeedTransportError(code);
+  return new ReleaseFeedTransportError(failure);
 }
 
 function callerAbortError(): Error {
@@ -147,7 +148,7 @@ function startOperation(
 
 function throwAbort(state: OperationState): never {
   if (state.reason === "caller") throw callerAbortError();
-  throw transportError("network-timeout");
+  throw transportError({ code: "network-timeout" });
 }
 
 async function withStageTimeout<T>(
@@ -168,16 +169,17 @@ function contentLength(response: Response): number | undefined {
   const header = response.headers.get("content-length");
   if (header === null) return undefined;
   if (!/^(?:0|[1-9]\d*)$/.test(header))
-    throw transportError("archive-integrity");
+    throw transportError({ code: "archive-integrity" });
   const parsed = Number(header);
-  if (!Number.isSafeInteger(parsed)) throw transportError("archive-integrity");
+  if (!Number.isSafeInteger(parsed))
+    throw transportError({ code: "archive-integrity" });
   return parsed;
 }
 
 function assertIdentityEncoding(response: Response): void {
   const encoding = response.headers.get("content-encoding");
   if (encoding !== null && encoding.trim().toLowerCase() !== "identity")
-    throw transportError("archive-integrity");
+    throw transportError({ code: "archive-integrity" });
 }
 
 function isStrongEtag(value: string | null): value is string {
@@ -227,7 +229,7 @@ async function consumeBody(
             return await reader.read();
           } catch {
             if (state.reason !== null) throwAbort(state);
-            throw transportError("network-unavailable");
+            throw transportError({ code: "network-unavailable" });
           }
         },
         timeoutMs,
@@ -344,27 +346,39 @@ export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort
       if (response.status === 304) {
         await cancelResponse(response);
         if (state.reason !== null) throwAbort(state);
-        if (request.etag == null) throw transportError("http-status");
+        if (request.etag == null) {
+          throw transportError({
+            code: "http-status",
+            reason: "unconditional-not-modified",
+          });
+        }
         return { kind: "not-modified" };
       }
       if (response.status === 206) {
         await cancelResponse(response);
         if (state.reason !== null) throwAbort(state);
-        throw transportError("archive-integrity");
+        throw transportError({
+          code: "http-status",
+          reason: "response-status",
+        });
       }
       if (response.status !== 200) {
         await cancelResponse(response);
         if (state.reason !== null) throwAbort(state);
-        throw transportError("http-status");
+        throw transportError({
+          code: "http-status",
+          reason: "response-status",
+        });
       }
 
       try {
         assertIdentityEncoding(response);
         const etag = response.headers.get("etag");
-        if (!isStrongEtag(etag)) throw transportError("archive-integrity");
+        if (!isStrongEtag(etag))
+          throw transportError({ code: "archive-integrity" });
         const declaredLength = contentLength(response);
         if (declaredLength !== undefined && declaredLength > request.maxBytes) {
-          throw transportError("envelope-too-large");
+          throw transportError({ code: "envelope-too-large" });
         }
 
         const chunks: Buffer[] = [];
@@ -372,7 +386,7 @@ export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort
         await consumeBody(response, state, request.timeouts, (chunk) => {
           receivedSize += chunk.byteLength;
           if (receivedSize > request.maxBytes)
-            throw transportError("envelope-too-large");
+            throw transportError({ code: "envelope-too-large" });
           chunks.push(Buffer.from(chunk));
         });
         if (state.reason !== null) throwAbort(state);
@@ -391,11 +405,11 @@ export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort
     request: DownloadArtifactRequest,
   ): Promise<DownloadArtifactResult> {
     if (this.artifactWriterPoisoned)
-      throw transportError("maintenance-required");
+      throw transportError({ code: "maintenance-required" });
     assertPositiveSafeInteger(request.expectedSize, "expectedSize");
     assertPositiveSafeInteger(request.maxBytes, "maxBytes");
     if (request.expectedSize > request.maxBytes)
-      throw transportError("archive-integrity");
+      throw transportError({ code: "archive-integrity" });
 
     const destination = resolve(request.destination);
     const parentDirectory = dirname(destination);
@@ -405,7 +419,7 @@ export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort
     try {
       stagingPath = artifactStagingPath(destination, stagingNameSource);
     } catch {
-      throw transportError("maintenance-required");
+      throw transportError({ code: "maintenance-required" });
     }
 
     const state = startOperation(request.timeouts, request.signal);
@@ -447,12 +461,18 @@ export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort
       if (response.status === 206) {
         await cancelResponse(response);
         if (state.reason !== null) throwAbort(state);
-        throw transportError("archive-integrity");
+        throw transportError({
+          code: "http-status",
+          reason: "response-status",
+        });
       }
       if (response.status !== 200) {
         await cancelResponse(response);
         if (state.reason !== null) throwAbort(state);
-        throw transportError("http-status");
+        throw transportError({
+          code: "http-status",
+          reason: "response-status",
+        });
       }
 
       assertIdentityEncoding(response);
@@ -462,14 +482,14 @@ export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort
         (declaredLength !== request.expectedSize ||
           declaredLength > request.maxBytes)
       ) {
-        throw transportError("archive-integrity");
+        throw transportError({ code: "archive-integrity" });
       }
 
       try {
         writer = await fileSystem.openExclusive(stagingPath);
       } catch (error) {
         if (errorCode(error) === "EEXIST")
-          throw transportError("maintenance-required");
+          throw transportError({ code: "maintenance-required" });
         throw new LocalResourceError();
       }
       stagingCreated = true;
@@ -483,20 +503,20 @@ export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort
           receivedSize > request.expectedSize ||
           receivedSize > request.maxBytes
         ) {
-          throw transportError("archive-integrity");
+          throw transportError({ code: "archive-integrity" });
         }
         hash.update(chunk);
         await localResource(() => writer!.write(chunk));
       });
       if (receivedSize !== request.expectedSize)
-        throw transportError("archive-integrity");
+        throw transportError({ code: "archive-integrity" });
 
       const sha256 = hash.digest("hex");
       await localResource(() => writer!.sync());
       if (state.reason !== null) throwAbort(state);
       if (!(await confirmWriterClosed())) {
         this.artifactWriterPoisoned = true;
-        throw transportError("maintenance-required");
+        throw transportError({ code: "maintenance-required" });
       }
       if (state.reason !== null) throwAbort(state);
 
@@ -504,7 +524,7 @@ export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort
         await fileSystem.link(stagingPath, destination);
       } catch (error) {
         if (errorCode(error) === "EEXIST")
-          throw transportError("maintenance-required");
+          throw transportError({ code: "maintenance-required" });
         throw new LocalResourceError();
       }
       published = true;
@@ -512,19 +532,19 @@ export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort
       try {
         await fileSystem.fsyncDirectory(parentDirectory);
       } catch {
-        throw transportError("maintenance-required");
+        throw transportError({ code: "maintenance-required" });
       }
       try {
         await fileSystem.unlink(stagingPath);
         stagingCreated = false;
       } catch (error) {
         if (errorCode(error) === "ENOENT") stagingCreated = false;
-        else throw transportError("maintenance-required");
+        else throw transportError({ code: "maintenance-required" });
       }
       try {
         await fileSystem.fsyncDirectory(parentDirectory);
       } catch {
-        throw transportError("maintenance-required");
+        throw transportError({ code: "maintenance-required" });
       }
       if (state.reason !== null) throwAbort(state);
       return { size: receivedSize, sha256 };
@@ -543,7 +563,7 @@ export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort
         );
         stagingCreated = !stagingRemoved;
         if (this.artifactWriterPoisoned || !stagingRemoved)
-          throw transportError("maintenance-required");
+          throw transportError({ code: "maintenance-required" });
       }
       if (
         published &&
@@ -554,7 +574,7 @@ export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort
       }
       if (state.reason !== null) throwAbort(state);
       if (error instanceof LocalResourceError)
-        throw transportError("disk-resource");
+        throw transportError({ code: "disk-resource" });
       throw error;
     } finally {
       state.finish();
@@ -589,7 +609,7 @@ export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort
       } catch (error) {
         if (state.reason !== null) throwAbort(state);
         if (error instanceof ReleaseFeedTransportError) throw error;
-        throw transportError("network-unavailable");
+        throw transportError({ code: "network-unavailable" });
       }
 
       if (!REDIRECT_STATUSES.has(response.status)) return response;
@@ -597,7 +617,7 @@ export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort
       if (location === null || redirects >= MAX_REDIRECTS) {
         await cancelResponse(response);
         if (state.reason !== null) throwAbort(state);
-        throw transportError("redirect-rejected");
+        throw transportError({ code: "redirect-rejected" });
       }
 
       let next: URL;
@@ -606,12 +626,12 @@ export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort
       } catch {
         await cancelResponse(response);
         if (state.reason !== null) throwAbort(state);
-        throw transportError("redirect-rejected");
+        throw transportError({ code: "redirect-rejected" });
       }
       if (next.origin !== configuredOrigin) {
         await cancelResponse(response);
         if (state.reason !== null) throwAbort(state);
-        throw transportError("redirect-rejected");
+        throw transportError({ code: "redirect-rejected" });
       }
 
       await cancelResponse(response);
@@ -626,10 +646,10 @@ export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort
     try {
       url = new URL(rawUrl);
     } catch {
-      throw transportError("redirect-rejected");
+      throw transportError({ code: "redirect-rejected" });
     }
     if (url.username !== "" || url.password !== "" || url.hash !== "")
-      throw transportError("redirect-rejected");
+      throw transportError({ code: "redirect-rejected" });
     if (url.protocol === "https:") return url;
     if (
       this.options.allowInsecureLoopback === true &&
@@ -638,6 +658,6 @@ export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort
     ) {
       return url;
     }
-    throw transportError("redirect-rejected");
+    throw transportError({ code: "redirect-rejected" });
   }
 }

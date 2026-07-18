@@ -163,7 +163,13 @@ describe("NodeReleaseFeedTransportAdapter", () => {
 
     await expect(
       transport.fetchEnvelope(request({ etag: null })),
-    ).rejects.toMatchObject({ code: "http-status" });
+    ).rejects.toMatchObject({
+      code: "http-status",
+      failure: {
+        code: "http-status",
+        reason: "unconditional-not-modified",
+      },
+    });
     expect(server.requests[0].headers["if-none-match"]).toBeUndefined();
   });
 
@@ -212,6 +218,10 @@ describe("NodeReleaseFeedTransportAdapter", () => {
 
     await expect(transport.fetchEnvelope(request())).rejects.toMatchObject({
       code: "http-status",
+      failure: {
+        code: "http-status",
+        reason: "unconditional-not-modified",
+      },
     });
   });
 
@@ -219,9 +229,24 @@ describe("NodeReleaseFeedTransportAdapter", () => {
     server.respond(status, {}, Buffer.from("failure body"));
 
     await expect(transport.fetchEnvelope(request())).rejects.toMatchObject({
-      code: status === 206 ? "archive-integrity" : "http-status",
+      code: "http-status",
+      failure: { code: "http-status", reason: "response-status" },
     });
   });
+
+  it.each([206, 404, 500])(
+    "classifies artifact HTTP status %s as an ordinary response status",
+    async (status) => {
+      server.respond(status, {}, Buffer.from("failure body"));
+
+      await expect(
+        transport.downloadArtifact(downloadRequest()),
+      ).rejects.toMatchObject({
+        code: "http-status",
+        failure: { code: "http-status", reason: "response-status" },
+      });
+    },
+  );
 
   it.each(["gzip", "br"])(
     "rejects transformed %s responses",
