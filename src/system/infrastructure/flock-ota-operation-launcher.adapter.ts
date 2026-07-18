@@ -3,11 +3,13 @@ import { randomBytes as nodeRandomBytes, timingSafeEqual } from "node:crypto";
 import { spawn as nodeSpawn, type SpawnOptions } from "node:child_process";
 import { constants } from "node:fs";
 import {
+  lstat as nodeLstat,
   open as nodeOpen,
+  realpath as nodeRealpath,
   rename as nodeRename,
   unlink as nodeUnlink,
 } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { Readable } from "node:stream";
 import {
   createOtaOperationRequest,
@@ -19,13 +21,18 @@ import {
   type OtaOperationRequest,
   type StartOperationResult,
 } from "../domain/ota-contracts";
+import { compareLibcVersions, parseLibcVersion } from "../domain/libc-version";
 import type { OtaOperationLauncherPort } from "../domain/ports/ota-operation-launcher.port";
 import type {
   OtaConfig,
   OtaLauncherConfig,
 } from "./ota-discovery-config.loader";
+import { OTA_LOCK_ACQUIRED_MARKER } from "./ota-lock-acquired-shim";
+
+export { OTA_LOCK_ACQUIRED_MARKER } from "./ota-lock-acquired-shim";
 
 const MAX_RECEIPT_BYTES = 1024;
+const MAX_MARKER_BYTES = 128;
 
 export interface OtaLauncherFileHandle {
   writeFile(bytes: Uint8Array): Promise<void>;
@@ -41,11 +48,30 @@ export interface OtaLauncherFileSystem {
   ): Promise<OtaLauncherFileHandle>;
   rename(from: string, to: string): Promise<void>;
   unlink(path: string): Promise<void>;
+  lstat(path: string): Promise<OtaLauncherStats>;
+  realpath(path: string): Promise<string>;
+  currentUid(): number;
+}
+
+export interface OtaLauncherStats {
+  readonly dev: number | bigint;
+  readonly ino: number | bigint;
+  readonly uid: number;
+  readonly mode: number;
+  isFile(): boolean;
+  isDirectory(): boolean;
+  isSymbolicLink(): boolean;
 }
 
 export interface OtaLauncherChild {
   readonly pid?: number;
-  readonly stdio: readonly [unknown, unknown, unknown, Readable | null];
+  readonly stdio: readonly [
+    unknown,
+    unknown,
+    unknown,
+    Readable | null,
+    Readable | null,
+  ];
   on(event: string, listener: (...args: never[]) => void): this;
   unref(): void;
 }
@@ -74,6 +100,13 @@ const nodeFileSystem: OtaLauncherFileSystem = {
   open: (path, flags, mode) => nodeOpen(path, flags, mode),
   rename: nodeRename,
   unlink: nodeUnlink,
+  lstat: nodeLstat,
+  realpath: nodeRealpath,
+  currentUid: () => {
+    const uid = process.getuid?.();
+    if (uid === undefined) throw new Error("current uid is unavailable");
+    return uid;
+  },
 };
 
 const nodeTimer: OtaLauncherTimer = {
@@ -120,17 +153,6 @@ function sameReceipt(
   );
 }
 
-function compareDottedVersions(left: string, right: string): number {
-  const leftParts = left.split(".").map(Number);
-  const rightParts = right.split(".").map(Number);
-  const length = Math.max(leftParts.length, rightParts.length);
-  for (let index = 0; index < length; index += 1) {
-    const difference = (leftParts[index] ?? 0) - (rightParts[index] ?? 0);
-    if (difference !== 0) return difference;
-  }
-  return 0;
-}
-
 function validateExpectedIdentity(
   input: CheckedReleaseIdentity,
   config: OtaLauncherConfig,
@@ -138,6 +160,7 @@ function validateExpectedIdentity(
   const expected = parseCheckedReleaseIdentity(input);
   const artifact = expected.artifact;
   const policy = config.policy;
+  const runtimeLibcVersion = parseLibcVersion(policy.target.libcVersion);
   if (
     expected.metadata.channel !== policy.channel ||
     artifact.targetName !== policy.target.targetName ||
@@ -145,10 +168,8 @@ function validateExpectedIdentity(
     artifact.target.arch !== policy.target.arch ||
     artifact.target.libc !== policy.target.libc ||
     artifact.target.nodeModulesAbi !== policy.target.nodeModulesAbi ||
-    compareDottedVersions(
-      artifact.target.libcMinVersion,
-      policy.target.libcVersion,
-    ) > 0 ||
+    compareLibcVersions(artifact.target.libcMinVersion, runtimeLibcVersion) >
+      0 ||
     !/^[0-9a-f]{40}$/.test(artifact.commit) ||
     artifact.size > policy.limits.maxArtifactBytes ||
     artifact.expandedSize > policy.limits.maxExpandedBytes ||
@@ -218,6 +239,7 @@ export class FlockOtaOperationLauncherAdapter implements OtaOperationLauncherPor
     let requestBytes: Buffer;
     let requestPath: string;
     try {
+      await this.preflightUpdater();
       const operationBytes = this.dependencies.randomBytes(16);
       if (operationBytes.byteLength !== 16) {
         throw new Error("operation ID entropy source returned the wrong size");
@@ -254,11 +276,11 @@ export class FlockOtaOperationLauncherAdapter implements OtaOperationLauncherPor
           "--no-fork",
           "--exclusive",
           "--nonblock",
-          "--conflict-exit-code",
+          "-E",
           String(this.config.launcher.conflictExitCode),
           this.config.launcher.lockPath,
           this.config.launcher.nodeExecutable,
-          this.config.launcher.updaterEntry,
+          this.config.launcher.lockAcquiredShimEntry,
           "--operation-id",
           request.operationId,
           "--handshake-fd",
@@ -267,7 +289,7 @@ export class FlockOtaOperationLauncherAdapter implements OtaOperationLauncherPor
         {
           detached: true,
           shell: false,
-          stdio: ["ignore", "ignore", "ignore", "pipe"],
+          stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"],
           env: this.config.launcher.environment,
         },
       );
@@ -282,6 +304,39 @@ export class FlockOtaOperationLauncherAdapter implements OtaOperationLauncherPor
       if (!cleaned) return rejected("maintenance-required");
     }
     return result;
+  }
+
+  private async preflightUpdater(): Promise<void> {
+    const updaterPath = this.config.launcher.updaterEntry;
+    const uid = this.dependencies.fs.currentUid();
+    const pathStat = await this.dependencies.fs.lstat(updaterPath);
+    if (
+      pathStat.isSymbolicLink() ||
+      !pathStat.isFile() ||
+      pathStat.uid !== uid ||
+      (pathStat.mode & 0o022) !== 0
+    ) {
+      throw new Error("updater entry failed provenance validation");
+    }
+
+    const resolvedPath = await this.dependencies.fs.realpath(updaterPath);
+    const resolvedParent = await this.dependencies.fs.realpath(
+      dirname(updaterPath),
+    );
+    if (resolvedPath !== join(resolvedParent, basename(updaterPath))) {
+      throw new Error("updater entry escaped its fixed directory");
+    }
+    const resolvedStat = await this.dependencies.fs.lstat(resolvedPath);
+    if (
+      resolvedStat.isSymbolicLink() ||
+      !resolvedStat.isFile() ||
+      resolvedStat.uid !== uid ||
+      (resolvedStat.mode & 0o022) !== 0 ||
+      resolvedStat.dev !== pathStat.dev ||
+      resolvedStat.ino !== pathStat.ino
+    ) {
+      throw new Error("updater entry changed during provenance validation");
+    }
   }
 
   private async persistRequest(
@@ -319,7 +374,10 @@ export class FlockOtaOperationLauncherAdapter implements OtaOperationLauncherPor
       if (handle) {
         await handle.close().catch(() => undefined);
       }
-      if (!renamed) {
+      if (renamed) {
+        await this.dependencies.fs.unlink(requestPath).catch(() => undefined);
+        await this.syncRequestDirectory().catch(() => undefined);
+      } else {
         await this.dependencies.fs.unlink(temporaryPath).catch(() => undefined);
       }
       throw error;
@@ -356,12 +414,14 @@ export class FlockOtaOperationLauncherAdapter implements OtaOperationLauncherPor
   ): Promise<StartOperationResult> {
     return new Promise((resolve) => {
       const pid = child.pid;
-      const pipe = child.stdio[3];
+      const receiptPipe = child.stdio[3];
+      const markerPipe = child.stdio[4];
       if (
         pid === undefined ||
         !Number.isSafeInteger(pid) ||
         pid <= 1 ||
-        pipe === null
+        receiptPipe === null ||
+        markerPipe === null
       ) {
         resolve(rejected("maintenance-required"));
         return;
@@ -369,10 +429,19 @@ export class FlockOtaOperationLauncherAdapter implements OtaOperationLauncherPor
 
       let settled = false;
       let acceptingFrames = true;
-      let pipeEnded = false;
-      let sawNewline = false;
-      let receivedBytes = 0;
-      const chunks: Buffer[] = [];
+      let receiptEnded = false;
+      let receiptSawNewline = false;
+      let receiptBytes = 0;
+      const receiptChunks: Buffer[] = [];
+      let validReceipt: OtaOperationReceipt | undefined;
+      let markerEnded = false;
+      let markerSawNewline = false;
+      let markerBytes = 0;
+      const markerChunks: Buffer[] = [];
+      let markerState: "pending" | "absent" | "valid" = "pending";
+      let childClosed = false;
+      let childCloseCode: number | null = null;
+      let receiptWasValidAtClose = false;
       let graceTimer: unknown;
       let killWaitTimer: unknown;
 
@@ -429,12 +498,42 @@ export class FlockOtaOperationLauncherAdapter implements OtaOperationLauncherPor
         this.config.launcher.handshakeTimeoutMs,
       );
 
-      pipe.on("data", (chunk: Buffer | string) => {
+      const maybeFinishStarted = (): void => {
+        if (markerState === "valid" && validReceipt !== undefined) {
+          if (!childClosed || receiptWasValidAtClose) {
+            finish({ kind: "started", receipt: validReceipt });
+          } else {
+            finish(rejected("maintenance-required"));
+          }
+        } else if (markerState === "absent" && validReceipt !== undefined) {
+          beginTermination();
+        }
+      };
+
+      const maybeFinishClosed = (): void => {
+        if (!childClosed || settled) return;
+        if (!acceptingFrames) {
+          finish(rejected("maintenance-required"));
+          return;
+        }
+        if (!receiptEnded || !markerEnded) return;
+        if (
+          markerState === "absent" &&
+          receiptBytes === 0 &&
+          childCloseCode === this.config.launcher.conflictExitCode
+        ) {
+          finish(rejected("operation-in-progress"));
+          return;
+        }
+        finish(rejected("maintenance-required"));
+      };
+
+      receiptPipe.on("data", (chunk: Buffer | string) => {
         if (!acceptingFrames || settled) return;
         const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
         if (
-          sawNewline ||
-          receivedBytes + bytes.byteLength > MAX_RECEIPT_BYTES
+          receiptSawNewline ||
+          receiptBytes + bytes.byteLength > MAX_RECEIPT_BYTES
         ) {
           beginTermination();
           return;
@@ -448,21 +547,22 @@ export class FlockOtaOperationLauncherAdapter implements OtaOperationLauncherPor
             beginTermination();
             return;
           }
-          sawNewline = true;
+          receiptSawNewline = true;
         }
-        receivedBytes += bytes.byteLength;
-        chunks.push(bytes);
+        receiptBytes += bytes.byteLength;
+        receiptChunks.push(bytes);
       });
 
-      pipe.on("end", () => {
-        pipeEnded = true;
+      receiptPipe.on("end", () => {
+        receiptEnded = true;
         if (!acceptingFrames || settled) return;
-        if (!sawNewline) {
-          if (receivedBytes > 0) beginTermination();
+        if (!receiptSawNewline) {
+          if (receiptBytes > 0) beginTermination();
+          else maybeFinishClosed();
           return;
         }
         try {
-          const frame = Buffer.concat(chunks, receivedBytes);
+          const frame = Buffer.concat(receiptChunks, receiptBytes);
           if (frame[frame.byteLength - 1] !== 0x0a) {
             throw new Error("receipt is not newline terminated");
           }
@@ -472,33 +572,87 @@ export class FlockOtaOperationLauncherAdapter implements OtaOperationLauncherPor
           if (!sameReceipt(receipt, request)) {
             throw new Error("receipt does not bind the operation request");
           }
-          finish({ kind: "started", receipt });
+          validReceipt = receipt;
+          maybeFinishStarted();
+          maybeFinishClosed();
         } catch {
           beginTermination();
         }
       });
 
-      pipe.on("error", () => beginTermination());
-      pipe.on("close", () => {
-        if (!pipeEnded && !settled) beginTermination();
+      receiptPipe.on("error", () => beginTermination());
+      receiptPipe.on("close", () => {
+        if (!receiptEnded && !settled) beginTermination();
+      });
+
+      markerPipe.on("data", (chunk: Buffer | string) => {
+        if (!acceptingFrames || settled) return;
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        if (
+          markerSawNewline ||
+          markerBytes + bytes.byteLength > MAX_MARKER_BYTES
+        ) {
+          beginTermination();
+          return;
+        }
+        const newline = bytes.indexOf(0x0a);
+        if (newline !== -1) {
+          if (
+            newline !== bytes.byteLength - 1 ||
+            bytes.indexOf(0x0a, newline + 1) !== -1
+          ) {
+            beginTermination();
+            return;
+          }
+          markerSawNewline = true;
+        }
+        markerBytes += bytes.byteLength;
+        markerChunks.push(bytes);
+      });
+
+      markerPipe.on("end", () => {
+        markerEnded = true;
+        if (!acceptingFrames || settled) return;
+        if (markerBytes === 0) {
+          markerState = "absent";
+          maybeFinishStarted();
+          maybeFinishClosed();
+          return;
+        }
+        try {
+          const frame = Buffer.concat(markerChunks, markerBytes);
+          const expected = Buffer.from(OTA_LOCK_ACQUIRED_MARKER, "ascii");
+          if (
+            !markerSawNewline ||
+            frame.byteLength !== expected.byteLength ||
+            !timingSafeEqual(frame, expected)
+          ) {
+            throw new Error("invalid lock-acquired marker");
+          }
+          markerState = "valid";
+          maybeFinishStarted();
+          maybeFinishClosed();
+        } catch {
+          beginTermination();
+        }
+      });
+
+      markerPipe.on("error", () => beginTermination());
+      markerPipe.on("close", () => {
+        if (!markerEnded && !settled) beginTermination();
       });
 
       child.on("error", () => finish(rejected("maintenance-required")));
       child.on("close", (code: number | null) => {
         if (settled) return;
-        if (!acceptingFrames) {
+        childClosed = true;
+        childCloseCode = code;
+        receiptWasValidAtClose = validReceipt !== undefined;
+        if (markerState === "valid" && !receiptWasValidAtClose) {
           finish(rejected("maintenance-required"));
           return;
         }
-        if (
-          pipeEnded &&
-          receivedBytes === 0 &&
-          code === this.config.launcher.conflictExitCode
-        ) {
-          finish(rejected("operation-in-progress"));
-          return;
-        }
-        finish(rejected("maintenance-required"));
+        maybeFinishClosed();
       });
 
       if (signal?.aborted) beginTermination();

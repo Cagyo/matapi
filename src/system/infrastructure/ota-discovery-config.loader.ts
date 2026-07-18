@@ -7,6 +7,7 @@ import {
   type UpdateTargetName,
 } from "../domain/ota-contracts";
 import type { ManifestPolicy } from "../domain/signed-manifest";
+import { parseLibcVersion } from "../domain/libc-version";
 
 export type OtaDiscoveryMode = "real" | "stub";
 
@@ -21,8 +22,11 @@ export interface OtaFixedPaths {
   nodeExecutable: string;
   lockPath: string;
   requestDirectory: string;
+  lockAcquiredShimEntry: string;
   updaterEntry: string;
 }
+
+export type OtaStartupValidatedPaths = Omit<OtaFixedPaths, "updaterEntry">;
 
 export interface OtaDiscoveryConfigInput {
   mode: OtaDiscoveryMode;
@@ -30,8 +34,9 @@ export interface OtaDiscoveryConfigInput {
   platform: NodeJS.Platform;
   architecture: NodeJS.Architecture;
   nodeModulesAbi: string;
+  runtimeLibcVersion: string;
   nodeExecutable?: string;
-  validateFixedPaths?: (paths: OtaFixedPaths) => void;
+  validateFixedPaths?: (paths: OtaStartupValidatedPaths) => void;
 }
 
 export interface OtaUpdaterConfig {
@@ -148,7 +153,7 @@ function realPath(path: string, label: string): Stats {
   return stat;
 }
 
-function defaultValidateFixedPaths(paths: OtaFixedPaths): void {
+function defaultValidateFixedPaths(paths: OtaStartupValidatedPaths): void {
   try {
     for (const [path, label] of [
       [paths.flockPath, "flock path"],
@@ -160,11 +165,14 @@ function defaultValidateFixedPaths(paths: OtaFixedPaths): void {
       }
       accessSync(path, constants.X_OK);
     }
-    const updaterEntry = realPath(paths.updaterEntry, "updater entry");
-    if (!updaterEntry.isFile() || (updaterEntry.mode & 0o022) !== 0) {
-      throw new Error("updater entry must be a regular file");
+    const shimEntry = realPath(
+      paths.lockAcquiredShimEntry,
+      "lock-acquired shim entry",
+    );
+    if (!shimEntry.isFile() || (shimEntry.mode & 0o022) !== 0) {
+      throw new Error("lock-acquired shim entry must be a regular file");
     }
-    accessSync(paths.updaterEntry, constants.R_OK);
+    accessSync(paths.lockAcquiredShimEntry, constants.R_OK);
 
     const lockParent = realPath(dirname(paths.lockPath), "lock parent");
     if (!lockParent.isDirectory() || (lockParent.mode & 0o022) !== 0) {
@@ -207,6 +215,7 @@ function deepFreeze<T>(value: T): T {
 }
 
 export function loadOtaConfig(input: OtaDiscoveryConfigInput): OtaConfig {
+  const runtimeLibcVersion = parseLibcVersion(input.runtimeLibcVersion);
   const target =
     input.mode === "real"
       ? runtimeTarget(input)
@@ -276,7 +285,7 @@ export function loadOtaConfig(input: OtaDiscoveryConfigInput): OtaConfig {
       platform: "linux",
       arch: target.arch,
       libc: "glibc",
-      libcVersion: input.env.HOME_WORKER_GLIBC_VERSION ?? "2.28",
+      libcVersion: runtimeLibcVersion,
       nodeModulesAbi: input.nodeModulesAbi,
     },
     runtime: { nodeMajor: 20, packageManager: "yarn@4.13.0" },
@@ -292,10 +301,17 @@ export function loadOtaConfig(input: OtaDiscoveryConfigInput): OtaConfig {
   const fixedPaths: OtaFixedPaths = {
     ...OTA_FIXED_PATHS,
     nodeExecutable: input.nodeExecutable ?? process.execPath,
+    lockAcquiredShimEntry: resolve(__dirname, "ota-lock-acquired-shim.js"),
     updaterEntry: resolve(__dirname, "ota-updater.js"),
   };
   if (input.mode === "real") {
-    (input.validateFixedPaths ?? defaultValidateFixedPaths)(fixedPaths);
+    (input.validateFixedPaths ?? defaultValidateFixedPaths)({
+      flockPath: fixedPaths.flockPath,
+      nodeExecutable: fixedPaths.nodeExecutable,
+      lockPath: fixedPaths.lockPath,
+      requestDirectory: fixedPaths.requestDirectory,
+      lockAcquiredShimEntry: fixedPaths.lockAcquiredShimEntry,
+    });
   }
 
   const updaterEnvironment = {
@@ -314,6 +330,7 @@ export function loadOtaConfig(input: OtaDiscoveryConfigInput): OtaConfig {
     HOME_WORKER_UPDATE_MAX_EXPANDED_BYTES: String(maxExpandedBytes),
     HOME_WORKER_UPDATE_MAX_FILES: String(maxFiles),
     HOME_WORKER_UPDATE_HEALTH_SECONDS: String(healthSeconds),
+    HOME_WORKER_UPDATE_RUNTIME_LIBC_VERSION: runtimeLibcVersion,
   };
 
   return deepFreeze({

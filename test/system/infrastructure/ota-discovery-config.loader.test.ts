@@ -32,6 +32,7 @@ function loadReal(env: NodeJS.ProcessEnv = validEnv()) {
     platform: "linux",
     architecture: "arm",
     nodeModulesAbi: "115",
+    runtimeLibcVersion: "2.28",
     nodeExecutable: "/usr/bin/node",
     validateFixedPaths: () => undefined,
   });
@@ -94,6 +95,7 @@ describe("loadOtaDiscoveryConfig", () => {
         platform: "linux",
         architecture: "x64",
         nodeModulesAbi: "115",
+        runtimeLibcVersion: "2.28",
         nodeExecutable: "/usr/bin/node",
         validateFixedPaths: () => undefined,
       }),
@@ -132,12 +134,16 @@ describe("loadOtaDiscoveryConfig", () => {
     expect(config.policy.channel).toBe("stable");
     expect(config.policy.target.targetName).toBe("linux-armv7-glibc");
     expect(config.policy.target.arch).toBe("arm");
+    expect(config.policy.target.libcVersion).toBe("2.28");
     expect(config.checkOptions.feedUrl).toBe(config.feedUrl);
     expect(config.launcher.policy).toBe(config.policy);
     expect(config.launcher.requestDirectory).toBe("/run/home-worker/requests");
     expect(config.launcher.lockPath).toBe("/run/home-worker/ota.lock");
     expect(config.launcher.flockPath).toBe("/usr/bin/flock");
     expect(config.launcher.nodeExecutable).toBe("/usr/bin/node");
+    expect(config.launcher.lockAcquiredShimEntry).toMatch(
+      /system\/infrastructure\/ota-lock-acquired-shim\.js$/,
+    );
     expect(config.updater.healthSeconds).toBe(60);
     expect(Object.isFrozen(config)).toBe(true);
     expect(Object.isFrozen(config.policy)).toBe(true);
@@ -151,12 +157,21 @@ describe("loadOtaDiscoveryConfig", () => {
   it("does not retain or reread the mutable environment after parsing", () => {
     const env = validEnv();
     env.HOME_WORKER_UPDATE_MAX_FILES = "10";
+    env.HOME_WORKER_GLIBC_VERSION = "999.999";
     const config = loadReal(env);
 
     env.HOME_WORKER_UPDATE_MAX_FILES = "20000";
     env.TELEGRAM_BOT_TOKEN = "must-not-be-inherited";
 
     expect(config.policy.limits.maxFiles).toBe(10);
+    expect(config.policy.target.libcVersion).toBe("2.28");
+    expect(config.launcher.environment).toHaveProperty(
+      "HOME_WORKER_UPDATE_RUNTIME_LIBC_VERSION",
+      "2.28",
+    );
+    expect(config.launcher.environment).not.toHaveProperty(
+      "HOME_WORKER_GLIBC_VERSION",
+    );
     expect(config.launcher.environment).not.toHaveProperty(
       "TELEGRAM_BOT_TOKEN",
     );
@@ -171,6 +186,7 @@ describe("loadOtaDiscoveryConfig", () => {
       platform: "linux",
       architecture: "arm",
       nodeModulesAbi: "115",
+      runtimeLibcVersion: "2.28",
       nodeExecutable: "/usr/bin/node",
       validateFixedPaths: (paths) => seen.push(paths),
     });
@@ -181,15 +197,45 @@ describe("loadOtaDiscoveryConfig", () => {
         nodeExecutable: "/usr/bin/node",
         lockPath: "/run/home-worker/ota.lock",
         requestDirectory: "/run/home-worker/requests",
-        updaterEntry: expect.stringMatching(
-          /system\/infrastructure\/ota-updater\.js$/,
+        lockAcquiredShimEntry: expect.stringMatching(
+          /system\/infrastructure\/ota-lock-acquired-shim\.js$/,
         ),
       },
     ]);
     expect(config.launcher.updaterEntry).toEqual(
-      (seen[0] as { updaterEntry: string }).updaterEntry,
+      expect.stringMatching(/system\/infrastructure\/ota-updater\.js$/),
     );
   });
+
+  it.each([
+    undefined,
+    "",
+    "2",
+    " 2.28",
+    "2.28 ",
+    "+2.28",
+    "2.2e1",
+    "02.28",
+    "2.028",
+    "2.٢٨",
+    `2.${"1".repeat(31)}`,
+  ])(
+    "rejects malformed injected runtime libc %j before config creation",
+    (value) => {
+      expect(() =>
+        loadOtaConfig({
+          mode: "real",
+          env: validEnv(),
+          platform: "linux",
+          architecture: "arm",
+          nodeModulesAbi: "115",
+          runtimeLibcVersion: value!,
+          nodeExecutable: "/usr/bin/node",
+          validateFixedPaths: () => undefined,
+        }),
+      ).toThrow(/libc/i);
+    },
+  );
 
   it.each([
     ["HOME_WORKER_UPDATE_POLL_MINUTES", 60, 24 * 60],
@@ -241,6 +287,7 @@ describe("loadOtaDiscoveryConfig", () => {
         platform: "darwin",
         architecture: "arm64",
         nodeModulesAbi: "115",
+        runtimeLibcVersion: "2.28",
       }),
     ).not.toThrow();
   });

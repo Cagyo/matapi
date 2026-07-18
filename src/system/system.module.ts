@@ -37,9 +37,9 @@ import { DrizzleSystemMetaRepository } from "./infrastructure/drizzle-system-met
 import { DualSlotTrustedStateAdapter } from "./infrastructure/dual-slot-trusted-state.adapter";
 import { Ed25519EnvelopeVerifierAdapter } from "./infrastructure/ed25519-envelope-verifier.adapter";
 import { FsInstalledReleaseAdapter } from "./infrastructure/fs-installed-release.adapter";
-import { FlockOtaOperationLauncherAdapter } from "./infrastructure/flock-ota-operation-launcher.adapter";
 import { NodeReleaseFeedTransportAdapter } from "./infrastructure/node-release-feed-transport.adapter";
 import { loadOtaConfig } from "./infrastructure/ota-discovery-config.loader";
+import { otaOperationLauncherForMode } from "./infrastructure/ota-operation-launcher.factory";
 import { OsSystemHealthAdapter } from "./infrastructure/os-system-health.adapter";
 import { Pm2ProcessRestarter } from "./infrastructure/pm2-process-restarter.adapter";
 import { ProcOtaClockAdapter } from "./infrastructure/proc-ota-clock.adapter";
@@ -61,12 +61,24 @@ export function resolveSystemMode(): SystemMode {
 }
 
 const mode = resolveSystemMode();
+const runtimeLibcVersion = (() => {
+  if (mode === "stub") return "2.28";
+  const report = process.report.getReport() as {
+    header?: { glibcVersionRuntime?: unknown };
+  };
+  const value = report.header?.glibcVersionRuntime;
+  if (typeof value !== "string") {
+    throw new Error("runtime glibc version report is unavailable");
+  }
+  return value;
+})();
 const otaConfig = loadOtaConfig({
   mode,
   env: process.env,
   platform: process.platform,
   architecture: process.arch,
   nodeModulesAbi: process.versions.modules,
+  runtimeLibcVersion,
   nodeExecutable: process.execPath,
 });
 
@@ -109,7 +121,7 @@ const timer: UpdateDiscoveryTimerPort = {
     },
     {
       provide: OTA_OPERATION_LAUNCHER,
-      useFactory: () => new FlockOtaOperationLauncherAdapter(otaConfig),
+      useValue: otaOperationLauncherForMode(mode, otaConfig),
     },
     {
       provide: SYSTEM_DEPS,

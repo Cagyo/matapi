@@ -6,6 +6,7 @@ import {
   type UpdateTargetName,
   type UpdateTarget,
 } from "./ota-contracts";
+import { compareLibcVersions, parseLibcVersion } from "./libc-version";
 import { decodeCanonicalBase64, parseStrictJson } from "./strict-json";
 
 const MAX_ENVELOPE_BYTES = 96 * 1024;
@@ -20,7 +21,6 @@ const MAX_FUTURE_SKEW_MS = 5 * 60 * 1000;
 const SHA256 = /^[0-9a-f]{64}$/;
 const COMMIT = /^[0-9a-f]{40}$/;
 const STABLE_SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
-const DOTTED_VERSION = /^(?:0|[1-9]\d*)(?:\.(?:0|[1-9]\d*))+$/;
 const ABI = /^(?:0|[1-9]\d*)$/;
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
@@ -185,23 +185,11 @@ function asStableSemver(value: unknown, label: string): string {
 }
 
 function asDottedVersion(value: unknown, label: string): string {
-  const version = asString(value, label);
-  if (version.length > 32 || !DOTTED_VERSION.test(version)) {
+  try {
+    return parseLibcVersion(asString(value, label));
+  } catch {
     invalid(`${label} must be a canonical dotted version`);
   }
-  return version;
-}
-
-function compareDottedVersions(left: string, right: string): number {
-  const leftParts = left.split(".").map(BigInt);
-  const rightParts = right.split(".").map(BigInt);
-  const length = Math.max(leftParts.length, rightParts.length);
-  for (let index = 0; index < length; index += 1) {
-    const difference = (leftParts[index] ?? 0n) - (rightParts[index] ?? 0n);
-    if (difference < 0n) return -1;
-    if (difference > 0n) return 1;
-  }
-  return 0;
 }
 
 function publicKeyId(publicKey: KeyObject): string | null {
@@ -340,7 +328,7 @@ function parseManifest(
     policy.target.libcVersion,
     "policy.target.libcVersion",
   );
-  if (compareDottedVersions(libcMinVersion, libcVersion) > 0) {
+  if (compareLibcVersions(libcMinVersion, libcVersion) > 0) {
     invalid("target requires a newer libc");
   }
   const nodeModulesAbi = asString(

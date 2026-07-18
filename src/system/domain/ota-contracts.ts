@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { parseLibcVersion } from "./libc-version";
 import {
   isCanonicalVersion,
   isSha256,
@@ -388,18 +389,19 @@ function parseTarget(value: unknown, ordered = false): UpdateTarget {
   if (target.arch !== "arm" && target.arch !== "arm64")
     invalid("target.arch is unsupported");
   if (target.libc !== "glibc") invalid("target.libc must be glibc");
-  const libcMinVersion = asString(
-    target.libcMinVersion,
-    "target.libcMinVersion",
-  );
+  let libcMinVersion: string;
+  try {
+    libcMinVersion = parseLibcVersion(
+      asString(target.libcMinVersion, "target.libcMinVersion"),
+    );
+  } catch {
+    invalid("target runtime versions are malformed");
+  }
   const nodeModulesAbi = asString(
     target.nodeModulesAbi,
     "target.nodeModulesAbi",
   );
-  if (
-    !/^\d+(?:\.\d+)+$/.test(libcMinVersion) ||
-    !/^\d+$/.test(nodeModulesAbi)
-  ) {
+  if (!/^\d+$/.test(nodeModulesAbi)) {
     invalid("target runtime versions are malformed");
   }
   return {
