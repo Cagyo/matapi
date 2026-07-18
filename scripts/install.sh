@@ -23,6 +23,7 @@ main() {
   install_system_deps
   install_node
   install_app
+  setup_ota_preparation
   setup_pigpiod
   setup_tmpfs
   prompt_config
@@ -272,6 +273,36 @@ install_app() {
   else
     install_production_deps
   fi
+}
+
+setup_ota_preparation() {
+  echo "Installing network-isolated OTA dependency preparation assets..."
+
+  sudo install -d -m 755 -o root -g root /usr/lib/home-worker
+  sudo install -m 644 -o root -g root \
+    "$INSTALL_DIR/installer/ota-prepare.mjs" \
+    /usr/lib/home-worker/ota-prepare.mjs
+  sudo install -m 755 -o root -g root \
+    "$INSTALL_DIR/installer/ota-prepare-activate" \
+    /usr/lib/home-worker/ota-prepare-activate
+  sudo install -m 644 -o root -g root \
+    "$INSTALL_DIR/systemd/home-worker-ota-prepare@.service" \
+    /etc/systemd/system/home-worker-ota-prepare@.service
+  sudo install -m 644 -o root -g root \
+    "$INSTALL_DIR/systemd/home-worker-ota-tmpfiles.conf" \
+    /usr/lib/tmpfiles.d/home-worker-ota.conf
+
+  if ! sudo visudo -c -f "$INSTALL_DIR/systemd/home-worker-ota-prepare.sudoers" >/dev/null; then
+    echo "ERROR: OTA preparation sudoers policy failed validation" >&2
+    exit 1
+  fi
+  sudo install -m 440 -o root -g root \
+    "$INSTALL_DIR/systemd/home-worker-ota-prepare.sudoers" \
+    /etc/sudoers.d/home-worker-ota-prepare
+
+  sudo systemd-tmpfiles --create /usr/lib/tmpfiles.d/home-worker-ota.conf
+  sudo systemctl daemon-reload
+  echo "OTA dependency preparation assets installed"
 }
 
 setup_pigpiod() {

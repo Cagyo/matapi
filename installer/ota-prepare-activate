@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 1 ]; then
+  exit 64
+fi
+
+operation_id=$1
+case "$operation_id" in
+  ??????????????????????) ;;
+  *) exit 64 ;;
+esac
+if ! printf '%s\n' "$operation_id" | LC_ALL=C grep -Eq '^[A-Za-z0-9_-]{21}[AQgw]$'; then
+  exit 64
+fi
+
+exec /bin/systemctl start -- "home-worker-ota-prepare@${operation_id}.service"
