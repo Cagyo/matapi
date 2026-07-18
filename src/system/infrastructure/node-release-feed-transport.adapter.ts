@@ -545,6 +545,13 @@ export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort
         if (this.artifactWriterPoisoned || !stagingRemoved)
           throw transportError("maintenance-required");
       }
+      if (
+        published &&
+        error instanceof ReleaseFeedTransportError &&
+        error.code === "maintenance-required"
+      ) {
+        throw error;
+      }
       if (state.reason !== null) throwAbort(state);
       if (error instanceof LocalResourceError)
         throw transportError("disk-resource");

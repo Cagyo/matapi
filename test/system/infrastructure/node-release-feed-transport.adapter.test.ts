@@ -752,6 +752,7 @@ describe("NodeReleaseFeedTransportAdapter", () => {
 
   it("keeps both verified links and requires maintenance after a post-link fsync failure", async () => {
     server.respond(200, {}, Buffer.alloc(10));
+    const controller = new AbortController();
     const paths = new Map<string, string>();
     const writer = {
       chmodPrivate: vi.fn().mockResolvedValue(undefined),
@@ -771,7 +772,10 @@ describe("NodeReleaseFeedTransportAdapter", () => {
       unlink: vi.fn(async (path: string) => {
         paths.delete(path);
       }),
-      fsyncDirectory: vi.fn().mockRejectedValue(ioError("EIO")),
+      fsyncDirectory: vi.fn(async () => {
+        controller.abort();
+        throw ioError("EIO");
+      }),
     };
     const injectedTransport = new NodeReleaseFeedTransportAdapter({
       allowInsecureLoopback: true,
@@ -780,11 +784,103 @@ describe("NodeReleaseFeedTransportAdapter", () => {
     });
 
     await expect(
-      injectedTransport.downloadArtifact(downloadRequest()),
+      injectedTransport.downloadArtifact(
+        downloadRequest({ signal: controller.signal }),
+      ),
     ).rejects.toMatchObject({ code: "maintenance-required" });
     expect(paths.get(destination)).toBe("verified");
     expect(paths.get(stagingPath(destination))).toBe("verified");
     expect(fileSystem.unlink).not.toHaveBeenCalled();
+  });
+
+  it("preserves maintenance when caller abort races a failed post-link staging unlink", async () => {
+    server.respond(200, {}, Buffer.alloc(10));
+    const controller = new AbortController();
+    const paths = new Map<string, string>();
+    const writer = {
+      chmodPrivate: vi.fn().mockResolvedValue(undefined),
+      write: vi.fn().mockResolvedValue(undefined),
+      sync: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      destroy: vi.fn(),
+    };
+    const fileSystem = {
+      openExclusive: vi.fn(async (path: string) => {
+        paths.set(path, "verified");
+        return writer;
+      }),
+      link: vi.fn(async (from: string, to: string) => {
+        paths.set(to, paths.get(from)!);
+      }),
+      unlink: vi.fn(async () => {
+        controller.abort();
+        throw ioError("EACCES");
+      }),
+      fsyncDirectory: vi.fn().mockResolvedValue(undefined),
+    };
+    const injectedTransport = new NodeReleaseFeedTransportAdapter({
+      allowInsecureLoopback: true,
+      fileSystem,
+      stagingNameSource: () => STAGING_TOKEN,
+    });
+
+    await expect(
+      injectedTransport.downloadArtifact(
+        downloadRequest({ signal: controller.signal }),
+      ),
+    ).rejects.toMatchObject({ code: "maintenance-required" });
+    expect(paths.get(destination)).toBe("verified");
+    expect(paths.get(stagingPath(destination))).toBe("verified");
+    expect(fileSystem.unlink).toHaveBeenCalledTimes(1);
+    expect(fileSystem.unlink).not.toHaveBeenCalledWith(destination);
+  });
+
+  it("preserves maintenance when caller abort races the second parent fsync failure", async () => {
+    server.respond(200, {}, Buffer.alloc(10));
+    const controller = new AbortController();
+    const paths = new Map<string, string>();
+    let fsyncCount = 0;
+    const writer = {
+      chmodPrivate: vi.fn().mockResolvedValue(undefined),
+      write: vi.fn().mockResolvedValue(undefined),
+      sync: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      destroy: vi.fn(),
+    };
+    const fileSystem = {
+      openExclusive: vi.fn(async (path: string) => {
+        paths.set(path, "verified");
+        return writer;
+      }),
+      link: vi.fn(async (from: string, to: string) => {
+        paths.set(to, paths.get(from)!);
+      }),
+      unlink: vi.fn(async (path: string) => {
+        paths.delete(path);
+      }),
+      fsyncDirectory: vi.fn(async () => {
+        fsyncCount += 1;
+        if (fsyncCount === 2) {
+          controller.abort();
+          throw ioError("EIO");
+        }
+      }),
+    };
+    const injectedTransport = new NodeReleaseFeedTransportAdapter({
+      allowInsecureLoopback: true,
+      fileSystem,
+      stagingNameSource: () => STAGING_TOKEN,
+    });
+
+    await expect(
+      injectedTransport.downloadArtifact(
+        downloadRequest({ signal: controller.signal }),
+      ),
+    ).rejects.toMatchObject({ code: "maintenance-required" });
+    expect(paths.get(destination)).toBe("verified");
+    expect(paths.has(stagingPath(destination))).toBe(false);
+    expect(fileSystem.unlink).toHaveBeenCalledTimes(1);
+    expect(fileSystem.unlink).not.toHaveBeenCalledWith(destination);
   });
 
   it("uses destroy once to confirm terminal close before publication", async () => {
