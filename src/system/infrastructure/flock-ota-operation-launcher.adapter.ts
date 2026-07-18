@@ -27,14 +27,21 @@ import type {
   OtaConfig,
   OtaLauncherConfig,
 } from "./ota-discovery-config.loader";
-import { OTA_LOCK_ACQUIRED_MARKER } from "./ota-lock-acquired-shim";
+import {
+  OTA_LOCK_ACQUIRED_MARKER,
+  OTA_LOCK_CONFLICT_MARKER,
+} from "./ota-lock-acquired-shim";
 
-export { OTA_LOCK_ACQUIRED_MARKER } from "./ota-lock-acquired-shim";
+export {
+  OTA_LOCK_ACQUIRED_MARKER,
+  OTA_LOCK_CONFLICT_MARKER,
+} from "./ota-lock-acquired-shim";
 
 const MAX_RECEIPT_BYTES = 1024;
 const MAX_MARKER_BYTES = 128;
 
 export interface OtaLauncherFileHandle {
+  readonly fd: number;
   writeFile(bytes: Uint8Array): Promise<void>;
   sync(): Promise<void>;
   close(): Promise<void>;
@@ -71,6 +78,7 @@ export interface OtaLauncherChild {
     unknown,
     Readable | null,
     Readable | null,
+    unknown,
   ];
   on(event: string, listener: (...args: never[]) => void): this;
   unref(): void;
@@ -268,18 +276,38 @@ export class FlockOtaOperationLauncherAdapter implements OtaOperationLauncherPor
       return rejected("maintenance-required");
     }
 
+    let lockLease: OtaLauncherFileHandle | undefined;
+    try {
+      lockLease = await this.dependencies.fs.open(
+        this.config.launcher.lockPath,
+        constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW,
+        0o600,
+      );
+      if (!Number.isSafeInteger(lockLease.fd) || lockLease.fd < 0) {
+        throw new Error("lock lease returned an unsafe file descriptor");
+      }
+    } catch {
+      await lockLease?.close().catch(() => undefined);
+      await this.removeRequest(requestPath);
+      return rejected("maintenance-required");
+    }
+
+    if (lockLease === undefined) {
+      await this.removeRequest(requestPath);
+      return rejected("maintenance-required");
+    }
+
+    if (signal?.aborted) {
+      await lockLease.close().catch(() => undefined);
+      await this.removeRequest(requestPath);
+      return rejected("maintenance-required");
+    }
+
     let child: OtaLauncherChild;
     try {
       child = this.dependencies.spawn(
-        this.config.launcher.flockPath,
+        this.config.launcher.nodeExecutable,
         [
-          "--no-fork",
-          "--exclusive",
-          "--nonblock",
-          "-E",
-          String(this.config.launcher.conflictExitCode),
-          this.config.launcher.lockPath,
-          this.config.launcher.nodeExecutable,
           this.config.launcher.lockAcquiredShimEntry,
           "--operation-id",
           request.operationId,
@@ -289,16 +317,34 @@ export class FlockOtaOperationLauncherAdapter implements OtaOperationLauncherPor
         {
           detached: true,
           shell: false,
-          stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"],
+          stdio: ["ignore", "ignore", "ignore", "pipe", "pipe", lockLease.fd],
           env: this.config.launcher.environment,
         },
       );
     } catch {
+      await lockLease.close().catch(() => undefined);
       await this.removeRequest(requestPath);
       return rejected("maintenance-required");
     }
 
-    const result = await this.waitForReceipt(child, request, signal);
+    const forcedCleanup = new AbortController();
+    const resultPromise = this.waitForReceipt(
+      child,
+      request,
+      signal,
+      forcedCleanup.signal,
+    );
+    try {
+      await lockLease.close();
+    } catch {
+      forcedCleanup.abort();
+      await resultPromise;
+      await lockLease.close().catch(() => undefined);
+      await this.removeRequest(requestPath);
+      return rejected("maintenance-required");
+    }
+
+    const result = await resultPromise;
     if (result.kind === "rejected") {
       const cleaned = await this.removeRequest(requestPath);
       if (!cleaned) return rejected("maintenance-required");
@@ -411,6 +457,7 @@ export class FlockOtaOperationLauncherAdapter implements OtaOperationLauncherPor
     child: OtaLauncherChild,
     request: OtaOperationRequest,
     signal?: AbortSignal,
+    forcedCleanupSignal?: AbortSignal,
   ): Promise<StartOperationResult> {
     return new Promise((resolve) => {
       const pid = child.pid;
@@ -438,9 +485,9 @@ export class FlockOtaOperationLauncherAdapter implements OtaOperationLauncherPor
       let markerSawNewline = false;
       let markerBytes = 0;
       const markerChunks: Buffer[] = [];
-      let markerState: "pending" | "absent" | "valid" = "pending";
+      let markerState: "pending" | "absent" | "acquired" | "conflict" =
+        "pending";
       let childClosed = false;
-      let childCloseCode: number | null = null;
       let receiptWasValidAtClose = false;
       let graceTimer: unknown;
       let killWaitTimer: unknown;
@@ -454,6 +501,7 @@ export class FlockOtaOperationLauncherAdapter implements OtaOperationLauncherPor
           this.dependencies.timer.clearTimeout(killWaitTimer);
         }
         signal?.removeEventListener("abort", onAbort);
+        forcedCleanupSignal?.removeEventListener("abort", onAbort);
       };
 
       const finish = (result: StartOperationResult): void => {
@@ -477,21 +525,22 @@ export class FlockOtaOperationLauncherAdapter implements OtaOperationLauncherPor
       const beginTermination = (): void => {
         if (settled || !acceptingFrames) return;
         acceptingFrames = false;
+        this.dependencies.timer.clearTimeout(handshakeTimer);
         signalGroup("SIGTERM");
         if (settled) return;
         graceTimer = this.dependencies.timer.setTimeout(() => {
           if (settled) return;
           signalGroup("SIGKILL");
           if (settled) return;
-          killWaitTimer = this.dependencies.timer.setTimeout(
-            () => finish(rejected("maintenance-required")),
-            this.config.launcher.killWaitMs,
-          );
+          killWaitTimer = this.dependencies.timer.setTimeout(() => {
+            if (!settled) signalGroup("SIGKILL");
+          }, this.config.launcher.killWaitMs);
         }, this.config.launcher.terminateGraceMs);
       };
 
       const onAbort = (): void => beginTermination();
       signal?.addEventListener("abort", onAbort, { once: true });
+      forcedCleanupSignal?.addEventListener("abort", onAbort, { once: true });
 
       const handshakeTimer = this.dependencies.timer.setTimeout(
         beginTermination,
@@ -499,7 +548,7 @@ export class FlockOtaOperationLauncherAdapter implements OtaOperationLauncherPor
       );
 
       const maybeFinishStarted = (): void => {
-        if (markerState === "valid" && validReceipt !== undefined) {
+        if (markerState === "acquired" && validReceipt !== undefined) {
           if (!childClosed || receiptWasValidAtClose) {
             finish({ kind: "started", receipt: validReceipt });
           } else {
@@ -518,9 +567,9 @@ export class FlockOtaOperationLauncherAdapter implements OtaOperationLauncherPor
         }
         if (!receiptEnded || !markerEnded) return;
         if (
-          markerState === "absent" &&
+          markerState === "conflict" &&
           receiptBytes === 0 &&
-          childCloseCode === this.config.launcher.conflictExitCode
+          validReceipt === undefined
         ) {
           finish(rejected("operation-in-progress"));
           return;
@@ -621,15 +670,18 @@ export class FlockOtaOperationLauncherAdapter implements OtaOperationLauncherPor
         }
         try {
           const frame = Buffer.concat(markerChunks, markerBytes);
-          const expected = Buffer.from(OTA_LOCK_ACQUIRED_MARKER, "ascii");
-          if (
-            !markerSawNewline ||
-            frame.byteLength !== expected.byteLength ||
-            !timingSafeEqual(frame, expected)
-          ) {
+          const acquired = Buffer.from(OTA_LOCK_ACQUIRED_MARKER, "ascii");
+          const conflict = Buffer.from(OTA_LOCK_CONFLICT_MARKER, "ascii");
+          const isAcquired =
+            frame.byteLength === acquired.byteLength &&
+            timingSafeEqual(frame, acquired);
+          const isConflict =
+            frame.byteLength === conflict.byteLength &&
+            timingSafeEqual(frame, conflict);
+          if (!markerSawNewline || (!isAcquired && !isConflict)) {
             throw new Error("invalid lock-acquired marker");
           }
-          markerState = "valid";
+          markerState = isAcquired ? "acquired" : "conflict";
           maybeFinishStarted();
           maybeFinishClosed();
         } catch {
@@ -642,20 +694,19 @@ export class FlockOtaOperationLauncherAdapter implements OtaOperationLauncherPor
         if (!markerEnded && !settled) beginTermination();
       });
 
-      child.on("error", () => finish(rejected("maintenance-required")));
-      child.on("close", (code: number | null) => {
+      child.on("error", () => beginTermination());
+      child.on("close", () => {
         if (settled) return;
         childClosed = true;
-        childCloseCode = code;
         receiptWasValidAtClose = validReceipt !== undefined;
-        if (markerState === "valid" && !receiptWasValidAtClose) {
+        if (markerState === "acquired" && !receiptWasValidAtClose) {
           finish(rejected("maintenance-required"));
           return;
         }
         maybeFinishClosed();
       });
 
-      if (signal?.aborted) beginTermination();
+      if (signal?.aborted || forcedCleanupSignal?.aborted) beginTermination();
     });
   }
 }

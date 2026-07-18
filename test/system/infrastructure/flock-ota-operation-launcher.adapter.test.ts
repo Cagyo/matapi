@@ -9,6 +9,7 @@ import {
 } from "../../../src/system/domain/ota-contracts";
 import {
   FlockOtaOperationLauncherAdapter,
+  OTA_LOCK_CONFLICT_MARKER,
   OTA_LOCK_ACQUIRED_MARKER,
   operationRequestPath,
   type OtaLauncherChild,
@@ -105,7 +106,6 @@ function config(): OtaConfig {
         "/opt/home-worker/current/dist/system/infrastructure/ota-updater.js",
       lockAcquiredShimEntry:
         "/opt/home-worker/current/dist/system/infrastructure/ota-lock-acquired-shim.js",
-      conflictExitCode: 73,
       handshakeTimeoutMs: 10_000,
       terminateGraceMs: 2_000,
       killWaitMs: 2_000,
@@ -154,6 +154,9 @@ interface FileSystemFake extends OtaLauncherFileSystem {
   parentSyncCount?: number;
   unlinkPaths: string[];
   updaterEntryKind?: "valid" | "missing" | "symlink" | "directory";
+  lockCloseCalls: number;
+  lockFd: number;
+  failFirstLockClose?: boolean;
 }
 
 function fileSystemFake(): FileSystemFake {
@@ -162,6 +165,8 @@ function fileSystemFake(): FileSystemFake {
     calls,
     openCalls: [],
     unlinkPaths: [],
+    lockCloseCalls: 0,
+    lockFd: 55,
     updaterEntryKind: "valid",
     async lstat(path) {
       calls.push(`lstat:${path}`);
@@ -193,8 +198,12 @@ function fileSystemFake(): FileSystemFake {
     async open(path, flags, mode) {
       fake.openCalls.push({ path, flags, mode });
       const isDirectory = path === config().launcher.requestDirectory;
-      calls.push(isDirectory ? "open-parent" : "open-temp");
-      const handle: OtaLauncherFileHandle = {
+      const isLock = path === config().launcher.lockPath;
+      calls.push(
+        isLock ? "open-lock" : isDirectory ? "open-parent" : "open-temp",
+      );
+      const handle = {
+        fd: isLock ? fake.lockFd : isDirectory ? 54 : 53,
         async writeFile(bytes) {
           calls.push("write");
           if (fake.failWrite) throw new Error("write failed");
@@ -210,9 +219,17 @@ function fileSystemFake(): FileSystemFake {
           }
         },
         async close() {
+          if (isLock) {
+            fake.lockCloseCalls += 1;
+            calls.push("close-lock");
+            if (fake.failFirstLockClose && fake.lockCloseCalls === 1) {
+              throw new Error("lock close failed");
+            }
+            return;
+          }
           calls.push(isDirectory ? "close-parent" : "close-file");
         },
-      };
+      } as OtaLauncherFileHandle;
       return handle;
     },
     async rename(_from, to) {
@@ -267,7 +284,7 @@ function harness(
   otaConfig: OtaConfig = config(),
 ): Harness {
   const child = new FakeChild();
-  const fs = fileSystemFake();
+  const fs = (overrides.fs as FileSystemFake | undefined) ?? fileSystemFake();
   const timer = manualTimer();
   const spawn = vi.fn(() => child);
   const signals: Harness["signals"] = [];
@@ -390,15 +407,8 @@ describe("FlockOtaOperationLauncherAdapter", () => {
         constants.O_NOFOLLOW,
     );
     expect(state.spawn).toHaveBeenCalledWith(
-      "/usr/bin/flock",
+      "/usr/bin/node",
       [
-        "--no-fork",
-        "--exclusive",
-        "--nonblock",
-        "-E",
-        "73",
-        "/run/home-worker/ota.lock",
-        "/usr/bin/node",
         "/opt/home-worker/current/dist/system/infrastructure/ota-lock-acquired-shim.js",
         "--operation-id",
         OPERATION_ID,
@@ -408,10 +418,16 @@ describe("FlockOtaOperationLauncherAdapter", () => {
       {
         detached: true,
         shell: false,
-        stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"],
+        stdio: ["ignore", "ignore", "ignore", "pipe", "pipe", 55],
         env: config().launcher.environment,
       },
     );
+    expect(state.fs.openCalls).toContainEqual({
+      path: "/run/home-worker/ota.lock",
+      flags: constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW,
+      mode: 0o600,
+    });
+    expect(state.fs.lockCloseCalls).toBe(1);
     expect(Object.keys(state.spawn.mock.calls[0][2].env)).toEqual(
       Object.keys(config().launcher.environment),
     );
@@ -448,6 +464,27 @@ describe("FlockOtaOperationLauncherAdapter", () => {
     releaseParentSync();
     await vi.waitFor(() => expect(state.spawn).toHaveBeenCalledOnce());
     const request = parseOtaOperationRequest(fs.bytes!);
+    await acceptLock(state);
+    state.child.handshake.end(receipt(request));
+    await expect(pending).resolves.toMatchObject({ kind: "started" });
+  });
+
+  it("can map a parent lock already opened as fd5 without leaking its copy", async () => {
+    const fs = fileSystemFake();
+    fs.lockFd = 5;
+    const state = harness({ fs });
+    const pending = state.launcher.startRollback();
+    const request = await waitForSpawn(state);
+
+    expect(state.spawn.mock.calls[0][2].stdio).toEqual([
+      "ignore",
+      "ignore",
+      "ignore",
+      "pipe",
+      "pipe",
+      5,
+    ]);
+    expect(state.fs.lockCloseCalls).toBe(1);
     await acceptLock(state);
     state.child.handshake.end(receipt(request));
     await expect(pending).resolves.toMatchObject({ kind: "started" });
@@ -629,7 +666,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
     expect(rejectedState.spawn).not.toHaveBeenCalled();
   });
 
-  it("maps only the dedicated pre-frame flock conflict to operation-in-progress", async () => {
+  it("maps only the strict lock-conflict control frame to operation-in-progress", async () => {
     const conflict = harness();
     const conflictPending = conflict.launcher.startUpdate(
       checkedReleaseFixture(),
@@ -638,17 +675,33 @@ describe("FlockOtaOperationLauncherAdapter", () => {
     const conflictEof = new Promise<void>((resolve) =>
       conflict.child.handshake.once("end", resolve),
     );
-    const conflictMarkerEof = new Promise<void>((resolve) =>
-      conflict.child.lockMarker.once("end", resolve),
-    );
     conflict.child.handshake.end();
-    conflict.child.lockMarker.end();
-    await Promise.all([conflictEof, conflictMarkerEof]);
-    conflict.child.emit("exit", 73, null);
+    await acceptLock(conflict, OTA_LOCK_CONFLICT_MARKER);
+    await conflictEof;
     conflict.child.emit("close", 73, null);
     await expect(conflictPending).resolves.toEqual({
       kind: "rejected",
       failure: { code: "operation-in-progress" },
+    });
+
+    const rawConflict = harness();
+    const rawConflictPending = rawConflict.launcher.startUpdate(
+      checkedReleaseFixture(),
+    );
+    await waitForSpawn(rawConflict);
+    const rawReceiptEof = new Promise<void>((resolve) =>
+      rawConflict.child.handshake.once("end", resolve),
+    );
+    const rawControlEof = new Promise<void>((resolve) =>
+      rawConflict.child.lockMarker.once("end", resolve),
+    );
+    rawConflict.child.handshake.end();
+    rawConflict.child.lockMarker.end();
+    await Promise.all([rawReceiptEof, rawControlEof]);
+    rawConflict.child.emit("close", 73, null);
+    await expect(rawConflictPending).resolves.toEqual({
+      kind: "rejected",
+      failure: { code: "maintenance-required" },
     });
 
     const generic = harness();
@@ -656,16 +709,8 @@ describe("FlockOtaOperationLauncherAdapter", () => {
       checkedReleaseFixture(),
     );
     await waitForSpawn(generic);
-    const genericEof = new Promise<void>((resolve) =>
-      generic.child.handshake.once("end", resolve),
-    );
-    const genericMarkerEof = new Promise<void>((resolve) =>
-      generic.child.lockMarker.once("end", resolve),
-    );
     generic.child.handshake.end();
     generic.child.lockMarker.end();
-    await Promise.all([genericEof, genericMarkerEof]);
-    generic.child.emit("exit", 1, null);
     generic.child.emit("close", 1, null);
     await expect(genericPending).resolves.toEqual({
       kind: "rejected",
@@ -764,6 +809,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
       kind: "rejected",
       failure: { code: "maintenance-required" },
     });
+    expect(sync.fs.lockCloseCalls).toBe(1);
 
     const emitted = harness();
     const pending = emitted.launcher.startUpdate(checkedReleaseFixture());
@@ -774,6 +820,62 @@ describe("FlockOtaOperationLauncherAdapter", () => {
       kind: "rejected",
       failure: { code: "maintenance-required" },
     });
+    expect(emitted.fs.lockCloseCalls).toBe(1);
+  });
+
+  it("keeps escalation and request retention active after child error until close", async () => {
+    const state = harness();
+    const pending = state.launcher.startUpdate(checkedReleaseFixture());
+    await waitForSpawn(state);
+
+    state.child.emit("error", new Error("kill failed while child is live"));
+    await vi.waitFor(() =>
+      expect(state.signals).toEqual([{ pid: -4242, signal: "SIGTERM" }]),
+    );
+    expect(state.fs.unlinkPaths).not.toContain(
+      `/run/home-worker/requests/${OPERATION_ID}.json`,
+    );
+    state.timer.fireNext();
+    expect(state.signals).toEqual([
+      { pid: -4242, signal: "SIGTERM" },
+      { pid: -4242, signal: "SIGKILL" },
+    ]);
+    let settled = false;
+    void pending.finally(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    state.child.emit("close", null, "SIGKILL");
+    await expect(pending).resolves.toEqual({
+      kind: "rejected",
+      failure: { code: "maintenance-required" },
+    });
+  });
+
+  it("terminates and reaps the group before recovering from parent lock-close failure", async () => {
+    const state = harness();
+    state.fs.failFirstLockClose = true;
+    const pending = state.launcher.startUpdate(checkedReleaseFixture());
+    await waitForSpawn(state);
+
+    await vi.waitFor(() =>
+      expect(state.signals).toEqual([{ pid: -4242, signal: "SIGTERM" }]),
+    );
+    let settled = false;
+    void pending.finally(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    state.child.emit("close", null, "SIGTERM");
+    await expect(pending).resolves.toEqual({
+      kind: "rejected",
+      failure: { code: "maintenance-required" },
+    });
+    expect(state.fs.lockCloseCalls).toBe(2);
   });
 
   it.each([
@@ -857,19 +959,39 @@ describe("FlockOtaOperationLauncherAdapter", () => {
 
     state.timer.fireNext();
     expect(state.signals).toEqual([{ pid: -4242, signal: "SIGTERM" }]);
+    const receiptEof = new Promise<void>((resolve) =>
+      state.child.handshake.once("end", resolve),
+    );
     state.child.handshake.end(receipt(request));
+    await receiptEof;
+    let settled = false;
+    void pending.finally(() => {
+      settled = true;
+    });
     await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(state.fs.unlinkPaths).not.toContain(
+      `/run/home-worker/requests/${OPERATION_ID}.json`,
+    );
 
     state.timer.fireNext();
     expect(state.signals).toEqual([
       { pid: -4242, signal: "SIGTERM" },
       { pid: -4242, signal: "SIGKILL" },
     ]);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(state.fs.unlinkPaths).not.toContain(
+      `/run/home-worker/requests/${OPERATION_ID}.json`,
+    );
     state.child.emit("close", null, "SIGKILL");
     await expect(pending).resolves.toEqual({
       kind: "rejected",
       failure: { code: "maintenance-required" },
     });
+    expect(state.fs.unlinkPaths).toContain(
+      `/run/home-worker/requests/${OPERATION_ID}.json`,
+    );
     expect(state.child.unref).not.toHaveBeenCalled();
   });
 
@@ -881,17 +1003,30 @@ describe("FlockOtaOperationLauncherAdapter", () => {
       controller.signal,
     );
     await waitForSpawn(state);
+    expect(state.fs.lockCloseCalls).toBe(1);
     await acceptLock(state);
 
     controller.abort();
     await vi.waitFor(() =>
       expect(state.signals).toEqual([{ pid: -4242, signal: "SIGTERM" }]),
     );
+    let settled = false;
+    void pending.finally(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(state.fs.unlinkPaths).not.toContain(
+      `/run/home-worker/requests/${OPERATION_ID}.json`,
+    );
     state.child.emit("close", null, "SIGTERM");
     await expect(pending).resolves.toMatchObject({
       kind: "rejected",
       failure: { code: "maintenance-required" },
     });
+    expect(state.fs.unlinkPaths).toContain(
+      `/run/home-worker/requests/${OPERATION_ID}.json`,
+    );
   });
 
   it("does not spawn when durable request persistence fails", async () => {

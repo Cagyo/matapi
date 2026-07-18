@@ -44,7 +44,6 @@ export interface OtaUpdaterConfig {
 }
 
 export interface OtaLauncherConfig extends OtaFixedPaths {
-  conflictExitCode: number;
   handshakeTimeoutMs: number;
   terminateGraceMs: number;
   killWaitMs: number;
@@ -355,7 +354,6 @@ export function loadOtaConfig(input: OtaDiscoveryConfigInput): OtaConfig {
     updater: { healthSeconds },
     launcher: {
       ...fixedPaths,
-      conflictExitCode: 73,
       handshakeTimeoutMs: 10_000,
       terminateGraceMs: 2_000,
       killWaitMs: 2_000,
