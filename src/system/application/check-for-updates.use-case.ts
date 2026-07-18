@@ -334,7 +334,13 @@ export class CheckForUpdatesUseCase {
         let fallback: FetchEnvelopeResult;
         try {
           fallback = await this.transport.fetchEnvelope(fetchRequest(null));
-        } catch {
+        } catch (error) {
+          if (
+            error instanceof ReleaseFeedTransportError &&
+            error.code === "http-status"
+          ) {
+            return failure("http-status");
+          }
           return failure(
             cached.code === "metadata-expired"
               ? "metadata-freeze"

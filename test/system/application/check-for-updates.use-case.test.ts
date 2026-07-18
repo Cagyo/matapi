@@ -8,7 +8,10 @@ import {
   type TrustedState,
 } from "../../../src/system/domain/ota-contracts";
 import type { OtaClockPort } from "../../../src/system/domain/ports/ota-clock.port";
-import type { ReleaseFeedTransportPort } from "../../../src/system/domain/ports/release-feed-transport.port";
+import {
+  ReleaseFeedTransportError,
+  type ReleaseFeedTransportPort,
+} from "../../../src/system/domain/ports/release-feed-transport.port";
 import {
   SignedEnvelopeVerificationError,
   type SignedEnvelopeVerifierPort,
@@ -283,6 +286,44 @@ describe("CheckForUpdatesUseCase", () => {
     expect(await h.useCase.execute()).toEqual({
       kind: "failure",
       failure: { code: "http-status" },
+    });
+    expect(h.state.commit).not.toHaveBeenCalled();
+  });
+
+  it("preserves the real transport protocol failure for a null-ETag fallback 304", async () => {
+    const h = harness();
+    vi.mocked(h.transport.fetchEnvelope)
+      .mockResolvedValueOnce({ kind: "not-modified" })
+      .mockRejectedValueOnce(new ReleaseFeedTransportError("http-status"));
+    vi.mocked(h.verifier.verify).mockImplementation(() => {
+      throw new SignedEnvelopeVerificationError("signature-invalid");
+    });
+
+    expect(await h.useCase.execute()).toEqual({
+      kind: "failure",
+      failure: { code: "http-status" },
+    });
+    expect(h.transport.fetchEnvelope).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ etag: null }),
+    );
+    expect(h.state.commit).not.toHaveBeenCalled();
+  });
+
+  it("keeps expired-cache fallback network failure classified as metadata freeze", async () => {
+    const h = harness();
+    vi.mocked(h.transport.fetchEnvelope)
+      .mockResolvedValueOnce({ kind: "not-modified" })
+      .mockRejectedValueOnce(
+        new ReleaseFeedTransportError("network-unavailable"),
+      );
+    vi.mocked(h.verifier.verify).mockImplementation(() => {
+      throw new SignedEnvelopeVerificationError("metadata-expired");
+    });
+
+    expect(await h.useCase.execute()).toEqual({
+      kind: "failure",
+      failure: { code: "metadata-freeze" },
     });
     expect(h.state.commit).not.toHaveBeenCalled();
   });
