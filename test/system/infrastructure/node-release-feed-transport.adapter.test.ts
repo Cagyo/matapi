@@ -14,7 +14,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import { tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import type { Socket } from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -97,6 +97,14 @@ const DEFAULT_TIMEOUTS = {
   idleMs: 500,
   totalMs: 2_000,
 };
+const STAGING_TOKEN = "00000000000000000000000000000001";
+
+function stagingPath(destination: string): string {
+  return resolve(
+    dirname(destination),
+    `.${basename(destination)}.ota-${STAGING_TOKEN}.partial`,
+  );
+}
 
 function ioError(code: string): Error & { code: string } {
   return Object.assign(new Error(code), { code });
@@ -127,6 +135,7 @@ describe("NodeReleaseFeedTransportAdapter", () => {
     await Promise.all([server.start(), evilServer.start()]);
     transport = new NodeReleaseFeedTransportAdapter({
       allowInsecureLoopback: true,
+      stagingNameSource: () => STAGING_TOKEN,
     });
     temporaryRoot = await mkdtemp(resolve(tmpdir(), "release-transport-"));
     destination = resolve(temporaryRoot, "artifact.tar.gz");
@@ -237,7 +246,6 @@ describe("NodeReleaseFeedTransportAdapter", () => {
   it.each([
     ["control", '"release\t42"'],
     ["space", '"release 42"'],
-    ["backslash", String.raw`"release\42"`],
   ])(
     "rejects a strong ETag containing a forbidden %s byte",
     async (_name, etag) => {
@@ -248,6 +256,16 @@ describe("NodeReleaseFeedTransportAdapter", () => {
       });
     },
   );
+
+  it("accepts backslash as a valid strong ETag character", async () => {
+    const etag = String.raw`"release\42"`;
+    server.respond(200, { etag }, Buffer.from("body"));
+
+    await expect(transport.fetchEnvelope(request())).resolves.toMatchObject({
+      kind: "ok",
+      etag,
+    });
+  });
 
   it("follows at most three same-origin redirects", async () => {
     server.handle((incoming, response) => {
@@ -355,6 +373,7 @@ describe("NodeReleaseFeedTransportAdapter", () => {
     });
     expect(await readFile(destination)).toEqual(body);
     expect((await stat(destination)).mode & 0o777).toBe(0o600);
+    await expect(access(stagingPath(destination))).rejects.toThrow();
   });
 
   it("removes a partial artifact after the exact byte count is wrong", async () => {
@@ -386,8 +405,9 @@ describe("NodeReleaseFeedTransportAdapter", () => {
 
     await expect(
       transport.downloadArtifact(downloadRequest()),
-    ).rejects.toThrow();
+    ).rejects.toMatchObject({ code: "maintenance-required" });
     expect(await readFile(destination, "utf8")).toBe("keep me");
+    await expect(access(stagingPath(destination))).rejects.toThrow();
   });
 
   it("applies an independent connect timeout", async () => {
@@ -477,12 +497,14 @@ describe("NodeReleaseFeedTransportAdapter", () => {
     const resetTransport = new NodeReleaseFeedTransportAdapter({
       allowInsecureLoopback: true,
       fetch: async () => resetResponse({ "content-length": "10" }),
+      stagingNameSource: () => STAGING_TOKEN,
     });
 
     await expect(
       resetTransport.downloadArtifact(downloadRequest()),
     ).rejects.toMatchObject({ code: "network-unavailable" });
     await expect(access(destination)).rejects.toThrow();
+    await expect(access(stagingPath(destination))).rejects.toThrow();
   });
 
   it("preserves the primary transfer failure after cleanup proves absence", async () => {
@@ -496,24 +518,27 @@ describe("NodeReleaseFeedTransportAdapter", () => {
     };
     const fileSystem = {
       openExclusive: vi.fn().mockResolvedValue(writer),
+      link: vi.fn(),
       unlink: vi.fn().mockResolvedValue(undefined),
-      lstat: vi.fn().mockRejectedValue(ioError("ENOENT")),
+      fsyncDirectory: vi.fn(),
     };
     const injectedTransport = new NodeReleaseFeedTransportAdapter({
       allowInsecureLoopback: true,
       fileSystem,
+      stagingNameSource: () => STAGING_TOKEN,
     });
 
     await expect(
       injectedTransport.downloadArtifact(downloadRequest()),
     ).rejects.toMatchObject({ code: "archive-integrity" });
     expect(writer.close).toHaveBeenCalled();
-    expect(writer.destroy).toHaveBeenCalled();
-    expect(fileSystem.unlink).toHaveBeenCalledWith(destination);
-    expect(fileSystem.lstat).toHaveBeenCalledWith(destination);
+    expect(writer.close).toHaveBeenCalledTimes(1);
+    expect(fileSystem.unlink).toHaveBeenCalledTimes(1);
+    expect(fileSystem.unlink).toHaveBeenCalledWith(stagingPath(destination));
+    expect(fileSystem.unlink).not.toHaveBeenCalledWith(destination);
   });
 
-  it("overrides a primary failure when cleanup cannot prove pathname absence", async () => {
+  it("overrides a primary failure when its single staging unlink fails", async () => {
     server.respond(200, {}, Buffer.alloc(9));
     const writer = {
       chmodPrivate: vi.fn().mockResolvedValue(undefined),
@@ -524,19 +549,22 @@ describe("NodeReleaseFeedTransportAdapter", () => {
     };
     const fileSystem = {
       openExclusive: vi.fn().mockResolvedValue(writer),
+      link: vi.fn(),
       unlink: vi.fn().mockRejectedValue(ioError("EACCES")),
-      lstat: vi.fn().mockRejectedValue(ioError("EACCES")),
+      fsyncDirectory: vi.fn(),
     };
     const injectedTransport = new NodeReleaseFeedTransportAdapter({
       allowInsecureLoopback: true,
       fileSystem,
+      stagingNameSource: () => STAGING_TOKEN,
     });
 
     await expect(
       injectedTransport.downloadArtifact(downloadRequest()),
     ).rejects.toMatchObject({ code: "maintenance-required" });
-    expect(fileSystem.unlink).toHaveBeenCalledTimes(2);
-    expect(fileSystem.lstat).toHaveBeenCalledTimes(2);
+    expect(fileSystem.unlink).toHaveBeenCalledTimes(1);
+    expect(fileSystem.unlink).toHaveBeenCalledWith(stagingPath(destination));
+    expect(fileSystem.unlink).not.toHaveBeenCalledWith(destination);
   });
 
   it("maps local writer failures to disk-resource after proven cleanup", async () => {
@@ -550,31 +578,35 @@ describe("NodeReleaseFeedTransportAdapter", () => {
     };
     const fileSystem = {
       openExclusive: vi.fn().mockResolvedValue(writer),
+      link: vi.fn(),
       unlink: vi.fn().mockResolvedValue(undefined),
-      lstat: vi.fn().mockRejectedValue(ioError("ENOENT")),
+      fsyncDirectory: vi.fn(),
     };
     const injectedTransport = new NodeReleaseFeedTransportAdapter({
       allowInsecureLoopback: true,
       fileSystem,
+      stagingNameSource: () => STAGING_TOKEN,
     });
 
     await expect(
       injectedTransport.downloadArtifact(downloadRequest()),
     ).rejects.toMatchObject({ code: "disk-resource" });
-    expect(writer.destroy).toHaveBeenCalled();
-    expect(fileSystem.unlink).toHaveBeenCalledWith(destination);
+    expect(fileSystem.unlink).toHaveBeenCalledWith(stagingPath(destination));
+    expect(fileSystem.unlink).not.toHaveBeenCalledWith(destination);
   });
 
-  it("maps an exclusive-open EEXIST failure to maintenance-required", async () => {
+  it("maps an exclusive staging-open EEXIST failure to maintenance-required", async () => {
     server.respond(200, {}, Buffer.alloc(10));
     const fileSystem = {
       openExclusive: vi.fn().mockRejectedValue(ioError("EEXIST")),
+      link: vi.fn(),
       unlink: vi.fn(),
-      lstat: vi.fn(),
+      fsyncDirectory: vi.fn(),
     };
     const injectedTransport = new NodeReleaseFeedTransportAdapter({
       allowInsecureLoopback: true,
       fileSystem,
+      stagingNameSource: () => STAGING_TOKEN,
     });
 
     await expect(
@@ -583,7 +615,179 @@ describe("NodeReleaseFeedTransportAdapter", () => {
     expect(fileSystem.unlink).not.toHaveBeenCalled();
   });
 
-  it("maps close failure to disk-resource when unlink and lstat prove absence", async () => {
+  it("poisons future downloads when close and destroy cannot confirm terminal close", async () => {
+    server.respond(200, {}, Buffer.alloc(10));
+    const writer = {
+      chmodPrivate: vi.fn().mockResolvedValue(undefined),
+      write: vi.fn().mockResolvedValue(undefined),
+      sync: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockRejectedValue(ioError("EIO")),
+      destroy: vi.fn().mockRejectedValue(ioError("EIO")),
+    };
+    const fileSystem = {
+      openExclusive: vi.fn().mockResolvedValue(writer),
+      link: vi.fn(),
+      unlink: vi.fn().mockResolvedValue(undefined),
+      fsyncDirectory: vi.fn(),
+    };
+    const injectedTransport = new NodeReleaseFeedTransportAdapter({
+      allowInsecureLoopback: true,
+      fileSystem,
+      stagingNameSource: () => STAGING_TOKEN,
+    });
+
+    await expect(
+      injectedTransport.downloadArtifact(downloadRequest()),
+    ).rejects.toMatchObject({ code: "maintenance-required" });
+    const requestCount = server.requests.length;
+    await expect(
+      injectedTransport.downloadArtifact(downloadRequest()),
+    ).rejects.toMatchObject({ code: "maintenance-required" });
+    expect(server.requests).toHaveLength(requestCount);
+    expect(writer.close).toHaveBeenCalledTimes(1);
+    expect(writer.destroy).toHaveBeenCalledTimes(1);
+    expect(fileSystem.link).not.toHaveBeenCalled();
+    expect(fileSystem.unlink).toHaveBeenCalledTimes(1);
+    expect(fileSystem.unlink).toHaveBeenCalledWith(stagingPath(destination));
+    expect(fileSystem.unlink).not.toHaveBeenCalledWith(destination);
+  });
+
+  it("publishes a verified staging inode without ever unlinking the final destination", async () => {
+    server.respond(200, {}, Buffer.alloc(10));
+    const writer = {
+      chmodPrivate: vi.fn().mockResolvedValue(undefined),
+      write: vi.fn().mockResolvedValue(undefined),
+      sync: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      destroy: vi.fn(),
+    };
+    const fileSystem = {
+      openExclusive: vi.fn().mockResolvedValue(writer),
+      link: vi.fn().mockResolvedValue(undefined),
+      unlink: vi.fn().mockResolvedValue(undefined),
+      fsyncDirectory: vi.fn().mockResolvedValue(undefined),
+    };
+    const injectedTransport = new NodeReleaseFeedTransportAdapter({
+      allowInsecureLoopback: true,
+      fileSystem,
+      stagingNameSource: () => STAGING_TOKEN,
+    });
+
+    await expect(
+      injectedTransport.downloadArtifact(downloadRequest()),
+    ).resolves.toMatchObject({ size: 10 });
+    expect(fileSystem.openExclusive).toHaveBeenCalledWith(
+      stagingPath(destination),
+    );
+    expect(writer.close).toHaveBeenCalledTimes(1);
+    expect(writer.destroy).not.toHaveBeenCalled();
+    expect(fileSystem.link).toHaveBeenCalledWith(
+      stagingPath(destination),
+      destination,
+    );
+    expect(fileSystem.fsyncDirectory).toHaveBeenNthCalledWith(
+      1,
+      dirname(destination),
+    );
+    expect(fileSystem.unlink).toHaveBeenCalledTimes(1);
+    expect(fileSystem.unlink).toHaveBeenCalledWith(stagingPath(destination));
+    expect(fileSystem.unlink).not.toHaveBeenCalledWith(destination);
+    expect(fileSystem.fsyncDirectory).toHaveBeenNthCalledWith(
+      2,
+      dirname(destination),
+    );
+    expect(writer.close.mock.invocationCallOrder[0]).toBeLessThan(
+      fileSystem.link.mock.invocationCallOrder[0],
+    );
+    expect(fileSystem.link.mock.invocationCallOrder[0]).toBeLessThan(
+      fileSystem.fsyncDirectory.mock.invocationCallOrder[0],
+    );
+    expect(fileSystem.fsyncDirectory.mock.invocationCallOrder[0]).toBeLessThan(
+      fileSystem.unlink.mock.invocationCallOrder[0],
+    );
+    expect(fileSystem.unlink.mock.invocationCallOrder[0]).toBeLessThan(
+      fileSystem.fsyncDirectory.mock.invocationCallOrder[1],
+    );
+  });
+
+  it("preserves a successor that appears between verification and link publication", async () => {
+    server.respond(200, {}, Buffer.alloc(10));
+    const paths = new Map<string, string>();
+    const writer = {
+      chmodPrivate: vi.fn().mockResolvedValue(undefined),
+      write: vi.fn().mockResolvedValue(undefined),
+      sync: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      destroy: vi.fn(),
+    };
+    const fileSystem = {
+      openExclusive: vi.fn(async (path: string) => {
+        paths.set(path, "verified");
+        return writer;
+      }),
+      link: vi.fn(async () => {
+        paths.set(destination, "successor");
+        throw ioError("EEXIST");
+      }),
+      unlink: vi.fn(async (path: string) => {
+        paths.delete(path);
+      }),
+      fsyncDirectory: vi.fn(),
+    };
+    const injectedTransport = new NodeReleaseFeedTransportAdapter({
+      allowInsecureLoopback: true,
+      fileSystem,
+      stagingNameSource: () => STAGING_TOKEN,
+    });
+
+    await expect(
+      injectedTransport.downloadArtifact(downloadRequest()),
+    ).rejects.toMatchObject({ code: "maintenance-required" });
+    expect(paths.get(destination)).toBe("successor");
+    expect(paths.has(stagingPath(destination))).toBe(false);
+    expect(fileSystem.unlink).toHaveBeenCalledTimes(1);
+    expect(fileSystem.unlink).toHaveBeenCalledWith(stagingPath(destination));
+    expect(fileSystem.unlink).not.toHaveBeenCalledWith(destination);
+  });
+
+  it("keeps both verified links and requires maintenance after a post-link fsync failure", async () => {
+    server.respond(200, {}, Buffer.alloc(10));
+    const paths = new Map<string, string>();
+    const writer = {
+      chmodPrivate: vi.fn().mockResolvedValue(undefined),
+      write: vi.fn().mockResolvedValue(undefined),
+      sync: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      destroy: vi.fn(),
+    };
+    const fileSystem = {
+      openExclusive: vi.fn(async (path: string) => {
+        paths.set(path, "verified");
+        return writer;
+      }),
+      link: vi.fn(async (from: string, to: string) => {
+        paths.set(to, paths.get(from)!);
+      }),
+      unlink: vi.fn(async (path: string) => {
+        paths.delete(path);
+      }),
+      fsyncDirectory: vi.fn().mockRejectedValue(ioError("EIO")),
+    };
+    const injectedTransport = new NodeReleaseFeedTransportAdapter({
+      allowInsecureLoopback: true,
+      fileSystem,
+      stagingNameSource: () => STAGING_TOKEN,
+    });
+
+    await expect(
+      injectedTransport.downloadArtifact(downloadRequest()),
+    ).rejects.toMatchObject({ code: "maintenance-required" });
+    expect(paths.get(destination)).toBe("verified");
+    expect(paths.get(stagingPath(destination))).toBe("verified");
+    expect(fileSystem.unlink).not.toHaveBeenCalled();
+  });
+
+  it("uses destroy once to confirm terminal close before publication", async () => {
     server.respond(200, {}, Buffer.alloc(10));
     const writer = {
       chmodPrivate: vi.fn().mockResolvedValue(undefined),
@@ -594,18 +798,25 @@ describe("NodeReleaseFeedTransportAdapter", () => {
     };
     const fileSystem = {
       openExclusive: vi.fn().mockResolvedValue(writer),
+      link: vi.fn().mockResolvedValue(undefined),
       unlink: vi.fn().mockResolvedValue(undefined),
-      lstat: vi.fn().mockRejectedValue(ioError("ENOENT")),
+      fsyncDirectory: vi.fn().mockResolvedValue(undefined),
     };
     const injectedTransport = new NodeReleaseFeedTransportAdapter({
       allowInsecureLoopback: true,
       fileSystem,
+      stagingNameSource: () => STAGING_TOKEN,
     });
 
     await expect(
       injectedTransport.downloadArtifact(downloadRequest()),
-    ).rejects.toMatchObject({ code: "disk-resource" });
-    expect(fileSystem.unlink).toHaveBeenCalledWith(destination);
+    ).resolves.toMatchObject({ size: 10 });
+    expect(writer.close).toHaveBeenCalledTimes(1);
+    expect(writer.destroy).toHaveBeenCalledTimes(1);
+    expect(fileSystem.link).toHaveBeenCalledWith(
+      stagingPath(destination),
+      destination,
+    );
   });
 
   it("does not let caller cancellation race a final clean EOF", async () => {

@@ -1,11 +1,12 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { constants } from "node:fs";
 import {
-  lstat as nodeLstat,
+  link as nodeLink,
   open,
   unlink as nodeUnlink,
   type FileHandle,
 } from "node:fs/promises";
+import { basename, dirname, resolve } from "node:path";
 import {
   ReleaseFeedTransportError,
   type DownloadArtifactRequest,
@@ -27,6 +28,8 @@ export interface NodeReleaseFeedTransportOptions {
   fetch?: typeof globalThis.fetch;
   /** Test seam for deterministic local cleanup and writer failures. */
   fileSystem?: ReleaseFeedFileSystem;
+  /** Test seam for a deterministic otherwise-random staging filename token. */
+  stagingNameSource?: () => string;
 }
 
 export interface ReleaseArtifactWriter {
@@ -39,8 +42,9 @@ export interface ReleaseArtifactWriter {
 
 export interface ReleaseFeedFileSystem {
   openExclusive(path: string): Promise<ReleaseArtifactWriter>;
+  link(existingPath: string, newPath: string): Promise<void>;
   unlink(path: string): Promise<void>;
-  lstat(path: string): Promise<unknown>;
+  fsyncDirectory(path: string): Promise<void>;
 }
 
 type AbortReason = "caller" | "timeout" | null;
@@ -183,8 +187,7 @@ function isStrongEtag(value: string | null): value is string {
     const code = value.charCodeAt(index);
     const isEtagCharacter =
       code === 0x21 ||
-      (code >= 0x23 && code <= 0x5b) ||
-      (code >= 0x5d && code <= 0x7e) ||
+      (code >= 0x23 && code <= 0x7e) ||
       (code >= 0x80 && code <= 0xff);
     if (!isEtagCharacter) return false;
   }
@@ -277,53 +280,48 @@ const NODE_RELEASE_FEED_FILE_SYSTEM: ReleaseFeedFileSystem = {
       write: (bytes) => writeFully(file, bytes),
       sync: () => file.sync(),
       close: () => file.close(),
-      destroy: () => file.close(),
     };
   },
+  link: (existingPath, newPath) => nodeLink(existingPath, newPath),
   unlink: (path) => nodeUnlink(path),
-  lstat: (path) => nodeLstat(path),
+  async fsyncDirectory(path): Promise<void> {
+    const directory = await open(path, constants.O_RDONLY);
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
+    }
+  },
 };
 
-async function pathnameIsAbsent(
+async function unlinkOwnedStaging(
   fileSystem: ReleaseFeedFileSystem,
-  destination: string,
+  stagingPath: string,
 ): Promise<boolean> {
   try {
-    await fileSystem.lstat(destination);
-    return false;
+    await fileSystem.unlink(stagingPath);
+    return true;
   } catch (error) {
     return errorCode(error) === "ENOENT";
   }
 }
 
-async function cleanupPartialArtifact(
-  fileSystem: ReleaseFeedFileSystem,
+function artifactStagingPath(
   destination: string,
-  writer: ReleaseArtifactWriter,
-): Promise<boolean> {
-  try {
-    await writer.close();
-  } catch {
-    // Pathname absence, checked below, is the authoritative cleanup proof.
-  }
-  try {
-    await writer.destroy?.();
-  } catch {
-    // A second close failure does not matter if pathname absence is proven.
-  }
-
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      await fileSystem.unlink(destination);
-    } catch {
-      // ENOENT and unlink failures are both resolved by the no-follow lstat.
-    }
-    if (await pathnameIsAbsent(fileSystem, destination)) return true;
-  }
-  return false;
+  source: () => string,
+): string {
+  const token = source();
+  if (!/^[A-Za-z0-9_-]{16,128}$/.test(token))
+    throw new Error("invalid artifact staging token");
+  return resolve(
+    dirname(destination),
+    `.${basename(destination)}.ota-${token}.partial`,
+  );
 }
 
 export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort {
+  private artifactWriterPoisoned = false;
+
   constructor(private readonly options: NodeReleaseFeedTransportOptions = {}) {}
 
   async fetchEnvelope(
@@ -392,16 +390,53 @@ export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort
   async downloadArtifact(
     request: DownloadArtifactRequest,
   ): Promise<DownloadArtifactResult> {
+    if (this.artifactWriterPoisoned)
+      throw transportError("maintenance-required");
     assertPositiveSafeInteger(request.expectedSize, "expectedSize");
     assertPositiveSafeInteger(request.maxBytes, "maxBytes");
     if (request.expectedSize > request.maxBytes)
       throw transportError("archive-integrity");
 
+    const destination = resolve(request.destination);
+    const parentDirectory = dirname(destination);
+    const stagingNameSource =
+      this.options.stagingNameSource ?? (() => randomBytes(16).toString("hex"));
+    let stagingPath: string;
+    try {
+      stagingPath = artifactStagingPath(destination, stagingNameSource);
+    } catch {
+      throw transportError("maintenance-required");
+    }
+
     const state = startOperation(request.timeouts, request.signal);
     const fileSystem = this.options.fileSystem ?? NODE_RELEASE_FEED_FILE_SYSTEM;
     let writer: ReleaseArtifactWriter | undefined;
-    let createdDestination = false;
+    let stagingCreated = false;
+    let published = false;
+    let closeAttempted = false;
+    let closeConfirmed = false;
     let response: Response | undefined;
+
+    const confirmWriterClosed = async (): Promise<boolean> => {
+      if (writer === undefined) return true;
+      if (closeAttempted) return closeConfirmed;
+      closeAttempted = true;
+      try {
+        await writer.close();
+        closeConfirmed = true;
+      } catch {
+        if (writer.destroy !== undefined) {
+          try {
+            await writer.destroy();
+            closeConfirmed = true;
+          } catch {
+            closeConfirmed = false;
+          }
+        }
+      }
+      return closeConfirmed;
+    };
+
     try {
       response = await this.fetchWithRedirects(
         request.url,
@@ -420,85 +455,100 @@ export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort
         throw transportError("http-status");
       }
 
+      assertIdentityEncoding(response);
+      const declaredLength = contentLength(response);
+      if (
+        declaredLength !== undefined &&
+        (declaredLength !== request.expectedSize ||
+          declaredLength > request.maxBytes)
+      ) {
+        throw transportError("archive-integrity");
+      }
+
       try {
-        assertIdentityEncoding(response);
-        const declaredLength = contentLength(response);
+        writer = await fileSystem.openExclusive(stagingPath);
+      } catch (error) {
+        if (errorCode(error) === "EEXIST")
+          throw transportError("maintenance-required");
+        throw new LocalResourceError();
+      }
+      stagingCreated = true;
+      await localResource(() => writer!.chmodPrivate());
+
+      const hash = createHash("sha256");
+      let receivedSize = 0;
+      await consumeBody(response, state, request.timeouts, async (chunk) => {
+        receivedSize += chunk.byteLength;
         if (
-          declaredLength !== undefined &&
-          (declaredLength !== request.expectedSize ||
-            declaredLength > request.maxBytes)
+          receivedSize > request.expectedSize ||
+          receivedSize > request.maxBytes
         ) {
           throw transportError("archive-integrity");
         }
+        hash.update(chunk);
+        await localResource(() => writer!.write(chunk));
+      });
+      if (receivedSize !== request.expectedSize)
+        throw transportError("archive-integrity");
 
-        try {
-          writer = await fileSystem.openExclusive(request.destination);
-        } catch (error) {
-          if (errorCode(error) === "EEXIST")
-            throw transportError("maintenance-required");
-          if (!(await pathnameIsAbsent(fileSystem, request.destination)))
-            throw transportError("maintenance-required");
-          throw new LocalResourceError();
-        }
-        createdDestination = true;
-        await localResource(() => writer!.chmodPrivate());
-
-        const hash = createHash("sha256");
-        let receivedSize = 0;
-        await consumeBody(response, state, request.timeouts, async (chunk) => {
-          receivedSize += chunk.byteLength;
-          if (
-            receivedSize > request.expectedSize ||
-            receivedSize > request.maxBytes
-          ) {
-            throw transportError("archive-integrity");
-          }
-          hash.update(chunk);
-          await localResource(() => writer!.write(chunk));
-        });
-        if (receivedSize !== request.expectedSize)
-          throw transportError("archive-integrity");
-
-        await localResource(() => writer!.sync());
-        if (state.reason !== null) throwAbort(state);
-        await localResource(() => writer!.close());
-        if (state.reason !== null) throwAbort(state);
-        createdDestination = false;
-        return {
-          size: receivedSize,
-          sha256: hash.digest("hex"),
-        };
-      } catch (error) {
-        await cancelResponse(response);
-        if (state.reason !== null) throwAbort(state);
-        if (error instanceof LocalResourceError)
-          throw transportError("disk-resource");
-        throw error;
+      const sha256 = hash.digest("hex");
+      await localResource(() => writer!.sync());
+      if (state.reason !== null) throwAbort(state);
+      if (!(await confirmWriterClosed())) {
+        this.artifactWriterPoisoned = true;
+        throw transportError("maintenance-required");
       }
+      if (state.reason !== null) throwAbort(state);
+
+      try {
+        await fileSystem.link(stagingPath, destination);
+      } catch (error) {
+        if (errorCode(error) === "EEXIST")
+          throw transportError("maintenance-required");
+        throw new LocalResourceError();
+      }
+      published = true;
+
+      try {
+        await fileSystem.fsyncDirectory(parentDirectory);
+      } catch {
+        throw transportError("maintenance-required");
+      }
+      try {
+        await fileSystem.unlink(stagingPath);
+        stagingCreated = false;
+      } catch (error) {
+        if (errorCode(error) === "ENOENT") stagingCreated = false;
+        else throw transportError("maintenance-required");
+      }
+      try {
+        await fileSystem.fsyncDirectory(parentDirectory);
+      } catch {
+        throw transportError("maintenance-required");
+      }
+      if (state.reason !== null) throwAbort(state);
+      return { size: receivedSize, sha256 };
     } catch (error) {
       await (response === undefined
         ? Promise.resolve()
         : cancelResponse(response));
-      let failure: unknown = error;
-      if (state.reason !== null) {
-        try {
-          throwAbort(state);
-        } catch (abortFailure) {
-          failure = abortFailure;
-        }
-      } else if (error instanceof LocalResourceError) {
-        failure = transportError("disk-resource");
-      }
 
-      if (
-        createdDestination &&
-        writer !== undefined &&
-        !(await cleanupPartialArtifact(fileSystem, request.destination, writer))
-      ) {
-        throw transportError("maintenance-required");
+      if (!published && stagingCreated) {
+        if (!(await confirmWriterClosed())) {
+          this.artifactWriterPoisoned = true;
+        }
+        const stagingRemoved = await unlinkOwnedStaging(
+          fileSystem,
+          stagingPath,
+        );
+        stagingCreated = !stagingRemoved;
+        if (this.artifactWriterPoisoned || !stagingRemoved)
+          throw transportError("maintenance-required");
       }
       if (state.reason !== null) throwAbort(state);
-      throw failure;
+      if (error instanceof LocalResourceError)
+        throw transportError("disk-resource");
+      throw error;
     } finally {
       state.finish();
     }
