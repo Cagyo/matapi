@@ -100,3 +100,37 @@ failures were established. No repository-wide pass is claimed.
 
 The pre-existing untracked `scripts/__pycache__/` directory was not read,
 modified, staged, or removed.
+
+## Review correction: pinned traversal and reserve-establishment pressure
+
+The review identified two boundary gaps and both were corrected without adding
+an OTA preparation orchestrator or changing unrelated installer behavior.
+
+- Prepared-tree measurement and durable flush now retain each validated
+  directory handle across enumeration and all descendant operations. The
+  directory path is revalidated against the pinned inode immediately after
+  enumeration, before and after each child path operation, and before the pinned
+  directory handle is synced or closed. A deterministic rename-plus-symlink
+  regression proves neither operation touches an outside child after the swap.
+- Reserve establishment now classifies `ENOSPC` and `EDQUOT` from exclusive
+  open, allocation writes, file sync, close, and the directory barrier as
+  `disk-resource`. It removes the incomplete reserve durably, attempts one clean
+  reserve restoration, and never leaks the raw filesystem resource code.
+  Injected preflight regressions cover all five persistence boundaries and
+  verify the complete 128 MiB reserve is restored after a one-shot failure.
+
+Review-fix RED:
+
+```text
+Test Files  2 failed (2)
+Tests       7 failed | 18 passed (25)
+Cause: both traversal cases touched the swapped outside child; all five reserve
+       boundaries leaked raw ENOSPC from preflight.
+```
+
+Review-fix focused GREEN:
+
+```text
+Test Files  3 passed (3)
+Tests       32 passed (32)
+```

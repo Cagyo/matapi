@@ -169,6 +169,16 @@ export class StorageBudgetGateway {
     if (await this.verifyReserve()) return;
     if (await this.reserveExists()) throw new DiskResourceError();
 
+    try {
+      await this.establishReserve();
+    } catch (error) {
+      if (!isResourceFailure(error)) throw error;
+      await this.recoverReserveEstablishment();
+      throw new DiskResourceError();
+    }
+  }
+
+  private async establishReserve(): Promise<void> {
     const handle = await this.fileSystem.open(
       this.options.reservePath,
       constants.O_WRONLY |
@@ -197,6 +207,34 @@ export class StorageBudgetGateway {
     }
     await this.options.barrier(dirname(this.options.reservePath));
     if (!(await this.verifyReserve())) throw new DiskResourceError();
+  }
+
+  private async recoverReserveEstablishment(): Promise<void> {
+    try {
+      await this.removeReserveForRecovery();
+      await this.establishReserve();
+    } catch {
+      try {
+        await this.removeReserveForRecovery();
+      } catch {
+        // The original resource failure remains the public classification.
+      }
+    }
+  }
+
+  private async removeReserveForRecovery(): Promise<void> {
+    let entry: StorageStat;
+    try {
+      entry = await this.fileSystem.lstat(this.options.reservePath);
+    } catch (error) {
+      if (hasCode(error, "ENOENT")) return;
+      throw error;
+    }
+    if (entry.isDirectory() && !entry.isSymbolicLink()) {
+      throw new DiskResourceError();
+    }
+    await this.fileSystem.unlink(this.options.reservePath);
+    await this.options.barrier(dirname(this.options.reservePath));
   }
 
   async verifyReserve(): Promise<boolean> {

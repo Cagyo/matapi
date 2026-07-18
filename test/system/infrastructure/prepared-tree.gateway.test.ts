@@ -7,6 +7,7 @@ import {
   open,
   readdir,
   readlink,
+  rename,
   rm,
   symlink,
   unlink,
@@ -183,4 +184,44 @@ describe("NodePreparedTreeGateway", () => {
       true,
     );
   });
+
+  it.each(["measure", "flush"])(
+    "does not touch children after the pinned root is swapped during %s enumeration",
+    async (operation) => {
+      const original = resolve(sandbox, "original-candidate");
+      const outsideDirectory = resolve(sandbox, "outside-directory");
+      const outsideChild = resolve(candidate, "secret");
+      await mkdir(outsideDirectory);
+      await writeFile(resolve(outsideDirectory, "secret"), "outside");
+      let swapped = false;
+      let outsideChildTouched = false;
+      const fileSystem: PreparedTreeFileSystem = {
+        lstat: async (path) => {
+          if (swapped && path === outsideChild) outsideChildTouched = true;
+          return lstat(path);
+        },
+        readdir: async (path) => {
+          if (!swapped && path === candidate) {
+            await rename(candidate, original);
+            await symlink(outsideDirectory, candidate);
+            swapped = true;
+          }
+          return readdir(path);
+        },
+        readlink,
+        open: (path, flags) => open(path, flags),
+      };
+      const gateway = new NodePreparedTreeGateway({
+        fileSystem,
+        barrier: async () => undefined,
+      });
+
+      await expect(
+        operation === "measure"
+          ? gateway.measureAndDigest(candidate)
+          : gateway.flushDurably(candidate),
+      ).rejects.toMatchObject({ code: "prepared-tree" });
+      expect(outsideChildTouched).toBe(false);
+    },
+  );
 });

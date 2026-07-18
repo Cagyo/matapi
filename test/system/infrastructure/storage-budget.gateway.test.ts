@@ -16,6 +16,7 @@ class FakeStorageFileSystem implements StorageBudgetFileSystem {
   reserveExists = false;
   reserveAllocatedBytes = 0;
   readonly events: string[] = [];
+  failAt: "open" | "write" | "sync" | "close" | undefined;
 
   constructor(
     private readonly reservePath: string,
@@ -27,7 +28,7 @@ class FakeStorageFileSystem implements StorageBudgetFileSystem {
       throw Object.assign(new Error("missing"), { code: "ENOENT" });
     }
     return {
-      size: EMERGENCY_RESERVE_BYTES,
+      size: this.reserveAllocatedBytes,
       blocks: this.reserveAllocatedBytes / 512,
       isFile: () => true,
       isDirectory: () => false,
@@ -38,17 +39,33 @@ class FakeStorageFileSystem implements StorageBudgetFileSystem {
   async open(path: string): Promise<StorageFileHandle> {
     if (path !== this.reservePath || this.reserveExists)
       throw new Error("exists");
+    if (this.failAt === "open") {
+      this.failAt = undefined;
+      throw Object.assign(new Error("pressure"), { code: "ENOSPC" });
+    }
     this.reserveExists = true;
     this.events.push("reserve-open");
     return {
       write: async (_buffer, _offset, length) => {
+        if (this.failAt === "write") {
+          this.failAt = undefined;
+          throw Object.assign(new Error("pressure"), { code: "ENOSPC" });
+        }
         this.reserveAllocatedBytes += length;
         return { bytesWritten: length };
       },
       sync: async () => {
+        if (this.failAt === "sync") {
+          this.failAt = undefined;
+          throw Object.assign(new Error("pressure"), { code: "ENOSPC" });
+        }
         this.events.push("reserve-sync");
       },
       close: async () => {
+        if (this.failAt === "close") {
+          this.failAt = undefined;
+          throw Object.assign(new Error("pressure"), { code: "ENOSPC" });
+        }
         this.events.push("reserve-close");
       },
     };
@@ -77,6 +94,7 @@ let fileSystem: FakeStorageFileSystem;
 let snapshots: { availableBytes: number; freeInodes: number }[];
 let statvfs: StatVfs;
 let barrier: ReturnType<typeof vi.fn<(path: string) => Promise<void>>>;
+let failBarrier: boolean;
 
 function storage(): StorageBudgetGateway {
   return new StorageBudgetGateway({
@@ -102,7 +120,12 @@ describe("StorageBudgetGateway", () => {
       { availableBytes: Number.MAX_SAFE_INTEGER, freeInodes: 1_000_000 },
     ];
     statvfs = vi.fn(async () => snapshots.shift() ?? snapshots.at(-1)!);
+    failBarrier = false;
     barrier = vi.fn(async (path: string) => {
+      if (failBarrier) {
+        failBarrier = false;
+        throw Object.assign(new Error("pressure"), { code: "ENOSPC" });
+      }
       fileSystem.events.push(`barrier:${path}`);
     });
   });
@@ -116,7 +139,7 @@ describe("StorageBudgetGateway", () => {
 
     await gateway.ensureReserve();
 
-    expect(fileSystem.reserveAllocatedBytes).toBe(128 * 1024 * 1024);
+    expect(fileSystem.reserveAllocatedBytes).toBe(EMERGENCY_RESERVE_BYTES);
     expect(fileSystem.events.slice(-3)).toEqual([
       "reserve-sync",
       "reserve-close",
@@ -144,6 +167,29 @@ describe("StorageBudgetGateway", () => {
       requiredInodes: 33,
     });
   });
+
+  it.each(["open", "write", "sync", "close", "barrier"] as const)(
+    "maps reserve %s pressure during preflight and restores a complete reserve",
+    async (boundary) => {
+      if (boundary === "barrier") failBarrier = true;
+      else fileSystem.failAt = boundary;
+      const gateway = storage();
+
+      await expect(
+        gateway.preflight({
+          compressedBytes: 100,
+          declaredExpansionBytes: 200,
+          maxPreparedBytes: 300,
+          maxPreparedFiles: 10,
+          currentReleaseAllocatedBytes: 250,
+          currentReleaseEntries: 7,
+          previousReleaseAllocatedBytes: 150,
+          previousReleaseEntries: 5,
+        }),
+      ).rejects.toMatchObject({ code: "disk-resource" });
+      expect(await gateway.verifyReserve()).toBe(true);
+    },
+  );
 
   it.each([
     [{ availableBytes: 1_099, freeInodes: 40 }, "bytes"],

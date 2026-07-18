@@ -82,88 +82,95 @@ export class NodePreparedTreeGateway implements PreparedTreeGateway {
 
   async measureAndDigest(root: string): Promise<PreparedTreeMeasurement> {
     try {
-      await this.assertStableDirectory(root);
       const records: PreparedTreeRecord[] = [];
       let allocatedBytes = 0;
       let entryCount = 0;
 
       const walk = async (directory: string, relativeDirectory: string) => {
         const before = await this.fileSystem.lstat(directory);
-        if (!before.isDirectory() || before.isSymbolicLink()) {
-          throw new PreparedTreeError("prepared tree directory changed type");
-        }
-        await this.assertStableDirectory(directory, before);
-
-        const names = await this.fileSystem.readdir(directory);
-        for (const name of names) {
-          if (
-            name === "" ||
-            name === "." ||
-            name === ".." ||
-            name.includes("/")
-          ) {
-            throw new PreparedTreeError(
-              "prepared tree contains an invalid child name",
-            );
-          }
-          const relativePath = relativeDirectory
-            ? `${relativeDirectory}/${name}`
-            : name;
-          const path = resolve(directory, name);
-          const beforeEntry = await this.fileSystem.lstat(path);
-
-          if (
-            isUpdaterMarkerPath(relativePath) &&
-            beforeEntry.isFile() &&
-            !beforeEntry.isSymbolicLink()
-          ) {
-            continue;
-          }
-
-          const allocated = checkedAdd(0, beforeEntry.blocks * 512);
-          allocatedBytes = checkedAdd(allocatedBytes, allocated);
-          entryCount = checkedAdd(entryCount, 1);
-          const normalizedMode = normalizePreparedTreeMode(beforeEntry.mode);
-
-          if (beforeEntry.isDirectory() && !beforeEntry.isSymbolicLink()) {
-            records.push({
-              relativePath,
-              entryType: "directory",
-              normalizedMode,
-              contentIdentity: "",
-            });
-            await walk(path, relativePath);
-          } else if (beforeEntry.isFile() && !beforeEntry.isSymbolicLink()) {
-            records.push({
-              relativePath,
-              entryType: "file",
-              normalizedMode,
-              contentIdentity: await this.hashRegularFile(path, beforeEntry),
-            });
-          } else if (beforeEntry.isSymbolicLink()) {
-            const linkTarget = await this.fileSystem.readlink(path);
-            const afterEntry = await this.fileSystem.lstat(path);
-            if (!sameEntry(beforeEntry, afterEntry)) {
+        const directoryHandle = await this.openStableDirectory(
+          directory,
+          before,
+        );
+        try {
+          const names = await this.fileSystem.readdir(directory);
+          await this.revalidateDirectory(directory, before, directoryHandle);
+          for (const name of names) {
+            if (
+              name === "" ||
+              name === "." ||
+              name === ".." ||
+              name.includes("/")
+            ) {
               throw new PreparedTreeError(
-                "prepared tree link changed while reading",
+                "prepared tree contains an invalid child name",
               );
             }
-            records.push({
-              relativePath,
-              entryType: "symlink",
-              normalizedMode,
-              contentIdentity: linkTarget,
-            });
-          } else {
-            throw new PreparedTreeError(
-              "prepared tree contains a special entry",
-            );
-          }
-        }
+            await this.revalidateDirectory(directory, before, directoryHandle);
+            const relativePath = relativeDirectory
+              ? `${relativeDirectory}/${name}`
+              : name;
+            const path = resolve(directory, name);
+            const beforeEntry = await this.fileSystem.lstat(path);
+            await this.revalidateDirectory(directory, before, directoryHandle);
 
-        const after = await this.fileSystem.lstat(directory);
-        if (!sameEntry(before, after)) {
-          throw new PreparedTreeError("prepared tree changed while traversing");
+            if (
+              isUpdaterMarkerPath(relativePath) &&
+              beforeEntry.isFile() &&
+              !beforeEntry.isSymbolicLink()
+            ) {
+              continue;
+            }
+
+            const allocated = checkedAdd(0, beforeEntry.blocks * 512);
+            allocatedBytes = checkedAdd(allocatedBytes, allocated);
+            entryCount = checkedAdd(entryCount, 1);
+            const normalizedMode = normalizePreparedTreeMode(beforeEntry.mode);
+
+            if (beforeEntry.isDirectory() && !beforeEntry.isSymbolicLink()) {
+              records.push({
+                relativePath,
+                entryType: "directory",
+                normalizedMode,
+                contentIdentity: "",
+              });
+              await walk(path, relativePath);
+            } else if (beforeEntry.isFile() && !beforeEntry.isSymbolicLink()) {
+              records.push({
+                relativePath,
+                entryType: "file",
+                normalizedMode,
+                contentIdentity: await this.hashRegularFile(path, beforeEntry),
+              });
+            } else if (beforeEntry.isSymbolicLink()) {
+              const linkTarget = await this.fileSystem.readlink(path);
+              await this.revalidateDirectory(
+                directory,
+                before,
+                directoryHandle,
+              );
+              const afterEntry = await this.fileSystem.lstat(path);
+              if (!sameEntry(beforeEntry, afterEntry)) {
+                throw new PreparedTreeError(
+                  "prepared tree link changed while reading",
+                );
+              }
+              records.push({
+                relativePath,
+                entryType: "symlink",
+                normalizedMode,
+                contentIdentity: linkTarget,
+              });
+            } else {
+              throw new PreparedTreeError(
+                "prepared tree contains a special entry",
+              );
+            }
+            await this.revalidateDirectory(directory, before, directoryHandle);
+          }
+          await this.revalidateDirectory(directory, before, directoryHandle);
+        } finally {
+          await directoryHandle.close();
         }
       };
 
@@ -186,38 +193,50 @@ export class NodePreparedTreeGateway implements PreparedTreeGateway {
       );
     }
     try {
-      await this.assertStableDirectory(root);
       const walk = async (directory: string): Promise<void> => {
-        const names = await this.fileSystem.readdir(directory);
-        for (const name of names) {
-          const path = resolve(directory, name);
-          const entry = await this.fileSystem.lstat(path);
-          if (entry.isDirectory() && !entry.isSymbolicLink()) {
-            await this.assertStableDirectory(path, entry);
-            await walk(path);
-          } else if (entry.isFile() && !entry.isSymbolicLink()) {
-            const handle = await this.fileSystem.open(
-              path,
-              constants.O_RDONLY | constants.O_NOFOLLOW,
-            );
-            try {
-              const opened = await handle.stat();
-              if (!sameEntry(entry, opened)) {
-                throw new PreparedTreeError(
-                  "prepared tree file changed before durable flush",
-                );
+        const before = await this.fileSystem.lstat(directory);
+        const directoryHandle = await this.openStableDirectory(
+          directory,
+          before,
+        );
+        try {
+          const names = await this.fileSystem.readdir(directory);
+          await this.revalidateDirectory(directory, before, directoryHandle);
+          for (const name of names) {
+            await this.revalidateDirectory(directory, before, directoryHandle);
+            const path = resolve(directory, name);
+            const entry = await this.fileSystem.lstat(path);
+            await this.revalidateDirectory(directory, before, directoryHandle);
+            if (entry.isDirectory() && !entry.isSymbolicLink()) {
+              await walk(path);
+            } else if (entry.isFile() && !entry.isSymbolicLink()) {
+              const handle = await this.fileSystem.open(
+                path,
+                constants.O_RDONLY | constants.O_NOFOLLOW,
+              );
+              try {
+                const opened = await handle.stat();
+                if (!sameEntry(entry, opened)) {
+                  throw new PreparedTreeError(
+                    "prepared tree file changed before durable flush",
+                  );
+                }
+                await handle.sync();
+              } finally {
+                await handle.close();
               }
-              await handle.sync();
-            } finally {
-              await handle.close();
+            } else if (!entry.isSymbolicLink()) {
+              throw new PreparedTreeError(
+                "prepared tree contains a special entry",
+              );
             }
-          } else if (!entry.isSymbolicLink()) {
-            throw new PreparedTreeError(
-              "prepared tree contains a special entry",
-            );
+            await this.revalidateDirectory(directory, before, directoryHandle);
           }
+          await directoryHandle.sync();
+          await this.revalidateDirectory(directory, before, directoryHandle);
+        } finally {
+          await directoryHandle.close();
         }
-        await this.syncDirectory(directory);
       };
 
       await walk(root);
@@ -262,11 +281,10 @@ export class NodePreparedTreeGateway implements PreparedTreeGateway {
     }
   }
 
-  private async assertStableDirectory(
+  private async openStableDirectory(
     path: string,
-    expected?: Stats,
-  ): Promise<void> {
-    const before = expected ?? (await this.fileSystem.lstat(path));
+    before: Stats,
+  ): Promise<PreparedTreeFileHandle> {
     if (!before.isDirectory() || before.isSymbolicLink()) {
       throw new PreparedTreeError("prepared tree root must be a directory");
     }
@@ -281,20 +299,32 @@ export class NodePreparedTreeGateway implements PreparedTreeGateway {
           "prepared tree directory changed while opening",
         );
       }
-    } finally {
+      return handle;
+    } catch (error) {
       await handle.close();
+      throw error;
     }
   }
 
-  private async syncDirectory(path: string): Promise<void> {
-    const handle = await this.fileSystem.open(
-      path,
-      constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
-    );
-    try {
-      await handle.sync();
-    } finally {
-      await handle.close();
+  private async revalidateDirectory(
+    path: string,
+    expected: Stats,
+    handle: PreparedTreeFileHandle,
+  ): Promise<void> {
+    const [atPath, opened] = await Promise.all([
+      this.fileSystem.lstat(path),
+      handle.stat(),
+    ]);
+    if (
+      !atPath.isDirectory() ||
+      atPath.isSymbolicLink() ||
+      !opened.isDirectory() ||
+      !sameEntry(expected, atPath) ||
+      !sameEntry(expected, opened)
+    ) {
+      throw new PreparedTreeError(
+        "prepared tree directory changed while traversing",
+      );
     }
   }
 }
