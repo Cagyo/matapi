@@ -20,9 +20,7 @@ export interface UpdateTarget {
   nodeModulesAbi: string;
 }
 
-export type UpdateTargetName =
-  | "linux-arm64-glibc"
-  | "linux-armv7-glibc";
+export type UpdateTargetName = "linux-arm64-glibc" | "linux-armv7-glibc";
 
 export function updateTargetName(
   target: Pick<UpdateTarget, "platform" | "arch" | "libc">,
@@ -111,6 +109,17 @@ export interface OtaOperationReceipt {
   operationId: string;
   kind: "update" | "rollback";
   acceptedAt: string;
+  requestSha256: string;
+  receiptGeneration: number;
+}
+
+export interface OtaOperationRequest {
+  schemaVersion: 1;
+  operationId: string;
+  kind: "update" | "rollback";
+  expected: CheckedReleaseIdentity | null;
+  acceptedAt: string;
+  requestSha256: string;
 }
 
 export type StartOperationResult =
@@ -249,6 +258,7 @@ const MAX_ARTIFACTS = 1024;
 const MAX_FAILURE_DAYS = 31;
 const MAX_DIAGNOSTIC_NOTES = 16;
 const MAX_DIAGNOSTIC_NOTE_BYTES = 160;
+const MAX_OPERATION_REQUEST_BYTES = 16 * 1024;
 const OPERATION_ID = /^[A-Za-z0-9_-]{22}$/;
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
@@ -332,6 +342,10 @@ function asOperationId(value: unknown, label: string): string {
   )
     invalid(`${label} must be a 22-character base64url ID`);
   return operationId;
+}
+
+export function parseOtaOperationId(value: unknown): string {
+  return asOperationId(value, "operationId");
 }
 
 function asSchemaVersion(value: unknown): 1 {
@@ -431,11 +445,7 @@ export function parseArtifactIdentity(
   const url = asString(artifact.url, "artifact.url");
   if (targetName !== expectedTargetName)
     invalid("artifact.targetName does not match target tuple");
-  if (
-    commit.length === 0 ||
-    url.length === 0 ||
-    artifact.format !== "tar.gz"
-  ) {
+  if (commit.length === 0 || url.length === 0 || artifact.format !== "tar.gz") {
     invalid("artifact contains an invalid required value");
   }
   return {
@@ -505,6 +515,146 @@ export function parseCheckedReleaseIdentity(
   return {
     artifact: parseArtifactIdentity(checked.artifact, ordered),
     metadata: parseMetadataIdentity(checked.metadata, ordered),
+  };
+}
+
+const OPERATION_REQUEST_PAYLOAD_KEYS = [
+  "schemaVersion",
+  "operationId",
+  "kind",
+  "expected",
+  "acceptedAt",
+] as const;
+
+const OPERATION_REQUEST_KEYS = [
+  ...OPERATION_REQUEST_PAYLOAD_KEYS,
+  "requestSha256",
+] as const;
+
+function operationRequestSha256(
+  request: Pick<
+    OtaOperationRequest,
+    "schemaVersion" | "operationId" | "kind" | "expected" | "acceptedAt"
+  >,
+): string {
+  const payload = {
+    schemaVersion: request.schemaVersion,
+    operationId: request.operationId,
+    kind: request.kind,
+    expected: request.expected,
+    acceptedAt: request.acceptedAt,
+  };
+  return createHash("sha256")
+    .update(JSON.stringify(payload), "utf8")
+    .digest("hex");
+}
+
+export function createOtaOperationRequest(input: {
+  operationId: string;
+  kind: "update" | "rollback";
+  expected: CheckedReleaseIdentity | null;
+  acceptedAt: string;
+}): { request: OtaOperationRequest; bytes: Buffer } {
+  const operationId = asOperationId(input.operationId, "operationId");
+  const acceptedAt = asTimestamp(input.acceptedAt, "acceptedAt");
+  const expected =
+    input.expected === null
+      ? null
+      : parseCheckedReleaseIdentity(input.expected, false);
+  if ((input.kind === "update") !== (expected !== null)) {
+    invalid("operation request kind and expected identity disagree");
+  }
+  const payload = {
+    schemaVersion: SCHEMA_VERSION,
+    operationId,
+    kind: input.kind,
+    expected,
+    acceptedAt,
+  } as const;
+  const request: OtaOperationRequest = {
+    ...payload,
+    requestSha256: operationRequestSha256(payload),
+  };
+  const bytes = Buffer.from(JSON.stringify(request), "utf8");
+  if (bytes.byteLength > MAX_OPERATION_REQUEST_BYTES) {
+    invalid("operation request is too large");
+  }
+  return { request, bytes };
+}
+
+export function parseOtaOperationRequest(
+  value: DocumentInput,
+): OtaOperationRequest {
+  const request = asDocument(value);
+  const serializedBytes =
+    typeof value === "string"
+      ? Buffer.byteLength(value, "utf8")
+      : value instanceof Uint8Array
+        ? value.byteLength
+        : Buffer.byteLength(JSON.stringify(request), "utf8");
+  if (serializedBytes > MAX_OPERATION_REQUEST_BYTES) {
+    invalid("operation request is too large");
+  }
+  expectFixedKeys(request, OPERATION_REQUEST_KEYS, "operation request", true);
+  const kind = asKind(request.kind, "operation request.kind");
+  const expected =
+    request.expected === null
+      ? null
+      : parseCheckedReleaseIdentity(request.expected, true);
+  if ((kind === "update") !== (expected !== null)) {
+    invalid("operation request kind and expected identity disagree");
+  }
+  const parsed: OtaOperationRequest = {
+    schemaVersion: asSchemaVersion(request.schemaVersion),
+    operationId: asOperationId(
+      request.operationId,
+      "operation request.operationId",
+    ),
+    kind,
+    expected,
+    acceptedAt: asTimestamp(request.acceptedAt, "operation request.acceptedAt"),
+    requestSha256: asSha256(
+      request.requestSha256,
+      "operation request.requestSha256",
+    ),
+  };
+  if (operationRequestSha256(parsed) !== parsed.requestSha256) {
+    invalid("operation request.requestSha256 does not match canonical payload");
+  }
+  return parsed;
+}
+
+const OPERATION_RECEIPT_KEYS = [
+  "schemaVersion",
+  "operationId",
+  "kind",
+  "acceptedAt",
+  "requestSha256",
+  "receiptGeneration",
+] as const;
+
+export function parseOtaOperationReceipt(
+  value: DocumentInput,
+): OtaOperationReceipt {
+  const receipt = asDocument(value);
+  expectFixedKeys(receipt, OPERATION_RECEIPT_KEYS, "operation receipt");
+  return {
+    schemaVersion: asSchemaVersion(receipt.schemaVersion),
+    operationId: asOperationId(
+      receipt.operationId,
+      "operation receipt.operationId",
+    ),
+    kind: asKind(receipt.kind, "operation receipt.kind"),
+    acceptedAt: asTimestamp(receipt.acceptedAt, "operation receipt.acceptedAt"),
+    requestSha256: asSha256(
+      receipt.requestSha256,
+      "operation receipt.requestSha256",
+    ),
+    receiptGeneration: asSafeInteger(
+      receipt.receiptGeneration,
+      "operation receipt.receiptGeneration",
+      1,
+    ),
   };
 }
 

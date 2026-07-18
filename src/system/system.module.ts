@@ -24,6 +24,7 @@ import { CLOCK_SYNC_PROBE } from "./domain/ports/clock-sync.port";
 import { INSTALLED_RELEASE } from "./domain/ports/installed-release.port";
 import { OTA_ADMIN_NOTIFICATIONS } from "./domain/ports/ota-admin-notification.port";
 import { OTA_CLOCK } from "./domain/ports/ota-clock.port";
+import { OTA_OPERATION_LAUNCHER } from "./domain/ports/ota-operation-launcher.port";
 import { OTA } from "./domain/ports/ota.port";
 import { PROCESS_RESTARTER } from "./domain/ports/process-restarter.port";
 import { RELEASE_FEED_TRANSPORT } from "./domain/ports/release-feed-transport.port";
@@ -36,8 +37,9 @@ import { DrizzleSystemMetaRepository } from "./infrastructure/drizzle-system-met
 import { DualSlotTrustedStateAdapter } from "./infrastructure/dual-slot-trusted-state.adapter";
 import { Ed25519EnvelopeVerifierAdapter } from "./infrastructure/ed25519-envelope-verifier.adapter";
 import { FsInstalledReleaseAdapter } from "./infrastructure/fs-installed-release.adapter";
+import { FlockOtaOperationLauncherAdapter } from "./infrastructure/flock-ota-operation-launcher.adapter";
 import { NodeReleaseFeedTransportAdapter } from "./infrastructure/node-release-feed-transport.adapter";
-import { loadOtaDiscoveryConfig } from "./infrastructure/ota-discovery-config.loader";
+import { loadOtaConfig } from "./infrastructure/ota-discovery-config.loader";
 import { OsSystemHealthAdapter } from "./infrastructure/os-system-health.adapter";
 import { Pm2ProcessRestarter } from "./infrastructure/pm2-process-restarter.adapter";
 import { ProcOtaClockAdapter } from "./infrastructure/proc-ota-clock.adapter";
@@ -59,12 +61,13 @@ export function resolveSystemMode(): SystemMode {
 }
 
 const mode = resolveSystemMode();
-const otaDiscoveryConfig = loadOtaDiscoveryConfig({
+const otaConfig = loadOtaConfig({
   mode,
   env: process.env,
   platform: process.platform,
   architecture: process.arch,
   nodeModulesAbi: process.versions.modules,
+  nodeExecutable: process.execPath,
 });
 
 const timer: UpdateDiscoveryTimerPort = {
@@ -105,6 +108,10 @@ const timer: UpdateDiscoveryTimerPort = {
       useClass: mode === "stub" ? StubOtaAdapter : ShellOtaAdapter,
     },
     {
+      provide: OTA_OPERATION_LAUNCHER,
+      useFactory: () => new FlockOtaOperationLauncherAdapter(otaConfig),
+    },
+    {
       provide: SYSTEM_DEPS,
       useClass:
         mode === "stub" ? StubSystemDepsAdapter : ShellSystemDepsAdapter,
@@ -138,15 +145,15 @@ const timer: UpdateDiscoveryTimerPort = {
     {
       provide: SIGNED_ENVELOPE_VERIFIER,
       useFactory: () =>
-        new Ed25519EnvelopeVerifierAdapter(otaDiscoveryConfig.trustDirectory),
+        new Ed25519EnvelopeVerifierAdapter(otaConfig.trustDirectory),
     },
     {
       provide: UPDATE_MANIFEST_POLICY,
-      useValue: otaDiscoveryConfig.policy,
+      useValue: otaConfig.policy,
     },
     {
       provide: UPDATE_CHECK_OPTIONS,
-      useValue: otaDiscoveryConfig.checkOptions,
+      useValue: otaConfig.checkOptions,
     },
     {
       provide: UPDATE_DISCOVERY_CLOCK,
@@ -163,7 +170,7 @@ const timer: UpdateDiscoveryTimerPort = {
     },
     {
       provide: UPDATE_DISCOVERY_OPTIONS,
-      useValue: otaDiscoveryConfig.discoveryOptions,
+      useValue: otaConfig.discoveryOptions,
     },
   ],
   exports: [
@@ -171,6 +178,7 @@ const timer: UpdateDiscoveryTimerPort = {
     SYSTEM_META_REPOSITORY,
     PROCESS_RESTARTER,
     OTA,
+    OTA_OPERATION_LAUNCHER,
     SYSTEM_DEPS,
     CLOCK_SYNC_PROBE,
     BootRecoveryService,

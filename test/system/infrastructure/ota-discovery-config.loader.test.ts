@@ -2,7 +2,10 @@ import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadOtaDiscoveryConfig } from "../../../src/system/infrastructure/ota-discovery-config.loader";
+import {
+  loadOtaConfig,
+  loadOtaDiscoveryConfig,
+} from "../../../src/system/infrastructure/ota-discovery-config.loader";
 
 const temporaryDirectories: string[] = [];
 
@@ -23,12 +26,14 @@ function validEnv(target = "linux-armv7-glibc"): NodeJS.ProcessEnv {
 }
 
 function loadReal(env: NodeJS.ProcessEnv = validEnv()) {
-  return loadOtaDiscoveryConfig({
+  return loadOtaConfig({
     mode: "real",
     env,
     platform: "linux",
     architecture: "arm",
     nodeModulesAbi: "115",
+    nodeExecutable: "/usr/bin/node",
+    validateFixedPaths: () => undefined,
   });
 }
 
@@ -39,6 +44,10 @@ afterEach(() => {
 });
 
 describe("loadOtaDiscoveryConfig", () => {
+  it("keeps the Task 5 loader name as the same config authority", () => {
+    expect(loadOtaDiscoveryConfig).toBe(loadOtaConfig);
+  });
+
   it.each([
     "HOME_WORKER_UPDATE_FEED_URL",
     "HOME_WORKER_UPDATE_TRUST_DIR",
@@ -85,6 +94,8 @@ describe("loadOtaDiscoveryConfig", () => {
         platform: "linux",
         architecture: "x64",
         nodeModulesAbi: "115",
+        nodeExecutable: "/usr/bin/node",
+        validateFixedPaths: () => undefined,
       }),
     ).toThrow("runtime");
   });
@@ -122,7 +133,105 @@ describe("loadOtaDiscoveryConfig", () => {
     expect(config.policy.target.targetName).toBe("linux-armv7-glibc");
     expect(config.policy.target.arch).toBe("arm");
     expect(config.checkOptions.feedUrl).toBe(config.feedUrl);
+    expect(config.launcher.policy).toBe(config.policy);
+    expect(config.launcher.requestDirectory).toBe("/run/home-worker/requests");
+    expect(config.launcher.lockPath).toBe("/run/home-worker/ota.lock");
+    expect(config.launcher.flockPath).toBe("/usr/bin/flock");
+    expect(config.launcher.nodeExecutable).toBe("/usr/bin/node");
+    expect(config.updater.healthSeconds).toBe(60);
+    expect(Object.isFrozen(config)).toBe(true);
+    expect(Object.isFrozen(config.policy)).toBe(true);
+    expect(Object.isFrozen(config.policy.target)).toBe(true);
+    expect(Object.isFrozen(config.launcher.environment)).toBe(true);
+    expect(() => {
+      (config.policy.target as { arch: string }).arch = "arm64";
+    }).toThrow();
   });
+
+  it("does not retain or reread the mutable environment after parsing", () => {
+    const env = validEnv();
+    env.HOME_WORKER_UPDATE_MAX_FILES = "10";
+    const config = loadReal(env);
+
+    env.HOME_WORKER_UPDATE_MAX_FILES = "20000";
+    env.TELEGRAM_BOT_TOKEN = "must-not-be-inherited";
+
+    expect(config.policy.limits.maxFiles).toBe(10);
+    expect(config.launcher.environment).not.toHaveProperty(
+      "TELEGRAM_BOT_TOKEN",
+    );
+  });
+
+  it("startup-validates only the compiled launcher paths", () => {
+    const seen: unknown[] = [];
+
+    const config = loadOtaConfig({
+      mode: "real",
+      env: validEnv(),
+      platform: "linux",
+      architecture: "arm",
+      nodeModulesAbi: "115",
+      nodeExecutable: "/usr/bin/node",
+      validateFixedPaths: (paths) => seen.push(paths),
+    });
+
+    expect(seen).toEqual([
+      {
+        flockPath: "/usr/bin/flock",
+        nodeExecutable: "/usr/bin/node",
+        lockPath: "/run/home-worker/ota.lock",
+        requestDirectory: "/run/home-worker/requests",
+        updaterEntry: expect.stringMatching(
+          /system\/infrastructure\/ota-updater\.js$/,
+        ),
+      },
+    ]);
+    expect(config.launcher.updaterEntry).toEqual(
+      (seen[0] as { updaterEntry: string }).updaterEntry,
+    );
+  });
+
+  it.each([
+    ["HOME_WORKER_UPDATE_POLL_MINUTES", 60, 24 * 60],
+    [
+      "HOME_WORKER_UPDATE_MAX_ARTIFACT_BYTES",
+      100 * 1024 * 1024,
+      100 * 1024 * 1024,
+    ],
+    [
+      "HOME_WORKER_UPDATE_MAX_EXPANDED_BYTES",
+      512 * 1024 * 1024,
+      512 * 1024 * 1024,
+    ],
+    ["HOME_WORKER_UPDATE_MAX_FILES", 20_000, 20_000],
+    ["HOME_WORKER_UPDATE_HEALTH_SECONDS", 60, 300],
+  ] as const)(
+    "strictly parses %s with default %i and ceiling %i",
+    (key, fallback, ceiling) => {
+      const defaults = loadReal(validEnv());
+      const numeric = {
+        HOME_WORKER_UPDATE_POLL_MINUTES:
+          defaults.discoveryOptions.pollIntervalMs / 60_000,
+        HOME_WORKER_UPDATE_MAX_ARTIFACT_BYTES:
+          defaults.policy.limits.maxArtifactBytes,
+        HOME_WORKER_UPDATE_MAX_EXPANDED_BYTES:
+          defaults.policy.limits.maxExpandedBytes,
+        HOME_WORKER_UPDATE_MAX_FILES: defaults.policy.limits.maxFiles,
+        HOME_WORKER_UPDATE_HEALTH_SECONDS: defaults.updater.healthSeconds,
+      };
+      expect(numeric[key]).toBe(fallback);
+
+      for (const value of ["", "0", "-1", "1.5", "1e2", "+1", " 1", "01"]) {
+        const env = validEnv();
+        env[key] = value;
+        expect(() => loadReal(env)).toThrow(key);
+      }
+
+      const over = validEnv();
+      over[key] = String(ceiling + 1);
+      expect(() => loadReal(over)).toThrow(key);
+    },
+  );
 
   it("preserves the explicit stub/test branch without required production settings", () => {
     expect(() =>
