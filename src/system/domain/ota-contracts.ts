@@ -277,7 +277,11 @@ function asTimestamp(value: unknown, label: string): string {
 
 function asOperationId(value: unknown, label: string): string {
   const operationId = asString(value, label);
-  if (!OPERATION_ID.test(operationId))
+  if (
+    !OPERATION_ID.test(operationId) ||
+    Buffer.from(operationId, "base64url").byteLength !== 16 ||
+    Buffer.from(operationId, "base64url").toString("base64url") !== operationId
+  )
     invalid(`${label} must be a 22-character base64url ID`);
   return operationId;
 }
@@ -310,12 +314,13 @@ function asKind(value: unknown, label: string): "update" | "rollback" {
   return value;
 }
 
-function parseTarget(value: unknown): UpdateTarget {
+function parseTarget(value: unknown, ordered = false): UpdateTarget {
   const target = asRecord(value, "target");
   expectFixedKeys(
     target,
     ["platform", "arch", "libc", "libcMinVersion", "nodeModulesAbi"],
     "target",
+    ordered,
   );
   if (target.platform !== "linux") invalid("target.platform must be linux");
   if (target.arch !== "arm" && target.arch !== "arm64")
@@ -344,7 +349,10 @@ function parseTarget(value: unknown): UpdateTarget {
   };
 }
 
-export function parseArtifactIdentity(value: unknown): ArtifactIdentity {
+export function parseArtifactIdentity(
+  value: unknown,
+  ordered = false,
+): ArtifactIdentity {
   const artifact = asRecord(value, "artifact");
   expectFixedKeys(
     artifact,
@@ -363,6 +371,7 @@ export function parseArtifactIdentity(value: unknown): ArtifactIdentity {
       "sha256",
     ],
     "artifact",
+    ordered,
   );
   const version = asString(artifact.version, "artifact.version");
   if (!isCanonicalVersion(version))
@@ -382,7 +391,7 @@ export function parseArtifactIdentity(value: unknown): ArtifactIdentity {
     version,
     commit,
     targetName,
-    target: parseTarget(artifact.target),
+    target: parseTarget(artifact.target, ordered),
     url,
     format: "tar.gz",
     size: asSafeInteger(artifact.size, "artifact.size", 1),
@@ -406,12 +415,16 @@ export function parseArtifactIdentity(value: unknown): ArtifactIdentity {
   };
 }
 
-export function parseMetadataIdentity(value: unknown): MetadataIdentity {
+export function parseMetadataIdentity(
+  value: unknown,
+  ordered = false,
+): MetadataIdentity {
   const metadata = asRecord(value, "metadata");
   expectFixedKeys(
     metadata,
     ["metadataVersion", "channel", "payloadSha256", "publishedAt", "expiresAt"],
     "metadata",
+    ordered,
   );
   if (metadata.channel !== "stable") invalid("metadata.channel must be stable");
   return {
@@ -429,12 +442,18 @@ export function parseMetadataIdentity(value: unknown): MetadataIdentity {
 
 export function parseCheckedReleaseIdentity(
   value: unknown,
+  ordered = false,
 ): CheckedReleaseIdentity {
   const checked = asRecord(value, "checked release");
-  expectFixedKeys(checked, ["artifact", "metadata"], "checked release");
+  expectFixedKeys(
+    checked,
+    ["artifact", "metadata"],
+    "checked release",
+    ordered,
+  );
   return {
-    artifact: parseArtifactIdentity(checked.artifact),
-    metadata: parseMetadataIdentity(checked.metadata),
+    artifact: parseArtifactIdentity(checked.artifact, ordered),
+    metadata: parseMetadataIdentity(checked.metadata, ordered),
   };
 }
 
@@ -495,6 +514,7 @@ function parseHighestMetadata(value: unknown): HighestMetadata {
     highest,
     ["metadataVersion", "payloadSha256"],
     "highestMetadata",
+    true,
   );
   return {
     metadataVersion: asSafeInteger(
@@ -511,7 +531,7 @@ function parseHighestMetadata(value: unknown): HighestMetadata {
 
 function parseEnvelope(value: unknown): TrustedEnvelope {
   const envelope = asRecord(value, "envelope");
-  expectFixedKeys(envelope, ["bytes", "etag"], "envelope");
+  expectFixedKeys(envelope, ["bytes", "etag"], "envelope", true);
   const bytes = asCanonicalBase64(envelope.bytes, "envelope.bytes");
   const etag = asString(envelope.etag, "envelope.etag");
   if (etag.length === 0) invalid("envelope.etag cannot be empty");
@@ -538,6 +558,7 @@ function parseTimeAnchor(value: unknown): TimeAnchor {
     anchor,
     ["wallMs", "monotonicMs", "bootId", "persistedAtMs"],
     "timeAnchor",
+    true,
   );
   const bootId = asString(anchor.bootId, "timeAnchor.bootId");
   if (bootId.length === 0) invalid("timeAnchor.bootId cannot be empty");
@@ -558,6 +579,7 @@ function parseTrustedArtifact(value: unknown): TrustedArtifact {
     artifact,
     ["version", "artifactSha256", "firstMetadataSha256"],
     "trusted artifact",
+    true,
   );
   const version = asString(artifact.version, "trusted artifact.version");
   if (!isCanonicalVersion(version))
@@ -575,12 +597,12 @@ function parseTrustedArtifact(value: unknown): TrustedArtifact {
   };
 }
 
-function parseFailureDays(value: unknown): FailureDay[] {
+function parseFailureDays(value: unknown, ordered = false): FailureDay[] {
   if (!Array.isArray(value) || value.length > MAX_FAILURE_DAYS)
     invalid("failureDays is too large");
   return value.map((entry, index) => {
     const day = asRecord(entry, `failureDays[${index}]`);
-    expectFixedKeys(day, ["day", "codes"], `failureDays[${index}]`);
+    expectFixedKeys(day, ["day", "codes"], `failureDays[${index}]`, ordered);
     const dayValue = asString(day.day, `failureDays[${index}].day`);
     const dayTimestamp = `${dayValue}T00:00:00.000Z`;
     if (
@@ -653,6 +675,7 @@ export function parseTrustedState(value: DocumentInput): TrustedState {
             notification,
             ["version", "artifactSha256"],
             "lastNotification",
+            true,
           );
           const version = asString(
             notification.version,
@@ -677,7 +700,7 @@ export function parseTrustedState(value: DocumentInput): TrustedState {
     timeAnchor: parseTimeAnchor(state.timeAnchor),
     artifacts: state.artifacts.map(parseTrustedArtifact),
     lastNotification,
-    failureDays: parseFailureDays(state.failureDays),
+    failureDays: parseFailureDays(state.failureDays, true),
     checksum: verifyChecksum(
       state,
       TRUSTED_STATE_KEYS.slice(0, -1),
@@ -687,9 +710,12 @@ export function parseTrustedState(value: DocumentInput): TrustedState {
   return result;
 }
 
-function parseDiagnostics(value: unknown): OperationDiagnostics {
+function parseDiagnostics(
+  value: unknown,
+  ordered = false,
+): OperationDiagnostics {
   const diagnostics = asRecord(value, "diagnostics");
-  expectFixedKeys(diagnostics, ["code", "notes"], "diagnostics");
+  expectFixedKeys(diagnostics, ["code", "notes"], "diagnostics", ordered);
   if (diagnostics.code !== null && !isOtaFailureCode(diagnostics.code))
     invalid("diagnostics.code is unsupported");
   if (
@@ -741,7 +767,7 @@ export function parseOperationJournal(value: DocumentInput): OperationJournal {
     expected:
       journal.expected === null
         ? null
-        : parseCheckedReleaseIdentity(journal.expected),
+        : parseCheckedReleaseIdentity(journal.expected, true),
     priorCurrent: asNullableReleaseName(journal.priorCurrent, "priorCurrent"),
     priorPrevious: asNullableReleaseName(
       journal.priorPrevious,
@@ -752,7 +778,7 @@ export function parseOperationJournal(value: DocumentInput): OperationJournal {
       journal.preparedTreeSha256,
       "preparedTreeSha256",
     ),
-    diagnostics: parseDiagnostics(journal.diagnostics),
+    diagnostics: parseDiagnostics(journal.diagnostics, true),
     updatedAt: asTimestamp(journal.updatedAt, "updatedAt"),
     checksum: verifyChecksum(
       journal,
@@ -937,6 +963,8 @@ export function parseStrictJson(input: string | Uint8Array): unknown {
 
 function assertNoDuplicateJsonKeys(source: string): void {
   let index = 0;
+  let depth = 0;
+  const maxDepth = 64;
   const whitespace = /[\t\n\r ]/;
   const skipWhitespace = (): void => {
     while (whitespace.test(source[index] ?? "")) index += 1;
@@ -967,11 +995,14 @@ function assertNoDuplicateJsonKeys(source: string): void {
     skipWhitespace();
     const character = source[index];
     if (character === "{") {
+      if (depth >= maxDepth) invalid("JSON nesting exceeds the depth limit");
+      depth += 1;
       index += 1;
       skipWhitespace();
       const keys = new Set<string>();
       if (source[index] === "}") {
         index += 1;
+        depth -= 1;
         return;
       }
       while (true) {
@@ -986,6 +1017,7 @@ function assertNoDuplicateJsonKeys(source: string): void {
         skipWhitespace();
         if (source[index] === "}") {
           index += 1;
+          depth -= 1;
           return;
         }
         if (source[index] !== ",") invalid("JSON object is malformed");
@@ -993,10 +1025,13 @@ function assertNoDuplicateJsonKeys(source: string): void {
       }
     }
     if (character === "[") {
+      if (depth >= maxDepth) invalid("JSON nesting exceeds the depth limit");
+      depth += 1;
       index += 1;
       skipWhitespace();
       if (source[index] === "]") {
         index += 1;
+        depth -= 1;
         return;
       }
       while (true) {
@@ -1004,6 +1039,7 @@ function assertNoDuplicateJsonKeys(source: string): void {
         skipWhitespace();
         if (source[index] === "]") {
           index += 1;
+          depth -= 1;
           return;
         }
         if (source[index] !== ",") invalid("JSON array is malformed");
@@ -1019,6 +1055,14 @@ function assertNoDuplicateJsonKeys(source: string): void {
         source.slice(index),
       )?.[0];
     if (!primitive) invalid("JSON is malformed");
+    const numeric = Number(primitive);
+    if (
+      /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(primitive) &&
+      (!Number.isFinite(numeric) ||
+        (Number.isInteger(numeric) && !Number.isSafeInteger(numeric)))
+    ) {
+      invalid("JSON contains an unsafe integer literal");
+    }
     index += primitive.length;
   };
   readValue();

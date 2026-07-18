@@ -4,6 +4,7 @@ import {
   parseReleaseName,
   sameCheckedRelease,
 } from "../../../src/system/domain/release-identity";
+import vectors from "../../fixtures/ota/contracts/schema-v1-vectors.json";
 import type { CheckedReleaseIdentity } from "../../../src/system/domain/ota-contracts";
 
 const checked: CheckedReleaseIdentity = {
@@ -59,5 +60,17 @@ describe("release identity", () => {
     });
     expect(() => parseReleaseName(`v1.4.2-${"a".repeat(64)}`)).toThrow();
     expect(() => parseReleaseName(`1.4.2-${"A".repeat(64)}`)).toThrow();
+    expect(() => parseReleaseName(`1.4.2-rc.1-${"a".repeat(64)}`)).toThrow();
+    expect(() => parseReleaseName(`01.4.2-${"a".repeat(64)}`)).toThrow();
+  });
+
+  it("matches the portable stable-feed release-name vectors", () => {
+    expect(parseReleaseName(vectors.releaseNames.valid)).toEqual({
+      version: "1.4.2",
+      artifactSha256: "a".repeat(64),
+    });
+    for (const invalid of vectors.releaseNames.invalid) {
+      expect(() => parseReleaseName(invalid)).toThrow();
+    }
   });
 });
