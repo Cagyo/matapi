@@ -24,17 +24,21 @@ import { DualSlotTrustedStateAdapter } from "../../../src/system/infrastructure/
 
 const roots: string[] = [];
 const ARTIFACT_SHA = "a".repeat(64);
-const FIRST_METADATA_SHA = "b".repeat(64);
 const TARGET_NAME = "linux-armv7-glibc";
 
-function artifactIdentity(artifactSha256 = ARTIFACT_SHA): ArtifactIdentity {
+function artifactIdentity(
+  artifactSha256 = ARTIFACT_SHA,
+  version = "1.4.2",
+  arch: "arm" | "arm64" = "arm",
+): ArtifactIdentity {
   return {
-    version: "1.4.2",
+    version,
     commit: "0123456789abcdef0123456789abcdef01234567",
-    targetName: TARGET_NAME,
+    targetName:
+      arch === "arm" ? "linux-armv7-glibc" : "linux-arm64-glibc",
     target: {
       platform: "linux",
-      arch: "arm",
+      arch,
       libc: "glibc",
       libcMinVersion: "2.28",
       nodeModulesAbi: "115",
@@ -61,8 +65,13 @@ function directory(): string {
   return root;
 }
 
-function envelope(metadataVersion = 42, artifactSha256 = ARTIFACT_SHA) {
-  const identity = artifactIdentity(artifactSha256);
+function envelope(
+  metadataVersion = 42,
+  artifactSha256 = ARTIFACT_SHA,
+  version = "1.4.2",
+  arch: "arm" | "arm64" = "arm",
+) {
+  const identity = artifactIdentity(artifactSha256, version, arch);
   const payload = Buffer.from(
     JSON.stringify({
       schemaVersion: 1,
@@ -108,9 +117,11 @@ function state(
   generation: number,
   metadataVersion = 42,
   artifactSha256 = ARTIFACT_SHA,
+  version = "1.4.2",
+  arch: "arm" | "arm64" = "arm",
 ): TrustedStateCommit {
-  const cached = envelope(metadataVersion, artifactSha256);
-  const identity = artifactIdentity(artifactSha256);
+  const cached = envelope(metadataVersion, artifactSha256, version, arch);
+  const identity = artifactIdentity(artifactSha256, version, arch);
   return {
     schemaVersion: 1,
     generation,
@@ -129,22 +140,44 @@ function state(
     artifacts: [
       {
         channel: "stable",
-        targetName: TARGET_NAME,
+        targetName: identity.targetName,
         version: identity.version,
         artifactIdentitySha256: artifactLedgerIdentitySha256(
           "stable",
           identity,
         ),
         artifactSha256,
-        firstMetadataSha256: FIRST_METADATA_SHA,
+        firstMetadataSha256: cached.payloadSha256,
       },
     ],
     lastNotification: {
-      version: "1.4.2",
+      version,
       artifactSha256,
     },
     failureDays: [{ day: "2030-01-01", codes: ["network-timeout"] }],
   };
+}
+
+function advancingState(
+  current: TrustedStateCommit,
+  generation: number,
+  metadataVersion: number,
+  version: string,
+  artifactSha256: string,
+): TrustedStateCommit {
+  const next = state(generation, metadataVersion, artifactSha256, version);
+  const selected = next.artifacts[0];
+  const selectedAlreadyExists = current.artifacts.some(
+    (entry) =>
+      entry.channel === selected.channel &&
+      entry.targetName === selected.targetName &&
+      entry.version === selected.version,
+  );
+  next.artifacts = [
+    ...structuredClone(current.artifacts),
+    ...(selectedAlreadyExists ? [] : [selected]),
+  ];
+  return next;
 }
 
 function slot(root: string, name: "a" | "b"): string {
@@ -239,6 +272,148 @@ describe("DualSlotTrustedStateAdapter", () => {
     );
   });
 
+  it("rejects the reviewer target-name alias and mixed-target ledger PoCs", async () => {
+    const aliasRoot = directory();
+    const aliasStore = new DualSlotTrustedStateAdapter(aliasRoot);
+    const aliased = state(1);
+    const aliasedIdentity = artifactIdentity();
+    aliasedIdentity.targetName = "linux-arm64-glibc";
+    aliased.artifacts[0].targetName = "linux-arm64-glibc";
+    aliased.artifacts[0].artifactIdentitySha256 =
+      artifactLedgerIdentitySha256("stable", aliasedIdentity);
+
+    await expect(aliasStore.seed(aliased)).rejects.toThrow(/target/i);
+
+    const mixedRoot = directory();
+    const mixedStore = new DualSlotTrustedStateAdapter(mixedRoot);
+    const mixed = state(1);
+    mixed.artifacts.push({
+      channel: "stable",
+      targetName: "linux-arm64-glibc",
+      version: "1.0.0",
+      artifactIdentitySha256: "d".repeat(64),
+      artifactSha256: "e".repeat(64),
+      firstMetadataSha256: "f".repeat(64),
+    });
+
+    await expect(mixedStore.seed(mixed)).rejects.toThrow(/target|seed/i);
+
+    const duplicateRoot = directory();
+    const duplicateStore = new DualSlotTrustedStateAdapter(duplicateRoot);
+    const duplicate = state(1);
+    duplicate.artifacts.push(structuredClone(duplicate.artifacts[0]));
+    await expect(duplicateStore.seed(duplicate)).rejects.toThrow(/duplicate/i);
+  });
+
+  it("requires seed provenance to be the one selected envelope artifact", async () => {
+    const extraRoot = directory();
+    const extraStore = new DualSlotTrustedStateAdapter(extraRoot);
+    const extra = state(1);
+    extra.artifacts.push({
+      channel: "stable",
+      targetName: TARGET_NAME,
+      version: "1.0.0",
+      artifactIdentitySha256: "d".repeat(64),
+      artifactSha256: "e".repeat(64),
+      firstMetadataSha256: "f".repeat(64),
+    });
+    await expect(extraStore.seed(extra)).rejects.toThrow(/seed|ledger/i);
+
+    const provenanceRoot = directory();
+    const provenanceStore = new DualSlotTrustedStateAdapter(provenanceRoot);
+    const wrongProvenance = state(1);
+    wrongProvenance.artifacts[0].firstMetadataSha256 = "f".repeat(64);
+    await expect(provenanceStore.seed(wrongProvenance)).rejects.toThrow(
+      /metadata|provenance/i,
+    );
+  });
+
+  it("allows only selected, first-seen artifacts on advancing metadata", async () => {
+    const root = directory();
+    const store = new DualSlotTrustedStateAdapter(root);
+    const baseline = state(1);
+    await store.seed(baseline);
+
+    const equalRefreshAddition = state(2);
+    equalRefreshAddition.artifacts.push({
+      channel: "stable",
+      targetName: TARGET_NAME,
+      version: "1.4.1",
+      artifactIdentitySha256: "d".repeat(64),
+      artifactSha256: "e".repeat(64),
+      firstMetadataSha256: "f".repeat(64),
+    });
+    await expect(store.commit(equalRefreshAddition)).rejects.toThrow(
+      /metadata|ledger|provenance/i,
+    );
+
+    const selected = advancingState(
+      baseline,
+      2,
+      43,
+      "1.4.3",
+      "d".repeat(64),
+    );
+    const wrongFirstMetadata = structuredClone(selected);
+    wrongFirstMetadata.artifacts.at(-1)!.firstMetadataSha256 = "f".repeat(64);
+    await expect(store.commit(wrongFirstMetadata)).rejects.toThrow(
+      /metadata|provenance/i,
+    );
+
+    const twoAdditions = structuredClone(selected);
+    twoAdditions.artifacts.push({
+      channel: "stable",
+      targetName: TARGET_NAME,
+      version: "1.4.4",
+      artifactIdentitySha256: "e".repeat(64),
+      artifactSha256: "f".repeat(64),
+      firstMetadataSha256: selected.highestMetadata.payloadSha256,
+    });
+    await expect(store.commit(twoAdditions)).rejects.toThrow(
+      /ledger|provenance/i,
+    );
+
+    const existingSelectionWithUnrelatedAddition = advancingState(
+      baseline,
+      2,
+      43,
+      "1.4.2",
+      ARTIFACT_SHA,
+    );
+    existingSelectionWithUnrelatedAddition.artifacts.push({
+      channel: "stable",
+      targetName: TARGET_NAME,
+      version: "1.4.1",
+      artifactIdentitySha256: "d".repeat(64),
+      artifactSha256: "e".repeat(64),
+      firstMetadataSha256:
+        existingSelectionWithUnrelatedAddition.highestMetadata.payloadSha256,
+    });
+    await expect(
+      store.commit(existingSelectionWithUnrelatedAddition),
+    ).rejects.toThrow(/ledger|provenance/i);
+
+    const committed = await store.commit(selected);
+    expect(committed.artifacts).toHaveLength(2);
+    expect(committed.artifacts[1].firstMetadataSha256).toBe(
+      committed.highestMetadata.payloadSha256,
+    );
+
+    const selectHistoric = advancingState(
+      committed,
+      3,
+      44,
+      "1.4.2",
+      ARTIFACT_SHA,
+    );
+    const historicFirstMetadata = committed.artifacts[0].firstMetadataSha256;
+    const refreshed = await store.commit(selectHistoric);
+    expect(refreshed.artifacts).toHaveLength(2);
+    expect(refreshed.artifacts[0].firstMetadataSha256).toBe(
+      historicFirstMetadata,
+    );
+  });
+
   it("fails closed on a checksum-valid legacy three-key ledger entry", async () => {
     const root = directory();
     const legacy = structuredClone(state(1)) as unknown as Record<
@@ -249,7 +424,7 @@ describe("DualSlotTrustedStateAdapter", () => {
       {
         version: "1.4.2",
         artifactSha256: ARTIFACT_SHA,
-        firstMetadataSha256: FIRST_METADATA_SHA,
+        firstMetadataSha256: "b".repeat(64),
       },
     ];
     writeFileSync(slot(root, "a"), JSON.stringify(checksummed(legacy)));
@@ -272,7 +447,7 @@ describe("DualSlotTrustedStateAdapter", () => {
         artifactIdentity(),
       ),
       artifactSha256: ARTIFACT_SHA,
-      firstMetadataSha256: FIRST_METADATA_SHA,
+      firstMetadataSha256: state(1).highestMetadata.payloadSha256,
     }));
 
     await expect(store.seed(oversized)).rejects.toThrow(/artifacts/i);
@@ -367,23 +542,23 @@ describe("DualSlotTrustedStateAdapter", () => {
   it("preserves metadata, ledger, and trusted-time anti-rollback floors on commit", async () => {
     const root = directory();
     const store = new DualSlotTrustedStateAdapter(root);
-    const baseline = state(1);
-    baseline.artifacts.push({
-      channel: "stable",
-      targetName: TARGET_NAME,
-      version: "1.0.0",
-      artifactIdentitySha256: "d".repeat(64),
-      artifactSha256: "e".repeat(64),
-      firstMetadataSha256: "f".repeat(64),
-    });
-    await store.seed(baseline);
+    const initial = state(1, 41, "e".repeat(64), "1.0.0");
+    await store.seed(initial);
+    const baseline = advancingState(
+      initial,
+      2,
+      42,
+      "1.4.2",
+      ARTIFACT_SHA,
+    );
+    await store.commit(baseline);
 
-    await expect(store.commit(state(2, 41))).rejects.toThrow(/metadata/i);
-    await expect(store.commit(state(2, 42, "d".repeat(64)))).rejects.toThrow(
+    await expect(store.commit(state(3, 41))).rejects.toThrow(/metadata/i);
+    await expect(store.commit(state(3, 42, "d".repeat(64)))).rejects.toThrow(
       /metadata|equivocation/i,
     );
 
-    const removedHistory = state(2);
+    const removedHistory = state(3);
     await expect(store.commit(removedHistory)).rejects.toThrow(/ledger/i);
 
     const historyMutations: ((entry: TrustedArtifact) => void)[] = [
@@ -407,17 +582,16 @@ describe("DualSlotTrustedStateAdapter", () => {
       },
     ];
     for (const mutateHistory of historyMutations) {
-      const mutatedHistory = state(2);
-      const history = structuredClone(baseline.artifacts[1]);
-      mutateHistory(history);
-      mutatedHistory.artifacts.push(history);
+      const mutatedHistory = state(3);
+      mutatedHistory.artifacts = structuredClone(baseline.artifacts);
+      mutateHistory(mutatedHistory.artifacts[0]);
       await expect(store.commit(mutatedHistory)).rejects.toThrow(
         /ledger|channel/i,
       );
     }
 
-    const regressedTime = state(2);
-    regressedTime.artifacts.push(baseline.artifacts[1]);
+    const regressedTime = state(3);
+    regressedTime.artifacts = structuredClone(baseline.artifacts);
     regressedTime.timeAnchor.wallMs -= 1;
     regressedTime.timeAnchor.persistedAtMs -= 1;
     await expect(store.commit(regressedTime)).rejects.toThrow(/time/i);

@@ -305,6 +305,21 @@ describe("signed OTA envelope", () => {
 });
 
 describe("signed manifest validation", () => {
+  it("requires the policy target name to match the canonical target tuple", () => {
+    const mismatchedPolicy = structuredClone(policy);
+    mismatchedPolicy.target.targetName = "linux-arm64-glibc";
+    const release = signed();
+
+    expect(() =>
+      verifySignedEnvelope(
+        release.bytes,
+        release.keys,
+        mismatchedPolicy,
+        CHECK_TIME,
+      ),
+    ).toThrow(/target mapping/i);
+  });
+
   it("accepts prepared-tree declarations at the separate hard ceilings", () => {
     const manifest = mutate(
       mutate(

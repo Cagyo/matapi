@@ -14,9 +14,10 @@ import {
   artifactLedgerIdentitySha256,
   parseArtifactIdentity,
   parseTrustedState,
-  type ArtifactIdentity,
+  updateTargetName,
   type TrustedArtifact,
   type TrustedState,
+  type UpdateTargetName,
 } from "../domain/ota-contracts";
 import {
   TrustedStateLostError,
@@ -43,6 +44,10 @@ type JsonRecord = Record<string, unknown>;
 interface LoadedSlot {
   name: SlotName;
   state: TrustedState;
+}
+
+interface SelectedEnvelopeArtifact {
+  ledgerEntry: TrustedArtifact;
 }
 
 export interface TrustedStateFaultHooks {
@@ -113,7 +118,9 @@ function checksummed(state: TrustedStateCommit): TrustedState {
   });
 }
 
-function validateEnvelopeRelationship(state: TrustedState): void {
+function validateEnvelopeRelationship(
+  state: TrustedState,
+): SelectedEnvelopeArtifact {
   if (!/^"[^"\r\n]*"$/.test(state.envelope.etag))
     throw new Error("trusted-state envelope ETag is not strong");
 
@@ -140,42 +147,61 @@ function validateEnvelopeRelationship(state: TrustedState): void {
     manifest.artifact,
     "trusted-state envelope artifact",
   );
+  const manifestTarget = asRecord(
+    manifest.target,
+    "trusted-state envelope target",
+  );
+  let selectedTargetName: UpdateTargetName;
+  if (
+    manifestTarget.platform !== "linux" ||
+    (manifestTarget.arch !== "arm" && manifestTarget.arch !== "arm64") ||
+    manifestTarget.libc !== "glibc"
+  ) {
+    throw new Error("trusted-state envelope target is unsupported");
+  }
+  try {
+    selectedTargetName = updateTargetName({
+      platform: manifestTarget.platform,
+      arch: manifestTarget.arch,
+      libc: manifestTarget.libc,
+    });
+  } catch {
+    throw new Error("trusted-state envelope target is unsupported");
+  }
+  const identity = parseArtifactIdentity({
+    version: manifest.version,
+    commit: manifest.commit,
+    targetName: selectedTargetName,
+    target: manifestTarget,
+    url: manifestArtifact.url,
+    format: manifestArtifact.format,
+    size: manifestArtifact.size,
+    expandedSize: manifestArtifact.expandedSize,
+    maxPreparedSize: manifestArtifact.maxPreparedSize,
+    maxPreparedFiles: manifestArtifact.maxPreparedFiles,
+    fileCount: manifestArtifact.fileCount,
+    sha256: manifestArtifact.sha256,
+  });
 
   const ledger = new Map<string, TrustedArtifact>();
   for (const entry of state.artifacts) {
+    if (entry.targetName !== selectedTargetName) {
+      throw new Error("trusted-state artifact ledger target changed");
+    }
     const key = artifactLedgerKey(entry);
     if (ledger.has(key))
       throw new Error("trusted-state artifact ledger contains duplicates");
     ledger.set(key, entry);
   }
 
-  const highestReleaseIsBound = state.artifacts
-    .filter(
-      (entry) =>
-        entry.channel === manifest.channel && entry.version === manifest.version,
-    )
-    .some((entry) => {
-      const identity: ArtifactIdentity = parseArtifactIdentity({
-        version: manifest.version,
-        commit: manifest.commit,
-        targetName: entry.targetName,
-        target: manifest.target,
-        url: manifestArtifact.url,
-        format: manifestArtifact.format,
-        size: manifestArtifact.size,
-        expandedSize: manifestArtifact.expandedSize,
-        maxPreparedSize: manifestArtifact.maxPreparedSize,
-        maxPreparedFiles: manifestArtifact.maxPreparedFiles,
-        fileCount: manifestArtifact.fileCount,
-        sha256: manifestArtifact.sha256,
-      });
-      return (
-        entry.artifactSha256 === identity.sha256 &&
-        entry.artifactIdentitySha256 ===
-          artifactLedgerIdentitySha256(entry.channel, identity)
-      );
-    });
-  if (!highestReleaseIsBound) {
+  const selectedLedgerEntry = ledger.get(
+    artifactLedgerCoordinates("stable", selectedTargetName, identity.version),
+  );
+  if (
+    selectedLedgerEntry?.artifactSha256 !== identity.sha256 ||
+    selectedLedgerEntry.artifactIdentitySha256 !==
+      artifactLedgerIdentitySha256("stable", identity)
+  ) {
     throw new Error("trusted-state envelope is absent from artifact ledger");
   }
   if (
@@ -188,13 +214,26 @@ function validateEnvelopeRelationship(state: TrustedState): void {
   ) {
     throw new Error("trusted-state last notification is absent from ledger");
   }
+  return { ledgerEntry: selectedLedgerEntry };
 }
 
 function artifactLedgerKey(artifact: TrustedArtifact): string {
-  return JSON.stringify([
+  return artifactLedgerCoordinates(
     artifact.channel,
     artifact.targetName,
     artifact.version,
+  );
+}
+
+function artifactLedgerCoordinates(
+  channel: TrustedArtifact["channel"],
+  targetName: TrustedArtifact["targetName"],
+  version: TrustedArtifact["version"],
+): string {
+  return JSON.stringify([
+    channel,
+    targetName,
+    version,
   ]);
 }
 
@@ -212,6 +251,7 @@ function artifactLedger(
 function validateStateTransition(
   current: TrustedState,
   next: TrustedState,
+  selected = validateEnvelopeRelationship(next),
 ): void {
   if (next.generation <= current.generation)
     throw new Error("trusted-state generation must advance");
@@ -231,18 +271,35 @@ function validateStateTransition(
 
   const currentLedger = artifactLedger(current);
   const nextLedger = artifactLedger(next);
-  for (const [version, identity] of currentLedger) {
-    const retained = nextLedger.get(version);
-    if (
-      retained?.channel !== identity.channel ||
-      retained.targetName !== identity.targetName ||
-      retained.version !== identity.version ||
-      retained.artifactIdentitySha256 !== identity.artifactIdentitySha256 ||
-      retained.artifactSha256 !== identity.artifactSha256 ||
-      retained?.firstMetadataSha256 !== identity.firstMetadataSha256
-    ) {
+  for (const [key, identity] of currentLedger) {
+    const retained = nextLedger.get(key);
+    if (JSON.stringify(retained) !== JSON.stringify(identity)) {
       throw new Error("trusted-state artifact ledger history changed");
     }
+  }
+  const additions = next.artifacts.filter(
+    (artifact) => !currentLedger.has(artifactLedgerKey(artifact)),
+  );
+  const metadataAdvanced =
+    next.highestMetadata.metadataVersion >
+    current.highestMetadata.metadataVersion;
+  if (!metadataAdvanced && additions.length !== 0) {
+    throw new Error("trusted-state ledger addition requires new metadata");
+  }
+  if (additions.length > 1) {
+    throw new Error("trusted-state ledger added multiple artifacts");
+  }
+  const selectedKey = artifactLedgerKey(selected.ledgerEntry);
+  if (currentLedger.has(selectedKey)) {
+    if (additions.length !== 0) {
+      throw new Error("trusted-state ledger added an unselected artifact");
+    }
+  } else if (
+    additions.length !== 1 ||
+    artifactLedgerKey(additions[0]) !== selectedKey ||
+    additions[0].firstMetadataSha256 !== next.highestMetadata.payloadSha256
+  ) {
+    throw new Error("trusted-state ledger provenance is invalid");
   }
 
   if (
@@ -261,6 +318,19 @@ function validateStateTransition(
       next.timeAnchor.wallMs - next.timeAnchor.monotonicMs;
     if (nextAffineFloor < currentAffineFloor)
       throw new Error("trusted-state same-boot affine time floor regressed");
+  }
+}
+
+function validateSeedProvenance(
+  state: TrustedState,
+  selected: SelectedEnvelopeArtifact,
+): void {
+  if (
+    state.artifacts.length !== 1 ||
+    selected.ledgerEntry.firstMetadataSha256 !==
+      state.highestMetadata.payloadSha256
+  ) {
+    throw new Error("trusted-state seed provenance is invalid");
   }
 }
 
@@ -337,8 +407,8 @@ export class DualSlotTrustedStateAdapter implements TrustedStatePort {
   ): Promise<TrustedState> {
     const current = await this.loadSelected();
     const next = checksummed(state);
-    validateEnvelopeRelationship(next);
-    validateStateTransition(current.state, next);
+    const selected = validateEnvelopeRelationship(next);
+    validateStateTransition(current.state, next, selected);
     const target: SlotName = current.name === "a" ? "b" : "a";
     await this.writeSlot(target, next);
     return next;
@@ -360,7 +430,8 @@ export class DualSlotTrustedStateAdapter implements TrustedStatePort {
       throw new Error("trusted-state seed refused existing slots");
     }
     const baseline = checksummed(state);
-    validateEnvelopeRelationship(baseline);
+    const selected = validateEnvelopeRelationship(baseline);
+    validateSeedProvenance(baseline, selected);
     await this.writeSlot("a", baseline);
     await this.writeSlot("b", baseline);
     return baseline;

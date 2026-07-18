@@ -11,7 +11,7 @@ const checked: CheckedReleaseIdentity = {
   artifact: {
     version: "1.4.2",
     commit: "0123456789abcdef0123456789abcdef01234567",
-    targetName: "linux-arm",
+    targetName: "linux-armv7-glibc",
     target: {
       platform: "linux",
       arch: "arm",

@@ -20,10 +20,25 @@ export interface UpdateTarget {
   nodeModulesAbi: string;
 }
 
+export type UpdateTargetName =
+  | "linux-arm64-glibc"
+  | "linux-armv7-glibc";
+
+export function updateTargetName(
+  target: Pick<UpdateTarget, "platform" | "arch" | "libc">,
+): UpdateTargetName {
+  if (target.platform !== "linux" || target.libc !== "glibc") {
+    throw new Error("unsupported OTA update target tuple");
+  }
+  if (target.arch === "arm64") return "linux-arm64-glibc";
+  if (target.arch === "arm") return "linux-armv7-glibc";
+  throw new Error("unsupported OTA update target tuple");
+}
+
 export interface ArtifactIdentity {
   version: string;
   commit: string;
-  targetName: string;
+  targetName: UpdateTargetName;
   target: UpdateTarget;
   url: string;
   format: "tar.gz";
@@ -137,7 +152,7 @@ export interface TimeAnchor {
 
 export interface TrustedArtifact {
   channel: "stable";
-  targetName: string;
+  targetName: UpdateTargetName;
   version: string;
   artifactIdentitySha256: string;
   artifactSha256: string;
@@ -411,10 +426,13 @@ export function parseArtifactIdentity(
     invalid("artifact.version is not canonical semver");
   const commit = asString(artifact.commit, "artifact.commit");
   const targetName = asString(artifact.targetName, "artifact.targetName");
+  const target = parseTarget(artifact.target, ordered);
+  const expectedTargetName = updateTargetName(target);
   const url = asString(artifact.url, "artifact.url");
+  if (targetName !== expectedTargetName)
+    invalid("artifact.targetName does not match target tuple");
   if (
     commit.length === 0 ||
-    targetName.length === 0 ||
     url.length === 0 ||
     artifact.format !== "tar.gz"
   ) {
@@ -423,8 +441,8 @@ export function parseArtifactIdentity(
   return {
     version,
     commit,
-    targetName,
-    target: parseTarget(artifact.target, ordered),
+    targetName: expectedTargetName,
+    target,
     url,
     format: "tar.gz",
     size: asSafeInteger(artifact.size, "artifact.size", 1),
@@ -627,8 +645,12 @@ function parseTrustedArtifact(value: unknown): TrustedArtifact {
     artifact.targetName,
     "trusted artifact.targetName",
   );
-  if (targetName.length === 0)
-    invalid("trusted artifact.targetName cannot be empty");
+  if (
+    targetName !== "linux-arm64-glibc" &&
+    targetName !== "linux-armv7-glibc"
+  ) {
+    invalid("trusted artifact.targetName is unsupported");
+  }
   const version = asString(artifact.version, "trusted artifact.version");
   if (!isCanonicalVersion(version))
     invalid("trusted artifact.version is not canonical semver");

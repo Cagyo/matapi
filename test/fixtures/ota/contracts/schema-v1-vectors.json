@@ -8,7 +8,7 @@
     ]
   },
   "canonicalChecksums": {
-    "trusted-state": "634395e94e62339f08b1f27157a5dd4420de3e1761a1bfb3928957900b150170",
+    "trusted-state": "f9f95e21d9b30cf89a2abc8dcde1c442f3bf375fc94e2e412582c5ca35a3ff30",
     "operation-journal": "7ca79fa30ebf0258ab1a7eeda8fb4827b06d8ca230008d47469e9885e4d1f1c2"
   },
   "bounds": {
@@ -67,7 +67,7 @@
       "value": {
         "version": "1.4.2",
         "commit": "0123456789abcdef0123456789abcdef01234567",
-        "targetName": "linux-arm",
+        "targetName": "linux-armv7-glibc",
         "target": {
           "platform": "linux",
           "arch": "arm",
@@ -101,7 +101,7 @@
         "artifact": {
           "version": "1.4.2",
           "commit": "0123456789abcdef0123456789abcdef01234567",
-          "targetName": "linux-arm",
+          "targetName": "linux-armv7-glibc",
           "target": {
             "platform": "linux",
             "arch": "arm",
@@ -134,7 +134,7 @@
         "artifact": {
           "version": "1.4.2",
           "commit": "0123456789abcdef0123456789abcdef01234567",
-          "targetName": "linux-arm",
+          "targetName": "linux-armv7-glibc",
           "target": {
             "platform": "linux",
             "arch": "arm",
@@ -229,9 +229,9 @@
         "artifacts": [
           {
             "channel": "stable",
-            "targetName": "linux-arm",
+            "targetName": "linux-armv7-glibc",
             "version": "1.4.2",
-            "artifactIdentitySha256": "afa2d2456774cdd640e7e05d849c1a019cefe6111e6df2396e96789b2e26a2ab",
+            "artifactIdentitySha256": "110e4130733251d86fe1181c0a1d51592efe1b95302e6e6dfedcb75f03b533f0",
             "artifactSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "firstMetadataSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
           }
@@ -241,7 +241,7 @@
           "artifactSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         },
         "failureDays": [{ "day": "2030-01-01", "codes": ["network-timeout"] }],
-        "checksum": "634395e94e62339f08b1f27157a5dd4420de3e1761a1bfb3928957900b150170"
+        "checksum": "f9f95e21d9b30cf89a2abc8dcde1c442f3bf375fc94e2e412582c5ca35a3ff30"
       }
     },
     {
@@ -375,9 +375,9 @@
         "artifacts": [
           {
             "channel": "stable",
-            "targetName": "linux-arm",
+            "targetName": "linux-armv7-glibc",
             "version": "1.4.2",
-            "artifactIdentitySha256": "afa2d2456774cdd640e7e05d849c1a019cefe6111e6df2396e96789b2e26a2ab",
+            "artifactIdentitySha256": "110e4130733251d86fe1181c0a1d51592efe1b95302e6e6dfedcb75f03b533f0",
             "artifactSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "firstMetadataSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
           }

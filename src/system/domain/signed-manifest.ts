@@ -1,8 +1,10 @@
 import { createHash, verify, type KeyObject } from "node:crypto";
-import type {
-  ArtifactIdentity,
-  CheckedReleaseIdentity,
-  UpdateTarget,
+import {
+  updateTargetName,
+  type ArtifactIdentity,
+  type CheckedReleaseIdentity,
+  type UpdateTargetName,
+  type UpdateTarget,
 } from "./ota-contracts";
 import { decodeCanonicalBase64, parseStrictJson } from "./strict-json";
 
@@ -39,7 +41,7 @@ export interface ManifestPolicy {
   feedUrl: string;
   channel: "stable";
   target: {
-    targetName: "linux-arm64-glibc" | "linux-armv7-glibc";
+    targetName: UpdateTargetName;
     platform: "linux";
     arch: "arm" | "arm64";
     libc: "glibc";
@@ -312,13 +314,13 @@ function parseManifest(
     ["platform", "arch", "libc", "libcMinVersion", "nodeModulesAbi"],
     "target",
   );
-  const expectedArch =
-    policy.target.targetName === "linux-arm64-glibc"
-      ? "arm64"
-      : policy.target.targetName === "linux-armv7-glibc"
-        ? "arm"
-        : invalid("policy target mapping is unsupported");
-  if (policy.target.arch !== expectedArch)
+  let mappedPolicyTargetName: UpdateTargetName;
+  try {
+    mappedPolicyTargetName = updateTargetName(policy.target);
+  } catch {
+    return invalid("policy target mapping is unsupported");
+  }
+  if (policy.target.targetName !== mappedPolicyTargetName)
     invalid("policy target mapping is inconsistent");
   if (
     targetValue.platform !== "linux" ||

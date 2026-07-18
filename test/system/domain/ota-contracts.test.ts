@@ -19,6 +19,7 @@ import {
   parseTrustedState,
   canTransitionOperationState,
   preservesOperationImmutables,
+  updateTargetName,
   type ArtifactIdentity,
 } from "../../../src/system/domain/ota-contracts";
 
@@ -99,7 +100,7 @@ function checksummed<T extends Record<string, unknown>>(value: T): T {
 const ARTIFACT_IDENTITY: ArtifactIdentity = {
   version: "1.4.2",
   commit: "0123456789abcdef0123456789abcdef01234567",
-  targetName: "linux-arm",
+  targetName: "linux-armv7-glibc",
   target: {
     platform: "linux",
     arch: "arm",
@@ -120,8 +121,32 @@ const ARTIFACT_IDENTITY: ArtifactIdentity = {
 describe("OTA schema-v1 contracts", () => {
   it("matches the canonical full-artifact ledger identity golden vector", () => {
     expect(artifactLedgerIdentitySha256("stable", ARTIFACT_IDENTITY)).toBe(
-      "afa2d2456774cdd640e7e05d849c1a019cefe6111e6df2396e96789b2e26a2ab",
+      "110e4130733251d86fe1181c0a1d51592efe1b95302e6e6dfedcb75f03b533f0",
     );
+  });
+
+  it.each([
+    ["arm", "linux-armv7-glibc"],
+    ["arm64", "linux-arm64-glibc"],
+  ] as const)("maps linux/%s/glibc to %s", (arch, targetName) => {
+    expect(
+      updateTargetName({ platform: "linux", arch, libc: "glibc" }),
+    ).toBe(targetName);
+  });
+
+  it("rejects target-name aliases and tuple mismatches", () => {
+    expect(() =>
+      parseArtifactIdentity({
+        ...ARTIFACT_IDENTITY,
+        targetName: "linux-arm",
+      }),
+    ).toThrow(/targetName/i);
+    expect(() =>
+      parseArtifactIdentity({
+        ...ARTIFACT_IDENTITY,
+        targetName: "linux-arm64-glibc",
+      }),
+    ).toThrow(/targetName/i);
   });
 
   it.each([
@@ -130,7 +155,7 @@ describe("OTA schema-v1 contracts", () => {
       "targetName",
       (artifact: ArtifactIdentity) => [
         "stable",
-        { ...artifact, targetName: "linux-arm-v2" },
+        { ...artifact, targetName: "linux-arm64-glibc" },
       ],
     ],
     [
@@ -275,6 +300,19 @@ describe("OTA schema-v1 contracts", () => {
     expect(() => parseTrustedState(checksummed(trusted))).toThrow(/artifact/i);
   });
 
+  it("rejects a trusted-artifact target-name alias at runtime", () => {
+    const trusted = structuredClone(
+      vectors.valid.find((vector) => vector.parser === "trusted-state")
+        ?.value,
+    ) as Record<string, unknown>;
+    const artifacts = trusted.artifacts as Record<string, unknown>[];
+    artifacts[0].targetName = "linux-arm";
+
+    expect(() => parseTrustedState(checksummed(trusted))).toThrow(
+      /targetName/i,
+    );
+  });
+
   it.each(["unknown", "prepared_v2", "../shared"])(
     "rejects hostile operation state %s",
     (phase) => {
@@ -366,7 +404,7 @@ describe("OTA schema-v1 contracts", () => {
         artifact: {
           version: "1.4.2",
           commit: "0123456789abcdef0123456789abcdef01234567",
-          targetName: "linux-arm",
+          targetName: "linux-armv7-glibc",
           target: {
             platform: "linux",
             arch: "arm",
