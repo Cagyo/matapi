@@ -39,6 +39,8 @@ const hostileExpected: Record<
   "truncated.tar.gz": { entryCount: 4, regularBytes: 19 },
   "trailing-data.tar.gz": { entryCount: 4, regularBytes: 19 },
   "trailing-tar-data.tar.gz": { entryCount: 4, regularBytes: 19 },
+  "file-trailing-slash.tar.gz": { entryCount: 1, regularBytes: 1 },
+  "duplicate-directory-slash.tar.gz": { entryCount: 2, regularBytes: 0 },
 };
 
 describe("inspectAndExtractTarGz", () => {
@@ -74,6 +76,21 @@ describe("inspectAndExtractTarGz", () => {
     ).toBe(0o755);
   });
 
+  it("accepts a canonical directory entry ending in one slash", async () => {
+    const destination = join(root, "directory-slash-candidate");
+    const request = input("directory-slash.tar.gz", destination);
+    request.expected = { entryCount: 2, regularBytes: 2 };
+
+    await expect(inspectAndExtractTarGz(request)).resolves.toEqual({
+      entryCount: 2,
+      regularFileCount: 1,
+      regularBytes: 2,
+    });
+    expect(await readFile(join(destination, "dist/main.js"), "utf8")).toBe(
+      "ok",
+    );
+  });
+
   it.each([
     "absolute.tar.gz",
     "dotdot.tar.gz",
@@ -91,6 +108,8 @@ describe("inspectAndExtractTarGz", () => {
     "truncated.tar.gz",
     "trailing-data.tar.gz",
     "trailing-tar-data.tar.gz",
+    "file-trailing-slash.tar.gz",
+    "duplicate-directory-slash.tar.gz",
   ])("rejects hostile archive fixture %s", async (fixture) => {
     const request = input(fixture, join(root, `candidate-${fixture}`));
     request.expected = hostileExpected[fixture];

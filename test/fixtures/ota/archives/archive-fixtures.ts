@@ -156,6 +156,17 @@ export async function writeOtaArchiveFixtures(root: string): Promise<void> {
 
   const tarFixtures: Record<string, Buffer> = {
     "valid.tar.gz": valid,
+    "directory-slash.tar.gz": await tarGz([
+      { name: "dist/", type: "directory" },
+      { name: "dist/main.js", body: Buffer.from("ok") },
+    ]),
+    "file-trailing-slash.tar.gz": await tarGz([
+      { name: "file/", body: Buffer.from("x") },
+    ]),
+    "duplicate-directory-slash.tar.gz": await tarGz([
+      { name: "dist/", type: "directory" },
+      { name: "dist", type: "directory" },
+    ]),
     "absolute.tar.gz": await tarGz([
       { name: "/etc/passwd", body: Buffer.from("x") },
     ]),

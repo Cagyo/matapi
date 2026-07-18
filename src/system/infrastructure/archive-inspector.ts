@@ -154,8 +154,12 @@ function assertSafeHeader(header: ParsedTarHeader): {
   ) {
     fail();
   }
+  const canonicalName =
+    header.type === "directory" && header.name.endsWith("/")
+      ? header.name.slice(0, -1)
+      : header.name;
   return {
-    path: canonicalArchivePath(header.name, HARD_MAX_PATH_BYTES),
+    path: canonicalArchivePath(canonicalName, HARD_MAX_PATH_BYTES),
     size: header.size,
     type: header.type,
   };

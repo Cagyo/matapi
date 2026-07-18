@@ -85,6 +85,36 @@ exit 0
 Current tar-stream and yauzl APIs were checked through Context7 before
 implementation (`/mafintosh/tar-stream`, `/thejoshwolfe/yauzl`).
 
+## Narrow directory-header review fix
+
+A follow-up review found that normal TAR directory names ending in one slash,
+such as `dist/`, reached the generic component validator with a terminal empty
+component and were rejected. The fix removes exactly one terminal slash only
+when tar-stream identifies the entry as a `directory`, then uses the resulting
+path for all validation, duplicate detection, and extraction. File entries keep
+the original strict rule, and a second trailing slash still fails normalization.
+
+Review-fix RED:
+
+```text
+corepack yarn test test/system/infrastructure/archive-inspector.test.ts
+Test Files  1 failed (1)
+Tests       1 failed | 22 passed (23)
+Cause: directory entry `dist/` rejected by canonicalArchivePath
+```
+
+Review-fix GREEN:
+
+```text
+corepack yarn test test/system/infrastructure/archive-inspector.test.ts
+Test Files  1 passed (1)
+Tests       25 passed (25)
+```
+
+The review fixtures also prove that a file named with a trailing slash remains
+rejected and that directory entries `dist/` and `dist` collide as one canonical
+duplicate identity.
+
 ## Caveats
 
 - A repository-wide `corepack yarn test` sweep reached unrelated existing
