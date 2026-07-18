@@ -1062,6 +1062,10 @@ const ruCatalog = {
   },
   ota: {
     checking: '🔄 Проверяем обновления...',
+    releaseAvailable: (version: string, commit: string) =>
+      `⬆️ Доступно обновление приложения ${version} (коммит ${commit}). Отправьте /update, чтобы проверить и установить его.`,
+    discoveryFailure: (code: string) =>
+      `⚠️ Проверка обновлений требует внимания (${code}). Установленная версия не изменена.`,
     upToDate: 'ℹ️ Установлена актуальная версия.',
     updating: (commit: string) =>
       `🔄 Обновление до ${commit}... Я ненадолго отключусь и сообщу, когда всё будет готово.`,

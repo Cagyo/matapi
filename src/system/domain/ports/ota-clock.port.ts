@@ -1,3 +1,5 @@
+export const OTA_CLOCK = Symbol("OTA_CLOCK");
+
 export interface OtaClockSnapshot {
   synchronized: boolean;
   wallMs: number;

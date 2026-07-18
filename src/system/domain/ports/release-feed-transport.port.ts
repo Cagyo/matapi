@@ -15,7 +15,7 @@ interface ReleaseFeedRequest {
 }
 
 export interface FetchEnvelopeRequest extends ReleaseFeedRequest {
-  etag?: string;
+  etag?: string | null;
 }
 
 export interface DownloadArtifactRequest extends ReleaseFeedRequest {

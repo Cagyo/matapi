@@ -333,7 +333,7 @@ export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort
       const headers: Record<string, string> = {
         "accept-encoding": "identity",
       };
-      if (request.etag !== undefined) headers["if-none-match"] = request.etag;
+      if (request.etag != null) headers["if-none-match"] = request.etag;
       const response = await this.fetchWithRedirects(
         request.url,
         headers,
@@ -344,7 +344,7 @@ export class NodeReleaseFeedTransportAdapter implements ReleaseFeedTransportPort
       if (response.status === 304) {
         await cancelResponse(response);
         if (state.reason !== null) throwAbort(state);
-        if (request.etag === undefined) throw transportError("http-status");
+        if (request.etag == null) throw transportError("http-status");
         return { kind: "not-modified" };
       }
       if (response.status === 206) {

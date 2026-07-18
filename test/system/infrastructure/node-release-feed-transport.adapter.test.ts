@@ -158,6 +158,15 @@ describe("NodeReleaseFeedTransportAdapter", () => {
     };
   }
 
+  it("treats an explicit null ETag as unconditional and rejects 304", async () => {
+    server.respond(304);
+
+    await expect(
+      transport.fetchEnvelope(request({ etag: null })),
+    ).rejects.toMatchObject({ code: "http-status" });
+    expect(server.requests[0].headers["if-none-match"]).toBeUndefined();
+  });
+
   function downloadRequest(
     overrides: Partial<DownloadArtifactRequest> = {},
   ): DownloadArtifactRequest {

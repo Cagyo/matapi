@@ -114,6 +114,17 @@ and directs the user to localized `/menu` usage only.
 | Port | Adapters | Status | Source |
 |---|---|---|---|
 | `SystemHealthPort` (`SYSTEM_HEALTH`) | `OsSystemHealthAdapter` (`df -kP`, `/sys/class/thermal`, `process.memoryUsage`, `os.totalmem`, `process.uptime`, `fs.stat` on `DATABASE_PATH`) | ✅ canonical — drives `/health`. Disk / CPU temp / db size degrade to `null` on dev hosts without throwing. | [system-health.port.ts](../src/system/domain/ports/system-health.port.ts) |
+| `ReleaseFeedTransportPort` (`RELEASE_FEED_TRANSPORT`) | `NodeReleaseFeedTransportAdapter` | ✅ bounded same-origin signed-feed transport; explicit null ETag is unconditional. | [release-feed-transport.port.ts](../src/system/domain/ports/release-feed-transport.port.ts) |
+| `TrustedStatePort` (`TRUSTED_STATE`) | `DualSlotTrustedStateAdapter` | ✅ atomic anti-rollback metadata, artifact provenance, and notification ledger. | [trusted-state.port.ts](../src/system/domain/ports/trusted-state.port.ts) |
+| `OtaClockPort` (`OTA_CLOCK`) | `ProcOtaClockAdapter` | ✅ synchronized wall/monotonic effective-time capture. | [ota-clock.port.ts](../src/system/domain/ports/ota-clock.port.ts) |
+| `SignedEnvelopeVerifierPort` (`SIGNED_ENVELOPE_VERIFIER`) | `Ed25519EnvelopeVerifierAdapter` | ✅ active-key signed-envelope verification with typed failures. | [signed-envelope-verifier.port.ts](../src/system/domain/ports/signed-envelope-verifier.port.ts) |
+| `InstalledReleasePort` (`INSTALLED_RELEASE`) | `FsInstalledReleaseAdapter` | ✅ resolves `current` plus no-follow `artifact-state.json`; never reads `system_meta`. | [installed-release.port.ts](../src/system/domain/ports/installed-release.port.ts) |
+| `UpdateCheckOptions` (`UPDATE_CHECK_OPTIONS`) | factory in `system.module.ts` | ✅ feed URL, envelope bound, and independent transport deadlines. | [update-check-options.port.ts](../src/system/application/ports/update-check-options.port.ts) |
+| `UpdateManifestPolicy` (`UPDATE_MANIFEST_POLICY`) | factory in `system.module.ts` | ✅ stable-channel target/runtime/resource verification policy. | [update-manifest-policy.port.ts](../src/system/application/ports/update-manifest-policy.port.ts) |
+| `UpdateDiscoveryClockPort` (`UPDATE_DISCOVERY_CLOCK`) | system `Date` factory; fixed test clocks | ✅ UTC notification-day clock, separate from signed effective time. | [update-discovery-clock.port.ts](../src/system/application/ports/update-discovery-clock.port.ts) |
+| `UpdateDiscoveryTimerPort` (`UPDATE_DISCOVERY_TIMER`) | Node timer factory; deterministic test timer | ✅ startup jitter and polling cadence seam. | [update-discovery-timer.port.ts](../src/system/application/ports/update-discovery-timer.port.ts) |
+| `UpdateDiscoveryRandomPort` (`UPDATE_DISCOVERY_RANDOM`) | `Math.random` factory; fixed test random | ✅ bounded startup-jitter seam. | [update-discovery-random.port.ts](../src/system/application/ports/update-discovery-random.port.ts) |
+| `UpdateDiscoveryOptions` (`UPDATE_DISCOVERY_OPTIONS`) | env-backed factory in `system.module.ts` | ✅ 60-minute default cadence and five-minute jitter ceiling. | [update-discovery-options.port.ts](../src/system/application/ports/update-discovery-options.port.ts) |
 
 ### Network context
 

@@ -1058,6 +1058,10 @@ const ukCatalog = {
   },
   ota: {
     checking: '🔄 Перевірка оновлень...',
+    releaseAvailable: (version: string, commit: string) =>
+      `⬆️ Доступне оновлення застосунку ${version} (коміт ${commit}). Надішліть /update, щоб перевірити та встановити його.`,
+    discoveryFailure: (code: string) =>
+      `⚠️ Перевірка оновлень потребує уваги (${code}). Встановлений випуск не змінено.`,
     upToDate: 'ℹ️ Установлено останню версію.',
     updating: (commit: string) =>
       `🔄 Оновлення до ${commit}... Я ненадовго буду не в мережі та повідомлю, коли все буде готово.`,

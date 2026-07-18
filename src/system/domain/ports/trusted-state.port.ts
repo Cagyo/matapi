@@ -1,5 +1,7 @@
 import type { TrustedState } from "../ota-contracts";
 
+export const TRUSTED_STATE = Symbol("TRUSTED_STATE");
+
 export type TrustedStateCommit = Omit<TrustedState, "checksum">;
 
 export class TrustedStateLostError extends Error {

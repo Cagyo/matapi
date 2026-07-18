@@ -77,6 +77,7 @@ import { SystemClockAdapter } from './infrastructure/system-clock.adapter';
     NotificationService,
     RecipientDirectoryService,
     CLOCK,
+    NOTIFIER,
   ],
 })
 export class EventModule {}
