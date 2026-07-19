@@ -168,3 +168,37 @@ Final correction verification:
 - Compiled `AppModule` Nest DI context in test/mock mode — `ok`.
 - No schema or generated migration file changed in this correction.
 - The pre-existing untracked `scripts/__pycache__/` remained untouched.
+
+## Final compatibility correction
+
+Correction commit: `fix(telegram): accept workflow receipts`
+
+The system OTA facade initially validated workflow receipt IDs as 16 lowercase
+hex characters. Workflow receipts are canonically 16-character unpadded
+base64url values, so valid mixed-case IDs and IDs containing `_` or `-` were
+rejected before reservation. The facade now uses the canonical
+`[A-Za-z0-9_-]{16}` grammar and verifies that the value round-trips as exactly
+12 base64url-decoded bytes.
+
+Compatibility RED:
+
+```text
+Test Files  1 failed (1)
+Tests       2 failed | 6 passed
+
+Both update and rollback rejected real non-hex base64url workflow receipts.
+```
+
+Compatibility focused GREEN:
+
+```text
+Test Files  15 passed (15)
+Tests       86 passed (86)
+```
+
+Final compatibility verification:
+
+- `yarn build` — exit `0`.
+- Targeted ESLint over the changed source and regression test — exit `0`.
+- `git diff --check` — exit `0`.
+- The pre-existing untracked `scripts/__pycache__/` remained untouched.

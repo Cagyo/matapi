@@ -44,6 +44,10 @@ const receipt: OtaOperationReceipt = {
   requestSha256: "c".repeat(64),
   receiptGeneration: 1,
 };
+const rollbackReceipt: OtaOperationReceipt = {
+  ...receipt,
+  kind: "rollback",
+};
 const workflow = {
   userId: 10,
   chatId: 20,
@@ -57,10 +61,13 @@ function harness(bound = true) {
       events.push("reserve");
       return { kind: "reserved" as const, receipt };
     }),
-    reserveRollback: vi.fn(),
-    publish: vi.fn(async () => {
+    reserveRollback: vi.fn(async () => {
+      events.push("reserve");
+      return { kind: "reserved" as const, receipt: rollbackReceipt };
+    }),
+    publish: vi.fn(async (operationReceipt: OtaOperationReceipt) => {
       events.push("publish");
-      return { kind: "started" as const, receipt };
+      return { kind: "started" as const, receipt: operationReceipt };
     }),
     cancel: vi.fn(async () => {
       events.push("cancel");
@@ -86,6 +93,39 @@ function harness(bound = true) {
 }
 
 describe("SignedFeedOtaAdapter", () => {
+  it("accepts a canonical non-hex base64url workflow receipt for update", async () => {
+    const h = harness();
+    const base64urlWorkflow = {
+      ...workflow,
+      workflowReceiptId: "AbCdEf0123_-xyZ9",
+    };
+
+    await expect(
+      h.ota.startUpdate(checked, base64urlWorkflow),
+    ).resolves.toEqual({ kind: "started", receipt });
+    expect(h.bindings.bind).toHaveBeenCalledWith({
+      receipt,
+      workflow: base64urlWorkflow,
+    });
+  });
+
+  it("accepts a canonical non-hex base64url workflow receipt for rollback", async () => {
+    const h = harness();
+    const base64urlWorkflow = {
+      ...workflow,
+      workflowReceiptId: "ZyXwVu9876_-tsR5",
+    };
+
+    await expect(h.ota.startRollback(base64urlWorkflow)).resolves.toEqual({
+      kind: "started",
+      receipt: rollbackReceipt,
+    });
+    expect(h.bindings.bind).toHaveBeenCalledWith({
+      receipt: rollbackReceipt,
+      workflow: base64urlWorkflow,
+    });
+  });
+
   it("reserves, durably binds the workflow, then publishes the exact update", async () => {
     const h = harness();
 

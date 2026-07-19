@@ -12,6 +12,8 @@ import {
 } from "../domain/ports/ota-operation-launcher.port";
 import type { OtaPort, OtaWorkflowReference } from "../domain/ports/ota.port";
 
+const WORKFLOW_RECEIPT_ID = /^[A-Za-z0-9_-]{16}$/;
+
 /** Keeps signed discovery and exact-identity operation launch behind one port. */
 @Injectable()
 export class SignedFeedOtaAdapter implements OtaPort {
@@ -84,7 +86,11 @@ export class SignedFeedOtaAdapter implements OtaPort {
       Number.isSafeInteger(reference.userId) &&
       Number.isSafeInteger(reference.chatId) &&
       typeof reference.workflowReceiptId === "string" &&
-      /^[0-9a-f]{16}$/.test(reference.workflowReceiptId)
+      WORKFLOW_RECEIPT_ID.test(reference.workflowReceiptId) &&
+      Buffer.from(reference.workflowReceiptId, "base64url").byteLength === 12 &&
+      Buffer.from(reference.workflowReceiptId, "base64url").toString(
+        "base64url",
+      ) === reference.workflowReceiptId
     );
   }
 
