@@ -34,9 +34,8 @@ function operationReport(journal, knownGood, outcome, now) {
   };
 }
 
-function canFinalize(journal, pointers, knownGood) {
+function hasCommittedCandidate(journal, pointers, knownGood) {
   return (
-    journal.phase === "activated" &&
     journal.candidate !== null &&
     journal.preparedTreeSha256 !== null &&
     pointers.current === journal.candidate &&
@@ -45,8 +44,48 @@ function canFinalize(journal, pointers, knownGood) {
     knownGood.operationId === journal.operationId &&
     knownGood.preparedTreeSha256 === journal.preparedTreeSha256 &&
     /^[0-9a-f]{64}$/.test(knownGood.artifactSha256) &&
-    /^[0-9a-f]{64}$/.test(knownGood.metadataSha256)
+    /^[0-9a-f]{64}$/.test(knownGood.metadataSha256) &&
+    journal.candidate.endsWith(`-${knownGood.artifactSha256}`) &&
+    (journal.kind === "rollback" ||
+      (journal.expected !== null &&
+        journal.expected.artifact.sha256 === knownGood.artifactSha256 &&
+        journal.expected.metadata.payloadSha256 === knownGood.metadataSha256))
   );
+}
+
+function hasRestorablePointers(journal, pointers) {
+  return (
+    (journal.phase === "activating" &&
+      (pointers.current === journal.priorCurrent ||
+        pointers.current === journal.candidate) &&
+      pointers.previous === journal.priorPrevious) ||
+    (journal.phase === "activated" &&
+      pointers.current === journal.candidate &&
+      (pointers.previous === journal.priorPrevious ||
+        pointers.previous === journal.priorCurrent))
+  );
+}
+
+async function stopForMaintenance(dependencies) {
+  await dependencies.reports.writeDurably(
+    maintenanceReport(dependencies.now()),
+  );
+  await dependencies.root.stop();
+}
+
+async function inspectKnownGood(dependencies, release) {
+  try {
+    const value = await dependencies.local.knownGood(release);
+    return value === null
+      ? { kind: "missing", value: null }
+      : { kind: "found", value };
+  } catch {
+    return { kind: "invalid", value: null };
+  }
+}
+
+async function readKnownGood(dependencies, release) {
+  return (await inspectKnownGood(dependencies, release)).value;
 }
 
 export async function recoverInterruptedActivation(dependencies) {
@@ -54,10 +93,7 @@ export async function recoverInterruptedActivation(dependencies) {
   try {
     journal = await dependencies.journal.load();
   } catch {
-    await dependencies.reports.writeDurably(
-      maintenanceReport(dependencies.now()),
-    );
-    await dependencies.root.stop();
+    await stopForMaintenance(dependencies);
     return;
   }
   if (journal === null) return;
@@ -66,64 +102,109 @@ export async function recoverInterruptedActivation(dependencies) {
   try {
     pointers = await dependencies.local.pointers();
   } catch {
-    await dependencies.reports.writeDurably(
-      maintenanceReport(dependencies.now()),
-    );
-    await dependencies.root.stop();
+    await stopForMaintenance(dependencies);
     return;
   }
-  let knownGood = null;
-  try {
-    knownGood = await dependencies.local.knownGood(journal.candidate);
-  } catch {}
-
-  if (canFinalize(journal, pointers, knownGood)) {
-    await dependencies.root.invoke(journal.operationId, "finalize-healthy");
-    await dependencies.reports.writeDurably(
-      operationReport(
-        journal,
-        knownGood,
-        journal.kind === "update" ? "updated" : "rolled-back",
-        dependencies.now(),
-      ),
-    );
+  const candidateInspection = await inspectKnownGood(
+    dependencies,
+    journal.candidate,
+  );
+  if (candidateInspection.kind === "invalid") {
+    await stopForMaintenance(dependencies);
     return;
   }
+  const candidateKnownGood = candidateInspection.value;
+  const committedCandidate = hasCommittedCandidate(
+    journal,
+    pointers,
+    candidateKnownGood,
+  );
 
-  if (journal.phase === "activating" || journal.phase === "activated") {
-    const priorKnownGood = await dependencies.local.knownGood(
-      journal.priorCurrent,
-    );
-    if (priorKnownGood === null) {
-      await dependencies.reports.writeDurably(
-        maintenanceReport(dependencies.now()),
+  switch (journal.phase) {
+    case "activated":
+      if (candidateKnownGood !== null) {
+        if (committedCandidate) {
+          await dependencies.root.invoke(
+            journal.operationId,
+            "finalize-healthy",
+          );
+          await dependencies.reports.writeDurably(
+            operationReport(
+              journal,
+              candidateKnownGood,
+              journal.kind === "update" ? "updated" : "rolled-back",
+              dependencies.now(),
+            ),
+          );
+          return;
+        }
+        await stopForMaintenance(dependencies);
+        return;
+      }
+    // An activated candidate without complete commit proof uses the same
+    // fail-safe restoration path as a partially completed activating phase.
+    case "activating": {
+      if (!hasRestorablePointers(journal, pointers)) {
+        await stopForMaintenance(dependencies);
+        return;
+      }
+      const priorKnownGood = await readKnownGood(
+        dependencies,
+        journal.priorCurrent,
       );
-      await dependencies.root.stop();
+      if (priorKnownGood === null) {
+        await stopForMaintenance(dependencies);
+        return;
+      }
+      await dependencies.reports.writeDurably(
+        operationReport(journal, priorKnownGood, "failed", dependencies.now()),
+      );
+      await dependencies.root.invoke(journal.operationId, "restore-prior");
       return;
     }
-    await dependencies.root.invoke(journal.operationId, "restore-prior");
-    await dependencies.reports.writeDurably(
-      operationReport(journal, priorKnownGood, "failed", dependencies.now()),
-    );
-    return;
-  }
 
-  if (journal.phase === "healthy") {
-    if (knownGood === null) {
+    case "healthy":
+      if (!committedCandidate) {
+        await stopForMaintenance(dependencies);
+        return;
+      }
       await dependencies.reports.writeDurably(
-        maintenanceReport(dependencies.now()),
+        operationReport(
+          journal,
+          candidateKnownGood,
+          journal.kind === "update" ? "updated" : "rolled-back",
+          dependencies.now(),
+        ),
       );
-      await dependencies.root.stop();
+      return;
+
+    case "rolled_back": {
+      const priorKnownGood = await readKnownGood(
+        dependencies,
+        journal.priorCurrent,
+      );
+      if (
+        pointers.current !== journal.priorCurrent ||
+        pointers.previous !== journal.priorPrevious ||
+        priorKnownGood === null
+      ) {
+        await stopForMaintenance(dependencies);
+        return;
+      }
+      await dependencies.reports.writeDurably(
+        operationReport(journal, priorKnownGood, "failed", dependencies.now()),
+      );
+      await dependencies.root.invoke(journal.operationId, "restore-prior");
       return;
     }
-    await dependencies.reports.writeDurably(
-      operationReport(
-        journal,
-        knownGood,
-        journal.kind === "update" ? "updated" : "rolled-back",
-        dependencies.now(),
-      ),
-    );
+
+    case "preparing":
+    case "prepared":
+    case "failed_pre_activation":
+    case "rollback_failed":
+    case "cleanup_pending":
+    default:
+      await stopForMaintenance(dependencies);
   }
 }
 
@@ -147,7 +228,8 @@ async function pointer(name) {
 }
 
 async function knownGood(candidate) {
-  if (candidate === null || !RELEASE.test(candidate)) return null;
+  if (candidate === null) return null;
+  if (!RELEASE.test(candidate)) throw new Error("known-good release");
   const path = join(RELEASES_ROOT, candidate, "known-good.json");
   try {
     const info = await lstat(path);
@@ -159,7 +241,7 @@ async function knownGood(candidate) {
       info.size < 1 ||
       info.size > 64 * 1024
     )
-      return null;
+      throw new Error("known-good ownership");
     const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
       const text = new TextDecoder("utf-8", { fatal: true }).decode(
@@ -191,13 +273,14 @@ async function knownGood(candidate) {
         new Date(Date.parse(value.activatedAt)).toISOString() !==
           value.activatedAt
       )
-        return null;
+        throw new Error("known-good contract");
       return value;
     } finally {
       await handle.close();
     }
-  } catch {
-    return null;
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
   }
 }
 

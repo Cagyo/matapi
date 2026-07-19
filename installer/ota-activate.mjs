@@ -1416,7 +1416,11 @@ export async function recoverOperation(operationIdInput, actionInput) {
   )
     fail();
   const operationId = canonicalOperationId(operationIdInput);
-  let selected = await loadJournal(operationId, ["activating", "activated"]);
+  let selected = await loadJournal(operationId, [
+    "activating",
+    "activated",
+    "rolled_back",
+  ]);
   const journal = selected.value;
   const current = await readPointer("current");
   const previous = await readPointer("previous");
@@ -1450,15 +1454,22 @@ export async function recoverOperation(operationIdInput, actionInput) {
     (journal.phase === "activated" &&
       current === journal.candidate &&
       (previous === journal.priorPrevious ||
-        previous === journal.priorCurrent));
+        previous === journal.priorCurrent)) ||
+    (journal.phase === "rolled_back" &&
+      current === journal.priorCurrent &&
+      previous === journal.priorPrevious);
   if (!pointerStateAllowed) fail();
-  await revalidateCandidate(journal, { recovery: true });
+  if (journal.phase !== "rolled_back") {
+    await revalidateCandidate(journal, { recovery: true });
+  }
   await revalidateKnownGoodRelease(journal.priorCurrent, journal);
   await restoreLinks(journal);
-  await transitionJournal(selected, "rolled_back", {
-    diagnostics: { code: "activation", notes: [] },
-    updatedAt: new Date().toISOString(),
-  });
+  if (journal.phase !== "rolled_back") {
+    await transitionJournal(selected, "rolled_back", {
+      diagnostics: { code: "activation", notes: [] },
+      updatedAt: new Date().toISOString(),
+    });
+  }
 }
 
 export async function activateOperation(operationIdInput) {

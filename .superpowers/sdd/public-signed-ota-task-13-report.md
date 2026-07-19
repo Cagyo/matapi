@@ -96,3 +96,58 @@ The focused OTA suites remained green in that run and in the clean rerun above.
 
 The pre-existing untracked `scripts/__pycache__/` directory was not read,
 modified, staged, or removed.
+
+## Re-review correction: exhaustive fail-closed recovery
+
+Correction commit: `fix(ota): fail closed recovery states`
+
+The first recovery coordinator handled `activating`, `activated`, and
+`healthy` with independent conditionals. Legal terminal or preparatory phases
+could therefore reach the end of the function without a report, a root action,
+or a stop request. In particular, `rollback_failed` allowed the required
+pre-PM2 unit to succeed after an explicitly failed rollback.
+
+Recovery now uses an exhaustive schema-v1 phase matrix:
+
+- `activated` finalizes only with exact root-pointer state and a matching
+  operation, tree, artifact, and metadata known-good identity;
+- `activating` and an uncommitted `activated` state durably record failure
+  before requesting the fixed root restore action;
+- `healthy` reports success only with the same complete commit proof;
+- `rolled_back` requires exact restored pointers and a prior known-good marker,
+  then invokes the root restore action idempotently for full signed-policy
+  revalidation; and
+- `preparing`, `prepared`, `failed_pre_activation`, `rollback_failed`, and
+  `cleanup_pending` write a null-identity maintenance report before requesting
+  stop. No valid phase can silently fall through.
+
+The root restore action accepts `rolled_back` only as an idempotent state. It
+revalidates the prior release against its signed envelope, known-good marker,
+trust keys, persistent policy, and exact pointers, but does not repeat the
+terminal journal transition.
+
+Correction RED:
+
+```text
+Test Files  1 failed (1)
+Tests       13 failed | 4 passed
+
+Failures covered silent legal-phase fallthrough, healthy pointer/marker
+conflicts, report-after-restore ordering, and non-idempotent rolled-back boot.
+```
+
+The stricter activated-conflict regression then failed 3/22 cases before the
+matrix distinguished an absent known-good marker (safe restoration) from a
+present stale marker or conflicting root pointer (maintenance stop). A final
+unreadable-marker regression failed 1/23 before corrupt marker reads were kept
+distinct from a genuinely absent marker.
+
+Correction GREEN and verification:
+
+```text
+Test Files  9 passed (9)
+Tests       156 passed (156)
+```
+
+The correction suite includes Task 13 recovery/consumption/policy tests plus
+the Task 12 root-helper, activation, and dual-slot journal regressions.
