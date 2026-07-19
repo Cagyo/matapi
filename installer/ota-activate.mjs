@@ -17,6 +17,7 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
+import { loadRootPolicy, validateRootPolicy } from "./ota-contracts.mjs";
 
 const INSTALL_ROOT = "/opt/home-worker";
 const RELEASES_ROOT = "/opt/home-worker/releases";
@@ -30,11 +31,6 @@ const SHA256 = /^[0-9a-f]{64}$/;
 const MAX_JSON_BYTES = 2 * 1024 * 1024;
 const MAX_ENVELOPE_BYTES = 96 * 1024;
 const MAX_PAYLOAD_BYTES = 64 * 1024;
-const MAX_ARTIFACT_BYTES = 100 * 1024 * 1024;
-const MAX_EXPANDED_BYTES = 512 * 1024 * 1024;
-const MAX_PREPARED_BYTES = 1024 * 1024 * 1024;
-const MAX_PREPARED_FILES = 200_000;
-const MAX_FILES = 20_000;
 const COMMIT = /^[0-9a-f]{40}$/;
 const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const ABI = /^(?:0|[1-9]\d*)$/;
@@ -153,67 +149,11 @@ function compareDottedVersions(left, right) {
 }
 
 function parseRootPolicy(value) {
-  if (
-    !exactKeys(value, ["feedUrl", "channel", "target", "runtime", "limits"]) ||
-    value.channel !== "stable" ||
-    !exactKeys(value.target, [
-      "targetName",
-      "platform",
-      "arch",
-      "libc",
-      "libcVersion",
-      "nodeModulesAbi",
-    ]) ||
-    value.target.platform !== "linux" ||
-    (value.target.arch !== "arm" && value.target.arch !== "arm64") ||
-    value.target.libc !== "glibc" ||
-    value.target.targetName !==
-      (value.target.arch === "arm"
-        ? "linux-armv7-glibc"
-        : "linux-arm64-glibc") ||
-    !canonicalDottedVersion(value.target.libcVersion) ||
-    typeof value.target.nodeModulesAbi !== "string" ||
-    !ABI.test(value.target.nodeModulesAbi) ||
-    !exactKeys(value.runtime, ["nodeMajor", "packageManager"]) ||
-    value.runtime.nodeMajor !== 20 ||
-    value.runtime.packageManager !== "yarn@4.13.0" ||
-    !exactKeys(value.limits, [
-      "maxArtifactBytes",
-      "maxExpandedBytes",
-      "maxPreparedBytes",
-      "maxPreparedFiles",
-      "maxFiles",
-    ]) ||
-    !positiveInteger(value.limits.maxArtifactBytes) ||
-    value.limits.maxArtifactBytes > MAX_ARTIFACT_BYTES ||
-    !positiveInteger(value.limits.maxExpandedBytes) ||
-    value.limits.maxExpandedBytes > MAX_EXPANDED_BYTES ||
-    !positiveInteger(value.limits.maxPreparedBytes) ||
-    value.limits.maxPreparedBytes > MAX_PREPARED_BYTES ||
-    !positiveInteger(value.limits.maxPreparedFiles) ||
-    value.limits.maxPreparedFiles > MAX_PREPARED_FILES ||
-    !positiveInteger(value.limits.maxFiles) ||
-    value.limits.maxFiles > MAX_FILES
-  )
-    fail();
-  let feedUrl;
   try {
-    feedUrl = new URL(value.feedUrl);
+    return validateRootPolicy(value);
   } catch {
     fail();
   }
-  const expectedPath = `/home-worker/stable/${value.target.targetName}/update-envelope.json`;
-  if (
-    feedUrl.protocol !== "https:" ||
-    feedUrl.username !== "" ||
-    feedUrl.password !== "" ||
-    feedUrl.search !== "" ||
-    feedUrl.hash !== "" ||
-    feedUrl.pathname !== expectedPath ||
-    feedUrl.href !== value.feedUrl
-  )
-    fail();
-  return value;
 }
 
 function canonicalTimestamp(value) {
@@ -586,7 +526,10 @@ export async function verifyCandidateAuthorization(
     const expectedUid =
       options.expectedUid ?? (trustRoot === TRUST_ROOT ? 0 : process.getuid());
     const now = options.now ?? new Date();
-    const policy = parseRootPolicy(options.policy);
+    const policy =
+      options.policy === undefined
+        ? await loadRootPolicy()
+        : parseRootPolicy(options.policy);
     if (
       !Number.isFinite(now.getTime()) ||
       envelopeBytes.byteLength > MAX_ENVELOPE_BYTES ||
@@ -630,7 +573,7 @@ export async function verifyCandidateAuthorization(
     const manifest = parseSignedManifest(
       payload,
       now,
-      journal.kind === "update",
+      journal.kind === "update" && options.recovery !== true,
       policy,
     );
     const identity = checkedIdentity(
@@ -713,7 +656,7 @@ function journalPayload(value) {
   };
 }
 
-function validJournal(value, operationId, phase = "prepared") {
+function validJournal(value, operationId, phases = ["prepared"]) {
   const payload = journalPayload(value);
   return (
     exactKeys(value, [
@@ -738,7 +681,7 @@ function validJournal(value, operationId, phase = "prepared") {
     Number.isSafeInteger(value.generation) &&
     value.generation > 0 &&
     value.operationId === operationId &&
-    value.phase === phase &&
+    phases.includes(value.phase) &&
     (value.kind === "update" || value.kind === "rollback") &&
     ((value.kind === "update" && value.expected !== null) ||
       (value.kind === "rollback" && value.expected === null)) &&
@@ -753,13 +696,13 @@ function validJournal(value, operationId, phase = "prepared") {
   );
 }
 
-async function loadPreparedJournal(operationId) {
+async function loadJournal(operationId, phases = ["prepared"]) {
   const slots = [];
   for (const name of ["operation-a.json", "operation-b.json"]) {
     try {
       const path = join(JOURNAL_ROOT, name);
       const value = await readJson(path);
-      if (validJournal(value, operationId)) {
+      if (validJournal(value, operationId, phases)) {
         const info = await lstat(path);
         slots.push({ name, value, uid: info.uid, gid: info.gid });
       }
@@ -869,7 +812,6 @@ async function assertRootProjection(operationId, journal) {
       "checksum",
       "candidate",
       "preparedTreeSha256",
-      "policy",
     ]) ||
     projection.schemaVersion !== 1 ||
     projection.operationId !== operationId ||
@@ -880,7 +822,6 @@ async function assertRootProjection(operationId, journal) {
   ) {
     fail();
   }
-  return parseRootPolicy(projection.policy);
 }
 
 async function readPointer(name) {
@@ -1160,7 +1101,7 @@ export async function digestTree(root, expectedUid = 0) {
   return hash.digest("hex");
 }
 
-async function revalidateCandidate(journal, policy) {
+async function revalidateCandidate(journal, options = {}) {
   const path = resolve(RELEASES_ROOT, journal.candidate);
   if (dirname(path) !== RELEASES_ROOT || basename(path) !== journal.candidate)
     fail();
@@ -1203,7 +1144,7 @@ async function revalidateCandidate(journal, policy) {
     fail();
   }
   let knownGood = null;
-  if (journal.kind === "rollback") {
+  if (journal.kind === "rollback" || options.requireKnownGood === true) {
     knownGood = await readJson(join(path, "known-good.json"), 64 * 1024);
     if (
       !exactKeys(knownGood, [
@@ -1228,12 +1169,41 @@ async function revalidateCandidate(journal, policy) {
     marker,
     envelope,
     knownGood,
-    { policy },
+    options.recovery === true ? { recovery: true } : undefined,
   );
   return {
     path,
     ...authorized,
   };
+}
+
+async function revalidateKnownGoodRelease(release, journal) {
+  if (!RELEASE_NAME.test(release)) fail();
+  const path = resolve(RELEASES_ROOT, release);
+  const knownGood = await readJson(join(path, "known-good.json"), 64 * 1024);
+  if (
+    !exactKeys(knownGood, [
+      "schemaVersion",
+      "operationId",
+      "artifactSha256",
+      "metadataSha256",
+      "preparedTreeSha256",
+      "activatedAt",
+    ]) ||
+    knownGood.schemaVersion !== 1 ||
+    !SHA256.test(knownGood.preparedTreeSha256)
+  )
+    fail();
+  return revalidateCandidate(
+    {
+      ...journal,
+      kind: "rollback",
+      expected: null,
+      candidate: release,
+      preparedTreeSha256: knownGood.preparedTreeSha256,
+    },
+    { recovery: true, requireKnownGood: true },
+  );
 }
 
 async function run(command, args, options = {}) {
@@ -1439,16 +1409,68 @@ async function writeKnownGood(candidate, operationId, preparedTreeSha256) {
   }
 }
 
+export async function recoverOperation(operationIdInput, actionInput) {
+  if (
+    arguments.length !== 2 ||
+    (actionInput !== "finalize-healthy" && actionInput !== "restore-prior")
+  )
+    fail();
+  const operationId = canonicalOperationId(operationIdInput);
+  let selected = await loadJournal(operationId, ["activating", "activated"]);
+  const journal = selected.value;
+  const current = await readPointer("current");
+  const previous = await readPointer("previous");
+
+  if (actionInput === "finalize-healthy") {
+    if (
+      journal.phase !== "activated" ||
+      current !== journal.candidate ||
+      previous !== journal.priorCurrent
+    )
+      fail();
+    const candidate = await revalidateCandidate(journal, {
+      recovery: true,
+      requireKnownGood: true,
+    });
+    const knownGood = await readJson(
+      join(candidate.path, "known-good.json"),
+      64 * 1024,
+    );
+    if (knownGood.operationId !== operationId) fail();
+    selected = await transitionJournal(selected, "healthy", {
+      updatedAt: new Date().toISOString(),
+    });
+    return;
+  }
+
+  const pointerStateAllowed =
+    (journal.phase === "activating" &&
+      (current === journal.priorCurrent || current === journal.candidate) &&
+      previous === journal.priorPrevious) ||
+    (journal.phase === "activated" &&
+      current === journal.candidate &&
+      (previous === journal.priorPrevious ||
+        previous === journal.priorCurrent));
+  if (!pointerStateAllowed) fail();
+  await revalidateCandidate(journal, { recovery: true });
+  await revalidateKnownGoodRelease(journal.priorCurrent, journal);
+  await restoreLinks(journal);
+  await transitionJournal(selected, "rolled_back", {
+    diagnostics: { code: "activation", notes: [] },
+    updatedAt: new Date().toISOString(),
+  });
+}
+
 export async function activateOperation(operationIdInput) {
   const operationId = canonicalOperationId(operationIdInput);
-  let selected = await loadPreparedJournal(operationId);
-  const policy = await assertRootProjection(operationId, selected.value);
+  let selected = await loadJournal(operationId);
+  await assertRootProjection(operationId, selected.value);
   await assertRecordedLinks(selected.value);
   await adoptCandidateTree(
     selected.value.candidate,
     selected.value.preparedTreeSha256,
   );
-  const candidate = await revalidateCandidate(selected.value, policy);
+  const candidate = await revalidateCandidate(selected.value);
 
   let switched = false;
   let previousCommitted = false;
@@ -1555,6 +1577,20 @@ if (
   process.argv[1] &&
   resolve(process.argv[1]) === resolve(new URL(import.meta.url).pathname)
 ) {
-  if (process.argv.length !== 3) process.exit(64);
-  activateOperation(process.argv[2]).catch(() => process.exit(75));
+  if (process.argv.length === 3) {
+    activateOperation(process.argv[2]).catch(() => process.exit(75));
+  } else if (
+    process.argv.length === 4 &&
+    (process.argv[2] === "--recover-finalize" ||
+      process.argv[2] === "--recover-restore")
+  ) {
+    recoverOperation(
+      process.argv[3],
+      process.argv[2] === "--recover-finalize"
+        ? "finalize-healthy"
+        : "restore-prior",
+    ).catch(() => process.exit(75));
+  } else {
+    process.exit(64);
+  }
 }

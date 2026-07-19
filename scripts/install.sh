@@ -27,6 +27,7 @@ main() {
   setup_pigpiod
   setup_tmpfs
   prompt_config
+  install_ota_policy
   configure_serial_headless
   patch_legacy_feature_serial_calls
   install_selected_features
@@ -283,8 +284,14 @@ setup_ota_preparation() {
     "$INSTALL_DIR/installer/ota-prepare.mjs" \
     /usr/lib/home-worker/ota-prepare.mjs
   sudo install -m 644 -o root -g root \
+    "$INSTALL_DIR/installer/ota-contracts.mjs" \
+    /usr/lib/home-worker/ota-contracts.mjs
+  sudo install -m 644 -o root -g root \
     "$INSTALL_DIR/installer/ota-activate.mjs" \
     /usr/lib/home-worker/ota-activate.mjs
+  sudo install -m 644 -o root -g root \
+    "$INSTALL_DIR/installer/ota-recover.mjs" \
+    /usr/lib/home-worker/ota-recover.mjs
   sudo install -m 644 -o root -g root \
     "$INSTALL_DIR/ecosystem.config.js" \
     /usr/lib/home-worker/ecosystem.config.cjs
@@ -298,6 +305,9 @@ setup_ota_preparation() {
     "$INSTALL_DIR/systemd/home-worker-ota-activate@.service" \
     /etc/systemd/system/home-worker-ota-activate@.service
   sudo install -m 644 -o root -g root \
+    "$INSTALL_DIR/systemd/home-worker-ota-recover.service" \
+    /etc/systemd/system/home-worker-ota-recover.service
+  sudo install -m 644 -o root -g root \
     "$INSTALL_DIR/systemd/home-worker-ota-tmpfiles.conf" \
     /usr/lib/tmpfiles.d/home-worker-ota.conf
 
@@ -308,10 +318,24 @@ setup_ota_preparation() {
   sudo install -m 440 -o root -g root \
     "$INSTALL_DIR/systemd/home-worker-ota-prepare.sudoers" \
     /etc/sudoers.d/home-worker-ota-prepare
+  if ! sudo visudo -c -f "$INSTALL_DIR/systemd/home-worker-ota-recovery.sudoers" >/dev/null; then
+    echo "ERROR: OTA recovery sudoers policy failed validation" >&2
+    exit 1
+  fi
+  sudo install -m 440 -o root -g root \
+    "$INSTALL_DIR/systemd/home-worker-ota-recovery.sudoers" \
+    /etc/sudoers.d/home-worker-ota-recovery
 
   sudo systemd-tmpfiles --create /usr/lib/tmpfiles.d/home-worker-ota.conf
   sudo systemctl daemon-reload
   echo "OTA preparation and activation assets installed"
+}
+
+install_ota_policy() {
+  echo "Installing root-owned OTA policy..."
+  sudo install -d -m 0755 -o root -g root /etc/home-worker
+  sudo /usr/bin/node /usr/lib/home-worker/ota-contracts.mjs install-policy
+  sudo systemctl enable home-worker-ota-recover.service
 }
 
 setup_pigpiod() {

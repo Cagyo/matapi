@@ -346,6 +346,30 @@ describe("OTA schema-v1 contracts", () => {
     ).toThrow();
   });
 
+  it("accepts null identities only for corrupt-state maintenance reports", () => {
+    const maintenance = {
+      schemaVersion: 1,
+      operationId: null,
+      kind: null,
+      outcome: "maintenance-required",
+      artifactSha256: null,
+      metadataSha256: null,
+      failure: { code: "maintenance-required" },
+      writtenAt: "2030-01-01T00:00:00.000Z",
+    };
+
+    expect(parseStartupReport(maintenance)).toEqual(maintenance);
+    expect(() =>
+      parseStartupReport({ ...maintenance, outcome: "updated" }),
+    ).toThrow();
+    expect(() =>
+      parseStartupReport({
+        ...maintenance,
+        operationId: "AAAAAAAAAAAAAAAAAAAAAA",
+      }),
+    ).toThrow();
+  });
+
   it.each(["9007199254740992", "-9007199254740992", "1e400"])(
     "rejects unsafe integer JSON literal %s",
     (value) => {

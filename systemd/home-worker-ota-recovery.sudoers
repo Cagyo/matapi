@@ -1,0 +1,2 @@
+homeworker ALL=(root) NOPASSWD: /usr/bin/node /usr/lib/home-worker/ota-activate.mjs --recover-finalize *
+homeworker ALL=(root) NOPASSWD: /usr/bin/node /usr/lib/home-worker/ota-activate.mjs --recover-restore *

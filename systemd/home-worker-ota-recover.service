@@ -1,0 +1,23 @@
+[Unit]
+Description=Recover interrupted Home Worker OTA activation
+Before=pm2-homeworker.service
+
+[Service]
+Type=oneshot
+User=homeworker
+Group=homeworker
+UMask=0077
+ExecStart=/usr/bin/node /usr/lib/home-worker/ota-recover.mjs
+PrivateNetwork=yes
+NoNewPrivileges=no
+PrivateTmp=yes
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/opt/home-worker
+InaccessiblePaths=-/opt/home-worker/.env
+TimeoutStartSec=45s
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+RequiredBy=pm2-homeworker.service

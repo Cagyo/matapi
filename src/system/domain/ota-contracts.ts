@@ -247,11 +247,11 @@ export interface PreparationReceipt {
 
 export interface StartupReport {
   schemaVersion: 1;
-  operationId: string;
-  kind: "update" | "rollback";
+  operationId: string | null;
+  kind: "update" | "rollback" | null;
   outcome: "updated" | "rolled-back" | "failed" | "maintenance-required";
-  artifactSha256: string;
-  metadataSha256: string;
+  artifactSha256: string | null;
+  metadataSha256: string | null;
   failure: OtaFailure | null;
   writtenAt: string;
 }
@@ -1176,13 +1176,45 @@ export function parseStartupReport(value: DocumentInput): StartupReport {
   ) {
     invalid("startup outcome is unsupported");
   }
+  const nullIdentity =
+    report.operationId === null &&
+    report.kind === null &&
+    report.artifactSha256 === null &&
+    report.metadataSha256 === null;
+  const completeIdentity =
+    report.operationId !== null &&
+    report.kind !== null &&
+    report.artifactSha256 !== null &&
+    report.metadataSha256 !== null;
+  if (
+    (!nullIdentity && !completeIdentity) ||
+    (nullIdentity && outcome !== "maintenance-required")
+  ) {
+    invalid("startup report identity is inconsistent");
+  }
+  const successful = outcome === "updated" || outcome === "rolled-back";
+  if (
+    (successful && report.failure !== null) ||
+    (!successful && report.failure === null)
+  ) {
+    invalid("startup report failure is inconsistent");
+  }
   return {
     schemaVersion: asSchemaVersion(report.schemaVersion),
-    operationId: asOperationId(report.operationId, "operationId"),
-    kind: asKind(report.kind, "kind"),
+    operationId:
+      report.operationId === null
+        ? null
+        : asOperationId(report.operationId, "operationId"),
+    kind: report.kind === null ? null : asKind(report.kind, "kind"),
     outcome: outcome as StartupReport["outcome"],
-    artifactSha256: asSha256(report.artifactSha256, "artifactSha256"),
-    metadataSha256: asSha256(report.metadataSha256, "metadataSha256"),
+    artifactSha256:
+      report.artifactSha256 === null
+        ? null
+        : asSha256(report.artifactSha256, "artifactSha256"),
+    metadataSha256:
+      report.metadataSha256 === null
+        ? null
+        : asSha256(report.metadataSha256, "metadataSha256"),
     failure: report.failure === null ? null : parseOtaFailure(report.failure),
     writtenAt: asTimestamp(report.writtenAt, "writtenAt"),
   };

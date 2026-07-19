@@ -1,9 +1,11 @@
 import { Module } from "@nestjs/common";
 import { EventModule } from "../events/event.module";
 import { BootRecoveryService } from "./application/boot-recovery.service";
+import { ConsumeStartupReportUseCase } from "./application/consume-startup-report.use-case";
 import { CheckForUpdatesUseCase } from "./application/check-for-updates.use-case";
 import { GracefulShutdownService } from "./application/graceful-shutdown.service";
 import { OtaAdminNotificationService } from "./application/ota-admin-notification.service";
+import { OtaOperationMonitorService } from "./application/ota-operation-monitor.service";
 import { UPDATE_CHECK_OPTIONS } from "./application/ports/update-check-options.port";
 import {
   UPDATE_DISCOVERY_CLOCK,
@@ -37,6 +39,7 @@ import { DrizzleSystemMetaRepository } from "./infrastructure/drizzle-system-met
 import { DualSlotTrustedStateAdapter } from "./infrastructure/dual-slot-trusted-state.adapter";
 import { Ed25519EnvelopeVerifierAdapter } from "./infrastructure/ed25519-envelope-verifier.adapter";
 import { FsInstalledReleaseAdapter } from "./infrastructure/fs-installed-release.adapter";
+import { FsStartupReportStore } from "./infrastructure/fs-startup-report.store";
 import { NodeReleaseFeedTransportAdapter } from "./infrastructure/node-release-feed-transport.adapter";
 import { loadOtaConfig } from "./infrastructure/ota-discovery-config.loader";
 import { otaOperationLauncherForMode } from "./infrastructure/ota-operation-launcher.factory";
@@ -104,6 +107,26 @@ const timer: UpdateDiscoveryTimerPort = {
     CheckForUpdatesUseCase,
     GracefulShutdownService,
     OtaAdminNotificationService,
+    OtaOperationMonitorService,
+    FsStartupReportStore,
+    {
+      provide: ConsumeStartupReportUseCase,
+      useFactory: (
+        reports: FsStartupReportStore,
+        meta: import("./domain/ports/system-meta-repository.port").SystemMetaRepositoryPort,
+      ) =>
+        new ConsumeStartupReportUseCase({
+          reports,
+          mirror: {
+            mirror: (report) =>
+              meta.set("ota_startup_report", JSON.stringify(report)),
+          },
+          // Task 14 registers concrete notification recipients. Until then a
+          // zero count deliberately retains the durable pending report.
+          delivery: { deliver: async () => ({ delivered: 0 }) },
+        }),
+      inject: [FsStartupReportStore, SYSTEM_META_REPOSITORY],
+    },
     UpdateDiscoveryService,
     {
       provide: OTA_ADMIN_NOTIFICATIONS,

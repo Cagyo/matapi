@@ -13,6 +13,7 @@ import {
   activateOperation,
   adoptCandidateTree,
   digestTree,
+  recoverOperation,
   verifyCandidateAuthorization,
 } from "../../../installer/ota-activate.mjs";
 
@@ -307,6 +308,19 @@ describe("root OTA activation helper assets", () => {
     },
   );
 
+  it("rejects altered recovery action or caller-supplied target before filesystem access", async () => {
+    await expect(
+      recoverOperation("AAAAAAAAAAAAAAAAAAAAAA", "activate-target"),
+    ).rejects.toMatchObject({ code: "maintenance-required" });
+    await expect(
+      recoverOperation(
+        "AAAAAAAAAAAAAAAAAAAAAA",
+        "restore-prior",
+        `9.9.9-${"f".repeat(64)}`,
+      ),
+    ).rejects.toMatchObject({ code: "maintenance-required" });
+  });
+
   it("fails closed when the root-owned operation projection is unavailable", async () => {
     await expect(
       activateOperation("AbCdEfGhIjKlMnOpQrStUw"),
@@ -339,7 +353,7 @@ describe("root OTA activation helper assets", () => {
     const activated = helper.indexOf('transitionJournal(selected, "activated"');
     const health = helper.indexOf("await waitForHealth(operationId");
     const knownGood = helper.indexOf("const knownGood = await writeKnownGood(");
-    const healthy = helper.indexOf('transitionJournal(selected, "healthy"');
+    const healthy = helper.lastIndexOf('transitionJournal(selected, "healthy"');
     const previous = helper.lastIndexOf('atomicLink("previous"');
 
     expect(migration).toBeLessThan(activating);
