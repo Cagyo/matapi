@@ -110,7 +110,6 @@ describe("candidate build orchestration", () => {
       "resolve-build-roots",
       "prepare-build-checkout",
       "install-development",
-      "test",
       "build",
       "prepare-assembly",
       "pin-yarn",
@@ -152,11 +151,11 @@ describe("candidate build orchestration", () => {
     expect(result.descriptorBytes.toString("utf8")).toContain(
       '"kind":"home-worker-unsigned-candidate"',
     );
+    expect(deps.run.mock.calls[0][0].env).not.toHaveProperty("NODE_ENV");
   });
 
   it.each([
     "install-development",
-    "test",
     "build",
     "pin-yarn",
     "create-archive",

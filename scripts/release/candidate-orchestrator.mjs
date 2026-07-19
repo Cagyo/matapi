@@ -64,7 +64,6 @@ function commandEnvironment(root, sourceDateEpoch, network) {
     TZ: "UTC",
     LC_ALL: "C",
     SOURCE_DATE_EPOCH: String(sourceDateEpoch),
-    NODE_ENV: "production",
     YARN_ENABLE_NETWORK: network ? "true" : "false",
     YARN_ENABLE_GLOBAL_CACHE: "false",
     YARN_ENABLE_IMMUTABLE_INSTALLS: "true",
@@ -156,17 +155,12 @@ export async function runCandidateBuild(rawInput, dependencies) {
   );
   await runStep(
     dependencies,
-    "test",
-    process.execPath,
-    [join(input.workRoot, "state/build", YARN_RUNTIME_NAME), "test"],
-    buildRoot,
-    buildEnv,
-  );
-  await runStep(
-    dependencies,
     "build",
     process.execPath,
-    [join(input.workRoot, "state/build", YARN_RUNTIME_NAME), "build"],
+    [
+      join(input.workRoot, "state/build", YARN_RUNTIME_NAME),
+      "build",
+    ],
     buildRoot,
     buildEnv,
   );

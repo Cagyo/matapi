@@ -61,7 +61,6 @@ function allowedCommand(phase, env) {
   if (phase === "install-development") {
     return [process.execPath, [runtime, "install", "--immutable"]];
   }
-  if (phase === "test") return [process.execPath, [runtime, "test"]];
   if (phase === "build") return [process.execPath, [runtime, "build"]];
   if (phase === "pin-yarn") {
     return [

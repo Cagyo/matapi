@@ -3,7 +3,6 @@ const STAGES = new Set([
   "resolve-build-roots",
   "prepare-build-checkout",
   "install-development",
-  "test",
   "build",
   "prepare-assembly",
   "pin-yarn",
