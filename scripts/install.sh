@@ -276,18 +276,27 @@ install_app() {
 }
 
 setup_ota_preparation() {
-  echo "Installing network-isolated OTA dependency preparation assets..."
+  echo "Installing network-isolated OTA preparation and activation assets..."
 
   sudo install -d -m 755 -o root -g root /usr/lib/home-worker
   sudo install -m 644 -o root -g root \
     "$INSTALL_DIR/installer/ota-prepare.mjs" \
     /usr/lib/home-worker/ota-prepare.mjs
+  sudo install -m 644 -o root -g root \
+    "$INSTALL_DIR/installer/ota-activate.mjs" \
+    /usr/lib/home-worker/ota-activate.mjs
+  sudo install -m 644 -o root -g root \
+    "$INSTALL_DIR/ecosystem.config.js" \
+    /usr/lib/home-worker/ecosystem.config.cjs
   sudo install -m 755 -o root -g root \
     "$INSTALL_DIR/installer/ota-prepare-activate" \
     /usr/lib/home-worker/ota-prepare-activate
   sudo install -m 644 -o root -g root \
     "$INSTALL_DIR/systemd/home-worker-ota-prepare@.service" \
     /etc/systemd/system/home-worker-ota-prepare@.service
+  sudo install -m 644 -o root -g root \
+    "$INSTALL_DIR/systemd/home-worker-ota-activate@.service" \
+    /etc/systemd/system/home-worker-ota-activate@.service
   sudo install -m 644 -o root -g root \
     "$INSTALL_DIR/systemd/home-worker-ota-tmpfiles.conf" \
     /usr/lib/tmpfiles.d/home-worker-ota.conf
@@ -302,7 +311,7 @@ setup_ota_preparation() {
 
   sudo systemd-tmpfiles --create /usr/lib/tmpfiles.d/home-worker-ota.conf
   sudo systemctl daemon-reload
-  echo "OTA dependency preparation assets installed"
+  echo "OTA preparation and activation assets installed"
 }
 
 setup_pigpiod() {

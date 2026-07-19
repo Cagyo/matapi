@@ -1,3 +1,4 @@
+import "dotenv/config";
 import Database from "better-sqlite3";
 import { resolve } from "node:path";
 import { createMigratedDatabase } from "../../database/create-migrated-database";

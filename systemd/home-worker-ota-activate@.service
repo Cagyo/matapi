@@ -1,0 +1,24 @@
+[Unit]
+Description=Activate Home Worker OTA release for operation %i
+ConditionPathExists=/opt/home-worker/shared/update
+ConditionPathExists=/run/home-worker/activate/%i.json
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/bin/node /usr/lib/home-worker/ota-activate.mjs %i
+TimeoutStartSec=3min
+TimeoutStopSec=30s
+KillMode=control-group
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/opt/home-worker /run/home-worker /home/homeworker/.pm2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+# Instances are started on demand only.

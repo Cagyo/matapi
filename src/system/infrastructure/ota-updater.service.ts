@@ -78,6 +78,11 @@ export interface OtaUpdaterTemporary {
 export interface OtaUpdaterLayoutPort {
   capturePointers(): Promise<ReleasePointers>;
   inspectCandidate(candidate: string): Promise<CandidateInspection>;
+  inspectPreparedCandidate(candidate: string): Promise<{
+    path: string;
+    artifactState: ArtifactMarker;
+    artifactEnvelope: Uint8Array;
+  }>;
   removeIncomplete(candidate: string): Promise<void>;
   createTemporary(operationId: string): Promise<OtaUpdaterTemporary>;
   reserveCandidate(candidate: string): Promise<string>;
@@ -150,6 +155,9 @@ export interface OtaUpdaterDependencies {
   cache: OtaUpdaterCachePort;
   preparation: OtaUpdaterPreparationPort;
   tree: PreparedTreeGateway;
+  activation: {
+    start(operationId: string): Promise<void>;
+  };
 }
 
 function fail(code: OtaFailureCode): never {
@@ -427,6 +435,7 @@ export class OtaUpdaterService {
     } finally {
       await this.dependencies.layout.cleanupTemporary(temporary);
     }
+    await this.activatePrepared(preparing);
   }
 
   private async reuseKnownGood(
@@ -468,6 +477,57 @@ export class OtaUpdaterService {
         preparedTreeSha256: measured.sha256,
         updatedAt: checkTime.toISOString(),
       });
+      await this.activatePrepared(journal);
+    } catch (error) {
+      maintenance(error);
+    }
+  }
+
+  private async activatePrepared(previous: OperationJournal): Promise<void> {
+    try {
+      const journal = await this.dependencies.journal.load();
+      if (
+        journal?.operationId !== previous.operationId ||
+        journal.kind !== "update" ||
+        journal.phase !== "prepared" ||
+        journal.expected === null ||
+        journal.candidate === null ||
+        journal.preparedTreeSha256 === null ||
+        !sameCheckedRelease(journal.expected, previous.expected!)
+      ) {
+        fail("maintenance-required");
+      }
+      const candidate = await this.dependencies.layout.inspectPreparedCandidate(
+        journal.candidate,
+      );
+      const measured = await this.dependencies.tree.measureAndDigest(
+        candidate.path,
+      );
+      const envelopeSha = createHash("sha256")
+        .update(candidate.artifactEnvelope)
+        .digest("hex");
+      const authorized = this.dependencies.verifier.verify(
+        candidate.artifactEnvelope,
+        this.dependencies.policy,
+        new Date(candidate.artifactState.metadata.publishedAt),
+      );
+      if (
+        !sameArtifact(
+          candidate.artifactState.artifact,
+          journal.expected.artifact,
+        ) ||
+        !sameMetadata(
+          candidate.artifactState.metadata,
+          journal.expected.metadata,
+        ) ||
+        !sameCheckedRelease(authorized.checkedRelease, journal.expected) ||
+        candidate.artifactState.envelopeSha256 !== envelopeSha ||
+        candidate.artifactState.preparedTreeSha256 !== measured.sha256 ||
+        journal.preparedTreeSha256 !== measured.sha256
+      ) {
+        fail("maintenance-required");
+      }
+      await this.dependencies.activation.start(journal.operationId);
     } catch (error) {
       maintenance(error);
     }

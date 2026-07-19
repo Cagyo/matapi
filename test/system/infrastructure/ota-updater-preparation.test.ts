@@ -194,13 +194,14 @@ function knownGood(): KnownGoodMarker {
 function dependencies(events: string[] = []): OtaUpdaterDependencies {
   const req = request();
   const journal = preparingJournal(req);
+  let selected: OperationJournal | null = null;
   return {
     policy,
     requests: {
       load: vi.fn(async () => req),
     },
     journal: {
-      load: vi.fn(async () => null),
+      load: vi.fn(async () => selected),
       start: vi.fn(async (input) => {
         events.push("journal:start");
         expect(input).toMatchObject({
@@ -209,17 +210,19 @@ function dependencies(events: string[] = []): OtaUpdaterDependencies {
           receiptGeneration: 1,
           candidate: CANDIDATE,
         });
-        return journal;
+        selected = journal;
+        return selected;
       }),
-      transition: vi.fn(async (_current, phase, update) => {
+      transition: vi.fn(async (current, phase, update) => {
         events.push(`journal:${phase}`);
-        return {
-          ...journal,
-          generation: 2,
+        selected = {
+          ...current,
+          generation: current.generation + 1,
           phase,
           preparedTreeSha256:
-            update?.preparedTreeSha256 ?? journal.preparedTreeSha256,
+            update?.preparedTreeSha256 ?? current.preparedTreeSha256,
         };
+        return selected;
       }),
     },
     handshake: {
@@ -261,6 +264,11 @@ function dependencies(events: string[] = []): OtaUpdaterDependencies {
         previous: null,
       })),
       inspectCandidate: vi.fn(async () => ({ kind: "absent" as const })),
+      inspectPreparedCandidate: vi.fn(async () => ({
+        path: `/opt/home-worker/releases/${CANDIDATE}`,
+        artifactState: artifactMarker(),
+        artifactEnvelope: ENVELOPE,
+      })),
       removeIncomplete: vi.fn(async () => undefined),
       createTemporary: vi.fn(async () => ({
         directory: "/tmp/ota-private",
@@ -329,6 +337,11 @@ function dependencies(events: string[] = []): OtaUpdaterDependencies {
         events.push("tree:flush");
       }),
     },
+    activation: {
+      start: vi.fn(async () => {
+        events.push("activation:start");
+      }),
+    },
   };
 }
 
@@ -368,6 +381,8 @@ describe("OtaUpdaterService preparation", () => {
       "tree:flush",
       "storage:checkpoint",
       "journal:prepared",
+      "trusted:verify",
+      "activation:start",
     ]);
     expect(deps.transport.fetchEnvelope).not.toHaveBeenCalled();
     expect(deps.trusted).not.toHaveProperty("commit");
@@ -470,5 +485,19 @@ describe("OtaUpdaterService preparation", () => {
       new OtaUpdaterService(deps).run(OPERATION_ID, 3),
     ).rejects.toThrow("injected fsync failure");
     expect(deps.journal.transition).not.toHaveBeenCalled();
+  });
+
+  it("revalidates the durable prepared candidate before requesting root activation", async () => {
+    const deps = dependencies();
+    vi.mocked(deps.layout.inspectPreparedCandidate).mockResolvedValue({
+      path: `/opt/home-worker/releases/${CANDIDATE}`,
+      artifactState: artifactMarker(checkedRelease(), "9".repeat(64)),
+      artifactEnvelope: ENVELOPE,
+    });
+
+    await expect(
+      new OtaUpdaterService(deps).run(OPERATION_ID, 3),
+    ).rejects.toMatchObject({ code: "maintenance-required" });
+    expect(deps.activation.start).not.toHaveBeenCalled();
   });
 });
