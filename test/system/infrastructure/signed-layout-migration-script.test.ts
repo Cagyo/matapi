@@ -406,8 +406,28 @@ describe("signed layout migration gate", () => {
     );
   });
 
+  it("refuses fresh mode when a PM2 worker already exists without external mutation", () => {
+    const setup = fixture({ legacy: false, workerState: "running" });
+
+    const result = run(setup, ["--fresh"]);
+
+    expect(result.status).toBe(75);
+    expect(`${result.stdout}${result.stderr}`).toContain("absent");
+    const calls = readFileSync(setup.calls, "utf8");
+    expect(calls).toContain("pm2:jlist");
+    expect(calls).not.toMatch(
+      /systemctl:(?:disable|enable)|pm2:(?:stop|start)|chattr:/,
+    );
+    expect(() => lstatSync(setup.installRoot)).toThrow();
+    expect(
+      readdirSync(join(setup.root, "var/lib/home-worker"), {
+        withFileTypes: true,
+      }).filter((entry) => entry.name.startsWith("migration-")),
+    ).toHaveLength(0);
+  });
+
   it("supports a guarded fresh layout only when the install root is absent", () => {
-    const setup = fixture({ legacy: false });
+    const setup = fixture({ legacy: false, workerState: "absent" });
 
     const result = run(setup, ["--fresh"]);
 

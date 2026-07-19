@@ -404,6 +404,9 @@ else process.exit(1);
 ' <<<"$PM2_LIST" 2>/dev/null)"; then
   fail_gate "Cannot validate the prior PM2 worker state."
 fi
+if [[ "$MODE" == "fresh" && "$WORKER_PRIOR_STATE" != "absent" ]]; then
+  fail_gate "Fresh install requires the PM2 worker state to be absent."
+fi
 POLLING_CHANGED=1
 "$SYSTEMCTL" disable home-worker-update.timer
 if [[ "$WORKER_PRIOR_STATE" == "running" ]]; then
