@@ -1,10 +1,14 @@
 # 25 — Installation
 
+> **Current rollout gate (Task 15, partial):** installation is offline and fail-closed. Invoke exactly `scripts/install.sh --fresh` or `scripts/install.sh --migrate --confirm`. Both modes require the fixed, authenticated baseline/key/policy inputs and perform no package-manager, repository, PM2, ownership, layout, or database mutation when those inputs are absent or invalid. Production layout adoption remains disabled until Tasks 16–18 provide and approve a genuine Pi baseline/key bundle; the validator exits 75 with provisioning guidance. The detailed Phase 0 flow below is retained only as historical context and must not be executed.
+
+The fixed production inputs are `/etc/home-worker/update-keys/active/bootstrap.pem`, its adjacent `bootstrap.sha256` fingerprint, `/etc/home-worker/ota-policy.json`, and `/var/lib/home-worker/bootstrap/{baseline-envelope.json,baseline.tar.gz}`. Overrides are accepted only by the guarded canonical temporary-root test harness.
+
 ## Dependencies
 - 00-overview.md (.env, project structure)
 - 01-database.md (migrations)
 
-## Phase 0 — Simple Install Script
+## Phase 0 — Retired Unsigned Install Script (Historical)
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/<user>/<repo>/main/scripts/install.sh | bash

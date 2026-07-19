@@ -18,12 +18,10 @@ Admin only
 ```
 
 ### Behavior
-1. Check for update lockfile (`/tmp/home-worker-updating.lock`) — if exists, reject
-2. Reply: "🔄 Checking for updates..."
-3. Trigger `scripts/update.sh` as child process
-4. Script: git fetch → compare → tag rollback point → git reset → yarn install --immutable → drizzle migrate → pm2 restart → 30s health check
-5. If health check passes: bot sends "✅ Update complete. Version: <commit_hash>"
-6. If health check fails: script rolls back automatically, notifies via direct curl to Telegram API
+1. Authorize the exact OTA operation through the Telegram application service.
+2. Reply with the operation receipt and status from the signed OTA workflow.
+3. Never execute `scripts/update.sh`; that compatibility entry point exits 64 and directs operators back to `/update`.
+4. Never use repository, checkout-copy, or unsigned release fallbacks.
 
 ### Output
 ```
@@ -44,9 +42,9 @@ Or:
 | Condition | Response |
 |-----------|----------|
 | Update already running | "⏳ Update already in progress, please wait." |
-| Git fetch fails | "❌ Failed to check for updates: [error]" |
-| yarn install fails | Auto-rollback, notify: "❌ Update failed, rolled back." |
-| Health check fails (app crashes within 30s) | Auto-rollback, notify via curl |
+| Signed metadata or artifact validation fails | Report the typed OTA failure receipt |
+| Preparation or activation fails | Preserve the current release and report the typed failure receipt |
+| Health check fails | Authenticated activation performs its bounded rollback workflow |
 
 ### Concurrent Prevention
 Lockfile `/tmp/home-worker-updating.lock` created at start, removed on exit (via `trap`). Bot checks lockfile before triggering.

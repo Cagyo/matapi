@@ -8,7 +8,6 @@ import { describe, expect, it } from 'vitest';
 
 describe('restricted RTSP runtime installation', () => {
   const installFeature = readFileSync(resolve('scripts/install-feature.sh'), 'utf8');
-  const install = readFileSync(resolve('scripts/install.sh'), 'utf8');
   const deps = readFileSync(resolve('config/system-deps.yml'), 'utf8');
   const envKeyProgram = (() => {
     const marker = 'sudo python3 - "$env_file" "$(id -u "$USER")" <<\'PY\'\n';
@@ -44,7 +43,6 @@ describe('restricted RTSP runtime installation', () => {
     expect(installFeature).toContain('d /run/home-worker/live-source-probe 0700 $USER $USER');
     expect(installFeature).not.toMatch(/sudoers[\s\S]*homeworker-ffmpeg-stream/);
     expect(installFeature).not.toMatch(/NOPASSWD:[^\n]*(?:nft|homeworker-ffmpeg|homeworker-stream-net)/);
-    expect(install).toContain("includes('rtsp')");
   });
 
   it('creates a locked no-login no-home stream identity and preserves an existing credential key', () => {
@@ -57,9 +55,6 @@ describe('restricted RTSP runtime installation', () => {
     expect(installFeature).not.toMatch(/echo[^\n]*RTSP_CREDENTIALS_KEY[^\n]*\$RTSP_CREDENTIALS_KEY/);
     expect(installFeature).toContain('restart the worker supervisor to refresh its homeworker-stream group membership');
     expect(installFeature).toMatch(/HOME_WORKER_RTSP_SKIP_RUNTIME_INSTALL[^\n]*VITEST/);
-    expect(install).toContain('RTSP_GROUP_REFRESH_REQUIRED=1');
-    expect(install).toContain('pm2 kill');
-    expect(install.indexOf('pm2 kill')).toBeLessThan(install.indexOf('pm2 jlist'));
   });
 
   it('preserves a safe existing credential key without changing the private env file', () => {

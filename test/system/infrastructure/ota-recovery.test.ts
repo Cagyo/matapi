@@ -396,7 +396,7 @@ describe("OTA boot recovery", () => {
     expect(setup.events).toEqual(["report", "stop"]);
   });
 
-  it("installs the isolated pre-PM2 recovery launcher and fixed helper actions", () => {
+  it("keeps the isolated recovery launcher dormant until baseline adoption", () => {
     const unit = readFileSync(
       resolve("systemd/home-worker-ota-recover.service"),
       "utf8",
@@ -405,7 +405,10 @@ describe("OTA boot recovery", () => {
       resolve("systemd/home-worker-ota-recovery.sudoers"),
       "utf8",
     );
-    const installer = readFileSync(resolve("scripts/install.sh"), "utf8");
+    const migration = readFileSync(
+      resolve("scripts/migrate-to-signed-ota.sh"),
+      "utf8",
+    );
     const launcher = readFileSync(resolve("installer/ota-recover.mjs"), "utf8");
 
     expect(unit).toContain("Before=pm2-homeworker.service");
@@ -418,12 +421,10 @@ describe("OTA boot recovery", () => {
     );
     expect(sudoers).toContain("--recover-finalize *");
     expect(sudoers).toContain("--recover-restore *");
-    expect(installer).toContain(
-      "/usr/lib/home-worker/ota-contracts.mjs install-policy",
+    expect(migration).toContain(
+      "production signed-layout adoption remains disabled",
     );
-    expect(installer).toContain(
-      "systemctl enable home-worker-ota-recover.service",
-    );
+    expect(migration).not.toMatch(/ota-recover\.service|install-policy/);
     expect(launcher).not.toMatch(
       /fetch\(|better-sqlite3|migrate|extract|waitForHealth/,
     );

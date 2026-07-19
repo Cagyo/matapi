@@ -1,11 +1,13 @@
 # 24 — OTA Updates
 
+> **Current rollout gate (Task 15, partial):** `scripts/update.sh` is no longer an updater; it exits 64 and directs the operator to the authenticated `/update` command. `scripts/install.sh` accepts only `--fresh` or `--migrate --confirm` and delegates to an offline signed-baseline validator. Missing or invalid fixed key, fingerprint, policy, envelope, archive, target-runtime, tree, disk, or inode inputs exit 75 before protected mutation. Production signed-layout adoption remains disabled until Tasks 16–18 deliver and approve the genuine Pi baseline/key bundle. The legacy script example below is historical and prohibited.
+
 ## Dependencies
 - 00-overview.md (system-deps.yml)
 - 06-bot-core.md (bot for notifications)
 - 01-database.md (migrations)
 
-## App Update Script
+## Retired Unsigned App Update Script (Historical)
 
 ```bash
 #!/bin/bash

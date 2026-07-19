@@ -74,7 +74,6 @@ function createRepositoryHarness(architecture = 'armhf') {
 
 describe('experimental live-stream installation', () => {
   const featureScript = readFileSync(resolve('scripts/install-feature.sh'), 'utf8');
-  const installScript = readFileSync(resolve('scripts/install.sh'), 'utf8');
 
   it('installs and diagnoses cloudflared only through the explicit rtsp feature', () => {
     expect(featureScript).toMatch(/\n {2}rtsp\)/);
@@ -83,7 +82,6 @@ describe('experimental live-stream installation', () => {
     expect(featureScript).toContain('"$cloudflared_bin" --config "$config" tunnel diag');
     expect(featureScript).toContain('sudo -H -u "$USER"');
     expect(featureScript).toContain('DNS resolution and outbound port 7844');
-    expect(installScript).toContain("includes('rtsp')");
   });
 
   it('configures the signed Cloudflare apt source before updating and installing', () => {

@@ -10,7 +10,7 @@ describe("OTA dependency preparation assets", () => {
   const activator = read("installer/ota-prepare-activate");
   const sudoers = read("systemd/home-worker-ota-prepare.sudoers");
   const tmpfiles = read("systemd/home-worker-ota-tmpfiles.conf");
-  const install = read("scripts/install.sh");
+  const migration = read("scripts/migrate-to-signed-ota.sh");
   const preparer = read("installer/ota-prepare.mjs");
 
   it("pins the required systemd sandbox and whole-cgroup lifecycle", () => {
@@ -75,16 +75,12 @@ describe("OTA dependency preparation assets", () => {
     );
   });
 
-  it("installs root-owned assets and creates only the volatile preparation root", () => {
+  it("keeps root-owned preparation assets dormant until baseline adoption is enabled", () => {
     expect(tmpfiles).toContain("d /run/home-worker/prepare 0711 root root - -");
     expect(tmpfiles).toContain(
       "f /run/home-worker/ota-prepare.lock 0644 root root - -",
     );
-    expect(install).toContain("setup_ota_preparation");
-    expect(install).toContain("systemd/home-worker-ota-prepare@.service");
-    expect(install).toContain("systemd/home-worker-ota-prepare.sudoers");
-    expect(install).toContain("systemd/home-worker-ota-tmpfiles.conf");
-    expect(install).toContain("installer/ota-prepare.mjs");
-    expect(install).toContain("installer/ota-prepare-activate");
+    expect(migration).toContain("production signed-layout adoption remains disabled");
+    expect(migration).not.toMatch(/ota-prepare@|ota-prepare\.sudoers|installer\/ota-prepare/);
   });
 });

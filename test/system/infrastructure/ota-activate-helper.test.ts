@@ -415,13 +415,12 @@ describe("root OTA activation helper assets", () => {
     expect(unit).toContain("TimeoutStartSec=3min");
   });
 
-  it("installs root-owned activation assets and separates the protected projection directory", () => {
-    const install = read("scripts/install.sh");
+  it("keeps root-owned activation assets dormant and separates the protected projection directory", () => {
+    const migration = read("scripts/migrate-to-signed-ota.sh");
     const tmpfiles = read("systemd/home-worker-ota-tmpfiles.conf");
 
-    expect(install).toContain("installer/ota-activate.mjs");
-    expect(install).toContain("home-worker-ota-activate@.service");
-    expect(install).toContain("/usr/lib/home-worker/ecosystem.config.cjs");
+    expect(migration).toContain("production signed-layout adoption remains disabled");
+    expect(migration).not.toMatch(/ota-activate@|installer\/ota-activate/);
     expect(tmpfiles).toContain("d /run/home-worker 1770 root homeworker");
     expect(tmpfiles).toContain("d /run/home-worker/activate 0700 root root");
   });
