@@ -209,7 +209,7 @@ async function copyClosedTree(source, destination, executable = false) {
 }
 
 async function runProcess(command, args, options) {
-  await new Promise((resolvePromise, reject) => {
+  return await new Promise((resolvePromise, reject) => {
     const child = spawn(command, args, {
       cwd: options.cwd,
       env: options.env,
@@ -561,6 +561,22 @@ export function createNodeCandidateDependencies() {
           {
             phase: "clone-source",
             cwd: dirname(buildRoot),
+            env: { PATH: "/usr/bin:/bin", LC_ALL: "C", TZ: "UTC" },
+          },
+        ),
+      );
+      await checkoutOperation("fetch-release-tag-failed", () =>
+        runProcess(
+          "/usr/bin/git",
+          [
+            "fetch",
+            "--no-tags",
+            sourceRoot,
+            `+refs/tags/${tag}:refs/tags/${tag}`,
+          ],
+          {
+            phase: "fetch-release-tag",
+            cwd: buildRoot,
             env: { PATH: "/usr/bin:/bin", LC_ALL: "C", TZ: "UTC" },
           },
         ),

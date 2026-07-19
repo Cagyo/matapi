@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import {
   access,
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   stat,
   symlink,
   writeFile,
@@ -21,6 +23,10 @@ import {
 
 const sha256 = (value: Buffer | string) =>
   createHash("sha256").update(value).digest("hex");
+
+function git(cwd: string, args: string[]) {
+  return execFileSync("/usr/bin/git", args, { cwd, encoding: "utf8" }).trim();
+}
 
 async function write(root: string, path: string, contents = `${path}\n`) {
   const destination = join(root, path);
@@ -85,6 +91,36 @@ describe("node candidate dependencies", () => {
         code: "tag-not-annotated",
       }),
     );
+  });
+
+  it("copies the exact annotated tag from a detached source checkout", async () => {
+    const parent = await realpath(
+      await mkdtemp(join(tmpdir(), "candidate-detached-tag-")),
+    );
+    const sourceRoot = join(parent, "source");
+    const buildRoot = join(parent, "work", "build");
+    await mkdir(sourceRoot);
+    git(sourceRoot, ["init"]);
+    git(sourceRoot, ["config", "user.email", "test@example.invalid"]);
+    git(sourceRoot, ["config", "user.name", "Candidate test"]);
+    await writeFile(join(sourceRoot, "package.json"), "{}\n");
+    git(sourceRoot, ["add", "package.json"]);
+    git(sourceRoot, ["commit", "-m", "fixture"]);
+    const commit = git(sourceRoot, ["rev-parse", "HEAD"]);
+    git(sourceRoot, ["tag", "-a", "v1.2.3", "-m", "fixture tag"]);
+    git(sourceRoot, ["checkout", "--detach", commit]);
+
+    const dependencies = createNodeCandidateDependencies();
+    await expect(
+      dependencies.prepareBuildCheckout({
+        sourceRoot,
+        buildRoot,
+        commit,
+        tag: "v1.2.3",
+      }),
+    ).resolves.toBeUndefined();
+    expect(git(buildRoot, ["cat-file", "-t", "refs/tags/v1.2.3"])).toBe("tag");
+    expect(git(buildRoot, ["rev-parse", "v1.2.3^{commit}"])).toBe(commit);
   });
 
   it("rejects canonical output aliases into the immutable source", async () => {
