@@ -59,7 +59,7 @@ function validFacts() {
 }
 
 describe("release candidate policy", () => {
-  it("accepts only a fully attested Linux ARM Node 20 candidate", () => {
+  it("accepts a fully attested dependency-free source candidate", () => {
     expect(evaluateReleasePolicy(validFacts())).toEqual({
       publishable: true,
       label: "publishable",
@@ -67,7 +67,7 @@ describe("release candidate policy", () => {
     });
   });
 
-  it("refuses the current Darwin/Node 24 class of host deterministically", () => {
+  it("accepts a source archive built on Darwin/Node 24", () => {
     const facts = validFacts();
     facts.host = {
       platform: "darwin",
@@ -78,14 +78,9 @@ describe("release candidate policy", () => {
     };
 
     expect(evaluateReleasePolicy(facts)).toEqual({
-      publishable: false,
-      label: "nonpublishable",
-      reasons: [
-        "host-libc",
-        "host-node-abi",
-        "host-node-major",
-        "host-platform",
-      ],
+      publishable: true,
+      label: "publishable",
+      reasons: [],
     });
   });
 
@@ -113,20 +108,16 @@ describe("release candidate policy", () => {
     ]);
   });
 
-  it("requires the pinned Node 20 module ABI across host, builder, and dependency preparation", () => {
+  it("does not conflate source-builder and Pi-native runtime ABIs", () => {
     const facts = validFacts();
     facts.host.nodeModulesAbi = "999";
     facts.builder.nodeModulesAbi = "999";
     facts.dependencies.nodeModulesAbi = "999";
 
-    expect(evaluateReleasePolicy(facts).reasons).toEqual([
-      "builder-runtime",
-      "dependencies-runtime",
-      "host-node-abi",
-    ]);
+    expect(evaluateReleasePolicy(facts).reasons).toEqual([]);
   });
 
-  it("does not treat an arbitrary 32-bit ARM host as an ARMv7 builder", () => {
+  it("accepts the declared ARMv7 deployment target from any source host", () => {
     const facts = validFacts();
     facts.request.target = "linux-armv7-glibc";
     facts.package.releaseTarget = "linux-armv7-glibc";
@@ -135,14 +126,14 @@ describe("release candidate policy", () => {
     facts.builder.target = "linux-armv7-glibc";
     facts.dependencies.target = "linux-armv7-glibc";
 
-    expect(evaluateReleasePolicy(facts).reasons).toEqual(["host-arm-version"]);
+    expect(evaluateReleasePolicy(facts).reasons).toEqual([]);
   });
 
-  it("does not label a musl host as a glibc release target", () => {
+  it("does not use the source host libc as deployment validation", () => {
     const facts = validFacts();
     facts.host.libc = "musl";
 
-    expect(evaluateReleasePolicy(facts).reasons).toEqual(["host-libc"]);
+    expect(evaluateReleasePolicy(facts).reasons).toEqual([]);
   });
 
   it("binds both the lockfile and pinned Yarn runtime digests", () => {

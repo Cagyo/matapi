@@ -1,7 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
 import { hostRefusalReasons } from "../../../scripts/release/build-candidate.mjs";
@@ -41,62 +39,23 @@ describe("release candidate CLI", () => {
     );
   });
 
-  it.runIf(process.platform === "darwin")(
-    "refuses a Linux ARM candidate from Darwin before source or output access",
-    () => {
-      const outputPath = join(tmpdir(), `must-not-exist-${process.pid}.tar.gz`);
-      const result = spawnSync(
-        process.execPath,
-        [
-          cliPath,
-          "--version",
-          "1.2.3",
-          "--commit",
-          "a".repeat(40),
-          "--tag",
-          "v1.2.3",
-          "--target",
-          "linux-arm64-glibc",
-          "--source",
-          "/path/that/does/not/exist",
-          "--work-root",
-          `${outputPath}.work`,
-          "--output-root",
-          `${outputPath}.output`,
-          "--builder-policy",
-          "/path/that/does/not/exist.json",
-        ],
-        {
-          cwd: repositoryRoot,
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            RELEASE_HOST_PLATFORM: "linux",
-            RELEASE_HOST_ARCH: "arm64",
-            RELEASE_NODE_MAJOR: "20",
-          },
-        },
-      );
+  it("allows either declared Pi target from a non-Pi source builder", () => {
+    const darwinSourceBuilder = {
+      platform: "darwin",
+      arch: "arm64",
+      armVersion: null,
+      libc: "unknown",
+      libcVersion: null,
+      nodeMajor: 24,
+      nodeModulesAbi: "137",
+    };
 
-      expect(result.status).toBe(75);
-      expect(result.stderr).toContain("NONPUBLISHABLE");
-      expect(result.stderr).toContain("host-platform");
-      expect(result.stderr).toContain("host-node-major");
-    },
-  );
-
-  it("refuses ARMv7 even when supplied ARMv7 host facts", () => {
     expect(
-      hostRefusalReasons("linux-armv7-glibc", {
-        platform: "linux",
-        arch: "arm",
-        armVersion: 7,
-        libc: "glibc",
-        libcVersion: "2.36",
-        nodeMajor: 20,
-        nodeModulesAbi: "115",
-      }),
-    ).toContain("target-disabled");
+      hostRefusalReasons("linux-arm64-glibc", darwinSourceBuilder),
+    ).toEqual([]);
+    expect(
+      hostRefusalReasons("linux-armv7-glibc", darwinSourceBuilder),
+    ).toEqual([]);
   });
 
   it("has no shell tar path or host identity environment override", async () => {

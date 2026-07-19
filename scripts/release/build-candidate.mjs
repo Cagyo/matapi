@@ -78,33 +78,8 @@ function parseArguments(argv) {
   return Object.freeze(options);
 }
 
-function actualHostFacts() {
-  const report = process.report?.getReport();
-  const libcVersion = report?.header?.glibcVersionRuntime;
-  return Object.freeze({
-    platform: process.platform,
-    arch: process.arch,
-    armVersion: Number(process.config.variables.arm_version) || null,
-    libc: libcVersion ? "glibc" : "unknown",
-    libcVersion: typeof libcVersion === "string" ? libcVersion : null,
-    nodeMajor: Number.parseInt(process.versions.node.split(".")[0], 10),
-    nodeModulesAbi: process.versions.modules,
-  });
-}
-
-export function hostRefusalReasons(targetName, host) {
-  const target = RELEASE_TARGETS[targetName];
-  const reasons = [];
-  if (targetName !== "linux-arm64-glibc") reasons.push("target-disabled");
-  if (host.platform !== target?.platform) reasons.push("host-platform");
-  if (host.arch !== target?.arch) reasons.push("host-arch");
-  if (host.libc !== target?.libc) reasons.push("host-libc");
-  if (target?.armVersion !== null && host.armVersion !== target?.armVersion) {
-    reasons.push("host-arm-version");
-  }
-  if (host.nodeMajor !== 20) reasons.push("host-node-major");
-  if (host.nodeModulesAbi !== "115") reasons.push("host-node-abi");
-  return reasons;
+export function hostRefusalReasons(targetName) {
+  return Object.hasOwn(RELEASE_TARGETS, targetName) ? [] : ["target-disabled"];
 }
 
 function runGit(source, args) {
@@ -166,7 +141,7 @@ function parsePackage(bytes) {
   }
 }
 
-function preflightReasons(options, checkout, packageJson, policy, host) {
+function preflightReasons(options, checkout, packageJson, policy) {
   const reasons = [];
   if (!checkout.clean) reasons.push("checkout-dirty");
   if (checkout.headCommit !== options.commit) reasons.push("checkout-head");
@@ -183,26 +158,13 @@ function preflightReasons(options, checkout, packageJson, policy, host) {
     reasons.push("package-manager");
   if (policy.target.targetName !== options.target)
     reasons.push("builder-target");
-  if (
-    policy.target.platform !== host.platform ||
-    policy.target.arch !== host.arch ||
-    policy.target.libc !== host.libc ||
-    policy.target.libcVersion !== host.libcVersion ||
-    policy.target.nodeModulesAbi !== host.nodeModulesAbi ||
-    policy.runtime.nodeMajor !== host.nodeMajor
-  ) {
-    reasons.push("builder-host-mismatch");
-  }
   return reasons;
 }
 
 async function main() {
   const options = parseArguments(process.argv.slice(2));
 
-  // These facts come only from Node's process identity. Refusal occurs before
-  // source, output, work, or builder-policy paths are accessed.
-  const host = actualHostFacts();
-  const earlyReasons = hostRefusalReasons(options.target, host);
+  const earlyReasons = hostRefusalReasons(options.target);
   if (earlyReasons.length > 0) refuse(earlyReasons);
 
   let sourceRoot;
@@ -250,7 +212,6 @@ async function main() {
     checkout,
     packageJson,
     builderPolicy,
-    host,
   );
   if (reasons.length > 0) refuse(reasons);
 

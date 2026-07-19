@@ -46,15 +46,13 @@ const RELEASE_YARN_POLICY = [
   "",
 ].join("\n");
 const MAX_COMMAND_OUTPUT = 4 * 1024 * 1024;
+const COREPACK_COMMAND = join(dirname(process.execPath), "corepack");
 const ALLOWED_COMMANDS = Object.freeze({
-  "install-development": [
-    "/usr/bin/corepack",
-    ["yarn", "install", "--immutable"],
-  ],
-  test: ["/usr/bin/corepack", ["yarn", "test"]],
-  build: ["/usr/bin/corepack", ["yarn", "build"]],
+  "install-development": [COREPACK_COMMAND, ["yarn", "install", "--immutable"]],
+  test: [COREPACK_COMMAND, ["yarn", "test"]],
+  build: [COREPACK_COMMAND, ["yarn", "build"]],
   "pin-yarn": [
-    "/usr/bin/corepack",
+    COREPACK_COMMAND,
     ["yarn", "set", "version", "4.13.0", "--yarn-path"],
   ],
 });

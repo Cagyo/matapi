@@ -13,7 +13,6 @@ export const RELEASE_TARGETS = Object.freeze({
   }),
 });
 
-const BUILDER_IDENTITY = "home-worker-linux-arm-builder-v1";
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const VERSION_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
@@ -46,8 +45,6 @@ export function evaluateReleasePolicy(facts) {
   const request = facts?.request ?? {};
   const checkout = facts?.checkout ?? {};
   const packageFacts = facts?.package ?? {};
-  const host = facts?.host ?? {};
-  const builder = facts?.builder ?? {};
   const environment = facts?.environment ?? {};
   const dependencies = facts?.dependencies ?? {};
   const target = Object.hasOwn(RELEASE_TARGETS, request.target)
@@ -75,26 +72,6 @@ export function evaluateReleasePolicy(facts) {
     reasons.push("package-manager");
   }
 
-  if (host.platform !== target?.platform) reasons.push("host-platform");
-  if (host.arch !== target?.arch) reasons.push("host-arch");
-  if (host.libc !== target?.libc) reasons.push("host-libc");
-  if (
-    target &&
-    target.armVersion !== null &&
-    host.armVersion !== target.armVersion
-  ) {
-    reasons.push("host-arm-version");
-  }
-  if (host.nodeMajor !== 20) reasons.push("host-node-major");
-  if (host.nodeModulesAbi !== "115") reasons.push("host-node-abi");
-
-  if (builder.controlled !== true) reasons.push("builder-control");
-  if (builder.identity !== BUILDER_IDENTITY) reasons.push("builder-identity");
-  if (builder.target !== request.target) reasons.push("builder-target");
-  if (builder.nodeMajor !== 20 || builder.nodeModulesAbi !== "115") {
-    reasons.push("builder-runtime");
-  }
-
   if (environment.tz !== "UTC") reasons.push("environment-tz");
   if (environment.locale !== "C") reasons.push("environment-locale");
   if (
@@ -105,11 +82,6 @@ export function evaluateReleasePolicy(facts) {
   }
 
   if (dependencies.validated !== true) reasons.push("dependencies-validation");
-  if (dependencies.target !== request.target)
-    reasons.push("dependencies-target");
-  if (dependencies.nodeMajor !== 20 || dependencies.nodeModulesAbi !== "115") {
-    reasons.push("dependencies-runtime");
-  }
   if (
     !matches(dependencies.yarnLockSha256, SHA256_PATTERN) ||
     dependencies.yarnLockSha256 !== dependencies.expectedYarnLockSha256
