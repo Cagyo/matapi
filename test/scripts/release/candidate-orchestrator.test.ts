@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { dirname } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import { runCandidateBuild } from "../../../scripts/release/candidate-orchestrator.mjs";
@@ -123,6 +124,15 @@ describe("candidate build orchestration", () => {
       commit: "a".repeat(40),
       tag: "v1.2.3",
     });
+    expect(deps.run).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        command: `${dirname(process.execPath)}/corepack`,
+        env: expect.objectContaining({
+          PATH: `${dirname(process.execPath)}:/usr/bin:/bin`,
+        }),
+      }),
+    );
     expect(deps.publish).toHaveBeenCalledWith(
       expect.objectContaining({ rootGuard: { fixture: true } }),
     );

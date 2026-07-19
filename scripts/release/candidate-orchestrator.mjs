@@ -13,7 +13,8 @@ import {
 const VERSION = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
 const COMMIT = /^[0-9a-f]{40}$/u;
 const YARN_RUNTIME_PATH = ".yarn/releases/yarn-4.13.0.cjs";
-const COREPACK_COMMAND = join(dirname(process.execPath), "corepack");
+const NODE_BIN_DIRECTORY = dirname(process.execPath);
+const COREPACK_COMMAND = join(NODE_BIN_DIRECTORY, "corepack");
 
 function separated(left, right) {
   return (
@@ -52,7 +53,7 @@ function validateInput(input) {
 
 function commandEnvironment(root, sourceDateEpoch, network) {
   return Object.freeze({
-    PATH: "/usr/bin:/bin",
+    PATH: `${NODE_BIN_DIRECTORY}:/usr/bin:/bin`,
     HOME: `${root}/home`,
     XDG_CACHE_HOME: `${root}/home/.cache`,
     XDG_CONFIG_HOME: `${root}/home/.config`,
