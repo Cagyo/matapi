@@ -46,14 +46,15 @@ const EXPECTED = {
 
 function journal(
   phase: OperationJournal["phase"] = "activated",
+  kind: OperationJournal["kind"] = "update",
 ): OperationJournal {
   return {
     schemaVersion: 1,
     generation: 4,
     operationId: OPERATION_ID,
-    kind: "update",
+    kind,
     phase,
-    expected: EXPECTED,
+    expected: kind === "update" ? EXPECTED : null,
     acceptedAt: "2030-01-01T00:00:00.000Z",
     requestSha256: "f".repeat(64),
     receiptGeneration: 1,
@@ -77,6 +78,11 @@ function fixture(input: {
     preparedTreeSha256: string;
   }> | null;
   candidateKnownGoodError?: Error;
+  candidateReleaseIdentity?: Partial<{
+    artifactSha256: string;
+    metadataSha256: string;
+    preparedTreeSha256: string;
+  }> | null;
   priorKnownGood?: Partial<{
     operationId: string;
     artifactSha256: string;
@@ -131,6 +137,15 @@ function fixture(input: {
             ...override,
           };
         }),
+        releaseIdentity: vi.fn(async () => {
+          if (input.candidateReleaseIdentity === null) return null;
+          return {
+            artifactSha256: ARTIFACT,
+            metadataSha256: METADATA,
+            preparedTreeSha256: TREE,
+            ...input.candidateReleaseIdentity,
+          };
+        }),
       },
       root: { invoke: rootAction, stop },
       reports: { writeDurably: write },
@@ -179,7 +194,16 @@ describe("OTA boot recovery", () => {
       expect(setup.events).toEqual([
         "report",
         `root:${OPERATION_ID}:restore-prior`,
+        "report",
       ]);
+      expect(setup.write.mock.calls[0]?.[0]).toEqual(
+        expect.objectContaining({
+          operationId: null,
+          artifactSha256: null,
+          metadataSha256: null,
+          outcome: "maintenance-required",
+        }),
+      );
     },
   );
 
@@ -236,6 +260,15 @@ describe("OTA boot recovery", () => {
       "report",
       `root:${OPERATION_ID}:restore-prior`,
     ]);
+    expect(setup.write).toHaveBeenCalledTimes(1);
+    expect(setup.write).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operationId: null,
+        artifactSha256: null,
+        metadataSha256: null,
+        outcome: "maintenance-required",
+      }),
+    );
   });
 
   it("accepts healthy only with matching pointers and same-operation known-good identity", async () => {
@@ -248,6 +281,23 @@ describe("OTA boot recovery", () => {
     );
     expect(setup.rootAction).not.toHaveBeenCalled();
     expect(setup.stop).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when healthy rollback known-good metadata conflicts with root-owned release evidence", async () => {
+    const setup = fixture({
+      loaded: journal("healthy", "rollback"),
+      candidateReleaseIdentity: { metadataSha256: "7".repeat(64) },
+    });
+
+    await recoverInterruptedActivation(setup.dependencies);
+
+    expect(setup.write).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operationId: null,
+        outcome: "maintenance-required",
+      }),
+    );
+    expect(setup.events).toEqual(["report", "stop"]);
   });
 
   it.each([
@@ -298,6 +348,7 @@ describe("OTA boot recovery", () => {
     expect(setup.events).toEqual([
       "report",
       `root:${OPERATION_ID}:restore-prior`,
+      "report",
     ]);
     expect(setup.write).toHaveBeenCalledWith(
       expect.objectContaining({ outcome: "failed" }),

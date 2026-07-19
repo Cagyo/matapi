@@ -151,3 +151,39 @@ Tests       156 passed (156)
 
 The correction suite includes Task 13 recovery/consumption/policy tests plus
 the Task 12 root-helper, activation, and dual-slot journal regressions.
+
+## Final re-review correction: recovered identity proof
+
+Correction commit: `fix(ota): bind recovered identities`
+
+The service-account recovery launcher no longer attributes a restored release
+from a merely syntactically valid prior known-good marker. Before either active
+restoration or idempotent `rolled_back` validation, it writes a durable
+null-identity maintenance report. Only after the fixed root action succeeds—
+which independently verifies the prior release's signed envelope, known-good
+marker, trust keys, persistent policy, tree, and pointers—does the launcher
+replace that pending report with the non-null failed-operation identity. Root
+rejection or a crash after the transition therefore retains null attribution
+instead of a false artifact or metadata claim.
+
+Healthy and activated commit proof now also reads the candidate's root-owned,
+non-writable canonical `artifact-state.json` and bounded
+`artifact-envelope.json` through no-follow handles. The envelope bytes must
+match the stored envelope digest, and artifact, metadata, and tree hashes must
+all match the known-good marker. This closes the rollback-specific gap where a
+syntactically valid metadata hash previously bypassed independent binding
+because rollback journals intentionally have no remote `expected` identity.
+
+Final correction RED:
+
+```text
+Test Files  1 failed (1)
+Tests       5 failed | 19 passed
+
+Failures: non-null attribution preceded root restore/rejection, successful
+restore lacked post-root enrichment, and healthy rollback ignored conflicting
+root-owned metadata evidence.
+```
+
+Final correction GREEN is included in the focused verification below: 9 files,
+157/157 tests passed.
