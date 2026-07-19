@@ -19,6 +19,27 @@ import {
 const read = (path: string) => readFileSync(resolve(path), "utf8");
 const roots: string[] = [];
 const ARTIFACT_SHA = "a".repeat(64);
+const ROOT_POLICY = {
+  feedUrl:
+    "https://updates.example.test/home-worker/stable/linux-armv7-glibc/update-envelope.json",
+  channel: "stable",
+  target: {
+    targetName: "linux-armv7-glibc",
+    platform: "linux",
+    arch: "arm",
+    libc: "glibc",
+    libcVersion: "2.36",
+    nodeModulesAbi: "115",
+  },
+  runtime: { nodeMajor: 20, packageManager: "yarn@4.13.0" },
+  limits: {
+    maxArtifactBytes: 100 * 1024 * 1024,
+    maxExpandedBytes: 512 * 1024 * 1024,
+    maxPreparedBytes: 1024 * 1024 * 1024,
+    maxPreparedFiles: 200_000,
+    maxFiles: 20_000,
+  },
+};
 
 afterEach(async () => {
   await Promise.all(
@@ -62,8 +83,11 @@ function manifest() {
   };
 }
 
-function signedEnvelope(pair = generateKeyPairSync("ed25519")) {
-  const payload = Buffer.from(JSON.stringify(manifest()));
+function signedEnvelope(
+  pair = generateKeyPairSync("ed25519"),
+  release = manifest(),
+) {
+  const payload = Buffer.from(JSON.stringify(release));
   return {
     pair,
     bytes: Buffer.from(
@@ -80,14 +104,16 @@ function signedEnvelope(pair = generateKeyPairSync("ed25519")) {
   };
 }
 
-function marker(envelope: Buffer) {
-  const release = manifest();
+function marker(envelope: Buffer, release = manifest()) {
   return {
     schemaVersion: 1,
     artifact: {
       version: release.version,
       commit: release.commit,
-      targetName: "linux-armv7-glibc",
+      targetName:
+        release.target.arch === "arm"
+          ? "linux-armv7-glibc"
+          : "linux-arm64-glibc",
       target: release.target,
       ...release.artifact,
     },
@@ -121,8 +147,8 @@ async function trustFixture(
   return root;
 }
 
-function checkedIdentity(envelope: Buffer) {
-  const value = marker(envelope);
+function checkedIdentity(envelope: Buffer, release = manifest()) {
+  const value = marker(envelope, release);
   return { artifact: value.artifact, metadata: value.metadata };
 }
 
@@ -137,7 +163,11 @@ describe("root OTA activation helper assets", () => {
         marker(signed.bytes),
         signed.bytes,
         null,
-        { trustRoot, now: new Date("2030-01-15T00:00:00.000Z") },
+        {
+          trustRoot,
+          policy: ROOT_POLICY,
+          now: new Date("2030-01-15T00:00:00.000Z"),
+        },
       ),
     ).toMatchObject({ artifactSha256: ARTIFACT_SHA });
 
@@ -148,7 +178,11 @@ describe("root OTA activation helper assets", () => {
         marker(untrusted.bytes),
         untrusted.bytes,
         null,
-        { trustRoot, now: new Date("2030-01-15T00:00:00.000Z") },
+        {
+          trustRoot,
+          policy: ROOT_POLICY,
+          now: new Date("2030-01-15T00:00:00.000Z"),
+        },
       ),
     ).rejects.toMatchObject({ code: "maintenance-required" });
   });
@@ -172,7 +206,11 @@ describe("root OTA activation helper assets", () => {
         artifact,
         signed.bytes,
         knownGood,
-        { trustRoot, now: new Date("2030-02-15T00:00:00.000Z") },
+        {
+          trustRoot,
+          policy: ROOT_POLICY,
+          now: new Date("2030-02-15T00:00:00.000Z"),
+        },
       ),
     ).resolves.toMatchObject({ artifactSha256: ARTIFACT_SHA });
     await expect(
@@ -181,10 +219,84 @@ describe("root OTA activation helper assets", () => {
         artifact,
         signed.bytes,
         null,
-        { trustRoot, now: new Date("2030-01-15T00:00:00.000Z") },
+        {
+          trustRoot,
+          policy: ROOT_POLICY,
+          now: new Date("2030-01-15T00:00:00.000Z"),
+        },
       ),
     ).rejects.toMatchObject({ code: "maintenance-required" });
   });
+
+  it.each([
+    [
+      "target architecture",
+      (release: ReturnType<typeof manifest>) => ({
+        ...release,
+        target: { ...release.target, arch: "arm64" },
+      }),
+    ],
+    [
+      "artifact origin",
+      (release: ReturnType<typeof manifest>) => ({
+        ...release,
+        artifact: {
+          ...release.artifact,
+          url: "https://attacker.example/releases/1.4.2.tar.gz",
+        },
+      }),
+    ],
+    [
+      "Node modules ABI",
+      (release: ReturnType<typeof manifest>) => ({
+        ...release,
+        target: { ...release.target, nodeModulesAbi: "127" },
+      }),
+    ],
+    [
+      "minimum libc",
+      (release: ReturnType<typeof manifest>) => ({
+        ...release,
+        target: { ...release.target, libcMinVersion: "2.37" },
+      }),
+    ],
+    [
+      "artifact ceiling",
+      (release: ReturnType<typeof manifest>) => ({
+        ...release,
+        artifact: {
+          ...release.artifact,
+          size: ROOT_POLICY.limits.maxArtifactBytes + 1,
+        },
+      }),
+    ],
+  ])(
+    "rejects signed metadata outside root policy: %s",
+    async (_case, mutate) => {
+      const pair = generateKeyPairSync("ed25519");
+      const release = mutate(manifest());
+      const signed = signedEnvelope(pair, release);
+      const trustRoot = await trustFixture("active", pair);
+      const artifact = marker(signed.bytes, release);
+
+      await expect(
+        verifyCandidateAuthorization(
+          {
+            kind: "update",
+            expected: checkedIdentity(signed.bytes, release),
+          },
+          artifact,
+          signed.bytes,
+          null,
+          {
+            trustRoot,
+            policy: ROOT_POLICY,
+            now: new Date("2030-01-15T00:00:00.000Z"),
+          },
+        ),
+      ).rejects.toMatchObject({ code: "maintenance-required" });
+    },
+  );
 
   it.each(["", "short", "AbCdEfGhIjKlMnOpQrStU!", "AAAAAAAAAAAAAAAAAAAAAB"])(
     "rejects a non-canonical operation ID %j before filesystem or PM2 access",

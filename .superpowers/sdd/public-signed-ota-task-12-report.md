@@ -94,3 +94,61 @@ Result: 12 files passed, 231/231 tests passed.
 
 The pre-existing untracked `scripts/__pycache__/` directory was not read,
 modified, staged, or removed.
+
+## Re-review correction: canonical root release policy
+
+Correction commit: `fix(ota): enforce root release policy`
+
+The first hardening pass cryptographically verified the exact signed payload
+and journal identity, but its local root parser did not independently apply the
+canonical `ManifestPolicy`. A valid publisher signature plus a matching journal
+could therefore authorize a release for another supported architecture or ABI,
+a libc minimum newer than the device, an artifact on another HTTPS origin, or
+resource declarations above the configured ceilings.
+
+The root-owned operation projection now carries the canonical policy authority.
+The activation helper validates its exact closed shape and compiled hard maxima,
+including the stable feed path for the one configured target. Before comparing
+the manifest with journal identity, root authorization independently requires:
+
+- the exact configured Linux ARM/ARM64 and glibc target mapping;
+- the exact Node modules ABI and a canonical signed libc minimum no newer than
+  the configured runtime libc;
+- a credential-free HTTPS feed URL at the fixed stable target path and an
+  artifact URL on that exact allowed origin;
+- the configured artifact, expanded, prepared-byte, prepared-file, and file
+  ceilings, each itself bounded by its compiled hard maximum; and
+- the existing stable channel, Node 20, and `yarn@4.13.0` runtime constraints.
+
+The regression uses correctly signed envelopes whose malicious identities are
+also copied into the marker and journal, proving journal agreement cannot stand
+in for policy authorization. It covers a different target architecture, an
+unauthorized artifact origin, Node ABI mismatch, incompatible libc minimum, and
+an artifact declaration one byte above the configured ceiling.
+
+Correction RED:
+
+```text
+Test Files  1 failed (1)
+Tests       5 failed | 15 passed (20)
+
+All five correctly signed, marker-matched, and journal-matched policy violations
+resolved instead of rejecting.
+```
+
+Correction GREEN and verification:
+
+```text
+corepack yarn test test/system/infrastructure/ota-activate-helper.test.ts \
+  test/system/infrastructure/ota-activation.test.ts
+
+Test Files  2 passed (2)
+Tests       33 passed (33)
+```
+
+`corepack yarn build`, targeted ESLint, `node --check`, targeted Prettier, and
+`git diff --check` all exited successfully. The pre-existing untracked
+`scripts/__pycache__/` directory remained untouched.
+
+The final policy-equivalence regression run also included the canonical signed
+manifest and discovery-config policy suites: 4 files passed, 142/142 tests.

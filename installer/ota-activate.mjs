@@ -30,6 +30,11 @@ const SHA256 = /^[0-9a-f]{64}$/;
 const MAX_JSON_BYTES = 2 * 1024 * 1024;
 const MAX_ENVELOPE_BYTES = 96 * 1024;
 const MAX_PAYLOAD_BYTES = 64 * 1024;
+const MAX_ARTIFACT_BYTES = 100 * 1024 * 1024;
+const MAX_EXPANDED_BYTES = 512 * 1024 * 1024;
+const MAX_PREPARED_BYTES = 1024 * 1024 * 1024;
+const MAX_PREPARED_FILES = 200_000;
+const MAX_FILES = 20_000;
 const COMMIT = /^[0-9a-f]{40}$/;
 const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const ABI = /^(?:0|[1-9]\d*)$/;
@@ -123,6 +128,92 @@ function exactKeys(value, keys) {
 
 function positiveInteger(value) {
   return Number.isSafeInteger(value) && value > 0;
+}
+
+function canonicalDottedVersion(value) {
+  return (
+    typeof value === "string" &&
+    value.length <= 32 &&
+    Buffer.byteLength(value, "utf8") === value.length &&
+    /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:\.(?:0|[1-9]\d*))*$/.test(value)
+  );
+}
+
+function compareDottedVersions(left, right) {
+  const leftParts = left.split(".").map(BigInt);
+  const rightParts = right.split(".").map(BigInt);
+  const length = Math.max(leftParts.length, rightParts.length);
+  for (let index = 0; index < length; index += 1) {
+    const leftPart = leftParts[index] ?? 0n;
+    const rightPart = rightParts[index] ?? 0n;
+    if (leftPart < rightPart) return -1;
+    if (leftPart > rightPart) return 1;
+  }
+  return 0;
+}
+
+function parseRootPolicy(value) {
+  if (
+    !exactKeys(value, ["feedUrl", "channel", "target", "runtime", "limits"]) ||
+    value.channel !== "stable" ||
+    !exactKeys(value.target, [
+      "targetName",
+      "platform",
+      "arch",
+      "libc",
+      "libcVersion",
+      "nodeModulesAbi",
+    ]) ||
+    value.target.platform !== "linux" ||
+    (value.target.arch !== "arm" && value.target.arch !== "arm64") ||
+    value.target.libc !== "glibc" ||
+    value.target.targetName !==
+      (value.target.arch === "arm"
+        ? "linux-armv7-glibc"
+        : "linux-arm64-glibc") ||
+    !canonicalDottedVersion(value.target.libcVersion) ||
+    typeof value.target.nodeModulesAbi !== "string" ||
+    !ABI.test(value.target.nodeModulesAbi) ||
+    !exactKeys(value.runtime, ["nodeMajor", "packageManager"]) ||
+    value.runtime.nodeMajor !== 20 ||
+    value.runtime.packageManager !== "yarn@4.13.0" ||
+    !exactKeys(value.limits, [
+      "maxArtifactBytes",
+      "maxExpandedBytes",
+      "maxPreparedBytes",
+      "maxPreparedFiles",
+      "maxFiles",
+    ]) ||
+    !positiveInteger(value.limits.maxArtifactBytes) ||
+    value.limits.maxArtifactBytes > MAX_ARTIFACT_BYTES ||
+    !positiveInteger(value.limits.maxExpandedBytes) ||
+    value.limits.maxExpandedBytes > MAX_EXPANDED_BYTES ||
+    !positiveInteger(value.limits.maxPreparedBytes) ||
+    value.limits.maxPreparedBytes > MAX_PREPARED_BYTES ||
+    !positiveInteger(value.limits.maxPreparedFiles) ||
+    value.limits.maxPreparedFiles > MAX_PREPARED_FILES ||
+    !positiveInteger(value.limits.maxFiles) ||
+    value.limits.maxFiles > MAX_FILES
+  )
+    fail();
+  let feedUrl;
+  try {
+    feedUrl = new URL(value.feedUrl);
+  } catch {
+    fail();
+  }
+  const expectedPath = `/home-worker/stable/${value.target.targetName}/update-envelope.json`;
+  if (
+    feedUrl.protocol !== "https:" ||
+    feedUrl.username !== "" ||
+    feedUrl.password !== "" ||
+    feedUrl.search !== "" ||
+    feedUrl.hash !== "" ||
+    feedUrl.pathname !== expectedPath ||
+    feedUrl.href !== value.feedUrl
+  )
+    fail();
+  return value;
 }
 
 function canonicalTimestamp(value) {
@@ -286,7 +377,7 @@ function parseSecurityJson(bytes) {
   return value;
 }
 
-function parseSignedManifest(payload, now, enforceFreshness) {
+function parseSignedManifest(payload, now, enforceFreshness, policy) {
   const manifest = parseSecurityJson(payload);
   if (
     !exactKeys(manifest, [
@@ -303,8 +394,9 @@ function parseSignedManifest(payload, now, enforceFreshness) {
     ]) ||
     manifest.schemaVersion !== 1 ||
     !positiveInteger(manifest.metadataVersion) ||
-    manifest.channel !== "stable" ||
+    manifest.channel !== policy.channel ||
     typeof manifest.version !== "string" ||
+    manifest.version.length > 64 ||
     !SEMVER.test(manifest.version) ||
     typeof manifest.commit !== "string" ||
     !COMMIT.test(manifest.commit) ||
@@ -326,15 +418,17 @@ function parseSignedManifest(payload, now, enforceFreshness) {
       "libcMinVersion",
       "nodeModulesAbi",
     ]) ||
-    manifest.target.platform !== "linux" ||
-    (manifest.target.arch !== "arm" && manifest.target.arch !== "arm64") ||
-    manifest.target.libc !== "glibc" ||
-    typeof manifest.target.libcMinVersion !== "string" ||
-    !/^(?:0|[1-9]\d*)(?:\.(?:0|[1-9]\d*))*$/.test(
+    manifest.target.platform !== policy.target.platform ||
+    manifest.target.arch !== policy.target.arch ||
+    manifest.target.libc !== policy.target.libc ||
+    !canonicalDottedVersion(manifest.target.libcMinVersion) ||
+    compareDottedVersions(
       manifest.target.libcMinVersion,
-    ) ||
+      policy.target.libcVersion,
+    ) > 0 ||
     typeof manifest.target.nodeModulesAbi !== "string" ||
-    !ABI.test(manifest.target.nodeModulesAbi)
+    !ABI.test(manifest.target.nodeModulesAbi) ||
+    manifest.target.nodeModulesAbi !== policy.target.nodeModulesAbi
   )
     fail();
   if (
@@ -356,17 +450,24 @@ function parseSignedManifest(payload, now, enforceFreshness) {
     !positiveInteger(manifest.artifact.maxPreparedFiles) ||
     !positiveInteger(manifest.artifact.fileCount) ||
     !SHA256.test(manifest.artifact.sha256) ||
+    manifest.artifact.size > policy.limits.maxArtifactBytes ||
+    manifest.artifact.expandedSize > policy.limits.maxExpandedBytes ||
+    manifest.artifact.maxPreparedSize > policy.limits.maxPreparedBytes ||
+    manifest.artifact.maxPreparedFiles > policy.limits.maxPreparedFiles ||
+    manifest.artifact.fileCount > policy.limits.maxFiles ||
     manifest.artifact.expandedSize > manifest.artifact.maxPreparedSize ||
     manifest.artifact.fileCount > manifest.artifact.maxPreparedFiles
   )
     fail();
   try {
     const url = new URL(manifest.artifact.url);
+    const feedUrl = new URL(policy.feedUrl);
     if (
       url.protocol !== "https:" ||
       url.username !== "" ||
       url.password !== "" ||
-      url.hash !== ""
+      url.hash !== "" ||
+      url.origin !== feedUrl.origin
     )
       fail();
   } catch (error) {
@@ -375,8 +476,8 @@ function parseSignedManifest(payload, now, enforceFreshness) {
   }
   if (
     !exactKeys(manifest.runtime, ["nodeMajor", "packageManager"]) ||
-    manifest.runtime.nodeMajor !== 20 ||
-    manifest.runtime.packageManager !== "yarn@4.13.0"
+    manifest.runtime.nodeMajor !== policy.runtime.nodeMajor ||
+    manifest.runtime.packageManager !== policy.runtime.packageManager
   )
     fail();
   return manifest;
@@ -426,15 +527,12 @@ async function loadVerificationKeys(trustRoot, scope, expectedUid) {
   return keys;
 }
 
-function checkedIdentity(manifest, payloadSha256) {
+function checkedIdentity(manifest, payloadSha256, targetName) {
   return {
     artifact: {
       version: manifest.version,
       commit: manifest.commit,
-      targetName:
-        manifest.target.arch === "arm"
-          ? "linux-armv7-glibc"
-          : "linux-arm64-glibc",
+      targetName,
       target: manifest.target,
       ...manifest.artifact,
     },
@@ -488,6 +586,7 @@ export async function verifyCandidateAuthorization(
     const expectedUid =
       options.expectedUid ?? (trustRoot === TRUST_ROOT ? 0 : process.getuid());
     const now = options.now ?? new Date();
+    const policy = parseRootPolicy(options.policy);
     if (
       !Number.isFinite(now.getTime()) ||
       envelopeBytes.byteLength > MAX_ENVELOPE_BYTES ||
@@ -532,10 +631,12 @@ export async function verifyCandidateAuthorization(
       payload,
       now,
       journal.kind === "update",
+      policy,
     );
     const identity = checkedIdentity(
       manifest,
       createHash("sha256").update(payload).digest("hex"),
+      policy.target.targetName,
     );
     if (
       !sameJson(identity, {
@@ -768,6 +869,7 @@ async function assertRootProjection(operationId, journal) {
       "checksum",
       "candidate",
       "preparedTreeSha256",
+      "policy",
     ]) ||
     projection.schemaVersion !== 1 ||
     projection.operationId !== operationId ||
@@ -778,6 +880,7 @@ async function assertRootProjection(operationId, journal) {
   ) {
     fail();
   }
+  return parseRootPolicy(projection.policy);
 }
 
 async function readPointer(name) {
@@ -1057,7 +1160,7 @@ export async function digestTree(root, expectedUid = 0) {
   return hash.digest("hex");
 }
 
-async function revalidateCandidate(journal) {
+async function revalidateCandidate(journal, policy) {
   const path = resolve(RELEASES_ROOT, journal.candidate);
   if (dirname(path) !== RELEASES_ROOT || basename(path) !== journal.candidate)
     fail();
@@ -1125,6 +1228,7 @@ async function revalidateCandidate(journal) {
     marker,
     envelope,
     knownGood,
+    { policy },
   );
   return {
     path,
@@ -1338,13 +1442,13 @@ async function writeKnownGood(candidate, operationId, preparedTreeSha256) {
 export async function activateOperation(operationIdInput) {
   const operationId = canonicalOperationId(operationIdInput);
   let selected = await loadPreparedJournal(operationId);
-  await assertRootProjection(operationId, selected.value);
+  const policy = await assertRootProjection(operationId, selected.value);
   await assertRecordedLinks(selected.value);
   await adoptCandidateTree(
     selected.value.candidate,
     selected.value.preparedTreeSha256,
   );
-  const candidate = await revalidateCandidate(selected.value);
+  const candidate = await revalidateCandidate(selected.value, policy);
 
   let switched = false;
   let previousCommitted = false;
