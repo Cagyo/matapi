@@ -300,6 +300,7 @@ SWAPPED=0
 POLLING_CHANGED=0
 POLLING_WAS_ENABLED=0
 WORKER_STOPPED=0
+WORKER_PRIOR_STATE=""
 COMPLETED=0
 
 safe_remove_temp() {
@@ -319,7 +320,7 @@ compensate() {
   if [[ "$LEGACY_MOVED" == "1" && -d "$BACKUP_ROOT" && ! -L "$BACKUP_ROOT" ]]; then
     mv -- "$BACKUP_ROOT" "$INSTALL_ROOT"
   fi
-  if [[ "$WORKER_STOPPED" == "1" && -d "$INSTALL_ROOT" ]]; then
+  if [[ "$WORKER_PRIOR_STATE" == "running" && "$WORKER_STOPPED" == "1" && -d "$INSTALL_ROOT" ]]; then
     (cd -- "$INSTALL_ROOT" && "$PM2" start ecosystem.config.js) >/dev/null 2>&1 || true
   fi
   if [[ "$POLLING_CHANGED" == "1" ]]; then
@@ -387,10 +388,30 @@ ln -s -- "releases/baseline" "$NEW_ROOT/current"
 if "$SYSTEMCTL" is-enabled --quiet home-worker-update.timer; then
   POLLING_WAS_ENABLED=1
 fi
+PM2_LIST="$("$PM2" jlist)" || fail_gate "Cannot capture the prior PM2 worker state."
+if ! WORKER_PRIOR_STATE="$($NODE_BIN -e '
+const { readFileSync } = require("node:fs");
+const source = readFileSync(0);
+if (source.length > 4 * 1024 * 1024) process.exit(1);
+const processes = JSON.parse(source.toString("utf8"));
+if (!Array.isArray(processes)) process.exit(1);
+const worker = processes.filter((entry) => entry?.name === "worker");
+if (worker.length === 0) process.stdout.write("absent");
+else if (worker.length !== 1) process.exit(1);
+else if (worker[0]?.pm2_env?.status === "online") process.stdout.write("running");
+else if (worker[0]?.pm2_env?.status === "stopped") process.stdout.write("stopped");
+else process.exit(1);
+' <<<"$PM2_LIST" 2>/dev/null)"; then
+  fail_gate "Cannot validate the prior PM2 worker state."
+fi
 POLLING_CHANGED=1
 "$SYSTEMCTL" disable home-worker-update.timer
-WORKER_STOPPED=1
-"$PM2" stop worker
+if [[ "$WORKER_PRIOR_STATE" == "running" ]]; then
+  if ! "$PM2" stop worker; then
+    fail_gate "PM2 refused to stop the running legacy worker."
+  fi
+  WORKER_STOPPED=1
+fi
 inject_failure pm2-stop
 
 if [[ "$MODE" == "migrate" ]]; then

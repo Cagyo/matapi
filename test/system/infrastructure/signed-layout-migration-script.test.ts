@@ -51,7 +51,12 @@ function executable(path: string, body: string): void {
 }
 
 function fixture(
-  options: { legacy?: boolean; pollingEnabled?: boolean } = { legacy: true },
+  options: {
+    legacy?: boolean;
+    pollingEnabled?: boolean;
+    workerState?: "running" | "stopped" | "absent";
+    failPm2Stop?: boolean;
+  } = { legacy: true },
 ) {
   const root = realpathSync(
     mkdtempSync(join(tmpdir(), "home-worker-migrate-")),
@@ -154,9 +159,30 @@ function fixture(
       command === "systemctl" && options.pollingEnabled === false
         ? 'if [[ "$1" == "is-enabled" ]]; then exit 1; fi\n'
         : "";
+    const workerState = options.workerState ?? "running";
+    const pm2List =
+      workerState === "absent"
+        ? []
+        : [
+            {
+              name: "worker",
+              pm2_env: {
+                status: workerState === "running" ? "online" : "stopped",
+              },
+            },
+          ];
+    const pm2Behavior =
+      command === "pm2"
+        ? [
+            `if [[ "$1" == "jlist" ]]; then printf '%s' '${JSON.stringify(pm2List)}'; exit 0; fi`,
+            options.failPm2Stop
+              ? 'if [[ "$1" == "stop" ]]; then exit 1; fi'
+              : "",
+          ].join("\n")
+        : "";
     executable(
       join(bin, command),
-      `printf '${command}:%s\\n' "$*" >> '${calls}'\n${disabledPolling}`,
+      `printf '${command}:%s\\n' "$*" >> '${calls}'\n${disabledPolling}${pm2Behavior}`,
     );
   }
   if (options.legacy !== false) {
@@ -346,6 +372,38 @@ describe("signed layout migration gate", () => {
     expect(
       calls.match(/systemctl:disable home-worker-update\.timer/g),
     ).toHaveLength(2);
+  });
+
+  it.each(["stopped", "absent"] as const)(
+    "does not start an initially %s worker during compensation",
+    (workerState) => {
+      const setup = fixture({ workerState });
+
+      const result = run(setup, ["--migrate", "--confirm"], "backup");
+
+      expect(result.status).toBe(75);
+      const calls = readFileSync(setup.calls, "utf8");
+      expect(calls).toContain("pm2:jlist");
+      expect(calls).not.toContain("pm2:stop worker");
+      expect(calls).not.toContain("pm2:start ecosystem.config.js");
+    },
+  );
+
+  it("does not treat a failed PM2 stop command as a stopped worker", () => {
+    const setup = fixture({ failPm2Stop: true });
+
+    const result = run(setup, ["--migrate", "--confirm"]);
+
+    expect(result.status).toBe(75);
+    const calls = readFileSync(setup.calls, "utf8");
+    expect(calls).toContain("pm2:stop worker");
+    expect(calls.indexOf("pm2:jlist")).toBeLessThan(
+      calls.indexOf("pm2:stop worker"),
+    );
+    expect(calls).not.toContain("pm2:start ecosystem.config.js");
+    expect(readFileSync(join(setup.installRoot, "dist/main.js"), "utf8")).toBe(
+      "legacy\n",
+    );
   });
 
   it("supports a guarded fresh layout only when the install root is absent", () => {
