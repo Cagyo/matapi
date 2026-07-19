@@ -25,19 +25,6 @@ const RECEIPT_KEYS = Object.freeze([
   "artifactSha256",
   "metadataSha256",
 ]);
-const FETCH_SENTINEL_KEYS = Object.freeze([
-  "schemaVersion",
-  "operationId",
-  "candidate",
-  "artifactSha256",
-  "metadataSha256",
-  "receiptSha256",
-  "archiveInputSha256",
-  "yarnLockSha256",
-  "yarnRuntimeSha256",
-  "coordinatorChallenge",
-  "lifecycleScripts",
-]);
 const BUILD_SENTINEL_KEYS = Object.freeze([
   "schemaVersion",
   "operationId",
@@ -658,7 +645,7 @@ function phaseEnvironment(context, phase) {
     YARN_ENABLE_GLOBAL_CACHE: "false",
     YARN_ENABLE_IMMUTABLE_INSTALLS: "true",
     YARN_ENABLE_IMMUTABLE_CACHE: "false",
-    YARN_ENABLE_SCRIPTS: network ? "false" : "true",
+    YARN_ENABLE_SCRIPTS: "true",
     YARN_CHECKSUM_BEHAVIOR: "throw",
     YARN_CACHE_FOLDER: join(context.temp, "yarn-cache"),
     YARN_NPM_REGISTRY_SERVER: "https://registry.npmjs.org",
@@ -748,32 +735,8 @@ async function writeJsonDurably(path, value, mode = 0o600) {
   await syncDirectory(parent);
 }
 
-function fetchSentinelPath(context) {
-  return join(context.temp, "fetch-sentinel.json");
-}
-
 function buildSentinelPath(context) {
   return join(context.temp, "build-sentinel.json");
-}
-
-function strictFetchSentinel(source, context) {
-  const value = parseStrictJson(source, FETCH_SENTINEL_KEYS);
-  if (
-    value.schemaVersion !== 1 ||
-    value.operationId !== context.operationId ||
-    value.candidate !== context.receipt.candidate ||
-    value.artifactSha256 !== context.receipt.artifactSha256 ||
-    value.metadataSha256 !== context.receipt.metadataSha256 ||
-    value.receiptSha256 !== context.receiptSha256 ||
-    !SHA256.test(value.archiveInputSha256) ||
-    !SHA256.test(value.yarnLockSha256) ||
-    !SHA256.test(value.yarnRuntimeSha256) ||
-    value.coordinatorChallenge !== context.coordinatorChallenge ||
-    value.lifecycleScripts !== false
-  ) {
-    fail();
-  }
-  return value;
 }
 
 function strictBuildSentinel(source, context, archiveInputs) {
@@ -792,7 +755,7 @@ function strictBuildSentinel(source, context, archiveInputs) {
     !Number.isSafeInteger(value.preparedBytes) ||
     value.preparedBytes < 0 ||
     value.coordinatorChallenge !== context.coordinatorChallenge ||
-    value.network !== false
+    value.network !== true
   ) {
     fail();
   }
@@ -823,16 +786,20 @@ export async function fetchDependencies(
     if (JSON.stringify(after) !== JSON.stringify(before))
       fail("dependency-install");
     await assertInstalledProjection(context.candidate);
-    await writeJsonDurably(fetchSentinelPath(context), {
+    const prepared = await measureDurably(context.candidate);
+    await writeJsonDurably(buildSentinelPath(context), {
       schemaVersion: 1,
       operationId,
       candidate: context.receipt.candidate,
       artifactSha256: context.receipt.artifactSha256,
       metadataSha256: context.receipt.metadataSha256,
       receiptSha256: context.receiptSha256,
-      ...after,
+      archiveInputSha256: after.archiveInputSha256,
+      preparedTreeSha256: prepared.sha256,
+      preparedFiles: prepared.entryCount,
+      preparedBytes: prepared.allocatedBytes,
       coordinatorChallenge: context.coordinatorChallenge,
-      lifecycleScripts: false,
+      network: true,
     });
   } catch (error) {
     if (error instanceof PreparationError) throw error;
@@ -943,62 +910,6 @@ async function measureDurably(candidate) {
   return after;
 }
 
-export async function buildDependencies(
-  operationId,
-  runner = defaultRunner,
-  options = {},
-) {
-  try {
-    const context = await resolveContext(operationId, {
-      ...options,
-      requireChallenge: true,
-    });
-    const sentinel = strictFetchSentinel(
-      decodeUtf8(
-        await readStableFile(fetchSentinelPath(context), MAX_JSON_BYTES),
-      ),
-      context,
-    );
-    const before = await validateArchiveInputs(context);
-    if (
-      before.archiveInputSha256 !== sentinel.archiveInputSha256 ||
-      before.yarnLockSha256 !== sentinel.yarnLockSha256 ||
-      before.yarnRuntimeSha256 !== sentinel.yarnRuntimeSha256
-    ) {
-      fail();
-    }
-    await assertInstalledProjection(context.candidate);
-    await runner({
-      command: "/usr/bin/node",
-      args: [YARN_RUNTIME_PATH, "rebuild"],
-      cwd: context.candidate,
-      env: phaseEnvironment(context, "build"),
-    });
-    const after = await validateArchiveInputs(context);
-    if (JSON.stringify(after) !== JSON.stringify(before))
-      fail("dependency-install");
-    await assertInstalledProjection(context.candidate);
-    const prepared = await measureDurably(context.candidate);
-    await writeJsonDurably(buildSentinelPath(context), {
-      schemaVersion: 1,
-      operationId,
-      candidate: context.receipt.candidate,
-      artifactSha256: context.receipt.artifactSha256,
-      metadataSha256: context.receipt.metadataSha256,
-      receiptSha256: context.receiptSha256,
-      archiveInputSha256: after.archiveInputSha256,
-      preparedTreeSha256: prepared.sha256,
-      preparedFiles: prepared.entryCount,
-      preparedBytes: prepared.allocatedBytes,
-      coordinatorChallenge: context.coordinatorChallenge,
-      network: false,
-    });
-  } catch (error) {
-    if (error instanceof PreparationError) throw error;
-    fail("dependency-install");
-  }
-}
-
 function systemctlProcess(args) {
   return new Promise((resolveRun, rejectRun) => {
     const child = spawn("/bin/systemctl", args, {
@@ -1070,7 +981,6 @@ export async function coordinatePreparation(
   try {
     context = await resolveContext(operationId, options);
     for (const path of [
-      fetchSentinelPath(context),
       buildSentinelPath(context),
       context.challengePath,
     ]) {
@@ -1089,7 +999,7 @@ export async function coordinatePreparation(
       ...options,
       requireChallenge: true,
     });
-    for (const phase of ["fetch", "build"]) {
+    for (const phase of ["fetch"]) {
       await runner({
         phase,
         unit: `home-worker-ota-deps-${phase}@${operationId}.service`,
@@ -1121,7 +1031,6 @@ async function main() {
   const [, , phase, operationId] = process.argv;
   if (phase === "coordinate") await coordinatePreparation(operationId);
   else if (phase === "fetch") await fetchDependencies(operationId);
-  else if (phase === "build") await buildDependencies(operationId);
   else fail();
 }
 

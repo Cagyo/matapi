@@ -8,7 +8,6 @@ const read = (path: string) => readFileSync(resolve(path), "utf8");
 describe("two-phase OTA dependency preparation assets", () => {
   const coordinator = read("systemd/home-worker-ota-prepare@.service");
   const fetchUnit = read("systemd/home-worker-ota-deps-fetch@.service");
-  const buildUnit = read("systemd/home-worker-ota-deps-build@.service");
   const activator = read("installer/ota-prepare-activate");
   const sudoers = read("systemd/home-worker-ota-prepare.sudoers");
   const tmpfiles = read("systemd/home-worker-ota-tmpfiles.conf");
@@ -31,22 +30,17 @@ describe("two-phase OTA dependency preparation assets", () => {
     expect(coordinator).toContain(
       "ExecStart=/usr/bin/flock --no-fork --exclusive /run/home-worker/ota-prepare.lock /usr/bin/node /usr/lib/home-worker/ota-prepare.mjs coordinate %i",
     );
-    expect(preparer).toContain(
-      "home-worker-ota-deps-${phase}@${operationId}.service",
-    );
+    expect(preparer).toContain('for (const phase of ["fetch"])');
+    expect(preparer).not.toContain("ota-deps-build@");
   });
 
   it("holds the coordinator lease across bounded phases and cancellation", () => {
     expect(coordinator).toContain("TimeoutStartSec=45min");
     expect(coordinator).toContain("TimeoutStopSec=2min");
     expect(fetchUnit).toContain("TimeoutStartSec=20min");
-    expect(buildUnit).toContain("TimeoutStartSec=20min");
     expect(fetchUnit).toContain("PartOf=home-worker-ota-prepare@%i.service");
-    expect(buildUnit).toContain("PartOf=home-worker-ota-prepare@%i.service");
     expect(fetchUnit).toContain("BindsTo=home-worker-ota-prepare@%i.service");
-    expect(buildUnit).toContain("BindsTo=home-worker-ota-prepare@%i.service");
     expect(fetchUnit).not.toContain("After=home-worker-ota-prepare@%i.service");
-    expect(buildUnit).not.toContain("After=home-worker-ota-prepare@%i.service");
     expect(preparer).toContain('process.once("SIGTERM", stopBeforeRelease)');
     expect(preparer).toContain(
       'systemctlProcess(["stop", "--wait", "--", unit])',
@@ -54,7 +48,7 @@ describe("two-phase OTA dependency preparation assets", () => {
     expect(preparer).toContain("await stopping");
   });
 
-  it("grants Internet address families only to the lifecycle-disabled fetch phase", () => {
+  it("grants Internet access only to the lifecycle-enabled production install", () => {
     expect(fetchUnit).toContain("User=homeworker");
     expect(fetchUnit).toContain("PrivateNetwork=no");
     expect(fetchUnit).toContain(
@@ -63,15 +57,7 @@ describe("two-phase OTA dependency preparation assets", () => {
     expect(fetchUnit).toContain("ota-prepare.mjs fetch %i");
     expect(fetchUnit).toContain("CapabilityBoundingSet=\n");
     expect(fetchUnit).not.toContain("CAP_DAC_OVERRIDE");
-    expect(buildUnit).toContain("User=homeworker");
-    expect(buildUnit).toContain("PrivateNetwork=yes");
-    expect(buildUnit).toContain("RestrictAddressFamilies=AF_UNIX");
-    expect(buildUnit).toContain("ota-prepare.mjs build %i");
-    expect(buildUnit).toContain("CapabilityBoundingSet=\n");
-    expect(buildUnit).not.toContain("CAP_DAC_OVERRIDE");
-    expect(preparer).toContain(
-      'YARN_ENABLE_SCRIPTS: network ? "false" : "true"',
-    );
+    expect(preparer).toContain('YARN_ENABLE_SCRIPTS: "true"');
     expect(preparer).toContain(
       'YARN_ENABLE_NETWORK: network ? "true" : "false"',
     );
@@ -81,11 +67,12 @@ describe("two-phase OTA dependency preparation assets", () => {
     expect(preparer).toContain('YARN_NETWORK_CONCURRENCY: "1"');
     expect(preparer).toContain('YARN_TASK_POOL_CONCURRENCY: "1"');
     expect(fetchUnit).toContain("MemoryMax=300M");
-    expect(buildUnit).toContain("MemoryMax=300M");
+    expect(preparer).toContain('YARN_CACHE_FOLDER: join(context.temp, "yarn-cache")');
+    expect(preparer).not.toContain("yarn rebuild");
   });
 
   it("seals the public registry and strips inherited credentials, proxies, and config homes", () => {
-    for (const unit of [coordinator, fetchUnit, buildUnit]) {
+    for (const unit of [coordinator, fetchUnit]) {
       expect(unit).toContain(
         "UnsetEnvironment=HOME XDG_CONFIG_HOME XDG_CACHE_HOME",
       );
@@ -104,8 +91,8 @@ describe("two-phase OTA dependency preparation assets", () => {
     ]);
   });
 
-  it("makes only the operation candidate and private temp writable", () => {
-    for (const unit of [coordinator, fetchUnit, buildUnit]) {
+  it("keeps archives cache-free and makes only the candidate and private temp writable", () => {
+    for (const unit of [coordinator, fetchUnit]) {
       const writable = unit
         .split("\n")
         .filter((line) => line.startsWith("ReadWritePaths="));
@@ -142,7 +129,7 @@ describe("two-phase OTA dependency preparation assets", () => {
   );
 
   it("contains no release adoption or persistent pointer authority", () => {
-    const preparationAssets = `${preparer}\n${activator}\n${coordinator}\n${fetchUnit}\n${buildUnit}`;
+    const preparationAssets = `${preparer}\n${activator}\n${coordinator}\n${fetchUnit}`;
     expect(preparationAssets).not.toMatch(
       /\/opt\/home-worker\/(?:current|previous)/u,
     );

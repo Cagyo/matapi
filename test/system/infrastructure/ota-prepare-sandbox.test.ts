@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import {
   mkdir,
   mkdtemp,
@@ -13,7 +12,6 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  buildDependencies,
   coordinatePreparation,
   fetchDependencies,
   validateLockLocators,
@@ -24,10 +22,6 @@ const ARTIFACT_SHA256 = "a".repeat(64);
 const METADATA_SHA256 = "b".repeat(64);
 const COORDINATOR_CHALLENGE = "c".repeat(64);
 const roots: string[] = [];
-
-function digest(value: string | Buffer): string {
-  return createHash("sha256").update(value).digest("hex");
-}
 
 const yarnPolicy = [
   "nodeLinker: node-modules",
@@ -151,8 +145,8 @@ afterEach(async () => {
   );
 });
 
-describe("two-phase OTA dependency preparation", () => {
-  it("fetches with literal pinned Yarn, a closed public-registry environment, and no lifecycle scripts", async () => {
+describe("OTA dependency preparation", () => {
+  it("installs production dependencies online with literal pinned Yarn and lifecycle scripts enabled", async () => {
     const setup = await fixture();
     let calls = 0;
 
@@ -172,7 +166,7 @@ describe("two-phase OTA dependency preparation", () => {
         expect(env).toMatchObject({
           HOME: join(setup.runtimeRoot, OPERATION_ID, "tmp", "home"),
           YARN_ENABLE_NETWORK: "true",
-          YARN_ENABLE_SCRIPTS: "false",
+          YARN_ENABLE_SCRIPTS: "true",
           NODE_OPTIONS: "--max-old-space-size=256",
           YARN_NETWORK_CONCURRENCY: "1",
           YARN_TASK_POOL_CONCURRENCY: "1",
@@ -212,59 +206,22 @@ describe("two-phase OTA dependency preparation", () => {
     );
 
     expect(calls).toBe(1);
-    const sentinel = JSON.parse(
-      await readFile(
-        join(setup.runtimeRoot, OPERATION_ID, "tmp", "fetch-sentinel.json"),
-        "utf8",
-      ),
-    );
-    expect(sentinel).toMatchObject({
-      schemaVersion: 1,
-      operationId: OPERATION_ID,
-      candidate: setup.candidateName,
-      lifecycleScripts: false,
-      coordinatorChallenge: COORDINATOR_CHALLENGE,
-      yarnLockSha256: digest(yarnLock),
-      yarnRuntimeSha256: digest("// pinned yarn\n"),
-    });
-    expect(JSON.stringify(sentinel)).not.toContain("cacheInventory");
-  });
-
-  it("builds native dependencies offline and durably measures the candidate", async () => {
-    const setup = await fixture();
-    await successfulFetch(setup);
-
-    await buildDependencies(
-      OPERATION_ID,
-      async ({ command, args, cwd, env }) => {
-        expect(command).toBe("/usr/bin/node");
-        expect(args).toEqual([".yarn/releases/yarn-4.13.0.cjs", "rebuild"]);
-        expect(cwd).toBe(setup.candidate);
-        expect(env).toMatchObject({
-          YARN_ENABLE_NETWORK: "false",
-          YARN_ENABLE_SCRIPTS: "true",
-          YARN_ENABLE_IMMUTABLE_CACHE: "false",
-          YARN_CHECKSUM_BEHAVIOR: "throw",
-          YARN_NPM_REGISTRY_SERVER: "https://registry.npmjs.org",
-        });
-        await writeFile(join(cwd, "node_modules", "native.node"), "native\n");
-      },
-      setup.options,
-    );
-
-    const sentinel = JSON.parse(
+    const prepared = JSON.parse(
       await readFile(
         join(setup.runtimeRoot, OPERATION_ID, "tmp", "build-sentinel.json"),
         "utf8",
       ),
     );
-    expect(sentinel).toMatchObject({
+    expect(prepared).toMatchObject({
       schemaVersion: 1,
       operationId: OPERATION_ID,
-      network: false,
+      candidate: setup.candidateName,
+      network: true,
+      coordinatorChallenge: COORDINATOR_CHALLENGE,
+      archiveInputSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
       preparedTreeSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
     });
-    expect(sentinel.preparedFiles).toBeGreaterThan(1);
+    expect(prepared.preparedFiles).toBeGreaterThan(1);
   });
 
   it.each([
@@ -365,28 +322,6 @@ describe("two-phase OTA dependency preparation", () => {
     expect(calls).toBe(0);
   });
 
-  it("rejects a receipt replaced between fetch and offline build", async () => {
-    const setup = await fixture();
-    await successfulFetch(setup);
-    await writeFile(
-      setup.receiptPath,
-      JSON.stringify(
-        {
-          schemaVersion: 1,
-          operationId: OPERATION_ID,
-          candidate: setup.candidateName,
-          artifactSha256: ARTIFACT_SHA256,
-          metadataSha256: METADATA_SHA256,
-        },
-        null,
-        2,
-      ),
-    );
-
-    await expect(
-      buildDependencies(OPERATION_ID, async () => undefined, setup.options),
-    ).rejects.toMatchObject({ code: "dependency-sandbox" });
-  });
 
   it("rejects fetch-time mutation of any archive input", async () => {
     const setup = await fixture();
@@ -402,21 +337,7 @@ describe("two-phase OTA dependency preparation", () => {
     ).rejects.toMatchObject({ code: "dependency-install" });
   });
 
-  it("rejects build-time mutation of any archive input", async () => {
-    const setup = await fixture();
-    await successfulFetch(setup);
-    await expect(
-      buildDependencies(
-        OPERATION_ID,
-        async ({ cwd }) => {
-          await writeFile(join(cwd, "config", "defaults.yml"), "mutated\n");
-        },
-        setup.options,
-      ),
-    ).rejects.toMatchObject({ code: "dependency-install" });
-  });
-
-  it("requires a fresh receipt-bound build sentinel before coordinator success", async () => {
+  it("requires a fresh receipt-bound preparation sentinel before coordinator success", async () => {
     const setup = await fixture();
 
     await expect(
@@ -425,26 +346,15 @@ describe("two-phase OTA dependency preparation", () => {
     await expect(readdir(setup.candidate)).resolves.toEqual([]);
   });
 
-  it("accepts coordinator success only after both real phase contracts complete", async () => {
+  it("accepts coordinator success after the real online install completes", async () => {
     const setup = await fixture();
 
     await expect(
       coordinatePreparation(
         OPERATION_ID,
         async ({ phase }) => {
-          if (phase === "fetch") await successfulFetch(setup);
-          else {
-            await buildDependencies(
-              OPERATION_ID,
-              async ({ cwd }) => {
-                await writeFile(
-                  join(cwd, "node_modules", "native.node"),
-                  "native\n",
-                );
-              },
-              setup.options,
-            );
-          }
+          expect(phase).toBe("fetch");
+          await successfulFetch(setup);
         },
         setup.options,
       ),
@@ -454,45 +364,36 @@ describe("two-phase OTA dependency preparation", () => {
         join(setup.runtimeRoot, OPERATION_ID, "tmp", "build-sentinel.json"),
         "utf8",
       ),
-    ).resolves.toContain('"network":false');
+    ).resolves.toContain('"network":true');
   });
 
-  it.each(["fetch", "build"] as const)(
-    "coordinator removes a candidate after failed %s without touching the live release",
-    async (failedPhase) => {
-      const setup = await fixture();
-      const phases: string[] = [];
-      await expect(
-        coordinatePreparation(
-          OPERATION_ID,
-          async ({ phase }) => {
-            phases.push(phase);
-            if (phase === failedPhase) {
-              await mkdir(join(setup.candidate, "node_modules"), {
-                recursive: true,
-              });
-              await writeFile(
-                join(setup.candidate, "node_modules", "partial"),
-                "partial phase output\n",
-              );
-              throw new Error("phase failed");
-            }
-          },
-          setup.options,
-        ),
-      ).rejects.toMatchObject({ code: "dependency-install" });
-      expect(phases).toEqual(
-        failedPhase === "fetch" ? ["fetch"] : ["fetch", "build"],
-      );
-      await expect(
-        readFile(join(setup.candidate, "package.json")),
-      ).rejects.toThrow();
-      await expect(readdir(setup.candidate)).resolves.toEqual([]);
-      await expect(
-        readFile(join(setup.liveRelease, "live.txt"), "utf8"),
-      ).resolves.toBe("still-running\n");
-    },
-  );
+  it("coordinator removes a candidate after a failed install without touching the live release", async () => {
+    const setup = await fixture();
+    const phases: string[] = [];
+    await expect(
+      coordinatePreparation(
+        OPERATION_ID,
+        async ({ phase }) => {
+          phases.push(phase);
+          await mkdir(join(setup.candidate, "node_modules"), {
+            recursive: true,
+          });
+          await writeFile(
+            join(setup.candidate, "node_modules", "partial"),
+            "partial install output\n",
+          );
+          throw new Error("install failed");
+        },
+        setup.options,
+      ),
+    ).rejects.toMatchObject({ code: "dependency-install" });
+    expect(phases).toEqual(["fetch"]);
+    await expect(readFile(join(setup.candidate, "package.json"))).rejects.toThrow();
+    await expect(readdir(setup.candidate)).resolves.toEqual([]);
+    await expect(
+      readFile(join(setup.liveRelease, "live.txt"), "utf8"),
+    ).resolves.toBe("still-running\n");
+  });
 
   it.each([
     "../escape",
