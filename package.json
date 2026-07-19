@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "description": "Home automation and security monitoring worker (NestJS + grammY) for Raspberry Pi",
+  "homeWorkerRelease": {
+    "target": "linux-arm64-glibc"
+  },
   "packageManager": "yarn@4.13.0",
   "engines": {
     "node": "20.x"

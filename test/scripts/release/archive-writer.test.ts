@@ -38,7 +38,6 @@ async function fixture() {
   await write(root, "package.json", '{"name":"fixture","version":"1.2.3"}\n');
   await write(root, "yarn.lock", "# fixture lock\n");
   await write(root, ".yarnrc.yml", "enableNetwork: false\n");
-  await write(root, "artifact-state.json", '{"fixture":true}\n');
   await write(root, "config/defaults.yml", "timezone: UTC\n");
   await write(root, ".yarn/releases/yarn-4.13.0.cjs", "/* fixture yarn */\n");
   await write(root, "dist/main.js", "export {};\n");
@@ -139,6 +138,7 @@ describe("deterministic release archive writer", () => {
     "dist/private.pem",
     "tests/dev-only.js",
     "dist/control\nname.js",
+    "artifact-state.json",
   ])("rejects denied or unlisted path %s", async (path) => {
     const candidate = await fixture();
     await write(candidate.root, path, "must not ship\n");

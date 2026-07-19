@@ -4,6 +4,8 @@ import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
+import { hostRefusalReasons } from "../../../scripts/release/build-candidate.mjs";
+
 const repositoryRoot = resolve(import.meta.dirname, "../../..");
 const cliPath = join(repositoryRoot, "scripts/release/build-candidate.mjs");
 
@@ -26,9 +28,11 @@ describe("release candidate CLI", () => {
           "linux-arm64-glibc",
           "--source",
           "/path/that/does/not/exist",
-          "--output",
-          outputPath,
-          "--builder-attestation",
+          "--work-root",
+          `${outputPath}.work`,
+          "--output-root",
+          `${outputPath}.output`,
+          "--builder-policy",
           "/path/that/does/not/exist.json",
         ],
         {
@@ -50,11 +54,35 @@ describe("release candidate CLI", () => {
     },
   );
 
+  it("refuses ARMv7 even when supplied ARMv7 host facts", () => {
+    expect(
+      hostRefusalReasons("linux-armv7-glibc", {
+        platform: "linux",
+        arch: "arm",
+        armVersion: 7,
+        libc: "glibc",
+        libcVersion: "2.36",
+        nodeMajor: 20,
+        nodeModulesAbi: "115",
+      }),
+    ).toContain("target-disabled");
+  });
+
   it("has no shell tar path or host identity environment override", async () => {
-    const source = await readFile(cliPath, "utf8");
+    const candidateSources = await Promise.all(
+      [
+        cliPath,
+        join(repositoryRoot, "scripts/release/candidate-orchestrator.mjs"),
+        join(repositoryRoot, "scripts/release/node-candidate-dependencies.mjs"),
+      ].map((path) => readFile(path, "utf8")),
+    );
+    const source = candidateSources.join("\n");
     expect(source).not.toMatch(
       /(?:exec|spawn)(?:File|Sync)?\([^\n]*['"]tar['"]/u,
     );
+    expect(source).not.toMatch(/\b(?:ssh|scp|sftp)\b|https?:\/\//iu);
+    expect(source).toContain("constants.O_DIRECTORY");
+    expect(source).toContain("/proc/self/fd/");
     expect(source).not.toContain("RELEASE_HOST_PLATFORM");
     expect(source).not.toContain("RELEASE_HOST_ARCH");
     expect(source).not.toContain("RELEASE_NODE_MAJOR");
@@ -72,6 +100,9 @@ describe("release candidate CLI", () => {
     expect(packageJson.scripts["release:candidate"]).toBe(
       "node scripts/release/build-candidate.mjs",
     );
+    expect(packageJson.homeWorkerRelease).toEqual({
+      target: "linux-arm64-glibc",
+    });
     expect(gitignore.split(/\r?\n/u)).toContain("/release-output/");
   });
 });

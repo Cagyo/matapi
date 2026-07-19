@@ -24,7 +24,6 @@ const MAX_ENTRIES = 20_000;
 const REQUIRED_FILES = new Set([
   ".yarn/releases/yarn-4.13.0.cjs",
   ".yarnrc.yml",
-  "artifact-state.json",
   "config/defaults.yml",
   "dist/main.js",
   "package.json",
@@ -41,7 +40,6 @@ const OPERATIONAL_SCRIPTS = new Set([
 const EXACT_FILES = new Set([
   ".yarn/releases/yarn-4.13.0.cjs",
   ".yarnrc.yml",
-  "artifact-state.json",
   "config/defaults.yml",
   "package.json",
   ...OPERATIONAL_SCRIPTS,
@@ -66,6 +64,11 @@ const DENIED_SEGMENTS = new Set([
   "src",
   "test",
   "tests",
+]);
+const UPDATER_MARKERS = new Set([
+  "artifact-state.json",
+  "artifact-envelope.json",
+  "known-good.json",
 ]);
 const DENIED_EXTENSIONS =
   /\.(?:db|db-shm|db-wal|sqlite|sqlite3|log|pem|key|p12|mp4|avi|mkv|jpe?g|png)$/iu;
@@ -116,7 +119,10 @@ function isDenied(path) {
   const segments = path.split("/");
   return (
     segments.some(
-      (segment) => DENIED_SEGMENTS.has(segment) || segment.startsWith(".env"),
+      (segment) =>
+        DENIED_SEGMENTS.has(segment) ||
+        UPDATER_MARKERS.has(segment) ||
+        segment.startsWith(".env"),
     ) || DENIED_EXTENSIONS.test(path)
   );
 }

@@ -1,18 +1,19 @@
 #!/usr/bin/env node
 
-import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { constants, lstat, open, readdir, realpath } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { constants, lstat, open, realpath } from "node:fs/promises";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { runCandidateBuild } from "./candidate-orchestrator.mjs";
 import {
-  RELEASE_TARGETS,
-  bytewiseCompare,
-  evaluateReleasePolicy,
-} from "./release-policy.mjs";
+  createNodeCandidateDependencies,
+  readRootOwnedBuilderPolicy,
+} from "./node-candidate-dependencies.mjs";
+import { RELEASE_TARGETS, bytewiseCompare } from "./release-policy.mjs";
 
 const EXIT_USAGE = 64;
+const EXIT_BUILD_FAILED = 70;
 const EXIT_NONPUBLISHABLE = 75;
 const REQUIRED_OPTIONS = Object.freeze([
   "version",
@@ -20,16 +21,17 @@ const REQUIRED_OPTIONS = Object.freeze([
   "tag",
   "target",
   "source",
-  "output",
-  "builder-attestation",
+  "work-root",
+  "output-root",
+  "builder-policy",
 ]);
 
 function usage(message) {
   if (message) process.stderr.write(`ERROR ${message}\n`);
   process.stderr.write(
     "Usage: build-candidate.mjs --version X.Y.Z --commit 40HEX --tag vX.Y.Z " +
-      "--target linux-arm64-glibc|linux-armv7-glibc --source ABSOLUTE_PATH " +
-      "--output ABSOLUTE_PATH --builder-attestation ABSOLUTE_PATH\n",
+      "--target linux-arm64-glibc --source ABSOLUTE_PATH --work-root ABSOLUTE_PATH " +
+      "--output-root ABSOLUTE_PATH --builder-policy ABSOLUTE_PATH\n",
   );
   process.exit(EXIT_USAGE);
 }
@@ -69,34 +71,34 @@ function parseArguments(argv) {
     usage("tag must exactly match the version");
   if (!Object.hasOwn(RELEASE_TARGETS, options.target))
     usage("unsupported release target");
-  if (!options.source.startsWith("/") || !options.output.startsWith("/")) {
-    usage("source and output paths must be absolute");
-  }
-  if (!options["builder-attestation"].startsWith("/")) {
-    usage("builder attestation path must be absolute");
+  for (const name of ["source", "work-root", "output-root", "builder-policy"]) {
+    if (!options[name].startsWith("/")) usage(`${name} path must be absolute`);
   }
   return Object.freeze(options);
 }
 
 function actualHostFacts() {
   const report = process.report?.getReport();
+  const libcVersion = report?.header?.glibcVersionRuntime;
   return Object.freeze({
     platform: process.platform,
     arch: process.arch,
     armVersion: Number(process.config.variables.arm_version) || null,
-    libc: report?.header?.glibcVersionRuntime ? "glibc" : "unknown",
+    libc: libcVersion ? "glibc" : "unknown",
+    libcVersion: typeof libcVersion === "string" ? libcVersion : null,
     nodeMajor: Number.parseInt(process.versions.node.split(".")[0], 10),
     nodeModulesAbi: process.versions.modules,
   });
 }
 
-function hostRefusalReasons(targetName, host) {
+export function hostRefusalReasons(targetName, host) {
   const target = RELEASE_TARGETS[targetName];
   const reasons = [];
-  if (host.platform !== target.platform) reasons.push("host-platform");
-  if (host.arch !== target.arch) reasons.push("host-arch");
-  if (host.libc !== target.libc) reasons.push("host-libc");
-  if (target.armVersion !== null && host.armVersion !== target.armVersion) {
+  if (targetName !== "linux-arm64-glibc") reasons.push("target-disabled");
+  if (host.platform !== target?.platform) reasons.push("host-platform");
+  if (host.arch !== target?.arch) reasons.push("host-arch");
+  if (host.libc !== target?.libc) reasons.push("host-libc");
+  if (target?.armVersion !== null && host.armVersion !== target?.armVersion) {
     reasons.push("host-arm-version");
   }
   if (host.nodeMajor !== 20) reasons.push("host-node-major");
@@ -105,196 +107,173 @@ function hostRefusalReasons(targetName, host) {
 }
 
 function runGit(source, args) {
-  const result = spawnSync("git", args, {
+  const result = spawnSync("/usr/bin/git", args, {
     cwd: source,
     encoding: "utf8",
+    env: { PATH: "/usr/bin:/bin", LC_ALL: "C", TZ: "UTC" },
     shell: false,
     maxBuffer: 4 * 1024 * 1024,
   });
-  if (result.status !== 0 || result.signal) {
+  if (result.status !== 0 || result.signal)
     throw new Error(`git ${args[0]} failed`);
-  }
   return result.stdout.trim();
 }
 
-async function readStableFile(path, requireRootOwner = false) {
+function sameIdentity(left, right) {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mode === right.mode &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs
+  );
+}
+
+async function readStableFile(path) {
   const before = await lstat(path, { bigint: true });
   if (!before.isFile() || before.isSymbolicLink())
     throw new Error("not a regular file");
-  if (requireRootOwner && (before.uid !== 0n || (before.mode & 0o22n) !== 0n)) {
-    throw new Error(
-      "attestation must be root-owned and not group/world writable",
-    );
-  }
   const handle = await open(
     path,
     constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
   );
   try {
+    const opened = await handle.stat({ bigint: true });
+    if (!sameIdentity(before, opened))
+      throw new Error("file changed while opening");
     const contents = await handle.readFile();
     const after = await handle.stat({ bigint: true });
-    if (
-      after.ino !== before.ino ||
-      after.size !== before.size ||
-      after.mtimeNs !== before.mtimeNs
-    ) {
-      throw new Error("file changed while being read");
-    }
+    if (!sameIdentity(opened, after))
+      throw new Error("file changed while reading");
     return contents;
   } finally {
     await handle.close();
   }
 }
 
-function parseJson(contents, description) {
+function parsePackage(bytes) {
   try {
-    const value = JSON.parse(contents.toString("utf8"));
-    if (value === null || typeof value !== "object" || Array.isArray(value)) {
-      throw new Error("object required");
-    }
+    const value = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+    );
+    if (value === null || typeof value !== "object" || Array.isArray(value))
+      throw new Error();
     return value;
   } catch {
-    throw new Error(`${description} is not valid JSON`);
+    throw new Error("package.json is not valid JSON");
   }
 }
 
-function digest(contents) {
-  return createHash("sha256").update(contents).digest("hex");
-}
-
-async function validateCache(source, expectedInventory) {
-  if (!Array.isArray(expectedInventory) || expectedInventory.length === 0) {
-    throw new Error("target cache inventory is absent");
+function preflightReasons(options, checkout, packageJson, policy, host) {
+  const reasons = [];
+  if (!checkout.clean) reasons.push("checkout-dirty");
+  if (checkout.headCommit !== options.commit) reasons.push("checkout-head");
+  if (checkout.tagKind !== "tag") reasons.push("checkout-tag-kind");
+  if (checkout.tagCommit !== options.commit)
+    reasons.push("checkout-tag-commit");
+  if (!Number.isSafeInteger(checkout.commitEpoch) || checkout.commitEpoch < 0) {
+    reasons.push("checkout-commit-epoch");
   }
-  const cacheRoot = join(source, ".yarn/cache");
-  const children = await readdir(cacheRoot, { withFileTypes: true });
-  const archiveNames = children
-    .filter((child) => child.isFile() && child.name.endsWith(".zip"))
-    .map((child) => child.name)
-    .sort(bytewiseCompare);
-  const expectedNames = expectedInventory
-    .map((entry) => entry.path)
-    .filter((path) => typeof path === "string")
-    .map((path) => path.replace(/^\.yarn\/cache\//u, ""))
-    .sort(bytewiseCompare);
-  if (JSON.stringify(archiveNames) !== JSON.stringify(expectedNames)) {
-    throw new Error("target cache file set differs from attestation");
+  if (packageJson.version !== options.version) reasons.push("package-version");
+  if (packageJson.homeWorkerRelease?.target !== options.target)
+    reasons.push("package-target");
+  if (packageJson.packageManager !== "yarn@4.13.0")
+    reasons.push("package-manager");
+  if (policy.target.targetName !== options.target)
+    reasons.push("builder-target");
+  if (
+    policy.target.platform !== host.platform ||
+    policy.target.arch !== host.arch ||
+    policy.target.libc !== host.libc ||
+    policy.target.libcVersion !== host.libcVersion ||
+    policy.target.nodeModulesAbi !== host.nodeModulesAbi ||
+    policy.runtime.nodeMajor !== host.nodeMajor
+  ) {
+    reasons.push("builder-host-mismatch");
   }
-  for (const entry of expectedInventory) {
-    if (!/^\.yarn\/cache\/[^/]+\.zip$/u.test(entry.path)) {
-      throw new Error("target cache attestation contains an unsafe path");
-    }
-    const contents = await readStableFile(join(source, entry.path));
-    if (contents.length !== entry.size || digest(contents) !== entry.sha256) {
-      throw new Error(
-        `target cache entry differs from attestation: ${entry.path}`,
-      );
-    }
-  }
+  return reasons;
 }
 
 async function main() {
   const options = parseArguments(process.argv.slice(2));
 
-  // These values intentionally come only from Node's immutable process identity.
-  // Environment variables cannot impersonate a Linux ARM release host.
+  // These facts come only from Node's process identity. Refusal occurs before
+  // source, output, work, or builder-policy paths are accessed.
   const host = actualHostFacts();
   const earlyReasons = hostRefusalReasons(options.target, host);
   if (earlyReasons.length > 0) refuse(earlyReasons);
 
-  let source;
-  let packageJson;
-  let attestation;
-  let yarnLock;
+  let sourceRoot;
   let checkout;
+  let packageJson;
+  let builderPolicy;
   try {
-    source = await realpath(resolve(options.source));
-    const sourceStat = await lstat(source);
-    if (!sourceStat.isDirectory() || sourceStat.isSymbolicLink()) {
-      throw new Error("source is not a regular directory");
-    }
-    const expectedOutputParent = join(source, "release-output");
-    if (dirname(resolve(options.output)) !== expectedOutputParent) {
-      throw new Error(
-        "output must be a direct child of the release-output directory",
-      );
-    }
-    const status = runGit(source, [
+    sourceRoot = await realpath(resolve(options.source));
+    const source = await lstat(sourceRoot);
+    if (!source.isDirectory() || source.isSymbolicLink())
+      throw new Error("source is unsafe");
+    const status = runGit(sourceRoot, [
       "status",
       "--porcelain=v1",
       "--untracked-files=normal",
     ]);
-    const headCommit = runGit(source, ["rev-parse", "--verify", "HEAD"]);
-    const tagKind = runGit(source, [
-      "cat-file",
-      "-t",
-      `refs/tags/${options.tag}`,
-    ]);
-    const tagCommit = runGit(source, [
-      "rev-parse",
-      "--verify",
-      `${options.tag}^{commit}`,
-    ]);
-    const commitEpochText = runGit(source, [
-      "show",
-      "-s",
-      "--format=%ct",
-      options.commit,
-    ]);
     checkout = {
       clean: status === "",
-      headCommit,
-      tagKind,
-      tagCommit,
-      commitEpoch: Number.parseInt(commitEpochText, 10),
+      headCommit: runGit(sourceRoot, ["rev-parse", "--verify", "HEAD"]),
+      tagKind: runGit(sourceRoot, [
+        "cat-file",
+        "-t",
+        `refs/tags/${options.tag}`,
+      ]),
+      tagCommit: runGit(sourceRoot, [
+        "rev-parse",
+        "--verify",
+        `${options.tag}^{commit}`,
+      ]),
+      commitEpoch: Number.parseInt(
+        runGit(sourceRoot, ["show", "-s", "--format=%ct", options.commit]),
+        10,
+      ),
     };
-    packageJson = parseJson(
-      await readStableFile(join(source, "package.json")),
-      "package.json",
+    packageJson = parsePackage(
+      await readStableFile(resolve(sourceRoot, "package.json")),
     );
-    yarnLock = await readStableFile(join(source, "yarn.lock"));
-    attestation = parseJson(
-      await readStableFile(options["builder-attestation"], true),
-      "builder attestation",
-    );
-    await validateCache(source, attestation.cache?.inventory);
+    builderPolicy = await readRootOwnedBuilderPolicy(options["builder-policy"]);
   } catch {
     refuse(["preflight-failed"]);
   }
 
-  const decision = evaluateReleasePolicy({
-    request: {
-      version: options.version,
-      commit: options.commit,
-      target: options.target,
-      tag: options.tag,
-    },
+  const reasons = preflightReasons(
+    options,
     checkout,
-    package: {
-      version: packageJson.version,
-      releaseTarget: packageJson.homeWorkerRelease?.target,
-      packageManager: packageJson.packageManager,
-    },
+    packageJson,
+    builderPolicy,
     host,
-    builder: attestation.builder,
-    environment: {
-      tz: process.env.TZ,
-      locale: process.env.LC_ALL,
-      sourceDateEpoch: Number.parseInt(process.env.SOURCE_DATE_EPOCH ?? "", 10),
-    },
-    cache: {
-      ...attestation.cache,
-      yarnLockSha256: digest(yarnLock),
-    },
-  });
-  if (!decision.publishable) refuse(decision.reasons);
+  );
+  if (reasons.length > 0) refuse(reasons);
 
-  // Candidate creation remains deliberately disabled in this safe local slice.
-  // A later controlled-builder task may connect this gate to the archive writer.
-  refuse(["candidate-emission-disabled"]);
+  try {
+    const result = await runCandidateBuild(
+      {
+        version: options.version,
+        commit: options.commit,
+        tag: options.tag,
+        target: options.target,
+        sourceDateEpoch: checkout.commitEpoch,
+        sourceRoot,
+        workRoot: options["work-root"],
+        outputRoot: options["output-root"],
+        builderPolicy,
+      },
+      createNodeCandidateDependencies(),
+    );
+    process.stdout.write(`CANDIDATE ${JSON.stringify(result.published)}\n`);
+  } catch {
+    process.stderr.write("BUILD_FAILED candidate-build\n");
+    process.exit(EXIT_BUILD_FAILED);
+  }
 }
 
 const invokedPath = process.argv[1] ? resolve(process.argv[1]) : "";
-if (invokedPath === fileURLToPath(import.meta.url)) {
-  await main();
-}
+if (invokedPath === fileURLToPath(import.meta.url)) await main();
