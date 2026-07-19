@@ -114,7 +114,7 @@ function fixture(events: string[], marker: ReadinessMarker | null = ready()) {
       start: vi.fn(async () => events.push("pm2:start")),
       inspect: vi.fn(async () => ({
         pid: 100,
-        restartCount: 7,
+        restartCount: 0,
         uptimeMs: 61_000,
         status: "online" as const,
       })),
@@ -179,8 +179,8 @@ describe("OtaActivationCoordinator", () => {
     expect(events.indexOf("known-good:fsync")).toBeLessThan(
       events.indexOf("journal:healthy"),
     );
-    expect(events.indexOf("journal:healthy")).toBeLessThan(
-      events.indexOf(`previous:${PRIOR_CURRENT}`),
+    expect(events.indexOf(`previous:${PRIOR_CURRENT}`)).toBeLessThan(
+      events.indexOf("journal:healthy"),
     );
   });
 
@@ -274,6 +274,66 @@ describe("OtaActivationCoordinator", () => {
     expect(events).toContain("journal:rollback_failed");
   });
 
+  it("restores both pointers when previous cannot be committed before healthy", async () => {
+    const events: string[] = [];
+    const dependencies = fixture(events);
+    dependencies.links.setPrevious = vi.fn(async () => {
+      events.push("previous:failed");
+      throw new OtaActivationError("activation");
+    });
+    const activation = new OtaActivationCoordinator(dependencies);
+
+    await expect(activation.run(OPERATION_ID)).rejects.toMatchObject({
+      code: "activation",
+    });
+    expect(events).not.toContain("journal:healthy");
+    expect(events).toContain(`restore:${PRIOR_CURRENT}:${PRIOR_PREVIOUS}`);
+    expect(events).toContain("journal:rolled_back");
+  });
+
+  it("preserves committed pointers and activated journal when healthy persistence fails", async () => {
+    const events: string[] = [];
+    const dependencies = fixture(events);
+    dependencies.journal.transition = vi.fn(
+      async (
+        source: OperationJournal,
+        phase: OperationJournal["phase"],
+      ): Promise<OperationJournal> => {
+        events.push(`journal:${phase}`);
+        if (phase === "healthy")
+          throw new Error("injected journal fsync failure");
+        return { ...source, generation: source.generation + 1, phase };
+      },
+    );
+    const activation = new OtaActivationCoordinator(dependencies);
+
+    await expect(activation.run(OPERATION_ID)).rejects.toMatchObject({
+      code: "maintenance-required",
+    });
+    expect(events.indexOf(`previous:${PRIOR_CURRENT}`)).toBeLessThan(
+      events.indexOf("journal:healthy"),
+    );
+    expect(events).not.toContain(`restore:${PRIOR_CURRENT}:${PRIOR_PREVIOUS}`);
+    expect(events).not.toContain("journal:rolled_back");
+  });
+
+  it("rejects a nonzero initial PM2 restart counter", async () => {
+    const events: string[] = [];
+    const dependencies = fixture(events);
+    dependencies.process.inspect = vi.fn(async () => ({
+      pid: 100,
+      restartCount: 1,
+      uptimeMs: 1,
+      status: "online" as const,
+    }));
+    const activation = new OtaActivationCoordinator(dependencies);
+
+    await expect(activation.run(OPERATION_ID)).rejects.toMatchObject({
+      code: "pm2",
+    });
+    expect(events).toContain(`restore:${PRIOR_CURRENT}:${PRIOR_PREVIOUS}`);
+  });
+
   it("makes a local rollback reversible by swapping the two recorded targets", async () => {
     const events: string[] = [];
     const dependencies = fixture(events);
@@ -300,7 +360,7 @@ describe("OtaActivationCoordinator", () => {
     await activation.run(OPERATION_ID);
 
     expect(events.indexOf(`current:${PRIOR_PREVIOUS}`)).toBeGreaterThan(-1);
-    expect(events.indexOf(`previous:${PRIOR_CURRENT}`)).toBeGreaterThan(
+    expect(events.indexOf(`previous:${PRIOR_CURRENT}`)).toBeLessThan(
       events.indexOf("journal:healthy"),
     );
   });

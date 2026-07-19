@@ -1,12 +1,17 @@
-import { createHash } from "node:crypto";
+import { createHash, createPublicKey, verify } from "node:crypto";
 import { constants } from "node:fs";
 import {
+  chmod,
+  chown,
   lstat,
+  lchown,
+  mkdir,
   open,
   readFile,
   readlink,
   readdir,
   rename,
+  rm,
   symlink,
   unlink,
 } from "node:fs/promises";
@@ -18,10 +23,19 @@ const RELEASES_ROOT = "/opt/home-worker/releases";
 const JOURNAL_ROOT = "/opt/home-worker/shared/update";
 const PROJECTION_ROOT = "/run/home-worker/activate";
 const READY_PATH = "/run/home-worker/ready.json";
+const TRUST_ROOT = "/etc/home-worker/update-keys";
 const OPERATION_ID = /^[A-Za-z0-9_-]{22}$/;
 const RELEASE_NAME = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-[0-9a-f]{64}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const MAX_JSON_BYTES = 2 * 1024 * 1024;
+const MAX_ENVELOPE_BYTES = 96 * 1024;
+const MAX_PAYLOAD_BYTES = 64 * 1024;
+const COMMIT = /^[0-9a-f]{40}$/;
+const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+const ABI = /^(?:0|[1-9]\d*)$/;
+const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const CANONICAL_BASE64 =
+  /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const MARKERS = new Set([
   "artifact-state.json",
   "artifact-envelope.json",
@@ -105,6 +119,477 @@ function exactKeys(value, keys) {
     !Array.isArray(value) &&
     Object.keys(value).sort().join("\0") === [...keys].sort().join("\0")
   );
+}
+
+function positiveInteger(value) {
+  return Number.isSafeInteger(value) && value > 0;
+}
+
+function canonicalTimestamp(value) {
+  return (
+    typeof value === "string" &&
+    TIMESTAMP.test(value) &&
+    !Number.isNaN(Date.parse(value)) &&
+    new Date(Date.parse(value)).toISOString() === value
+  );
+}
+
+function canonicalBase64(value) {
+  if (
+    typeof value !== "string" ||
+    value.length % 4 !== 0 ||
+    !CANONICAL_BASE64.test(value)
+  )
+    fail();
+  const bytes = Buffer.from(value, "base64");
+  if (bytes.toString("base64") !== value) fail();
+  return bytes;
+}
+
+function parseSecurityJson(bytes) {
+  let source;
+  try {
+    source = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+      bytes,
+    );
+  } catch {
+    fail();
+  }
+  if (source.startsWith("\uFEFF")) fail();
+
+  let index = 0;
+  let depth = 0;
+  const whitespace = new Set([" ", "\t", "\n", "\r"]);
+  const skip = () => {
+    while (whitespace.has(source[index] ?? "")) index += 1;
+  };
+  const consume = (character) => {
+    if (source[index] !== character) return false;
+    index += 1;
+    return true;
+  };
+  const parseString = () => {
+    const start = index;
+    index += 1;
+    while (index < source.length) {
+      const code = source.charCodeAt(index);
+      if (code === 0x22) {
+        index += 1;
+        try {
+          return JSON.parse(source.slice(start, index));
+        } catch {
+          fail();
+        }
+      }
+      if (code < 0x20) fail();
+      if (code === 0x5c) {
+        index += 1;
+        const escape = source[index];
+        if (escape === "u") {
+          if (!/^[0-9a-fA-F]{4}$/.test(source.slice(index + 1, index + 5)))
+            fail();
+          index += 5;
+          continue;
+        }
+        if (!['"', "\\", "/", "b", "f", "n", "r", "t"].includes(escape)) fail();
+      }
+      index += 1;
+    }
+    fail();
+  };
+  const parseNumber = () => {
+    const token = /^-?(?:0|[1-9]\d*)/.exec(source.slice(index))?.[0];
+    if (!token) fail();
+    index += token.length;
+    const value = Number(token);
+    if (!Number.isSafeInteger(value)) fail();
+    return value;
+  };
+  const enter = () => {
+    if (depth >= 64) fail();
+    depth += 1;
+  };
+  let parseValue;
+  const parseObject = () => {
+    enter();
+    index += 1;
+    skip();
+    const result = {};
+    const keys = new Set();
+    if (consume("}")) {
+      depth -= 1;
+      return result;
+    }
+    while (true) {
+      skip();
+      if (source[index] !== '"') fail();
+      const key = parseString();
+      if (keys.has(key)) fail();
+      keys.add(key);
+      skip();
+      if (!consume(":")) fail();
+      Object.defineProperty(result, key, {
+        value: parseValue(),
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+      skip();
+      if (consume("}")) {
+        depth -= 1;
+        return result;
+      }
+      if (!consume(",")) fail();
+    }
+  };
+  const parseArray = () => {
+    enter();
+    index += 1;
+    skip();
+    const result = [];
+    if (consume("]")) {
+      depth -= 1;
+      return result;
+    }
+    while (true) {
+      result.push(parseValue());
+      skip();
+      if (consume("]")) {
+        depth -= 1;
+        return result;
+      }
+      if (!consume(",")) fail();
+    }
+  };
+  parseValue = () => {
+    skip();
+    const character = source[index];
+    if (character === "{") return parseObject();
+    if (character === "[") return parseArray();
+    if (character === '"') return parseString();
+    for (const [token, value] of [
+      ["true", true],
+      ["false", false],
+      ["null", null],
+    ]) {
+      if (source.slice(index, index + token.length) === token) {
+        index += token.length;
+        return value;
+      }
+    }
+    if (character === "-" || /\d/.test(character ?? "")) return parseNumber();
+    fail();
+  };
+  const value = parseValue();
+  skip();
+  if (index !== source.length) fail();
+  return value;
+}
+
+function parseSignedManifest(payload, now, enforceFreshness) {
+  const manifest = parseSecurityJson(payload);
+  if (
+    !exactKeys(manifest, [
+      "schemaVersion",
+      "metadataVersion",
+      "channel",
+      "version",
+      "commit",
+      "publishedAt",
+      "expiresAt",
+      "target",
+      "artifact",
+      "runtime",
+    ]) ||
+    manifest.schemaVersion !== 1 ||
+    !positiveInteger(manifest.metadataVersion) ||
+    manifest.channel !== "stable" ||
+    typeof manifest.version !== "string" ||
+    !SEMVER.test(manifest.version) ||
+    typeof manifest.commit !== "string" ||
+    !COMMIT.test(manifest.commit) ||
+    !canonicalTimestamp(manifest.publishedAt) ||
+    !canonicalTimestamp(manifest.expiresAt) ||
+    Date.parse(manifest.publishedAt) >= Date.parse(manifest.expiresAt) ||
+    Date.parse(manifest.expiresAt) - Date.parse(manifest.publishedAt) >
+      31 * 24 * 60 * 60 * 1000 ||
+    (enforceFreshness &&
+      (Date.parse(manifest.publishedAt) > now.getTime() + 5 * 60 * 1000 ||
+        Date.parse(manifest.expiresAt) <= now.getTime()))
+  )
+    fail();
+  if (
+    !exactKeys(manifest.target, [
+      "platform",
+      "arch",
+      "libc",
+      "libcMinVersion",
+      "nodeModulesAbi",
+    ]) ||
+    manifest.target.platform !== "linux" ||
+    (manifest.target.arch !== "arm" && manifest.target.arch !== "arm64") ||
+    manifest.target.libc !== "glibc" ||
+    typeof manifest.target.libcMinVersion !== "string" ||
+    !/^(?:0|[1-9]\d*)(?:\.(?:0|[1-9]\d*))*$/.test(
+      manifest.target.libcMinVersion,
+    ) ||
+    typeof manifest.target.nodeModulesAbi !== "string" ||
+    !ABI.test(manifest.target.nodeModulesAbi)
+  )
+    fail();
+  if (
+    !exactKeys(manifest.artifact, [
+      "url",
+      "format",
+      "size",
+      "expandedSize",
+      "maxPreparedSize",
+      "maxPreparedFiles",
+      "fileCount",
+      "sha256",
+    ]) ||
+    typeof manifest.artifact.url !== "string" ||
+    manifest.artifact.format !== "tar.gz" ||
+    !positiveInteger(manifest.artifact.size) ||
+    !positiveInteger(manifest.artifact.expandedSize) ||
+    !positiveInteger(manifest.artifact.maxPreparedSize) ||
+    !positiveInteger(manifest.artifact.maxPreparedFiles) ||
+    !positiveInteger(manifest.artifact.fileCount) ||
+    !SHA256.test(manifest.artifact.sha256) ||
+    manifest.artifact.expandedSize > manifest.artifact.maxPreparedSize ||
+    manifest.artifact.fileCount > manifest.artifact.maxPreparedFiles
+  )
+    fail();
+  try {
+    const url = new URL(manifest.artifact.url);
+    if (
+      url.protocol !== "https:" ||
+      url.username !== "" ||
+      url.password !== "" ||
+      url.hash !== ""
+    )
+      fail();
+  } catch (error) {
+    if (error instanceof ActivationError) throw error;
+    fail();
+  }
+  if (
+    !exactKeys(manifest.runtime, ["nodeMajor", "packageManager"]) ||
+    manifest.runtime.nodeMajor !== 20 ||
+    manifest.runtime.packageManager !== "yarn@4.13.0"
+  )
+    fail();
+  return manifest;
+}
+
+async function loadVerificationKeys(trustRoot, scope, expectedUid) {
+  const directory = resolve(trustRoot, scope);
+  let directoryInfo;
+  try {
+    directoryInfo = await lstat(directory);
+  } catch (error) {
+    if (error?.code === "ENOENT") return new Map();
+    throw error;
+  }
+  if (
+    !directoryInfo.isDirectory() ||
+    directoryInfo.isSymbolicLink() ||
+    directoryInfo.uid !== expectedUid ||
+    (directoryInfo.mode & 0o022) !== 0
+  )
+    fail();
+  const keys = new Map();
+  for (const name of (await readdir(directory)).sort()) {
+    if (!name.endsWith(".pem") || name.includes("/")) continue;
+    const path = join(directory, name);
+    try {
+      const info = await lstat(path);
+      if (
+        !info.isFile() ||
+        info.isSymbolicLink() ||
+        info.uid !== expectedUid ||
+        (info.mode & 0o022) !== 0
+      )
+        continue;
+      const publicKey = createPublicKey(await readBytes(path, 64 * 1024));
+      if (
+        publicKey.type !== "public" ||
+        publicKey.asymmetricKeyType !== "ed25519"
+      )
+        continue;
+      const keyId = createHash("sha256")
+        .update(publicKey.export({ format: "der", type: "spki" }))
+        .digest("hex");
+      if (!keys.has(keyId)) keys.set(keyId, publicKey);
+    } catch {}
+  }
+  return keys;
+}
+
+function checkedIdentity(manifest, payloadSha256) {
+  return {
+    artifact: {
+      version: manifest.version,
+      commit: manifest.commit,
+      targetName:
+        manifest.target.arch === "arm"
+          ? "linux-armv7-glibc"
+          : "linux-arm64-glibc",
+      target: manifest.target,
+      ...manifest.artifact,
+    },
+    metadata: {
+      metadataVersion: manifest.metadataVersion,
+      channel: manifest.channel,
+      payloadSha256,
+      publishedAt: manifest.publishedAt,
+      expiresAt: manifest.expiresAt,
+    },
+  };
+}
+
+function sameJson(left, right) {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => sameJson(value, right[index]))
+    );
+  }
+  if (
+    left === null ||
+    right === null ||
+    typeof left !== "object" ||
+    typeof right !== "object"
+  )
+    return false;
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every(
+      (key, index) =>
+        key === rightKeys[index] && sameJson(left[key], right[key]),
+    )
+  );
+}
+
+export async function verifyCandidateAuthorization(
+  journal,
+  marker,
+  envelopeBytes,
+  knownGood,
+  options = {},
+) {
+  try {
+    const trustRoot = options.trustRoot ?? TRUST_ROOT;
+    const expectedUid =
+      options.expectedUid ?? (trustRoot === TRUST_ROOT ? 0 : process.getuid());
+    const now = options.now ?? new Date();
+    if (
+      !Number.isFinite(now.getTime()) ||
+      envelopeBytes.byteLength > MAX_ENVELOPE_BYTES ||
+      !exactKeys(marker, [
+        "schemaVersion",
+        "artifact",
+        "metadata",
+        "envelopeSha256",
+        "preparedTreeSha256",
+        "writtenAt",
+      ]) ||
+      marker.schemaVersion !== 1 ||
+      marker.envelopeSha256 !==
+        createHash("sha256").update(envelopeBytes).digest("hex")
+    )
+      fail();
+    const envelope = parseSecurityJson(envelopeBytes);
+    if (
+      !exactKeys(envelope, ["payload", "signatures"]) ||
+      !Array.isArray(envelope.signatures) ||
+      envelope.signatures.length < 1 ||
+      envelope.signatures.length > 3
+    )
+      fail();
+    const payload = canonicalBase64(envelope.payload);
+    if (payload.byteLength > MAX_PAYLOAD_BYTES) fail();
+    const seen = new Set();
+    const signatures = envelope.signatures.map((entry) => {
+      if (
+        !exactKeys(entry, ["keyId", "signature"]) ||
+        typeof entry.keyId !== "string" ||
+        !SHA256.test(entry.keyId) ||
+        seen.has(entry.keyId)
+      )
+        fail();
+      seen.add(entry.keyId);
+      const signature = canonicalBase64(entry.signature);
+      if (signature.byteLength !== 64) fail();
+      return { keyId: entry.keyId, signature };
+    });
+    const manifest = parseSignedManifest(
+      payload,
+      now,
+      journal.kind === "update",
+    );
+    const identity = checkedIdentity(
+      manifest,
+      createHash("sha256").update(payload).digest("hex"),
+    );
+    if (
+      !sameJson(identity, {
+        artifact: marker.artifact,
+        metadata: marker.metadata,
+      })
+    )
+      fail();
+    const active = await loadVerificationKeys(trustRoot, "active", expectedUid);
+    const verifiesWith = (keys) =>
+      signatures.some(({ keyId, signature }) => {
+        const key = keys.get(keyId);
+        return key !== undefined && verify(null, payload, key, signature);
+      });
+    if (journal.kind === "update") {
+      if (!sameJson(identity, journal.expected) || !verifiesWith(active))
+        fail();
+    } else {
+      const retired = await loadVerificationKeys(
+        trustRoot,
+        "retired",
+        expectedUid,
+      );
+      if (
+        !exactKeys(knownGood, [
+          "schemaVersion",
+          "operationId",
+          "artifactSha256",
+          "metadataSha256",
+          "preparedTreeSha256",
+          "activatedAt",
+        ]) ||
+        knownGood.schemaVersion !== 1 ||
+        !OPERATION_ID.test(knownGood.operationId) ||
+        Buffer.from(knownGood.operationId, "base64url").length !== 16 ||
+        Buffer.from(knownGood.operationId, "base64url").toString(
+          "base64url",
+        ) !== knownGood.operationId ||
+        knownGood.artifactSha256 !== identity.artifact.sha256 ||
+        knownGood.metadataSha256 !== identity.metadata.payloadSha256 ||
+        knownGood.preparedTreeSha256 !== marker.preparedTreeSha256 ||
+        !canonicalTimestamp(knownGood.activatedAt) ||
+        (!verifiesWith(active) && !verifiesWith(retired))
+      )
+        fail();
+    }
+    return {
+      artifactSha256: identity.artifact.sha256,
+      metadataSha256: identity.metadata.payloadSha256,
+    };
+  } catch (error) {
+    if (error instanceof ActivationError) throw error;
+    fail();
+  }
 }
 
 function journalPayload(value) {
@@ -332,14 +817,181 @@ async function assertRecordedLinks(journal) {
   }
 }
 
-async function adoptCandidate(journal) {
-  const path = resolve(RELEASES_ROOT, journal.candidate);
-  if (dirname(path) !== RELEASES_ROOT || basename(path) !== journal.candidate)
-    fail();
+async function fsyncDirectory(path) {
+  const handle = await open(
+    path,
+    constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+  );
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+async function hardenTree(root, ownerUid, ownerGid) {
+  async function walk(path) {
+    const entry = await lstat(path);
+    if (entry.isSymbolicLink()) {
+      await lchown(path, ownerUid, ownerGid);
+      return;
+    }
+    if (entry.isDirectory()) {
+      await chown(path, ownerUid, ownerGid);
+      await chmod(path, 0o755);
+      const names = await readdir(path);
+      names.sort((left, right) =>
+        Buffer.compare(Buffer.from(left), Buffer.from(right)),
+      );
+      for (const name of names) {
+        if (!name || name === "." || name === ".." || name.includes("/"))
+          fail("prepared-tree");
+        await walk(join(path, name));
+      }
+      return;
+    }
+    if (!entry.isFile()) fail("prepared-tree");
+    await chown(path, ownerUid, ownerGid);
+    await chmod(path, (entry.mode & 0o111) === 0 ? 0o644 : 0o755);
+  }
+  await walk(root);
+}
+
+async function copyAdoptedTree(sourceRoot, targetRoot, ownerUid, ownerGid) {
+  await mkdir(targetRoot, { mode: 0o700 });
+  await chown(targetRoot, ownerUid, ownerGid);
+  async function copyDirectory(source, target, isRoot = false) {
+    if (!isRoot) {
+      await mkdir(target, { mode: 0o755 });
+      await chown(target, ownerUid, ownerGid);
+    }
+    const names = await readdir(source);
+    names.sort((left, right) =>
+      Buffer.compare(Buffer.from(left), Buffer.from(right)),
+    );
+    for (const name of names) {
+      if (!name || name === "." || name === ".." || name.includes("/"))
+        fail("prepared-tree");
+      const sourcePath = join(source, name);
+      const targetPath = join(target, name);
+      const entry = await lstat(sourcePath);
+      if (entry.isDirectory() && !entry.isSymbolicLink()) {
+        await copyDirectory(sourcePath, targetPath);
+      } else if (entry.isFile() && !entry.isSymbolicLink()) {
+        const sourceHandle = await open(
+          sourcePath,
+          constants.O_RDONLY | constants.O_NOFOLLOW,
+        );
+        let targetHandle;
+        try {
+          const before = await sourceHandle.stat();
+          if (!before.isFile()) fail("prepared-tree");
+          targetHandle = await open(
+            targetPath,
+            constants.O_WRONLY |
+              constants.O_CREAT |
+              constants.O_EXCL |
+              constants.O_NOFOLLOW,
+            (before.mode & 0o111) === 0 ? 0o644 : 0o755,
+          );
+          await targetHandle.chown(ownerUid, ownerGid);
+          const buffer = Buffer.allocUnsafe(64 * 1024);
+          let offset = 0;
+          while (true) {
+            const { bytesRead } = await sourceHandle.read(
+              buffer,
+              0,
+              buffer.length,
+              offset,
+            );
+            if (bytesRead === 0) break;
+            let written = 0;
+            while (written < bytesRead) {
+              const result = await targetHandle.write(
+                buffer,
+                written,
+                bytesRead - written,
+                offset + written,
+              );
+              if (result.bytesWritten <= 0) fail("prepared-tree");
+              written += result.bytesWritten;
+            }
+            offset += bytesRead;
+          }
+          const after = await sourceHandle.stat();
+          if (
+            before.dev !== after.dev ||
+            before.ino !== after.ino ||
+            before.size !== after.size ||
+            before.mtimeMs !== after.mtimeMs ||
+            offset !== before.size
+          )
+            fail("prepared-tree");
+          await targetHandle.chmod((before.mode & 0o111) === 0 ? 0o644 : 0o755);
+          await targetHandle.sync();
+        } finally {
+          await targetHandle?.close();
+          await sourceHandle.close();
+        }
+      } else if (entry.isSymbolicLink()) {
+        await symlink(await readlink(sourcePath), targetPath);
+        await lchown(targetPath, ownerUid, ownerGid);
+      } else {
+        fail("prepared-tree");
+      }
+    }
+    await chmod(target, 0o755);
+    await fsyncDirectory(target);
+  }
+  await copyDirectory(sourceRoot, targetRoot, true);
+}
+
+export async function adoptCandidateTree(
+  candidate,
+  preparedTreeSha256,
+  options = {},
+) {
+  if (!RELEASE_NAME.test(candidate) || !SHA256.test(preparedTreeSha256)) fail();
+  const releasesRoot = options.releasesRoot ?? RELEASES_ROOT;
+  const ownerUid = options.ownerUid ?? 0;
+  const ownerGid = options.ownerGid ?? 0;
+  const path = resolve(releasesRoot, candidate);
+  if (dirname(path) !== releasesRoot || basename(path) !== candidate) fail();
   const entry = await lstat(path);
   if (!entry.isDirectory() || entry.isSymbolicLink()) fail();
-  await run("/bin/chown", ["-R", "--no-dereference", "0:0", "--", path]);
-  await run("/bin/sync", ["-f", path]);
+  const suffix = `${process.pid}.${Date.now()}`;
+  const quarantine = join(releasesRoot, `.${candidate}.${suffix}.quarantine`);
+  const projection = join(releasesRoot, `.${candidate}.${suffix}.projection`);
+  let quarantined = false;
+  let installed = false;
+  try {
+    await rename(path, quarantine);
+    quarantined = true;
+    await fsyncDirectory(releasesRoot);
+    await hardenTree(quarantine, ownerUid, ownerGid);
+    await copyAdoptedTree(quarantine, projection, ownerUid, ownerGid);
+    if ((await digestTree(projection, ownerUid)) !== preparedTreeSha256) fail();
+    await rename(projection, path);
+    installed = true;
+    await fsyncDirectory(releasesRoot);
+    if ((await digestTree(path, ownerUid)) !== preparedTreeSha256) fail();
+    await rm(quarantine, { recursive: true });
+    quarantined = false;
+    await fsyncDirectory(releasesRoot);
+  } catch (error) {
+    await rm(projection, { recursive: true, force: true }).catch(
+      () => undefined,
+    );
+    if (installed) {
+      await rm(path, { recursive: true, force: true }).catch(() => undefined);
+      installed = false;
+    }
+    if (quarantined) {
+      await rename(quarantine, path).catch(() => undefined);
+      await fsyncDirectory(releasesRoot).catch(() => undefined);
+    }
+    throw error;
+  }
 }
 
 function prefix(value) {
@@ -349,7 +1001,7 @@ function prefix(value) {
   return Buffer.concat([length, bytes]);
 }
 
-async function digestTree(root) {
+export async function digestTree(root, expectedUid = 0) {
   const records = [];
   async function walk(directory, relativeDirectory) {
     const names = await readdir(directory);
@@ -364,7 +1016,7 @@ async function digestTree(root) {
         : name;
       const path = join(directory, name);
       const entry = await lstat(path);
-      if (entry.uid !== 0 || (entry.mode & 0o022) !== 0) fail();
+      if (entry.uid !== expectedUid || (entry.mode & 0o022) !== 0) fail();
       if (
         MARKERS.has(relativePath) &&
         entry.isFile() &&
@@ -447,8 +1099,9 @@ async function revalidateCandidate(journal) {
   ) {
     fail();
   }
+  let knownGood = null;
   if (journal.kind === "rollback") {
-    const knownGood = await readJson(join(path, "known-good.json"), 64 * 1024);
+    knownGood = await readJson(join(path, "known-good.json"), 64 * 1024);
     if (
       !exactKeys(knownGood, [
         "schemaVersion",
@@ -467,10 +1120,15 @@ async function revalidateCandidate(journal) {
       fail();
     }
   }
+  const authorized = await verifyCandidateAuthorization(
+    journal,
+    marker,
+    envelope,
+    knownGood,
+  );
   return {
     path,
-    artifactSha256: marker.artifact.sha256,
-    metadataSha256: marker.metadata.payloadSha256,
+    ...authorized,
   };
 }
 
@@ -536,6 +1194,7 @@ async function removeLink(name) {
   await unlink(join(INSTALL_ROOT, name)).catch((error) => {
     if (error.code !== "ENOENT") throw error;
   });
+  await fsyncDirectory(INSTALL_ROOT);
 }
 
 async function restoreLinks(journal) {
@@ -681,13 +1340,18 @@ export async function activateOperation(operationIdInput) {
   let selected = await loadPreparedJournal(operationId);
   await assertRootProjection(operationId, selected.value);
   await assertRecordedLinks(selected.value);
-  await adoptCandidate(selected.value);
+  await adoptCandidateTree(
+    selected.value.candidate,
+    selected.value.preparedTreeSha256,
+  );
   const candidate = await revalidateCandidate(selected.value);
 
   let switched = false;
+  let previousCommitted = false;
   try {
     await unlink(READY_PATH).catch(() => undefined);
     await pm2(["stop", "worker"]);
+    await pm2(["delete", "worker"]);
     await run(
       "/usr/bin/sudo",
       [
@@ -727,18 +1391,21 @@ export async function activateOperation(operationIdInput) {
       },
     );
     const first = await inspectWorker();
+    if (first.restartCount !== 0) fail("restart-loop");
     await waitForHealth(operationId, candidate, first);
     const knownGood = await writeKnownGood(
       candidate,
       operationId,
       selected.value.preparedTreeSha256,
     );
+    if (selected.value.priorCurrent === null) await removeLink("previous");
+    else await atomicLink("previous", selected.value.priorCurrent);
+    previousCommitted = true;
     selected = await transitionJournal(selected, "healthy", {
       updatedAt: knownGood.activatedAt,
     });
-    if (selected.value.priorCurrent === null) await removeLink("previous");
-    else await atomicLink("previous", selected.value.priorCurrent);
   } catch (error) {
+    if (previousCommitted) fail("maintenance-required");
     try {
       if (switched) await restoreLinks(selected.value);
       await pm2([

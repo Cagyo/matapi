@@ -151,7 +151,7 @@ export class OtaActivationCoordinator {
     };
     let stopped = false;
     let switched = false;
-    let healthy = false;
+    let previousCommitted = false;
     try {
       await this.dependencies.readiness.clear();
       stopped = true;
@@ -178,7 +178,7 @@ export class OtaActivationCoordinator {
         !Number.isSafeInteger(first.pid) ||
         first.pid <= 0 ||
         !Number.isSafeInteger(first.restartCount) ||
-        first.restartCount < 0
+        first.restartCount !== 0
       ) {
         fail("pm2");
       }
@@ -201,41 +201,38 @@ export class OtaActivationCoordinator {
         prepared.releasePath,
         marker,
       );
+      await this.dependencies.links.setPrevious(snapshots.current);
+      previousCommitted = true;
       journal = await this.dependencies.journal.transition(journal, "healthy", {
         updatedAt: marker.activatedAt,
       });
-      healthy = true;
-      await this.dependencies.links.setPrevious(snapshots.current);
       await this.dependencies.metadata.mirror({
         artifactSha256: prepared.artifactSha256,
         metadataSha256: prepared.metadataSha256,
       });
     } catch (error) {
+      if (previousCommitted) fail("maintenance-required");
       if (switched) {
         try {
           await this.dependencies.links.restore(snapshots);
           await this.dependencies.process.start();
         } catch {
-          if (!healthy) {
-            await this.dependencies.journal
-              .transition(journal, "rollback_failed", {
-                diagnostics: { code: "rollback", notes: [] },
-                updatedAt: this.dependencies.now().toISOString(),
-              })
-              .catch(() => undefined);
-          }
+          await this.dependencies.journal
+            .transition(journal, "rollback_failed", {
+              diagnostics: { code: "rollback", notes: [] },
+              updatedAt: this.dependencies.now().toISOString(),
+            })
+            .catch(() => undefined);
           fail("rollback");
         }
-        if (!healthy) {
-          await this.dependencies.journal.transition(journal, "rolled_back", {
-            diagnostics: {
-              code:
-                error instanceof OtaActivationError ? error.code : "activation",
-              notes: [],
-            },
-            updatedAt: this.dependencies.now().toISOString(),
-          });
-        }
+        await this.dependencies.journal.transition(journal, "rolled_back", {
+          diagnostics: {
+            code:
+              error instanceof OtaActivationError ? error.code : "activation",
+            notes: [],
+          },
+          updatedAt: this.dependencies.now().toISOString(),
+        });
       } else if (stopped) {
         try {
           await this.dependencies.process.start();
