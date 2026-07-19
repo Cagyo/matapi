@@ -4,7 +4,8 @@ export type ExternalWorkflow =
   | 'logs' | 'csv' | 'language' | 'help' | 'sensor-add'
   | 'sensor-modify' | 'sensor-remove' | 'sensor-import' | 'sensor-export'
   | 'drive-status' | 'drive-setup' | 'storage-cleanup' | 'health'
-  | 'system-update' | 'system-restart' | 'invite' | 'camera';
+  | 'system-update' | 'system-restart' | 'invite' | 'camera'
+  | 'ota-update' | 'ota-rollback';
 
 export type WorkflowReturnPhase = 'cancellable' | 'running';
 export type WorkflowReturnDestination = 'origin' | 'home';
@@ -36,6 +37,7 @@ const WORKFLOWS = new Set<ExternalWorkflow>([
   'sensor-modify', 'sensor-remove', 'sensor-import', 'sensor-export',
   'drive-status', 'drive-setup', 'storage-cleanup', 'health',
   'system-update', 'system-restart', 'invite', 'camera',
+  'ota-update', 'ota-rollback',
 ]);
 
 export function workflowReturnCallback(

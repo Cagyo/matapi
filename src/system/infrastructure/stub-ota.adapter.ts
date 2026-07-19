@@ -1,35 +1,47 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { OtaPort, UpdateCheck } from '../domain/ports/ota.port';
+import { Injectable } from "@nestjs/common";
+import type {
+  CheckedReleaseIdentity,
+  OtaOperationReceipt,
+  ReserveOperationResult,
+  StartOperationResult,
+  UpdateCheck,
+} from "../domain/ota-contracts";
+import type { OtaPort } from "../domain/ports/ota.port";
 
-/**
- * Dev/stub `OtaPort` implementation.
- *
- * Avoids running git fetch, shell scripts, or modifying lockfiles on dev hosts
- * and during E2E tests.
- */
+const REJECTED = Object.freeze({
+  kind: "rejected" as const,
+  failure: Object.freeze({ code: "maintenance-required" as const }),
+});
+
+/** Safe local-mode facade: discovery and mutation are both non-operational. */
 @Injectable()
 export class StubOtaAdapter implements OtaPort {
-  private readonly logger = new Logger(StubOtaAdapter.name);
-  private locked = false;
-
-  async isLocked(): Promise<boolean> {
-    return this.locked;
+  checkForUpdates(): Promise<UpdateCheck> {
+    return Promise.resolve({
+      kind: "failure",
+      failure: { code: "maintenance-required" },
+    });
   }
 
-  async checkForUpdates(): Promise<UpdateCheck> {
-    this.logger.debug('StubOtaAdapter checkForUpdates() called');
-    return {
-      hasUpdates: false,
-      localCommit: 'dev-mock-commit',
-      remoteCommit: 'dev-mock-commit',
-    };
+  reserveUpdate(
+    _expected: CheckedReleaseIdentity,
+    _signal?: AbortSignal,
+  ): Promise<ReserveOperationResult> {
+    return Promise.resolve(REJECTED);
   }
 
-  async startUpdate(): Promise<void> {
-    this.logger.log('StubOtaAdapter startUpdate() called (simulating OTA update)');
+  reserveRollback(_signal?: AbortSignal): Promise<ReserveOperationResult> {
+    return Promise.resolve(REJECTED);
   }
 
-  async startRollback(): Promise<void> {
-    this.logger.log('StubOtaAdapter startRollback() called (simulating OTA rollback)');
+  publish(
+    _receipt: OtaOperationReceipt,
+    _signal?: AbortSignal,
+  ): Promise<StartOperationResult> {
+    return Promise.resolve(REJECTED);
+  }
+
+  cancel(_receipt: OtaOperationReceipt): Promise<boolean> {
+    return Promise.resolve(false);
   }
 }

@@ -65,7 +65,9 @@ function recoveryDependencies(result: 'completed' | 'resumable' | 'no-workflow' 
 
 describe('RestartConfirmationService', () => {
   it('is a no-op when no restart reason flag is set', async () => {
-    const dm: DirectMessengerPort = { send: vi.fn().mockResolvedValue(undefined) };
+    const dm: DirectMessengerPort = {
+      send: vi.fn().mockResolvedValue(undefined),
+    };
     const { workflows, restore } = recoveryDependencies();
     const service = new RestartConfirmationService(
       makeMeta(),
@@ -82,12 +84,10 @@ describe('RestartConfirmationService', () => {
 
   it('notifies all admins on user_command restart and clears the flag', async () => {
     const meta = makeMeta({ [RESTART_REASON_KEY]: 'user_command' });
-    const dm: DirectMessengerPort = { send: vi.fn().mockResolvedValue(undefined) };
-    const users = new InMemoryUserRepository([
-      admin(1, 'Ada'),
-      admin(2, 'Bob'),
-      user(3, 'Cal'),
-    ]);
+    const dm: DirectMessengerPort = {
+      send: vi.fn().mockResolvedValue(undefined),
+    };
+    const users = new InMemoryUserRepository([admin(1, 'Ada'), admin(2, 'Bob'), user(3, 'Cal')]);
     const { workflows, restore } = recoveryDependencies();
     const service = new RestartConfirmationService(meta, users, dm, workflows, restore);
 
@@ -99,12 +99,14 @@ describe('RestartConfirmationService', () => {
     expect(await meta.get(RESTART_REASON_KEY)).toBeNull();
   });
 
-  it('reports a successful OTA update with short commit hash', async () => {
+  it('leaves OTA operation outcomes to the startup-report delivery path', async () => {
     const meta = makeMeta({
       [RESTART_REASON_KEY]: 'ota_update',
       update_commit: 'abcdef1234567890',
     });
-    const dm: DirectMessengerPort = { send: vi.fn().mockResolvedValue(undefined) };
+    const dm: DirectMessengerPort = {
+      send: vi.fn().mockResolvedValue(undefined),
+    };
     const { workflows, restore } = recoveryDependencies();
     const service = new RestartConfirmationService(
       meta,
@@ -116,36 +118,25 @@ describe('RestartConfirmationService', () => {
 
     await service.run();
 
-    expect(dm.send).toHaveBeenCalledWith(1, en.ota.updateSuccess('abcdef1'));
-  });
-
-  it('reports a failed OTA update', async () => {
-    const meta = makeMeta({ [RESTART_REASON_KEY]: 'ota_update_failed' });
-    const dm: DirectMessengerPort = { send: vi.fn().mockResolvedValue(undefined) };
-    const { workflows, restore } = recoveryDependencies();
-    const service = new RestartConfirmationService(
-      meta,
-      new InMemoryUserRepository([admin(1, 'Ada')]),
-      dm,
-      workflows,
-      restore,
-    );
-
-    await service.run();
-
-    expect(dm.send).toHaveBeenCalledWith(1, en.ota.updateFailed);
+    expect(dm.send).not.toHaveBeenCalled();
+    expect(workflows.completeHeadless).not.toHaveBeenCalled();
+    expect(await meta.get(RESTART_REASON_KEY)).toBeNull();
   });
 
   it('completes the matching system-update receipt after the successful post-health restart', async () => {
     const meta = makeMeta({ [RESTART_REASON_KEY]: 'system_update' });
-    const dm: DirectMessengerPort = { send: vi.fn().mockResolvedValue(undefined) };
+    const dm: DirectMessengerPort = {
+      send: vi.fn().mockResolvedValue(undefined),
+    };
     const workflows = {
       completeHeadless: vi.fn(async (input: { deliver(): Promise<void> }) => {
         await input.deliver();
         return 'completed' as const;
       }),
     } as unknown as WorkflowEntryCoordinator;
-    const restore = { execute: vi.fn().mockResolvedValue({ kind: 'opened' }) } as unknown as RestoreWorkflowOriginUseCase;
+    const restore = {
+      execute: vi.fn().mockResolvedValue({ kind: 'opened' }),
+    } as unknown as RestoreWorkflowOriginUseCase;
     const service = new RestartConfirmationService(
       meta,
       new InMemoryUserRepository([admin(1, 'Ada')]),
@@ -156,16 +147,20 @@ describe('RestartConfirmationService', () => {
 
     await service.run();
 
-    expect(workflows.completeHeadless).toHaveBeenCalledWith(expect.objectContaining({
-      workflow: 'system-update',
-    }));
+    expect(workflows.completeHeadless).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workflow: 'system-update',
+      }),
+    );
     expect(dm.send).toHaveBeenCalledWith(1, en.systemUpdate.completed);
     expect(await meta.get(RESTART_REASON_KEY)).toBeNull();
   });
 
   it('completes the matching system-update receipt after a failed health check recovers the worker', async () => {
     const meta = makeMeta({ [RESTART_REASON_KEY]: 'system_update_failed' });
-    const dm: DirectMessengerPort = { send: vi.fn().mockResolvedValue(undefined) };
+    const dm: DirectMessengerPort = {
+      send: vi.fn().mockResolvedValue(undefined),
+    };
     const { workflows, restore } = recoveryDependencies('completed');
     const service = new RestartConfirmationService(
       meta,
@@ -177,35 +172,19 @@ describe('RestartConfirmationService', () => {
 
     await service.run();
 
-    expect(workflows.completeHeadless).toHaveBeenCalledWith(expect.objectContaining({
-      workflow: 'system-update',
-    }));
-    expect(await meta.get(RESTART_REASON_KEY)).toBeNull();
-  });
-
-  it('reports a rollback completion', async () => {
-    const meta = makeMeta({
-      [RESTART_REASON_KEY]: 'rollback',
-      rollback_commit: '1234567abcdef',
-    });
-    const dm: DirectMessengerPort = { send: vi.fn().mockResolvedValue(undefined) };
-    const { workflows, restore } = recoveryDependencies();
-    const service = new RestartConfirmationService(
-      meta,
-      new InMemoryUserRepository([admin(1, 'Ada')]),
-      dm,
-      workflows,
-      restore,
+    expect(workflows.completeHeadless).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workflow: 'system-update',
+      }),
     );
-
-    await service.run();
-
-    expect(dm.send).toHaveBeenCalledWith(1, en.ota.rollbackSuccess('1234567'));
+    expect(await meta.get(RESTART_REASON_KEY)).toBeNull();
   });
 
   it('uses the current initiator role and locale for a contextual restart instead of broadcasting', async () => {
     const meta = makeMeta({ [RESTART_REASON_KEY]: 'user_command' });
-    const dm: DirectMessengerPort = { send: vi.fn().mockResolvedValue(undefined) };
+    const dm: DirectMessengerPort = {
+      send: vi.fn().mockResolvedValue(undefined),
+    };
     const { workflows, restore } = recoveryDependencies('completed');
     const service = new RestartConfirmationService(
       meta,
@@ -217,51 +196,41 @@ describe('RestartConfirmationService', () => {
 
     await service.run();
 
-    expect(workflows.completeHeadless).toHaveBeenCalledWith(expect.objectContaining({
-      identity: expect.objectContaining({ userId: 7, chatId: 7, role: 'user', locale: 'en' }),
-      workflow: 'system-restart',
-    }));
+    expect(workflows.completeHeadless).toHaveBeenCalledWith(
+      expect.objectContaining({
+        identity: expect.objectContaining({
+          userId: 7,
+          chatId: 7,
+          role: 'user',
+          locale: 'en',
+        }),
+        workflow: 'system-restart',
+      }),
+    );
     expect(dm.send).not.toHaveBeenCalled();
     expect(await meta.get(RESTART_REASON_KEY)).toBeNull();
   });
 
-  it('delivers a contextual restart result using the initiator current locale', async () => {
-    const meta = makeMeta({ [RESTART_REASON_KEY]: 'ota_update' });
-    const dm: DirectMessengerPort = { send: vi.fn().mockResolvedValue(undefined) };
-    const workflows = {
-      completeHeadless: vi.fn(async (input: { deliver(): Promise<void> }) => {
-        await input.deliver();
-        return 'completed' as const;
-      }),
-    } as unknown as WorkflowEntryCoordinator;
-    const restore = { execute: vi.fn().mockResolvedValue({ kind: 'opened' }) } as unknown as RestoreWorkflowOriginUseCase;
-    const service = new RestartConfirmationService(
-      meta,
-      new InMemoryUserRepository([{ ...user(7, 'Olena'), locale: 'uk' as const }]),
-      dm,
-      workflows,
-      restore,
-    );
-
-    await service.run();
-
-    expect(dm.send).toHaveBeenCalledWith(7, catalogFor('uk').ota.updateSuccess('unknown'));
-  });
-
   it('passes the localized recovery outcome into the restored Home notice', async () => {
     const meta = makeMeta({ [RESTART_REASON_KEY]: 'user_command' });
-    const dm: DirectMessengerPort = { send: vi.fn().mockResolvedValue(undefined) };
+    const dm: DirectMessengerPort = {
+      send: vi.fn().mockResolvedValue(undefined),
+    };
     const notice = catalogFor('uk').ota.restartComplete;
     const workflows = {
-      completeHeadless: vi.fn(async (input: {
-        recoveryNotice?: string;
-        restore(receipt: { payload: { workflow: 'system-restart' } }, notice: string): Promise<boolean>;
-      }) => {
-        await input.restore({ payload: { workflow: 'system-restart' } }, input.recoveryNotice!);
-        return 'completed' as const;
-      }),
+      completeHeadless: vi.fn(
+        async (input: {
+          recoveryNotice?: string;
+          restore(receipt: { payload: { workflow: 'system-restart' } }, notice: string): Promise<boolean>;
+        }) => {
+          await input.restore({ payload: { workflow: 'system-restart' } }, input.recoveryNotice!);
+          return 'completed' as const;
+        },
+      ),
     } as unknown as WorkflowEntryCoordinator;
-    const restore = { execute: vi.fn().mockResolvedValue({ kind: 'opened' }) } as unknown as RestoreWorkflowOriginUseCase;
+    const restore = {
+      execute: vi.fn().mockResolvedValue({ kind: 'opened' }),
+    } as unknown as RestoreWorkflowOriginUseCase;
     const service = new RestartConfirmationService(
       meta,
       new InMemoryUserRepository([{ ...admin(7, 'Olena'), locale: 'uk' as const }]),
@@ -272,18 +241,22 @@ describe('RestartConfirmationService', () => {
 
     await service.run();
 
-    expect(restore.execute).toHaveBeenCalledWith(expect.objectContaining({
-      userId: 7,
-      locale: 'uk',
-      requested: { kind: 'admin-system' },
-      notice,
-    }));
+    expect(restore.execute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 7,
+        locale: 'uk',
+        requested: { kind: 'admin-system' },
+        notice,
+      }),
+    );
     expect(dm.send).not.toHaveBeenCalled();
   });
 
   it('does not fall back to broadcast when a contextual recovery remains resumable', async () => {
     const meta = makeMeta({ [RESTART_REASON_KEY]: 'user_command' });
-    const dm: DirectMessengerPort = { send: vi.fn().mockResolvedValue(undefined) };
+    const dm: DirectMessengerPort = {
+      send: vi.fn().mockResolvedValue(undefined),
+    };
     const { workflows, restore } = recoveryDependencies('resumable');
     const service = new RestartConfirmationService(
       meta,

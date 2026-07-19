@@ -170,6 +170,37 @@ export const homeActionReceipts = sqliteTable(
   (table) => [primaryKey({ columns: [table.userId, table.chatId, table.kind] })],
 );
 
+// ─── OTA Operation Workflow Authority ───
+// An updater request may be published only after this exact operation/user/
+// private-chat/workflow receipt binding exists. Delivery fields are durable
+// CAS markers used by startup-report recovery.
+export const otaOperationWorkflows = sqliteTable(
+  'ota_operation_workflows',
+  {
+    operationId: text('operation_id').primaryKey(),
+    operationKind: text('operation_kind').notNull(),
+    userId: integer('user_id').notNull().references(() => users.telegramId, { onDelete: 'cascade' }),
+    chatId: integer('chat_id').notNull(),
+    workflowReceiptId: text('workflow_receipt_id').notNull(),
+    authorizedAt: integer('authorized_at', { mode: 'timestamp' }).notNull(),
+    deliveryLeaseId: text('delivery_lease_id'),
+    deliveryLeaseUntil: integer('delivery_lease_until', { mode: 'timestamp' }),
+    deliveredAt: integer('delivered_at', { mode: 'timestamp' }),
+    acknowledgedAt: integer('acknowledged_at', { mode: 'timestamp' }),
+  },
+  (table) => [
+    index('idx_ota_operation_workflows_owner').on(
+      table.userId,
+      table.chatId,
+      table.workflowReceiptId,
+    ),
+    index('idx_ota_operation_workflows_delivery').on(
+      table.acknowledgedAt,
+      table.deliveryLeaseUntil,
+    ),
+  ],
+);
+
 // ─── Invite Codes ───
 export const inviteCodes = sqliteTable('invite_codes', {
   code: text('code').primaryKey(),

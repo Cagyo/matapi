@@ -1,29 +1,24 @@
-export const OTA = Symbol('OTA');
+import type {
+  CheckedReleaseIdentity,
+  OtaOperationReceipt,
+  ReserveOperationResult,
+  StartOperationResult,
+  UpdateCheck,
+} from "../ota-contracts";
 
-export interface UpdateCheck {
-  hasUpdates: boolean;
-  localCommit: string;
-  remoteCommit: string;
-}
+export const OTA = Symbol("OTA");
 
-/**
- * Out-of-the-air update operations (spec 13 / spec 24). The adapter
- * shells out to `scripts/update.sh`, which owns the lockfile, git tag,
- * install, migrate, pm2 restart and health-check sequence.
- */
+/** Signed-feed OTA facade used by interface contexts. */
 export interface OtaPort {
-  /** `true` when an update is currently being applied. */
-  isLocked(): Promise<boolean>;
-  /** `git fetch` + commit comparison. Does not mutate the working copy. */
   checkForUpdates(): Promise<UpdateCheck>;
-  /**
-   * Spawn the detached update script. Resolves once the child has been
-   * spawned; the script will pm2-restart this process shortly after.
-   */
-  startUpdate(): Promise<void>;
-  /**
-   * Spawn the detached rollback script. Same behaviour as `startUpdate`.
-   * Rejects with `NoRollbackTagError` when no `rollback-*` tag exists.
-   */
-  startRollback(): Promise<void>;
+  reserveUpdate(
+    expected: CheckedReleaseIdentity,
+    signal?: AbortSignal,
+  ): Promise<ReserveOperationResult>;
+  reserveRollback(signal?: AbortSignal): Promise<ReserveOperationResult>;
+  publish(
+    receipt: OtaOperationReceipt,
+    signal?: AbortSignal,
+  ): Promise<StartOperationResult>;
+  cancel(receipt: OtaOperationReceipt): Promise<boolean>;
 }

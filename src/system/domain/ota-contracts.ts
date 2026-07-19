@@ -127,6 +127,10 @@ export type StartOperationResult =
   | { kind: "started"; receipt: OtaOperationReceipt }
   | { kind: "rejected"; failure: OtaFailure };
 
+export type ReserveOperationResult =
+  | { kind: "reserved"; receipt: OtaOperationReceipt }
+  | { kind: "rejected"; failure: OtaFailure };
+
 export type OperationPhase =
   | "preparing"
   | "prepared"

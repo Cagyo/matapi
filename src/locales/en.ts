@@ -1061,6 +1061,12 @@ const enCatalog = {
       `⬆️ Application update ${version} for ${targetName} is available (commit ${commit}). Send /update to review and install it.`,
     discoveryFailure: (code: string) =>
       `⚠️ Update discovery requires attention (${code}). The installed release was not changed.`,
+    operationFailure: (code: string) =>
+      `❌ The update operation could not continue (${code}). The installed release was not changed.`,
+    operationOutcome: (kind: 'update' | 'rollback', outcome: string) =>
+      `✅ ${kind === 'update' ? 'Update' : 'Rollback'} completed (${outcome}).`,
+    maintenanceOutcome: (code: string) =>
+      `⚠️ OTA maintenance requires attention (${code}).`,
     upToDate: 'ℹ️ Already up to date.',
     updating: (commit: string) =>
       `🔄 Updating to ${commit}... I will go offline briefly and report back when ready.`,

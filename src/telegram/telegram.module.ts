@@ -8,13 +8,14 @@ import { FeatureModule } from '../features/feature.module';
 import { NetworkModule } from '../network/network.module';
 import { SensorModule } from '../sensors/sensor.module';
 import { SystemModule } from '../system/system.module';
+import { OTA_OPERATION_WORKFLOW_REPOSITORY } from './application/ports/ota-operation-workflow-repository.port';
+import {
+  OTA_WORKFLOW_COMPLETION,
+  TELEGRAM_STARTUP_REPORT_DELIVERY,
+} from './application/ports/startup-report-delivery-adapter.port';
 import { ClaimAdminUseCase } from './application/claim-admin.use-case';
 import { DemoteUserUseCase } from './application/demote-user.use-case';
-import {
-  INVITE_CODE_GENERATOR,
-  InviteUseCase,
-  defaultInviteCodeGenerator,
-} from './application/invite.use-case';
+import { INVITE_CODE_GENERATOR, InviteUseCase, defaultInviteCodeGenerator } from './application/invite.use-case';
 import { MuteSensorUseCase } from './application/mute-sensor.use-case';
 import { PauseNonCriticalNotificationsUseCase } from './application/pause-non-critical-notifications.use-case';
 import { ResumeNonCriticalNotificationsUseCase } from './application/resume-non-critical-notifications.use-case';
@@ -51,10 +52,7 @@ import { UpdateSystemUseCase } from './application/update-system.use-case';
 import { ExportConfigUseCase } from './application/export-config.use-case';
 import { ImportCameraLiveSourcesUseCase } from './application/import-camera-live-sources.use-case';
 import { StageCsvExportUseCase } from './application/stage-csv-export.use-case';
-import {
-  CSV_TEMP_DIRECTORY,
-  CSV_TEMP_FILE,
-} from './application/ports/csv-temp-file.port';
+import { CSV_TEMP_DIRECTORY, CSV_TEMP_FILE } from './application/ports/csv-temp-file.port';
 import { ADMIN_CLAIM_CREDENTIAL } from './domain/ports/admin-claim-credential.port';
 import { DIRECT_MESSENGER } from './domain/ports/direct-messenger.port';
 import { CONFIG_CODEC } from './domain/ports/config-codec.port';
@@ -71,6 +69,7 @@ import { ConsoleNotifierAdapter } from './infrastructure/console-notifier.adapte
 import { EnvAdminClaimCredentialAdapter } from './infrastructure/env-admin-claim-credential.adapter';
 import { TelegramAdminAlertAdapter } from './infrastructure/telegram-admin-alert.adapter';
 import { TelegramOtaAdminNotificationAdapter } from './infrastructure/telegram-ota-admin-notification.adapter';
+import { DrizzleOtaOperationWorkflowRepository } from './infrastructure/drizzle-ota-operation-workflow.repository';
 import { TelegramLiveStreamMessageCleanupAdapter } from './infrastructure/telegram-live-stream-message-cleanup.adapter';
 import { DrizzleInviteCodeRepository } from './infrastructure/drizzle-invite-code.repository';
 import { DrizzleUserRepository } from './infrastructure/drizzle-user.repository';
@@ -131,6 +130,7 @@ import { WorkflowOperationQueue } from './interfaces/workflow-operation.queue';
 import { WorkflowEntryCoordinator } from './interfaces/workflow-entry.coordinator';
 import { WorkflowNavigationHandler } from './interfaces/workflow-navigation.handler';
 import { WorkflowNavigationPresenter } from './interfaces/workflow-navigation.presenter';
+import { TelegramStartupReportDeliveryAdapter } from './infrastructure/telegram-startup-report-delivery.adapter';
 
 function resolveBotMode(): BotMode {
   if (process.env.BOT_MODE === 'mock') return 'mock';
@@ -155,15 +155,7 @@ const mode = resolveBotMode();
  * `TelegramDirectMessenger` falls back to logging in the same regime.
  */
 @Module({
-  imports: [
-    ConfigModule,
-    EventModule,
-    SensorModule,
-    SystemModule,
-    CameraModule,
-    FeatureModule,
-    NetworkModule,
-  ],
+  imports: [ConfigModule, EventModule, SensorModule, SystemModule, CameraModule, FeatureModule, NetworkModule],
   providers: [
     { provide: BOT_MODE, useValue: mode },
     {
@@ -176,17 +168,11 @@ const mode = resolveBotMode();
     },
     {
       provide: INVITE_CODE_REPOSITORY,
-      useClass:
-        mode === 'mock'
-          ? InMemoryInviteCodeRepository
-          : DrizzleInviteCodeRepository,
+      useClass: mode === 'mock' ? InMemoryInviteCodeRepository : DrizzleInviteCodeRepository,
     },
     {
       provide: USER_SENSOR_MUTE_REPOSITORY,
-      useClass:
-        mode === 'mock'
-          ? InMemoryUserSensorMuteRepository
-          : DrizzleUserSensorMuteRepository,
+      useClass: mode === 'mock' ? InMemoryUserSensorMuteRepository : DrizzleUserSensorMuteRepository,
     },
     {
       provide: HOME_SESSION_STORE,
@@ -196,20 +182,25 @@ const mode = resolveBotMode();
       provide: HOME_ACTION_REPOSITORY,
       ...(mode === 'mock'
         ? {
-          useFactory: (users: InMemoryUserRepository) => new InMemoryHomeActionRepository(users),
-          inject: [USER_REPOSITORY],
-        }
+            useFactory: (users: InMemoryUserRepository) => new InMemoryHomeActionRepository(users),
+            inject: [USER_REPOSITORY],
+          }
         : { useClass: DrizzleHomeActionRepository }),
     },
     { provide: HOME_TOKEN_GENERATOR, useClass: CryptoHomeTokenGenerator },
     {
+      provide: OTA_OPERATION_WORKFLOW_REPOSITORY,
+      useClass: DrizzleOtaOperationWorkflowRepository,
+    },
+    {
       provide: HOME_MESSAGE_DELIVERY,
-      useClass: mode === 'mock'
-        ? InMemoryHomeMessageDeliveryAdapter
-        : TelegramHomeMessageAdapter,
+      useClass: mode === 'mock' ? InMemoryHomeMessageDeliveryAdapter : TelegramHomeMessageAdapter,
     },
     InMemoryHomeHealthSnapshotAdapter,
-    { provide: HOME_HEALTH_SNAPSHOT, useExisting: InMemoryHomeHealthSnapshotAdapter },
+    {
+      provide: HOME_HEALTH_SNAPSHOT,
+      useExisting: InMemoryHomeHealthSnapshotAdapter,
+    },
     { provide: INVITE_CODE_GENERATOR, useValue: defaultInviteCodeGenerator },
     // One repository instance serves both the recipient reads and the pause
     // mutations so their state cannot diverge. Foundation only — no handler,
@@ -258,7 +249,10 @@ const mode = resolveBotMode();
     ImportCameraLiveSourcesUseCase,
     StageCsvExportUseCase,
     { provide: CONFIG_CODEC, useClass: YamlConfigCodec },
-    { provide: CSV_TEMP_DIRECTORY, useValue: join(tmpdir(), 'home-worker-csv') },
+    {
+      provide: CSV_TEMP_DIRECTORY,
+      useValue: join(tmpdir(), 'home-worker-csv'),
+    },
     LocaleMiddleware,
     { provide: CSV_TEMP_FILE, useClass: NodeCsvTempFileAdapter },
     RoleMiddleware,
@@ -292,6 +286,7 @@ const mode = resolveBotMode();
     WorkflowDraftRegistry,
     WorkflowOperationQueue,
     WorkflowEntryCoordinator,
+    { provide: OTA_WORKFLOW_COMPLETION, useExisting: WorkflowEntryCoordinator },
     WorkflowNavigationPresenter,
     WorkflowNavigationHandler,
     HomeLauncher,
@@ -302,6 +297,11 @@ const mode = resolveBotMode();
     ConsoleNotifierAdapter,
     TelegramAdminAlertAdapter,
     TelegramOtaAdminNotificationAdapter,
+    TelegramStartupReportDeliveryAdapter,
+    {
+      provide: TELEGRAM_STARTUP_REPORT_DELIVERY,
+      useExisting: TelegramStartupReportDeliveryAdapter,
+    },
     TelegramLiveStreamMessageCleanupAdapter,
     TelegramRecipientDirectoryAdapter,
     GrammyBotGateway,

@@ -6,6 +6,7 @@ import { CheckForUpdatesUseCase } from "./application/check-for-updates.use-case
 import { GracefulShutdownService } from "./application/graceful-shutdown.service";
 import { OtaAdminNotificationService } from "./application/ota-admin-notification.service";
 import { OtaOperationMonitorService } from "./application/ota-operation-monitor.service";
+import { StartupReportDeliveryService } from "./application/startup-report-delivery.service";
 import { UPDATE_CHECK_OPTIONS } from "./application/ports/update-check-options.port";
 import {
   UPDATE_DISCOVERY_CLOCK,
@@ -46,7 +47,7 @@ import { otaOperationLauncherForMode } from "./infrastructure/ota-operation-laun
 import { OsSystemHealthAdapter } from "./infrastructure/os-system-health.adapter";
 import { Pm2ProcessRestarter } from "./infrastructure/pm2-process-restarter.adapter";
 import { ProcOtaClockAdapter } from "./infrastructure/proc-ota-clock.adapter";
-import { ShellOtaAdapter } from "./infrastructure/shell-ota.adapter";
+import { SignedFeedOtaAdapter } from "./infrastructure/signed-feed-ota.adapter";
 import { ShellSystemDepsAdapter } from "./infrastructure/shell-system-deps.adapter";
 import { TimedatectlClockSyncAdapter } from "./infrastructure/timedatectl-clock-sync.adapter";
 import { StubOtaAdapter } from "./infrastructure/stub-ota.adapter";
@@ -108,12 +109,14 @@ const timer: UpdateDiscoveryTimerPort = {
     GracefulShutdownService,
     OtaAdminNotificationService,
     OtaOperationMonitorService,
+    StartupReportDeliveryService,
     FsStartupReportStore,
     {
       provide: ConsumeStartupReportUseCase,
       useFactory: (
         reports: FsStartupReportStore,
         meta: import("./domain/ports/system-meta-repository.port").SystemMetaRepositoryPort,
+        delivery: StartupReportDeliveryService,
       ) =>
         new ConsumeStartupReportUseCase({
           reports,
@@ -121,11 +124,13 @@ const timer: UpdateDiscoveryTimerPort = {
             mirror: (report) =>
               meta.set("ota_startup_report", JSON.stringify(report)),
           },
-          // Task 14 registers concrete notification recipients. Until then a
-          // zero count deliberately retains the durable pending report.
-          delivery: { deliver: async () => ({ delivered: 0 }) },
+          delivery,
         }),
-      inject: [FsStartupReportStore, SYSTEM_META_REPOSITORY],
+      inject: [
+        FsStartupReportStore,
+        SYSTEM_META_REPOSITORY,
+        StartupReportDeliveryService,
+      ],
     },
     UpdateDiscoveryService,
     {
@@ -140,7 +145,7 @@ const timer: UpdateDiscoveryTimerPort = {
     },
     {
       provide: OTA,
-      useClass: mode === "stub" ? StubOtaAdapter : ShellOtaAdapter,
+      useClass: mode === "stub" ? StubOtaAdapter : SignedFeedOtaAdapter,
     },
     {
       provide: OTA_OPERATION_LAUNCHER,
@@ -220,6 +225,7 @@ const timer: UpdateDiscoveryTimerPort = {
     GracefulShutdownService,
     CheckForUpdatesUseCase,
     OtaAdminNotificationService,
+    StartupReportDeliveryService,
   ],
 })
 export class SystemModule {}

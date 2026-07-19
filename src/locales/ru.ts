@@ -1066,6 +1066,12 @@ const ruCatalog = {
       `⬆️ Доступно обновление приложения ${version} для ${targetName} (коммит ${commit}). Отправьте /update, чтобы проверить и установить его.`,
     discoveryFailure: (code: string) =>
       `⚠️ Проверка обновлений требует внимания (${code}). Установленная версия не изменена.`,
+    operationFailure: (code: string) =>
+      `❌ Операцию обновления нельзя продолжить (${code}). Установленная версия не изменена.`,
+    operationOutcome: (kind: 'update' | 'rollback', outcome: string) =>
+      `✅ ${kind === 'update' ? 'Обновление' : 'Откат'} завершено (${outcome}).`,
+    maintenanceOutcome: (code: string) =>
+      `⚠️ Обслуживание OTA требует внимания (${code}).`,
     upToDate: 'ℹ️ Установлена актуальная версия.',
     updating: (commit: string) =>
       `🔄 Обновление до ${commit}... Я ненадолго отключусь и сообщу, когда всё будет готово.`,

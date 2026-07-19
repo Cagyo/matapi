@@ -18,6 +18,7 @@ import { RecipientDirectoryService } from '../../events/application/recipient-di
 import { BotRunnerRegistry } from '../../network/application/bot-runner.registry';
 import { BotRunnerPort } from '../../network/domain/ports/bot-runner.port';
 import { OtaAdminNotificationService } from '../../system/application/ota-admin-notification.service';
+import { StartupReportDeliveryService } from '../../system/application/startup-report-delivery.service';
 import { RestartConfirmationService } from '../interfaces/restart-confirmation.service';
 import { SystemOnlineNotifier } from '../application/system-online-notifier.service';
 import { ClaimAdminHandler } from '../interfaces/claim-admin.handler';
@@ -56,13 +57,14 @@ import { homeCallbackAckMiddleware } from '../interfaces/home-callback-ack.middl
 import { TelegramContext } from '../interfaces/telegram-context';
 import { homeUpdateConstraints } from '../interfaces/home-update-constraints';
 import { BotCommandsMenuService } from '../application/bot-commands-menu.service';
-import {
-  HOME_MESSAGE_DELIVERY,
-  type HomeMessageDeliveryPort,
-} from '../application/ports/home-message-delivery.port';
+import { HOME_MESSAGE_DELIVERY, type HomeMessageDeliveryPort } from '../application/ports/home-message-delivery.port';
 import { ConsoleNotifierAdapter } from './console-notifier.adapter';
 import { TelegramAdminAlertAdapter } from './telegram-admin-alert.adapter';
 import { TelegramOtaAdminNotificationAdapter } from './telegram-ota-admin-notification.adapter';
+import {
+  TELEGRAM_STARTUP_REPORT_DELIVERY,
+  type TelegramStartupReportDeliveryPort,
+} from '../application/ports/startup-report-delivery-adapter.port';
 import { TelegramLiveStreamMessageCleanupAdapter } from './telegram-live-stream-message-cleanup.adapter';
 import { TelegramDirectMessenger } from './telegram-direct-messenger.adapter';
 import { TelegramNotifierAdapter } from './telegram-notifier.adapter';
@@ -83,9 +85,7 @@ export type BotMode = 'real' | 'mock';
  *   bound instead so the event pipeline drains locally without a token.
  */
 @Injectable()
-export class GrammyBotGateway
-  implements OnApplicationBootstrap, OnModuleDestroy, BotRunnerPort
-{
+export class GrammyBotGateway implements OnApplicationBootstrap, OnModuleDestroy, BotRunnerPort {
   private readonly logger = new Logger(GrammyBotGateway.name);
   private bot?: Bot<TelegramContext>;
   private runner?: RunnerHandle;
@@ -190,7 +190,14 @@ export class GrammyBotGateway
     @Inject(forwardRef(() => BotCommandsMenuService))
     private readonly botCommandsMenu: BotCommandsMenuService,
     private readonly localeMiddleware: LocaleMiddleware,
-    @Optional() private readonly token: string | undefined = process.env.TELEGRAM_BOT_TOKEN,
+    @Optional()
+    private readonly token: string | undefined = process.env.TELEGRAM_BOT_TOKEN,
+    @Optional()
+    @Inject(forwardRef(() => StartupReportDeliveryService))
+    private readonly startupReportDelivery?: StartupReportDeliveryService,
+    @Optional()
+    @Inject(TELEGRAM_STARTUP_REPORT_DELIVERY)
+    private readonly telegramStartupReportDelivery?: TelegramStartupReportDeliveryPort,
   ) {}
 
   /** Last update received from Telegram, or `null` if none yet (spec 08, 22). */
@@ -218,6 +225,11 @@ export class GrammyBotGateway
 
   async onApplicationBootstrap(): Promise<void> {
     this.liveStreamMessageCleanup.register(this.telegramLiveStreamMessageCleanup);
+    // Registration precedes SystemOnlineNotifier, whose boot recovery consumes
+    // the pending report. The system context never depends on Telegram.
+    if (this.startupReportDelivery && this.telegramStartupReportDelivery) {
+      this.startupReportDelivery.register(this.telegramStartupReportDelivery);
+    }
     if (this.mode === 'mock' || !this.token) {
       this.logger.warn(
         this.mode === 'mock'
@@ -236,9 +248,7 @@ export class GrammyBotGateway
 
     // 30s timeout on polling (spec 06 → Polling Health) — prevents
     // half-open TCP sockets on network drops.
-    bot.api.config.use((prev, method, payload, signal) =>
-      prev(method, { timeoutSeconds: 30, ...payload }, signal),
-    );
+    bot.api.config.use((prev, method, payload, signal) => prev(method, { timeoutSeconds: 30, ...payload }, signal));
     bot.api.config.use(autoRetry());
 
     // Private-chat-only filter (spec 06 → Chat Architecture). Updates from
@@ -298,19 +308,13 @@ export class GrammyBotGateway
     // update, rollback) to admins, then clear the flag.
     void this.restartConfirmation
       .run()
-      .catch((err) =>
-        this.logger.warn(
-          `restart confirmation failed: ${(err as Error).message}`,
-        ),
-      );
+      .catch((err) => this.logger.warn(`restart confirmation failed: ${(err as Error).message}`));
 
     // Broadcast that the worker is back online, surfacing any DB recovery or
     // clock-drift warning from boot recovery (spec 23).
     void this.systemOnline
       .run()
-      .catch((err) =>
-        this.logger.warn(`system online notice failed: ${(err as Error).message}`),
-      );
+      .catch((err) => this.logger.warn(`system online notice failed: ${(err as Error).message}`));
 
     // Drain anything pending from a previous run.
     void this.eventProcessor.drain();
@@ -332,6 +336,7 @@ export class GrammyBotGateway
     this.recipientDirectory.clear();
     this.adminAlertService.clear();
     this.otaAdminNotifications.clear();
+    this.startupReportDelivery?.clear();
     this.liveStreamMessageCleanup.clear();
     this.bot = undefined;
     this.runner = undefined;

@@ -359,6 +359,74 @@ afterEach(() => {
 });
 
 describe("FlockOtaOperationLauncherAdapter", () => {
+  it("reserves the exact checked identity durably without spawning until publication", async () => {
+    const state = harness();
+    const expected = checkedReleaseFixture();
+
+    const reservation = await state.launcher.reserveUpdate(expected);
+
+    expect(reservation).toEqual({
+      kind: "reserved",
+      receipt: {
+        schemaVersion: 1,
+        operationId: OPERATION_ID,
+        kind: "update",
+        acceptedAt: ACCEPTED_AT,
+        requestSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+        receiptGeneration: 1,
+      },
+    });
+    expect(state.spawn).not.toHaveBeenCalled();
+    expect(parseOtaOperationRequest(state.fs.bytes!).expected).toEqual(
+      expected,
+    );
+
+    if (reservation.kind !== "reserved")
+      throw new Error("expected reservation");
+    const pending = state.launcher.publish(reservation.receipt);
+    const request = await waitForSpawn(state);
+    await acceptLock(state);
+    state.child.handshake.end(receipt(request, { receiptGeneration: 1 }));
+
+    await expect(pending).resolves.toEqual({
+      kind: "started",
+      receipt: reservation.receipt,
+    });
+  });
+
+  it("cancels an unpublished reservation and never spawns it", async () => {
+    const state = harness();
+    const reservation = await state.launcher.reserveRollback();
+    if (reservation.kind !== "reserved")
+      throw new Error("expected reservation");
+
+    await expect(state.launcher.cancel(reservation.receipt)).resolves.toBe(
+      true,
+    );
+
+    expect(state.spawn).not.toHaveBeenCalled();
+    expect(state.fs.unlinkPaths).toContain(
+      `/run/home-worker/requests/${OPERATION_ID}.json`,
+    );
+  });
+
+  it("makes an unauthorized reservation unpublishable even when cleanup fails", async () => {
+    const fs = fileSystemFake();
+    fs.unlink = vi.fn(async () => {
+      throw new Error("cleanup failed");
+    });
+    const state = harness({ fs });
+    const reservation = await state.launcher.reserveRollback();
+    if (reservation.kind !== "reserved") throw new Error("expected reservation");
+
+    await expect(state.launcher.cancel(reservation.receipt)).resolves.toBe(false);
+    await expect(state.launcher.publish(reservation.receipt)).resolves.toEqual({
+      kind: "rejected",
+      failure: { code: "maintenance-required" },
+    });
+    expect(state.spawn).not.toHaveBeenCalled();
+  });
+
   it("durably persists the exact displayed identity before fixed no-shell spawn", async () => {
     const state = harness();
     const expected = checkedReleaseFixture();

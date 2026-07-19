@@ -1062,6 +1062,12 @@ const ukCatalog = {
       `⬆️ Доступне оновлення застосунку ${version} для ${targetName} (коміт ${commit}). Надішліть /update, щоб перевірити та встановити його.`,
     discoveryFailure: (code: string) =>
       `⚠️ Перевірка оновлень потребує уваги (${code}). Встановлений випуск не змінено.`,
+    operationFailure: (code: string) =>
+      `❌ Операцію оновлення неможливо продовжити (${code}). Встановлений випуск не змінено.`,
+    operationOutcome: (kind: 'update' | 'rollback', outcome: string) =>
+      `✅ ${kind === 'update' ? 'Оновлення' : 'Відкат'} завершено (${outcome}).`,
+    maintenanceOutcome: (code: string) =>
+      `⚠️ Обслуговування OTA потребує уваги (${code}).`,
     upToDate: 'ℹ️ Установлено останню версію.',
     updating: (commit: string) =>
       `🔄 Оновлення до ${commit}... Я ненадовго буду не в мережі та повідомлю, коли все буде готово.`,

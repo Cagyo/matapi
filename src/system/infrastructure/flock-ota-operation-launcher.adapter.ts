@@ -19,6 +19,7 @@ import {
   type CheckedReleaseIdentity,
   type OtaOperationReceipt,
   type OtaOperationRequest,
+  type ReserveOperationResult,
   type StartOperationResult,
 } from "../domain/ota-contracts";
 import { compareLibcVersions, parseLibcVersion } from "../domain/libc-version";
@@ -135,7 +136,7 @@ const defaultDependencies: OtaLauncherDependencies = {
 
 function rejected(
   code: "operation-in-progress" | "maintenance-required",
-): StartOperationResult {
+): Extract<StartOperationResult, { kind: "rejected" }> {
   return { kind: "rejected", failure: { code } };
 }
 
@@ -220,6 +221,8 @@ export function operationRequestPath(
 
 @Injectable()
 export class FlockOtaOperationLauncherAdapter implements OtaOperationLauncherPort {
+  private readonly reservations = new Map<string, OtaOperationRequest>();
+
   constructor(
     private readonly config: OtaConfig,
     private readonly dependencies: OtaLauncherDependencies = defaultDependencies,
@@ -236,11 +239,59 @@ export class FlockOtaOperationLauncherAdapter implements OtaOperationLauncherPor
     return this.launch("rollback", null, signal);
   }
 
+  reserveUpdate(
+    expected: CheckedReleaseIdentity,
+    signal?: AbortSignal,
+  ): Promise<ReserveOperationResult> {
+    return this.reserve("update", expected, signal);
+  }
+
+  reserveRollback(signal?: AbortSignal): Promise<ReserveOperationResult> {
+    return this.reserve("rollback", null, signal);
+  }
+
+  async publish(
+    receipt: OtaOperationReceipt,
+    signal?: AbortSignal,
+  ): Promise<StartOperationResult> {
+    const request = this.reservations.get(receipt.operationId);
+    if (
+      request === undefined ||
+      receipt.receiptGeneration !== 1 ||
+      !sameReceipt(receipt, request)
+    ) {
+      return rejected("maintenance-required");
+    }
+    return this.publishReserved(request, signal);
+  }
+
+  async cancel(receipt: OtaOperationReceipt): Promise<boolean> {
+    const request = this.reservations.get(receipt.operationId);
+    if (request === undefined || !sameReceipt(receipt, request)) return false;
+    // Authorization failure must make the reservation unpublishable even if
+    // filesystem cleanup itself needs later maintenance.
+    this.reservations.delete(request.operationId);
+    const removed = await this.removeRequest(
+      operationRequestPath(this.config.launcher, request.operationId),
+    );
+    return removed;
+  }
+
   private async launch(
     kind: "update" | "rollback",
     expectedInput: CheckedReleaseIdentity | null,
     signal?: AbortSignal,
   ): Promise<StartOperationResult> {
+    const reservation = await this.reserve(kind, expectedInput, signal);
+    if (reservation.kind === "rejected") return reservation;
+    return this.publish(reservation.receipt, signal);
+  }
+
+  private async reserve(
+    kind: "update" | "rollback",
+    expectedInput: CheckedReleaseIdentity | null,
+    signal?: AbortSignal,
+  ): Promise<ReserveOperationResult> {
     if (signal?.aborted) return rejected("maintenance-required");
 
     let request: OtaOperationRequest;
@@ -276,6 +327,34 @@ export class FlockOtaOperationLauncherAdapter implements OtaOperationLauncherPor
       return rejected("maintenance-required");
     }
 
+    this.reservations.set(request.operationId, request);
+    return {
+      kind: "reserved",
+      receipt: {
+        schemaVersion: request.schemaVersion,
+        operationId: request.operationId,
+        kind: request.kind,
+        acceptedAt: request.acceptedAt,
+        requestSha256: request.requestSha256,
+        receiptGeneration: 1,
+      },
+    };
+  }
+
+  private async publishReserved(
+    request: OtaOperationRequest,
+    signal?: AbortSignal,
+  ): Promise<StartOperationResult> {
+    const requestPath = operationRequestPath(
+      this.config.launcher,
+      request.operationId,
+    );
+    if (signal?.aborted) {
+      await this.removeRequest(requestPath);
+      this.reservations.delete(request.operationId);
+      return rejected("maintenance-required");
+    }
+
     let lockLease: OtaLauncherFileHandle | undefined;
     try {
       lockLease = await this.dependencies.fs.open(
@@ -289,17 +368,20 @@ export class FlockOtaOperationLauncherAdapter implements OtaOperationLauncherPor
     } catch {
       await lockLease?.close().catch(() => undefined);
       await this.removeRequest(requestPath);
+      this.reservations.delete(request.operationId);
       return rejected("maintenance-required");
     }
 
     if (lockLease === undefined) {
       await this.removeRequest(requestPath);
+      this.reservations.delete(request.operationId);
       return rejected("maintenance-required");
     }
 
     if (signal?.aborted) {
       await lockLease.close().catch(() => undefined);
       await this.removeRequest(requestPath);
+      this.reservations.delete(request.operationId);
       return rejected("maintenance-required");
     }
 
@@ -324,6 +406,7 @@ export class FlockOtaOperationLauncherAdapter implements OtaOperationLauncherPor
     } catch {
       await lockLease.close().catch(() => undefined);
       await this.removeRequest(requestPath);
+      this.reservations.delete(request.operationId);
       return rejected("maintenance-required");
     }
 
@@ -341,10 +424,12 @@ export class FlockOtaOperationLauncherAdapter implements OtaOperationLauncherPor
       await resultPromise;
       await lockLease.close().catch(() => undefined);
       await this.removeRequest(requestPath);
+      this.reservations.delete(request.operationId);
       return rejected("maintenance-required");
     }
 
     const result = await resultPromise;
+    this.reservations.delete(request.operationId);
     if (result.kind === "rejected") {
       const cleaned = await this.removeRequest(requestPath);
       if (!cleaned) return rejected("maintenance-required");

@@ -1,12 +1,17 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { Composer } from 'grammy';
-import { en } from '../../locales/en';
-import { UpdateSystemUseCase } from '../application/update-system.use-case';
-import { OtaCheckFailedError } from '../../system/domain/errors/ota-check-failed.error';
-import { UpdateInProgressError } from '../../system/domain/errors/update-in-progress.error';
-import { RoleMiddleware } from './role.middleware';
-import { TelegramHandler } from './telegram-handler';
-import { TelegramContext } from './telegram-context';
+import { Injectable, Logger } from "@nestjs/common";
+import { Composer, InlineKeyboard } from "grammy";
+import { en } from "../../locales/en";
+import type { LocaleCatalog } from "../../locales";
+import {
+  isOtaFailureCode,
+  type OtaFailureCode,
+} from "../../system/domain/ota-failure";
+import { UpdateSystemUseCase } from "../application/update-system.use-case";
+import { workflowReturnCallback } from "../domain/workflow-return";
+import { RoleMiddleware } from "./role.middleware";
+import { TelegramContext } from "./telegram-context";
+import { TelegramHandler } from "./telegram-handler";
+import { WorkflowEntryCoordinator } from "./workflow-entry.coordinator";
 
 @Injectable()
 export class UpdateHandler implements TelegramHandler {
@@ -15,33 +20,75 @@ export class UpdateHandler implements TelegramHandler {
   constructor(
     private readonly update: UpdateSystemUseCase,
     private readonly guard: RoleMiddleware,
+    private readonly workflows: WorkflowEntryCoordinator,
   ) {}
 
   register(composer: Composer<TelegramContext>): void {
-    composer.command('update', this.guard.adminOnly, async (ctx: TelegramContext) => {
-      try {
-        await ctx.reply(en.ota.checking);
-        const outcome = await this.update.execute();
-        if (outcome.kind === 'up-to-date') {
-          await ctx.reply(en.ota.upToDate);
-          return;
-        }
-        await ctx.reply(en.ota.updating(outcome.commit.slice(0, 7)));
-      } catch (err) {
-        if (err instanceof UpdateInProgressError) {
-          await ctx.reply(en.ota.inProgress);
-          return;
-        }
-        if (err instanceof OtaCheckFailedError) {
-          await ctx.reply(en.ota.fetchFailed(err.reason));
-          return;
-        }
-        this.logger.error(
-          `/update failed: ${(err as Error).message}`,
-          (err as Error).stack,
-        );
-        await ctx.reply(en.ota.fetchFailed((err as Error).message));
+    composer.command("update", this.guard.adminOnly, (ctx) => this.handle(ctx));
+  }
+
+  private async handle(ctx: TelegramContext): Promise<void> {
+    const catalog = ctx.localeState?.catalog ?? en;
+    try {
+      await ctx.reply(catalog.ota.checking);
+      const check = await this.update.check();
+      if (check.kind === "failure") {
+        await ctx.reply(catalog.ota.operationFailure(check.failure.code));
+        return;
       }
-    });
+      if (check.kind === "current") {
+        await ctx.reply(catalog.ota.upToDate);
+        return;
+      }
+      const receipt = await this.workflows.begin(ctx, "ota-update", {
+        source: "natural-parent",
+      });
+      if (!receipt || !(await this.workflows.markRunning(ctx, receipt))) {
+        await ctx.reply(catalog.ota.operationFailure("maintenance-required"));
+        return;
+      }
+      const outcome = await this.update.launch({
+        checked: check.available,
+        userId: receipt.userId,
+        chatId: receipt.chatId,
+        workflowReceiptId: receipt.id,
+      });
+      if (outcome.kind === "failure") {
+        await ctx.reply(catalog.ota.operationFailure(outcome.failure.code), {
+          reply_markup: this.runningKeyboard(catalog, receipt.id),
+        });
+        return;
+      }
+      await ctx.reply(catalog.ota.updating(outcome.commit.slice(0, 7)), {
+        reply_markup: this.runningKeyboard(catalog, receipt.id),
+      });
+    } catch (error) {
+      this.logger.error("/update failed", (error as Error).stack);
+      await ctx.reply(
+        catalog.ota.operationFailure(
+          this.failureCode(error) ?? "maintenance-required",
+        ),
+      );
+    }
+  }
+
+  private runningKeyboard(
+    catalog: LocaleCatalog,
+    receiptId: string,
+  ): InlineKeyboard {
+    return new InlineKeyboard()
+      .text(
+        catalog.home.common.back,
+        workflowReturnCallback(receiptId, "origin"),
+      )
+      .text(
+        catalog.home.common.home,
+        workflowReturnCallback(receiptId, "home"),
+      );
+  }
+
+  private failureCode(error: unknown): OtaFailureCode | null {
+    const code = (error as { failure?: { code?: unknown } }).failure?.code;
+    return isOtaFailureCode(code) ? code : null;
   }
 }

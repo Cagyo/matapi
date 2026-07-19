@@ -18,13 +18,9 @@ import { catalogFor } from '../../locales';
 import type { LocaleCatalog } from '../../locales';
 import { WorkflowEntryCoordinator } from './workflow-entry.coordinator';
 
-const UPDATE_COMMIT_KEY = 'update_commit';
-const UPDATE_STATUS_KEY = 'update_status';
-const ROLLBACK_COMMIT_KEY = 'rollback_commit';
-
 /**
  * Runs once after the bot is online. Reads `system_meta.restart_reason`
- * set by `/restart`, the OTA scripts, or rollback. It completes the matching
+ * set by `/restart` or the system-package updater. It completes the matching
  * contextual restart workflow first, falling back to an admin broadcast when
  * none exists, then clears the flag. Idempotent — a fresh boot with no flag
  * is a no-op.
@@ -54,9 +50,6 @@ export class RestartConfirmationService {
     }
 
     await this.meta.delete(RESTART_REASON_KEY);
-    await this.meta.delete(UPDATE_COMMIT_KEY);
-    await this.meta.delete(UPDATE_STATUS_KEY);
-    await this.meta.delete(ROLLBACK_COMMIT_KEY);
   }
 
   private async completeContextualRestart(
@@ -107,22 +100,10 @@ export class RestartConfirmationService {
     switch (reason) {
       case 'user_command':
         return catalog.ota.restartComplete;
-      case 'ota_update': {
-        const commit = (await this.meta.get(UPDATE_COMMIT_KEY)) ?? 'unknown';
-        return catalog.ota.updateSuccess(this.shortCommit(commit));
-      }
-      case 'ota_update_failed':
-        return catalog.ota.updateFailed;
       case 'system_update':
         return catalog.systemUpdate.completed;
       case 'system_update_failed':
         return catalog.systemUpdate.failed;
-      case 'rollback': {
-        const commit = (await this.meta.get(ROLLBACK_COMMIT_KEY)) ?? 'unknown';
-        return catalog.ota.rollbackSuccess(this.shortCommit(commit));
-      }
-      case 'rollback_failed':
-        return catalog.ota.rollbackFailed('see worker logs');
       default:
         this.logger.warn(`Unknown restart_reason: ${reason}`);
         return null;
@@ -143,9 +124,5 @@ export class RestartConfirmationService {
         }),
       ),
     );
-  }
-
-  private shortCommit(commit: string): string {
-    return commit.slice(0, 7);
   }
 }

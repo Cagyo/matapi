@@ -26,6 +26,7 @@ export function naturalWorkflowOrigin(workflow: ExternalWorkflow): HomeView {
     case 'drive-status': case 'drive-setup': case 'storage-cleanup':
       return { kind: 'admin-storage' };
     case 'health': case 'system-update': case 'system-restart':
+    case 'ota-update': case 'ota-rollback':
       return { kind: 'admin-system' };
     case 'invite': return { kind: 'admin-tools' };
     case 'camera': return { kind: 'home', checking: false };
