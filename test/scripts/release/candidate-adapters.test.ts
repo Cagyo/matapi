@@ -227,29 +227,24 @@ describe("node candidate dependencies", () => {
     }
   });
 
-  it("seals a pinned offline Yarn release policy after projection removal", async () => {
+  it("seals a pinned public-registry Yarn release policy", async () => {
     const root = await mkdtemp(join(tmpdir(), "candidate-assembly-"));
     await mkdir(join(root, ".yarn/releases"), { recursive: true });
-    await mkdir(join(root, "node_modules"));
     await writeFile(join(root, ".yarn/releases/yarn-4.13.0.cjs"), "yarn\n");
-    await writeFile(join(root, ".yarn/install-state.gz"), "transient\n");
     const dependencies = createNodeCandidateDependencies();
 
-    await dependencies.removeProductionProjection({ assemblyRoot: root });
     await dependencies.sealReleaseConfig({ assemblyRoot: root });
 
-    await expect(access(join(root, "node_modules"))).rejects.toThrow();
-    await expect(
-      access(join(root, ".yarn/install-state.gz")),
-    ).rejects.toThrow();
     await expect(readFile(join(root, ".yarnrc.yml"), "utf8")).resolves.toBe(
       [
         "nodeLinker: node-modules",
         "enableGlobalCache: false",
         "enableNetwork: false",
         "enableImmutableInstalls: true",
-        "enableImmutableCache: true",
-        "cacheFolder: .yarn/cache",
+        "enableScripts: false",
+        "checksumBehavior: throw",
+        "npmRegistryServer: https://registry.npmjs.org",
+        "npmAlwaysAuth: false",
         "yarnPath: .yarn/releases/yarn-4.13.0.cjs",
         "",
       ].join("\n"),

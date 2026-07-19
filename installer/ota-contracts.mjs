@@ -37,7 +37,6 @@ const FAILURE_CODES = new Set([
   "archive-policy",
   "dependency-sandbox",
   "dependency-install",
-  "cache-mutation",
   "prepared-tree",
   "migration",
   "activation",

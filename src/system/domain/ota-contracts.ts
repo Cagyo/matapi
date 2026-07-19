@@ -246,7 +246,6 @@ export interface PreparationReceipt {
   candidate: string;
   artifactSha256: string;
   metadataSha256: string;
-  inventorySha256: string;
 }
 
 export interface StartupReport {
@@ -1142,7 +1141,6 @@ export function parsePreparationReceipt(
       "candidate",
       "artifactSha256",
       "metadataSha256",
-      "inventorySha256",
     ],
     "preparation receipt",
   );
@@ -1152,7 +1150,6 @@ export function parsePreparationReceipt(
     candidate: asReleaseName(receipt.candidate, "candidate"),
     artifactSha256: asSha256(receipt.artifactSha256, "artifactSha256"),
     metadataSha256: asSha256(receipt.metadataSha256, "metadataSha256"),
-    inventorySha256: asSha256(receipt.inventorySha256, "inventorySha256"),
   };
 }
 

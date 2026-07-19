@@ -112,7 +112,8 @@ export function encodeCandidateDescriptor({
   commit,
   sourceDateEpoch,
   builderPolicy,
-  cacheInventorySha256,
+  yarnLockSha256,
+  yarnRuntimeSha256,
   archive,
 }) {
   if (
@@ -122,7 +123,8 @@ export function encodeCandidateDescriptor({
     !COMMIT.test(commit) ||
     !Number.isSafeInteger(sourceDateEpoch) ||
     sourceDateEpoch < 0 ||
-    !SHA256.test(cacheInventorySha256) ||
+    !SHA256.test(yarnLockSha256) ||
+    !SHA256.test(yarnRuntimeSha256) ||
     builderPolicy?.schemaVersion !== 1 ||
     builderPolicy?.target?.targetName !== "linux-arm64-glibc" ||
     builderPolicy?.runtime?.nodeMajor !== 20 ||
@@ -144,7 +146,8 @@ export function encodeCandidateDescriptor({
     runtime: { ...builderPolicy.runtime },
     provenance: {
       sourceDateEpoch,
-      cacheInventorySha256,
+      yarnLockSha256,
+      yarnRuntimeSha256,
     },
   };
   return Buffer.from(`${JSON.stringify(descriptor)}\n`, "utf8");

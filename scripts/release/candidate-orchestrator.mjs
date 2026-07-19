@@ -9,11 +9,10 @@ import {
   encodeCandidateDescriptor,
   measureCandidateArchive,
 } from "./candidate-descriptor.mjs";
-import { computeCacheInventorySha256 } from "./release-policy.mjs";
 
 const VERSION = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
 const COMMIT = /^[0-9a-f]{40}$/u;
-const SHA256 = /^[0-9a-f]{64}$/u;
+const YARN_RUNTIME_PATH = ".yarn/releases/yarn-4.13.0.cjs";
 
 function separated(left, right) {
   return (
@@ -79,24 +78,20 @@ async function runAtStage(stage, operation, code = "operation-failed") {
   }
 }
 
-function validateCacheSnapshot(stage, snapshot) {
-  try {
-    if (
-      !SHA256.test(snapshot?.sha256) ||
-      computeCacheInventorySha256(snapshot.inventory) !== snapshot.sha256
-    ) {
-      throw new CandidateBuildFailure(stage, "cache-invalid");
-    }
-    return snapshot;
-  } catch (error) {
-    throw classifyCandidateBuildFailure(error, stage, "cache-invalid");
-  }
-}
-
 function runStep(dependencies, phase, command, args, cwd, env) {
   return runAtStage(phase, () =>
     dependencies.run({ phase, command, args, cwd, env }),
   );
+}
+
+function requiredFileDigest(inventory, path) {
+  const entry = inventory.find(
+    (candidate) => candidate.path === path && candidate.type === "file",
+  );
+  if (!entry || !/^[0-9a-f]{64}$/u.test(entry.sha256)) {
+    throw new Error(`Archive inventory is missing ${path}`);
+  }
+  return entry.sha256;
 }
 
 export async function runCandidateBuild(rawInput, dependencies) {
@@ -132,20 +127,13 @@ export async function runCandidateBuild(rawInput, dependencies) {
   };
   const buildRoot = `${input.workRoot}/build`;
   const assemblyRoot = `${input.workRoot}/assembly`;
-  const validationRoot = `${input.workRoot}/validation`;
   const buildState = `${input.workRoot}/state/build`;
   const assemblyState = `${input.workRoot}/state/assembly`;
-  const validationState = `${input.workRoot}/state/validation`;
   const buildEnv = commandEnvironment(buildState, input.sourceDateEpoch, true);
   const assemblyEnv = commandEnvironment(
     assemblyState,
     input.sourceDateEpoch,
     true,
-  );
-  const validationEnv = commandEnvironment(
-    validationState,
-    input.sourceDateEpoch,
-    false,
   );
 
   await runAtStage("prepare-build-checkout", () =>
@@ -192,65 +180,14 @@ export async function runCandidateBuild(rawInput, dependencies) {
     assemblyRoot,
     assemblyEnv,
   );
-  await runStep(
-    dependencies,
-    "focus-production-online",
-    "/usr/bin/node",
-    [
-      ".yarn/releases/yarn-4.13.0.cjs",
-      "workspaces",
-      "focus",
-      "-A",
-      "--production",
-    ],
-    assemblyRoot,
-    assemblyEnv,
-  );
-  await runAtStage("remove-production-projection", () =>
-    dependencies.removeProductionProjection({ assemblyRoot }),
-  );
   await runAtStage("seal-release-config", () =>
     dependencies.sealReleaseConfig({ assemblyRoot }),
   );
-  const before = validateCacheSnapshot(
-    "inspect-cache-before",
-    await runAtStage("inspect-cache-before", () =>
-      dependencies.inspectCache(assemblyRoot),
-    ),
-  );
-
-  await runAtStage("prepare-validation-copy", () =>
-    dependencies.prepareValidationCopy({ assemblyRoot, validationRoot }),
-  );
-  await runStep(
-    dependencies,
-    "focus-production-offline",
-    "/usr/bin/node",
-    [
-      ".yarn/releases/yarn-4.13.0.cjs",
-      "workspaces",
-      "focus",
-      "-A",
-      "--production",
-    ],
-    validationRoot,
-    validationEnv,
-  );
-  const after = validateCacheSnapshot(
-    "inspect-cache-after",
-    await runAtStage("inspect-cache-after", () =>
-      dependencies.inspectCache(validationRoot),
-    ),
-  );
-  if (after.sha256 !== before.sha256) {
-    throw new CandidateBuildFailure("inspect-cache-after", "cache-mutated");
-  }
 
   const generated = await runAtStage("create-archive", () =>
     dependencies.createArchive({
       assemblyRoot,
       sourceDateEpoch: input.sourceDateEpoch,
-      expectedCacheInventory: before.inventory,
     }),
   );
   const archive = await runAtStage("measure-archive", () =>
@@ -266,7 +203,11 @@ export async function runCandidateBuild(rawInput, dependencies) {
       commit: input.commit,
       sourceDateEpoch: input.sourceDateEpoch,
       builderPolicy: input.builderPolicy,
-      cacheInventorySha256: before.sha256,
+      yarnLockSha256: requiredFileDigest(generated.inventory, "yarn.lock"),
+      yarnRuntimeSha256: requiredFileDigest(
+        generated.inventory,
+        YARN_RUNTIME_PATH,
+      ),
       archive,
     }),
   );

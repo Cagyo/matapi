@@ -1,30 +1,12 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
-import {
-  computeCacheInventorySha256,
-  evaluateReleasePolicy,
-} from "../../../scripts/release/release-policy.mjs";
+import { evaluateReleasePolicy } from "../../../scripts/release/release-policy.mjs";
 
 const sha256 = (value: string) =>
   createHash("sha256").update(value).digest("hex");
 
-const cacheInventory = [
-  {
-    path: ".yarn/cache/a-package-npm-1.0.0.zip",
-    size: 17,
-    sha256: sha256("a"),
-  },
-  {
-    path: ".yarn/cache/z-package-npm-2.0.0.zip",
-    size: 23,
-    sha256: sha256("z"),
-  },
-];
-
 function validFacts() {
-  const inventorySha256 = computeCacheInventorySha256(cacheInventory);
-
   return {
     request: {
       version: "1.2.3",
@@ -63,15 +45,15 @@ function validFacts() {
       locale: "C",
       sourceDateEpoch: 1_725_000_000,
     },
-    cache: {
+    dependencies: {
       validated: true,
       target: "linux-arm64-glibc",
       nodeMajor: 20,
       nodeModulesAbi: "115",
       yarnLockSha256: sha256("lock"),
       expectedYarnLockSha256: sha256("lock"),
-      inventory: cacheInventory,
-      inventorySha256,
+      yarnRuntimeSha256: sha256("yarn"),
+      expectedYarnRuntimeSha256: sha256("yarn"),
     },
   };
 }
@@ -131,15 +113,15 @@ describe("release candidate policy", () => {
     ]);
   });
 
-  it("requires the pinned Node 20 module ABI across host, builder, and cache", () => {
+  it("requires the pinned Node 20 module ABI across host, builder, and dependency preparation", () => {
     const facts = validFacts();
     facts.host.nodeModulesAbi = "999";
     facts.builder.nodeModulesAbi = "999";
-    facts.cache.nodeModulesAbi = "999";
+    facts.dependencies.nodeModulesAbi = "999";
 
     expect(evaluateReleasePolicy(facts).reasons).toEqual([
       "builder-runtime",
-      "cache-runtime",
+      "dependencies-runtime",
       "host-node-abi",
     ]);
   });
@@ -151,7 +133,7 @@ describe("release candidate policy", () => {
     facts.host.arch = "arm";
     facts.host.armVersion = 6;
     facts.builder.target = "linux-armv7-glibc";
-    facts.cache.target = "linux-armv7-glibc";
+    facts.dependencies.target = "linux-armv7-glibc";
 
     expect(evaluateReleasePolicy(facts).reasons).toEqual(["host-arm-version"]);
   });
@@ -163,27 +145,15 @@ describe("release candidate policy", () => {
     expect(evaluateReleasePolicy(facts).reasons).toEqual(["host-libc"]);
   });
 
-  it("canonicalizes cache inventory bytewise and detects mutations", () => {
-    const reversed = [...cacheInventory].reverse();
-    expect(computeCacheInventorySha256(reversed)).toBe(
-      computeCacheInventorySha256(cacheInventory),
-    );
-
+  it("binds both the lockfile and pinned Yarn runtime digests", () => {
     const facts = validFacts();
-    facts.cache.inventory = [
-      cacheInventory[0],
-      { ...cacheInventory[1], size: cacheInventory[1].size + 1 },
-    ];
+    facts.dependencies.yarnLockSha256 = sha256("mutated lock");
+    facts.dependencies.yarnRuntimeSha256 = sha256("mutated yarn");
 
-    expect(evaluateReleasePolicy(facts).reasons).toEqual(["cache-inventory"]);
-  });
-
-  it("rejects malformed cache inventory records", () => {
-    expect(() =>
-      computeCacheInventorySha256([
-        { path: "../escape.zip", size: 1, sha256: "0".repeat(64) },
-      ]),
-    ).toThrow(/cache inventory/i);
+    expect(evaluateReleasePolicy(facts).reasons).toEqual([
+      "dependencies-lock",
+      "dependencies-yarn-runtime",
+    ]);
   });
 
   it("rejects inherited object keys as unsupported targets", () => {
@@ -191,7 +161,7 @@ describe("release candidate policy", () => {
     facts.request.target = "__proto__";
     facts.package.releaseTarget = "__proto__";
     facts.builder.target = "__proto__";
-    facts.cache.target = "__proto__";
+    facts.dependencies.target = "__proto__";
 
     expect(evaluateReleasePolicy(facts).reasons).toContain("request-target");
   });

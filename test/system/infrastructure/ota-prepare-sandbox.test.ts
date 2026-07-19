@@ -3,6 +3,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   realpath,
   rm,
   symlink,
@@ -11,21 +12,49 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { writeOtaArchiveFixtures } from "../../fixtures/ota/archives/archive-fixtures";
 import {
-  inspectCacheInventory,
-  prepareDependencies,
-  type PreparationRunner,
+  buildDependencies,
+  coordinatePreparation,
+  fetchDependencies,
+  validateLockLocators,
 } from "../../../installer/ota-prepare.mjs";
 
 const OPERATION_ID = "AbCdEfGhIjKlMnOpQrStUw";
 const ARTIFACT_SHA256 = "a".repeat(64);
 const METADATA_SHA256 = "b".repeat(64);
+const COORDINATOR_CHALLENGE = "c".repeat(64);
 const roots: string[] = [];
 
 function digest(value: string | Buffer): string {
   return createHash("sha256").update(value).digest("hex");
 }
+
+const yarnPolicy = [
+  "nodeLinker: node-modules",
+  "enableGlobalCache: false",
+  "enableNetwork: false",
+  "enableImmutableInstalls: true",
+  "enableScripts: false",
+  "checksumBehavior: throw",
+  "npmRegistryServer: https://registry.npmjs.org",
+  "npmAlwaysAuth: false",
+  "yarnPath: .yarn/releases/yarn-4.13.0.cjs",
+  "",
+].join("\n");
+
+const yarnLock = [
+  "__metadata:",
+  "  version: 8",
+  "",
+  '"home-worker@workspace:.":',
+  "  version: 0.0.0-use.local",
+  '  resolution: "home-worker@workspace:."',
+  "",
+  '"fixture@npm:^1.0.0":',
+  "  version: 1.0.0",
+  '  resolution: "fixture@npm:1.0.0"',
+  "",
+].join("\n");
 
 async function fixture() {
   const root = await realpath(await mkdtemp(resolve(tmpdir(), "ota-prepare-")));
@@ -35,36 +64,23 @@ async function fixture() {
   const candidateName = `1.4.2-${ARTIFACT_SHA256}`;
   const candidate = join(releasesRoot, candidateName);
   const operationRoot = join(runtimeRoot, OPERATION_ID);
-  const cacheFixtures = join(root, "cache-fixtures");
+  const liveRelease = join(releasesRoot, `1.4.1-${"d".repeat(64)}`);
   await mkdir(join(candidate, ".yarn", "releases"), { recursive: true });
-  await mkdir(operationRoot, { recursive: true });
-  await mkdir(join(operationRoot, "tmp"));
-  await writeOtaArchiveFixtures(cacheFixtures);
-  await mkdir(join(candidate, ".yarn", "cache"));
-  await writeFile(
-    join(candidate, ".yarn", "cache", "fixture.zip"),
-    await readFile(
-      join(cacheFixtures, "cache-cases", "valid.zip", "valid.zip"),
-    ),
-  );
+  await mkdir(join(candidate, "dist"));
+  await mkdir(join(candidate, "config"));
+  await mkdir(join(candidate, "scripts"));
+  await writeFile(join(candidate, "dist", "main.js"), "export {};\n");
+  await writeFile(join(candidate, "config", "defaults.yml"), "timezone: UTC\n");
+  await writeFile(join(candidate, "scripts", "update.sh"), "#!/bin/sh\n");
+  await mkdir(liveRelease, { recursive: true });
+  await writeFile(join(liveRelease, "live.txt"), "still-running\n");
+  await mkdir(join(operationRoot, "tmp"), { recursive: true });
   await writeFile(
     join(candidate, "package.json"),
     JSON.stringify({ packageManager: "yarn@4.13.0" }),
   );
-  await writeFile(join(candidate, "yarn.lock"), "__metadata:\n  version: 8\n");
-  await writeFile(
-    join(candidate, ".yarnrc.yml"),
-    [
-      "nodeLinker: node-modules",
-      "enableGlobalCache: false",
-      "enableNetwork: false",
-      "enableImmutableInstalls: true",
-      "enableImmutableCache: true",
-      "cacheFolder: .yarn/cache",
-      "yarnPath: .yarn/releases/yarn-4.13.0.cjs",
-      "",
-    ].join("\n"),
-  );
+  await writeFile(join(candidate, "yarn.lock"), yarnLock);
+  await writeFile(join(candidate, ".yarnrc.yml"), yarnPolicy);
   await writeFile(
     join(candidate, ".yarn", "releases", "yarn-4.13.0.cjs"),
     "// pinned yarn\n",
@@ -78,22 +94,55 @@ async function fixture() {
     }),
   );
   await symlink(candidate, join(operationRoot, "candidate"));
-
-  const inventory = await inspectCacheInventory(
-    join(candidate, ".yarn", "cache"),
-  );
   await writeFile(
-    join(runtimeRoot, `${OPERATION_ID}.json`),
+    join(operationRoot, "tmp", "coordinator-challenge.json"),
+    `${JSON.stringify({
+      schemaVersion: 1,
+      operationId: OPERATION_ID,
+      challenge: COORDINATOR_CHALLENGE,
+    })}\n`,
+  );
+  const receiptPath = join(runtimeRoot, `${OPERATION_ID}.json`);
+  await writeFile(
+    receiptPath,
     JSON.stringify({
       schemaVersion: 1,
       operationId: OPERATION_ID,
       candidate: candidateName,
       artifactSha256: ARTIFACT_SHA256,
       metadataSha256: METADATA_SHA256,
-      inventorySha256: inventory.sha256,
     }),
   );
-  return { root, runtimeRoot, releasesRoot, candidate };
+  const options = {
+    runtimeRoot,
+    releasesRoot,
+    enforceRootOwnership: false,
+  };
+  return {
+    root,
+    runtimeRoot,
+    releasesRoot,
+    candidate,
+    candidateName,
+    liveRelease,
+    receiptPath,
+    options,
+  };
+}
+
+async function successfulFetch(setup: Awaited<ReturnType<typeof fixture>>) {
+  await fetchDependencies(
+    OPERATION_ID,
+    async ({ cwd }) => {
+      await mkdir(join(cwd, "node_modules"));
+      await writeFile(
+        join(cwd, "node_modules", "fixture.js"),
+        "module.exports=1\n",
+      );
+      await writeFile(join(cwd, ".yarn", "install-state.gz"), "state\n");
+    },
+    setup.options,
+  );
 }
 
 afterEach(async () => {
@@ -102,116 +151,343 @@ afterEach(async () => {
   );
 });
 
-describe("ota-prepare dependency sandbox contract", () => {
-  it("runs the bundled Yarn with only the fixed environment and leaves signed inputs unchanged", async () => {
+describe("two-phase OTA dependency preparation", () => {
+  it("fetches with literal pinned Yarn, a closed public-registry environment, and no lifecycle scripts", async () => {
     const setup = await fixture();
-    const protectedPaths = [
-      "package.json",
-      "yarn.lock",
-      ".yarnrc.yml",
-      ".yarn/releases/yarn-4.13.0.cjs",
-      "artifact-state.json",
-    ];
-    const before = await Promise.all(
-      protectedPaths.map(async (path) =>
-        digest(await readFile(join(setup.candidate, path))),
+    let calls = 0;
+
+    await fetchDependencies(
+      OPERATION_ID,
+      async ({ command, args, cwd, env }) => {
+        calls += 1;
+        expect(command).toBe("/usr/bin/node");
+        expect(args).toEqual([
+          ".yarn/releases/yarn-4.13.0.cjs",
+          "workspaces",
+          "focus",
+          "--all",
+          "--production",
+        ]);
+        expect(cwd).toBe(setup.candidate);
+        expect(env).toMatchObject({
+          HOME: join(setup.runtimeRoot, OPERATION_ID, "tmp", "home"),
+          YARN_ENABLE_NETWORK: "true",
+          YARN_ENABLE_SCRIPTS: "false",
+          YARN_ENABLE_IMMUTABLE_CACHE: "false",
+          YARN_CHECKSUM_BEHAVIOR: "throw",
+          YARN_NPM_REGISTRY_SERVER: "https://registry.npmjs.org",
+          YARN_NPM_ALWAYS_AUTH: "false",
+        });
+        expect(Object.keys(env).sort()).toEqual(
+          [
+            "HOME",
+            "JOBS",
+            "NODE_ENV",
+            "NODE_OPTIONS",
+            "PATH",
+            "TEMP",
+            "TMP",
+            "TMPDIR",
+            "XDG_CACHE_HOME",
+            "XDG_CONFIG_HOME",
+            "YARN_CACHE_FOLDER",
+            "YARN_ENABLE_GLOBAL_CACHE",
+            "YARN_ENABLE_IMMUTABLE_INSTALLS",
+            "YARN_ENABLE_IMMUTABLE_CACHE",
+            "YARN_ENABLE_NETWORK",
+            "YARN_ENABLE_SCRIPTS",
+            "YARN_CHECKSUM_BEHAVIOR",
+            "YARN_NPM_ALWAYS_AUTH",
+            "YARN_NPM_REGISTRY_SERVER",
+          ].sort(),
+        );
+        await mkdir(join(cwd, "node_modules"));
+      },
+      setup.options,
+    );
+
+    expect(calls).toBe(1);
+    const sentinel = JSON.parse(
+      await readFile(
+        join(setup.runtimeRoot, OPERATION_ID, "tmp", "fetch-sentinel.json"),
+        "utf8",
       ),
     );
-    const runner: PreparationRunner = async ({ command, args, cwd, env }) => {
-      expect(command).toBe("/usr/bin/node");
-      expect(args).toEqual([
-        ".yarn/releases/yarn-4.13.0.cjs",
-        "workspaces",
-        "focus",
-        "-A",
-        "--production",
-      ]);
-      expect(cwd).toBe(setup.candidate);
-      expect(env).toMatchObject({
-        HOME: join(setup.runtimeRoot, OPERATION_ID, "tmp", "home"),
-        TMPDIR: join(setup.runtimeRoot, OPERATION_ID, "tmp"),
-        NODE_OPTIONS: "--max-old-space-size=512",
-        npm_config_jobs: "1",
-        JOBS: "1",
-        YARN_ENABLE_NETWORK: "false",
-        YARN_ENABLE_IMMUTABLE_CACHE: "true",
-      });
-      expect(Object.keys(env).sort()).toEqual(
-        [
-          "HOME",
-          "JOBS",
-          "NODE_ENV",
-          "NODE_OPTIONS",
-          "PATH",
-          "TEMP",
-          "TMP",
-          "TMPDIR",
-          "XDG_CACHE_HOME",
-          "XDG_CONFIG_HOME",
-          "YARN_CACHE_FOLDER",
-          "YARN_ENABLE_GLOBAL_CACHE",
-          "YARN_ENABLE_IMMUTABLE_CACHE",
-          "YARN_ENABLE_IMMUTABLE_INSTALLS",
-          "YARN_ENABLE_NETWORK",
-          "YARN_IGNORE_PATH",
-          "npm_config_cache",
-          "npm_config_jobs",
-        ].sort(),
-      );
-      await mkdir(join(cwd, "node_modules"));
-    };
-
-    await expect(
-      prepareDependencies(OPERATION_ID, runner, {
-        runtimeRoot: setup.runtimeRoot,
-        releasesRoot: setup.releasesRoot,
-        enforceRootOwnership: false,
-      }),
-    ).resolves.toBeUndefined();
-
-    const after = await Promise.all(
-      protectedPaths.map(async (path) =>
-        digest(await readFile(join(setup.candidate, path))),
-      ),
-    );
-    expect(after).toEqual(before);
+    expect(sentinel).toMatchObject({
+      schemaVersion: 1,
+      operationId: OPERATION_ID,
+      candidate: setup.candidateName,
+      lifecycleScripts: false,
+      coordinatorChallenge: COORDINATOR_CHALLENGE,
+      yarnLockSha256: digest(yarnLock),
+      yarnRuntimeSha256: digest("// pinned yarn\n"),
+    });
+    expect(JSON.stringify(sentinel)).not.toContain("cacheInventory");
   });
 
-  it("rejects cache mutation performed by dependency lifecycle code", async () => {
+  it("builds native dependencies offline and durably measures the candidate", async () => {
     const setup = await fixture();
-    const runner: PreparationRunner = async ({ cwd }) => {
-      await writeFile(join(cwd, ".yarn", "cache", "fixture.zip"), "mutated");
-    };
+    await successfulFetch(setup);
 
-    await expect(
-      prepareDependencies(OPERATION_ID, runner, {
-        runtimeRoot: setup.runtimeRoot,
-        releasesRoot: setup.releasesRoot,
-        enforceRootOwnership: false,
-      }),
-    ).rejects.toMatchObject({ code: "cache-mutation" });
+    await buildDependencies(
+      OPERATION_ID,
+      async ({ command, args, cwd, env }) => {
+        expect(command).toBe("/usr/bin/node");
+        expect(args).toEqual([".yarn/releases/yarn-4.13.0.cjs", "rebuild"]);
+        expect(cwd).toBe(setup.candidate);
+        expect(env).toMatchObject({
+          YARN_ENABLE_NETWORK: "false",
+          YARN_ENABLE_SCRIPTS: "true",
+          YARN_ENABLE_IMMUTABLE_CACHE: "false",
+          YARN_CHECKSUM_BEHAVIOR: "throw",
+          YARN_NPM_REGISTRY_SERVER: "https://registry.npmjs.org",
+        });
+        await writeFile(join(cwd, "node_modules", "native.node"), "native\n");
+      },
+      setup.options,
+    );
+
+    const sentinel = JSON.parse(
+      await readFile(
+        join(setup.runtimeRoot, OPERATION_ID, "tmp", "build-sentinel.json"),
+        "utf8",
+      ),
+    );
+    expect(sentinel).toMatchObject({
+      schemaVersion: 1,
+      operationId: OPERATION_ID,
+      network: false,
+      preparedTreeSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+    });
+    expect(sentinel.preparedFiles).toBeGreaterThan(1);
   });
 
   it.each([
-    "package.json",
-    "yarn.lock",
-    ".yarnrc.yml",
-    ".yarn/releases/yarn-4.13.0.cjs",
-    "artifact-state.json",
-  ])("rejects lifecycle mutation of signed input %s", async (path) => {
+    "evil@git+ssh://git@example.test/repo.git",
+    "evil@https://example.test/evil.tgz",
+    "evil@npm:https://example.test/evil.tgz",
+    "evil@file:../evil",
+    "evil@portal:../evil",
+    "evil@patch:evil@npm%3A1.0.0#./local.patch",
+  ])("rejects unsupported lock locator %s", async (locator) => {
+    expect(() => {
+      validateLockLocators(
+        `__metadata:\n  version: 8\n\n"evil@npm:*":\n  version: 1.0.0\n  resolution: "${locator}"\n`,
+      );
+    }).toThrow(expect.objectContaining({ code: "dependency-sandbox" }));
+  });
+
+  it.each([
+    [
+      "flow mapping",
+      '__metadata:\n  version: 8\n\n"home-worker@workspace:.":\n  version: 0.0.0-use.local\n  resolution: "home-worker@workspace:."\n"evil@npm:*": {version: 1.0.0, resolution: "evil@https://example.test/evil.tgz"}\n',
+    ],
+    [
+      "spaced key",
+      '__metadata:\n  version: 8\n\n"evil@npm:*":\n  version: 1.0.0\n  resolution : "evil@https://example.test/evil.tgz"\n',
+    ],
+    [
+      "Unicode-escaped duplicate key",
+      '__metadata:\n  version: 8\n\n"evil@npm:*":\n  version: 1.0.0\n  resolution: "evil@npm:1.0.0"\n  "resolutio\\u006e": "evil@https://example.test/evil.tgz"\n',
+    ],
+    [
+      "bare-CR hidden record",
+      '__metadata:\n  version: 8\n# x\r"evil@npm:*":\r  version: 1.0.0\r  resolution: "evil@https://example.test/evil.tgz"\n"ok@npm:*":\n  version: 1.0.0\n  resolution: "ok@npm:1.0.0"\n',
+    ],
+  ])("rejects a %s lockfile locator bypass", (_name, lockfile) => {
+    expect(() => {
+      validateLockLocators(lockfile);
+    }).toThrow(expect.objectContaining({ code: "dependency-sandbox" }));
+  });
+
+  it("accepts Yarn's built-in compatibility patch locators", () => {
+    expect(() => {
+      validateLockLocators(
+        '__metadata:\n  version: 8\n\n"fsevents@npm:2.3.3":\n  version: 2.3.3\n  resolution: "fsevents@patch:fsevents@npm%3A2.3.3#optional!builtin<compat/fsevents>::version=2.3.3&hash=df0bf1"\n',
+      );
+    }).not.toThrow();
+  });
+
+  it.each([
+    "preinstall",
+    "install",
+    "postinstall",
+    "prepare",
+    "prepack",
+    "postpack",
+    "prepublish",
+    "prepublishOnly",
+  ])("rejects root manifest %s hooks before online fetch", async (hook) => {
     const setup = await fixture();
-    const runner: PreparationRunner = async ({ cwd }) => {
-      await writeFile(join(cwd, path), "mutated");
-    };
+    await writeFile(
+      join(setup.candidate, "package.json"),
+      JSON.stringify({
+        packageManager: "yarn@4.13.0",
+        scripts: { [hook]: "node hostile.mjs" },
+      }),
+    );
+    let calls = 0;
 
     await expect(
-      prepareDependencies(OPERATION_ID, runner, {
-        runtimeRoot: setup.runtimeRoot,
-        releasesRoot: setup.releasesRoot,
-        enforceRootOwnership: false,
-      }),
-    ).rejects.toMatchObject({ code: "cache-mutation" });
+      fetchDependencies(
+        OPERATION_ID,
+        async () => {
+          calls += 1;
+        },
+        setup.options,
+      ),
+    ).rejects.toMatchObject({ code: "dependency-sandbox" });
+    expect(calls).toBe(0);
   });
+
+  it("rejects bare-CR hidden Yarn policy before online fetch", async () => {
+    const setup = await fixture();
+    await writeFile(
+      join(setup.candidate, ".yarnrc.yml"),
+      `${yarnPolicy}# x\rnpmScopes:\r  evil:\r    npmRegistryServer: https://example.test\n`,
+    );
+    let calls = 0;
+
+    await expect(
+      fetchDependencies(
+        OPERATION_ID,
+        async () => {
+          calls += 1;
+        },
+        setup.options,
+      ),
+    ).rejects.toMatchObject({ code: "dependency-sandbox" });
+    expect(calls).toBe(0);
+  });
+
+  it("rejects a receipt replaced between fetch and offline build", async () => {
+    const setup = await fixture();
+    await successfulFetch(setup);
+    await writeFile(
+      setup.receiptPath,
+      JSON.stringify(
+        {
+          schemaVersion: 1,
+          operationId: OPERATION_ID,
+          candidate: setup.candidateName,
+          artifactSha256: ARTIFACT_SHA256,
+          metadataSha256: METADATA_SHA256,
+        },
+        null,
+        2,
+      ),
+    );
+
+    await expect(
+      buildDependencies(OPERATION_ID, async () => undefined, setup.options),
+    ).rejects.toMatchObject({ code: "dependency-sandbox" });
+  });
+
+  it("rejects fetch-time mutation of any archive input", async () => {
+    const setup = await fixture();
+    await expect(
+      fetchDependencies(
+        OPERATION_ID,
+        async ({ cwd }) => {
+          await mkdir(join(cwd, "node_modules"));
+          await writeFile(join(cwd, "dist", "main.js"), "mutated\n");
+        },
+        setup.options,
+      ),
+    ).rejects.toMatchObject({ code: "dependency-install" });
+  });
+
+  it("rejects build-time mutation of any archive input", async () => {
+    const setup = await fixture();
+    await successfulFetch(setup);
+    await expect(
+      buildDependencies(
+        OPERATION_ID,
+        async ({ cwd }) => {
+          await writeFile(join(cwd, "config", "defaults.yml"), "mutated\n");
+        },
+        setup.options,
+      ),
+    ).rejects.toMatchObject({ code: "dependency-install" });
+  });
+
+  it("requires a fresh receipt-bound build sentinel before coordinator success", async () => {
+    const setup = await fixture();
+
+    await expect(
+      coordinatePreparation(OPERATION_ID, async () => undefined, setup.options),
+    ).rejects.toMatchObject({ code: "dependency-install" });
+    await expect(readdir(setup.candidate)).resolves.toEqual([]);
+  });
+
+  it("accepts coordinator success only after both real phase contracts complete", async () => {
+    const setup = await fixture();
+
+    await expect(
+      coordinatePreparation(
+        OPERATION_ID,
+        async ({ phase }) => {
+          if (phase === "fetch") await successfulFetch(setup);
+          else {
+            await buildDependencies(
+              OPERATION_ID,
+              async ({ cwd }) => {
+                await writeFile(
+                  join(cwd, "node_modules", "native.node"),
+                  "native\n",
+                );
+              },
+              setup.options,
+            );
+          }
+        },
+        setup.options,
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      readFile(
+        join(setup.runtimeRoot, OPERATION_ID, "tmp", "build-sentinel.json"),
+        "utf8",
+      ),
+    ).resolves.toContain('"network":false');
+  });
+
+  it.each(["fetch", "build"] as const)(
+    "coordinator removes a candidate after failed %s without touching the live release",
+    async (failedPhase) => {
+      const setup = await fixture();
+      const phases: string[] = [];
+      await expect(
+        coordinatePreparation(
+          OPERATION_ID,
+          async ({ phase }) => {
+            phases.push(phase);
+            if (phase === failedPhase) {
+              await mkdir(join(setup.candidate, "node_modules"), {
+                recursive: true,
+              });
+              await writeFile(
+                join(setup.candidate, "node_modules", "partial"),
+                "partial phase output\n",
+              );
+              throw new Error("phase failed");
+            }
+          },
+          setup.options,
+        ),
+      ).rejects.toMatchObject({ code: "dependency-install" });
+      expect(phases).toEqual(
+        failedPhase === "fetch" ? ["fetch"] : ["fetch", "build"],
+      );
+      await expect(
+        readFile(join(setup.candidate, "package.json")),
+      ).rejects.toThrow();
+      await expect(readdir(setup.candidate)).resolves.toEqual([]);
+      await expect(
+        readFile(join(setup.liveRelease, "live.txt"), "utf8"),
+      ).resolves.toBe("still-running\n");
+    },
+  );
 
   it.each([
     "../escape",
@@ -221,7 +497,7 @@ describe("ota-prepare dependency sandbox contract", () => {
   ])(
     "rejects hostile or non-canonical operation ID %s",
     async (operationId) => {
-      await expect(prepareDependencies(operationId)).rejects.toMatchObject({
+      await expect(fetchDependencies(operationId)).rejects.toMatchObject({
         code: "dependency-sandbox",
       });
     },

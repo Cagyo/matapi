@@ -1,7 +1,6 @@
-import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { deflateRawSync, gzipSync, gunzipSync } from "node:zlib";
+import { gzipSync, gunzipSync } from "node:zlib";
 import tar from "tar-stream";
 
 interface TarFixtureEntry {
@@ -11,15 +10,6 @@ interface TarFixtureEntry {
   type?: tar.Headers["type"];
   linkname?: string;
   pax?: Record<string, string>;
-}
-
-interface ZipFixtureEntry {
-  name: string;
-  body?: Buffer;
-  storedBody?: Buffer;
-  flags?: number;
-  method?: number;
-  declaredSize?: number;
 }
 
 function collect(stream: NodeJS.ReadableStream): Promise<Buffer> {
@@ -67,70 +57,6 @@ function tarChecksum(header: Buffer): void {
   header.write(encoded, 148, 6, "ascii");
   header[154] = 0;
   header[155] = 0x20;
-}
-
-function crc32(bytes: Buffer): number {
-  let crc = 0xffffffff;
-  for (const byte of bytes) {
-    crc ^= byte;
-    for (let bit = 0; bit < 8; bit += 1) {
-      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
-    }
-  }
-  return (crc ^ 0xffffffff) >>> 0;
-}
-
-function zip(entries: ZipFixtureEntry[]): Buffer {
-  const localRecords: Buffer[] = [];
-  const centralRecords: Buffer[] = [];
-  let offset = 0;
-
-  for (const fixture of entries) {
-    const name = Buffer.from(fixture.name, "utf8");
-    const body = fixture.body ?? Buffer.alloc(0);
-    const method = fixture.method ?? 0;
-    const compressed =
-      fixture.storedBody ?? (method === 8 ? deflateRawSync(body) : body);
-    const flags = fixture.flags ?? 0x800;
-    const declaredSize = fixture.declaredSize ?? body.length;
-    const checksum = crc32(body);
-
-    const local = Buffer.alloc(30);
-    local.writeUInt32LE(0x04034b50, 0);
-    local.writeUInt16LE(20, 4);
-    local.writeUInt16LE(flags, 6);
-    local.writeUInt16LE(method, 8);
-    local.writeUInt32LE(checksum, 14);
-    local.writeUInt32LE(compressed.length, 18);
-    local.writeUInt32LE(declaredSize, 22);
-    local.writeUInt16LE(name.length, 26);
-    const localRecord = Buffer.concat([local, name, compressed]);
-    localRecords.push(localRecord);
-
-    const central = Buffer.alloc(46);
-    central.writeUInt32LE(0x02014b50, 0);
-    central.writeUInt16LE(0x031e, 4);
-    central.writeUInt16LE(20, 6);
-    central.writeUInt16LE(flags, 8);
-    central.writeUInt16LE(method, 10);
-    central.writeUInt32LE(checksum, 16);
-    central.writeUInt32LE(compressed.length, 20);
-    central.writeUInt32LE(declaredSize, 24);
-    central.writeUInt16LE(name.length, 28);
-    central.writeUInt32LE((0o100644 << 16) >>> 0, 38);
-    central.writeUInt32LE(offset, 42);
-    centralRecords.push(Buffer.concat([central, name]));
-    offset += localRecord.length;
-  }
-
-  const centralDirectory = Buffer.concat(centralRecords);
-  const end = Buffer.alloc(22);
-  end.writeUInt32LE(0x06054b50, 0);
-  end.writeUInt16LE(entries.length, 8);
-  end.writeUInt16LE(entries.length, 10);
-  end.writeUInt32LE(centralDirectory.length, 12);
-  end.writeUInt32LE(offset, 16);
-  return Buffer.concat([...localRecords, centralDirectory, end]);
 }
 
 export async function writeOtaArchiveFixtures(root: string): Promise<void> {
@@ -210,50 +136,4 @@ export async function writeOtaArchiveFixtures(root: string): Promise<void> {
   for (const [name, bytes] of Object.entries(tarFixtures)) {
     await writeFile(join(root, name), bytes);
   }
-
-  const zipFixtures: Record<string, Buffer> = {
-    "valid.zip": zip([
-      {
-        name: "node_modules/pkg/package.json",
-        body: Buffer.from('{"name":"pkg"}'),
-      },
-      {
-        name: "node_modules/pkg/index.js",
-        body: Buffer.from("module.exports=1"),
-      },
-    ]),
-    "encrypted.zip": zip([
-      {
-        name: "node_modules/pkg/secret",
-        body: Buffer.from("x"),
-        storedBody: Buffer.alloc(13),
-        flags: 0x801,
-      },
-    ]),
-    "traversal.zip": zip([{ name: "../outside", body: Buffer.from("x") }]),
-    "duplicate.zip": zip([
-      { name: "node_modules/pkg/a", body: Buffer.from("a") },
-      { name: "node_modules/pkg/a", body: Buffer.from("b") },
-    ]),
-    "bomb.zip": zip([
-      {
-        name: "node_modules/pkg/bomb",
-        body: Buffer.from("x"),
-        method: 8,
-        declaredSize: 4096,
-      },
-    ]),
-    "unsupported-method.zip": zip([{ name: "node_modules/pkg/a", method: 99 }]),
-  };
-
-  const cacheCases = join(root, "cache-cases");
-  for (const [name, bytes] of Object.entries(zipFixtures)) {
-    const caseRoot = join(cacheCases, name);
-    await mkdir(caseRoot, { recursive: true });
-    await writeFile(join(caseRoot, name), bytes);
-  }
-}
-
-export function sha256(bytes: Buffer): string {
-  return createHash("sha256").update(bytes).digest("hex");
 }

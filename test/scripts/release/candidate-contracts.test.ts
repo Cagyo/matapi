@@ -175,7 +175,8 @@ describe("unsigned candidate descriptor", () => {
       commit: "a".repeat(40),
       sourceDateEpoch: 1_725_000_000,
       builderPolicy: builderPolicy(),
-      cacheInventorySha256: sha256("cache inventory"),
+      yarnLockSha256: sha256("lockfile"),
+      yarnRuntimeSha256: sha256("pinned yarn"),
       archive,
     });
     const parsed = JSON.parse(descriptor.toString("utf8"));
@@ -191,9 +192,11 @@ describe("unsigned candidate descriptor", () => {
       runtime: builderPolicy().runtime,
       provenance: {
         sourceDateEpoch: 1_725_000_000,
-        cacheInventorySha256: sha256("cache inventory"),
+        yarnLockSha256: sha256("lockfile"),
+        yarnRuntimeSha256: sha256("pinned yarn"),
       },
     });
+    expect(descriptor.toString("utf8")).not.toContain("cacheInventory");
     expect(descriptor.toString("utf8")).toBe(`${JSON.stringify(parsed)}\n`);
   });
 

@@ -9,12 +9,10 @@ import {
   readdir,
   realpath,
   rename,
-  rm,
   unlink,
 } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 
-import { inspectCacheInventory } from "../../installer/ota-prepare.mjs";
 import { createDeterministicTarGz } from "./archive-writer.mjs";
 import {
   CandidateBuildFailure,
@@ -24,10 +22,7 @@ import {
   parseBuilderPolicy,
   validateBuilderPolicyOwnership,
 } from "./builder-policy.mjs";
-import {
-  bytewiseCompare,
-  computeCacheInventorySha256,
-} from "./release-policy.mjs";
+import { bytewiseCompare } from "./release-policy.mjs";
 
 const RELEASE_FILES = Object.freeze([
   "package.json",
@@ -43,8 +38,10 @@ const RELEASE_YARN_POLICY = [
   "enableGlobalCache: false",
   "enableNetwork: false",
   "enableImmutableInstalls: true",
-  "enableImmutableCache: true",
-  "cacheFolder: .yarn/cache",
+  "enableScripts: false",
+  "checksumBehavior: throw",
+  "npmRegistryServer: https://registry.npmjs.org",
+  "npmAlwaysAuth: false",
   "yarnPath: .yarn/releases/yarn-4.13.0.cjs",
   "",
 ].join("\n");
@@ -59,26 +56,6 @@ const ALLOWED_COMMANDS = Object.freeze({
   "pin-yarn": [
     "/usr/bin/corepack",
     ["yarn", "set", "version", "4.13.0", "--yarn-path"],
-  ],
-  "focus-production-online": [
-    "/usr/bin/node",
-    [
-      ".yarn/releases/yarn-4.13.0.cjs",
-      "workspaces",
-      "focus",
-      "-A",
-      "--production",
-    ],
-  ],
-  "focus-production-offline": [
-    "/usr/bin/node",
-    [
-      ".yarn/releases/yarn-4.13.0.cjs",
-      "workspaces",
-      "focus",
-      "-A",
-      "--production",
-    ],
   ],
 });
 
@@ -640,23 +617,6 @@ export function createNodeCandidateDependencies() {
       }
     },
 
-    async removeProductionProjection({ assemblyRoot }) {
-      const root = await realpath(resolve(assemblyRoot));
-      const projection = join(root, "node_modules");
-      await ensureRealDirectory(projection, "Production dependency projection");
-      await rm(projection, { recursive: true });
-      const installState = join(root, ".yarn/install-state.gz");
-      try {
-        const info = await lstat(installState);
-        if (!info.isFile() || info.isSymbolicLink()) {
-          throw new Error("Yarn install state path is unsafe");
-        }
-        await unlink(installState);
-      } catch (error) {
-        if (error.code !== "ENOENT") throw error;
-      }
-    },
-
     async sealReleaseConfig({ assemblyRoot }) {
       const root = await realpath(resolve(assemblyRoot));
       const releasePath = join(root, ".yarn/releases/yarn-4.13.0.cjs");
@@ -687,11 +647,6 @@ export function createNodeCandidateDependencies() {
       await syncDirectory(root);
     },
 
-    async prepareValidationCopy({ assemblyRoot, validationRoot }) {
-      await absent(validationRoot, "Validation root");
-      await copyClosedTree(assemblyRoot, validationRoot);
-    },
-
     async run({ phase, command, args, cwd, env }) {
       const allowed = ALLOWED_COMMANDS[phase];
       if (
@@ -705,29 +660,31 @@ export function createNodeCandidateDependencies() {
       await runProcess(command, args, { phase, cwd, env });
     },
 
-    async inspectCache(root) {
-      const inspected = await inspectCacheInventory(join(root, ".yarn/cache"));
-      const inventory = inspected.archives.map((entry) => ({
-        path: `.yarn/cache/${entry.path}`,
-        size: entry.size,
-        sha256: entry.sha256,
-      }));
-      return Object.freeze({
-        inventory,
-        sha256: computeCacheInventorySha256(inventory),
-      });
-    },
-
-    async createArchive({
-      assemblyRoot,
-      sourceDateEpoch,
-      expectedCacheInventory,
-    }) {
-      return createDeterministicTarGz({
+    async createArchive({ assemblyRoot, sourceDateEpoch }) {
+      await absent(
+        join(assemblyRoot, "node_modules"),
+        "Release dependency projection",
+      );
+      await absent(
+        join(assemblyRoot, ".yarn", "cache"),
+        "Release dependency cache",
+      );
+      const generated = await createDeterministicTarGz({
         root: assemblyRoot,
         sourceDateEpoch,
-        expectedCacheInventory,
       });
+      if (
+        generated.inventory.some(
+          (entry) =>
+            entry.path === "node_modules" ||
+            entry.path.startsWith("node_modules/") ||
+            entry.path === ".yarn/cache" ||
+            entry.path.startsWith(".yarn/cache/"),
+        )
+      ) {
+        throw new Error("Release archive contains dependency payload");
+      }
+      return generated;
     },
 
     publish: publishCandidatePair,

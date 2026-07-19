@@ -22,7 +22,6 @@ export const OTA_FAILURE_CODES = [
   "archive-policy",
   "dependency-sandbox",
   "dependency-install",
-  "cache-mutation",
   "prepared-tree",
   "migration",
   "activation",

@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-
 export const RELEASE_TARGETS = Object.freeze({
   "linux-arm64-glibc": Object.freeze({
     platform: "linux",
@@ -19,45 +17,9 @@ const BUILDER_IDENTITY = "home-worker-linux-arm-builder-v1";
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const VERSION_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
-const CACHE_PATH_PATTERN = /^\.yarn\/cache\/[^/]+\.zip$/u;
 
 export function bytewiseCompare(left, right) {
   return Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"));
-}
-
-function normalizeCacheInventory(records) {
-  if (!Array.isArray(records) || records.length === 0) {
-    throw new TypeError("Cache inventory must contain at least one record");
-  }
-
-  const seen = new Set();
-  const normalized = records.map((record) => {
-    if (
-      record === null ||
-      typeof record !== "object" ||
-      !CACHE_PATH_PATTERN.test(record.path) ||
-      !Number.isSafeInteger(record.size) ||
-      record.size <= 0 ||
-      !SHA256_PATTERN.test(record.sha256)
-    ) {
-      throw new TypeError("Cache inventory contains an invalid record");
-    }
-    if (seen.has(record.path)) {
-      throw new TypeError("Cache inventory contains a duplicate path");
-    }
-    seen.add(record.path);
-    return { path: record.path, size: record.size, sha256: record.sha256 };
-  });
-
-  normalized.sort((left, right) => bytewiseCompare(left.path, right.path));
-  return normalized;
-}
-
-export function computeCacheInventorySha256(records) {
-  const canonical = normalizeCacheInventory(records)
-    .map(({ path, size, sha256 }) => `${path}\0${size}\0${sha256}\n`)
-    .join("");
-  return createHash("sha256").update(canonical, "utf8").digest("hex");
 }
 
 function matches(value, pattern) {
@@ -87,7 +49,7 @@ export function evaluateReleasePolicy(facts) {
   const host = facts?.host ?? {};
   const builder = facts?.builder ?? {};
   const environment = facts?.environment ?? {};
-  const cache = facts?.cache ?? {};
+  const dependencies = facts?.dependencies ?? {};
   const target = Object.hasOwn(RELEASE_TARGETS, request.target)
     ? RELEASE_TARGETS[request.target]
     : undefined;
@@ -142,26 +104,23 @@ export function evaluateReleasePolicy(facts) {
     reasons.push("source-date-epoch");
   }
 
-  if (cache.validated !== true) reasons.push("cache-validation");
-  if (cache.target !== request.target) reasons.push("cache-target");
-  if (cache.nodeMajor !== 20 || cache.nodeModulesAbi !== "115") {
-    reasons.push("cache-runtime");
+  if (dependencies.validated !== true) reasons.push("dependencies-validation");
+  if (dependencies.target !== request.target)
+    reasons.push("dependencies-target");
+  if (dependencies.nodeMajor !== 20 || dependencies.nodeModulesAbi !== "115") {
+    reasons.push("dependencies-runtime");
   }
   if (
-    !matches(cache.yarnLockSha256, SHA256_PATTERN) ||
-    cache.yarnLockSha256 !== cache.expectedYarnLockSha256
+    !matches(dependencies.yarnLockSha256, SHA256_PATTERN) ||
+    dependencies.yarnLockSha256 !== dependencies.expectedYarnLockSha256
   ) {
-    reasons.push("cache-lock");
+    reasons.push("dependencies-lock");
   }
-  try {
-    if (
-      !matches(cache.inventorySha256, SHA256_PATTERN) ||
-      computeCacheInventorySha256(cache.inventory) !== cache.inventorySha256
-    ) {
-      reasons.push("cache-inventory");
-    }
-  } catch {
-    reasons.push("cache-inventory");
+  if (
+    !matches(dependencies.yarnRuntimeSha256, SHA256_PATTERN) ||
+    dependencies.yarnRuntimeSha256 !== dependencies.expectedYarnRuntimeSha256
+  ) {
+    reasons.push("dependencies-yarn-runtime");
   }
 
   return immutableDecision(reasons);

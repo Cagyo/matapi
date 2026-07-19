@@ -1,20 +1,22 @@
 [Unit]
-Description=Coordinate Home Worker OTA dependency preparation for operation %i
+Description=Build Home Worker OTA native dependencies for operation %i
 ConditionPathExists=/run/home-worker/prepare/%i.json
 ConditionPathExists=/run/home-worker/prepare/%i/candidate
+PartOf=home-worker-ota-prepare@%i.service
+BindsTo=home-worker-ota-prepare@%i.service
 
 [Service]
 Type=oneshot
-User=root
-Group=root
+User=homeworker
+Group=homeworker
 UMask=0077
-WorkingDirectory=/
-ExecStart=/usr/bin/flock --no-fork --exclusive /run/home-worker/ota-prepare.lock /usr/bin/node /usr/lib/home-worker/ota-prepare.mjs coordinate %i
+WorkingDirectory=/run/home-worker/prepare/%i/candidate
+ExecStart=/usr/bin/node /usr/lib/home-worker/ota-prepare.mjs build %i
 KillMode=control-group
-TimeoutStartSec=45min
-TimeoutStopSec=2min
-MemoryMax=128M
-TasksMax=32
+TimeoutStartSec=20min
+TimeoutStopSec=30s
+MemoryMax=512M
+TasksMax=64
 PrivateNetwork=yes
 RestrictAddressFamilies=AF_UNIX
 PrivateTmp=yes
@@ -33,12 +35,19 @@ RestrictRealtime=yes
 RestrictNamespaces=yes
 LockPersonality=yes
 RemoveIPC=yes
-CapabilityBoundingSet=CAP_DAC_OVERRIDE
+CapabilityBoundingSet=
 AmbientCapabilities=
 SystemCallArchitectures=native
 InaccessiblePaths=/opt/home-worker/shared
 InaccessiblePaths=/opt/home-worker/data
 InaccessiblePaths=-/opt/home-worker/.env
+InaccessiblePaths=-/opt/home-worker/.npmrc
+InaccessiblePaths=-/opt/home-worker/.yarnrc.yml
+InaccessiblePaths=-/opt/home-worker/releases/.npmrc
+InaccessiblePaths=-/opt/home-worker/releases/.yarnrc.yml
+InaccessiblePaths=/home/homeworker/.pm2
+InaccessiblePaths=-/etc/npmrc
+InaccessiblePaths=-/etc/yarnrc.yml
 ReadWritePaths=/run/home-worker/prepare/%i/candidate /run/home-worker/prepare/%i/tmp
 Environment=PATH=/usr/bin:/bin
 UnsetEnvironment=HOME XDG_CONFIG_HOME XDG_CACHE_HOME NODE_OPTIONS npm_config_userconfig npm_config_registry npm_config_proxy npm_config_https_proxy NPM_CONFIG_USERCONFIG NPM_CONFIG_REGISTRY NPM_CONFIG_PROXY NPM_CONFIG_HTTPS_PROXY YARN_NPM_AUTH_TOKEN YARN_NPM_AUTH_IDENT YARN_HTTP_PROXY YARN_HTTPS_PROXY HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
@@ -46,4 +55,4 @@ StandardOutput=journal
 StandardError=journal
 
 [Install]
-# Instances are started on demand only; this template is never enabled.
+# Coordinator-started only; this template is never enabled or sudo-startable.

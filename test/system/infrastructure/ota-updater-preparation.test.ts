@@ -311,17 +311,6 @@ function dependencies(events: string[] = []): OtaUpdaterDependencies {
         events.push("archive");
       }),
     },
-    cache: {
-      inspect: vi.fn(async () => {
-        events.push("cache");
-        return {
-          archives: [],
-          entryCount: 1,
-          expandedBytes: 1,
-          sha256: "1".repeat(64),
-        };
-      }),
-    },
     preparation: {
       start: vi.fn(async () => {
         events.push("prepare");
@@ -368,8 +357,6 @@ describe("OtaUpdaterService preparation", () => {
       "download",
       "storage:checkpoint",
       "archive",
-      "storage:checkpoint",
-      "cache",
       "storage:checkpoint",
       "marker:preparation",
       "prepare",

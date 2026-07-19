@@ -111,7 +111,10 @@ describe("release candidate CLI", () => {
     expect(source).not.toMatch(
       /(?:exec|spawn)(?:File|Sync)?\([^\n]*['"]tar['"]/u,
     );
-    expect(source).not.toMatch(/\b(?:ssh|scp|sftp)\b|https?:\/\//iu);
+    expect(source).not.toMatch(/\b(?:ssh|scp|sftp)\b/iu);
+    expect(source.match(/https?:\/\/[^"'\s]+/gu)).toEqual([
+      "https://registry.npmjs.org",
+    ]);
     expect(source).toContain("constants.O_DIRECTORY");
     expect(source).toContain("/proc/self/fd/");
     expect(source).not.toContain("RELEASE_HOST_PLATFORM");

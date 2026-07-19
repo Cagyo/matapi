@@ -11,10 +11,7 @@ import {
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 
-import {
-  bytewiseCompare,
-  computeCacheInventorySha256,
-} from "./release-policy.mjs";
+import { bytewiseCompare } from "./release-policy.mjs";
 
 const BLOCK_SIZE = 512;
 const MAX_PATH_BYTES = 240;
@@ -47,7 +44,6 @@ const EXACT_FILES = new Set([
 ]);
 const EXACT_DIRECTORIES = new Set([
   ".yarn",
-  ".yarn/cache",
   ".yarn/releases",
   "config",
   "dist",
@@ -72,8 +68,6 @@ const UPDATER_MARKERS = new Set([
 ]);
 const DENIED_EXTENSIONS =
   /\.(?:db|db-shm|db-wal|sqlite|sqlite3|log|pem|key|p12|mp4|avi|mkv|jpe?g|png)$/iu;
-const CACHE_PATH = /^\.yarn\/cache\/[^/]+\.zip$/u;
-
 function sha256(contents) {
   return createHash("sha256").update(contents).digest("hex");
 }
@@ -138,7 +132,6 @@ function isAllowedDirectory(path) {
 function isAllowedFile(path) {
   return (
     EXACT_FILES.has(path) ||
-    CACHE_PATH.test(path) ||
     path.startsWith("dist/") ||
     /^migrations\/(?:.+\/)*[^/]+\.sql$/u.test(path) ||
     /^migrations\/meta\/(?:.+\/)*[^/]+\.json$/u.test(path)
@@ -177,23 +170,7 @@ async function readStableFile(
   }
 }
 
-function compareCacheInventory(actual, expected) {
-  let expectedDigest;
-  let actualDigest;
-  try {
-    expectedDigest = computeCacheInventorySha256(expected);
-    actualDigest = computeCacheInventorySha256(actual);
-  } catch (error) {
-    throw new Error(`Invalid cache inventory: ${error.message}`);
-  }
-  if (expectedDigest !== actualDigest) {
-    throw new Error(
-      "Cache inventory does not match the validated target cache",
-    );
-  }
-}
-
-export async function inspectReleaseTree({ root, expectedCacheInventory }) {
+export async function inspectReleaseTree({ root }) {
   const rootPath = await realpath(resolve(root));
   const rootStat = await lstat(rootPath, { bigint: true });
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
@@ -313,10 +290,6 @@ export async function inspectReleaseTree({ root, expectedCacheInventory }) {
     if (!paths.has(required))
       throw new Error(`Missing required release file: ${required}`);
   }
-  const actualCacheInventory = entries
-    .filter((entry) => entry.type === "file" && CACHE_PATH.test(entry.path))
-    .map(({ path, size, sha256 }) => ({ path, size, sha256 }));
-  compareCacheInventory(actualCacheInventory, expectedCacheInventory);
   entries.sort((left, right) => bytewiseCompare(left.path, right.path));
   return entries;
 }
@@ -538,15 +511,11 @@ export function validateDeterministicTarGz({
   return inventory;
 }
 
-export async function createDeterministicTarGz({
-  root,
-  sourceDateEpoch,
-  expectedCacheInventory,
-}) {
+export async function createDeterministicTarGz({ root, sourceDateEpoch }) {
   if (!Number.isSafeInteger(sourceDateEpoch) || sourceDateEpoch < 0) {
     throw new TypeError("SOURCE_DATE_EPOCH must be a nonnegative integer");
   }
-  const entries = await inspectReleaseTree({ root, expectedCacheInventory });
+  const entries = await inspectReleaseTree({ root });
   const inventory = inventoryOf(entries, sourceDateEpoch);
   const bytes = deterministicGzip(buildTar(entries, sourceDateEpoch));
   validateDeterministicTarGz({
@@ -575,7 +544,6 @@ export async function writeDeterministicArchive({
   root,
   outputPath,
   sourceDateEpoch,
-  expectedCacheInventory,
   faultInjection,
 }) {
   if (
@@ -600,7 +568,6 @@ export async function writeDeterministicArchive({
   const archive = await createDeterministicTarGz({
     root,
     sourceDateEpoch,
-    expectedCacheInventory,
   });
   const tempPath = join(
     parent,

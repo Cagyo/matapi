@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 
 import { runCandidateBuild } from "../../../scripts/release/candidate-orchestrator.mjs";
-import { computeCacheInventorySha256 } from "../../../scripts/release/release-policy.mjs";
 
 const digest = (value: string) =>
   createHash("sha256").update(value).digest("hex");
@@ -23,6 +22,16 @@ const policy = {
 
 const inventory = [
   {
+    path: ".yarn/releases/yarn-4.13.0.cjs",
+    type: "file",
+    mode: 0o644,
+    uid: 0,
+    gid: 0,
+    mtime: 1_725_000_000,
+    size: 11,
+    sha256: digest("yarn"),
+  },
+  {
     path: "dist/main.js",
     type: "file",
     mode: 0o644,
@@ -32,12 +41,17 @@ const inventory = [
     size: 11,
     sha256: digest("main"),
   },
+  {
+    path: "yarn.lock",
+    type: "file",
+    mode: 0o644,
+    uid: 0,
+    gid: 0,
+    mtime: 1_725_000_000,
+    size: 11,
+    sha256: digest("lock"),
+  },
 ];
-const cacheInventory = [
-  { path: ".yarn/cache/a.zip", size: 7, sha256: digest("cache") },
-];
-const cacheInventorySha256 = computeCacheInventorySha256(cacheInventory);
-
 function input(run = "a") {
   return {
     version: "1.2.3",
@@ -71,22 +85,8 @@ function dependencies(failPhase?: string) {
     ),
     prepareBuildCheckout: vi.fn(async () => record("prepare-build-checkout")),
     prepareAssembly: vi.fn(async () => record("prepare-assembly")),
-    removeProductionProjection: vi.fn(async () =>
-      record("remove-production-projection"),
-    ),
     sealReleaseConfig: vi.fn(async () => record("seal-release-config")),
-    prepareValidationCopy: vi.fn(async () => record("prepare-validation-copy")),
     run: vi.fn(async ({ phase }: { phase: string }) => record(phase)),
-    inspectCache: vi
-      .fn()
-      .mockImplementationOnce(async () => {
-        await record("inspect-cache-before");
-        return { inventory: cacheInventory, sha256: cacheInventorySha256 };
-      })
-      .mockImplementationOnce(async () => {
-        await record("inspect-cache-after");
-        return { inventory: cacheInventory, sha256: cacheInventorySha256 };
-      }),
     createArchive: vi.fn(async () => {
       await record("create-archive");
       return { bytes: Buffer.from("archive"), inventory };
@@ -100,7 +100,7 @@ function dependencies(failPhase?: string) {
 }
 
 describe("candidate build orchestration", () => {
-  it("keeps source, assembly, validation, and output roots separate and ordered", async () => {
+  it("builds and archives a dependency-free candidate in order", async () => {
     const { deps, calls } = dependencies();
 
     const result = await runCandidateBuild(input(), deps);
@@ -113,13 +113,7 @@ describe("candidate build orchestration", () => {
       "build",
       "prepare-assembly",
       "pin-yarn",
-      "focus-production-online",
-      "remove-production-projection",
       "seal-release-config",
-      "inspect-cache-before",
-      "prepare-validation-copy",
-      "focus-production-offline",
-      "inspect-cache-after",
       "create-archive",
       "publish",
     ]);
@@ -136,9 +130,9 @@ describe("candidate build orchestration", () => {
       buildRoot: "/work/a/build",
       assemblyRoot: "/work/a/assembly",
     });
-    expect(deps.prepareValidationCopy).toHaveBeenCalledWith({
+    expect(deps.createArchive).toHaveBeenCalledWith({
       assemblyRoot: "/work/a/assembly",
-      validationRoot: "/work/a/validation",
+      sourceDateEpoch: 1_725_000_000,
     });
     expect(result.descriptorBytes.toString("utf8")).toContain(
       '"kind":"home-worker-unsigned-candidate"',
@@ -150,10 +144,6 @@ describe("candidate build orchestration", () => {
     "test",
     "build",
     "pin-yarn",
-    "focus-production-online",
-    "inspect-cache-before",
-    "focus-production-offline",
-    "inspect-cache-after",
     "create-archive",
   ])("emits no output when %s fails", async (phase) => {
     const { deps } = dependencies(phase);
@@ -191,45 +181,6 @@ describe("candidate build orchestration", () => {
     });
     expect(deps.resolveBuildRoots).not.toHaveBeenCalled();
     expect(deps.prepareBuildCheckout).not.toHaveBeenCalled();
-  });
-
-  it("rejects cache mutation before archiving", async () => {
-    const { deps } = dependencies();
-    deps.inspectCache.mockReset();
-    const mutated = [
-      { path: ".yarn/cache/a.zip", size: 8, sha256: digest("changed") },
-    ];
-    deps.inspectCache
-      .mockResolvedValueOnce({
-        inventory: cacheInventory,
-        sha256: cacheInventorySha256,
-      })
-      .mockResolvedValueOnce({
-        inventory: mutated,
-        sha256: computeCacheInventorySha256(mutated),
-      });
-
-    await expect(runCandidateBuild(input(), deps)).rejects.toMatchObject({
-      stage: "inspect-cache-after",
-      code: "cache-mutated",
-    });
-    expect(deps.createArchive).not.toHaveBeenCalled();
-    expect(deps.publish).not.toHaveBeenCalled();
-  });
-
-  it("classifies malformed cache inventories at their inspection stage", async () => {
-    const { deps } = dependencies();
-    deps.inspectCache.mockReset();
-    deps.inspectCache.mockResolvedValueOnce({
-      inventory: [{ path: "../private.zip", size: 1, sha256: digest("x") }],
-      sha256: "a".repeat(64),
-    });
-
-    await expect(runCandidateBuild(input(), deps)).rejects.toMatchObject({
-      stage: "inspect-cache-before",
-      code: "cache-invalid",
-    });
-    expect(deps.publish).not.toHaveBeenCalled();
   });
 
   it("produces byte-identical descriptors for independent run roots", async () => {

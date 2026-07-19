@@ -115,20 +115,6 @@ export interface OtaUpdaterArchivePort {
   }): Promise<void>;
 }
 
-export interface OtaUpdaterCacheInventory {
-  archives: readonly { path: string; size: number; sha256: string }[];
-  entryCount: number;
-  expandedBytes: number;
-  sha256: string;
-}
-
-export interface OtaUpdaterCachePort {
-  inspect(
-    candidatePath: string,
-    release: CheckedReleaseIdentity,
-  ): Promise<OtaUpdaterCacheInventory>;
-}
-
 export interface OtaUpdaterPreparationPort {
   start(input: {
     operationId: string;
@@ -136,7 +122,6 @@ export interface OtaUpdaterPreparationPort {
     candidatePath: string;
     artifactSha256: string;
     metadataSha256: string;
-    inventorySha256: string;
   }): Promise<void>;
 }
 
@@ -152,7 +137,6 @@ export interface OtaUpdaterDependencies {
   storage: OtaUpdaterStoragePort;
   transport: ReleaseFeedTransportPort;
   archive: OtaUpdaterArchivePort;
-  cache: OtaUpdaterCachePort;
   preparation: OtaUpdaterPreparationPort;
   tree: PreparedTreeGateway;
   activation: {
@@ -375,11 +359,6 @@ export class OtaUpdaterService {
             release: request.expected!,
           });
           await checkpoint();
-          const inventory = await this.dependencies.cache.inspect(
-            candidatePath,
-            request.expected!,
-          );
-          await checkpoint();
 
           const preliminary = markerFor(
             request.expected!,
@@ -397,7 +376,6 @@ export class OtaUpdaterService {
             candidatePath,
             artifactSha256: request.expected!.artifact.sha256,
             metadataSha256: verified.payloadSha256,
-            inventorySha256: inventory.sha256,
           });
           await checkpoint();
           await this.dependencies.layout.createSharedLinks(candidatePath);

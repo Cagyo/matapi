@@ -7,13 +7,7 @@ const STAGES = new Set([
   "build",
   "prepare-assembly",
   "pin-yarn",
-  "focus-production-online",
-  "remove-production-projection",
   "seal-release-config",
-  "inspect-cache-before",
-  "prepare-validation-copy",
-  "focus-production-offline",
-  "inspect-cache-after",
   "create-archive",
   "measure-archive",
   "encode-descriptor",
@@ -33,8 +27,6 @@ const CODES = new Set([
   "tag-not-annotated",
   "tag-commit-mismatch",
   "root-overlap",
-  "cache-invalid",
-  "cache-mutated",
   "unclassified-failure",
 ]);
 

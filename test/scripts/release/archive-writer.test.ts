@@ -16,7 +16,6 @@ import {
   validateDeterministicTarGz,
   writeDeterministicArchive,
 } from "../../../scripts/release/archive-writer.mjs";
-import { computeCacheInventorySha256 } from "../../../scripts/release/release-policy.mjs";
 
 const EPOCH = 1_725_000_000;
 const hash = (data: Buffer | string) =>
@@ -30,10 +29,6 @@ async function write(root: string, path: string, contents: string | Buffer) {
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "home-worker-release-fixture-"));
-  const cacheFiles = [
-    [".yarn/cache/a-package-npm-1.0.0.zip", Buffer.from("cache-a")],
-    [".yarn/cache/z-package-npm-2.0.0.zip", Buffer.from("cache-z")],
-  ] as const;
 
   await write(root, "package.json", '{"name":"fixture","version":"1.2.3"}\n');
   await write(root, "yarn.lock", "# fixture lock\n");
@@ -48,32 +43,19 @@ async function fixture() {
   await write(root, "scripts/rollback.sh", "#!/bin/sh\nexit 0\n");
   await write(root, "scripts/system-update.sh", "#!/bin/sh\nexit 0\n");
   await write(root, "scripts/update.sh", "#!/bin/sh\nexit 0\n");
-  for (const [path, contents] of cacheFiles) await write(root, path, contents);
-
-  const cacheInventory = cacheFiles.map(([path, contents]) => ({
-    path,
-    size: contents.length,
-    sha256: hash(contents),
-  }));
-  return {
-    root,
-    cacheInventory,
-    cacheInventorySha256: computeCacheInventorySha256(cacheInventory),
-  };
+  return { root };
 }
 
 describe("deterministic release archive writer", () => {
   it("emits identical gzip bytes with canonical paths and metadata", async () => {
-    const { root, cacheInventory } = await fixture();
+    const { root } = await fixture();
     const first = await createDeterministicTarGz({
       root,
       sourceDateEpoch: EPOCH,
-      expectedCacheInventory: cacheInventory,
     });
     const second = await createDeterministicTarGz({
       root,
       sourceDateEpoch: EPOCH,
-      expectedCacheInventory: [...cacheInventory].reverse(),
     });
 
     expect(first.bytes).toEqual(second.bytes);
@@ -117,7 +99,6 @@ describe("deterministic release archive writer", () => {
       createDeterministicTarGz({
         root: linked.root,
         sourceDateEpoch: EPOCH,
-        expectedCacheInventory: linked.cacheInventory,
       }),
     ).rejects.toThrow(/symbolic link/i);
 
@@ -127,7 +108,6 @@ describe("deterministic release archive writer", () => {
       createDeterministicTarGz({
         root: writable.root,
         sourceDateEpoch: EPOCH,
-        expectedCacheInventory: writable.cacheInventory,
       }),
     ).rejects.toThrow(/unsafe mode/i);
   });
@@ -146,33 +126,42 @@ describe("deterministic release archive writer", () => {
       createDeterministicTarGz({
         root: candidate.root,
         sourceDateEpoch: EPOCH,
-        expectedCacheInventory: candidate.cacheInventory,
       }),
     ).rejects.toThrow(/denied|allowlist|unsafe/i);
   });
 
-  it("rejects cache inventory mutations before emitting output", async () => {
+  it.each(["node_modules/pkg/index.js", ".yarn/cache/pkg.zip"])(
+    "rejects dependency payload %s before emitting output",
+    async (path) => {
+      const candidate = await fixture();
+      await write(candidate.root, path, "must be installed on the Pi\n");
+      const outputPath = join(
+        candidate.root,
+        "..",
+        `candidate-${Date.now()}.tar.gz`,
+      );
+
+      await expect(
+        writeDeterministicArchive({
+          root: candidate.root,
+          outputPath,
+          sourceDateEpoch: EPOCH,
+        }),
+      ).rejects.toThrow(/denied|allowlist/i);
+      await expect(readFile(outputPath)).rejects.toThrow();
+    },
+  );
+
+  it("rejects an empty dependency cache from the archive writer", async () => {
     const candidate = await fixture();
-    await write(
-      candidate.root,
-      candidate.cacheInventory[0].path,
-      "mutated-cache-contents",
-    );
-    const outputPath = join(
-      candidate.root,
-      "..",
-      `candidate-${Date.now()}.tar.gz`,
-    );
+    await mkdir(join(candidate.root, ".yarn", "cache"), { recursive: true });
 
     await expect(
-      writeDeterministicArchive({
+      createDeterministicTarGz({
         root: candidate.root,
-        outputPath,
         sourceDateEpoch: EPOCH,
-        expectedCacheInventory: candidate.cacheInventory,
       }),
-    ).rejects.toThrow(/cache inventory/i);
-    await expect(readFile(outputPath)).rejects.toThrow();
+    ).rejects.toThrow(/denied|allowlist/i);
   });
 
   it("writes through an exclusive atomic destination", async () => {
@@ -186,7 +175,6 @@ describe("deterministic release archive writer", () => {
       root: candidate.root,
       outputPath,
       sourceDateEpoch: EPOCH,
-      expectedCacheInventory: candidate.cacheInventory,
     });
 
     expect(hash(await readFile(outputPath))).toBe(result.sha256);
@@ -195,7 +183,6 @@ describe("deterministic release archive writer", () => {
         root: candidate.root,
         outputPath,
         sourceDateEpoch: EPOCH,
-        expectedCacheInventory: candidate.cacheInventory,
       }),
     ).rejects.toThrow(/already exists/i);
   });
@@ -215,7 +202,6 @@ describe("deterministic release archive writer", () => {
           root: candidate.root,
           outputPath,
           sourceDateEpoch: EPOCH,
-          expectedCacheInventory: candidate.cacheInventory,
           faultInjection,
         }),
       ).rejects.toThrow(/injected publication failure/i);
