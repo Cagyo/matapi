@@ -4,6 +4,7 @@ import type {
   OtaOperationReceipt,
 } from "../../../src/system/domain/ota-contracts";
 import { SignedFeedOtaAdapter } from "../../../src/system/infrastructure/signed-feed-ota.adapter";
+import { OtaWorkflowBindingRegistry } from "../../../src/system/application/ota-workflow-binding.registry";
 
 const checked = {
   artifact: {
@@ -43,58 +44,127 @@ const receipt: OtaOperationReceipt = {
   requestSha256: "c".repeat(64),
   receiptGeneration: 1,
 };
+const workflow = {
+  userId: 10,
+  chatId: 20,
+  workflowReceiptId: "1234567890abcdef",
+};
 
-describe("SignedFeedOtaAdapter", () => {
-  it("passes the exact identity returned by one signed check into reservation", async () => {
-    const checks = {
-      execute: vi
-        .fn()
-        .mockResolvedValue({
-          kind: "available",
-          installed: checked.artifact,
-          available: checked,
-        }),
-    };
-    const launcher = {
-      reserveUpdate: vi.fn().mockResolvedValue({ kind: "reserved", receipt }),
-      reserveRollback: vi.fn(),
-      publish: vi.fn(),
-      cancel: vi.fn(),
-      startUpdate: vi.fn(),
-      startRollback: vi.fn(),
-    };
-    const ota = new SignedFeedOtaAdapter(checks as never, launcher);
-
-    const result = await ota.checkForUpdates();
-    if (result.kind !== "available")
-      throw new Error("expected available release");
-    await ota.reserveUpdate(result.available);
-
-    expect(checks.execute).toHaveBeenCalledOnce();
-    expect(launcher.reserveUpdate).toHaveBeenCalledWith(checked, undefined);
-    expect(launcher.reserveUpdate.mock.calls[0][0]).toBe(checked);
-  });
-
-  it("delegates publication and cancellation only by the reservation receipt", async () => {
-    const launcher = {
-      reserveUpdate: vi.fn(),
-      reserveRollback: vi.fn(),
-      publish: vi.fn().mockResolvedValue({ kind: "started", receipt }),
-      cancel: vi.fn().mockResolvedValue(true),
-      startUpdate: vi.fn(),
-      startRollback: vi.fn(),
-    };
-    const ota = new SignedFeedOtaAdapter(
+function harness(bound = true) {
+  const events: string[] = [];
+  const launcher = {
+    reserveUpdate: vi.fn(async () => {
+      events.push("reserve");
+      return { kind: "reserved" as const, receipt };
+    }),
+    reserveRollback: vi.fn(),
+    publish: vi.fn(async () => {
+      events.push("publish");
+      return { kind: "started" as const, receipt };
+    }),
+    cancel: vi.fn(async () => {
+      events.push("cancel");
+      return true;
+    }),
+  };
+  const bindings = {
+    bind: vi.fn(async () => {
+      events.push("bind");
+      return bound;
+    }),
+  };
+  return {
+    ota: new SignedFeedOtaAdapter(
       { execute: vi.fn() } as never,
       launcher,
-    );
+      bindings as never,
+    ),
+    launcher,
+    bindings,
+    events,
+  };
+}
 
-    await expect(ota.publish(receipt)).resolves.toEqual({
+describe("SignedFeedOtaAdapter", () => {
+  it("reserves, durably binds the workflow, then publishes the exact update", async () => {
+    const h = harness();
+
+    await expect(h.ota.startUpdate(checked, workflow)).resolves.toEqual({
       kind: "started",
       receipt,
     });
-    await expect(ota.cancel(receipt)).resolves.toBe(true);
-    expect(launcher.publish).toHaveBeenCalledWith(receipt, undefined);
-    expect(launcher.cancel).toHaveBeenCalledWith(receipt);
+
+    expect(h.events).toEqual(["reserve", "bind", "publish"]);
+    expect(h.launcher.reserveUpdate).toHaveBeenCalledWith(checked, undefined);
+    expect(h.bindings.bind).toHaveBeenCalledWith({ receipt, workflow });
+  });
+
+  it("cancels a failed durable binding and never publishes", async () => {
+    const h = harness(false);
+
+    await expect(h.ota.startUpdate(checked, workflow)).resolves.toEqual({
+      kind: "rejected",
+      failure: { code: "maintenance-required" },
+    });
+
+    expect(h.events).toEqual(["reserve", "bind", "cancel"]);
+    expect(h.launcher.publish).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when no durable binding delegate is registered", async () => {
+    const h = harness();
+    const ota = new SignedFeedOtaAdapter(
+      { execute: vi.fn() } as never,
+      h.launcher,
+      new OtaWorkflowBindingRegistry(),
+    );
+
+    await expect(ota.startUpdate(checked, workflow)).resolves.toEqual({
+      kind: "rejected",
+      failure: { code: "maintenance-required" },
+    });
+    expect(h.launcher.cancel).toHaveBeenCalledWith(receipt);
+    expect(h.launcher.publish).not.toHaveBeenCalled();
+  });
+
+  it("rejects a missing workflow reference before creating a reservation", async () => {
+    const h = harness();
+
+    await expect(h.ota.startUpdate(checked, undefined as never)).resolves.toEqual({
+      kind: "rejected",
+      failure: { code: "maintenance-required" },
+    });
+
+    expect(h.launcher.reserveUpdate).not.toHaveBeenCalled();
+    expect(h.bindings.bind).not.toHaveBeenCalled();
+  });
+
+  it("does not revoke a durable binding when publication reports failure", async () => {
+    const h = harness();
+    h.launcher.publish.mockResolvedValueOnce({
+      kind: "rejected",
+      failure: { code: "operation-in-progress" },
+    });
+
+    await expect(h.ota.startUpdate(checked, workflow)).resolves.toEqual({
+      kind: "rejected",
+      failure: { code: "operation-in-progress" },
+    });
+
+    expect(h.events).toEqual(["reserve", "bind"]);
+    expect(h.launcher.publish).toHaveBeenCalledWith(receipt, undefined);
+    expect(h.launcher.cancel).not.toHaveBeenCalled();
+  });
+
+  it("retains the durable binding when publication crashes", async () => {
+    const h = harness();
+    h.launcher.publish.mockRejectedValueOnce(new Error("publish crashed"));
+
+    await expect(h.ota.startUpdate(checked, workflow)).resolves.toEqual({
+      kind: "rejected",
+      failure: { code: "maintenance-required" },
+    });
+    expect(h.bindings.bind).toHaveBeenCalledOnce();
+    expect(h.launcher.cancel).not.toHaveBeenCalled();
   });
 });

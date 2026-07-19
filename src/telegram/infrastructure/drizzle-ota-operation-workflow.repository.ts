@@ -22,14 +22,20 @@ function expectedWorkflow(kind: OtaOperationKind): OtaWorkflow {
 
 function decodeWorkflow(
   payload: string,
-): { workflow: OtaWorkflow; phase: "running" } | null {
+): { workflow: OtaWorkflow; phase: "running"; deliveryStage?: string } | null {
   try {
     const value = JSON.parse(payload) as Record<string, unknown>;
     if (
       (value.workflow === "ota-update" || value.workflow === "ota-rollback") &&
       value.phase === "running"
     ) {
-      return { workflow: value.workflow, phase: value.phase };
+      return {
+        workflow: value.workflow,
+        phase: value.phase,
+        ...(typeof value.deliveryStage === "string"
+          ? { deliveryStage: value.deliveryStage }
+          : {}),
+      };
     }
   } catch {
     // Persisted malformed workflow state is never authority.
@@ -122,8 +128,8 @@ export class DrizzleOtaOperationWorkflowRepository implements OtaOperationWorkfl
       if (row.operationKind !== input.operationKind)
         return { kind: "invalid-route" };
       if (row.acknowledgedAt) return { kind: "acknowledged" };
-      const workflow = this.validWorkflow(tx, row, input.now);
-      if (!workflow) return { kind: "invalid-route" };
+      const workflowState = this.workflowState(tx, row, input.now);
+      if (!workflowState) return { kind: "invalid-route" };
       if (row.deliveryLeaseUntil && row.deliveryLeaseUntil > input.now)
         return { kind: "busy" };
       if (row.deliveredAt) {
@@ -167,7 +173,13 @@ export class DrizzleOtaOperationWorkflowRepository implements OtaOperationWorkfl
         )
         .run();
       return claimed.changes === 1
-        ? { kind: "claimed", route: route(row) }
+        ? {
+            kind:
+              workflowState === "completed"
+                ? "workflow-completed"
+                : "claimed",
+            route: route(row),
+          }
         : { kind: "busy" };
     });
   }
@@ -217,7 +229,11 @@ export class DrizzleOtaOperationWorkflowRepository implements OtaOperationWorkfl
     );
   }
 
-  private validWorkflow(tx: Writer, row: RouteRow, now: Date): boolean {
+  private workflowState(
+    tx: Writer,
+    row: RouteRow,
+    now: Date,
+  ): "active" | "completed" | null {
     const receipt = tx
       .select()
       .from(homeActionReceipts)
@@ -230,14 +246,32 @@ export class DrizzleOtaOperationWorkflowRepository implements OtaOperationWorkfl
         ),
       )
       .get();
-    if (!receipt) return false;
+    if (!receipt) return null;
     const workflow = decodeWorkflow(receipt.payload);
-    return (
-      workflow?.workflow ===
-        expectedWorkflow(row.operationKind as OtaOperationKind) &&
+    if (
+      workflow?.workflow !==
+      expectedWorkflow(row.operationKind as OtaOperationKind)
+    ) {
+      return null;
+    }
+    if (
       ["pending", "executing", "returned"].includes(receipt.status) &&
       receipt.expiresAt > now
-    );
+    ) {
+      return "active";
+    }
+    if (
+      receipt.status === "completed" &&
+      [
+        "direct-delivered",
+        "notice-delivered",
+        "restored",
+        "delivered",
+      ].includes(workflow.deliveryStage ?? "")
+    ) {
+      return "completed";
+    }
+    return null;
   }
 
   private immediate<T>(operation: (tx: Writer) => T): T {

@@ -33,4 +33,10 @@ export class TelegramDirectMessenger implements DirectMessengerPort {
       );
     }
   }
+
+  async sendConfirmed(telegramId: number, text: string): Promise<boolean> {
+    if (!this.bot) return false;
+    await this.bot.api.sendMessage(telegramId, text);
+    return true;
+  }
 }

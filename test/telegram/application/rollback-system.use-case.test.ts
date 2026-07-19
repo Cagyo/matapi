@@ -12,47 +12,19 @@ const receipt = {
 };
 
 describe("RollbackSystemUseCase", () => {
-  it("authorizes the exact rollback workflow before publishing", async () => {
-    const events: string[] = [];
+  it("passes the exact rollback workflow reference to the safe OTA coordinator", async () => {
     const ota: OtaPort = {
       checkForUpdates: vi.fn(),
-      reserveUpdate: vi.fn(),
-      reserveRollback: vi.fn(async () => {
-        events.push("reserve");
-        return { kind: "reserved", receipt };
-      }),
-      publish: vi.fn(async () => {
-        events.push("publish");
-        return { kind: "started", receipt };
-      }),
-      cancel: vi.fn(),
+      startUpdate: vi.fn(),
+      startRollback: vi.fn(async () => ({ kind: "started", receipt })),
     };
-    const routes = {
-      authorize: vi.fn(async () => {
-        events.push("authorize");
-        return "authorized" as const;
-      }),
-      revoke: vi.fn(),
-      claimDelivery: vi.fn(),
-      markDelivered: vi.fn(),
-      acknowledge: vi.fn(),
-    };
-    const useCase = new RollbackSystemUseCase(ota, routes);
+    const useCase = new RollbackSystemUseCase(ota);
+    const workflow = { userId: 10, chatId: 20, workflowReceiptId: "1234567890abcdef" };
 
-    await expect(
-      useCase.launch({
-        userId: 10,
-        chatId: 20,
-        workflowReceiptId: "1234567890abcdef",
-      }),
-    ).resolves.toEqual({ kind: "started", operationId: receipt.operationId });
-    expect(events).toEqual(["reserve", "authorize", "publish"]);
-    expect(routes.authorize).toHaveBeenCalledWith(
-      expect.objectContaining({
-        operationKind: "rollback",
-        userId: 10,
-        chatId: 20,
-      }),
-    );
+    await expect(useCase.launch(workflow)).resolves.toEqual({
+      kind: "started",
+      operationId: receipt.operationId,
+    });
+    expect(ota.startRollback).toHaveBeenCalledWith(workflow);
   });
 });

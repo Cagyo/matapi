@@ -228,17 +228,6 @@ export class FlockOtaOperationLauncherAdapter implements OtaOperationLauncherPor
     private readonly dependencies: OtaLauncherDependencies = defaultDependencies,
   ) {}
 
-  startUpdate(
-    expected: CheckedReleaseIdentity,
-    signal?: AbortSignal,
-  ): Promise<StartOperationResult> {
-    return this.launch("update", expected, signal);
-  }
-
-  startRollback(signal?: AbortSignal): Promise<StartOperationResult> {
-    return this.launch("rollback", null, signal);
-  }
-
   reserveUpdate(
     expected: CheckedReleaseIdentity,
     signal?: AbortSignal,
@@ -275,16 +264,6 @@ export class FlockOtaOperationLauncherAdapter implements OtaOperationLauncherPor
       operationRequestPath(this.config.launcher, request.operationId),
     );
     return removed;
-  }
-
-  private async launch(
-    kind: "update" | "rollback",
-    expectedInput: CheckedReleaseIdentity | null,
-    signal?: AbortSignal,
-  ): Promise<StartOperationResult> {
-    const reservation = await this.reserve(kind, expectedInput, signal);
-    if (reservation.kind === "rejected") return reservation;
-    return this.publish(reservation.receipt, signal);
   }
 
   private async reserve(

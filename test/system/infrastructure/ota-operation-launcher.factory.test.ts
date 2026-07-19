@@ -11,10 +11,19 @@ describe("otaOperationLauncherForMode", () => {
     const launcher = otaOperationLauncherForMode("stub", {} as OtaConfig);
 
     expect(launcher).toBeInstanceOf(StubOtaOperationLauncherAdapter);
-    await expect(launcher.startRollback()).resolves.toEqual({
+    await expect(launcher.reserveRollback()).resolves.toEqual({
       kind: "rejected",
       failure: { code: "maintenance-required" },
     });
+  });
+
+  it("has no direct-start bypass and keeps the raw launcher module-private", () => {
+    const launcher = otaOperationLauncherForMode("stub", {} as OtaConfig);
+    const exports = Reflect.getMetadata("exports", SystemModule) as unknown[];
+
+    expect(launcher).not.toHaveProperty("startUpdate");
+    expect(launcher).not.toHaveProperty("startRollback");
+    expect(exports).not.toContain(OTA_OPERATION_LAUNCHER);
   });
 
   it("binds the flock launcher only in real mode", () => {

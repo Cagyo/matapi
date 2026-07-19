@@ -39,14 +39,4 @@ export class StubOtaOperationLauncherAdapter implements OtaOperationLauncherPort
     return Promise.resolve(false);
   }
 
-  startUpdate(
-    _expected: CheckedReleaseIdentity,
-    _signal?: AbortSignal,
-  ): Promise<StartOperationResult> {
-    return Promise.resolve(MAINTENANCE_REJECTION);
-  }
-
-  startRollback(_signal?: AbortSignal): Promise<StartOperationResult> {
-    return Promise.resolve(MAINTENANCE_REJECTION);
-  }
 }

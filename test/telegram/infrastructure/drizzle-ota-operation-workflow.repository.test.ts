@@ -146,4 +146,55 @@ describe("DrizzleOtaOperationWorkflowRepository", () => {
       }),
     ).resolves.toEqual({ kind: "acknowledged" });
   });
+
+  it("reclaims a completed exact workflow after a crash before route delivery was marked", async () => {
+    await repository.authorize({
+      operationId: OPERATION_ID,
+      operationKind: "update",
+      userId: 100,
+      chatId: 200,
+      workflowReceiptId: RECEIPT_ID,
+      authorizedAt: NOW,
+    });
+    sqlite
+      .prepare(
+        "UPDATE home_action_receipts SET status = 'completed', payload = ? WHERE id = ?",
+      )
+      .run(
+        JSON.stringify({
+          workflow: "ota-update",
+          phase: "running",
+          originSource: "natural-parent",
+          origin: { kind: "admin-system" },
+          deliveryStage: "restored",
+        }),
+        RECEIPT_ID,
+      );
+
+    const claim = await repository.claimDelivery({
+      operationId: OPERATION_ID,
+      operationKind: "update",
+      leaseId: "lease-after-crash",
+      now: LATER,
+      leaseUntil: new Date(LATER.getTime() + 60_000),
+    });
+    expect(claim).toMatchObject({
+      kind: "workflow-completed",
+      route: { workflowReceiptId: RECEIPT_ID },
+    });
+    await expect(
+      repository.markDelivered({
+        operationId: OPERATION_ID,
+        leaseId: "lease-after-crash",
+        deliveredAt: LATER,
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      repository.acknowledge({
+        operationId: OPERATION_ID,
+        leaseId: "lease-after-crash",
+        acknowledgedAt: LATER,
+      }),
+    ).resolves.toBe(true);
+  });
 });

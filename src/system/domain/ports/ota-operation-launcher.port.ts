@@ -18,9 +18,4 @@ export interface OtaOperationLauncherPort {
     signal?: AbortSignal,
   ): Promise<StartOperationResult>;
   cancel(receipt: OtaOperationReceipt): Promise<boolean>;
-  startUpdate(
-    expected: CheckedReleaseIdentity,
-    signal?: AbortSignal,
-  ): Promise<StartOperationResult>;
-  startRollback(signal?: AbortSignal): Promise<StartOperationResult>;
 }

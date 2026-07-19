@@ -1,9 +1,8 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { CheckForUpdatesUseCase } from "../application/check-for-updates.use-case";
+import { OtaWorkflowBindingRegistry } from "../application/ota-workflow-binding.registry";
 import type {
   CheckedReleaseIdentity,
-  OtaOperationReceipt,
-  ReserveOperationResult,
   StartOperationResult,
   UpdateCheck,
 } from "../domain/ota-contracts";
@@ -11,7 +10,7 @@ import {
   OTA_OPERATION_LAUNCHER,
   type OtaOperationLauncherPort,
 } from "../domain/ports/ota-operation-launcher.port";
-import type { OtaPort } from "../domain/ports/ota.port";
+import type { OtaPort, OtaWorkflowReference } from "../domain/ports/ota.port";
 
 /** Keeps signed discovery and exact-identity operation launch behind one port. */
 @Injectable()
@@ -20,31 +19,76 @@ export class SignedFeedOtaAdapter implements OtaPort {
     private readonly checks: CheckForUpdatesUseCase,
     @Inject(OTA_OPERATION_LAUNCHER)
     private readonly launcher: OtaOperationLauncherPort,
+    private readonly bindings: OtaWorkflowBindingRegistry,
   ) {}
 
   checkForUpdates(): Promise<UpdateCheck> {
     return this.checks.execute();
   }
 
-  reserveUpdate(
+  async startUpdate(
     expected: CheckedReleaseIdentity,
-    signal?: AbortSignal,
-  ): Promise<ReserveOperationResult> {
-    return this.launcher.reserveUpdate(expected, signal);
-  }
-
-  reserveRollback(signal?: AbortSignal): Promise<ReserveOperationResult> {
-    return this.launcher.reserveRollback(signal);
-  }
-
-  publish(
-    receipt: OtaOperationReceipt,
+    workflow: OtaWorkflowReference,
     signal?: AbortSignal,
   ): Promise<StartOperationResult> {
-    return this.launcher.publish(receipt, signal);
+    if (!this.validWorkflowReference(workflow)) return this.rejected();
+    return this.start(() => this.launcher.reserveUpdate(expected, signal), workflow, signal);
   }
 
-  cancel(receipt: OtaOperationReceipt): Promise<boolean> {
-    return this.launcher.cancel(receipt);
+  async startRollback(
+    workflow: OtaWorkflowReference,
+    signal?: AbortSignal,
+  ): Promise<StartOperationResult> {
+    if (!this.validWorkflowReference(workflow)) return this.rejected();
+    return this.start(() => this.launcher.reserveRollback(signal), workflow, signal);
+  }
+
+  private async start(
+    reserve: () => ReturnType<OtaOperationLauncherPort["reserveRollback"]>,
+    workflow: OtaWorkflowReference,
+    signal?: AbortSignal,
+  ): Promise<StartOperationResult> {
+    let reservation: Awaited<ReturnType<typeof reserve>>;
+    try {
+      reservation = await reserve();
+    } catch {
+      return this.rejected();
+    }
+    if (reservation.kind === "rejected") return reservation;
+    let bound = false;
+    try {
+      bound = await this.bindings.bind({
+        receipt: reservation.receipt,
+        workflow,
+      });
+    } catch {
+      // Binding failures are authorization failures and remain unpublished.
+    }
+    if (!bound) {
+      await this.launcher.cancel(reservation.receipt).catch(() => false);
+      return this.rejected();
+    }
+    // Once the durable route exists, retain it across every publication
+    // outcome: the updater may have become externally visible before failure.
+    try {
+      return await this.launcher.publish(reservation.receipt, signal);
+    } catch {
+      return this.rejected();
+    }
+  }
+
+  private validWorkflowReference(value: unknown): value is OtaWorkflowReference {
+    if (!value || typeof value !== "object") return false;
+    const reference = value as Record<string, unknown>;
+    return (
+      Number.isSafeInteger(reference.userId) &&
+      Number.isSafeInteger(reference.chatId) &&
+      typeof reference.workflowReceiptId === "string" &&
+      /^[0-9a-f]{16}$/.test(reference.workflowReceiptId)
+    );
+  }
+
+  private rejected(): StartOperationResult {
+    return { kind: "rejected", failure: { code: "maintenance-required" } };
   }
 }

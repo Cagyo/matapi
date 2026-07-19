@@ -13,9 +13,9 @@ import {
 } from "../application/ports/startup-report-delivery-adapter.port";
 import { RestoreWorkflowOriginUseCase } from "../application/restore-workflow-origin.use-case";
 import {
-  DIRECT_MESSENGER,
-  type DirectMessengerPort,
-} from "../domain/ports/direct-messenger.port";
+  STARTUP_REPORT_MESSAGE_DELIVERY,
+  type StartupReportMessageDeliveryPort,
+} from "../application/ports/startup-report-message-delivery.port";
 import {
   USER_REPOSITORY,
   type UserRepositoryPort,
@@ -33,7 +33,8 @@ export class TelegramStartupReportDeliveryAdapter implements StartupReportDelive
     @Inject(OTA_OPERATION_WORKFLOW_REPOSITORY)
     private readonly routes: OtaOperationWorkflowRepositoryPort,
     @Inject(USER_REPOSITORY) private readonly users: UserRepositoryPort,
-    @Inject(DIRECT_MESSENGER) private readonly messenger: DirectMessengerPort,
+    @Inject(STARTUP_REPORT_MESSAGE_DELIVERY)
+    private readonly messenger: StartupReportMessageDeliveryPort,
     @Inject(OTA_WORKFLOW_COMPLETION)
     private readonly workflows: OtaWorkflowCompletionPort,
     private readonly restoreWorkflow: RestoreWorkflowOriginUseCase,
@@ -61,6 +62,20 @@ export class TelegramStartupReportDeliveryAdapter implements StartupReportDelive
       });
       return { delivered: acknowledged ? 1 : 0 };
     }
+    if (claim.kind === "workflow-completed") {
+      const delivered = await this.routes.markDelivered({
+        operationId: report.operationId,
+        leaseId,
+        deliveredAt: new Date(),
+      });
+      if (!delivered) return { delivered: 0 };
+      const acknowledged = await this.routes.acknowledge({
+        operationId: report.operationId,
+        leaseId,
+        acknowledgedAt: new Date(),
+      });
+      return { delivered: acknowledged ? 1 : 0 };
+    }
     if (claim.kind !== "claimed") return { delivered: 0 };
 
     const user = await this.users.findByTelegramId(claim.route.userId);
@@ -78,7 +93,13 @@ export class TelegramStartupReportDeliveryAdapter implements StartupReportDelive
         catalog,
       },
       workflow: claim.route.workflow,
-      deliver: () => this.messenger.send(claim.route.chatId, text),
+      deliver: async () => {
+        const confirmed = await this.messenger.sendConfirmed(
+          claim.route.chatId,
+          text,
+        );
+        if (!confirmed) throw new Error("Telegram delivery was not confirmed");
+      },
       recoveryNotice: text,
       restore: async (receipt, notice) => {
         if (receipt.id !== claim.route.workflowReceiptId) return false;
@@ -120,11 +141,10 @@ export class TelegramStartupReportDeliveryAdapter implements StartupReportDelive
     const results = await Promise.all(
       recipients.map(async (admin) => {
         try {
-          await this.messenger.send(
+          return await this.messenger.sendConfirmed(
             admin.telegramId,
             catalogFor(admin.locale).ota.maintenanceOutcome(failure),
           );
-          return true;
         } catch {
           this.logger.warn("OTA maintenance report delivery failed");
           return false;

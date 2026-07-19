@@ -24,10 +24,10 @@ non-mutating compatible facade.
 3. `publish`: accept only that exact in-process reservation receipt and run the
    existing detached flock/receipt handshake.
 
-Failed authorization cancels and parent-syncs the reservation. Publish failure
-revokes the unused route. A crash can leave an authorized request that was
-never published, but no updater process can start before the database route is
-durable.
+Failed authorization cancels and parent-syncs the reservation. Once a route is
+durable, publish rejection or failure retains it because the updater may have
+become externally visible before the caller observed the failure. No updater
+process can start before the database route is durable.
 
 ## Durable startup delivery
 
@@ -106,3 +106,65 @@ dual-slot operation journal, and OTA contract suites.
 
 The pre-existing untracked `scripts/__pycache__/` directory was not read,
 modified, staged, or removed.
+
+## Review hardening correction
+
+Correction commit: `fix(telegram): harden OTA delivery`
+
+The first Task 14 implementation still exported the raw operation-launcher
+token and its adapters retained convenience `startUpdate` / `startRollback`
+methods. Those methods performed reserve → publish without a workflow row.
+The raw launcher is now internal to `SystemModule` and exposes reservation
+transport only. The exported high-level OTA facade accepts an exact workflow
+reference and performs reserve → durable binding → publish through a
+system-owned, fail-closed binding registry registered by Telegram. Missing or
+invalid references are rejected before reservation; absent registration or a
+failed binding cancels the request without publication. Once binding succeeds,
+publication rejection or crash retains the route.
+
+Startup delivery now recognizes a terminal exact workflow receipt with a
+delivery-proving stage as durable evidence after a crash between workflow
+completion and route delivery CAS. After the lease expires, retry claims that
+state, marks the route delivered, acknowledges it, and does not send again.
+An already acknowledged route reports delivery without another effect, so the
+outer startup-report consumer only removes the pending filesystem report.
+
+The startup-report adapter no longer uses the lossy direct-message port. Its
+dedicated confirmed port returns false without a live bot and propagates
+Telegram rejection. Exact workflow completion receives that confirmed effect
+through `WorkflowEntryCoordinator.completeHeadless`; exact route CAS does not
+advance after an unconfirmed send. Null-operation maintenance fan-out counts
+only confirmed sends, so zero confirmations retain the report.
+
+Correction RED:
+
+```text
+Test Files  3 failed (3)
+Tests       6 failed | 6 passed
+
+Failures: direct-start/module-export bypass, completed-workflow invalid-route,
+and startup delivery using the swallowing send boundary.
+```
+
+Correction focused GREEN:
+
+```text
+Test Files  15 passed (15)
+Tests       84 passed (84)
+```
+
+Task 12/13 regression GREEN:
+
+```text
+Test Files  9 passed (9)
+Tests       164 passed (164)
+```
+
+Final correction verification:
+
+- `yarn build` — exit `0`.
+- Targeted ESLint over every changed TypeScript file — exit `0`.
+- `git diff --check` — exit `0`.
+- Compiled `AppModule` Nest DI context in test/mock mode — `ok`.
+- No schema or generated migration file changed in this correction.
+- The pre-existing untracked `scripts/__pycache__/` remained untouched.

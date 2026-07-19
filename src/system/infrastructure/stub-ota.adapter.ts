@@ -1,12 +1,10 @@
 import { Injectable } from "@nestjs/common";
 import type {
   CheckedReleaseIdentity,
-  OtaOperationReceipt,
-  ReserveOperationResult,
   StartOperationResult,
   UpdateCheck,
 } from "../domain/ota-contracts";
-import type { OtaPort } from "../domain/ports/ota.port";
+import type { OtaPort, OtaWorkflowReference } from "../domain/ports/ota.port";
 
 const REJECTED = Object.freeze({
   kind: "rejected" as const,
@@ -23,25 +21,18 @@ export class StubOtaAdapter implements OtaPort {
     });
   }
 
-  reserveUpdate(
+  startUpdate(
     _expected: CheckedReleaseIdentity,
-    _signal?: AbortSignal,
-  ): Promise<ReserveOperationResult> {
-    return Promise.resolve(REJECTED);
-  }
-
-  reserveRollback(_signal?: AbortSignal): Promise<ReserveOperationResult> {
-    return Promise.resolve(REJECTED);
-  }
-
-  publish(
-    _receipt: OtaOperationReceipt,
+    _workflow: OtaWorkflowReference,
     _signal?: AbortSignal,
   ): Promise<StartOperationResult> {
     return Promise.resolve(REJECTED);
   }
 
-  cancel(_receipt: OtaOperationReceipt): Promise<boolean> {
-    return Promise.resolve(false);
+  startRollback(
+    _workflow: OtaWorkflowReference,
+    _signal?: AbortSignal,
+  ): Promise<StartOperationResult> {
+    return Promise.resolve(REJECTED);
   }
 }

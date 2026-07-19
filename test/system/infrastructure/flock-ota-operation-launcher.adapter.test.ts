@@ -307,6 +307,25 @@ function harness(
   };
 }
 
+async function startUpdate(
+  launcher: FlockOtaOperationLauncherAdapter,
+  expected: CheckedReleaseIdentity,
+  signal?: AbortSignal,
+) {
+  const reservation = await launcher.reserveUpdate(expected, signal);
+  if (reservation.kind === "rejected") return reservation;
+  return launcher.publish(reservation.receipt, signal);
+}
+
+async function startRollback(
+  launcher: FlockOtaOperationLauncherAdapter,
+  signal?: AbortSignal,
+) {
+  const reservation = await launcher.reserveRollback(signal);
+  if (reservation.kind === "rejected") return reservation;
+  return launcher.publish(reservation.receipt, signal);
+}
+
 async function acceptLock(
   state: Harness,
   frame: string | Buffer = OTA_LOCK_ACQUIRED_MARKER,
@@ -430,7 +449,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
   it("durably persists the exact displayed identity before fixed no-shell spawn", async () => {
     const state = harness();
     const expected = checkedReleaseFixture();
-    const pending = state.launcher.startUpdate(expected);
+    const pending = startUpdate(state.launcher, expected);
     const request = await waitForSpawn(state);
 
     expect(request.expected).toEqual(expected);
@@ -524,7 +543,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
       return handle;
     };
     const state = harness({ fs });
-    const pending = state.launcher.startUpdate(checkedReleaseFixture());
+    const pending = startUpdate(state.launcher, checkedReleaseFixture());
 
     await vi.waitFor(() => expect(fs.calls).toContain("sync-parent"));
     expect(state.spawn).not.toHaveBeenCalled();
@@ -541,7 +560,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
     const fs = fileSystemFake();
     fs.lockFd = 5;
     const state = harness({ fs });
-    const pending = state.launcher.startRollback();
+    const pending = startRollback(state.launcher);
     const request = await waitForSpawn(state);
 
     expect(state.spawn.mock.calls[0][2].stdio).toEqual([
@@ -560,7 +579,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
 
   it("rejects request identity mutation against the canonical authorization digest", async () => {
     const state = harness();
-    const pending = state.launcher.startUpdate(checkedReleaseFixture());
+    const pending = startUpdate(state.launcher, checkedReleaseFixture());
     const request = await waitForSpawn(state);
     const mutated = JSON.parse(state.fs.bytes!.toString("utf8"));
     mutated.expected.artifact.sha256 = "f".repeat(64);
@@ -576,7 +595,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
 
   it("does not report started before a complete receipt and fd EOF", async () => {
     const state = harness();
-    const pending = state.launcher.startUpdate(checkedReleaseFixture());
+    const pending = startUpdate(state.launcher, checkedReleaseFixture());
     const request = await waitForSpawn(state);
     const frame = receipt(request);
     await acceptLock(state);
@@ -610,7 +629,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
 
   it("writes rollback with null expected identity", async () => {
     const state = harness();
-    const pending = state.launcher.startRollback();
+    const pending = startRollback(state.launcher);
     const request = await waitForSpawn(state);
 
     expect(request).toMatchObject({ kind: "rollback", expected: null });
@@ -660,7 +679,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
 
     for (const expected of mutations) {
       const state = harness();
-      await expect(state.launcher.startUpdate(expected)).resolves.toEqual({
+      await expect(startUpdate(state.launcher, expected)).resolves.toEqual({
         kind: "rejected",
         failure: { code: "maintenance-required" },
       });
@@ -675,7 +694,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
       state.fs.updaterEntryKind = kind;
 
       await expect(
-        state.launcher.startUpdate(checkedReleaseFixture()),
+        startUpdate(state.launcher, checkedReleaseFixture()),
       ).resolves.toEqual({
         kind: "rejected",
         failure: { code: "maintenance-required" },
@@ -694,7 +713,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
       const state = harness({}, invalidConfig);
 
       await expect(
-        state.launcher.startUpdate(checkedReleaseFixture()),
+        startUpdate(state.launcher, checkedReleaseFixture()),
       ).resolves.toEqual({
         kind: "rejected",
         failure: { code: "maintenance-required" },
@@ -711,7 +730,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
     acceptedExpected.artifact.target.libcMinVersion =
       "2.9007199254740993123456788";
     const accepted = harness({}, acceptedConfig);
-    const acceptedPending = accepted.launcher.startUpdate(acceptedExpected);
+    const acceptedPending = startUpdate(accepted.launcher, acceptedExpected);
     const request = await waitForSpawn(accepted);
     await acceptLock(accepted);
     accepted.child.handshake.end(receipt(request));
@@ -725,7 +744,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
     const rejectedState = harness({}, rejectedConfig);
 
     await expect(
-      rejectedState.launcher.startUpdate(rejectedExpected),
+      startUpdate(rejectedState.launcher, rejectedExpected),
     ).resolves.toEqual({
       kind: "rejected",
       failure: { code: "maintenance-required" },
@@ -736,7 +755,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
 
   it("maps only the strict lock-conflict control frame to operation-in-progress", async () => {
     const conflict = harness();
-    const conflictPending = conflict.launcher.startUpdate(
+    const conflictPending = startUpdate(conflict.launcher,
       checkedReleaseFixture(),
     );
     await waitForSpawn(conflict);
@@ -753,7 +772,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
     });
 
     const rawConflict = harness();
-    const rawConflictPending = rawConflict.launcher.startUpdate(
+    const rawConflictPending = startUpdate(rawConflict.launcher,
       checkedReleaseFixture(),
     );
     await waitForSpawn(rawConflict);
@@ -773,7 +792,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
     });
 
     const generic = harness();
-    const genericPending = generic.launcher.startUpdate(
+    const genericPending = startUpdate(generic.launcher,
       checkedReleaseFixture(),
     );
     await waitForSpawn(generic);
@@ -788,7 +807,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
 
   it("maps updater exit 73 after lock provenance to maintenance-required", async () => {
     const state = harness();
-    const pending = state.launcher.startUpdate(checkedReleaseFixture());
+    const pending = startUpdate(state.launcher, checkedReleaseFixture());
     await waitForSpawn(state);
     await acceptLock(state);
     const receiptEof = new Promise<void>((resolve) =>
@@ -807,7 +826,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
 
   it("maps a child close after lock provenance but before fd3 receipt to maintenance", async () => {
     const state = harness();
-    const pending = state.launcher.startUpdate(checkedReleaseFixture());
+    const pending = startUpdate(state.launcher, checkedReleaseFixture());
     await waitForSpawn(state);
     await acceptLock(state);
 
@@ -826,7 +845,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
     ["oversized", Buffer.alloc(129, 0x61)],
   ] as const)("rejects a %s fd4 lock marker", async (_label, marker) => {
     const state = harness();
-    const pending = state.launcher.startUpdate(checkedReleaseFixture());
+    const pending = startUpdate(state.launcher, checkedReleaseFixture());
     await waitForSpawn(state);
     state.child.lockMarker.end(marker);
 
@@ -835,7 +854,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
 
   it("waits for strict fd4 EOF when the durable receipt drains first", async () => {
     const state = harness();
-    const pending = state.launcher.startUpdate(checkedReleaseFixture());
+    const pending = startUpdate(state.launcher, checkedReleaseFixture());
     const request = await waitForSpawn(state);
     state.child.handshake.end(receipt(request));
 
@@ -852,7 +871,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
 
   it("ignores a valid lock marker arriving after timeout arbitration", async () => {
     const state = harness();
-    const pending = state.launcher.startUpdate(checkedReleaseFixture());
+    const pending = startUpdate(state.launcher, checkedReleaseFixture());
     await waitForSpawn(state);
 
     state.timer.fireNext();
@@ -872,7 +891,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
       },
     });
     await expect(
-      sync.launcher.startUpdate(checkedReleaseFixture()),
+      startUpdate(sync.launcher, checkedReleaseFixture()),
     ).resolves.toEqual({
       kind: "rejected",
       failure: { code: "maintenance-required" },
@@ -880,7 +899,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
     expect(sync.fs.lockCloseCalls).toBe(1);
 
     const emitted = harness();
-    const pending = emitted.launcher.startUpdate(checkedReleaseFixture());
+    const pending = startUpdate(emitted.launcher, checkedReleaseFixture());
     await waitForSpawn(emitted);
     emitted.child.emit("error", new Error("spawn failed"));
     emitted.child.emit("close", null, null);
@@ -893,7 +912,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
 
   it("keeps escalation and request retention active after child error until close", async () => {
     const state = harness();
-    const pending = state.launcher.startUpdate(checkedReleaseFixture());
+    const pending = startUpdate(state.launcher, checkedReleaseFixture());
     await waitForSpawn(state);
 
     state.child.emit("error", new Error("kill failed while child is live"));
@@ -925,7 +944,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
   it("terminates and reaps the group before recovering from parent lock-close failure", async () => {
     const state = harness();
     state.fs.failFirstLockClose = true;
-    const pending = state.launcher.startUpdate(checkedReleaseFixture());
+    const pending = startUpdate(state.launcher, checkedReleaseFixture());
     await waitForSpawn(state);
 
     await vi.waitFor(() =>
@@ -980,7 +999,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
     ],
   ] as const)("rejects a %s receipt", async (_label, frame) => {
     const state = harness();
-    const pending = state.launcher.startUpdate(checkedReleaseFixture());
+    const pending = startUpdate(state.launcher, checkedReleaseFixture());
     const request = await waitForSpawn(state);
     await acceptLock(state);
     state.child.handshake.end(frame(request));
@@ -989,7 +1008,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
 
   it("rejects fatal UTF-8 and receipts larger than 1 KiB", async () => {
     const invalidUtf8 = harness();
-    const utf8Pending = invalidUtf8.launcher.startUpdate(
+    const utf8Pending = startUpdate(invalidUtf8.launcher,
       checkedReleaseFixture(),
     );
     await waitForSpawn(invalidUtf8);
@@ -998,7 +1017,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
     await expectMaintenanceAfterClose(invalidUtf8, utf8Pending);
 
     const oversized = harness();
-    const oversizedPending = oversized.launcher.startUpdate(
+    const oversizedPending = startUpdate(oversized.launcher,
       checkedReleaseFixture(),
     );
     await waitForSpawn(oversized);
@@ -1009,7 +1028,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
 
   it("drains a valid receipt after exit and lets it win a later child close", async () => {
     const state = harness();
-    const pending = state.launcher.startUpdate(checkedReleaseFixture());
+    const pending = startUpdate(state.launcher, checkedReleaseFixture());
     const request = await waitForSpawn(state);
 
     state.child.emit("exit", 1, null);
@@ -1021,7 +1040,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
 
   it("on timeout terminates, waits, escalates, and ignores a late valid frame", async () => {
     const state = harness();
-    const pending = state.launcher.startUpdate(checkedReleaseFixture());
+    const pending = startUpdate(state.launcher, checkedReleaseFixture());
     const request = await waitForSpawn(state);
     await acceptLock(state);
 
@@ -1066,7 +1085,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
   it("uses the same terminate-and-reap path for caller abort", async () => {
     const state = harness();
     const controller = new AbortController();
-    const pending = state.launcher.startUpdate(
+    const pending = startUpdate(state.launcher,
       checkedReleaseFixture(),
       controller.signal,
     );
@@ -1102,7 +1121,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
     state.fs.failWrite = true;
 
     await expect(
-      state.launcher.startUpdate(checkedReleaseFixture()),
+      startUpdate(state.launcher, checkedReleaseFixture()),
     ).resolves.toEqual({
       kind: "rejected",
       failure: { code: "maintenance-required" },
@@ -1116,7 +1135,7 @@ describe("FlockOtaOperationLauncherAdapter", () => {
     state.fs.failFirstParentSync = true;
 
     await expect(
-      state.launcher.startUpdate(checkedReleaseFixture()),
+      startUpdate(state.launcher, checkedReleaseFixture()),
     ).resolves.toEqual({
       kind: "rejected",
       failure: { code: "maintenance-required" },

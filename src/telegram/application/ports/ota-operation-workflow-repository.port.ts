@@ -17,6 +17,7 @@ export interface OtaOperationRoute {
 export type OtaDeliveryClaim =
   | { kind: "claimed"; route: OtaOperationRoute }
   | { kind: "delivered"; route: OtaOperationRoute }
+  | { kind: "workflow-completed"; route: OtaOperationRoute }
   | { kind: "acknowledged" | "busy" | "not-found" | "invalid-route" };
 
 export interface OtaOperationWorkflowRepositoryPort {

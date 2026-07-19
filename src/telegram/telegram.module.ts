@@ -55,6 +55,7 @@ import { StageCsvExportUseCase } from './application/stage-csv-export.use-case';
 import { CSV_TEMP_DIRECTORY, CSV_TEMP_FILE } from './application/ports/csv-temp-file.port';
 import { ADMIN_CLAIM_CREDENTIAL } from './domain/ports/admin-claim-credential.port';
 import { DIRECT_MESSENGER } from './domain/ports/direct-messenger.port';
+import { STARTUP_REPORT_MESSAGE_DELIVERY } from './application/ports/startup-report-message-delivery.port';
 import { CONFIG_CODEC } from './domain/ports/config-codec.port';
 import { INVITE_CODE_REPOSITORY } from './domain/ports/invite-code-repository.port';
 import { NOTIFICATION_PAUSE_REPOSITORY } from './domain/ports/notification-pause-repository.port';
@@ -131,6 +132,8 @@ import { WorkflowEntryCoordinator } from './interfaces/workflow-entry.coordinato
 import { WorkflowNavigationHandler } from './interfaces/workflow-navigation.handler';
 import { WorkflowNavigationPresenter } from './interfaces/workflow-navigation.presenter';
 import { TelegramStartupReportDeliveryAdapter } from './infrastructure/telegram-startup-report-delivery.adapter';
+import { TelegramOtaWorkflowBindingAdapter } from './infrastructure/telegram-ota-workflow-binding.adapter';
+import { TelegramStartupReportMessengerAdapter } from './infrastructure/telegram-startup-report-messenger.adapter';
 
 function resolveBotMode(): BotMode {
   if (process.env.BOT_MODE === 'mock') return 'mock';
@@ -211,6 +214,8 @@ const mode = resolveBotMode();
     UndoNonCriticalPauseUseCase,
     TelegramDirectMessenger,
     { provide: DIRECT_MESSENGER, useExisting: TelegramDirectMessenger },
+    TelegramStartupReportMessengerAdapter,
+    { provide: STARTUP_REPORT_MESSAGE_DELIVERY, useExisting: TelegramStartupReportMessengerAdapter },
     ClaimAdminUseCase,
     InviteUseCase,
     RegisterUserUseCase,
@@ -298,6 +303,7 @@ const mode = resolveBotMode();
     TelegramAdminAlertAdapter,
     TelegramOtaAdminNotificationAdapter,
     TelegramStartupReportDeliveryAdapter,
+    TelegramOtaWorkflowBindingAdapter,
     {
       provide: TELEGRAM_STARTUP_REPORT_DELIVERY,
       useExisting: TelegramStartupReportDeliveryAdapter,

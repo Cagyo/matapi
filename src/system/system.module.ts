@@ -7,6 +7,7 @@ import { GracefulShutdownService } from "./application/graceful-shutdown.service
 import { OtaAdminNotificationService } from "./application/ota-admin-notification.service";
 import { OtaOperationMonitorService } from "./application/ota-operation-monitor.service";
 import { StartupReportDeliveryService } from "./application/startup-report-delivery.service";
+import { OtaWorkflowBindingRegistry } from "./application/ota-workflow-binding.registry";
 import { UPDATE_CHECK_OPTIONS } from "./application/ports/update-check-options.port";
 import {
   UPDATE_DISCOVERY_CLOCK,
@@ -110,6 +111,7 @@ const timer: UpdateDiscoveryTimerPort = {
     OtaAdminNotificationService,
     OtaOperationMonitorService,
     StartupReportDeliveryService,
+    OtaWorkflowBindingRegistry,
     FsStartupReportStore,
     {
       provide: ConsumeStartupReportUseCase,
@@ -218,7 +220,6 @@ const timer: UpdateDiscoveryTimerPort = {
     SYSTEM_META_REPOSITORY,
     PROCESS_RESTARTER,
     OTA,
-    OTA_OPERATION_LAUNCHER,
     SYSTEM_DEPS,
     CLOCK_SYNC_PROBE,
     BootRecoveryService,
@@ -226,6 +227,7 @@ const timer: UpdateDiscoveryTimerPort = {
     CheckForUpdatesUseCase,
     OtaAdminNotificationService,
     StartupReportDeliveryService,
+    OtaWorkflowBindingRegistry,
   ],
 })
 export class SystemModule {}
