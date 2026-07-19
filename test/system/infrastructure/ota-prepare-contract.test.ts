@@ -77,6 +77,11 @@ describe("two-phase OTA dependency preparation assets", () => {
     );
     expect(preparer).toContain('YARN_ENABLE_IMMUTABLE_CACHE: "false"');
     expect(preparer).toContain('YARN_CHECKSUM_BEHAVIOR: "throw"');
+    expect(preparer).toContain('NODE_OPTIONS: "--max-old-space-size=256"');
+    expect(preparer).toContain('YARN_NETWORK_CONCURRENCY: "1"');
+    expect(preparer).toContain('YARN_TASK_POOL_CONCURRENCY: "1"');
+    expect(fetchUnit).toContain("MemoryMax=300M");
+    expect(buildUnit).toContain("MemoryMax=300M");
   });
 
   it("seals the public registry and strips inherited credentials, proxies, and config homes", () => {

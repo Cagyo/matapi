@@ -173,6 +173,9 @@ describe("two-phase OTA dependency preparation", () => {
           HOME: join(setup.runtimeRoot, OPERATION_ID, "tmp", "home"),
           YARN_ENABLE_NETWORK: "true",
           YARN_ENABLE_SCRIPTS: "false",
+          NODE_OPTIONS: "--max-old-space-size=256",
+          YARN_NETWORK_CONCURRENCY: "1",
+          YARN_TASK_POOL_CONCURRENCY: "1",
           YARN_ENABLE_IMMUTABLE_CACHE: "false",
           YARN_CHECKSUM_BEHAVIOR: "throw",
           YARN_NPM_REGISTRY_SERVER: "https://registry.npmjs.org",
@@ -199,6 +202,8 @@ describe("two-phase OTA dependency preparation", () => {
             "YARN_CHECKSUM_BEHAVIOR",
             "YARN_NPM_ALWAYS_AUTH",
             "YARN_NPM_REGISTRY_SERVER",
+            "YARN_NETWORK_CONCURRENCY",
+            "YARN_TASK_POOL_CONCURRENCY",
           ].sort(),
         );
         await mkdir(join(cwd, "node_modules"));
