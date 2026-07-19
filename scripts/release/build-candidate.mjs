@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { runCandidateBuild } from "./candidate-orchestrator.mjs";
+import { encodeCandidateBuildFailure } from "./candidate-build-failure.mjs";
 import {
   createNodeCandidateDependencies,
   readRootOwnedBuilderPolicy,
@@ -269,9 +270,10 @@ async function main() {
       createNodeCandidateDependencies(),
     );
     process.stdout.write(`CANDIDATE ${JSON.stringify(result.published)}\n`);
-  } catch {
-    process.stderr.write("BUILD_FAILED candidate-build\n");
-    process.exit(EXIT_BUILD_FAILED);
+  } catch (error) {
+    process.stderr.write("BUILD_FAILED ");
+    process.stderr.write(encodeCandidateBuildFailure(error));
+    process.exitCode = EXIT_BUILD_FAILED;
   }
 }
 

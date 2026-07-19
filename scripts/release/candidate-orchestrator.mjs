@@ -2,6 +2,10 @@ import { resolve, sep } from "node:path";
 
 import { encodeBuilderPolicy, parseBuilderPolicy } from "./builder-policy.mjs";
 import {
+  CandidateBuildFailure,
+  classifyCandidateBuildFailure,
+} from "./candidate-build-failure.mjs";
+import {
   encodeCandidateDescriptor,
   measureCandidateArchive,
 } from "./candidate-descriptor.mjs";
@@ -38,7 +42,7 @@ function validateInput(input) {
     !separated(sourceRoot, outputRoot) ||
     !separated(workRoot, outputRoot)
   ) {
-    throw new Error("Source, work, and output roots must be separate");
+    throw new CandidateBuildFailure("resolve-build-roots", "root-overlap");
   }
   const builderPolicy = parseBuilderPolicy(
     encodeBuilderPolicy(input.builderPolicy),
@@ -67,25 +71,58 @@ function commandEnvironment(root, sourceDateEpoch, network) {
   });
 }
 
+async function runAtStage(stage, operation, code = "operation-failed") {
+  try {
+    return await operation();
+  } catch (error) {
+    throw classifyCandidateBuildFailure(error, stage, code);
+  }
+}
+
+function validateCacheSnapshot(stage, snapshot) {
+  try {
+    if (
+      !SHA256.test(snapshot?.sha256) ||
+      computeCacheInventorySha256(snapshot.inventory) !== snapshot.sha256
+    ) {
+      throw new CandidateBuildFailure(stage, "cache-invalid");
+    }
+    return snapshot;
+  } catch (error) {
+    throw classifyCandidateBuildFailure(error, stage, "cache-invalid");
+  }
+}
+
 function runStep(dependencies, phase, command, args, cwd, env) {
-  return dependencies.run({ phase, command, args, cwd, env });
+  return runAtStage(phase, () =>
+    dependencies.run({ phase, command, args, cwd, env }),
+  );
 }
 
 export async function runCandidateBuild(rawInput, dependencies) {
-  let input = validateInput(rawInput);
-  const resolved = await dependencies.resolveBuildRoots({
-    sourceRoot: input.sourceRoot,
-    workRoot: input.workRoot,
-    outputRoot: input.outputRoot,
-  });
+  let input;
+  try {
+    input = validateInput(rawInput);
+  } catch (error) {
+    throw classifyCandidateBuildFailure(
+      error,
+      "validate-input",
+      "invalid-input",
+    );
+  }
+  const resolved = await runAtStage("resolve-build-roots", () =>
+    dependencies.resolveBuildRoots({
+      sourceRoot: input.sourceRoot,
+      workRoot: input.workRoot,
+      outputRoot: input.outputRoot,
+    }),
+  );
   if (
     !separated(resolved.sourceRoot, resolved.workRoot) ||
     !separated(resolved.sourceRoot, resolved.outputRoot) ||
     !separated(resolved.workRoot, resolved.outputRoot)
   ) {
-    throw new Error(
-      "Canonical source, work, and output roots must be separate",
-    );
+    throw new CandidateBuildFailure("resolve-build-roots", "root-overlap");
   }
   input = {
     ...input,
@@ -111,12 +148,14 @@ export async function runCandidateBuild(rawInput, dependencies) {
     false,
   );
 
-  await dependencies.prepareBuildCheckout({
-    sourceRoot: input.sourceRoot,
-    buildRoot,
-    commit: input.commit,
-    tag: input.tag,
-  });
+  await runAtStage("prepare-build-checkout", () =>
+    dependencies.prepareBuildCheckout({
+      sourceRoot: input.sourceRoot,
+      buildRoot,
+      commit: input.commit,
+      tag: input.tag,
+    }),
+  );
   await runStep(
     dependencies,
     "install-development",
@@ -142,7 +181,9 @@ export async function runCandidateBuild(rawInput, dependencies) {
     buildEnv,
   );
 
-  await dependencies.prepareAssembly({ buildRoot, assemblyRoot });
+  await runAtStage("prepare-assembly", () =>
+    dependencies.prepareAssembly({ buildRoot, assemblyRoot }),
+  );
   await runStep(
     dependencies,
     "pin-yarn",
@@ -165,17 +206,22 @@ export async function runCandidateBuild(rawInput, dependencies) {
     assemblyRoot,
     assemblyEnv,
   );
-  await dependencies.removeProductionProjection({ assemblyRoot });
-  await dependencies.sealReleaseConfig({ assemblyRoot });
-  const before = await dependencies.inspectCache(assemblyRoot);
-  if (
-    !SHA256.test(before?.sha256) ||
-    computeCacheInventorySha256(before.inventory) !== before.sha256
-  ) {
-    throw new Error("Invalid sealed cache inventory");
-  }
+  await runAtStage("remove-production-projection", () =>
+    dependencies.removeProductionProjection({ assemblyRoot }),
+  );
+  await runAtStage("seal-release-config", () =>
+    dependencies.sealReleaseConfig({ assemblyRoot }),
+  );
+  const before = validateCacheSnapshot(
+    "inspect-cache-before",
+    await runAtStage("inspect-cache-before", () =>
+      dependencies.inspectCache(assemblyRoot),
+    ),
+  );
 
-  await dependencies.prepareValidationCopy({ assemblyRoot, validationRoot });
+  await runAtStage("prepare-validation-copy", () =>
+    dependencies.prepareValidationCopy({ assemblyRoot, validationRoot }),
+  );
   await runStep(
     dependencies,
     "focus-production-offline",
@@ -190,43 +236,50 @@ export async function runCandidateBuild(rawInput, dependencies) {
     validationRoot,
     validationEnv,
   );
-  const after = await dependencies.inspectCache(validationRoot);
-  if (
-    !SHA256.test(after?.sha256) ||
-    computeCacheInventorySha256(after.inventory) !== after.sha256 ||
-    after.sha256 !== before.sha256
-  ) {
-    throw new Error(
-      "Production cache mutation detected during offline validation",
-    );
+  const after = validateCacheSnapshot(
+    "inspect-cache-after",
+    await runAtStage("inspect-cache-after", () =>
+      dependencies.inspectCache(validationRoot),
+    ),
+  );
+  if (after.sha256 !== before.sha256) {
+    throw new CandidateBuildFailure("inspect-cache-after", "cache-mutated");
   }
 
-  const generated = await dependencies.createArchive({
-    assemblyRoot,
-    sourceDateEpoch: input.sourceDateEpoch,
-    expectedCacheInventory: before.inventory,
-  });
-  const archive = measureCandidateArchive({
-    archiveBytes: generated.bytes,
-    inventory: generated.inventory,
-    sourceDateEpoch: input.sourceDateEpoch,
-  });
-  const descriptorBytes = encodeCandidateDescriptor({
-    version: input.version,
-    commit: input.commit,
-    sourceDateEpoch: input.sourceDateEpoch,
-    builderPolicy: input.builderPolicy,
-    cacheInventorySha256: before.sha256,
-    archive,
-  });
+  const generated = await runAtStage("create-archive", () =>
+    dependencies.createArchive({
+      assemblyRoot,
+      sourceDateEpoch: input.sourceDateEpoch,
+      expectedCacheInventory: before.inventory,
+    }),
+  );
+  const archive = await runAtStage("measure-archive", () =>
+    measureCandidateArchive({
+      archiveBytes: generated.bytes,
+      inventory: generated.inventory,
+      sourceDateEpoch: input.sourceDateEpoch,
+    }),
+  );
+  const descriptorBytes = await runAtStage("encode-descriptor", () =>
+    encodeCandidateDescriptor({
+      version: input.version,
+      commit: input.commit,
+      sourceDateEpoch: input.sourceDateEpoch,
+      builderPolicy: input.builderPolicy,
+      cacheInventorySha256: before.sha256,
+      archive,
+    }),
+  );
   const basename = `home-worker-${input.version}-${input.target}`;
-  const published = await dependencies.publish({
-    outputRoot: input.outputRoot,
-    archiveName: `${basename}.tar.gz`,
-    archiveBytes: generated.bytes,
-    descriptorName: `${basename}.candidate.json`,
-    descriptorBytes,
-    rootGuard: resolved.rootGuard,
-  });
+  const published = await runAtStage("publish-local", () =>
+    dependencies.publish({
+      outputRoot: input.outputRoot,
+      archiveName: `${basename}.tar.gz`,
+      archiveBytes: generated.bytes,
+      descriptorName: `${basename}.candidate.json`,
+      descriptorBytes,
+      rootGuard: resolved.rootGuard,
+    }),
+  );
   return Object.freeze({ archive, descriptorBytes, published });
 }

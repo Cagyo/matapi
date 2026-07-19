@@ -17,6 +17,10 @@ import { basename, dirname, join, resolve, sep } from "node:path";
 import { inspectCacheInventory } from "../../installer/ota-prepare.mjs";
 import { createDeterministicTarGz } from "./archive-writer.mjs";
 import {
+  CandidateBuildFailure,
+  classifyCandidateBuildFailure,
+} from "./candidate-build-failure.mjs";
+import {
   parseBuilderPolicy,
   validateBuilderPolicyOwnership,
 } from "./builder-policy.mjs";
@@ -103,12 +107,24 @@ function separated(left, right) {
 
 export function validateClonedTag({ tagKind, tagCommit, commit }) {
   if (tagKind !== "tag") {
-    throw new Error(
-      "Release reference must remain an annotated tag in the clone",
+    throw new CandidateBuildFailure(
+      "prepare-build-checkout",
+      "tag-not-annotated",
     );
   }
   if (tagCommit !== commit) {
-    throw new Error("Release tag must resolve to the exact requested commit");
+    throw new CandidateBuildFailure(
+      "prepare-build-checkout",
+      "tag-commit-mismatch",
+    );
+  }
+}
+
+async function checkoutOperation(code, operation) {
+  try {
+    return await operation();
+  } catch (error) {
+    throw classifyCandidateBuildFailure(error, "prepare-build-checkout", code);
   }
 }
 
@@ -485,7 +501,16 @@ export function createNodeCandidateDependencies() {
       await ensureRealDirectory(canonicalSource, "Source root");
       await ensureRealDirectory(canonicalOutput, "Candidate output root");
       const requestedWork = resolve(workRoot);
-      await absent(requestedWork, "Work root");
+      try {
+        await lstat(requestedWork);
+        throw new CandidateBuildFailure(
+          "resolve-build-roots",
+          "work-root-exists",
+        );
+      } catch (error) {
+        if (error instanceof CandidateBuildFailure) throw error;
+        if (error.code !== "ENOENT") throw error;
+      }
       const workParent = await realpath(dirname(requestedWork));
       const canonicalWork = join(workParent, basename(requestedWork));
       if (
@@ -525,50 +550,68 @@ export function createNodeCandidateDependencies() {
     async prepareBuildCheckout({ sourceRoot, buildRoot, commit, tag }) {
       await ensureRealDirectory(sourceRoot, "Source root");
       const workRoot = dirname(buildRoot);
-      await absent(workRoot, "Work root");
+      try {
+        await lstat(workRoot);
+        throw new CandidateBuildFailure(
+          "prepare-build-checkout",
+          "work-root-exists",
+        );
+      } catch (error) {
+        if (error instanceof CandidateBuildFailure) throw error;
+        if (error.code !== "ENOENT") throw error;
+      }
       const workParent = dirname(workRoot);
       if ((await realpath(workParent)) !== workParent) {
-        throw new Error("Work root parent must not traverse a symbolic link");
+        throw new CandidateBuildFailure(
+          "prepare-build-checkout",
+          "work-parent-alias",
+        );
       }
-      await mkdir(workRoot, { mode: 0o700 });
-      await runProcess(
-        "/usr/bin/git",
-        [
-          "clone",
-          "--no-hardlinks",
-          "--no-checkout",
-          "--",
-          sourceRoot,
-          buildRoot,
-        ],
-        {
-          phase: "clone-source",
-          cwd: dirname(buildRoot),
-          env: { PATH: "/usr/bin:/bin", LC_ALL: "C", TZ: "UTC" },
-        },
+      await checkoutOperation("work-root-create-failed", () =>
+        mkdir(workRoot, { mode: 0o700 }),
       );
-      await runProcess("/usr/bin/git", ["checkout", "--detach", commit], {
-        phase: "checkout-source",
-        cwd: buildRoot,
-        env: { PATH: "/usr/bin:/bin", LC_ALL: "C", TZ: "UTC" },
-      });
-      const tagKind = await runProcess(
-        "/usr/bin/git",
-        ["cat-file", "-t", `refs/tags/${tag}`],
-        {
+      await checkoutOperation("clone-source-failed", () =>
+        runProcess(
+          "/usr/bin/git",
+          [
+            "clone",
+            "--no-hardlinks",
+            "--no-checkout",
+            "--",
+            sourceRoot,
+            buildRoot,
+          ],
+          {
+            phase: "clone-source",
+            cwd: dirname(buildRoot),
+            env: { PATH: "/usr/bin:/bin", LC_ALL: "C", TZ: "UTC" },
+          },
+        ),
+      );
+      await checkoutOperation("checkout-source-failed", () =>
+        runProcess("/usr/bin/git", ["checkout", "--detach", commit], {
+          phase: "checkout-source",
+          cwd: buildRoot,
+          env: { PATH: "/usr/bin:/bin", LC_ALL: "C", TZ: "UTC" },
+        }),
+      );
+      const tagKind = await checkoutOperation("tag-kind-read-failed", () =>
+        runProcess("/usr/bin/git", ["cat-file", "-t", `refs/tags/${tag}`], {
           phase: "verify-tag-kind",
           cwd: buildRoot,
           env: { PATH: "/usr/bin:/bin", LC_ALL: "C", TZ: "UTC" },
-        },
+        }),
       );
-      const tagCommit = await runProcess(
-        "/usr/bin/git",
-        ["rev-parse", "--verify", `${tag}^{commit}`],
-        {
-          phase: "verify-tag-commit",
-          cwd: buildRoot,
-          env: { PATH: "/usr/bin:/bin", LC_ALL: "C", TZ: "UTC" },
-        },
+      const tagCommit = await checkoutOperation("tag-commit-read-failed", () =>
+        runProcess(
+          "/usr/bin/git",
+          ["rev-parse", "--verify", `${tag}^{commit}`],
+          {
+            phase: "verify-tag-commit",
+            cwd: buildRoot,
+            env: { PATH: "/usr/bin:/bin", LC_ALL: "C", TZ: "UTC" },
+          },
+        ),
       );
       validateClonedTag({ tagKind, tagCommit, commit });
     },

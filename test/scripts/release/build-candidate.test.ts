@@ -5,11 +5,42 @@ import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
 import { hostRefusalReasons } from "../../../scripts/release/build-candidate.mjs";
+import {
+  CandidateBuildFailure,
+  encodeCandidateBuildFailure,
+} from "../../../scripts/release/candidate-build-failure.mjs";
 
 const repositoryRoot = resolve(import.meta.dirname, "../../..");
 const cliPath = join(repositoryRoot, "scripts/release/build-candidate.mjs");
 
 describe("release candidate CLI", () => {
+  it("emits one canonical secret-free builder failure record", () => {
+    const failure = new CandidateBuildFailure(
+      "resolve-build-roots",
+      "work-root-exists",
+      { cause: new Error("SECRET /srv/private/source") },
+    );
+
+    const encoded = encodeCandidateBuildFailure(failure).toString("utf8");
+
+    expect(encoded).toBe(
+      '{"schemaVersion":1,"kind":"home-worker-candidate-build-failure","stage":"resolve-build-roots","code":"work-root-exists"}\n',
+    );
+    expect(encoded).not.toContain("SECRET");
+    expect(encoded).not.toContain("/srv/private/source");
+  });
+
+  it("downgrades a forged failure classification to the closed fallback", () => {
+    const forged = Object.assign(
+      Object.create(CandidateBuildFailure.prototype) as CandidateBuildFailure,
+      { stage: "SECRET-/srv/private", code: "attacker-controlled" },
+    );
+
+    expect(encodeCandidateBuildFailure(forged).toString("utf8")).toBe(
+      '{"schemaVersion":1,"kind":"home-worker-candidate-build-failure","stage":"candidate-build","code":"unclassified-failure"}\n',
+    );
+  });
+
   it.runIf(process.platform === "darwin")(
     "refuses a Linux ARM candidate from Darwin before source or output access",
     () => {
@@ -86,6 +117,7 @@ describe("release candidate CLI", () => {
     expect(source).not.toContain("RELEASE_HOST_PLATFORM");
     expect(source).not.toContain("RELEASE_HOST_ARCH");
     expect(source).not.toContain("RELEASE_NODE_MAJOR");
+    expect(source).not.toContain("process.exit(EXIT_BUILD_FAILED)");
   });
 
   it("registers the candidate command and ignores only its output directory", async () => {

@@ -157,9 +157,24 @@ describe("candidate build orchestration", () => {
     "create-archive",
   ])("emits no output when %s fails", async (phase) => {
     const { deps } = dependencies(phase);
-    await expect(runCandidateBuild(input(), deps)).rejects.toThrow(
-      `failed ${phase}`,
+    await expect(runCandidateBuild(input(), deps)).rejects.toMatchObject({
+      stage: phase,
+      code: "operation-failed",
+    });
+    expect(deps.publish).not.toHaveBeenCalled();
+  });
+
+  it("classifies canonical root resolution failures before work creation", async () => {
+    const { deps } = dependencies();
+    deps.resolveBuildRoots.mockRejectedValueOnce(
+      new Error("secret path /builder/private"),
     );
+
+    await expect(runCandidateBuild(input(), deps)).rejects.toMatchObject({
+      stage: "resolve-build-roots",
+      code: "operation-failed",
+    });
+    expect(deps.prepareBuildCheckout).not.toHaveBeenCalled();
     expect(deps.publish).not.toHaveBeenCalled();
   });
 
@@ -170,7 +185,10 @@ describe("candidate build orchestration", () => {
         { ...input(), workRoot: "/source/work", outputRoot: "/output" },
         deps,
       ),
-    ).rejects.toThrow(/separate/i);
+    ).rejects.toMatchObject({
+      stage: "resolve-build-roots",
+      code: "root-overlap",
+    });
     expect(deps.resolveBuildRoots).not.toHaveBeenCalled();
     expect(deps.prepareBuildCheckout).not.toHaveBeenCalled();
   });
@@ -191,10 +209,26 @@ describe("candidate build orchestration", () => {
         sha256: computeCacheInventorySha256(mutated),
       });
 
-    await expect(runCandidateBuild(input(), deps)).rejects.toThrow(
-      /cache mutation/i,
-    );
+    await expect(runCandidateBuild(input(), deps)).rejects.toMatchObject({
+      stage: "inspect-cache-after",
+      code: "cache-mutated",
+    });
     expect(deps.createArchive).not.toHaveBeenCalled();
+    expect(deps.publish).not.toHaveBeenCalled();
+  });
+
+  it("classifies malformed cache inventories at their inspection stage", async () => {
+    const { deps } = dependencies();
+    deps.inspectCache.mockReset();
+    deps.inspectCache.mockResolvedValueOnce({
+      inventory: [{ path: "../private.zip", size: 1, sha256: digest("x") }],
+      sha256: "a".repeat(64),
+    });
+
+    await expect(runCandidateBuild(input(), deps)).rejects.toMatchObject({
+      stage: "inspect-cache-before",
+      code: "cache-invalid",
+    });
     expect(deps.publish).not.toHaveBeenCalled();
   });
 

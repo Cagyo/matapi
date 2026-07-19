@@ -67,14 +67,24 @@ describe("node candidate dependencies", () => {
         tagCommit: "b".repeat(40),
         commit: "a".repeat(40),
       });
-    }).toThrow(/exact requested commit/i);
+    }).toThrow(
+      expect.objectContaining({
+        stage: "prepare-build-checkout",
+        code: "tag-commit-mismatch",
+      }),
+    );
     expect(() => {
       validateClonedTag({
         tagKind: "commit",
         tagCommit: "a".repeat(40),
         commit: "a".repeat(40),
       });
-    }).toThrow(/annotated tag/i);
+    }).toThrow(
+      expect.objectContaining({
+        stage: "prepare-build-checkout",
+        code: "tag-not-annotated",
+      }),
+    );
   });
 
   it("rejects canonical output aliases into the immutable source", async () => {
@@ -168,7 +178,28 @@ describe("node candidate dependencies", () => {
         commit: "a".repeat(40),
         tag: "v1.2.3",
       }),
-    ).rejects.toThrow(/work root already exists/i);
+    ).rejects.toMatchObject({
+      stage: "prepare-build-checkout",
+      code: "work-root-exists",
+    });
+  });
+
+  it("classifies a pre-existing candidate work root without exposing its path", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "candidate-existing-layout-"));
+    const sourceRoot = join(parent, "source");
+    const workRoot = join(parent, "work");
+    const outputRoot = join(parent, "output");
+    await mkdir(sourceRoot);
+    await mkdir(workRoot);
+    await mkdir(outputRoot);
+    const dependencies = createNodeCandidateDependencies();
+
+    await expect(
+      dependencies.resolveBuildRoots({ sourceRoot, workRoot, outputRoot }),
+    ).rejects.toMatchObject({
+      stage: "resolve-build-roots",
+      code: "work-root-exists",
+    });
   });
 
   it("assembles only immutable release inputs and omits updater-owned state", async () => {
