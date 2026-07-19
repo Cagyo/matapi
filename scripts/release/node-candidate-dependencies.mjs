@@ -18,10 +18,7 @@ import {
   CandidateBuildFailure,
   classifyCandidateBuildFailure,
 } from "./candidate-build-failure.mjs";
-import {
-  parseBuilderPolicy,
-  validateBuilderPolicyOwnership,
-} from "./builder-policy.mjs";
+import { parseBuilderPolicy } from "./builder-policy.mjs";
 import { bytewiseCompare } from "./release-policy.mjs";
 
 const RELEASE_FILES = Object.freeze([
@@ -340,10 +337,12 @@ async function writeTemporary(parent, name, bytes) {
   return path;
 }
 
-export async function readRootOwnedBuilderPolicy(path) {
+export async function readSourceBuilderPolicy(path) {
   const requested = resolve(path);
   const before = await lstat(requested, { bigint: true });
-  validateBuilderPolicyOwnership(before);
+  if (!before.isFile() || before.isSymbolicLink()) {
+    throw new Error("Source builder policy must be a regular file");
+  }
   const handle = await open(
     requested,
     constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),

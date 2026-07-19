@@ -9,7 +9,7 @@ import { runCandidateBuild } from "./candidate-orchestrator.mjs";
 import { encodeCandidateBuildFailure } from "./candidate-build-failure.mjs";
 import {
   createNodeCandidateDependencies,
-  readRootOwnedBuilderPolicy,
+  readSourceBuilderPolicy,
 } from "./node-candidate-dependencies.mjs";
 import { RELEASE_TARGETS, bytewiseCompare } from "./release-policy.mjs";
 
@@ -202,7 +202,7 @@ async function main() {
     packageJson = parsePackage(
       await readStableFile(resolve(sourceRoot, "package.json")),
     );
-    builderPolicy = await readRootOwnedBuilderPolicy(options["builder-policy"]);
+    builderPolicy = await readSourceBuilderPolicy(options["builder-policy"]);
   } catch {
     refuse(["preflight-failed"]);
   }
