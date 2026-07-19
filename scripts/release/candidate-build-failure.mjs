@@ -5,7 +5,6 @@ const STAGES = new Set([
   "install-development",
   "build",
   "prepare-assembly",
-  "pin-yarn",
   "seal-release-config",
   "create-archive",
   "measure-archive",

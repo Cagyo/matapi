@@ -252,6 +252,9 @@ describe("node candidate dependencies", () => {
     await expect(
       readFile(join(assemblyRoot, "scripts/update.sh"), "utf8"),
     ).resolves.toBe("scripts/update.sh\n");
+    await expect(
+      readFile(join(assemblyRoot, ".yarn/releases/yarn-4.13.0.cjs"), "utf8"),
+    ).resolves.toContain("Yarn");
     for (const denied of [
       "src/private.ts",
       "test/dev-only.ts",

@@ -112,7 +112,6 @@ describe("candidate build orchestration", () => {
       "install-development",
       "build",
       "prepare-assembly",
-      "pin-yarn",
       "seal-release-config",
       "create-archive",
       "publish",
@@ -157,7 +156,6 @@ describe("candidate build orchestration", () => {
   it.each([
     "install-development",
     "build",
-    "pin-yarn",
     "create-archive",
   ])("emits no output when %s fails", async (phase) => {
     const { deps } = dependencies(phase);

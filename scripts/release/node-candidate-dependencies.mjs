@@ -62,12 +62,6 @@ function allowedCommand(phase, env) {
     return [process.execPath, [runtime, "install", "--immutable"]];
   }
   if (phase === "build") return [process.execPath, [runtime, "build"]];
-  if (phase === "pin-yarn") {
-    return [
-      process.execPath,
-      [runtime, "set", "version", "4.13.0", "--yarn-path"],
-    ];
-  }
   return null;
 }
 
@@ -284,6 +278,15 @@ export async function prepareIsolatedCommandEnvironment(env) {
 
 async function provisionYarnRuntime(env) {
   const destination = join(dirname(env.HOME), YARN_RUNTIME_NAME);
+  try {
+    const existing = await lstat(destination);
+    if (!existing.isFile() || existing.isSymbolicLink()) {
+      throw new Error("Provisioned Yarn runtime path is unsafe");
+    }
+    await unlink(destination);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
   await copyClosedTree(PROVISIONED_YARN_RUNTIME, destination);
 }
 
@@ -650,6 +653,12 @@ export function createNodeCandidateDependencies() {
           if (path !== "migrations" || error.code !== "ENOENT") throw error;
         }
       }
+      const yarnRelease = join(
+        assemblyRoot,
+        ".yarn/releases/yarn-4.13.0.cjs",
+      );
+      await mkdir(dirname(yarnRelease), { recursive: true, mode: 0o755 });
+      await copyClosedTree(PROVISIONED_YARN_RUNTIME, yarnRelease);
     },
 
     async sealReleaseConfig({ assemblyRoot }) {

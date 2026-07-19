@@ -129,13 +129,7 @@ export async function runCandidateBuild(rawInput, dependencies) {
   const buildRoot = `${input.workRoot}/build`;
   const assemblyRoot = `${input.workRoot}/assembly`;
   const buildState = `${input.workRoot}/state/build`;
-  const assemblyState = `${input.workRoot}/state/assembly`;
   const buildEnv = commandEnvironment(buildState, input.sourceDateEpoch, true);
-  const assemblyEnv = commandEnvironment(
-    assemblyState,
-    input.sourceDateEpoch,
-    true,
-  );
 
   await runAtStage("prepare-build-checkout", () =>
     dependencies.prepareBuildCheckout({
@@ -167,20 +161,6 @@ export async function runCandidateBuild(rawInput, dependencies) {
 
   await runAtStage("prepare-assembly", () =>
     dependencies.prepareAssembly({ buildRoot, assemblyRoot }),
-  );
-  await runStep(
-    dependencies,
-    "pin-yarn",
-    process.execPath,
-    [
-      join(input.workRoot, "state/assembly", YARN_RUNTIME_NAME),
-      "set",
-      "version",
-      "4.13.0",
-      "--yarn-path",
-    ],
-    assemblyRoot,
-    assemblyEnv,
   );
   await runAtStage("seal-release-config", () =>
     dependencies.sealReleaseConfig({ assemblyRoot }),
