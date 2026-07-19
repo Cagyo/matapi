@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
+import { homedir } from "node:os";
 import {
   constants,
   link,
@@ -43,16 +44,33 @@ const RELEASE_YARN_POLICY = [
   "",
 ].join("\n");
 const MAX_COMMAND_OUTPUT = 4 * 1024 * 1024;
-const COREPACK_COMMAND = join(dirname(process.execPath), "corepack");
-const ALLOWED_COMMANDS = Object.freeze({
-  "install-development": [COREPACK_COMMAND, ["yarn", "install", "--immutable"]],
-  test: [COREPACK_COMMAND, ["yarn", "test"]],
-  build: [COREPACK_COMMAND, ["yarn", "build"]],
-  "pin-yarn": [
-    COREPACK_COMMAND,
-    ["yarn", "set", "version", "4.13.0", "--yarn-path"],
-  ],
-});
+const YARN_RUNTIME_NAME = "yarn-4.13.0.cjs";
+const PROVISIONED_YARN_RUNTIME = join(
+  process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"),
+  "node",
+  "corepack",
+  "v1",
+  "yarn",
+  "4.13.0",
+  "yarn.js",
+);
+
+function allowedCommand(phase, env) {
+  const runtime = join(dirname(env?.HOME ?? ""), YARN_RUNTIME_NAME);
+  if (!runtime.startsWith("/")) return null;
+  if (phase === "install-development") {
+    return [process.execPath, [runtime, "install", "--immutable"]];
+  }
+  if (phase === "test") return [process.execPath, [runtime, "test"]];
+  if (phase === "build") return [process.execPath, [runtime, "build"]];
+  if (phase === "pin-yarn") {
+    return [
+      process.execPath,
+      [runtime, "set", "version", "4.13.0", "--yarn-path"],
+    ];
+  }
+  return null;
+}
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -263,6 +281,11 @@ export async function prepareIsolatedCommandEnvironment(env) {
     await mkdir(path, { recursive: true, mode: 0o700 });
     await ensureRealDirectory(path, "Release command state path");
   }
+}
+
+async function provisionYarnRuntime(env) {
+  const destination = join(dirname(env.HOME), YARN_RUNTIME_NAME);
+  await copyClosedTree(PROVISIONED_YARN_RUNTIME, destination);
 }
 
 async function syncDirectory(path) {
@@ -661,7 +684,7 @@ export function createNodeCandidateDependencies() {
     },
 
     async run({ phase, command, args, cwd, env }) {
-      const allowed = ALLOWED_COMMANDS[phase];
+      const allowed = allowedCommand(phase, env);
       if (
         !allowed ||
         command !== allowed[0] ||
@@ -670,6 +693,7 @@ export function createNodeCandidateDependencies() {
         throw new Error(`Refusing unexpected release command: ${phase}`);
       }
       await prepareIsolatedCommandEnvironment(env);
+      await provisionYarnRuntime(env);
       await runProcess(command, args, { phase, cwd, env });
     },
 

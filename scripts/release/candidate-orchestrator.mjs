@@ -13,8 +13,8 @@ import {
 const VERSION = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
 const COMMIT = /^[0-9a-f]{40}$/u;
 const YARN_RUNTIME_PATH = ".yarn/releases/yarn-4.13.0.cjs";
+const YARN_RUNTIME_NAME = "yarn-4.13.0.cjs";
 const NODE_BIN_DIRECTORY = dirname(process.execPath);
-const COREPACK_COMMAND = join(NODE_BIN_DIRECTORY, "corepack");
 
 function separated(left, right) {
   return (
@@ -149,24 +149,24 @@ export async function runCandidateBuild(rawInput, dependencies) {
   await runStep(
     dependencies,
     "install-development",
-    COREPACK_COMMAND,
-    ["yarn", "install", "--immutable"],
+    process.execPath,
+    [join(input.workRoot, "state/build", YARN_RUNTIME_NAME), "install", "--immutable"],
     buildRoot,
     buildEnv,
   );
   await runStep(
     dependencies,
     "test",
-    COREPACK_COMMAND,
-    ["yarn", "test"],
+    process.execPath,
+    [join(input.workRoot, "state/build", YARN_RUNTIME_NAME), "test"],
     buildRoot,
     buildEnv,
   );
   await runStep(
     dependencies,
     "build",
-    COREPACK_COMMAND,
-    ["yarn", "build"],
+    process.execPath,
+    [join(input.workRoot, "state/build", YARN_RUNTIME_NAME), "build"],
     buildRoot,
     buildEnv,
   );
@@ -177,8 +177,14 @@ export async function runCandidateBuild(rawInput, dependencies) {
   await runStep(
     dependencies,
     "pin-yarn",
-    COREPACK_COMMAND,
-    ["yarn", "set", "version", "4.13.0", "--yarn-path"],
+    process.execPath,
+    [
+      join(input.workRoot, "state/assembly", YARN_RUNTIME_NAME),
+      "set",
+      "version",
+      "4.13.0",
+      "--yarn-path",
+    ],
     assemblyRoot,
     assemblyEnv,
   );

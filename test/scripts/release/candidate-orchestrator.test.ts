@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import { runCandidateBuild } from "../../../scripts/release/candidate-orchestrator.mjs";
@@ -127,7 +127,12 @@ describe("candidate build orchestration", () => {
     expect(deps.run).toHaveBeenNthCalledWith(
       1,
       expect.objectContaining({
-        command: `${dirname(process.execPath)}/corepack`,
+        command: process.execPath,
+        args: [
+          join("/work/a", "state/build", "yarn-4.13.0.cjs"),
+          "install",
+          "--immutable",
+        ],
         env: expect.objectContaining({
           PATH: `${dirname(process.execPath)}:/usr/bin:/bin`,
         }),
