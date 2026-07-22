@@ -17,9 +17,7 @@ export class ListFeaturesUseCase {
     @Inject(FEATURE_QUERY) private readonly features: FeatureQueryPort,
   ) {}
 
-  async execute(
-    _resolveDescription?: (key: string) => string,
-  ): Promise<FeatureStatus[]> {
+  async execute(): Promise<FeatureStatus[]> {
     const rows = await this.features.listAll();
     const byName = new Map(rows.map((row) => [row.name, row]));
     return FEATURE_CATALOG.map((entry) => {

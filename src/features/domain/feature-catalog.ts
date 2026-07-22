@@ -2,7 +2,7 @@
  * The fixed catalogue of toggleable features (spec 17). The `features` table
  * stores per-deployment `enabled` / `installed` state keyed by these names;
  * this constant is the source of truth for which names are valid and the
- * human-readable description shown by `/feature list`.
+ * locale description key used by interface adapters.
  */
 import catalog from '../../../config/feature-catalog.json';
 import {
@@ -16,8 +16,6 @@ export interface FeatureCatalogEntry {
   defaultEnabled?: boolean;
 }
 
-export type FeatureDescriptionResolver = (key: string) => string;
-
 export const FEATURE_CATALOG = validateFeatureCatalog(catalog);
 
 export type FeatureName = ManageableFeatureName;
@@ -25,15 +23,6 @@ export type FeatureName = ManageableFeatureName;
 /** Narrow an arbitrary string to a known catalogue feature name. */
 export function isKnownFeature(name: string): name is FeatureName {
   return FEATURE_CATALOG.some((entry) => entry.name === name);
-}
-
-/** Resolve the catalogue description for a known feature name. */
-export function featureDescription(
-  name: FeatureName,
-  resolveDescription: FeatureDescriptionResolver,
-): string {
-  const entry = FEATURE_CATALOG.find((feature) => feature.name === name)!;
-  return resolveDescription(entry.descriptionKey);
 }
 
 function validateFeatureCatalog(value: unknown): readonly FeatureCatalogEntry[] {
