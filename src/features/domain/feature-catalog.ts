@@ -5,26 +5,22 @@
  * human-readable description shown by `/feature list`.
  */
 import catalog from '../../../config/feature-catalog.json';
+import {
+  isManageableFeature,
+  type ManageableFeatureName,
+} from './manageable-feature';
 
-export type FeatureCatalogEntry =
-  | {
-      name: string;
-      description: string;
-      descriptionKey?: never;
-      defaultEnabled?: boolean;
-    }
-  | {
-      name: string;
-      description?: never;
-      descriptionKey: string;
-      defaultEnabled?: boolean;
-    };
+export interface FeatureCatalogEntry {
+  name: ManageableFeatureName;
+  descriptionKey: string;
+  defaultEnabled?: boolean;
+}
 
 export type FeatureDescriptionResolver = (key: string) => string;
 
-export const FEATURE_CATALOG = catalog as readonly FeatureCatalogEntry[];
+export const FEATURE_CATALOG = validateFeatureCatalog(catalog);
 
-export type FeatureName = (typeof FEATURE_CATALOG)[number]['name'];
+export type FeatureName = ManageableFeatureName;
 
 /** Narrow an arbitrary string to a known catalogue feature name. */
 export function isKnownFeature(name: string): name is FeatureName {
@@ -37,5 +33,38 @@ export function featureDescription(
   resolveDescription: FeatureDescriptionResolver,
 ): string {
   const entry = FEATURE_CATALOG.find((feature) => feature.name === name)!;
-  return entry.description ?? resolveDescription(entry.descriptionKey);
+  return resolveDescription(entry.descriptionKey);
+}
+
+function validateFeatureCatalog(value: unknown): readonly FeatureCatalogEntry[] {
+  if (!Array.isArray(value)) throw new RangeError('Invalid feature catalog');
+
+  const seen = new Set<ManageableFeatureName>();
+  const entries: FeatureCatalogEntry[] = [];
+  for (const entry of value) {
+    if (
+      !isRecord(entry) ||
+      !isManageableFeature(entry.name) ||
+      typeof entry.descriptionKey !== 'string' ||
+      entry.descriptionKey.trim() === '' ||
+      (entry.defaultEnabled !== undefined &&
+        typeof entry.defaultEnabled !== 'boolean') ||
+      seen.has(entry.name)
+    ) {
+      throw new RangeError('Invalid feature catalog');
+    }
+    seen.add(entry.name);
+    entries.push({
+      name: entry.name,
+      descriptionKey: entry.descriptionKey,
+      ...(entry.defaultEnabled === undefined
+        ? {}
+        : { defaultEnabled: entry.defaultEnabled }),
+    });
+  }
+  return entries;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

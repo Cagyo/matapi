@@ -36,7 +36,7 @@ describe('ListFeaturesUseCase', () => {
     expect(result.every((f) => !f.enabled && !f.installed)).toBe(true);
     expect(result.find((f) => f.name === 'zigbee')).toMatchObject({
       name: 'zigbee',
-      description: 'Zigbee2MQTT gateway',
+      description: 'zigbee',
       enabled: false,
       installed: false,
     });
