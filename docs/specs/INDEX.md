@@ -49,7 +49,7 @@ Use this file to decide **which** `docs/*.md` to load. Each doc declares its own
 | [14](14-bot-cmd-camera.md) | `/camera` | Snapshot, record, on/off |
 | [15](15-bot-cmd-gdrive.md) | `/gdrive status` | Drive quota / sync status report |
 | [16](16-bot-cmd-config-yaml.md) | `/export_config` `/import_config` | YAML round-trip of sensor config |
-| [17](17-bot-cmd-feature.md) | `/feature enable\|disable` | Feature-flag toggles |
+| [17](17-bot-cmd-feature.md) | `/feature install\|enable\|disable` | Feature installation and runtime gates |
 | [18](18-bot-cmd-system-update.md) | `/system_update` | OS-level apt update flow |
 | [19](19-bot-notifications.md) | Notifications | Severity routing, aggregation, quiet hours |
 | [20](20-camera.md) | Camera Module | Motion daemon control, segments |

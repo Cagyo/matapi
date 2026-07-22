@@ -82,7 +82,7 @@ After MVP runs reliably for 2+ weeks.
 - Google Drive sync (rclone) + bidirectional cleanup
 - Database backup to Google Drive (daily)
 - YAML import/export for config (with schema validation)
-- Feature toggle system (install-time selection; bot only toggles pre-installed features)
+- Feature management (install-time selection plus guarded Telegram install/enable/disable)
 - Notification preferences (mute, quiet hours, debounce)
 
 ### Phase 2 — Extended Features
@@ -795,6 +795,7 @@ No time window, no claim code. Simple and sufficient for a locally deployed syst
 | `/update` | OTA app update (git pull + yarn install + pm2 restart) |
 | `/rollback` | Revert to previous version |
 | `/system_update` | Update system deps (shows diff, requires confirmation) |
+| `/feature install <n>` | Install an available feature through the fixed privileged helper |
 | `/feature enable <n>` | Enable a pre-installed feature |
 | `/feature disable <n>` | Disable feature |
 | `/health` | System health report |
@@ -1340,7 +1341,7 @@ Replaces terminal prompts with a web interface:
 2. Starts a standalone lightweight HTTP server on `:3000` (not NestJS — separate 50-line script)
 3. Wizard steps:
    - Step 1: Telegram bot token (validates via Telegram `getMe` API)
-   - Step 2: Feature selection checkboxes (Digital, UART, Zigbee, Motion, Neobox, 4G)
+   - Step 2: Feature selection checkboxes (Digital, UART, Zigbee, Motion, RTSP)
    - Step 3: Feature-specific config (only for selected features — e.g., rclone auth for Motion)
 4. Wizard writes `.env` + `features.json`, triggers feature dep installation
 5. Wizard starts NestJS worker, then shuts itself down
@@ -1348,9 +1349,7 @@ Replaces terminal prompts with a web interface:
 
 ### 16.3 Feature Installation
 
-Each feature maps to system deps and npm packages. Features are installed at install-time (via wizard or install script). The bot command `/feature enable/disable` only toggles features whose deps are already installed — it does not install deps at runtime.
-
-To install new feature deps after initial setup: re-run the install script with updated feature selection, or SSH in and run the feature install function manually.
+Each supported feature maps to fixed system dependencies. Features can be installed during setup or later through `/feature install`, which uses the root-owned allowlisted helper. `/feature enable` and `/feature disable` change runtime feature state but never run package installation. See [Telegram Feature Management Design](../superpowers/specs/2026-07-22-telegram-feature-management-design.md).
 
 ```bash
 install_feature() {

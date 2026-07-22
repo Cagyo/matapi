@@ -153,7 +153,7 @@ All user commands plus:
 /update — Update worker
 /rollback — Revert update
 /system_update — Update system deps
-/feature enable|disable — Toggle features
+/feature install|enable|disable — Manage features
 /gdrive status — Drive sync status
 /camera enable|disable — Motion daemon
 /restart — Restart worker

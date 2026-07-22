@@ -261,9 +261,9 @@ Standalone lightweight HTTP server (not NestJS):
 
 1. Install script runs unattended (no prompts)
 2. Starts `scripts/setup-wizard/index.js` on loopback-only `127.0.0.1:3000`
-3. Wizard: bot token → feature selection → feature config
+3. Wizard: bot token → supported feature selection → feature config
 4. Generates `CLAIM_ADMIN_TOKEN`, writes it only to the mode-`0600` `.env`, and writes `features.json`
-5. Triggers feature dep installation per selection
+5. Triggers feature dependency installation per selection, then atomically rewrites `features.json.enabled` to contain only verified successes
 6. Starts NestJS worker, shuts itself down
 7. Final page shows `/claim_admin <claim-token>` once; the installer never reads or prints the token
 
@@ -334,4 +334,4 @@ EOF
 }
 ```
 
-Bot `/feature enable/disable` only toggles pre-installed features. Does not install deps at runtime.
+The initial installer and the runtime `/feature install` workflow use the same fixed per-feature routines. Runtime installation is allowed only through the root-owned, allowlisted helper defined in [the Telegram feature-management design](../superpowers/specs/2026-07-22-telegram-feature-management-design.md). `/feature enable` and `/feature disable` never run package installation.
