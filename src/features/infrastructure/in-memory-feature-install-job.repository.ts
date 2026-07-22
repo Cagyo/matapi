@@ -1,5 +1,6 @@
 import { FeatureInstallBusyError } from '../domain/errors/feature-install-busy.error';
 import { FeatureStateChangedError } from '../domain/errors/feature-state-changed.error';
+import type { Feature } from '../domain/feature.entity';
 import type {
   CreateFeatureInstallJob,
   FeatureAttentionReason,
@@ -13,35 +14,38 @@ import type { FeatureRepositoryPort } from '../domain/ports/feature-repository.p
 /** In-memory `FeatureInstallJobRepositoryPort` for use-case tests and mock mode. */
 export class InMemoryFeatureInstallJobRepository implements FeatureInstallJobRepositoryPort {
   private readonly jobs = new Map<string, FeatureInstallJob>();
+  private stateChanges: Promise<void> = Promise.resolve();
 
   constructor(private readonly features: FeatureRepositoryPort) {}
 
   async createQueued(input: CreateFeatureInstallJob): Promise<FeatureInstallJob> {
-    const feature = await this.features.findByName(input.feature);
-    if (!feature
-      || feature.installed !== input.expected.installed
-      || feature.enabled !== input.expected.enabled) {
-      throw new FeatureStateChangedError(input.feature);
-    }
-    const active = await this.findActive();
-    if (active) throw new FeatureInstallBusyError(active.feature);
-    const job: FeatureInstallJob = {
-      id: input.id,
-      feature: input.feature,
-      status: 'queued',
-      activeSlot: 1,
-      requestedByUserId: input.requestedByUserId,
-      requestedInChatId: input.requestedInChatId,
-      workflowReceiptId: input.workflowReceiptId,
-      previousInstalled: feature.installed,
-      previousEnabled: feature.enabled,
-      restartScope: null,
-      failureCode: null,
-      createdAt: input.now,
-      updatedAt: input.now,
-    };
-    this.jobs.set(job.id, job);
-    return { ...job };
+    return this.serialize(async () => {
+      const feature = await this.features.findByName(input.feature);
+      if (!feature
+        || feature.installed !== input.expected.installed
+        || feature.enabled !== input.expected.enabled) {
+        throw new FeatureStateChangedError(input.feature);
+      }
+      const active = await this.findActive();
+      if (active) throw new FeatureInstallBusyError(active.feature);
+      const job: FeatureInstallJob = {
+        id: input.id,
+        feature: input.feature,
+        status: 'queued',
+        activeSlot: 1,
+        requestedByUserId: input.requestedByUserId,
+        requestedInChatId: input.requestedInChatId,
+        workflowReceiptId: input.workflowReceiptId,
+        previousInstalled: feature.installed,
+        previousEnabled: feature.enabled,
+        restartScope: null,
+        failureCode: null,
+        createdAt: input.now,
+        updatedAt: input.now,
+      };
+      this.jobs.set(job.id, job);
+      return { ...job };
+    });
   }
 
   async findById(id: string): Promise<FeatureInstallJob | null> {
@@ -63,27 +67,30 @@ export class InMemoryFeatureInstallJobRepository implements FeatureInstallJobRep
   }
 
   async markRunning(id: string, now: Date): Promise<FeatureInstallJob> {
-    const job = this.requireActive(id, false);
-    job.status = 'running';
-    job.updatedAt = now;
-    return { ...job };
+    return this.serialize(async () => {
+      const job = this.requireActive(id, true);
+      job.status = 'running';
+      job.updatedAt = now;
+      return { ...job };
+    });
   }
 
   async terminalizeSuccess(input: { id: string; restartScope: RestartScope; now: Date }): Promise<FeatureInstallJob> {
-    const job = this.requireActive(input.id, false);
-    const current = await this.requireFeature(job.feature);
-    await this.features.setVerified({ name: job.feature, installed: true, attentionReason: null });
-    await this.features.compareAndSetEnabled({
-      name: job.feature,
-      expected: { installed: true, enabled: current.enabled, attentionReason: null },
-      enabled: true,
+    return this.serialize(async () => {
+      const job = this.requireActive(input.id, false);
+      const current = await this.requireFeature(job.feature);
+      await this.applyFeatureState(job.feature, current, {
+        installed: true,
+        enabled: true,
+        attentionReason: null,
+      });
+      job.status = 'succeeded';
+      job.activeSlot = null;
+      job.restartScope = input.restartScope;
+      job.failureCode = null;
+      job.updatedAt = input.now;
+      return { ...job };
     });
-    job.status = 'succeeded';
-    job.activeSlot = null;
-    job.restartScope = input.restartScope;
-    job.failureCode = null;
-    job.updatedAt = input.now;
-    return { ...job };
   }
 
   async terminalizeFailure(input: {
@@ -93,32 +100,28 @@ export class InMemoryFeatureInstallJobRepository implements FeatureInstallJobRep
     preservePreviousState: boolean;
     now: Date;
   }): Promise<FeatureInstallJob> {
-    const job = this.requireActive(input.id, true);
-    if (input.preservePreviousState) {
-      const current = await this.requireFeature(job.feature);
-      await this.features.setVerified({
-        name: job.feature,
-        installed: job.previousInstalled,
-        attentionReason: input.attentionReason,
-      });
-      await this.features.compareAndSetEnabled({
-        name: job.feature,
-        expected: {
+    return this.serialize(async () => {
+      const job = this.requireActive(input.id, true);
+      if (input.preservePreviousState) {
+        const current = await this.requireFeature(job.feature);
+        await this.applyFeatureState(job.feature, current, {
           installed: job.previousInstalled,
-          enabled: current.enabled,
+          enabled: job.previousEnabled,
           attentionReason: input.attentionReason,
-        },
-        enabled: job.previousEnabled,
-      });
-    } else {
-      await this.features.setAttention(job.feature, input.attentionReason);
-    }
-    job.status = 'failed';
-    job.activeSlot = null;
-    job.restartScope = null;
-    job.failureCode = input.failureCode;
-    job.updatedAt = input.now;
-    return { ...job };
+        });
+      } else {
+        const updated = await this.features.setAttention(job.feature, input.attentionReason);
+        if (updated.attentionReason !== input.attentionReason) {
+          throw new RangeError(`Feature '${job.feature}' attention state changed before terminal failure`);
+        }
+      }
+      job.status = 'failed';
+      job.activeSlot = null;
+      job.restartScope = null;
+      job.failureCode = input.failureCode;
+      job.updatedAt = input.now;
+      return { ...job };
+    });
   }
 
   private requireActive(id: string, allowQueued: boolean): FeatureInstallJob {
@@ -133,5 +136,50 @@ export class InMemoryFeatureInstallJobRepository implements FeatureInstallJobRep
     const feature = await this.features.findByName(name);
     if (!feature) throw new RangeError(`Feature '${name}' is missing`);
     return feature;
+  }
+
+  private async applyFeatureState(
+    name: FeatureInstallJob['feature'],
+    previous: Feature,
+    desired: { installed: boolean; enabled: boolean; attentionReason: FeatureAttentionReason | null },
+  ): Promise<void> {
+    let verified = false;
+    try {
+      await this.features.setVerified({
+        name,
+        installed: desired.installed,
+        attentionReason: desired.attentionReason,
+      });
+      verified = true;
+      const updated = await this.features.compareAndSetEnabled({
+        name,
+        expected: {
+          installed: desired.installed,
+          enabled: previous.enabled,
+          attentionReason: desired.attentionReason,
+        },
+        enabled: desired.enabled,
+      });
+      if (updated
+        && updated.installed === desired.installed
+        && updated.enabled === desired.enabled
+        && updated.attentionReason === desired.attentionReason) return;
+      throw new RangeError(`Feature '${name}' state changed before terminalization`);
+    } catch (error) {
+      if (verified) {
+        await this.features.setVerified({
+          name,
+          installed: previous.installed,
+          attentionReason: previous.attentionReason,
+        });
+      }
+      throw error;
+    }
+  }
+
+  private serialize<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.stateChanges.then(operation, operation);
+    this.stateChanges = result.then(() => undefined, () => undefined);
+    return result;
   }
 }

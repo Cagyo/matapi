@@ -3,6 +3,7 @@ import { asc } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../database/database.module';
 import { features } from '../../database/schema';
 import { Feature } from '../domain/feature.entity';
+import type { FeatureAttentionReason } from '../domain/manageable-feature';
 import { FeatureQueryPort } from '../domain/ports/feature-query.port';
 
 type FeatureRow = typeof features.$inferSelect;
@@ -28,6 +29,6 @@ function toFeature(row: FeatureRow): Feature {
     enabled: row.enabled ?? false,
     installed: row.installed ?? false,
     config: (row.config as Record<string, unknown> | null) ?? null,
-    attentionReason: null,
+    attentionReason: row.attentionReason as FeatureAttentionReason | null,
   };
 }
