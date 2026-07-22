@@ -1,4 +1,5 @@
 import { Feature } from '../feature.entity';
+import type { FeatureAttentionReason, ManageableFeatureName } from '../manageable-feature';
 
 export const FEATURE_REPOSITORY = Symbol('FEATURE_REPOSITORY');
 
@@ -16,4 +17,22 @@ export interface FeatureRepositoryPort {
    * row. Rows are seeded at install time; this never creates a row.
    */
   setEnabled(name: string, enabled: boolean): Promise<Feature>;
+
+  compareAndSetEnabled(input: {
+    name: ManageableFeatureName;
+    expected: {
+      installed: boolean;
+      enabled: boolean;
+      attentionReason: FeatureAttentionReason | null;
+    };
+    enabled: boolean;
+  }): Promise<Feature | null>;
+
+  setVerified(input: {
+    name: ManageableFeatureName;
+    installed: boolean;
+    attentionReason: FeatureAttentionReason | null;
+  }): Promise<Feature>;
+
+  setAttention(name: ManageableFeatureName, reason: FeatureAttentionReason | null): Promise<Feature>;
 }

@@ -1,4 +1,5 @@
-import { sqliteTable, text, integer, index, primaryKey, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import { sql } from 'drizzle-orm';
+import { check, sqliteTable, text, integer, index, primaryKey, uniqueIndex } from 'drizzle-orm/sqlite-core';
 import { DEFAULT_LOCALE } from '../telegram/domain/locale';
 import type { LiveSourceSettings } from '../camera/domain/live-source.entity';
 
@@ -241,7 +242,38 @@ export const features = sqliteTable('features', {
   enabled: integer('enabled', { mode: 'boolean' }).default(false),
   installed: integer('installed', { mode: 'boolean' }).default(false),
   config: text('config', { mode: 'json' }),
+  attentionReason: text('attention_reason'),
 });
+
+export const featureInstallJobs = sqliteTable(
+  'feature_install_jobs',
+  {
+    id: text('id').primaryKey(),
+    featureName: text('feature_name').notNull().references(() => features.name),
+    status: text('status').notNull(),
+    activeSlot: integer('active_slot'),
+    requestedByUserId: integer('requested_by_user_id').notNull(),
+    requestedInChatId: integer('requested_in_chat_id').notNull(),
+    workflowReceiptId: text('workflow_receipt_id').notNull(),
+    previousInstalled: integer('previous_installed', { mode: 'boolean' }).notNull(),
+    previousEnabled: integer('previous_enabled', { mode: 'boolean' }).notNull(),
+    restartScope: text('restart_scope'),
+    failureCode: text('failure_code'),
+    createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+  },
+  (table) => [
+    uniqueIndex('idx_feature_install_jobs_active_slot').on(table.activeSlot),
+    index('idx_feature_install_jobs_feature_time').on(table.featureName, table.createdAt),
+    index('idx_feature_install_jobs_receipt').on(table.workflowReceiptId),
+    check('feature_install_jobs_status_check', sql`${table.status} in ('queued', 'running', 'succeeded', 'failed')`),
+    check('feature_install_jobs_active_slot_check', sql`(
+      (${table.status} in ('queued', 'running') and ${table.activeSlot} = 1)
+      or (${table.status} in ('succeeded', 'failed') and ${table.activeSlot} is null)
+    )`),
+    check('feature_install_jobs_restart_scope_check', sql`${table.restartScope} is null or ${table.restartScope} in ('worker', 'supervisor', 'host')`),
+  ],
+);
 
 // ─── System Metadata ───
 export const systemMeta = sqliteTable('system_meta', {
