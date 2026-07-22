@@ -1,10 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
-import {
-  featureDescription,
-  FEATURE_CATALOG,
-  type FeatureDescriptionResolver,
-} from '../domain/feature-catalog';
-import { FeatureStatus } from '../domain/feature-status';
+import { FEATURE_CATALOG } from '../domain/feature-catalog';
+import { deriveFeatureStatus, FeatureStatus } from '../domain/feature-status';
 import {
   FEATURE_QUERY,
   FeatureQueryPort,
@@ -22,18 +18,19 @@ export class ListFeaturesUseCase {
   ) {}
 
   async execute(
-    resolveDescription: FeatureDescriptionResolver = (key) => key,
+    _resolveDescription?: (key: string) => string,
   ): Promise<FeatureStatus[]> {
     const rows = await this.features.listAll();
     const byName = new Map(rows.map((row) => [row.name, row]));
     return FEATURE_CATALOG.map((entry) => {
       const row = byName.get(entry.name);
-      return {
+      return deriveFeatureStatus({
         name: entry.name,
-        description: featureDescription(entry.name, resolveDescription),
         enabled: row?.enabled ?? false,
         installed: row?.installed ?? false,
-      };
+        config: row?.config ?? null,
+        attentionReason: row?.attentionReason ?? null,
+      }, null);
     });
   }
 }

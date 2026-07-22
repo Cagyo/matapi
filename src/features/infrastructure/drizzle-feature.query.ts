@@ -28,5 +28,6 @@ function toFeature(row: FeatureRow): Feature {
     enabled: row.enabled ?? false,
     installed: row.installed ?? false,
     config: (row.config as Record<string, unknown> | null) ?? null,
+    attentionReason: null,
   };
 }
