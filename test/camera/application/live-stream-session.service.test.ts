@@ -52,6 +52,39 @@ describe('LiveStreamSessionService', () => {
     expect(gateway.startCalls).toHaveLength(1);
   });
 
+  it('settles a cancelled replacement and its joiner after deferred readiness', async () => {
+    let release!: () => void;
+    const availability: FeatureAvailabilityPort = {
+      awaitInitialVerification: vi.fn(), inspect: vi.fn(),
+      requireReady: vi.fn()
+        .mockResolvedValueOnce(undefined)
+        .mockImplementationOnce(() => new Promise<void>((resolve) => { release = resolve; }))
+        .mockResolvedValue(undefined),
+    };
+    const gateway = new DeferredGateway();
+    const service = createService({ gateway, availability });
+    const first = service.open(source('front'), 1);
+    await vi.waitFor(() => expect(gateway.startCalls).toHaveLength(1));
+    const replacement = service.open(source('garden'), 2);
+    gateway.resolveStart();
+    await expect(first).rejects.toMatchObject({ code: 'LIVE_STREAM_UNAVAILABLE' });
+    await vi.waitFor(() => expect(availability.requireReady).toHaveBeenCalledTimes(2));
+    const joiner = service.open(source('garden'), 3);
+    await service.stop(0);
+    release();
+
+    await expect(Promise.allSettled([replacement, joiner])).resolves.toEqual([
+      expect.objectContaining({ status: 'rejected' }),
+      expect.objectContaining({ status: 'rejected' }),
+    ]);
+    expect(gateway.startCalls).toHaveLength(1);
+
+    const later = service.open(source('later'), 4);
+    await vi.waitFor(() => expect(gateway.startCalls).toHaveLength(2));
+    gateway.resolveStart();
+    await expect(later).resolves.toMatchObject({ cameraName: 'later' });
+  });
+
   it('starts the full session deadline only after tunnel readiness succeeds', async () => {
     vi.useFakeTimers();
     const clock = new FakeMonotonicClock(1_000);

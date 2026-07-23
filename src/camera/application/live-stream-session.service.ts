@@ -434,7 +434,7 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     if (pending.cancelled || this.pending !== pending) {
-      deferred.reject(new LiveStreamUnavailableError());
+      this.discardPending(pending);
       return;
     }
 
@@ -934,6 +934,13 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
 
   private rejectPending(pending: PendingOpen): void {
     this.rejectRequests(pending.requests);
+  }
+
+  /** Settles every waiter associated with an abandoned preflight atomically. */
+  private discardPending(pending: PendingOpen): void {
+    if (this.pending === pending) this.pending = undefined;
+    this.rejectPending(pending);
+    this.rejectReplacement(pending);
   }
 
   private rejectRequests(
