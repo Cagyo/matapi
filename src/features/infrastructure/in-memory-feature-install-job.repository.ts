@@ -68,7 +68,7 @@ export class InMemoryFeatureInstallJobRepository implements FeatureInstallJobRep
 
   async markRunning(id: string, now: Date): Promise<FeatureInstallJob> {
     return this.serialize(async () => {
-      const job = this.requireActive(id, true);
+      const job = this.requireQueued(id);
       job.status = 'running';
       job.updatedAt = now;
       return { ...job };
@@ -127,6 +127,14 @@ export class InMemoryFeatureInstallJobRepository implements FeatureInstallJobRep
   private requireActive(id: string, allowQueued: boolean): FeatureInstallJob {
     const job = this.jobs.get(id);
     if (!job || job.activeSlot !== 1 || (job.status !== 'running' && !(allowQueued && job.status === 'queued'))) {
+      throw new RangeError(`Install job '${id}' is not active`);
+    }
+    return job;
+  }
+
+  private requireQueued(id: string): FeatureInstallJob {
+    const job = this.jobs.get(id);
+    if (!job || job.activeSlot !== 1 || job.status !== 'queued') {
       throw new RangeError(`Install job '${id}' is not active`);
     }
     return job;

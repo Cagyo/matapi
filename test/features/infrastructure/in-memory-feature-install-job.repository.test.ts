@@ -21,6 +21,23 @@ describe('InMemoryFeatureInstallJobRepository', () => {
     expect(await jobs.findActive()).toMatchObject({ status: 'queued', activeSlot: 1 });
   });
 
+  it('rejects marking an already running job as running without updating it', async () => {
+    const features = new InMemoryFeatureRepository([feature('motion')]);
+    const jobs = new InMemoryFeatureInstallJobRepository(features);
+    const queued = await create(jobs, 'abcdefghijklmnop', 'motion');
+    const runningAt = new Date('2030-01-02T03:05:05.000Z');
+    const repeatedAt = new Date('2030-01-02T03:06:05.000Z');
+
+    await jobs.markRunning(queued.id, runningAt);
+
+    await expect(jobs.markRunning(queued.id, repeatedAt)).rejects.toThrow("Install job 'abcdefghijklmnop' is not active");
+    await expect(jobs.findById(queued.id)).resolves.toMatchObject({
+      status: 'running',
+      activeSlot: 1,
+      updatedAt: runningAt,
+    });
+  });
+
   it('keeps a running job active and restores the feature when success cannot enable it', async () => {
     const features = new CompareAndSetFailureFeatureRepository(feature('motion'));
     const jobs = new InMemoryFeatureInstallJobRepository(features);
