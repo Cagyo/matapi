@@ -691,6 +691,12 @@ const ukCatalog = {
     },
   },
   feature: {
+    stale: {
+      disabled: (name: string) => `${name} вимкнено.`,
+      attention: (name: string) => `${name} потребує уваги.`,
+      installing: (name: string) => `${name} ще встановлюється.`,
+      unavailable: (name: string) => `${name} недоступно.`,
+    },
     usage: '❌ Використання: /feature enable|disable|list [назва_можливості]',
     listHeader: '🔧 Можливості',
     listLine(f: FeatureStatus): string {

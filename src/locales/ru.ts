@@ -691,6 +691,12 @@ const ruCatalog = {
     },
   },
   feature: {
+    stale: {
+      disabled: (name: string) => `${name} отключена.`,
+      attention: (name: string) => `${name} требует внимания.`,
+      installing: (name: string) => `${name} ещё устанавливается.`,
+      unavailable: (name: string) => `${name} недоступна.`,
+    },
     usage: '❌ Использование: /feature enable|disable|list [имя_функции]',
     listHeader: '🔧 Дополнительные функции',
     listLine(f: FeatureStatus): string {

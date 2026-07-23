@@ -1,4 +1,4 @@
-import { Injectable, Logger, Optional } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { parse } from 'date-fns';
 import { Composer, InlineKeyboard, InputFile } from 'grammy';
 import { BrowseMotionEventsUseCase } from '../../camera/application/browse-motion-events.use-case';
@@ -29,6 +29,8 @@ import { TelegramHandler } from './telegram-handler';
 import { WorkflowEntryCoordinator, type WorkflowLaunch } from './workflow-entry.coordinator';
 import { WorkflowDraftRegistry, type WorkflowDraftCanceller } from './workflow-draft.registry';
 import { WorkflowNavigationHandler } from './workflow-navigation.handler';
+import { FEATURE_AVAILABILITY, type FeatureAvailabilityPort } from '../../features/domain/ports/feature-availability.port';
+import { FeatureUnavailableError } from '../../features/domain/errors/feature-unavailable.error';
 
 const CAMERA_BROWSE_TTL_MS = 10 * 60_000;
 const MAX_CALLBACK_BYTES = 64;
@@ -88,6 +90,7 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
     private readonly workflows: WorkflowEntryCoordinator,
     private readonly drafts: WorkflowDraftRegistry,
     @Optional() private readonly navigation?: WorkflowNavigationHandler,
+    @Optional() @Inject(FEATURE_AVAILABILITY) private readonly availability?: FeatureAvailabilityPort,
   ) {
     this.drafts.register('camera', this);
   }
@@ -175,17 +178,18 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
     const receipt = launch?.receipt ?? (await this.workflows.begin(ctx, 'camera', { source: 'natural-parent' }));
     if (!receipt) return;
     this.remember(ctx, receipt);
-    const keyboard = new InlineKeyboard()
-      .text(this.catalog(ctx).camera.dashboardButtons.live, callback(receipt.id, 'l'))
-      .row()
-      .text(en.camera.dashboardButtons.snapshot, callback(receipt.id, 's'))
-      .text(en.camera.dashboardButtons.browseEvents, callback(receipt.id, 'b'))
-      .row()
-      .text(en.camera.dashboardButtons.eventsToday, callback(receipt.id, 'e'))
-      .text(en.camera.dashboardButtons.status, callback(receipt.id, 'q'))
-      .row()
-      .text(en.camera.dashboardButtons.close, callback(receipt.id, 'x'));
-    await ctx.reply(en.camera.dashboardTitle, {
+    const [motion, rtsp] = await Promise.all([this.isReady('motion'), this.isReady('rtsp')]);
+    const copy = this.catalog(ctx).camera.dashboardButtons;
+    const keyboard = new InlineKeyboard();
+    if (motion || rtsp) keyboard.text(copy.live, callback(receipt.id, 'l')).row();
+    if (motion) {
+      keyboard.text(copy.snapshot, callback(receipt.id, 's'))
+        .text(copy.browseEvents, callback(receipt.id, 'b')).row()
+        .text(copy.eventsToday, callback(receipt.id, 'e'))
+        .text(copy.status, callback(receipt.id, 'q')).row();
+    }
+    keyboard.text(copy.close, callback(receipt.id, 'x'));
+    await ctx.reply(this.catalog(ctx).camera.dashboardTitle, {
       reply_markup: this.withHome(receipt, keyboard),
     });
   }
@@ -454,6 +458,7 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
   }
 
   private async handleSnapshot(ctx: TelegramContext, receipt: WorkflowReturnReceipt, name?: string): Promise<void> {
+    if (!(await this.requireFeature(ctx, receipt, 'motion'))) return;
     if (!(await this.workflows.markRunning(ctx, receipt))) return;
     await ctx.replyWithChatAction('upload_photo');
     const result = await this.snapshot.execute(name);
@@ -464,6 +469,7 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
     );
   }
   private async handleEvents(ctx: TelegramContext, receipt: WorkflowReturnReceipt, dateArg?: string): Promise<void> {
+    if (!(await this.requireFeature(ctx, receipt, 'motion'))) return;
     const day = dateArg ? parse(dateArg, 'dd.MM.yyyy', new Date()) : new Date();
     if (Number.isNaN(day.getTime())) {
       await this.complete(ctx, receipt, () => ctx.reply(en.camera.invalidDate));
@@ -499,6 +505,7 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
     );
   }
   private async handleVideo(ctx: TelegramContext, receipt: WorkflowReturnReceipt, rawId: string): Promise<void> {
+    if (!(await this.requireFeature(ctx, receipt, 'motion'))) return;
     const id = parseEventId(rawId);
     if (id === null) {
       await this.complete(ctx, receipt, () => ctx.reply(en.camera.usage));
@@ -532,6 +539,7 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
     );
   }
   private async handlePhoto(ctx: TelegramContext, receipt: WorkflowReturnReceipt, rawId: string): Promise<void> {
+    if (!(await this.requireFeature(ctx, receipt, 'motion'))) return;
     const id = parseEventId(rawId);
     if (id === null) {
       await this.complete(ctx, receipt, () => ctx.reply(en.camera.usage));
@@ -547,16 +555,19 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
     );
   }
   private async handleEnable(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<void> {
+    if (!(await this.requireFeature(ctx, receipt, 'motion'))) return;
     if (!(await this.requireAdmin(ctx, receipt)) || !(await this.workflows.markRunning(ctx, receipt))) return;
     await this.enable.execute();
     await this.complete(ctx, receipt, () => ctx.reply(en.camera.motionStarted));
   }
   private async handleDisable(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<void> {
+    if (!(await this.requireFeature(ctx, receipt, 'motion'))) return;
     if (!(await this.requireAdmin(ctx, receipt)) || !(await this.workflows.markRunning(ctx, receipt))) return;
     await this.disable.execute();
     await this.complete(ctx, receipt, () => ctx.reply(en.camera.motionStopped));
   }
   private async handleStatus(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<void> {
+    if (!(await this.requireFeature(ctx, receipt, 'motion'))) return;
     const status = await this.status.execute();
     await this.complete(ctx, receipt, () => ctx.reply(`${en.camera.statusHeader}\n\n${en.camera.statusBody(status)}`));
   }
@@ -567,6 +578,7 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
     reference?: string,
     resolution: 'name' | 'id' = 'name',
   ): Promise<void> {
+    if (!(await this.requireEitherFeature(ctx, receipt))) return;
     const telegramId = ctx.from?.id;
     const chatId = ctx.chat?.id;
     if (!telegramId || chatId === undefined || !(await this.workflows.markRunning(ctx, receipt))) return;
@@ -613,6 +625,31 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
     if (ctx.localeState?.user.role === 'admin') return true;
     await this.complete(ctx, receipt, () => ctx.reply(en.common.adminRequired));
     return false;
+  }
+  private async isReady(name: 'motion' | 'rtsp'): Promise<boolean> {
+    if (!this.availability) return true;
+    try { await this.availability.requireReady(name); return true; } catch { return false; }
+  }
+  private async requireEitherFeature(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<boolean> {
+    if (!this.availability || await this.isReady('motion') || await this.isReady('rtsp')) return true;
+    return this.requireFeature(ctx, receipt, 'motion');
+  }
+  private async requireFeature(ctx: TelegramContext, receipt: WorkflowReturnReceipt, name: 'motion' | 'rtsp'): Promise<boolean> {
+    try {
+      await this.availability?.requireReady(name);
+      return true;
+    } catch (error) {
+      if (error instanceof FeatureUnavailableError) {
+        const copy = this.catalog(ctx).feature.stale;
+        const label = name === 'motion' ? 'Motion' : 'RTSP';
+        const message = error.state === 'installed-off' ? copy.disabled(label)
+          : error.state === 'needs-attention' ? copy.attention(label)
+            : error.state === 'installing' ? copy.installing(label) : copy.unavailable(label);
+        await this.complete(ctx, receipt, () => ctx.reply(message));
+        return false;
+      }
+      throw error;
+    }
   }
   private async complete(
     ctx: TelegramContext,

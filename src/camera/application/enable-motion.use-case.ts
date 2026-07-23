@@ -8,6 +8,7 @@ import {
   MOTION_CONTROL,
   MotionControlPort,
 } from '../domain/ports/motion-control.port';
+import { FEATURE_AVAILABILITY, type FeatureAvailabilityPort } from '../../features/domain/ports/feature-availability.port';
 
 /**
  * `/camera enable` — spec 14. Records the admin's intent (`desired=on`) so the
@@ -18,12 +19,15 @@ export class EnableMotionUseCase {
   constructor(
     @Inject(MOTION_CONTROL) private readonly motion: MotionControlPort,
     @Inject(SYSTEM_META_REPOSITORY) private readonly meta: SystemMetaRepositoryPort,
+    @Inject(FEATURE_AVAILABILITY) private readonly availability?: FeatureAvailabilityPort,
   ) {}
 
   async execute(): Promise<void> {
+    await this.availability?.requireReady('motion');
     // Intent first: even if start() throws (already running / not installed),
     // the recorded intent matches what the admin asked for.
     await this.meta.set(MOTION_DESIRED_STATE_KEY, 'on');
+    await this.availability?.requireReady('motion');
     await this.motion.start();
   }
 }

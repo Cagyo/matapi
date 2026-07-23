@@ -1,5 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { MEDIA_WRITER, MediaWriterPort } from '../domain/ports/media-writer.port';
+import { FEATURE_AVAILABILITY, type FeatureAvailabilityPort } from '../../features/domain/ports/feature-availability.port';
 
 /**
  * Records a saved snapshot (spec 20). Invoked by Motion's `on_picture_save`
@@ -12,9 +13,11 @@ export class RecordSnapshotUseCase {
 
   constructor(
     @Inject(MEDIA_WRITER) private readonly writer: MediaWriterPort,
+    @Inject(FEATURE_AVAILABILITY) private readonly availability?: FeatureAvailabilityPort,
   ) {}
 
   async execute(snapshotPath: string): Promise<void> {
+    await this.availability?.requireReady('motion');
     const updated = await this.writer.setSnapshotForLatestOpenEvent(snapshotPath);
     if (!updated) {
       this.logger.warn(

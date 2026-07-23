@@ -13,6 +13,7 @@ import { workflowReturnCallback } from '../domain/workflow-return';
 import type { TelegramContext } from './telegram-context';
 import { WorkflowEntryCoordinator, type WorkflowLaunch } from './workflow-entry.coordinator';
 import { WorkflowNavigationHandler } from './workflow-navigation.handler';
+import { FeatureUnavailableError } from '../../features/domain/errors/feature-unavailable.error';
 
 const SOURCE_STATE_TTL_MS = 10 * 60_000;
 const SELECTOR_LENGTH = 12;
@@ -108,7 +109,8 @@ export class CameraSourcesHandler {
       try {
         const sources = await this.list.execute();
         await this.complete(ctx, receipt, () => this.replyList(ctx, sources));
-      } catch {
+      } catch (error) {
+        if (await this.replyUnavailable(ctx, receipt, error)) return;
         await this.complete(ctx, receipt, () => ctx.reply(copy.listFailed));
       }
       return;
@@ -200,7 +202,8 @@ export class CameraSourcesHandler {
         tlsMode: /^rtsps:\/\//iu.test(text) ? 'strict' : 'none',
         profile: 'eco',
       });
-    } catch {
+    } catch (error) {
+      if (await this.replyUnavailable(ctx, state.receipt, error)) return true;
       /* map every credential failure to safe localized copy */
     } finally {
       if (messageId !== undefined) {
@@ -234,7 +237,8 @@ export class CameraSourcesHandler {
     let sources: RedactedLiveSource[];
     try {
       sources = await this.list.execute();
-    } catch {
+    } catch (error) {
+      if (await this.replyUnavailable(ctx, receipt, error)) return;
       await this.complete(ctx, receipt, () => ctx.reply(copy.listFailed));
       return;
     }
@@ -284,6 +288,16 @@ export class CameraSourcesHandler {
     this.clear(ctx, receipt.id);
     await this.complete(ctx, receipt, () => ctx.reply(this.catalog(ctx).common.adminRequired));
     return false;
+  }
+  private async replyUnavailable(ctx: TelegramContext, receipt: WorkflowReturnReceipt, error: unknown): Promise<boolean> {
+    if (!(error instanceof FeatureUnavailableError)) return false;
+    const stale = this.catalog(ctx).feature.stale;
+    const name = 'RTSP';
+    const message = error.state === 'installed-off' ? stale.disabled(name)
+      : error.state === 'needs-attention' ? stale.attention(name)
+        : error.state === 'installing' ? stale.installing(name) : stale.unavailable(name);
+    await this.complete(ctx, receipt, () => ctx.reply(message));
+    return true;
   }
 
   private async complete(

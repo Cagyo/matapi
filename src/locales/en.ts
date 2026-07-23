@@ -686,6 +686,12 @@ const enCatalog = {
     },
   },
   feature: {
+    stale: {
+      disabled: (name: string) => `${name} is disabled.`,
+      attention: (name: string) => `${name} needs attention.`,
+      installing: (name: string) => `${name} is still installing.`,
+      unavailable: (name: string) => `${name} is unavailable.`,
+    },
     usage: '❌ Usage: /feature enable|disable|list [feature_name]',
     listHeader: '🔧 Features',
     listLine(f: FeatureStatus): string {

@@ -10,6 +10,8 @@ import {
   type MediaRepositoryPort,
 } from '../../camera/domain/ports/media-repository.port';
 import type { ConfigSnapshotLiveSource } from '../domain/config-snapshot';
+import { FEATURE_AVAILABILITY, type FeatureAvailabilityPort } from '../../features/domain/ports/feature-availability.port';
+import { RtspSourceStartGate } from '../../camera/application/rtsp-source-start-gate.service';
 
 export interface CameraLiveSourceImportPlan {
   sources: readonly LiveSource[];
@@ -22,11 +24,14 @@ export class ImportCameraLiveSourcesUseCase {
     @Inject(MEDIA_REPOSITORY) private readonly media: MediaRepositoryPort,
     @Inject(LIVE_SOURCE_REPOSITORY)
     private readonly repository: LiveSourceRepositoryPort,
+    @Inject(FEATURE_AVAILABILITY) private readonly availability?: FeatureAvailabilityPort,
+    private readonly gate?: RtspSourceStartGate,
   ) {}
 
   async prepare(
     imported: readonly ConfigSnapshotLiveSource[],
   ): Promise<CameraLiveSourceImportPlan> {
+    await this.availability?.requireReady('rtsp');
     const current = await this.repository.listRedacted();
     const currentByCamera = new Map(current.map((entry) => [entry.cameraId, entry]));
     const sources: LiveSource[] = [];
@@ -67,6 +72,8 @@ export class ImportCameraLiveSourcesUseCase {
   }
 
   async commit(plan: CameraLiveSourceImportPlan): Promise<readonly string[]> {
+    await this.availability?.requireReady('rtsp');
+    this.gate?.assertCanStart('rtsp');
     await this.repository.saveMetadataBatch(plan.sources);
     return plan.configured;
   }

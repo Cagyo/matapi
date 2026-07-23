@@ -8,6 +8,7 @@ import {
   MOTION_CONTROL,
   MotionControlPort,
 } from '../domain/ports/motion-control.port';
+import { FEATURE_AVAILABILITY, type FeatureAvailabilityPort } from '../../features/domain/ports/feature-availability.port';
 
 export interface CameraStatusResult {
   running: boolean;
@@ -23,9 +24,11 @@ export class CameraStatusUseCase {
     @Inject(MOTION_CONTROL) private readonly motion: MotionControlPort,
     @Inject(MEDIA_REPOSITORY) private readonly media: MediaRepositoryPort,
     @Inject(MEDIA_FILE) private readonly files: MediaFilePort,
+    @Inject(FEATURE_AVAILABILITY) private readonly availability?: FeatureAvailabilityPort,
   ) {}
 
   async execute(): Promise<CameraStatusResult> {
+    await this.availability?.requireReady('motion');
     const now = new Date();
     const [running, lastEvent, localStorageBytes, eventsToday] =
       await Promise.all([

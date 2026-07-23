@@ -12,6 +12,7 @@ import {
   MotionControlPort,
 } from '../domain/ports/motion-control.port';
 import { SNAPSHOT, SnapshotPort } from '../domain/ports/snapshot.port';
+import { FEATURE_AVAILABILITY, type FeatureAvailabilityPort } from '../../features/domain/ports/feature-availability.port';
 
 export interface SnapshotResult {
   buffer: Buffer;
@@ -32,15 +33,18 @@ export class GetSnapshotUseCase {
     @Inject(MEDIA_REPOSITORY) private readonly media: MediaRepositoryPort,
     @Inject(MOTION_CONTROL) private readonly motion: MotionControlPort,
     @Inject(SNAPSHOT) private readonly snapshot: SnapshotPort,
+    @Inject(FEATURE_AVAILABILITY) private readonly availability?: FeatureAvailabilityPort,
   ) {}
 
   async execute(cameraName?: string): Promise<SnapshotResult> {
+    await this.availability?.requireReady('motion');
     const camera = await this.resolveCamera(cameraName);
 
     if (!(await this.motion.isActive())) {
       throw new MotionNotRunningError();
     }
 
+    await this.availability?.requireReady('motion');
     const buffer = await this.snapshot.grab(camera.id, camera.name);
     return { buffer, cameraName: camera.name, takenAt: new Date() };
   }

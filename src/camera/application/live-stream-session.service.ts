@@ -31,6 +31,7 @@ import {
   type MonotonicClockPort,
 } from '../domain/ports/monotonic-clock.port';
 import { RtspSourceStartGate } from './rtsp-source-start-gate.service';
+import { FEATURE_AVAILABILITY, type FeatureAvailabilityPort } from '../../features/domain/ports/feature-availability.port';
 
 export interface OpenLiveStreamResult {
   watchUrl: string;
@@ -120,7 +121,10 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
     private readonly durationMs = 300_000,
     private readonly operationTimeoutMs = 30_000,
     private readonly maxViewers = 2,
-    private readonly sourceStartGate = new RtspSourceStartGate(),
+    // Direct unit construction has no feature lifecycle; composition always
+    // injects the fail-closed gate.
+    private readonly sourceStartGate = new RtspSourceStartGate(undefined, true),
+    @Inject(FEATURE_AVAILABILITY) private readonly availability?: FeatureAvailabilityPort,
   ) {
     this.gateway.onFailure?.(() => {
       void this.stop(0).catch(() => undefined);
@@ -231,7 +235,7 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
           return;
         }
 
-        this.beginStart(source, telegramId, deferred);
+        await this.beginStart(source, telegramId, deferred);
       } catch {
         deferred.reject(new LiveStreamUnavailableError());
       }
@@ -397,12 +401,13 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  private beginStart(
+  private async beginStart(
     source: LiveStreamSource,
     telegramId: number,
     deferred: Deferred<OpenLiveStreamResult>,
-  ): void {
+  ): Promise<void> {
     try {
+      if (this.availability) await this.availability.requireReady(source.kind === 'rtsp' ? 'rtsp' : 'motion');
       this.sourceStartGate.assertCanStart(source.kind);
     } catch {
       deferred.reject(new LiveStreamUnavailableError());
@@ -934,7 +939,7 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
     const replacement = pending.replacement;
     const [first, ...joiningRequests] = replacement.requests;
     if (!first) return;
-    this.beginStart(replacement.source, first.telegramId, first.deferred);
+    void this.beginStart(replacement.source, first.telegramId, first.deferred);
     this.pending?.requests.push(...joiningRequests);
   }
 

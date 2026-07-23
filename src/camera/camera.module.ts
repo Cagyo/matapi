@@ -2,13 +2,17 @@ import { Module } from '@nestjs/common';
 import { EventModule } from '../events/event.module';
 import { FeatureModule } from '../features/feature.module';
 import {
-  FEATURE_DISABLE_LIFECYCLE,
-  type FeatureDisableLifecycleRegistryPort,
-} from '../features/domain/ports/feature-disable-lifecycle.port';
+  FEATURE_RUNTIME_LIFECYCLE,
+  type FeatureRuntimeLifecycleRegistryPort,
+} from '../features/domain/ports/feature-runtime-lifecycle.port';
 import {
   FEATURE_QUERY,
   type FeatureQueryPort,
 } from '../features/domain/ports/feature-query.port';
+import {
+  FEATURE_AVAILABILITY,
+  type FeatureAvailabilityPort,
+} from '../features/domain/ports/feature-availability.port';
 import { SystemModule } from '../system/system.module';
 import { AdminAlertService } from './application/admin-alert.service';
 import { BackupUploadUseCase } from './application/backup-upload.use-case';
@@ -18,7 +22,7 @@ import { CleanupCoordinatorService } from './application/cleanup-coordinator.ser
 import { CleanupDriveUseCase } from './application/cleanup-drive.use-case';
 import { CleanupLocalStorageUseCase } from './application/cleanup-local-storage.use-case';
 import { DisableMotionUseCase } from './application/disable-motion.use-case';
-import { DisableRtspFeatureUseCase } from './application/disable-rtsp-feature.use-case';
+import { FeatureCameraRuntimeLifecycleService } from './application/feature-camera-runtime-lifecycle.service';
 import { DriveSyncScheduler } from './application/drive-sync.scheduler';
 import { EnableMotionUseCase } from './application/enable-motion.use-case';
 import { GdriveStatusUseCase } from './application/gdrive-status.use-case';
@@ -365,6 +369,7 @@ const liveStreamOptions = liveStreamOptionsFromEnv(process.env);
         messageCleanup: LiveStreamMessageCleanupPort,
         options: LiveStreamOptions,
         sourceStartGate: RtspSourceStartGate,
+        availability: FeatureAvailabilityPort,
       ) => new LiveStreamSessionService(
         gateway,
         lease,
@@ -375,6 +380,7 @@ const liveStreamOptions = liveStreamOptionsFromEnv(process.env);
         options.startTimeoutMs,
         options.maxViewers,
         sourceStartGate,
+        availability,
       ),
       inject: [
         LIVE_STREAM_GATEWAY,
@@ -384,24 +390,21 @@ const liveStreamOptions = liveStreamOptionsFromEnv(process.env);
         LIVE_STREAM_MESSAGE_CLEANUP,
         LIVE_STREAM_OPTIONS,
         RtspSourceStartGate,
+        FEATURE_AVAILABILITY,
       ],
     },
+    FeatureCameraRuntimeLifecycleService,
     {
-      provide: DisableRtspFeatureUseCase,
+      provide: 'FEATURE_CAMERA_RUNTIME_LIFECYCLE_REGISTRATION',
       useFactory: (
-        gate: RtspSourceStartGate,
-        sessions: LiveStreamSessionService,
-        lifecycle: FeatureDisableLifecycleRegistryPort,
+        lifecycle: FeatureRuntimeLifecycleRegistryPort,
+        camera: FeatureCameraRuntimeLifecycleService,
       ) => {
-        const disableRtsp = new DisableRtspFeatureUseCase(gate, sessions);
-        lifecycle.register(disableRtsp);
-        return disableRtsp;
+        lifecycle.register('motion', camera.motion);
+        lifecycle.register('rtsp', camera.rtsp);
+        return camera;
       },
-      inject: [
-        RtspSourceStartGate,
-        LiveStreamSessionService,
-        FEATURE_DISABLE_LIFECYCLE,
-      ],
+      inject: [FEATURE_RUNTIME_LIFECYCLE, FeatureCameraRuntimeLifecycleService],
     },
     {
       provide: LIVE_SOURCE_SESSION_CONTROL,

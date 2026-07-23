@@ -5,6 +5,7 @@ import {
   OnApplicationBootstrap,
   OnModuleDestroy,
 } from '@nestjs/common';
+import { FEATURE_AVAILABILITY, type FeatureAvailabilityPort } from '../../features/domain/ports/feature-availability.port';
 import { CAMERA_MODE, CameraMode } from '../camera.tokens';
 import { ADMIN_ALERT, AdminAlertPort } from '../domain/ports/admin-alert.port';
 import { MOTION_DESIRED_STATE_KEY } from '../domain/motion-desired-state';
@@ -35,44 +36,71 @@ export class MotionWatcherService
 {
   private readonly logger = new Logger(MotionWatcherService.name);
   private timer?: NodeJS.Timeout;
+  private backoffTimer?: NodeJS.Timeout;
   private degraded = false;
-  private checking = false;
+  private wanted = false;
+  private stopped = false;
+  private generation = 0;
+  private inFlight?: Promise<void>;
 
   constructor(
     @Inject(CAMERA_MODE) private readonly mode: CameraMode,
     @Inject(MOTION_CONTROL) private readonly motion: MotionControlPort,
     @Inject(ADMIN_ALERT) private readonly adminAlert: AdminAlertPort,
     @Inject(SYSTEM_META_REPOSITORY) private readonly meta: SystemMetaRepositoryPort,
+    @Inject(FEATURE_AVAILABILITY) private readonly availability?: FeatureAvailabilityPort,
   ) {}
 
-  onApplicationBootstrap(): void {
-    if (this.mode !== 'real') return;
+  onApplicationBootstrap(): void { void this.start(); }
+
+  async start(): Promise<void> {
+    if (this.mode !== 'real' || this.wanted) return;
+    await this.availability?.requireReady('motion');
+    if (this.mode !== 'real' || this.wanted) return;
+    this.wanted = true;
+    this.stopped = false;
+    const generation = this.generation;
 
     const interval = this.resolveInterval();
     this.timer = setInterval(() => {
-      void this.tick();
+      void this.runTick(generation);
     }, interval);
     // Don't keep the event loop alive solely for the watcher.
     this.timer.unref?.();
     this.logger.log(`Motion watcher active (every ${interval}ms)`);
+    void this.runTick(generation);
   }
 
-  onModuleDestroy(): void {
+  async stop(): Promise<void> {
+    this.wanted = false;
+    this.stopped = true;
+    this.generation++;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+    if (this.backoffTimer) clearTimeout(this.backoffTimer);
+    this.backoffTimer = undefined;
+    await this.inFlight;
   }
+
+  onModuleDestroy(): void { void this.stop(); }
 
   /** Exposed for `/health` (spec 08, 23). */
   isDegraded(): boolean {
     return this.degraded;
   }
 
-  private async tick(): Promise<void> {
-    if (this.checking) return; // skip if a slow check overran the interval
-    this.checking = true;
+  private runTick(generation: number): Promise<void> {
+    if (this.inFlight) return this.inFlight;
+    this.inFlight = this.tick(generation).finally(() => { this.inFlight = undefined; });
+    return this.inFlight;
+  }
+
+  private async tick(generation = this.generation): Promise<void> {
+    if (!this.isCurrent(generation)) return;
     try {
+      await this.requireCurrent(generation);
       if (await this.motion.isActive()) {
-        if (this.degraded) await this.recover();
+        if (this.degraded) { await this.requireCurrent(generation); await this.recover(); }
         return;
       }
 
@@ -83,21 +111,21 @@ export class MotionWatcherService
         return;
       }
 
-      const restored = await this.tryRestart();
+      const restored = await this.tryRestart(generation);
       if (restored) {
-        if (this.degraded) await this.recover();
+        if (this.degraded) { await this.requireCurrent(generation); await this.recover(); }
       } else {
+        await this.requireCurrent(generation);
         await this.markDown();
       }
     } catch (error) {
       this.logger.warn(`Motion watch tick failed: ${(error as Error).message}`);
-    } finally {
-      this.checking = false;
     }
   }
 
-  private async tryRestart(): Promise<boolean> {
+  private async tryRestart(generation: number): Promise<boolean> {
     for (let attempt = 1; attempt <= MAX_RESTART_ATTEMPTS; attempt++) {
+      await this.requireCurrent(generation);
       if (await this.isMotionDesiredOff()) {
         // A deliberate stop landed while we were mid-recovery — e.g.
         // /camera disable during the ~2s backoff between attempts. The
@@ -107,7 +135,9 @@ export class MotionWatcherService
         return true;
       }
       try {
+        await this.requireCurrent(generation);
         await this.motion.restart();
+        await this.requireCurrent(generation);
         if (await this.motion.isActive()) {
           this.logger.log(`Motion daemon restarted (attempt ${attempt})`);
           return true;
@@ -117,7 +147,7 @@ export class MotionWatcherService
           `Motion restart attempt ${attempt} failed: ${(error as Error).message}`,
         );
       }
-      if (attempt < MAX_RESTART_ATTEMPTS) await this.sleep(RESTART_BACKOFF_MS);
+      if (attempt < MAX_RESTART_ATTEMPTS) await this.sleep(RESTART_BACKOFF_MS, generation);
     }
     return false;
   }
@@ -151,7 +181,22 @@ export class MotionWatcherService
     return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_INTERVAL_MS;
   }
 
-  private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+  private isCurrent(generation: number): boolean { return !this.stopped && generation === this.generation; }
+
+  private async requireCurrent(generation: number): Promise<void> {
+    if (!this.isCurrent(generation)) throw new WatcherStoppedError();
+    await this.availability?.requireReady('motion');
+    if (!this.isCurrent(generation)) throw new WatcherStoppedError();
+  }
+
+  private sleep(ms: number, generation: number): Promise<void> {
+    return new Promise((resolve) => {
+      this.backoffTimer = setTimeout(() => {
+        this.backoffTimer = undefined;
+        if (this.isCurrent(generation)) resolve();
+      }, ms);
+    });
   }
 }
+
+class WatcherStoppedError extends Error {}

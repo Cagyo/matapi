@@ -8,6 +8,7 @@ import {
   MEDIA_REPOSITORY,
   MediaRepositoryPort,
 } from '../domain/ports/media-repository.port';
+import { FEATURE_AVAILABILITY, type FeatureAvailabilityPort } from '../../features/domain/ports/feature-availability.port';
 
 export interface PhotoResult {
   event: MotionEvent;
@@ -20,9 +21,11 @@ export class GetMotionPhotoUseCase {
   constructor(
     @Inject(MEDIA_REPOSITORY) private readonly media: MediaRepositoryPort,
     @Inject(MEDIA_FILE) private readonly files: MediaFilePort,
+    @Inject(FEATURE_AVAILABILITY) private readonly availability?: FeatureAvailabilityPort,
   ) {}
 
   async execute(eventId: number): Promise<PhotoResult> {
+    await this.availability?.requireReady('motion');
     const event = await this.media.findEventById(eventId);
     if (!event) throw new EventNotFoundError(eventId);
 

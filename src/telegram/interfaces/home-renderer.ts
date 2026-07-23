@@ -23,7 +23,7 @@ export function renderHomeMessage(
 ): HomeRenderedMessage {
   switch (screen.kind) {
     case 'home':
-      return { text: renderHomeText(catalog, screen.summary, screen.checking), rows: homeRows(catalog, identity) };
+      return { text: renderHomeText(catalog, screen.summary, screen.checking), rows: homeRows(catalog, identity, screen.cameraAvailable) };
     case 'sensors':
       return { text: renderSensorsText(catalog, screen), rows: sensorRows(catalog, identity, screen) };
     case 'notifications':
@@ -149,9 +149,11 @@ function notificationText(catalog: LocaleCatalog, summary: HomeSummary): string 
   }
 }
 
-function homeRows(catalog: LocaleCatalog, identity: PendingHomeIdentity): readonly HomeButton[][] {
+function homeRows(catalog: LocaleCatalog, identity: PendingHomeIdentity, cameraAvailable = true): readonly HomeButton[][] {
+  const primary = [button(catalog.home.buttons.sensors, identity, { kind: 'sensors', page: 0 })];
+  if (cameraAvailable) primary.push(button(catalog.home.buttons.camera, identity, { kind: 'camera' }));
   return [
-    [button(catalog.home.buttons.sensors, identity, { kind: 'sensors', page: 0 }), button(catalog.home.buttons.camera, identity, { kind: 'camera' })],
+    primary,
     [button(catalog.home.buttons.notifications, identity, { kind: 'notifications' }), button(catalog.home.buttons.more, identity, { kind: 'more' })],
     [button(catalog.home.buttons.checkNow, identity, { kind: 'check' })],
   ];

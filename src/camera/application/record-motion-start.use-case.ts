@@ -7,6 +7,7 @@ import {
 } from '../domain/ports/media-repository.port';
 import { MEDIA_WRITER, MediaWriterPort } from '../domain/ports/media-writer.port';
 import { SNAPSHOT, SnapshotPort } from '../domain/ports/snapshot.port';
+import { FEATURE_AVAILABILITY, type FeatureAvailabilityPort } from '../../features/domain/ports/feature-availability.port';
 
 /**
  * Records the start of a motion event (spec 20). Invoked by Motion's
@@ -24,9 +25,11 @@ export class RecordMotionStartUseCase {
     @Inject(MEDIA_WRITER) private readonly writer: MediaWriterPort,
     @Inject(SNAPSHOT) private readonly snapshot: SnapshotPort,
     @Inject(MOTION_ALERT) private readonly alert: MotionAlertPort,
+    @Inject(FEATURE_AVAILABILITY) private readonly availability?: FeatureAvailabilityPort,
   ) {}
 
   async execute(cameraRef?: string): Promise<void> {
+    await this.availability?.requireReady('motion');
     const camera = await this.resolveCamera(cameraRef);
     if (!camera) {
       this.logger.warn(
@@ -36,10 +39,12 @@ export class RecordMotionStartUseCase {
     }
 
     const startedAt = new Date();
+    await this.availability?.requireReady('motion');
     await this.writer.createEvent(camera.id, startedAt);
 
     let photo: Buffer | null = null;
     try {
+      await this.availability?.requireReady('motion');
       photo = await this.snapshot.grab(camera.id, camera.name);
     } catch (error) {
       this.logger.warn(
@@ -49,6 +54,7 @@ export class RecordMotionStartUseCase {
       );
     }
 
+    await this.availability?.requireReady('motion');
     await this.alert.motionStarted(camera.name, startedAt, photo, camera.id);
   }
 

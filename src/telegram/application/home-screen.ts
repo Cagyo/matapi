@@ -5,7 +5,7 @@ import type { NotificationScreen } from './get-notification-screen.use-case';
 import type { NotificationTarget, NotificationTargetPage } from './notification-target-directory.service';
 
 export type HomeScreen =
-  | { kind: 'home'; summary: HomeSummary; checking: boolean }
+  | { kind: 'home'; summary: HomeSummary; checking: boolean; cameraAvailable?: boolean }
   | {
     kind: 'sensors';
     summary: HomeSummary;

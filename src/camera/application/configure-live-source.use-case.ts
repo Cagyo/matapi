@@ -24,6 +24,8 @@ import {
   MEDIA_REPOSITORY,
   type MediaRepositoryPort,
 } from '../domain/ports/media-repository.port';
+import { FEATURE_AVAILABILITY, type FeatureAvailabilityPort } from '../../features/domain/ports/feature-availability.port';
+import { RtspSourceStartGate } from './rtsp-source-start-gate.service';
 
 export interface ConfigureLiveSourceInput {
   cameraName: string;
@@ -43,9 +45,12 @@ export class ConfigureLiveSourceUseCase {
     @Inject(LIVE_SOURCE_CREDENTIAL)
     private readonly credentials: LiveSourceCredentialPort,
     @Inject(LIVE_SOURCE_PROBE) private readonly probe: LiveSourceProbePort,
+    @Inject(FEATURE_AVAILABILITY) private readonly availability?: FeatureAvailabilityPort,
+    private readonly gate?: RtspSourceStartGate,
   ) {}
 
   async execute(input: ConfigureLiveSourceInput): Promise<RedactedLiveSource> {
+    await this.availability?.requireReady('rtsp');
     if ('certificateFingerprint' in input) {
       throw new InvalidLiveSourceError('certificate fingerprint is unsupported');
     }
@@ -60,11 +65,15 @@ export class ConfigureLiveSourceUseCase {
       substream: input.substream,
       ready: true,
     });
+    await this.availability?.requireReady('rtsp');
+    this.gate?.assertCanStart('rtsp');
     await this.probe.run(source);
     const encrypted = this.credentials.encrypt(
       source.cameraId,
       source.credentialPayload(),
     );
+    await this.availability?.requireReady('rtsp');
+    this.gate?.assertCanStart('rtsp');
     await this.repository.save(source, encrypted);
     return {
       cameraId: source.cameraId,

@@ -12,6 +12,7 @@ import { NotificationTargetDirectoryService, notificationTargetPage } from './no
 import { NotificationTargetUnavailableError } from '../domain/errors/notification-target-unavailable.error';
 import { SetAutoCleanThresholdUseCase } from './set-auto-clean-threshold.use-case';
 import { AdminHomeViewForbiddenError } from '../domain/errors/admin-home-view-forbidden.error';
+import { FEATURE_AVAILABILITY, type FeatureAvailabilityPort } from '../../features/domain/ports/feature-availability.port';
 
 export interface GetHomeScreenInput {
   userId: number;
@@ -28,6 +29,7 @@ export class GetHomeScreenUseCase {
     private readonly notifications: GetNotificationScreenUseCase,
     private readonly targets: NotificationTargetDirectoryService,
     private readonly autoClean?: SetAutoCleanThresholdUseCase,
+    @Inject(FEATURE_AVAILABILITY) private readonly availability?: FeatureAvailabilityPort,
   ) {}
 
   async execute(input: GetHomeScreenInput): Promise<HomeScreen> {
@@ -36,7 +38,14 @@ export class GetHomeScreenUseCase {
     }
     if (input.view.kind === 'home') {
       const summary = await this.summary.execute(input.userId);
-      return { kind: 'home', summary, checking: input.view.checking };
+      const [motion, rtsp] = await Promise.all([
+        this.availability?.inspect('motion'), this.availability?.inspect('rtsp'),
+      ]);
+      const operational = (status: Awaited<ReturnType<FeatureAvailabilityPort['inspect']>> | undefined) =>
+        Boolean(status?.installed && status.enabled && status.ready && !status.busy && status.attentionReason === null);
+      return this.availability
+        ? { kind: 'home', summary, checking: input.view.checking, cameraAvailable: operational(motion) || operational(rtsp) }
+        : { kind: 'home', summary, checking: input.view.checking };
     }
     if (input.view.kind === 'sensors') {
       const summary = await this.summary.execute(input.userId);

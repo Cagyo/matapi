@@ -32,7 +32,7 @@ describe('DisableRtspFeatureUseCase', () => {
     await new DisableRtspFeatureUseCase(gate, sessions as never).beforeDisable('motion');
 
     expect(sessions.stopSourceKind).not.toHaveBeenCalled();
-    expect(() => gate.assertCanStart('rtsp')).not.toThrow();
+    expect(() => gate.assertCanStart('rtsp')).toThrow();
   });
 
   it('keeps RTSP starts closed when stopping fails so cleanup can be retried', async () => {

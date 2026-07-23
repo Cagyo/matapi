@@ -7,6 +7,7 @@ import {
   MEDIA_REPOSITORY,
   MediaRepositoryPort,
 } from '../domain/ports/media-repository.port';
+import { FEATURE_AVAILABILITY, type FeatureAvailabilityPort } from '../../features/domain/ports/feature-availability.port';
 
 /** Telegram's hard limit for bot-sent files. */
 export const TELEGRAM_MAX_FILE_BYTES = 50 * 1024 * 1024;
@@ -28,9 +29,11 @@ export class GetMotionVideoUseCase {
   constructor(
     @Inject(MEDIA_REPOSITORY) private readonly media: MediaRepositoryPort,
     @Inject(MEDIA_FILE) private readonly files: MediaFilePort,
+    @Inject(FEATURE_AVAILABILITY) private readonly availability?: FeatureAvailabilityPort,
   ) {}
 
   async execute(eventId: number): Promise<VideoDelivery> {
+    await this.availability?.requireReady('motion');
     const event = await this.media.findEventById(eventId);
     if (!event) throw new EventNotFoundError(eventId);
 

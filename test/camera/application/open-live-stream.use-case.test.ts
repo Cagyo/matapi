@@ -40,7 +40,7 @@ describe('OpenLiveStreamUseCase', () => {
       );
 
       expect(compiledUseCase).toContain(
-        'rtsp_source_start_gate_service_1.RtspSourceStartGate])',
+        'rtsp_source_start_gate_service_1.RtspSourceStartGate, Object])',
       );
     } finally {
       rmSync(outputDir, { force: true, recursive: true });

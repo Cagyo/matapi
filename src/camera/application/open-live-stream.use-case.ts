@@ -11,6 +11,7 @@ import {
 import { LiveStreamSourceResolverService } from './live-stream-source-resolver.service';
 import { RtspSourceStartGate } from './rtsp-source-start-gate.service';
 import type { LiveStreamSource } from '../domain/live-stream.entity';
+import { FEATURE_AVAILABILITY, type FeatureAvailabilityPort } from '../../features/domain/ports/feature-availability.port';
 
 export interface OpenLiveStreamInput {
   telegramId: number;
@@ -31,6 +32,7 @@ export class OpenLiveStreamUseCase {
     @Inject(LIVE_STREAM_CAPABILITY)
     private readonly capability: LiveStreamCapabilityPort,
     private readonly sourceStartGate: RtspSourceStartGate,
+    @Inject(FEATURE_AVAILABILITY) private readonly availability?: FeatureAvailabilityPort,
   ) {}
 
   async execute(input: OpenLiveStreamInput): Promise<OpenLiveStreamResult> {
@@ -46,9 +48,11 @@ export class OpenLiveStreamUseCase {
   }
 
   private async ensureAvailable(source: LiveStreamSource): Promise<void> {
-    this.sourceStartGate.assertCanStart(source.kind);
+    await this.availability?.requireReady(source.kind === 'rtsp' ? 'rtsp' : 'motion');
     if (!(await this.capability.isAvailable(source.kind))) {
       throw new LiveStreamUnavailableError();
     }
+    await this.availability?.requireReady(source.kind === 'rtsp' ? 'rtsp' : 'motion');
+    this.sourceStartGate.assertCanStart(source.kind);
   }
 }
