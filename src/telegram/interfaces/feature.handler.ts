@@ -81,7 +81,9 @@ export class FeatureHandler implements TelegramHandler, FeatureInstallOutcomePor
       }
       await ctx.reply(ctx.localeState!.catalog.feature.usage);
     });
-    composer.callbackQuery(FEATURE_CALLBACK, this.guard.registered, async (ctx) => {
+    // Accept the whole bounded feature namespace so malformed controls are
+    // acknowledged and recover safely instead of falling through silently.
+    composer.callbackQuery(/^ft:/, this.guard.registered, async (ctx) => {
       await this.acknowledge(ctx);
       await this.handleCallback(ctx);
     });
@@ -99,7 +101,7 @@ export class FeatureHandler implements TelegramHandler, FeatureInstallOutcomePor
       }
       keyboard.text(ctx.localeState!.catalog.home.workflow.home, `wr:${receipt.id}:h`);
       await ctx.reply(catalog.listHeader, { reply_markup: keyboard });
-    } catch {
+    } catch (error) {
       await ctx.reply(ctx.localeState!.catalog.feature.listFailed);
     }
   }
@@ -112,11 +114,11 @@ export class FeatureHandler implements TelegramHandler, FeatureInstallOutcomePor
     let final: FeatureDetail;
     try {
       final = await this.detail.execute(job.feature);
-    } catch {
+    } catch (error) {
       // The terminal job remains retryable: without an authoritative current
       // feature projection we must not turn success into a guessed failure.
       this.logger.warn(`Feature install outcome detail unavailable for ${job.feature}`);
-      return;
+      throw error;
     }
     const succeeded = job.status === 'succeeded' && final.status.attentionReason === null;
     const message = succeeded

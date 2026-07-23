@@ -77,7 +77,9 @@ describe('FeatureHandler', () => {
   it('acknowledges malformed and stale callbacks without claiming a mutation', async () => {
     const { handler, ctx, claim } = setup();
     let callbackHandler: ((ctx: typeof ctx) => Promise<void>) | undefined;
-    handler.register({ command: vi.fn(), callbackQuery: vi.fn((_: unknown, _guard: unknown, callback: typeof callbackHandler) => { callbackHandler = callback; }) } as never);
+    let matcher: RegExp | undefined;
+    handler.register({ command: vi.fn(), callbackQuery: vi.fn((pattern: RegExp, _guard: unknown, callback: typeof callbackHandler) => { matcher = pattern; callbackHandler = callback; }) } as never);
+    expect(matcher!.test('ft:c:bad')).toBe(true);
     await callbackHandler!({ ...ctx, callbackQuery: { data: 'ft:c:bad' } });
     expect(ctx.answerCallbackQuery).toHaveBeenCalledOnce();
     expect(claim.execute).not.toHaveBeenCalled();
@@ -91,16 +93,16 @@ describe('FeatureHandler', () => {
     expect(verify.execute).toHaveBeenCalledWith({ name: 'digital', source: 'manual', expected: { installed: true, enabled: true, attentionReason: 'readiness-failed' } });
   });
 
-  it('keeps exact terminal delivery pending when its authoritative detail cannot be read', async () => {
+  it('rejects terminal delivery when its authoritative detail cannot be read so recovery can retry', async () => {
     const { handler, workflows } = setup();
     (handler as any).users = { findByTelegramId: vi.fn().mockResolvedValue({ telegramId: 7, locale: 'en', role: 'admin' }) };
     (handler as any).detail = { execute: vi.fn().mockRejectedValue(new Error('db unavailable')) };
-    await handler.notify({
+    await expect(handler.notify({
       id: 'jobabcdefghijkl', feature: 'digital', status: 'succeeded', activeSlot: null,
       requestedByUserId: 7, requestedInChatId: 7, workflowReceiptId: receipt.id,
       previousInstalled: false, previousEnabled: false, restartScope: 'worker', failureCode: null,
       createdAt: new Date(), updatedAt: new Date(),
-    });
+    })).rejects.toThrow('db unavailable');
     expect(workflows.completeHeadless).not.toHaveBeenCalled();
   });
 

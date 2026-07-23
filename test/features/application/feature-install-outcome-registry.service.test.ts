@@ -25,16 +25,21 @@ describe('FeatureInstallOutcomeRegistryService', () => {
     await registry.notify(job('second'));
     const notify = vi.fn().mockResolvedValue(undefined);
 
-    registry.register({ notify });
+    registry.register({ notifyPreRestart: vi.fn(), notify });
     await vi.waitFor(() => expect(notify).toHaveBeenCalledTimes(2));
     expect(notify.mock.calls.map(([delivered]) => (delivered as FeatureInstallJob).id))
       .toEqual(['first', 'second']);
   });
 
-  it('keeps terminal persistence independent when a listener rejects', async () => {
+  it('keeps a rejected listener retryable and delivers exactly once on the next recovery pass', async () => {
     const registry = new FeatureInstallOutcomeRegistryService();
-    registry.register({ notify: vi.fn().mockRejectedValue(new Error('telegram offline')) });
+    const notify = vi.fn()
+      .mockRejectedValueOnce(new Error('projection unavailable'))
+      .mockResolvedValueOnce(undefined);
+    registry.register({ notifyPreRestart: vi.fn(), notify });
 
     await expect(registry.notify(job('retryable'))).resolves.toBeUndefined();
+    await expect(registry.notify(job('retryable'))).resolves.toBeUndefined();
+    expect(notify).toHaveBeenCalledTimes(2);
   });
 });
