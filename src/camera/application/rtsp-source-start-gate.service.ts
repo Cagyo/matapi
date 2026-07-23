@@ -1,4 +1,4 @@
-import { Injectable, type OnApplicationBootstrap } from '@nestjs/common';
+import { Injectable, Optional, type OnApplicationBootstrap } from '@nestjs/common';
 import { LiveStreamUnavailableError } from '../domain/errors/live-stream-unavailable.error';
 import type { LiveStreamSource } from '../domain/live-stream.entity';
 import { FEATURE_AVAILABILITY, type FeatureAvailabilityPort } from '../../features/domain/ports/feature-availability.port';
@@ -12,7 +12,7 @@ export class RtspSourceStartGate implements OnApplicationBootstrap {
 
   constructor(
     @Inject(FEATURE_AVAILABILITY) private readonly availability?: FeatureAvailabilityPort,
-    initiallyOpen = false,
+    @Optional() initiallyOpen = false,
   ) { this.rtspClosed = !initiallyOpen; }
 
   onApplicationBootstrap(): void { void this.open().catch(() => undefined); }

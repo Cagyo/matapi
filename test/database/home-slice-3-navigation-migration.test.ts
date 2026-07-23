@@ -17,6 +17,14 @@ function migrationWithSuffix(suffix: string): string {
   return `migrations/${filename}`;
 }
 
+function migrationsAfter(filename: string): string[] {
+  return readdirSync(resolve('migrations'))
+    .filter((entry) => entry.endsWith('.sql'))
+    .sort()
+    .map((entry) => `migrations/${entry}`)
+    .filter((entry) => entry > filename);
+}
+
 function apply(sqlite: Database.Database, filename: string): void {
   for (const statement of readFileSync(resolve(filename), 'utf8').split('--> statement-breakpoint')) {
     if (statement.trim()) sqlite.exec(statement);
@@ -40,7 +48,9 @@ describe('Home Slice 3 navigation migration', () => {
     sqlite.prepare(`INSERT INTO home_sessions (user_id, chat_id, active_message_id, active_token, active_revision, active_view, active_sensor_page, active_checking, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(100, 200, 300, TOKEN, 1, 'sensors', 0, 1, NOW.getTime() / 1000);
 
-    apply(sqlite, migrationWithSuffix('home_slice_3_navigation'));
+    const slice3Migration = migrationWithSuffix('home_slice_3_navigation');
+    apply(sqlite, slice3Migration);
+    for (const filename of migrationsAfter(slice3Migration)) apply(sqlite, filename);
 
     const db = drizzle(sqlite, { schema });
     const sessions = new DrizzleHomeSessionStore(db);
