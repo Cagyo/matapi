@@ -11,7 +11,10 @@ import {
   type FeatureRepositoryPort,
 } from '../domain/ports/feature-repository.port';
 import type { FeatureAvailabilityPort } from '../domain/ports/feature-availability.port';
-import { FeatureReadinessBootService } from './feature-readiness-boot.service';
+import {
+  FEATURE_READINESS_BARRIER,
+  type FeatureReadinessBarrierPort,
+} from '../domain/ports/feature-readiness-barrier.port';
 
 @Injectable()
 export class FeatureAvailabilityService implements FeatureAvailabilityPort {
@@ -19,11 +22,12 @@ export class FeatureAvailabilityService implements FeatureAvailabilityPort {
     @Inject(FEATURE_REPOSITORY) private readonly features: FeatureRepositoryPort,
     @Inject(FEATURE_INSTALL_JOB_REPOSITORY)
     private readonly jobs: FeatureInstallJobRepositoryPort,
-    private readonly boot: FeatureReadinessBootService,
+    @Inject(FEATURE_READINESS_BARRIER)
+    private readonly barrier: FeatureReadinessBarrierPort,
   ) {}
 
   awaitInitialVerification(): Promise<void> {
-    return this.boot.awaitInitialVerification();
+    return this.barrier.awaitInitialVerification();
   }
 
   async inspect(name: ManageableFeatureName): Promise<FeatureStatus> {

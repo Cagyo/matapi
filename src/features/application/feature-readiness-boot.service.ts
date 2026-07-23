@@ -1,10 +1,11 @@
 import { Inject, Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
 import { MANAGEABLE_FEATURE_NAMES } from '../domain/manageable-feature';
 import { FEATURE_QUERY, type FeatureQueryPort } from '../domain/ports/feature-query.port';
+import type { FeatureReadinessBarrierPort } from '../domain/ports/feature-readiness-barrier.port';
 import { VerifyFeatureReadinessUseCase } from './verify-feature-readiness.use-case';
 
 @Injectable()
-export class FeatureReadinessBootService implements OnApplicationBootstrap {
+export class FeatureReadinessBootService implements FeatureReadinessBarrierPort, OnApplicationBootstrap {
   private readonly logger = new Logger(FeatureReadinessBootService.name);
   private initialVerification: Promise<void> | undefined;
 

@@ -7,6 +7,7 @@ import { InMemoryFeatureReadinessAdapter } from '../../../src/features/infrastru
 import { InMemoryFeatureRepository } from '../../../src/features/infrastructure/in-memory-feature.repository';
 import { InMemoryFeatureQuery } from '../../../src/features/infrastructure/in-memory-feature.query';
 import { VerifyFeatureReadinessUseCase } from '../../../src/features/application/verify-feature-readiness.use-case';
+import type { FeatureReadinessBarrierPort } from '../../../src/features/domain/ports/feature-readiness-barrier.port';
 
 describe('FeatureReadinessBootService', () => {
   it('shares one initial verification pass among concurrent callers', async () => {
@@ -27,7 +28,10 @@ describe('FeatureReadinessBootService', () => {
     const features = new InMemoryFeatureRepository([{ name: 'digital', installed: true, enabled: true, config: null, attentionReason: null }]);
     const readiness = { verify: vi.fn(async () => { await pending; return { ready: true as const, restartScope: 'worker' as const }; }) };
     const boot = new FeatureReadinessBootService(new InMemoryFeatureQuery([{ name: 'digital', installed: true, enabled: true, config: null, attentionReason: null }]), new VerifyFeatureReadinessUseCase(features, readiness));
-    const availability = new FeatureAvailabilityService(features, new InMemoryFeatureInstallJobRepository(features), boot);
+    const barrier: FeatureReadinessBarrierPort = {
+      awaitInitialVerification: () => boot.awaitInitialVerification(),
+    };
+    const availability = new FeatureAvailabilityService(features, new InMemoryFeatureInstallJobRepository(features), barrier);
     const inspect = availability.inspect('digital');
     const required = availability.requireReady('digital');
     await Promise.resolve();

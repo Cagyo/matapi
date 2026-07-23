@@ -17,6 +17,7 @@ import { FEATURE_DISABLE_LIFECYCLE } from './domain/ports/feature-disable-lifecy
 import { FEATURE_INSTALL_JOB_REPOSITORY } from './domain/ports/feature-install-job.repository.port';
 import { FEATURE_READINESS } from './domain/ports/feature-readiness.port';
 import { FEATURE_AVAILABILITY } from './domain/ports/feature-availability.port';
+import { FEATURE_READINESS_BARRIER } from './domain/ports/feature-readiness-barrier.port';
 import { DrizzleFeatureInstallJobRepository } from './infrastructure/drizzle-feature-install-job.repository';
 import { DigitalReadinessAdapter } from './infrastructure/readiness/digital-readiness.adapter';
 import { UartReadinessAdapter } from './infrastructure/readiness/uart-readiness.adapter';
@@ -55,6 +56,7 @@ import { FeatureReadinessRouter } from './infrastructure/readiness/feature-readi
     DisableFeatureUseCase,
     VerifyFeatureReadinessUseCase,
     FeatureReadinessBootService,
+    { provide: FEATURE_READINESS_BARRIER, useExisting: FeatureReadinessBootService },
     FeatureAvailabilityService,
     { provide: FEATURE_AVAILABILITY, useExisting: FeatureAvailabilityService },
     ListManageableFeaturesUseCase,
@@ -71,7 +73,6 @@ import { FeatureReadinessRouter } from './infrastructure/readiness/feature-readi
     ListFeaturesUseCase,
     ListManageableFeaturesUseCase,
     GetFeatureDetailUseCase,
-    FeatureAvailabilityService,
   ],
 })
 export class FeatureModule {}

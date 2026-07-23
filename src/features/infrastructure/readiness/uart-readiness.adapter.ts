@@ -41,6 +41,8 @@ export class UartReadinessAdapter implements FeatureReadinessPort {
       if (!/^\s*enable_uart\s*=\s*1\s*$/mu.test(config)) throw new Error('UART disabled');
       check = 'serial console';
       await this.assertConsoleDisabled();
+      const activeCmdline = await this.readActiveCmdline();
+      if (SERIAL_CONSOLE_PATTERN.test(activeCmdline)) throw new Error('serial console active in kernel cmdline');
       const cmdline = await this.readBootCmdline();
       if (SERIAL_CONSOLE_PATTERN.test(cmdline)) throw new Error('serial console remains in cmdline');
       check = 'serial device access';
@@ -68,11 +70,15 @@ export class UartReadinessAdapter implements FeatureReadinessPort {
     }
   }
 
+  private readActiveCmdline(): Promise<string> {
+    return this.files.readFile('/proc/cmdline');
+  }
+
   private async assertConsoleDisabled(): Promise<void> {
     for (const unit of SERIAL_GETTY_UNITS) {
       const state = await this.execFile(
         '/bin/systemctl',
-        ['show', unit, '--property=LoadState,UnitFileState'],
+        ['show', unit, '--property=LoadState,UnitFileState,ActiveState'],
         READINESS_COMMAND_OPTIONS,
       );
       const values = new Map(
@@ -82,7 +88,11 @@ export class UartReadinessAdapter implements FeatureReadinessPort {
         }),
       );
       if (values.get('LoadState') === 'not-found') continue;
-      if (values.get('LoadState') !== 'loaded' || values.get('UnitFileState') !== 'disabled') {
+      if (
+        values.get('LoadState') !== 'loaded' ||
+        values.get('UnitFileState') !== 'disabled' ||
+        values.get('ActiveState') !== 'inactive'
+      ) {
         throw new Error('serial console enabled or unavailable');
       }
     }

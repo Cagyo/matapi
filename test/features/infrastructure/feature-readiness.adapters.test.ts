@@ -26,8 +26,8 @@ describe('feature readiness adapters', () => {
     await expect(adapter.verify('zigbee')).resolves.toEqual({ ready: false, failureCode: 'application-verification-failed' });
   });
 
-  it('checks UART boot configuration, disabled console, and worker device access through seams', async () => {
-    const execFile = vi.fn().mockResolvedValue({ stdout: 'LoadState=loaded\nUnitFileState=disabled\n', stderr: '' });
+  it('checks UART boot configuration, inactive disabled console, and worker device access through seams', async () => {
+    const execFile = vi.fn().mockResolvedValue({ stdout: 'LoadState=loaded\nUnitFileState=disabled\nActiveState=inactive\n', stderr: '' });
     const openReadWrite = vi.fn().mockResolvedValue(undefined);
     const adapter = new UartReadinessAdapter({
       execFile,
@@ -42,17 +42,17 @@ describe('feature readiness adapters', () => {
     });
 
     await expect(adapter.verify('uart')).resolves.toEqual({ ready: true, restartScope: 'worker' });
-    expect(execFile).toHaveBeenCalledWith('/bin/systemctl', ['show', 'serial-getty@serial0.service', '--property=LoadState,UnitFileState'], expect.objectContaining({ timeout: 5_000, maxBuffer: 4_096 }));
-    expect(execFile).toHaveBeenCalledWith('/bin/systemctl', ['show', 'serial-getty@ttyAMA0.service', '--property=LoadState,UnitFileState'], expect.anything());
-    expect(execFile).toHaveBeenCalledWith('/bin/systemctl', ['show', 'serial-getty@ttyS0.service', '--property=LoadState,UnitFileState'], expect.anything());
-    expect(execFile).toHaveBeenCalledWith('/bin/systemctl', ['show', 'serial-getty@ttyAMA10.service', '--property=LoadState,UnitFileState'], expect.anything());
+    expect(execFile).toHaveBeenCalledWith('/bin/systemctl', ['show', 'serial-getty@serial0.service', '--property=LoadState,UnitFileState,ActiveState'], expect.objectContaining({ timeout: 5_000, maxBuffer: 4_096 }));
+    expect(execFile).toHaveBeenCalledWith('/bin/systemctl', ['show', 'serial-getty@ttyAMA0.service', '--property=LoadState,UnitFileState,ActiveState'], expect.anything());
+    expect(execFile).toHaveBeenCalledWith('/bin/systemctl', ['show', 'serial-getty@ttyS0.service', '--property=LoadState,UnitFileState,ActiveState'], expect.anything());
+    expect(execFile).toHaveBeenCalledWith('/bin/systemctl', ['show', 'serial-getty@ttyAMA10.service', '--property=LoadState,UnitFileState,ActiveState'], expect.anything());
     expect(openReadWrite).toHaveBeenCalledWith('/dev/serial0');
   });
 
   it('rejects UART readiness when an installer-managed serial getty alias is enabled', async () => {
     vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     const execFile = vi.fn().mockImplementation((_executable: string, arguments_: readonly string[]) => Promise.resolve({
-      stdout: arguments_[1] === 'serial-getty@ttyAMA10.service' ? 'LoadState=loaded\nUnitFileState=enabled\n' : 'LoadState=loaded\nUnitFileState=disabled\n',
+      stdout: arguments_[1] === 'serial-getty@ttyAMA10.service' ? 'LoadState=loaded\nUnitFileState=enabled\nActiveState=inactive\n' : 'LoadState=loaded\nUnitFileState=disabled\nActiveState=inactive\n',
       stderr: '',
     }));
     const adapter = new UartReadinessAdapter({
@@ -63,11 +63,51 @@ describe('feature readiness adapters', () => {
     await expect(adapter.verify('uart')).resolves.toEqual({ ready: false, failureCode: 'application-verification-failed' });
   });
 
-  it('rejects UART readiness when cmdline retains an active serial console alias', async () => {
+  it('rejects UART readiness when the next-boot cmdline retains a serial console alias', async () => {
     vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     const adapter = new UartReadinessAdapter({
-      execFile: vi.fn().mockResolvedValue({ stdout: 'LoadState=loaded\nUnitFileState=disabled\n', stderr: '' }),
-      files: { readFile: vi.fn((path: string) => Promise.resolve(path.endsWith('config.txt') ? 'enable_uart=1\n' : 'console=ttyAMA0,115200 rootwait\n')), openReadWrite: vi.fn() },
+      execFile: vi.fn().mockResolvedValue({ stdout: 'LoadState=loaded\nUnitFileState=disabled\nActiveState=inactive\n', stderr: '' }),
+      files: {
+        readFile: vi.fn((path: string) => Promise.resolve(
+          path.endsWith('config.txt') ? 'enable_uart=1\n'
+            : path === '/proc/cmdline' ? 'quiet\n'
+              : 'console=ttyAMA0,115200 rootwait\n',
+        )),
+        openReadWrite: vi.fn(),
+      },
+    });
+
+    await expect(adapter.verify('uart')).resolves.toEqual({ ready: false, failureCode: 'application-verification-failed' });
+  });
+
+  it('rejects UART readiness when the active kernel cmdline retains a serial console alias', async () => {
+    vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const adapter = new UartReadinessAdapter({
+      execFile: vi.fn().mockResolvedValue({ stdout: 'LoadState=loaded\nUnitFileState=disabled\nActiveState=inactive\n', stderr: '' }),
+      files: {
+        readFile: vi.fn((path: string) => Promise.resolve(
+          path.endsWith('config.txt') ? 'enable_uart=1\n'
+            : path === '/proc/cmdline' ? 'console=serial0,115200 rootwait\n'
+              : 'quiet\n',
+        )),
+        openReadWrite: vi.fn(),
+      },
+    });
+
+    await expect(adapter.verify('uart')).resolves.toEqual({ ready: false, failureCode: 'application-verification-failed' });
+  });
+
+  it('rejects UART readiness when a disabled serial getty remains active', async () => {
+    vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const execFile = vi.fn().mockImplementation((_executable: string, arguments_: readonly string[]) => Promise.resolve({
+      stdout: arguments_[1] === 'serial-getty@ttyS0.service'
+        ? 'LoadState=loaded\nUnitFileState=disabled\nActiveState=active\n'
+        : 'LoadState=loaded\nUnitFileState=disabled\nActiveState=inactive\n',
+      stderr: '',
+    }));
+    const adapter = new UartReadinessAdapter({
+      execFile,
+      files: { readFile: vi.fn((path: string) => Promise.resolve(path.endsWith('config.txt') ? 'enable_uart=1\n' : 'quiet\n')), openReadWrite: vi.fn() },
     });
 
     await expect(adapter.verify('uart')).resolves.toEqual({ ready: false, failureCode: 'application-verification-failed' });
