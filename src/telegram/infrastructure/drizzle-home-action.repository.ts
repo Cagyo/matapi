@@ -246,7 +246,9 @@ export class DrizzleHomeActionRepository implements HomeActionRepositoryPort {
       const receipt = row && decode(row);
       if (receipt?.kind !== 'workflow-return' || receipt.id !== input.id) return 'superseded';
       if (receipt.status !== 'executing' && receipt.status !== 'returned') return 'terminal';
-      if (receipt.expiresAt.getTime() <= input.now.getTime()) return 'expired';
+      // An executing action owns durable external work; its exact receipt
+      // remains recoverable even after the UI-return TTL elapsed.
+      if (receipt.status !== 'executing' && receipt.expiresAt.getTime() <= input.now.getTime()) return 'expired';
       const currentStage = receipt.payload.deliveryStage ?? 'pending';
       if (!canTransitionWorkflowDeliveryStage(currentStage, input.stage)) return 'terminal';
       const updated: WorkflowReturnReceipt = {

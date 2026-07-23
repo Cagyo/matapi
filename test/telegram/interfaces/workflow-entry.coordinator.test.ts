@@ -795,6 +795,50 @@ describe('WorkflowEntryCoordinator', () => {
     }));
   });
 
+  it('delivers an expired executing historical receipt exactly once during headless recovery', async () => {
+    const now = new Date('2030-01-03T00:00:00.000Z');
+    const expired = {
+      ...restartReceipt('pending', 'executing'),
+      expiresAt: new Date('2030-01-02T00:00:00.000Z'),
+    } satisfies WorkflowReturnReceipt;
+    const current = {
+      ...expired,
+      id: 'qrstuvwxyzabcdef',
+      status: 'pending' as const,
+      expiresAt: new Date('2030-01-04T00:00:00.000Z'),
+      payload: { ...expired.payload, workflow: 'camera' as const },
+    } satisfies WorkflowReturnReceipt;
+    const { InMemoryHomeActionRepository } = await import('../../../src/telegram/infrastructure/in-memory-home-action.repository');
+    const actions = new InMemoryHomeActionRepository();
+    await actions.beginWorkflowReturn(expired);
+    await actions.beginWorkflowReturn(current);
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const restore = vi.fn().mockResolvedValue(true);
+    const coordinator = new WorkflowEntryCoordinator(
+      { execute: vi.fn() } as unknown as BeginWorkflowReturnUseCase,
+      new WorkflowDraftRegistry(), new WorkflowOperationQueue(), actions,
+      { now: () => now },
+    );
+
+    await expect(coordinator.completeHeadless({
+      identity: recoveryIdentity,
+      workflow: 'system-restart',
+      receiptId: expired.id,
+      deliver,
+      restore,
+    })).resolves.toBe('completed');
+    expect(deliver).toHaveBeenCalledOnce();
+    expect(restore).toHaveBeenCalledOnce();
+    await expect(coordinator.completeHeadless({
+      identity: recoveryIdentity,
+      workflow: 'system-restart',
+      receiptId: expired.id,
+      deliver,
+      restore,
+    })).resolves.toBe('no-workflow');
+    expect(deliver).toHaveBeenCalledOnce();
+  });
+
   it('finishes a known outcome notice without rendering it a second time when its acknowledgement fails', async () => {
     const pending = restartReceipt('pending');
     const actions = {

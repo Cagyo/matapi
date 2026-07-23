@@ -185,7 +185,9 @@ export class InMemoryHomeActionRepository implements HomeActionRepositoryPort {
     const receipt = this.getExact({ ...input, kind: 'workflow-return' });
     if (receipt?.kind !== 'workflow-return' || receipt.userId !== input.userId || receipt.chatId !== input.chatId) return 'superseded';
     if (receipt.status !== 'executing' && receipt.status !== 'returned') return 'terminal';
-    if (receipt.expiresAt.getTime() <= input.now.getTime()) return 'expired';
+    // Match SQLite: an executing receipt can still record post-downtime
+    // delivery progress, while pending/returned receipts retain TTL expiry.
+    if (receipt.status !== 'executing' && receipt.expiresAt.getTime() <= input.now.getTime()) return 'expired';
     const currentStage = receipt.payload.deliveryStage ?? 'pending';
     if (!canTransitionWorkflowDeliveryStage(currentStage, input.stage)) return 'terminal';
     const updated: WorkflowReturnReceipt = {

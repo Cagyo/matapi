@@ -203,6 +203,18 @@ function describeWorkflowReturnRepositoryContract(
         .resolves.toBeNull();
     });
 
+    it('advances delivery stages on an expired exact executing receipt', async () => {
+      const executing = workflowReceipt(undefined, {
+        status: 'executing',
+        expiresAt: NOW,
+      });
+      await harness.repository.beginWorkflowReturn(executing);
+
+      await expect(harness.repository.updateWorkflowReturnDeliveryStage({
+        userId: 100, chatId: 200, id: executing.id, stage: 'direct-attempted', now: NOW,
+      })).resolves.toBe('updated');
+    });
+
     it('claims pending once and exposes executing as resumable', async () => {
       const pending = workflowReceipt();
       await harness.repository.beginWorkflowReturn(pending);
