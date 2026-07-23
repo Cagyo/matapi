@@ -12,10 +12,19 @@ import { FEATURE_REPOSITORY } from './domain/ports/feature-repository.port';
 import { DrizzleFeatureQuery } from './infrastructure/drizzle-feature.query';
 import { DrizzleFeatureRepository } from './infrastructure/drizzle-feature.repository';
 import { FeatureSeederService } from './application/feature-seeder.service';
+import { BeginFeatureInstallUseCase } from './application/begin-feature-install.use-case';
+import { ReconcileFeatureInstallUseCase } from './application/reconcile-feature-install.use-case';
+import { FeatureInstallRecoveryService } from './application/feature-install-recovery.service';
+import { FeatureInstallOutcomeRegistryService } from './application/feature-install-outcome-registry.service';
 import { FeatureDisableLifecycleRegistry } from './application/feature-disable-lifecycle-registry.service';
 import { FEATURE_RUNTIME_LIFECYCLE } from './domain/ports/feature-runtime-lifecycle.port';
 import { FEATURE_RESTART } from './domain/ports/feature-restart.port';
 import { FEATURE_INSTALL_JOB_REPOSITORY } from './domain/ports/feature-install-job.repository.port';
+import { FEATURE_INSTALL_REQUEST } from './domain/ports/feature-install-request.port';
+import { FEATURE_INSTALL_RESULT } from './domain/ports/feature-install-result.port';
+import { FEATURE_INSTALL_CONTROLLER } from './domain/ports/feature-install-controller.port';
+import { FEATURE_INSTALL_OUTCOME_REGISTRY } from './domain/ports/feature-install-outcome.port';
+import { FEATURE_CLOCK } from './domain/ports/feature-clock.port';
 import { FEATURE_READINESS } from './domain/ports/feature-readiness.port';
 import { FEATURE_AVAILABILITY } from './domain/ports/feature-availability.port';
 import { FEATURE_READINESS_BARRIER } from './domain/ports/feature-readiness-barrier.port';
@@ -27,6 +36,10 @@ import { MotionReadinessAdapter } from './infrastructure/readiness/motion-readin
 import { RtspReadinessAdapter } from './infrastructure/readiness/rtsp-readiness.adapter';
 import { FeatureReadinessRouter } from './infrastructure/readiness/feature-readiness.router';
 import { FixedFeatureRestartAdapter } from './infrastructure/fixed-feature-restart.adapter';
+import { FsFeatureInstallRequestAdapter } from './infrastructure/fs-feature-install-request.adapter';
+import { FsFeatureInstallResultAdapter } from './infrastructure/fs-feature-install-result.adapter';
+import { SystemdFeatureInstallControllerAdapter } from './infrastructure/systemd-feature-install-controller.adapter';
+import { SystemFeatureClockAdapter } from './infrastructure/system-feature-clock.adapter';
 import { PROCESS_RESTARTER, type ProcessRestarterPort } from '../system/domain/ports/process-restarter.port';
 import { resolveSystemMode } from '../system/domain/system-mode';
 import { Pm2ProcessRestarter } from '../system/infrastructure/pm2-process-restarter.adapter';
@@ -45,6 +58,10 @@ const systemMode = resolveSystemMode();
     { provide: FEATURE_QUERY, useClass: DrizzleFeatureQuery },
     { provide: FEATURE_REPOSITORY, useClass: DrizzleFeatureRepository },
     { provide: FEATURE_INSTALL_JOB_REPOSITORY, useClass: DrizzleFeatureInstallJobRepository },
+    { provide: FEATURE_INSTALL_REQUEST, useClass: FsFeatureInstallRequestAdapter },
+    { provide: FEATURE_INSTALL_RESULT, useClass: FsFeatureInstallResultAdapter },
+    { provide: FEATURE_INSTALL_CONTROLLER, useClass: SystemdFeatureInstallControllerAdapter },
+    { provide: FEATURE_CLOCK, useClass: SystemFeatureClockAdapter },
     {
       provide: FEATURE_READINESS,
       useFactory: () => new FeatureReadinessRouter({
@@ -56,6 +73,8 @@ const systemMode = resolveSystemMode();
       }),
     },
     FeatureDisableLifecycleRegistry,
+    FeatureInstallOutcomeRegistryService,
+    { provide: FEATURE_INSTALL_OUTCOME_REGISTRY, useExisting: FeatureInstallOutcomeRegistryService },
     {
       provide: FEATURE_RUNTIME_LIFECYCLE,
       useExisting: FeatureDisableLifecycleRegistry,
@@ -80,16 +99,23 @@ const systemMode = resolveSystemMode();
     GetFeatureDetailUseCase,
     ListFeaturesUseCase,
     FeatureSeederService,
+    ReconcileFeatureInstallUseCase,
+    FeatureInstallRecoveryService,
+    BeginFeatureInstallUseCase,
   ],
   exports: [
     FEATURE_QUERY,
     FEATURE_AVAILABILITY,
     FEATURE_RUNTIME_LIFECYCLE,
+    FEATURE_INSTALL_OUTCOME_REGISTRY,
     EnableFeatureUseCase,
     DisableFeatureUseCase,
     ListFeaturesUseCase,
     ListManageableFeaturesUseCase,
     GetFeatureDetailUseCase,
+    BeginFeatureInstallUseCase,
+    ReconcileFeatureInstallUseCase,
+    FeatureInstallRecoveryService,
   ],
 })
 export class FeatureModule {}

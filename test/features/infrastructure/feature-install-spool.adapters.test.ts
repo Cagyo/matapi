@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 const fsMocks = vi.hoisted(() => ({
   link: vi.fn(),
   open: vi.fn(),
+  rename: vi.fn(),
   unlink: vi.fn(),
 }));
 
@@ -99,5 +100,19 @@ describe('feature install spool adapters', () => {
     }
     configure(`{"feature":"rtsp","jobId":"${JOB}","version":1}\n`, { uid: 0, gid: process.getgid?.() ?? 0, mode: 0o100640 });
     await expect(adapter.readState(JOB, 'digital')).rejects.toThrow('result-invalid');
+  });
+
+  it('cancels only an exact request that the root helper has not claimed', async () => {
+    fsMocks.open.mockImplementation(async (path: string, openFlags: number) => {
+      if (path === '/var/lib/home-worker/feature-install-requests' && (openFlags & constants.O_DIRECTORY)) return directoryHandle();
+      return fileHandle(request);
+    });
+    fsMocks.rename.mockResolvedValue(undefined);
+    fsMocks.unlink.mockResolvedValue(undefined);
+    const adapter = new FsFeatureInstallRequestAdapter();
+
+    await expect(adapter.cancelUnclaimed({ version: 1, jobId: JOB, feature: 'digital' })).resolves.toBe(true);
+    fsMocks.rename.mockRejectedValueOnce(Object.assign(new Error('claimed'), { code: 'ENOENT' }));
+    await expect(adapter.cancelUnclaimed({ version: 1, jobId: JOB, feature: 'digital' })).resolves.toBe(false);
   });
 });

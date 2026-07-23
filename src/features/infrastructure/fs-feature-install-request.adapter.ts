@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { link, open, unlink } from 'node:fs/promises';
+import { link, open, rename, unlink } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { assertFeatureInstallRequest, parseFeatureInstallRequest, type FeatureInstallRequestV1 } from '../domain/manageable-feature';
@@ -43,6 +43,32 @@ export class FsFeatureInstallRequestAdapter implements FeatureInstallRequestPort
     } finally {
       await handle?.close().catch(() => undefined);
       await unlink(temporary).catch(() => undefined);
+    }
+  }
+
+  async cancelUnclaimed(request: FeatureInstallRequestV1): Promise<boolean> {
+    const canonical = assertFeatureInstallRequest(request);
+    const body = `${JSON.stringify({ feature: canonical.feature, jobId: canonical.jobId, version: 1 })}\n`;
+    const uid = process.getuid?.() ?? -1;
+    const gid = process.getgid?.() ?? -1;
+    await validateSpoolDirectory(DEFAULT_REQUEST_DIRECTORY, 0, gid, 0o730);
+    const target = join(DEFAULT_REQUEST_DIRECTORY, `${canonical.jobId}.json`);
+    const cancellation = join(DEFAULT_REQUEST_DIRECTORY, `.${canonical.jobId}.${randomUUID()}.cancel`);
+    try {
+      // Claim the name first. The root helper consumes only *.json entries,
+      // so a successful rename proves it cannot claim this request afterwards.
+      await rename(target, cancellation);
+      if (await readSafeRequest(cancellation, uid, gid) !== body) {
+        await link(cancellation, target).then(() => unlink(cancellation)).catch(() => undefined);
+        return false;
+      }
+      await unlink(cancellation);
+      await syncDirectory(DEFAULT_REQUEST_DIRECTORY);
+      return true;
+    } catch (error: unknown) {
+      if (isCode(error, 'ENOENT')) return false;
+      await unlink(cancellation).catch(() => undefined);
+      throw error;
     }
   }
 }
