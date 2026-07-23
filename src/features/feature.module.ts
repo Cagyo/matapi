@@ -115,8 +115,6 @@ const systemMode = resolveSystemMode();
     GetFeatureDetailUseCase,
     BeginFeatureInstallUseCase,
     VerifyFeatureReadinessUseCase,
-    ReconcileFeatureInstallUseCase,
-    FeatureInstallRecoveryService,
   ],
 })
 export class FeatureModule {}

@@ -14,6 +14,13 @@ function emittedParamTypes(path: string): string {
   }).outputText;
 }
 
+function moduleExports(path: string): string[] {
+  const source = readFileSync(resolve(path), 'utf8');
+  const match = /exports:\s*\[([\s\S]*?)\],\s*\}\)\s*\nexport class FeatureModule/u.exec(source);
+  if (!match) throw new Error(`Unable to find FeatureModule exports in ${path}`);
+  return match[1].split(',').map((entry) => entry.trim()).filter(Boolean);
+}
+
 describe('Telegram role-use-case dependency metadata', () => {
   it.each([
     'src/telegram/application/promote-user.use-case.ts',
@@ -46,5 +53,31 @@ describe('Telegram role-use-case dependency metadata', () => {
     expect(home).not.toContain('LegacyMenuHandler');
     expect(home).not.toContain('DrizzleHomeActionRepository');
     expect(module).not.toContain('forwardRef(');
+  });
+
+  it('exports only FeatureModule ports and use cases consumed across context boundaries', () => {
+    expect(moduleExports('src/features/feature.module.ts')).toEqual([
+      'FEATURE_QUERY',
+      'FEATURE_AVAILABILITY',
+      'FEATURE_RUNTIME_LIFECYCLE',
+      'FEATURE_INSTALL_OUTCOME_REGISTRY',
+      'EnableFeatureUseCase',
+      'DisableFeatureUseCase',
+      'ListManageableFeaturesUseCase',
+      'GetFeatureDetailUseCase',
+      'BeginFeatureInstallUseCase',
+      'VerifyFeatureReadinessUseCase',
+    ]);
+  });
+
+  it.each([
+    'src/sensors/sensor.module.ts',
+    'src/camera/camera.module.ts',
+    'src/telegram/telegram.module.ts',
+  ])('%s imports FeatureModule without circular forwardRef wiring', (path) => {
+    const source = readFileSync(resolve(path), 'utf8');
+
+    expect(source).toContain("from '../features/feature.module'");
+    expect(source).not.toContain('forwardRef(');
   });
 });
