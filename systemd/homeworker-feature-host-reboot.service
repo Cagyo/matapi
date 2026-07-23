@@ -1,0 +1,6 @@
+[Unit]
+Description=Reboot host after Home Worker feature installation
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl reboot

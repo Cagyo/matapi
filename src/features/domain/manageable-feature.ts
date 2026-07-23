@@ -108,6 +108,7 @@ export function parseFeatureInstallResult(raw: string): FeatureInstallResultV1 {
     throw new RangeError('Feature result exceeds 4096 bytes');
   }
 
+  rejectDuplicateObjectKeys(raw);
   const value: unknown = JSON.parse(raw);
   if (!isRecord(value)) throw new RangeError('Feature result must be an object');
 
@@ -159,6 +160,57 @@ export function parseFeatureInstallResult(raw: string): FeatureInstallResultV1 {
     return value as FeatureInstallResultV1;
   }
   throw new RangeError('Feature result outcome is invalid');
+}
+
+/**
+ * The installer accepts only this tiny, closed wire format.  JSON.parse alone
+ * would silently accept duplicate names, so reject them before parsing.
+ */
+export function parseFeatureInstallRequest(raw: string): FeatureInstallRequestV1 {
+  if (Buffer.byteLength(raw, 'utf8') > 4_096) {
+    throw new RangeError('Feature request exceeds 4096 bytes');
+  }
+  rejectDuplicateObjectKeys(raw);
+  const value: unknown = JSON.parse(raw);
+  return assertFeatureInstallRequest(value);
+}
+
+/** Validates an in-memory request before it can influence a spool filename. */
+export function assertFeatureInstallRequest(value: unknown): FeatureInstallRequestV1 {
+  if (!isRecord(value)) throw new RangeError('Feature request must be an object');
+  const keys = Object.keys(value).sort();
+  const expected = ['feature', 'jobId', 'version'];
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
+    throw new RangeError('Feature request has unknown or missing keys');
+  }
+  if (value.version !== 1 || typeof value.jobId !== 'string' || !JOB_ID.test(value.jobId) || !isManageableFeature(value.feature)) {
+    throw new RangeError('Feature request identity is invalid');
+  }
+  return { version: 1, jobId: value.jobId, feature: value.feature };
+}
+
+function rejectDuplicateObjectKeys(raw: string): void {
+  const keys = new Set<string>();
+  let depth = 0;
+  for (let index = 0; index < raw.length; index += 1) {
+    const char = raw[index];
+    if (char === '{' || char === '[') { depth += 1; continue; }
+    if (char === '}' || char === ']') { depth -= 1; continue; }
+    if (char !== '"' || depth !== 1) continue;
+    const start = index;
+    index += 1;
+    for (; index < raw.length; index += 1) {
+      if (raw[index] === '\\') { index += 1; continue; }
+      if (raw[index] === '"') break;
+    }
+    if (index >= raw.length) return;
+    let cursor = index + 1;
+    while (/\s/u.test(raw[cursor] ?? '')) cursor += 1;
+    if (raw[cursor] !== ':') continue;
+    const key = JSON.parse(raw.slice(start, index + 1)) as string;
+    if (keys.has(key)) throw new RangeError('Feature payload has duplicate keys');
+    keys.add(key);
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

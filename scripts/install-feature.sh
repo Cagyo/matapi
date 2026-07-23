@@ -1,10 +1,19 @@
 #!/bin/bash
 set -euo pipefail
 FEATURE="${1:-}"
-USER="${HOME_WORKER_USER:-homeworker}"
 APT_LOCK_TIMEOUT_SECONDS=300
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-INSTALL_DIR="${HOME_WORKER_INSTALL_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+if [ "${HOME_WORKER_PRIVILEGED:-0}" = "1" ]; then
+  # The root-owned helper supplies only a fixed feature argument and a
+  # sanitized environment.  Do not inherit install paths or account selectors.
+  USER="homeworker"
+  SCRIPT_DIR="/usr/lib/home-worker"
+  INSTALL_DIR="/usr/lib/home-worker"
+  sudo() { "$@"; }
+else
+  USER="${HOME_WORKER_USER:-homeworker}"
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  INSTALL_DIR="${HOME_WORKER_INSTALL_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+fi
 
 apt_get() {
   sudo apt-get -o "DPkg::Lock::Timeout=${APT_LOCK_TIMEOUT_SECONDS}" "$@"
@@ -287,10 +296,6 @@ EOF
       sudo raspi-config nonint do_serial_cons 1 || true
     fi
     ;;
-  4g)
-    echo "Installing 4G failover dependencies..."
-    apt_get install -y usb-modeswitch
-    ;;
   rtsp)
     echo "Installing experimental cloudflared live-stream capability..."
     CLOUDFLARED_ARCH="${HOME_WORKER_DEBIAN_ARCH:-$(dpkg --print-architecture)}"
@@ -383,8 +388,11 @@ EOF
     echo "RTSP runtime installed; restart the worker supervisor to refresh its homeworker-stream group membership. Until then RTSP startup remains fail closed."
     echo "Experimental cloudflared live-stream capability installed."
     ;;
-  digital|neobox)
-    echo "No additional system dependencies required for feature: $FEATURE"
+  digital)
+    echo "Installing pigpio GPIO daemon..."
+    apt_get install -y pigpio
+    sudo systemctl enable --now pigpiod.service
+    sudo systemctl is-active --quiet pigpiod.service
     ;;
   *)
     echo "Unknown feature: $FEATURE" >&2

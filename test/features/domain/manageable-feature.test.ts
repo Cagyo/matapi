@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { FEATURE_CATALOG } from '../../../src/features/domain/feature-catalog';
 import {
   MANAGEABLE_FEATURE_NAMES,
+  assertFeatureInstallRequest,
   isManageableFeature,
+  parseFeatureInstallRequest,
   parseFeatureInstallResult,
 } from '../../../src/features/domain/manageable-feature';
 import { deriveFeatureStatus } from '../../../src/features/domain/feature-status';
@@ -181,6 +183,21 @@ describe('manageable feature domain', () => {
         }),
       ),
     ).toThrow(RangeError);
+  });
+
+  it('rejects duplicate and non-closed request schema at the runtime boundary', () => {
+    expect(() => parseFeatureInstallRequest(
+      '{"version":1,"jobId":"abcdefghijklmnop","feature":"digital","feature":"rtsp"}',
+    )).toThrow(RangeError);
+    expect(() => parseFeatureInstallRequest(
+      '{"version":true,"jobId":"abcdefghijklmnop","feature":"digital"}',
+    )).toThrow(RangeError);
+    expect(parseFeatureInstallRequest(
+      '{"version":1,"jobId":"abcdefghijklmnop","feature":"digital"}',
+    )).toEqual({ version: 1, jobId: 'abcdefghijklmnop', feature: 'digital' });
+    expect(() => assertFeatureInstallRequest({
+      version: 1, jobId: 'abcdefghijklmnop', feature: 'digital', extra: undefined,
+    })).toThrow(RangeError);
   });
 
   it('exposes stable, typed domain error codes', () => {

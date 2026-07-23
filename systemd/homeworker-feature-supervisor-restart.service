@@ -1,0 +1,6 @@
+[Unit]
+Description=Restart Home Worker PM2 supervisor after feature installation
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl restart pm2-homeworker.service
