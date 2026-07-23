@@ -40,6 +40,20 @@ export class InMemoryFeatureRepository implements FeatureRepositoryPort {
     return { ...feature };
   }
 
+  async compareAndSetAttention(input: {
+    name: ManageableFeatureName;
+    expected: { installed: boolean; enabled: boolean; attentionReason: FeatureAttentionReason | null };
+    attentionReason: FeatureAttentionReason | null;
+  }): Promise<Feature | null> {
+    const feature = this.features.find((candidate) => candidate.name === input.name);
+    if (!feature
+      || feature.installed !== input.expected.installed
+      || feature.enabled !== input.expected.enabled
+      || feature.attentionReason !== input.expected.attentionReason) return null;
+    feature.attentionReason = input.attentionReason;
+    return { ...feature };
+  }
+
   async setVerified(input: {
     name: ManageableFeatureName;
     installed: boolean;

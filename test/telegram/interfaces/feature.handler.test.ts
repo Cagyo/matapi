@@ -16,13 +16,23 @@ function setup() {
     { name: 'motion', installed: false, enabled: false, ready: false, busy: false, attentionReason: null, display: 'not-installed', action: 'install' },
     { name: 'rtsp', installed: false, enabled: false, ready: false, busy: false, attentionReason: null, display: 'not-installed', action: 'install' },
   ]) };
+  const detail = { execute: vi.fn().mockResolvedValue({ status: list.execute.mock.results ? { name: 'digital', installed: false, enabled: false, ready: false, busy: false, attentionReason: null, display: 'not-installed', action: 'install' } : null, impact: { dependencies: 'pigpiod', controls: 'digital-sensors', monitoring: 'sensor-work', restartScope: 'worker' } }) };
+  const install = { execute: vi.fn().mockResolvedValue({ job: {}, stage: 'running' }) };
+  const enable = { execute: vi.fn().mockResolvedValue({}) };
+  const disable = { execute: vi.fn().mockResolvedValue({}) };
+  const verify = { execute: vi.fn().mockResolvedValue({ ready: true }) };
+  const claim = { execute: vi.fn().mockResolvedValue({ kind: 'claimed', receipt, operation: { kind: 'feature-mutation', feature: 'digital', action: 'install', expectedInstalled: false, expectedEnabled: false, expectedAttentionReason: null } }) };
+  const workflows = { begin: vi.fn().mockResolvedValue(receipt), loadCurrent: vi.fn().mockResolvedValue(receipt), completeHeadless: vi.fn() };
+  const navigation = { complete: vi.fn().mockResolvedValue(undefined) };
+  const outcomes = { register: vi.fn() };
   const handler = new FeatureHandler(
-    list as never, {} as never, {} as never, {} as never, {} as never, {} as never,
-    {} as never, { begin: vi.fn().mockResolvedValue(receipt), completeHeadless: vi.fn() } as never,
-    {} as never, {} as never, { register: vi.fn() } as never, {} as never, {} as never, {} as never,
+    list as never, detail as never, install as never, enable as never, disable as never, verify as never,
+    claim as never, workflows as never,
+    navigation as never, {} as never, outcomes as never, { findByTelegramId: vi.fn() } as never, {} as never,
+    { adminOnly: vi.fn(), registered: vi.fn() } as never,
   );
-  const ctx = { from: { id: 7 }, chat: { id: 7, type: 'private' }, localeState: { locale: 'en', catalog: catalogFor('en'), user: { telegramId: 7, role: 'admin' } }, reply: vi.fn().mockResolvedValue({}) };
-  return { ctx, handler, list };
+  const ctx = { from: { id: 7 }, chat: { id: 7, type: 'private' }, localeState: { locale: 'en', catalog: catalogFor('en'), user: { telegramId: 7, role: 'admin' } }, reply: vi.fn().mockResolvedValue({}), answerCallbackQuery: vi.fn().mockResolvedValue(undefined) };
+  return { ctx, handler, list, detail, install, enable, disable, verify, claim, workflows, navigation, outcomes };
 }
 
 describe('FeatureHandler', () => {
@@ -34,5 +44,41 @@ describe('FeatureHandler', () => {
     expect(keyboard.slice(0, 5).every((row: unknown[]) => row.length === 1)).toBe(true);
     expect(keyboard.slice(0, 5).map((row: Array<{ callback_data: string }>) => row[0].callback_data))
       .toEqual(['ft:d:abcdefghijklmnop:d', 'ft:d:abcdefghijklmnop:u', 'ft:d:abcdefghijklmnop:z', 'ft:d:abcdefghijklmnop:m', 'ft:d:abcdefghijklmnop:r']);
+  });
+
+  it('registers recovery after locale and never treats direct commands as mutations', async () => {
+    const { handler, outcomes, install, ctx } = setup();
+    let command: ((ctx: typeof ctx) => Promise<void>) | undefined;
+    const composer = { command: vi.fn((_: string, _guard: unknown, callback: typeof command) => { command = callback; }), callbackQuery: vi.fn() };
+    handler.register(composer as never);
+    await command!({ ...ctx, match: 'install digital' });
+    expect(outcomes.register).toHaveBeenCalledWith(handler);
+    expect(install.execute).not.toHaveBeenCalled();
+  });
+
+  it('rejects extra command tokens with usage and no navigation receipt', async () => {
+    const { handler, ctx, workflows } = setup();
+    let command: ((ctx: typeof ctx) => Promise<void>) | undefined;
+    handler.register({ command: vi.fn((_: string, _guard: unknown, callback: typeof command) => { command = callback; }), callbackQuery: vi.fn() } as never);
+    await command!({ ...ctx, match: 'list extra' });
+    expect(workflows.begin).not.toHaveBeenCalled();
+    expect(ctx.reply).toHaveBeenCalledWith(catalogFor('en').feature.usage);
+  });
+
+  it('acknowledges malformed and stale callbacks without claiming a mutation', async () => {
+    const { handler, ctx, claim } = setup();
+    let callbackHandler: ((ctx: typeof ctx) => Promise<void>) | undefined;
+    handler.register({ command: vi.fn(), callbackQuery: vi.fn((_: unknown, _guard: unknown, callback: typeof callbackHandler) => { callbackHandler = callback; }) } as never);
+    await callbackHandler!({ ...ctx, callbackQuery: { data: 'ft:c:bad' } });
+    expect(ctx.answerCallbackQuery).toHaveBeenCalledOnce();
+    expect(claim.execute).not.toHaveBeenCalled();
+    expect(ctx.reply).toHaveBeenCalledWith(catalogFor('en').feature.recovery.stale);
+  });
+
+  it('passes the claimed exact expected snapshot to verification', async () => {
+    const { handler, ctx, claim, verify } = setup();
+    claim.execute.mockResolvedValueOnce({ kind: 'claimed', receipt, operation: { kind: 'feature-mutation', feature: 'digital', action: 'verify', expectedInstalled: true, expectedEnabled: true, expectedAttentionReason: 'readiness-failed' } });
+    await (handler as any).confirm(ctx, receipt.id, true);
+    expect(verify.execute).toHaveBeenCalledWith({ name: 'digital', source: 'manual', expected: { installed: true, enabled: true, attentionReason: 'readiness-failed' } });
   });
 });

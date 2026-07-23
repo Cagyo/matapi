@@ -19,7 +19,7 @@ function create(state: unknown = { kind: 'terminal', result: success }) {
   const results = { readState: vi.fn(async () => state), removeTerminal: vi.fn(async () => undefined) };
   const lifecycle = { register: vi.fn(), beforeDisable: vi.fn(async () => undefined), afterEnable: vi.fn(async () => undefined) };
   const restart = { dispatch: vi.fn(async () => undefined) };
-  const outcomes = { register: vi.fn(), notify: vi.fn(async () => undefined) };
+  const outcomes = { register: vi.fn(), notifyPreRestart: vi.fn(async () => undefined), notify: vi.fn(async () => undefined) };
   const useCase = new ReconcileFeatureInstallUseCase(
     jobs, results, new VerifyFeatureReadinessUseCase(features, readiness), lifecycle, restart, features, outcomes, { now: () => now },
   );
@@ -32,7 +32,7 @@ async function running(test: ReturnType<typeof create>) {
 }
 
 describe('ReconcileFeatureInstallUseCase', () => {
-  it('commits success before result cleanup, lifecycle, outcome delivery, and restart', async () => {
+  it('sends a best-effort pre-restart copy before dispatch and defers exact outcome delivery', async () => {
     const test = create();
     await running(test);
     const order: string[] = [];
@@ -41,12 +41,13 @@ describe('ReconcileFeatureInstallUseCase', () => {
       order.push('remove');
     });
     test.lifecycle.afterEnable.mockImplementation(async () => { order.push('lifecycle'); });
-    test.outcomes.notify.mockImplementation(async () => { order.push('outcome'); });
+    test.outcomes.notifyPreRestart.mockImplementation(async () => { order.push('pre-restart'); });
     test.restart.dispatch.mockImplementation(async () => { order.push('restart'); });
 
     await test.useCase.execute(id);
 
-    expect(order).toEqual(['remove', 'lifecycle', 'outcome', 'restart']);
+    expect(order).toEqual(['remove', 'lifecycle', 'pre-restart', 'restart']);
+    expect(test.outcomes.notify).not.toHaveBeenCalled();
     expect(await test.features.findByName('digital')).toMatchObject({ installed: true, enabled: true, attentionReason: null });
   });
 
@@ -82,5 +83,6 @@ describe('ReconcileFeatureInstallUseCase', () => {
 
     expect(test.restart.dispatch).toHaveBeenCalledTimes(1);
     expect(await test.features.findByName('digital')).toMatchObject({ attentionReason: 'restart-required' });
+    expect(test.outcomes.notify).toHaveBeenCalledWith(expect.objectContaining({ status: 'succeeded' }));
   });
 });

@@ -62,6 +62,26 @@ export class DrizzleFeatureRepository implements FeatureRepositoryPort {
     return row ? toFeature(row) : null;
   }
 
+  async compareAndSetAttention(input: {
+    name: ManageableFeatureName;
+    expected: { installed: boolean; enabled: boolean; attentionReason: FeatureAttentionReason | null };
+    attentionReason: FeatureAttentionReason | null;
+  }): Promise<Feature | null> {
+    const [row] = this.db.update(features)
+      .set({ attentionReason: input.attentionReason })
+      .where(and(
+        eq(features.name, input.name),
+        booleanMatches(features.installed, input.expected.installed),
+        booleanMatches(features.enabled, input.expected.enabled),
+        input.expected.attentionReason === null
+          ? isNull(features.attentionReason)
+          : eq(features.attentionReason, input.expected.attentionReason),
+      ))
+      .returning()
+      .all();
+    return row ? toFeature(row) : null;
+  }
+
   async setVerified(input: {
     name: ManageableFeatureName;
     installed: boolean;

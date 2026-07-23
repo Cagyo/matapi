@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Composer, InlineKeyboard } from 'grammy';
 import { BeginFeatureInstallUseCase } from '../../features/application/begin-feature-install.use-case';
 import { DisableFeatureUseCase } from '../../features/application/disable-feature.use-case';
@@ -40,6 +40,7 @@ const FEATURE_CODE: Record<ManageableFeatureName, string> = {
 /** Receipt-bound, localized feature navigation. Feature state remains in the feature module. */
 @Injectable()
 export class FeatureHandler implements TelegramHandler, FeatureInstallOutcomePort {
+  private readonly logger = new Logger(FeatureHandler.name);
   constructor(
     private readonly list: ListManageableFeaturesUseCase,
     private readonly detail: GetFeatureDetailUseCase,
@@ -63,9 +64,10 @@ export class FeatureHandler implements TelegramHandler, FeatureInstallOutcomePor
     // install outcomes always render with the recipient's persisted locale.
     this.outcomes.register(this);
     composer.command('feature', this.guard.adminOnly, async (ctx) => {
-      const [subcommand, name] = String(ctx.match ?? '').trim().split(/\s+/).filter(Boolean);
-      if (subcommand === 'list') return this.handleList(ctx);
-      if ((subcommand === 'install' || subcommand === 'enable' || subcommand === 'disable') && name) {
+      const args = String(ctx.match ?? '').trim().split(/\s+/).filter(Boolean);
+      const [subcommand, name] = args;
+      if (subcommand === 'list' && args.length === 1) return this.handleList(ctx);
+      if ((subcommand === 'install' || subcommand === 'enable' || subcommand === 'disable') && args.length === 2 && name) {
         const receipt = await this.beginList(ctx);
         if (!receipt) return;
         // Command verbs express navigation intent only; current state chooses the operation.
@@ -101,15 +103,19 @@ export class FeatureHandler implements TelegramHandler, FeatureInstallOutcomePor
     if (!user) return;
     const catalog = catalogFor(user.locale);
     const name = catalog.feature.names[job.feature];
-    const message = job.status === 'succeeded'
+    const final = await this.detail.execute(job.feature).catch(() => null);
+    const succeeded = job.status === 'succeeded' && final?.status.attentionReason === null;
+    const message = succeeded
       ? catalog.feature.outcome.success(name)
-      : catalog.feature.outcome.failure(name, job.failureCode ?? 'interrupted');
+      : catalog.feature.outcome.failure(name, failureLabel(catalog.feature, job.failureCode, final?.status.attentionReason));
     await this.workflows.completeHeadless({
       identity: { userId: user.telegramId, chatId: job.requestedInChatId, locale: user.locale, role: user.role, catalog },
       workflow: 'feature',
       receiptId: job.workflowReceiptId,
       deliver: () => this.dm.send(job.requestedInChatId, message),
-      recoveryNotice: catalog.feature.outcome.recovered(name),
+      recoveryNotice: succeeded
+        ? catalog.feature.outcome.recoveredSuccess(name)
+        : catalog.feature.outcome.recoveredFailure(name, failureLabel(catalog.feature, job.failureCode, final?.status.attentionReason)),
       restore: async (receipt, notice) => (await this.restoreWorkflow.execute({
         userId: user.telegramId,
         chatId: job.requestedInChatId,
@@ -121,6 +127,16 @@ export class FeatureHandler implements TelegramHandler, FeatureInstallOutcomePor
         notice,
       })).kind === 'opened',
     });
+  }
+
+  async notifyPreRestart(job: FeatureInstallJob): Promise<void> {
+    const user = await this.users.findByTelegramId(job.requestedByUserId);
+    if (!user) return;
+    const catalog = catalogFor(user.locale);
+    const scope = job.restartScope ?? 'worker';
+    await this.dm.send(job.requestedInChatId, catalog.feature.preRestart(
+      catalog.feature.names[job.feature], catalog.feature.restartScope[scope],
+    ));
   }
 
   private async handleCallback(ctx: TelegramContext): Promise<void> {
@@ -175,12 +191,13 @@ export class FeatureHandler implements TelegramHandler, FeatureInstallOutcomePor
       dependencies: catalog.impact.dependencies[detail.impact.dependencies],
       controls: catalog.impact.controls[detail.impact.controls],
       monitoring: catalog.impact.monitoring[detail.impact.monitoring],
+      downtime: catalog.downtime[detail.impact.restartScope],
       attention: detail.status.attentionReason ? catalog.attention[detail.status.attentionReason] : null,
     });
     const keyboard = new InlineKeyboard();
     if (action) {
       const button = action === 'verify' ? callback('v', receipt.id) : callback('c', receipt.id);
-      keyboard.text(catalog.confirmation[action](name, detail.impact.restartScope), button).row();
+      keyboard.text(catalog.confirmation[action](name, catalog.restartScope[detail.impact.restartScope]), button).row();
     }
     keyboard.text(catalog.listBack, callback('l', receipt.id)).row();
     keyboard.text(ctx.localeState!.catalog.home.common.back, `wr:${receipt.id}:o`)
@@ -211,7 +228,7 @@ export class FeatureHandler implements TelegramHandler, FeatureInstallOutcomePor
       } else if (operation.action === 'disable') {
         await this.disable.execute({ name: operation.feature, expected: expected(operation) });
       } else {
-        await this.verify.execute({ name: operation.feature, source: 'manual' });
+        await this.verify.execute({ name: operation.feature, source: 'manual', expected: expected(operation) });
       }
       await this.navigation.complete(ctx, { receipt }, {
         effectStage: 'pending',
@@ -219,7 +236,14 @@ export class FeatureHandler implements TelegramHandler, FeatureInstallOutcomePor
         failureNotice: catalog.recovery.unavailable,
       });
     } catch (error) {
+      if (error instanceof FeatureStateChangedError) {
+        await this.openDetail(ctx, receipt, operation.feature);
+        return;
+      }
       const message = this.failure(catalog, operation, error);
+      if (!isExpectedFeatureError(error)) {
+        this.logger.error(`Feature ${operation.action} failed for ${operation.feature}`);
+      }
       await this.navigation.complete(ctx, { receipt }, {
         effectStage: 'pending',
         deliver: async () => { await ctx.reply(message); },
@@ -289,4 +313,20 @@ function workflowOrigin(receipt: WorkflowReturnReceipt) {
   return receipt.payload.originSource === 'captured' && receipt.sessionToken
     ? { source: 'captured' as const, view: receipt.payload.origin, sessionToken: receipt.sessionToken }
     : { source: 'natural-parent' as const };
+}
+
+function isExpectedFeatureError(error: unknown): boolean {
+  return error instanceof FeatureInstallBusyError
+    || error instanceof FeatureStateChangedError
+    || error instanceof FeatureVerificationError
+    || error instanceof UnknownFeatureError;
+}
+
+function failureLabel(
+  catalog: LocaleCatalog['feature'],
+  failureCode: FeatureInstallJob['failureCode'],
+  attention: FeatureStatus['attentionReason'] | undefined,
+): string {
+  if (attention) return catalog.attention[attention];
+  return catalog.failure[failureCode ?? 'interrupted'];
 }

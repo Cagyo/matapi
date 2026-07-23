@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { VerifyFeatureReadinessUseCase } from '../../../src/features/application/verify-feature-readiness.use-case';
 import { FeatureVerificationError } from '../../../src/features/domain/errors/feature-verification.error';
+import { FeatureStateChangedError } from '../../../src/features/domain/errors/feature-state-changed.error';
 import { InMemoryFeatureReadinessAdapter } from '../../../src/features/infrastructure/in-memory-feature-readiness.adapter';
 import { InMemoryFeatureRepository } from '../../../src/features/infrastructure/in-memory-feature.repository';
 
@@ -48,5 +49,15 @@ describe('VerifyFeatureReadinessUseCase', () => {
 
     expect(result).toEqual({ ready: false, failureCode: 'application-verification-failed' });
     expect(await features.findByName('uart')).toMatchObject({ attentionReason: null });
+  });
+
+  it('rejects a receipt-bound manual verification when the feature changed', async () => {
+    const features = new InMemoryFeatureRepository([{ name: 'digital', installed: true, enabled: true, config: null, attentionReason: 'readiness-failed' }]);
+    const readiness = new InMemoryFeatureReadinessAdapter();
+
+    await expect(new VerifyFeatureReadinessUseCase(features, readiness).execute({
+      name: 'digital', source: 'manual',
+      expected: { installed: true, enabled: true, attentionReason: null },
+    })).rejects.toBeInstanceOf(FeatureStateChangedError);
   });
 });

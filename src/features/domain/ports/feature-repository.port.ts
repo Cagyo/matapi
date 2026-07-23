@@ -35,6 +35,17 @@ export interface FeatureRepositoryPort {
     enabled: boolean;
   }): Promise<Feature | null>;
 
+  /** Atomically replaces attention only when the receipt's snapshot is current. */
+  compareAndSetAttention(input: {
+    name: ManageableFeatureName;
+    expected: {
+      installed: boolean;
+      enabled: boolean;
+      attentionReason: FeatureAttentionReason | null;
+    };
+    attentionReason: FeatureAttentionReason | null;
+  }): Promise<Feature | null>;
+
   setVerified(input: {
     name: ManageableFeatureName;
     installed: boolean;

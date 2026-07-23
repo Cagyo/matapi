@@ -29,6 +29,10 @@ export class FeatureInstallOutcomeRegistryService
     await this.enqueue([...this.listeners], [job]);
   }
 
+  async notifyPreRestart(job: FeatureInstallJob): Promise<void> {
+    await this.enqueuePreRestart([...this.listeners], job);
+  }
+
   private enqueue(
     listeners: readonly FeatureInstallOutcomePort[],
     jobs: readonly FeatureInstallJob[],
@@ -42,6 +46,18 @@ export class FeatureInstallOutcomeRegistryService
             // Receipt delivery is retried by recovery; it must never alter state.
           }
         }
+      }
+    });
+    this.deliveryTail = delivery.catch(() => undefined);
+    return delivery;
+  }
+
+  private enqueuePreRestart(
+    listeners: readonly FeatureInstallOutcomePort[], job: FeatureInstallJob,
+  ): Promise<void> {
+    const delivery = this.deliveryTail.then(async () => {
+      for (const listener of listeners) {
+        try { await listener.notifyPreRestart(job); } catch { /* terminal recovery remains durable */ }
       }
     });
     this.deliveryTail = delivery.catch(() => undefined);

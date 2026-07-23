@@ -83,7 +83,6 @@ export class ReconcileFeatureInstallUseCase {
     const job = await this.jobs.findById(id);
     if (!job) return null;
     if (job.status === 'succeeded' || job.status === 'failed') {
-      await this.outcomes.notify(job);
       return job;
     }
 
@@ -123,11 +122,12 @@ export class ReconcileFeatureInstallUseCase {
       await this.outcomes.notify(terminal);
       return terminal;
     }
-    await this.outcomes.notify(terminal);
+    await this.outcomes.notifyPreRestart(terminal);
     try {
       await this.restart.dispatch(scope);
     } catch {
       await this.features.setAttention(job.feature, 'restart-required').catch(() => undefined);
+      await this.outcomes.notify(terminal);
       throw new FeatureRestartDispatchError(job.feature, scope);
     }
     return terminal;
@@ -154,11 +154,12 @@ export class ReconcileFeatureInstallUseCase {
         await this.outcomes.notify(terminal);
         return terminal;
       }
-      await this.outcomes.notify(terminal);
+      await this.outcomes.notifyPreRestart(terminal);
       try {
         await this.restart.dispatch(FEATURE_INSTALL_RESTART_SCOPE[job.feature]);
       } catch {
         await this.features.setAttention(job.feature, 'restart-required').catch(() => undefined);
+        await this.outcomes.notify(terminal);
         throw new FeatureRestartDispatchError(job.feature, FEATURE_INSTALL_RESTART_SCOPE[job.feature]);
       }
       return terminal;
