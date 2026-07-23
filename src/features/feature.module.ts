@@ -13,7 +13,8 @@ import { DrizzleFeatureQuery } from './infrastructure/drizzle-feature.query';
 import { DrizzleFeatureRepository } from './infrastructure/drizzle-feature.repository';
 import { FeatureSeederService } from './application/feature-seeder.service';
 import { FeatureDisableLifecycleRegistry } from './application/feature-disable-lifecycle-registry.service';
-import { FEATURE_DISABLE_LIFECYCLE } from './domain/ports/feature-disable-lifecycle.port';
+import { FEATURE_RUNTIME_LIFECYCLE } from './domain/ports/feature-runtime-lifecycle.port';
+import { FEATURE_RESTART } from './domain/ports/feature-restart.port';
 import { FEATURE_INSTALL_JOB_REPOSITORY } from './domain/ports/feature-install-job.repository.port';
 import { FEATURE_READINESS } from './domain/ports/feature-readiness.port';
 import { FEATURE_AVAILABILITY } from './domain/ports/feature-availability.port';
@@ -25,6 +26,13 @@ import { ZigbeeReadinessAdapter } from './infrastructure/readiness/zigbee-readin
 import { MotionReadinessAdapter } from './infrastructure/readiness/motion-readiness.adapter';
 import { RtspReadinessAdapter } from './infrastructure/readiness/rtsp-readiness.adapter';
 import { FeatureReadinessRouter } from './infrastructure/readiness/feature-readiness.router';
+import { FixedFeatureRestartAdapter } from './infrastructure/fixed-feature-restart.adapter';
+import { PROCESS_RESTARTER, type ProcessRestarterPort } from '../system/domain/ports/process-restarter.port';
+import { resolveSystemMode } from '../system/domain/system-mode';
+import { Pm2ProcessRestarter } from '../system/infrastructure/pm2-process-restarter.adapter';
+import { StubProcessRestarter } from '../system/infrastructure/stub-process-restarter.adapter';
+
+const systemMode = resolveSystemMode();
 
 /**
  * Features composition root. Exposes a read projection of the `features` table
@@ -49,8 +57,17 @@ import { FeatureReadinessRouter } from './infrastructure/readiness/feature-readi
     },
     FeatureDisableLifecycleRegistry,
     {
-      provide: FEATURE_DISABLE_LIFECYCLE,
+      provide: FEATURE_RUNTIME_LIFECYCLE,
       useExisting: FeatureDisableLifecycleRegistry,
+    },
+    {
+      provide: PROCESS_RESTARTER,
+      useClass: systemMode === 'stub' ? StubProcessRestarter : Pm2ProcessRestarter,
+    },
+    {
+      provide: FEATURE_RESTART,
+      useFactory: (restarter: ProcessRestarterPort) => new FixedFeatureRestartAdapter(restarter),
+      inject: [PROCESS_RESTARTER],
     },
     EnableFeatureUseCase,
     DisableFeatureUseCase,
@@ -67,7 +84,7 @@ import { FeatureReadinessRouter } from './infrastructure/readiness/feature-readi
   exports: [
     FEATURE_QUERY,
     FEATURE_AVAILABILITY,
-    FEATURE_DISABLE_LIFECYCLE,
+    FEATURE_RUNTIME_LIFECYCLE,
     EnableFeatureUseCase,
     DisableFeatureUseCase,
     ListFeaturesUseCase,

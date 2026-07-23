@@ -1,76 +1,100 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { DisableFeatureUseCase } from '../../../src/features/application/disable-feature.use-case';
-import { FeatureAlreadyDisabledError } from '../../../src/features/domain/errors/feature-already-disabled.error';
-import { UnknownFeatureError } from '../../../src/features/domain/errors/unknown-feature.error';
+import { FeatureInstallBusyError } from '../../../src/features/domain/errors/feature-install-busy.error';
+import { FeatureRestartDispatchError } from '../../../src/features/domain/errors/feature-restart-dispatch.error';
+import { FeatureStateChangedError } from '../../../src/features/domain/errors/feature-state-changed.error';
+import type { FeatureInstallJobRepositoryPort } from '../../../src/features/domain/ports/feature-install-job.repository.port';
+import type { FeatureRestartPort } from '../../../src/features/domain/ports/feature-restart.port';
+import type { FeatureRuntimeLifecycleRegistryPort } from '../../../src/features/domain/ports/feature-runtime-lifecycle.port';
 import { InMemoryFeatureRepository } from '../../../src/features/infrastructure/in-memory-feature.repository';
 
-const noLifecycle = { beforeDisable: async () => undefined };
+const expected = { installed: true, enabled: true, attentionReason: null } as const;
+
+function setup() {
+  const features = new InMemoryFeatureRepository([
+    { name: 'uart', installed: true, enabled: true, config: null, attentionReason: null },
+  ]);
+  const jobs: Pick<FeatureInstallJobRepositoryPort, 'findActive'> = {
+    findActive: vi.fn().mockResolvedValue(null),
+  };
+  const lifecycle: Pick<FeatureRuntimeLifecycleRegistryPort, 'beforeDisable' | 'afterEnable'> = {
+    beforeDisable: vi.fn().mockResolvedValue(undefined),
+    afterEnable: vi.fn().mockResolvedValue(undefined),
+  };
+  const restart: FeatureRestartPort = { dispatch: vi.fn().mockResolvedValue(undefined) };
+  return {
+    features,
+    jobs,
+    lifecycle,
+    restart,
+    useCase: new DisableFeatureUseCase(features, jobs, lifecycle, restart),
+  };
+}
 
 describe('DisableFeatureUseCase', () => {
-  it('disables an enabled feature', async () => {
-    const repo = new InMemoryFeatureRepository([
-      { name: 'uart', enabled: true, installed: true, config: null },
-    ]);
-    const useCase = new DisableFeatureUseCase(repo, noLifecycle);
-
-    const feature = await useCase.execute('uart');
-
-    expect(feature.enabled).toBe(false);
-    expect((await repo.findByName('uart'))?.enabled).toBe(false);
-  });
-
-  it('throws UnknownFeatureError for a name outside the catalogue', async () => {
-    const useCase = new DisableFeatureUseCase(new InMemoryFeatureRepository(), noLifecycle);
-    await expect(useCase.execute('xyz')).rejects.toBeInstanceOf(
-      UnknownFeatureError,
-    );
-  });
-
-  it('throws FeatureAlreadyDisabledError when already disabled', async () => {
-    const repo = new InMemoryFeatureRepository([
-      { name: 'uart', enabled: false, installed: true, config: null },
-    ]);
-    const useCase = new DisableFeatureUseCase(repo, noLifecycle);
-    await expect(useCase.execute('uart')).rejects.toBeInstanceOf(
-      FeatureAlreadyDisabledError,
-    );
-  });
-
-  it('throws FeatureAlreadyDisabledError when no row exists', async () => {
-    const useCase = new DisableFeatureUseCase(new InMemoryFeatureRepository(), noLifecycle);
-    await expect(useCase.execute('zigbee')).rejects.toBeInstanceOf(
-      FeatureAlreadyDisabledError,
-    );
-  });
-
-  it('runs lifecycle cleanup before persisting the disabled flag', async () => {
+  it('tears down before CAS, retains installed, and then restarts the worker', async () => {
+    const { useCase, features, lifecycle, restart } = setup();
     const order: string[] = [];
-    const repo = new InMemoryFeatureRepository([
-      { name: 'rtsp', enabled: true, installed: true, config: null },
-    ]);
-    const original = repo.setEnabled.bind(repo);
-    repo.setEnabled = async (...args) => {
+    vi.mocked(lifecycle.beforeDisable).mockImplementation(async () => { order.push('teardown'); });
+    const compare = features.compareAndSetEnabled.bind(features);
+    features.compareAndSetEnabled = async (input) => {
       order.push('persist');
-      return original(...args);
+      return compare(input);
     };
-    const useCase = new DisableFeatureUseCase(repo, {
-      beforeDisable: async () => { order.push('cleanup'); },
-    });
+    vi.mocked(restart.dispatch).mockImplementation(async () => { order.push('restart'); });
 
-    await useCase.execute('rtsp');
+    const result = await useCase.execute({ name: 'uart', expected });
 
-    expect(order).toEqual(['cleanup', 'persist']);
+    expect(result).toMatchObject({ feature: { installed: true, enabled: false }, restartScope: 'worker' });
+    expect(order).toEqual(['teardown', 'persist', 'restart']);
   });
 
-  it('does not persist disabled when lifecycle cleanup fails', async () => {
-    const repo = new InMemoryFeatureRepository([
-      { name: 'rtsp', enabled: true, installed: true, config: null },
-    ]);
-    const useCase = new DisableFeatureUseCase(repo, {
-      beforeDisable: async () => { throw new Error('cleanup failed'); },
-    });
+  it('blocks only an active install of the same feature', async () => {
+    const same = setup();
+    vi.mocked(same.jobs.findActive).mockResolvedValue({ feature: 'uart' } as never);
+    await expect(same.useCase.execute({ name: 'uart', expected })).rejects.toBeInstanceOf(FeatureInstallBusyError);
 
-    await expect(useCase.execute('rtsp')).rejects.toThrow('cleanup failed');
-    expect((await repo.findByName('rtsp'))?.enabled).toBe(true);
+    const different = setup();
+    vi.mocked(different.jobs.findActive).mockResolvedValue({ feature: 'motion' } as never);
+    await expect(different.useCase.execute({ name: 'uart', expected })).resolves.toMatchObject({
+      feature: { enabled: false },
+    });
+  });
+
+  it('leaves the flag unchanged when teardown fails and attempts recovery', async () => {
+    const { useCase, features, lifecycle } = setup();
+    vi.mocked(lifecycle.beforeDisable).mockRejectedValue(new Error('bounded teardown failed'));
+
+    await expect(useCase.execute({ name: 'uart', expected })).rejects.toThrow('bounded teardown failed');
+    expect(lifecycle.afterEnable).toHaveBeenCalledWith('uart');
+    expect(await features.findByName('uart')).toMatchObject({ enabled: true });
+  });
+
+  it('restores runtime when CAS loses a race after teardown', async () => {
+    const { useCase, features, lifecycle } = setup();
+    features.compareAndSetEnabled = vi.fn().mockResolvedValue(null);
+
+    await expect(useCase.execute({ name: 'uart', expected })).rejects.toBeInstanceOf(FeatureStateChangedError);
+    expect(lifecycle.afterEnable).toHaveBeenCalledWith('uart');
+    expect(await features.findByName('uart')).toMatchObject({ enabled: true });
+  });
+
+  it('marks partial uncertainty when runtime restoration fails after a CAS race', async () => {
+    const { useCase, features, lifecycle } = setup();
+    features.compareAndSetEnabled = vi.fn().mockResolvedValue(null);
+    vi.mocked(lifecycle.afterEnable).mockRejectedValue(new Error('restore failed'));
+
+    await expect(useCase.execute({ name: 'uart', expected })).rejects.toBeInstanceOf(FeatureStateChangedError);
+    expect(await features.findByName('uart')).toMatchObject({ enabled: true, attentionReason: 'partial-state-uncertain' });
+  });
+
+  it('marks restart required without rolling state back when restart dispatch fails', async () => {
+    const { useCase, features, restart } = setup();
+    vi.mocked(restart.dispatch).mockRejectedValue(new Error('restart failed'));
+
+    await expect(useCase.execute({ name: 'uart', expected })).rejects.toEqual(
+      new FeatureRestartDispatchError('uart', 'worker'),
+    );
+    expect(await features.findByName('uart')).toMatchObject({ enabled: false, attentionReason: 'restart-required' });
   });
 });

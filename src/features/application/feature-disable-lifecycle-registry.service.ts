@@ -1,23 +1,29 @@
 import { Injectable } from '@nestjs/common';
 import type {
-  FeatureDisableLifecyclePort,
-  FeatureDisableLifecycleRegistryPort,
-} from '../domain/ports/feature-disable-lifecycle.port';
+  FeatureRuntimeLifecyclePort,
+  FeatureRuntimeLifecycleRegistryPort,
+} from '../domain/ports/feature-runtime-lifecycle.port';
+import type { ManageableFeatureName } from '../domain/manageable-feature';
 
-/** Composition seam for feature-specific pre-disable cleanup. */
+/** Composition seam for feature-specific runtime cleanup and reload. */
 @Injectable()
 export class FeatureDisableLifecycleRegistry
-  implements FeatureDisableLifecycleRegistryPort
+  implements FeatureRuntimeLifecycleRegistryPort
 {
-  private readonly lifecycles = new Set<FeatureDisableLifecyclePort>();
+  private readonly lifecycles = new Map<ManageableFeatureName, FeatureRuntimeLifecyclePort>();
 
-  register(lifecycle: FeatureDisableLifecyclePort): void {
-    this.lifecycles.add(lifecycle);
+  register(name: ManageableFeatureName, lifecycle: FeatureRuntimeLifecyclePort): void {
+    if (this.lifecycles.has(name)) {
+      throw new RangeError(`Feature runtime lifecycle already registered: ${name}`);
+    }
+    this.lifecycles.set(name, lifecycle);
   }
 
-  async beforeDisable(name: string): Promise<void> {
-    for (const lifecycle of this.lifecycles) {
-      await lifecycle.beforeDisable(name);
-    }
+  async beforeDisable(name: ManageableFeatureName): Promise<void> {
+    await this.lifecycles.get(name)?.beforeDisable();
+  }
+
+  async afterEnable(name: ManageableFeatureName): Promise<void> {
+    await this.lifecycles.get(name)?.afterEnable();
   }
 }
