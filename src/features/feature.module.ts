@@ -9,6 +9,7 @@ import { FeatureAvailabilityService } from './application/feature-availability.s
 import { FeatureReadinessBootService } from './application/feature-readiness-boot.service';
 import { FEATURE_QUERY } from './domain/ports/feature-query.port';
 import { FEATURE_REPOSITORY } from './domain/ports/feature-repository.port';
+import { FEATURE_SEED_CONFIG } from './domain/ports/feature-seed-config.port';
 import { DrizzleFeatureQuery } from './infrastructure/drizzle-feature.query';
 import { DrizzleFeatureRepository } from './infrastructure/drizzle-feature.repository';
 import { FeatureSeederService } from './application/feature-seeder.service';
@@ -40,6 +41,7 @@ import { FsFeatureInstallRequestAdapter } from './infrastructure/fs-feature-inst
 import { FsFeatureInstallResultAdapter } from './infrastructure/fs-feature-install-result.adapter';
 import { SystemdFeatureInstallControllerAdapter } from './infrastructure/systemd-feature-install-controller.adapter';
 import { SystemFeatureClockAdapter } from './infrastructure/system-feature-clock.adapter';
+import { FsFeatureSeedConfigAdapter } from './infrastructure/fs-feature-seed-config.adapter';
 import { PROCESS_RESTARTER, type ProcessRestarterPort } from '../system/domain/ports/process-restarter.port';
 import { resolveSystemMode } from '../system/domain/system-mode';
 import { Pm2ProcessRestarter } from '../system/infrastructure/pm2-process-restarter.adapter';
@@ -57,6 +59,7 @@ const systemMode = resolveSystemMode();
   providers: [
     { provide: FEATURE_QUERY, useClass: DrizzleFeatureQuery },
     { provide: FEATURE_REPOSITORY, useClass: DrizzleFeatureRepository },
+    { provide: FEATURE_SEED_CONFIG, useClass: FsFeatureSeedConfigAdapter },
     { provide: FEATURE_INSTALL_JOB_REPOSITORY, useClass: DrizzleFeatureInstallJobRepository },
     { provide: FEATURE_INSTALL_REQUEST, useClass: FsFeatureInstallRequestAdapter },
     { provide: FEATURE_INSTALL_RESULT, useClass: FsFeatureInstallResultAdapter },

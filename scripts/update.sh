@@ -13,6 +13,26 @@ INSTALL_DIR="${HOME_WORKER_INSTALL_DIR:-/opt/home-worker}"
 LOCKFILE="${HOME_WORKER_UPDATE_LOCK:-/tmp/home-worker-updating.lock}"
 APP_NAME="${PM2_APP_NAME:-worker}"
 HEALTH_CHECK_SEC="${UPDATE_HEALTH_CHECK_SEC:-30}"
+FEATURE_HELPER="/usr/lib/home-worker/feature-installer"
+FEATURE_HELPER_VERSION="/usr/lib/home-worker/feature-installer.version"
+FEATURE_HELPER_MANIFEST="/usr/lib/home-worker/feature-installer.manifest"
+
+helper_update_required() {
+  echo "helper-update-required: root feature-management artifacts are missing or stale." >&2
+  echo "Run the trusted root installer (scripts/install.sh) locally to deploy the matching /usr/lib/home-worker helper bundle, then retry the update." >&2
+  exit 3
+}
+
+require_current_feature_helper() {
+  local expected
+  expected="$(tr -d '\r\n' < "$INSTALL_DIR/config/feature-installer.version" 2>/dev/null || true)"
+  [[ "$expected" =~ ^[0-9]+$ ]] || helper_update_required
+  [[ -x "$FEATURE_HELPER" && -r "$FEATURE_HELPER_VERSION" && -r "$FEATURE_HELPER_MANIFEST" ]] || helper_update_required
+  [[ "$(cat "$FEATURE_HELPER_VERSION" 2>/dev/null || true)" == "$expected" ]] || helper_update_required
+  # The executable is root-owned and independently validates every manifest
+  # entry. This update process intentionally has no sudo capability.
+  "$FEATURE_HELPER" --validate-installation >/dev/null 2>&1 || helper_update_required
+}
 
 configured_database_path() {
   if [[ -n "${DATABASE_PATH:-}" ]]; then
@@ -40,6 +60,7 @@ echo "$$" > "$LOCKFILE"
 trap 'rm -f "$LOCKFILE"' EXIT
 
 cd "$INSTALL_DIR"
+require_current_feature_helper
 
 # Write key/value into system_meta. Uses sqlite3 if available, otherwise
 # falls back to better-sqlite3 via a tiny node one-liner.
@@ -218,6 +239,10 @@ if [[ "$UPDATED_VIA" == "git" ]]; then
   git reset --hard "origin/$BRANCH"
   NEW_COMMIT="$(git rev-parse HEAD)"
 fi
+
+# A new application release may require a newer root helper bundle. Stop here
+# instead of attempting to install worker-writable sources with sudo.
+require_current_feature_helper
 
 write_meta "restart_reason" "ota_update"
 write_meta "update_commit" "$NEW_COMMIT"

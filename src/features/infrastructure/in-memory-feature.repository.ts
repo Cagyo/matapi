@@ -7,6 +7,13 @@ import { FeatureRepositoryPort } from '../domain/ports/feature-repository.port';
 export class InMemoryFeatureRepository implements FeatureRepositoryPort {
   constructor(private features: Feature[] = []) {}
 
+  async insertMissing(rows: readonly { name: ManageableFeatureName; installed: boolean; enabled: boolean }[]): Promise<void> {
+    for (const row of rows) {
+      if (this.features.some((feature) => feature.name === row.name)) continue;
+      this.features.push({ ...row, config: null, attentionReason: null });
+    }
+  }
+
   async findByName(name: string): Promise<Feature | null> {
     const feature = this.features.find((f) => f.name === name);
     return feature ? { ...feature } : null;

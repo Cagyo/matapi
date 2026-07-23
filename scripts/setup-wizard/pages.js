@@ -197,12 +197,19 @@ function featureDescription(feature, localeCatalog) {
   return feature.description ?? '';
 }
 
+const MANAGEABLE_FEATURES = ['digital', 'uart', 'zigbee', 'motion', 'rtsp'];
+
 function renderStep2(token, botUsername, catalog = [], pairingSecret = '', localeCatalog) {
   const safeToken = escapeHtml(token);
   const safeUser = escapeHtml(botUsername);
   const safePairingSecret = escapeHtml(pairingSecret);
 
-  const featuresHtml = catalog.map(f => `
+  const byName = new Map(Array.isArray(catalog) ? catalog
+    .filter((feature) => feature && MANAGEABLE_FEATURES.includes(feature.name))
+    .map((feature) => [feature.name, feature]) : []);
+  const featuresHtml = MANAGEABLE_FEATURES.map((name) => {
+    const f = byName.get(name) || { name, descriptionKey: name, defaultEnabled: name !== 'rtsp' };
+    return `
     <label class="feature-item">
       <input type="checkbox" name="features" value="${escapeHtml(f.name)}"${f.defaultEnabled === false ? '' : ' checked'}>
       <span class="feature-info">
@@ -210,7 +217,8 @@ function renderStep2(token, botUsername, catalog = [], pairingSecret = '', local
         <span class="feature-desc">${escapeHtml(featureDescription(f, localeCatalog))}</span>
       </span>
     </label>
-  `).join('');
+  `;
+  }).join('');
 
   const content = `
     <h1>Select Features</h1>

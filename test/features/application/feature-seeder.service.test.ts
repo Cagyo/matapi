@@ -1,82 +1,52 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { FeatureSeederService } from '../../../src/features/application/feature-seeder.service';
 import { FEATURE_CATALOG } from '../../../src/features/domain/feature-catalog';
-import { existsSync, readFileSync } from 'node:fs';
-
-vi.mock('node:fs', () => ({
-  existsSync: vi.fn(),
-  readFileSync: vi.fn(),
-}));
 
 describe('FeatureSeederService', () => {
   let seeder: FeatureSeederService;
-  let mockDb: any;
-  let mockQuery: any;
+  let config: { loadEnabled: ReturnType<typeof vi.fn> };
+  let query: { listAll: ReturnType<typeof vi.fn> };
+  let repository: { insertMissing: ReturnType<typeof vi.fn> };
 
   beforeEach(() => {
-    vi.clearAllMocks();
-    mockDb = {
-      transaction: vi.fn((fn: (tx: typeof mockTx) => void) => {
-        fn(mockTx);
-      }),
-    };
-    mockQuery = {
-      listAll: vi.fn(),
-    };
-    seeder = new FeatureSeederService(mockDb, mockQuery);
+    config = { loadEnabled: vi.fn() };
+    query = { listAll: vi.fn() };
+    repository = { insertMissing: vi.fn().mockResolvedValue(undefined) };
+    seeder = new FeatureSeederService(config, query, repository);
   });
 
-  const mockTx = {
-    delete: vi.fn().mockReturnValue({ run: vi.fn() }),
-    insert: vi.fn().mockReturnValue({ values: vi.fn().mockReturnValue({ run: vi.fn() }) }),
-  };
-
-  it('skips seeding if database already has all catalog items (Fix 5a guard)', async () => {
-    mockQuery.listAll.mockResolvedValue(FEATURE_CATALOG.map(({ name }) => ({ name })));
-
+  it('does not touch a complete catalogue', async () => {
+    query.listAll.mockResolvedValue(FEATURE_CATALOG.map(({ name }) => ({ name })));
     await seeder.onModuleInit();
-
-    expect(mockDb.transaction).not.toHaveBeenCalled();
+    expect(repository.insertMissing).not.toHaveBeenCalled();
   });
 
-  it('handles malformed features.json without throwing (Fix 5b)', async () => {
-    mockQuery.listAll.mockResolvedValue([]);
-    vi.mocked(existsSync).mockReturnValue(true);
-    vi.mocked(readFileSync).mockReturnValue('{ bad json');
-
+  it.each([null, []])('never seeds success from a missing or malformed config result', async (enabled) => {
+    query.listAll.mockResolvedValue([]);
+    config.loadEnabled.mockResolvedValue(enabled);
     await seeder.onModuleInit();
-
-    expect(mockDb.transaction).not.toHaveBeenCalled();
+    expect(repository.insertMissing).toHaveBeenCalledWith(FEATURE_CATALOG.map(({ name }) => ({
+      name, installed: false, enabled: false,
+    })));
   });
 
-  it('seeds items inside a transaction when features.json is valid (Fix 5a)', async () => {
-    mockQuery.listAll.mockResolvedValue([]);
-    vi.mocked(existsSync).mockReturnValue(true);
-    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ enabled: ['digital', 'motion'] }));
-
+  it('marks only the final verified enabled list installed and enabled on an empty database', async () => {
+    query.listAll.mockResolvedValue([]);
+    config.loadEnabled.mockResolvedValue(['digital', 'motion']);
     await seeder.onModuleInit();
-
-    expect(mockDb.transaction).toHaveBeenCalled();
-    expect(mockTx.insert).toHaveBeenCalledTimes(FEATURE_CATALOG.length);
+    expect(repository.insertMissing).toHaveBeenCalledWith(FEATURE_CATALOG.map(({ name }) => ({
+      name, installed: name === 'digital' || name === 'motion', enabled: name === 'digital' || name === 'motion',
+    })));
   });
 
-  it('adds a newly catalogued feature without resetting existing feature state', async () => {
-    mockQuery.listAll.mockResolvedValue([
-      { name: 'motion', installed: true, enabled: true },
-      { name: 'uart', installed: true, enabled: false },
-    ]);
-    vi.mocked(existsSync).mockReturnValue(true);
-    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ enabled: ['motion'] }));
-
+  it('adds only missing catalogue rows without consulting first-install config on upgrades', async () => {
+    query.listAll.mockResolvedValue([{ name: 'motion' }, { name: 'uart' }]);
     await seeder.onModuleInit();
-
-    expect(mockTx.delete).not.toHaveBeenCalled();
-    const insertValues = mockTx.insert.mock.results[0]?.value.values;
-    expect(insertValues).toHaveBeenCalledWith({
-      name: 'rtsp',
-      installed: false,
-      enabled: false,
-    });
-    expect(insertValues).toHaveBeenCalledTimes(FEATURE_CATALOG.length - 2);
+    expect(config.loadEnabled).not.toHaveBeenCalled();
+    expect(repository.insertMissing).toHaveBeenCalledWith(expect.arrayContaining([
+      { name: 'digital', installed: false, enabled: false },
+      { name: 'zigbee', installed: false, enabled: false },
+      { name: 'rtsp', installed: false, enabled: false },
+    ]));
   });
 });

@@ -9,6 +9,13 @@ export const FEATURE_REPOSITORY = Symbol('FEATURE_REPOSITORY');
  * this port is reserved for the toggle write path.
  */
 export interface FeatureRepositoryPort {
+  /** Insert catalogue rows in one atomic adapter operation without changing existing state. */
+  insertMissing(rows: readonly {
+    name: ManageableFeatureName;
+    installed: boolean;
+    enabled: boolean;
+  }[]): Promise<void>;
+
   /** A single feature row, or `null` when no row exists for the name. */
   findByName(name: string): Promise<Feature | null>;
 

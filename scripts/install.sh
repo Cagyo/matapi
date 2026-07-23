@@ -26,6 +26,7 @@ main() {
   setup_pigpiod
   setup_tmpfs
   prompt_config
+  install_feature_management_artifacts
   configure_serial_headless
   patch_legacy_feature_serial_calls
   install_selected_features
@@ -502,38 +503,149 @@ install_selected_features() {
     return
   fi
 
-  local failed=""
+  local failed="" successful=""
   local features
-  features=$(node -e "try { const f = require('$features_file'); (f.enabled || []).filter(n => n !== 'rtsp').forEach(n => console.log(n)); } catch {}")
+  features=$(node -e "try { const f = require(process.argv[1]); const selected = f.enabled || []; const rtspSelected = selected.includes('rtsp'); const allowed = new Set(['digital','uart','zigbee','motion','rtsp']); [...new Set(selected)].filter(n => allowed.has(n) && (n !== 'rtsp' || rtspSelected)).forEach(n => console.log(n)); } catch {}" "$features_file")
+
+  # Wizard selection is only an input. Do not publish any successful state
+  # until the fixed root routine and both verifications have completed.
+  write_verified_feature_config ""
 
   while IFS= read -r feature; do
-    if [ -z "$feature" ]; then continue; fi
+    [ -z "$feature" ] && continue
     echo "Installing dependencies for feature: $feature"
-    if ! "$INSTALL_DIR/scripts/install-feature.sh" "$feature"; then
+    if HOME_WORKER_PRIVILEGED=1 /usr/lib/home-worker/install-feature-routines "$feature" \
+      && /usr/lib/home-worker/feature-installer --verify-feature "$feature" \
+      && verify_feature_visible_to_application "$feature"; then
+      successful="${successful}${successful:+,}$feature"
+      if [ "$feature" = "rtsp" ]; then
+        # usermod changes supplementary groups only for new processes. Force the
+        # PM2 daemon itself to be recreated later so the worker receives the
+        # private homeworker-stream group; before that, runtime adapters fail closed.
+        RTSP_GROUP_REFRESH_REQUIRED=1
+      fi
+    else
       echo "WARNING: Failed to install dependencies for $feature"
       failed="$failed $feature"
     fi
   done <<< "$features"
 
-  # The live stream is experimental and must only dispatch its installer when
-  # the wizard recorded an explicit rtsp selection. Task 4 provides the
-  # cloudflared capability behind this dispatch.
-  if node -e "try { const f = require('$features_file'); process.exit((f.enabled || []).includes('rtsp') ? 0 : 1); } catch { process.exit(1); }"; then
-    echo "Installing dependencies for feature: rtsp"
-    if ! "$INSTALL_DIR/scripts/install-feature.sh" rtsp; then
-      echo "WARNING: Failed to install dependencies for rtsp"
-      failed="$failed rtsp"
-    else
-      # usermod changes supplementary groups only for new processes. Force the
-      # PM2 daemon itself to be recreated later so the worker receives the
-      # private homeworker-stream group; before that, runtime adapters fail closed.
-      RTSP_GROUP_REFRESH_REQUIRED=1
-    fi
-  fi
+  write_verified_feature_config "$successful"
 
   if [ -n "$failed" ]; then
     echo "⚠️ Failed feature installations:$failed (worker will start without these dependencies)"
   fi
+}
+
+verify_feature_visible_to_application() {
+  local feature="$1"
+  # This is intentionally limited to fixed application-owned state. Privileged
+  # verification is performed by the root helper; this catches an absent or
+  # unreadable configuration boundary before it is seeded as installed.
+  sudo -u "$USER" node -e '
+    const fs = require("fs");
+    const [file, feature] = process.argv.slice(1);
+    const stat = fs.statSync(file);
+    if (!stat.isFile() || (stat.mode & 0o777) !== 0o600) process.exit(1);
+    const env = fs.readFileSync(file, "utf8");
+    if (!env.includes("TELEGRAM_BOT_TOKEN=")) process.exit(1);
+    if (feature === "rtsp" && !env.includes("LIVE_STREAM_ENABLED=true")) process.exit(1);
+  ' "$INSTALL_DIR/.env" "$feature"
+}
+
+write_verified_feature_config() {
+  local csv="$1"
+  sudo -u "$USER" node -e '
+    const fs = require("fs");
+    const path = require("path");
+    const [target, csv] = process.argv.slice(1);
+    const enabled = csv ? csv.split(",") : [];
+    const payload = JSON.stringify({ enabled, liveStream: enabled.includes("rtsp"), timestamp: new Date().toISOString() }, null, 2) + "\n";
+    const directory = path.dirname(target);
+    const temporary = path.join(directory, `.features.${process.pid}.${Date.now()}.tmp`);
+    let file;
+    try {
+      file = fs.openSync(temporary, "wx", 0o644);
+      fs.writeFileSync(file, payload, "utf8");
+      fs.fsyncSync(file);
+      fs.closeSync(file); file = undefined;
+      fs.renameSync(temporary, target);
+      const dir = fs.openSync(directory, "r");
+      try { fs.fsyncSync(dir); } finally { fs.closeSync(dir); }
+    } finally {
+      if (file !== undefined) fs.closeSync(file);
+      try { fs.unlinkSync(temporary); } catch (_) {}
+    }
+  ' "$INSTALL_DIR/features.json" "$csv"
+}
+
+install_feature_management_artifacts() {
+  local bundle="/usr/lib/home-worker"
+  local source_version="$INSTALL_DIR/config/feature-installer.version"
+  local version
+  version="$(tr -d '\r\n' < "$source_version" 2>/dev/null || true)"
+  if ! [[ "$version" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: invalid feature-installer version source" >&2
+    exit 1
+  fi
+
+  echo "Installing root-owned feature-management boundary..."
+  sudo install -d -m 0755 -o root -g root "$bundle" "$bundle/systemd"
+  install_root_bundle_file "$INSTALL_DIR/scripts/feature-installer.py" "$bundle/feature-installer" 0755
+  install_root_bundle_file "$INSTALL_DIR/scripts/install-feature.sh" "$bundle/install-feature-routines" 0755
+  install_root_bundle_file "$INSTALL_DIR/scripts/live-stream-net-helper" "$bundle/live-stream-net-helper" 0755
+  install_root_bundle_file "$INSTALL_DIR/scripts/live-stream-ffmpeg-runner" "$bundle/live-stream-ffmpeg-runner" 0755
+  for unit in homeworker-feature-install.service homeworker-feature-supervisor-restart.service homeworker-feature-host-reboot.service homeworker-ffmpeg-stream@.service homeworker-stream-net.service homeworker-stream-systemd.rules; do
+    install_root_bundle_file "$INSTALL_DIR/systemd/$unit" "$bundle/systemd/$unit" 0644
+  done
+  install_root_bundle_file "$source_version" "$bundle/feature-installer.version" 0644
+
+  local manifest_tmp
+  manifest_tmp="$(mktemp)"
+  {
+    printf 'version %s\n' "$version"
+    for path in "$bundle/feature-installer" "$bundle/install-feature-routines" "$bundle/live-stream-net-helper" "$bundle/live-stream-ffmpeg-runner" \
+      "$bundle/systemd/homeworker-feature-install.service" "$bundle/systemd/homeworker-feature-supervisor-restart.service" "$bundle/systemd/homeworker-feature-host-reboot.service" \
+      "$bundle/systemd/homeworker-ffmpeg-stream@.service" "$bundle/systemd/homeworker-stream-net.service" "$bundle/systemd/homeworker-stream-systemd.rules"; do
+      mode=$(printf '%04o' "0$(stat -c '%a' "$path")")
+      digest=$(sha256sum "$path" | awk '{print $1}')
+      printf '%s %s %s\n' "$digest" "$mode" "$path"
+    done
+  } > "$manifest_tmp"
+  install_root_bundle_file "$manifest_tmp" "$bundle/feature-installer.manifest" 0644
+  rm -f "$manifest_tmp"
+
+  sudo install -d -m 0711 -o root -g root /var/lib/home-worker
+  sudo install -d -m 0770 -o root -g "$USER" /var/lib/home-worker/feature-install-requests /var/lib/home-worker/feature-install-results
+  sudo install -d -m 0700 -o root -g root /var/lib/home-worker/feature-install-claims
+  install_feature_management_sudoers
+  for unit in homeworker-feature-install.service homeworker-feature-supervisor-restart.service homeworker-feature-host-reboot.service homeworker-ffmpeg-stream@.service homeworker-stream-net.service; do
+    sudo install -m 0644 -o root -g root "$bundle/systemd/$unit" "/etc/systemd/system/$unit"
+  done
+  sudo systemctl daemon-reload
+  /usr/lib/home-worker/feature-installer --validate-installation || { echo "ERROR: root feature helper validation failed" >&2; exit 1; }
+}
+
+install_root_bundle_file() {
+  local source="$1" target="$2" mode="$3" temporary
+  temporary="$(sudo mktemp "${target}.tmp.XXXXXX")"
+  sudo install -m "$mode" -o root -g root "$source" "$temporary"
+  sudo mv -f "$temporary" "$target"
+}
+
+install_feature_management_sudoers() {
+  local temporary
+  temporary="$(mktemp)"
+  cat > "$temporary" <<EOF
+$USER ALL=(root) NOPASSWD: /bin/systemctl start --no-block homeworker-feature-install.service, /bin/systemctl start --no-block homeworker-feature-supervisor-restart.service, /bin/systemctl start --no-block homeworker-feature-host-reboot.service
+EOF
+  if ! sudo visudo -c -f "$temporary" >/dev/null; then
+    rm -f "$temporary"
+    echo "ERROR: feature-management sudoers validation failed" >&2
+    exit 1
+  fi
+  sudo install -m 0440 -o root -g root "$temporary" /etc/sudoers.d/homeworker-feature-management
+  rm -f "$temporary"
 }
 
 ensure_motion_video_storage_permissions() {

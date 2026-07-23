@@ -190,6 +190,10 @@ class CompareAndSetFailureFeatureRepository implements FeatureRepositoryPort {
     return this.delegate.findByName(name);
   }
 
+  insertMissing(rows: Parameters<FeatureRepositoryPort['insertMissing']>[0]) {
+    return this.delegate.insertMissing(rows);
+  }
+
   setEnabled(name: string, enabled: boolean) {
     return this.delegate.setEnabled(name, enabled);
   }

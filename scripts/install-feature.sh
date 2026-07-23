@@ -6,8 +6,11 @@ if [ "${HOME_WORKER_PRIVILEGED:-0}" = "1" ]; then
   # The root-owned helper supplies only a fixed feature argument and a
   # sanitized environment.  Do not inherit install paths or account selectors.
   USER="homeworker"
+  # Routines may read only the fixed worker configuration, never executable
+  # templates from the worker-writable application tree.
   SCRIPT_DIR="/usr/lib/home-worker"
-  INSTALL_DIR="/usr/lib/home-worker"
+  INSTALL_DIR="/opt/home-worker"
+  ROOT_BUNDLE_DIR="/usr/lib/home-worker"
   # Keep the fixed routines byte-for-byte command compatible: several of them
   # intentionally switch to the fixed homeworker account. Root sudo performs
   # that transition while retaining the routine's literal argv.
@@ -16,6 +19,7 @@ else
   USER="${HOME_WORKER_USER:-homeworker}"
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   INSTALL_DIR="${HOME_WORKER_INSTALL_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+  ROOT_BUNDLE_DIR="$INSTALL_DIR"
 fi
 
 apt_get() {
@@ -149,11 +153,11 @@ PY
   rm -f "$policy_tmp"
   sudo install -m 0755 -o root -g root "$SCRIPT_DIR/live-stream-net-helper" /usr/lib/home-worker/live-stream-net-helper
   sudo install -m 0755 -o root -g root "$SCRIPT_DIR/live-stream-ffmpeg-runner" /usr/lib/home-worker/live-stream-ffmpeg-runner
-  sudo install -m 0644 -o root -g root "$INSTALL_DIR/systemd/homeworker-ffmpeg-stream@.service" /etc/systemd/system/homeworker-ffmpeg-stream@.service
-  sudo install -m 0644 -o root -g root "$INSTALL_DIR/systemd/homeworker-stream-net.service" /etc/systemd/system/homeworker-stream-net.service
+  sudo install -m 0644 -o root -g root "$ROOT_BUNDLE_DIR/systemd/homeworker-ffmpeg-stream@.service" /etc/systemd/system/homeworker-ffmpeg-stream@.service
+  sudo install -m 0644 -o root -g root "$ROOT_BUNDLE_DIR/systemd/homeworker-stream-net.service" /etc/systemd/system/homeworker-stream-net.service
   local polkit_tmp
   polkit_tmp="$(mktemp)"
-  sed "s/@HOME_WORKER_USER@/$USER/g" "$INSTALL_DIR/systemd/homeworker-stream-systemd.rules" > "$polkit_tmp"
+  sed "s/@HOME_WORKER_USER@/$USER/g" "$ROOT_BUNDLE_DIR/systemd/homeworker-stream-systemd.rules" > "$polkit_tmp"
   sudo install -m 0644 -o root -g root "$polkit_tmp" /etc/polkit-1/rules.d/49-homeworker-stream-systemd.rules
   rm -f "$polkit_tmp"
   local tmpfiles_tmp

@@ -17,7 +17,7 @@ export class FsFeatureInstallRequestAdapter implements FeatureInstallRequestPort
     const body = `${JSON.stringify({ feature: canonical.feature, jobId: canonical.jobId, version: 1 })}\n`;
     const uid = process.getuid?.() ?? -1;
     const gid = process.getgid?.() ?? -1;
-    await validateSpoolDirectory(DEFAULT_REQUEST_DIRECTORY, 0, gid, 0o730);
+    await validateSpoolDirectory(DEFAULT_REQUEST_DIRECTORY, 0, gid, 0o770);
     const target = join(DEFAULT_REQUEST_DIRECTORY, `${canonical.jobId}.json`);
     const temporary = join(DEFAULT_REQUEST_DIRECTORY, `.${canonical.jobId}.${randomUUID()}.tmp`);
     let handle: Awaited<ReturnType<typeof open>> | undefined;
@@ -51,7 +51,7 @@ export class FsFeatureInstallRequestAdapter implements FeatureInstallRequestPort
     const body = `${JSON.stringify({ feature: canonical.feature, jobId: canonical.jobId, version: 1 })}\n`;
     const uid = process.getuid?.() ?? -1;
     const gid = process.getgid?.() ?? -1;
-    await validateSpoolDirectory(DEFAULT_REQUEST_DIRECTORY, 0, gid, 0o730);
+    await validateSpoolDirectory(DEFAULT_REQUEST_DIRECTORY, 0, gid, 0o770);
     const target = join(DEFAULT_REQUEST_DIRECTORY, `${canonical.jobId}.json`);
     const cancellation = join(DEFAULT_REQUEST_DIRECTORY, `.${canonical.jobId}.${randomUUID()}.cancel`);
     try {

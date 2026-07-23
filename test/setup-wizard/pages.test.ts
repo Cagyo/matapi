@@ -36,6 +36,18 @@ describe('pairing forms', () => {
     expect(html).not.toContain('value="rtsp" checked');
   });
 
+  it('renders exactly the five manageable feature values and excludes legacy names', () => {
+    const html = renderStep2('token', 'bot', [
+      { name: '4g', defaultEnabled: true },
+      { name: 'neobox', defaultEnabled: true },
+      { name: 'digital', defaultEnabled: true },
+    ]);
+    const values = [...html.matchAll(/name="features" value="([^"]+)"/g)].map((match) => match[1]);
+    expect(values).toEqual(['digital', 'uart', 'zigbee', 'motion', 'rtsp']);
+    expect(html).not.toContain('value="4g"');
+    expect(html).not.toContain('value="neobox"');
+  });
+
   it('renders the live-stream description from the supplied locale catalog', () => {
     const liveStreamDescription = en.setupWizard.featureDescriptions.rtsp;
     const html = renderStep2(

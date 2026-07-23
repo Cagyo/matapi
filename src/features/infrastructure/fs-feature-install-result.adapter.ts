@@ -12,7 +12,7 @@ export class FsFeatureInstallResultAdapter implements FeatureInstallResultPort {
     | { kind: 'absent' } | { kind: 'running' } | { kind: 'terminal'; result: FeatureInstallResultV1 }
   > {
     if (!/^[A-Za-z0-9_-]{16}$/u.test(jobId) || !isManageableFeature(feature)) throw new RangeError('result-invalid');
-    await validateSpoolDirectory(DEFAULT_RESULT_DIRECTORY, 0, process.getgid?.() ?? -1, 0o730)
+    await validateSpoolDirectory(DEFAULT_RESULT_DIRECTORY, 0, process.getgid?.() ?? -1, 0o770)
       .catch(() => { throw new RangeError('result-invalid'); });
     // A durable marker is a commit barrier: do not observe an early result.
     const marker = await this.readMarker(join(DEFAULT_RESULT_DIRECTORY, `${jobId}.running`), jobId, feature);
@@ -22,7 +22,7 @@ export class FsFeatureInstallResultAdapter implements FeatureInstallResultPort {
 
   async removeTerminal(jobId: string): Promise<void> {
     if (!/^[A-Za-z0-9_-]{16}$/u.test(jobId)) throw new RangeError('result-invalid');
-    await validateSpoolDirectory(DEFAULT_RESULT_DIRECTORY, 0, process.getgid?.() ?? -1, 0o730)
+    await validateSpoolDirectory(DEFAULT_RESULT_DIRECTORY, 0, process.getgid?.() ?? -1, 0o770)
       .catch(() => { throw new RangeError('result-invalid'); });
     const path = join(DEFAULT_RESULT_DIRECTORY, `${jobId}.json`);
     // Validate the exact terminal entry before deleting it after Task 8 commits.

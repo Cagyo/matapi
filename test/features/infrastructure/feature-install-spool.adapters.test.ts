@@ -37,7 +37,7 @@ function fileHandle(content: string, overrides: Partial<{ isFile(): boolean; uid
 }
 
 function directoryHandle() {
-  return { stat: vi.fn(async () => ({ isDirectory: () => true, uid: 0, gid: process.getgid?.() ?? 0, mode: 0o40730 })), sync: vi.fn(async () => undefined), close: vi.fn(async () => undefined) };
+  return { stat: vi.fn(async () => ({ isDirectory: () => true, uid: 0, gid: process.getgid?.() ?? 0, mode: 0o40770 })), sync: vi.fn(async () => undefined), close: vi.fn(async () => undefined) };
 }
 
 describe('feature install spool adapters', () => {
@@ -89,7 +89,7 @@ describe('feature install spool adapters', () => {
     });
     configure(request, { uid: 0, gid: process.getgid?.() ?? 0, mode: 0o100640 });
     const adapter = new FsFeatureInstallResultAdapter();
-    await expect(validateSpoolDirectory('/var/lib/home-worker/feature-install-results', 0, process.getgid?.() ?? 0, 0o730)).resolves.toBeUndefined();
+    await expect(validateSpoolDirectory('/var/lib/home-worker/feature-install-results', 0, process.getgid?.() ?? 0, 0o770)).resolves.toBeUndefined();
     await expect(adapter.readState(JOB, 'digital')).resolves.toEqual({ kind: 'running' });
     expect(flags.some((value) => (value & constants.O_NONBLOCK) !== 0 && (value & constants.O_NOFOLLOW) !== 0)).toBe(true);
     for (const overrides of [

@@ -2,6 +2,8 @@ const http = require('node:http');
 const { createHash, timingSafeEqual } = require('node:crypto');
 const { renderStep1, renderStep2, renderDone, renderErrorPage } = require('./pages');
 
+const MANAGEABLE_FEATURES = new Set(['digital', 'uart', 'zigbee', 'motion', 'rtsp']);
+
 function parseBody(req) {
   return new Promise((resolve, reject) => {
     let body = '';
@@ -147,9 +149,10 @@ function createSetupServer({
           return;
         }
 
-        const features = Array.isArray(body.features)
+        const requestedFeatures = Array.isArray(body.features)
           ? body.features
           : (body.features ? [body.features] : []);
+        const features = [...new Set(requestedFeatures.filter((feature) => MANAGEABLE_FEATURES.has(feature)))];
         const { claimAdminToken } = writeConfig(installDir, result.cleanedToken, features);
 
         res.once('finish', onComplete);

@@ -7,6 +7,22 @@ const run = promisify(execFile);
 const helper = resolve(__dirname, '../../../scripts/feature-installer.py');
 
 describe('feature installer boundary', () => {
+  it('fails closed when the deployed helper manifest or version is stale', async () => {
+    const program = String.raw`
+import importlib.util, os, tempfile
+spec = importlib.util.spec_from_file_location('helper', ${JSON.stringify(helper)})
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+with tempfile.TemporaryDirectory() as root:
+  m.VERSION_PATH = root + '/version'; m.MANIFEST_PATH = root + '/manifest'; m.ROOT_BUNDLE_FILES = {}
+  open(m.VERSION_PATH, 'w').write('999\\n')
+  open(m.MANIFEST_PATH, 'w').write('version 999\\n')
+  os.chmod(m.VERSION_PATH, 0o644); os.chmod(m.MANIFEST_PATH, 0o644)
+  try: m.validate_root_bundle(); raise AssertionError('stale version accepted')
+  except RuntimeError as error: assert str(error) == 'helper-version-mismatch'
+`;
+    await expect(run('python3', ['-c', program])).resolves.toMatchObject({ stderr: '' });
+  });
+
   it('executes strict parsers, claim durability ordering, and terminal-marker recovery', async () => {
     const program = String.raw`
 import importlib.util, json, os, tempfile
@@ -62,7 +78,7 @@ with tempfile.TemporaryDirectory() as root:
   m.INSTALL_ROOT = root; m.REQUEST_DIRECTORY = root + '/requests'; m.CLAIM_DIRECTORY = root + '/claims'; m.RESULT_DIRECTORY = root + '/results'
   for path in (m.REQUEST_DIRECTORY, m.CLAIM_DIRECTORY, m.RESULT_DIRECTORY): os.mkdir(path)
   os.write(os.open(m.REQUEST_DIRECTORY + '/abcdefghijklmnop.json', os.O_WRONLY | os.O_CREAT, 0o600), m.canonical_request(request))
-  uid, gid = os.getuid(), os.getgid(); m.worker_ids = lambda: (uid, gid); m.validate_layout = lambda *_: None
+  uid, gid = os.getuid(), os.getgid(); m.worker_ids = lambda: (uid, gid); m.validate_layout = lambda *_: None; m.validate_root_bundle = lambda: None
   m.directory_fd = lambda path, *_: os.open(path, os.O_RDONLY)
   real_open_claim, real_fchown = m.open_claim, m.os.fchown
   m.open_claim = lambda *_: m.canonical_request(request); m.os.fchown = lambda *_: None

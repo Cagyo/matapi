@@ -14,6 +14,13 @@ type FeatureRow = typeof features.$inferSelect;
 export class DrizzleFeatureRepository implements FeatureRepositoryPort {
   constructor(@Inject(DB) private readonly db: AppDatabase) {}
 
+  async insertMissing(rows: readonly { name: ManageableFeatureName; installed: boolean; enabled: boolean }[]): Promise<void> {
+    if (rows.length === 0) return;
+    this.db.transaction((tx) => {
+      tx.insert(features).values([...rows]).onConflictDoNothing().run();
+    });
+  }
+
   async findByName(name: string): Promise<Feature | null> {
     const row = this.db
       .select()

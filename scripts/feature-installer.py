@@ -7,6 +7,7 @@ environment overrides.
 """
 import fcntl
 import grp
+import hashlib
 import json
 import os
 import pwd
@@ -23,6 +24,9 @@ CLAIM_DIRECTORY = INSTALL_ROOT + '/feature-install-claims'
 RESULT_DIRECTORY = INSTALL_ROOT + '/feature-install-results'
 LOCK_PATH = '/run/lock/homeworker-feature-install.lock'
 ROUTINES_PATH = '/usr/lib/home-worker/install-feature-routines'
+VERSION_PATH = '/usr/lib/home-worker/feature-installer.version'
+MANIFEST_PATH = '/usr/lib/home-worker/feature-installer.manifest'
+INSTALLER_VERSION = '1'
 WORKER_NAME = 'homeworker'
 MAX_BYTES = 4096
 TIMEOUT_SECONDS = 30 * 60
@@ -43,9 +47,80 @@ class InvalidRequest(ValueError):
     pass
 
 
+ROOT_BUNDLE_FILES = {
+    '/usr/lib/home-worker/feature-installer': 0o755,
+    '/usr/lib/home-worker/install-feature-routines': 0o755,
+    '/usr/lib/home-worker/live-stream-net-helper': 0o755,
+    '/usr/lib/home-worker/live-stream-ffmpeg-runner': 0o755,
+    '/usr/lib/home-worker/systemd/homeworker-feature-install.service': 0o644,
+    '/usr/lib/home-worker/systemd/homeworker-feature-supervisor-restart.service': 0o644,
+    '/usr/lib/home-worker/systemd/homeworker-feature-host-reboot.service': 0o644,
+    '/usr/lib/home-worker/systemd/homeworker-ffmpeg-stream@.service': 0o644,
+    '/usr/lib/home-worker/systemd/homeworker-stream-net.service': 0o644,
+    '/usr/lib/home-worker/systemd/homeworker-stream-systemd.rules': 0o644,
+}
+
+
 def worker_ids():
     entry = pwd.getpwnam(WORKER_NAME)
     return entry.pw_uid, entry.pw_gid
+
+
+def root_owned_file(path, mode):
+    try:
+        value = os.stat(path, follow_symlinks=False)
+    except OSError:
+        return False
+    return (stat.S_ISREG(value.st_mode) and value.st_nlink == 1 and value.st_uid == 0
+            and value.st_gid == 0 and stat.S_IMODE(value.st_mode) == mode)
+
+
+def file_digest(path):
+    fd = os.open(path, os.O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+    try:
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                return digest.hexdigest()
+            digest.update(chunk)
+    finally:
+        os.close(fd)
+
+
+def validate_root_bundle():
+    """Reject stale/tampered root assets before a request can run a routine."""
+    if not root_owned_file(VERSION_PATH, 0o644) or not root_owned_file(MANIFEST_PATH, 0o644):
+        raise RuntimeError('helper-version-mismatch')
+    try:
+        with open(VERSION_PATH, 'r', encoding='ascii') as stream:
+            if stream.read() != INSTALLER_VERSION + '\n':
+                raise RuntimeError('helper-version-mismatch')
+        with open(MANIFEST_PATH, 'r', encoding='ascii') as stream:
+            lines = stream.read().splitlines()
+    except (OSError, UnicodeError):
+        raise RuntimeError('helper-version-mismatch')
+    if not lines or lines[0] != 'version ' + INSTALLER_VERSION or len(lines) != len(ROOT_BUNDLE_FILES) + 1:
+        raise RuntimeError('helper-version-mismatch')
+    seen = set()
+    for line in lines[1:]:
+        pieces = line.split(' ', 2)
+        if len(pieces) != 3:
+            raise RuntimeError('helper-version-mismatch')
+        digest, mode_text, path = pieces
+        if path not in ROOT_BUNDLE_FILES or path in seen or mode_text != format(ROOT_BUNDLE_FILES[path], '04o'):
+            raise RuntimeError('helper-version-mismatch')
+        if not re.fullmatch(r'[0-9a-f]{64}', digest) or not root_owned_file(path, ROOT_BUNDLE_FILES[path]):
+            raise RuntimeError('helper-version-mismatch')
+        try:
+            actual_digest = file_digest(path)
+        except OSError:
+            raise RuntimeError('helper-version-mismatch')
+        if actual_digest != digest:
+            raise RuntimeError('helper-version-mismatch')
+        seen.add(path)
+    if seen != set(ROOT_BUNDLE_FILES):
+        raise RuntimeError('helper-version-mismatch')
 
 
 def fsync_directory(fd):
@@ -79,9 +154,9 @@ def validate_layout(worker_uid, worker_gid):
     root = os.stat(INSTALL_ROOT, follow_symlinks=False)
     if not stat.S_ISDIR(root.st_mode) or root.st_uid != 0 or (stat.S_IMODE(root.st_mode) & 0o022):
         raise RuntimeError('unsafe install root')
-    expected = ((REQUEST_DIRECTORY, 0, worker_gid, 0o730),
+    expected = ((REQUEST_DIRECTORY, 0, worker_gid, 0o770),
                 (CLAIM_DIRECTORY, 0, 0, 0o700),
-                (RESULT_DIRECTORY, 0, worker_gid, 0o730))
+                (RESULT_DIRECTORY, 0, worker_gid, 0o770))
     for path, uid, gid, mode in expected:
         value = os.stat(path, follow_symlinks=False)
         if (not stat.S_ISDIR(value.st_mode) or value.st_uid != uid or value.st_gid != gid
@@ -224,7 +299,7 @@ def parse_result(data, request):
         if value['failureCode'] is not None or not value['privilegedReady'] or value['restartScope'] not in ('worker', 'supervisor', 'host'):
             raise InvalidRequest('result success')
     elif value['outcome'] == 'failed':
-        if (value['failureCode'] not in ('request-invalid', 'dependency-install-failed', 'privileged-verification-failed', 'interrupted')
+        if (value['failureCode'] not in ('request-invalid', 'dependency-install-failed', 'privileged-verification-failed', 'helper-version-mismatch', 'interrupted')
                 or value['privilegedReady'] is not False or value['restartScope'] is not None):
             raise InvalidRequest('result failure')
     else:
@@ -349,9 +424,9 @@ def recover_committed_markers(result_fd, worker_uid, worker_gid):
 def process_one():
     worker_uid, worker_gid = worker_ids()
     validate_layout(worker_uid, worker_gid)
-    request_fd = directory_fd(REQUEST_DIRECTORY, 0, worker_gid, 0o730)
+    request_fd = directory_fd(REQUEST_DIRECTORY, 0, worker_gid, 0o770)
     claim_fd = directory_fd(CLAIM_DIRECTORY, 0, 0, 0o700)
-    result_fd = directory_fd(RESULT_DIRECTORY, 0, worker_gid, 0o730)
+    result_fd = directory_fd(RESULT_DIRECTORY, 0, worker_gid, 0o770)
     try:
         recover_committed_markers(result_fd, worker_uid, worker_gid)
         name = claim_next(request_fd, claim_fd)
@@ -364,6 +439,13 @@ def process_one():
             remove_entry(claim_fd, name)
             return True
         result_name = request['jobId'] + '.json'
+        try:
+            validate_root_bundle()
+        except RuntimeError:
+            write_atomic(result_fd, result_name, result_payload(request, 'failed', 'helper-version-mismatch'), worker_gid)
+            remove_entry(claim_fd, name)
+            remove_entry(result_fd, request['jobId'] + '.running')
+            return True
         try:
             parse_result(open_checked_result(result_fd, result_name, worker_uid, worker_gid), request)
             # A terminal result is authoritative, including after a crash.
@@ -401,6 +483,20 @@ def process_one():
 
 
 def main():
+    if len(sys.argv) == 2 and sys.argv[1] == '--validate-installation':
+        try:
+            validate_root_bundle()
+            return 0
+        except RuntimeError:
+            return 3
+    if len(sys.argv) == 3 and sys.argv[1] == '--verify-feature' and sys.argv[2] in FEATURES:
+        try:
+            validate_root_bundle()
+            return 0 if verify_feature(sys.argv[2]) else 4
+        except RuntimeError:
+            return 3
+    if len(sys.argv) != 1:
+        return 2
     try:
         lock = lock_installer()
     except BlockingIOError:
