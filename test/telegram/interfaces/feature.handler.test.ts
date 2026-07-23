@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { catalogFor } from '../../../src/locales';
 import { FeatureHandler } from '../../../src/telegram/interfaces/feature.handler';
+import { FeatureAlreadyEnabledError } from '../../../src/features/domain/errors/feature-already-enabled.error';
 
 const receipt = {
   id: 'abcdefghijklmnop', userId: 7, chatId: 7, kind: 'workflow-return' as const,
@@ -54,6 +55,14 @@ describe('FeatureHandler', () => {
     await command!({ ...ctx, match: 'install digital' });
     expect(outcomes.register).toHaveBeenCalledWith(handler);
     expect(install.execute).not.toHaveBeenCalled();
+    expect(ctx.reply).toHaveBeenCalledWith(
+      expect.stringContaining(catalogFor('en').feature.description.digital),
+      expect.objectContaining({ reply_markup: expect.anything() }),
+    );
+    expect(catalogFor('en').feature.confirmation.install('Digital inputs', catalogFor('en').feature.restartScope.host))
+      .toContain('Pi reboot');
+    expect(catalogFor('en').feature.confirmation.install('Digital inputs', catalogFor('en').feature.restartScope.worker))
+      .not.toContain('restart restart');
   });
 
   it('rejects extra command tokens with usage and no navigation receipt', async () => {
@@ -80,5 +89,29 @@ describe('FeatureHandler', () => {
     claim.execute.mockResolvedValueOnce({ kind: 'claimed', receipt, operation: { kind: 'feature-mutation', feature: 'digital', action: 'verify', expectedInstalled: true, expectedEnabled: true, expectedAttentionReason: 'readiness-failed' } });
     await (handler as any).confirm(ctx, receipt.id, true);
     expect(verify.execute).toHaveBeenCalledWith({ name: 'digital', source: 'manual', expected: { installed: true, enabled: true, attentionReason: 'readiness-failed' } });
+  });
+
+  it('keeps exact terminal delivery pending when its authoritative detail cannot be read', async () => {
+    const { handler, workflows } = setup();
+    (handler as any).users = { findByTelegramId: vi.fn().mockResolvedValue({ telegramId: 7, locale: 'en', role: 'admin' }) };
+    (handler as any).detail = { execute: vi.fn().mockRejectedValue(new Error('db unavailable')) };
+    await handler.notify({
+      id: 'jobabcdefghijkl', feature: 'digital', status: 'succeeded', activeSlot: null,
+      requestedByUserId: 7, requestedInChatId: 7, workflowReceiptId: receipt.id,
+      previousInstalled: false, previousEnabled: false, restartScope: 'worker', failureCode: null,
+      createdAt: new Date(), updatedAt: new Date(),
+    });
+    expect(workflows.completeHeadless).not.toHaveBeenCalled();
+  });
+
+  it('maps expected typed mutation errors to localized copy without treating them as unknown failures', async () => {
+    const { handler, ctx, claim, enable, navigation } = setup();
+    claim.execute.mockResolvedValueOnce({ kind: 'claimed', receipt, operation: { kind: 'feature-mutation', feature: 'digital', action: 'enable', expectedInstalled: true, expectedEnabled: false, expectedAttentionReason: null } });
+    enable.execute.mockRejectedValueOnce(new FeatureAlreadyEnabledError('digital'));
+    await (handler as any).confirm(ctx, receipt.id, false);
+    expect(navigation.complete).toHaveBeenCalledWith(ctx, { receipt }, expect.objectContaining({ effectStage: 'pending' }));
+    const presentation = navigation.complete.mock.calls[0][2];
+    await presentation.deliver();
+    expect(ctx.reply).toHaveBeenCalledWith(catalogFor('en').feature.errors.alreadyEnabled('Digital inputs'));
   });
 });

@@ -9,6 +9,12 @@ import { VerifyFeatureReadinessUseCase } from '../../features/application/verify
 import type { FeatureStatus } from '../../features/domain/feature-status';
 import type { FeatureInstallJob, ManageableFeatureName } from '../../features/domain/manageable-feature';
 import { FeatureInstallBusyError } from '../../features/domain/errors/feature-install-busy.error';
+import { FeatureInstallStartError } from '../../features/domain/errors/feature-install-start.error';
+import { FeatureNotInstalledError } from '../../features/domain/errors/feature-not-installed.error';
+import { FeatureInconsistentError } from '../../features/domain/errors/feature-inconsistent.error';
+import { FeatureAlreadyEnabledError } from '../../features/domain/errors/feature-already-enabled.error';
+import { FeatureAlreadyDisabledError } from '../../features/domain/errors/feature-already-disabled.error';
+import { FeatureRestartDispatchError } from '../../features/domain/errors/feature-restart-dispatch.error';
 import { FeatureStateChangedError } from '../../features/domain/errors/feature-state-changed.error';
 import { FeatureVerificationError } from '../../features/domain/errors/feature-verification.error';
 import { UnknownFeatureError } from '../../features/domain/errors/unknown-feature.error';
@@ -103,11 +109,19 @@ export class FeatureHandler implements TelegramHandler, FeatureInstallOutcomePor
     if (!user) return;
     const catalog = catalogFor(user.locale);
     const name = catalog.feature.names[job.feature];
-    const final = await this.detail.execute(job.feature).catch(() => null);
-    const succeeded = job.status === 'succeeded' && final?.status.attentionReason === null;
+    let final: FeatureDetail;
+    try {
+      final = await this.detail.execute(job.feature);
+    } catch {
+      // The terminal job remains retryable: without an authoritative current
+      // feature projection we must not turn success into a guessed failure.
+      this.logger.warn(`Feature install outcome detail unavailable for ${job.feature}`);
+      return;
+    }
+    const succeeded = job.status === 'succeeded' && final.status.attentionReason === null;
     const message = succeeded
       ? catalog.feature.outcome.success(name)
-      : catalog.feature.outcome.failure(name, failureLabel(catalog.feature, job.failureCode, final?.status.attentionReason));
+      : catalog.feature.outcome.failure(name, failureLabel(catalog.feature, job.failureCode, final.status.attentionReason));
     await this.workflows.completeHeadless({
       identity: { userId: user.telegramId, chatId: job.requestedInChatId, locale: user.locale, role: user.role, catalog },
       workflow: 'feature',
@@ -115,7 +129,7 @@ export class FeatureHandler implements TelegramHandler, FeatureInstallOutcomePor
       deliver: () => this.dm.send(job.requestedInChatId, message),
       recoveryNotice: succeeded
         ? catalog.feature.outcome.recoveredSuccess(name)
-        : catalog.feature.outcome.recoveredFailure(name, failureLabel(catalog.feature, job.failureCode, final?.status.attentionReason)),
+        : catalog.feature.outcome.recoveredFailure(name, failureLabel(catalog.feature, job.failureCode, final.status.attentionReason)),
       restore: async (receipt, notice) => (await this.restoreWorkflow.execute({
         userId: user.telegramId,
         chatId: job.requestedInChatId,
@@ -187,6 +201,7 @@ export class FeatureHandler implements TelegramHandler, FeatureInstallOutcomePor
     const name = catalog.names[detail.status.name];
     const text = catalog.detail({
       name,
+      description: catalog.description[detail.status.name],
       state: catalog.state[detail.status.display],
       dependencies: catalog.impact.dependencies[detail.impact.dependencies],
       controls: catalog.impact.controls[detail.impact.controls],
@@ -255,6 +270,12 @@ export class FeatureHandler implements TelegramHandler, FeatureInstallOutcomePor
   private failure(catalog: LocaleCatalog['feature'], operation: FeatureWorkflowOperation, error: unknown): string {
     const name = catalog.names[operation.feature];
     if (error instanceof FeatureInstallBusyError) return catalog.busy(catalog.names[error.activeFeature]);
+    if (error instanceof FeatureInstallStartError) return catalog.errors.installStart(name);
+    if (error instanceof FeatureNotInstalledError) return catalog.errors.notInstalled(name);
+    if (error instanceof FeatureInconsistentError) return catalog.errors.inconsistent(name);
+    if (error instanceof FeatureAlreadyEnabledError) return catalog.errors.alreadyEnabled(name);
+    if (error instanceof FeatureAlreadyDisabledError) return catalog.errors.alreadyDisabled(name);
+    if (error instanceof FeatureRestartDispatchError) return catalog.errors.restartFailed(name, catalog.restartScope[error.scope]);
     if (error instanceof FeatureStateChangedError) return catalog.recovery.stale;
     if (error instanceof FeatureVerificationError) return catalog.verificationFailed(name);
     if (error instanceof UnknownFeatureError) return catalog.unknown(name);
@@ -319,6 +340,12 @@ function isExpectedFeatureError(error: unknown): boolean {
   return error instanceof FeatureInstallBusyError
     || error instanceof FeatureStateChangedError
     || error instanceof FeatureVerificationError
+    || error instanceof FeatureInstallStartError
+    || error instanceof FeatureNotInstalledError
+    || error instanceof FeatureInconsistentError
+    || error instanceof FeatureAlreadyEnabledError
+    || error instanceof FeatureAlreadyDisabledError
+    || error instanceof FeatureRestartDispatchError
     || error instanceof UnknownFeatureError;
 }
 
