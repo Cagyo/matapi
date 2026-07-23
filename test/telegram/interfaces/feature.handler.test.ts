@@ -43,7 +43,7 @@ describe('FeatureHandler', () => {
     const keyboard = ctx.reply.mock.calls[0][1].reply_markup.inline_keyboard;
     expect(keyboard.slice(0, 5)).toHaveLength(5);
     expect(keyboard.slice(0, 5).every((row: unknown[]) => row.length === 1)).toBe(true);
-    expect(keyboard.slice(0, 5).map((row: Array<{ callback_data: string }>) => row[0].callback_data))
+    expect(keyboard.slice(0, 5).map((row: { callback_data: string }[]) => row[0].callback_data))
       .toEqual(['ft:d:abcdefghijklmnop:d', 'ft:d:abcdefghijklmnop:u', 'ft:d:abcdefghijklmnop:z', 'ft:d:abcdefghijklmnop:m', 'ft:d:abcdefghijklmnop:r']);
   });
 

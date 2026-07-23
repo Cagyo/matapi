@@ -101,7 +101,7 @@ export class FeatureHandler implements TelegramHandler, FeatureInstallOutcomePor
       }
       keyboard.text(ctx.localeState!.catalog.home.workflow.home, `wr:${receipt.id}:h`);
       await ctx.reply(catalog.listHeader, { reply_markup: keyboard });
-    } catch (error) {
+    } catch {
       await ctx.reply(ctx.localeState!.catalog.feature.listFailed);
     }
   }
@@ -158,7 +158,7 @@ export class FeatureHandler implements TelegramHandler, FeatureInstallOutcomePor
   private async handleCallback(ctx: TelegramContext): Promise<void> {
     const parsed = parseCallback(ctx.callbackQuery?.data ?? '');
     const identity = currentWorkflowIdentity(ctx);
-    if (!parsed || !identity || identity.role !== 'admin') return this.stale(ctx);
+    if (!parsed || identity?.role !== 'admin') return this.stale(ctx);
     if (parsed.kind === 'd') {
       const current = await this.workflows.loadCurrent(ctx, parsed.receiptId, 'feature');
       if (!current || !parsed.feature) return this.stale(ctx);
