@@ -7,6 +7,7 @@ import type { MediaRepositoryPort } from '../../../src/camera/domain/ports/media
 import type { LiveSourceProbePort } from '../../../src/camera/domain/ports/live-source-probe.port';
 import { AesGcmLiveSourceCredentialAdapter } from '../../../src/camera/infrastructure/aes-gcm-live-source-credential.adapter';
 import { InMemoryLiveSourceRepository } from '../../../src/camera/infrastructure/in-memory-live-source.repository';
+import type { FeatureAvailabilityPort } from '../../../src/features/domain/ports/feature-availability.port';
 
 function media(cameras: { id: string; name: string; type: string; enabled: boolean }[]): MediaRepositoryPort {
   return {
@@ -107,5 +108,20 @@ describe('live stream source resolver RTSP metadata boundary', () => {
         kind: 'motion-mjpeg', cameraId: 'first', cameraName: 'First',
         upstreamUrl: 'http://127.0.0.1:8081/?action=stream',
       });
+  });
+
+  it('chooses a ready RTSP source when Motion is unavailable', async () => {
+    const cameras = [
+      { id: 'motion', name: 'Motion', type: 'motion', enabled: true },
+      { id: 'rtsp', name: 'RTSP', type: 'rtsp', enabled: true },
+    ];
+    const sources = { isReady: vi.fn(async (id: string) => id === 'rtsp') } as unknown as LiveSourceRepositoryPort;
+    const availability: FeatureAvailabilityPort = {
+      awaitInitialVerification: vi.fn(), inspect: vi.fn(),
+      requireReady: vi.fn(async (name) => { if (name === 'motion') throw new Error('disabled'); }),
+    };
+
+    await expect(new LiveStreamSourceResolverService(media(cameras), sources, availability).resolve())
+      .resolves.toEqual({ kind: 'rtsp', cameraId: 'rtsp', cameraName: 'RTSP' });
   });
 });

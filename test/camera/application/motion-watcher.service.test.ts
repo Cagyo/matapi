@@ -9,6 +9,7 @@ import {
 } from '../../../src/camera/domain/ports/admin-alert.port';
 import { MotionControlPort } from '../../../src/camera/domain/ports/motion-control.port';
 import { SystemMetaRepositoryPort } from '../../../src/system/domain/ports/system-meta-repository.port';
+import type { FeatureAvailabilityPort } from '../../../src/features/domain/ports/feature-availability.port';
 
 class FakeMotion implements MotionControlPort {
   active: boolean;
@@ -141,6 +142,44 @@ describe('MotionWatcherService', () => {
     watcher.onApplicationBootstrap();
 
     expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('does not arm after stop wins an availability wait', async () => {
+    let release!: () => void;
+    const availability: FeatureAvailabilityPort = {
+      awaitInitialVerification: vi.fn(), inspect: vi.fn(),
+      requireReady: vi.fn(() => new Promise<void>((resolve) => { release = resolve; })),
+    };
+    const motion = new FakeMotion(false);
+    const { meta } = memMeta();
+    const watcher = new MotionWatcherService('real', motion, new RecordingAdminAlert(), meta, availability);
+    const interval = vi.spyOn(global, 'setInterval');
+
+    const starting = watcher.start();
+    await watcher.stop();
+    release();
+    await starting;
+
+    expect(interval).not.toHaveBeenCalled();
+    expect(motion.restartCalls).toBe(0);
+  });
+
+  it('settles stop during a restart backoff and prevents later restarts', async () => {
+    const motion = new FakeMotion(false);
+    motion.restartSucceeds = false;
+    const { meta } = memMeta();
+    const availability: FeatureAvailabilityPort = {
+      awaitInitialVerification: vi.fn(), inspect: vi.fn(), requireReady: vi.fn().mockResolvedValue(undefined),
+    };
+    const watcher = new MotionWatcherService('real', motion, new RecordingAdminAlert(), meta, availability);
+
+    await watcher.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(motion.restartCalls).toBe(1);
+    await watcher.stop();
+    await vi.runAllTimersAsync();
+
+    expect(motion.restartCalls).toBe(1);
   });
 
   it('leaves a deliberately stopped daemon alone (desired=off)', async () => {

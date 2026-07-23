@@ -686,6 +686,7 @@ const enCatalog = {
     },
   },
   feature: {
+    names: { motion: 'Motion camera', rtsp: 'RTSP camera' },
     stale: {
       disabled: (name: string) => `${name} is disabled.`,
       attention: (name: string) => `${name} needs attention.`,

@@ -406,13 +406,6 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
     telegramId: number,
     deferred: Deferred<OpenLiveStreamResult>,
   ): Promise<void> {
-    try {
-      if (this.availability) await this.availability.requireReady(source.kind === 'rtsp' ? 'rtsp' : 'motion');
-      this.sourceStartGate.assertCanStart(source.kind);
-    } catch {
-      deferred.reject(new LiveStreamUnavailableError());
-      return;
-    }
     const startedMonotonicMs = this.clock.now();
     const pending: PendingOpen = {
       source,
@@ -427,6 +420,18 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
       cancelled: false,
     };
     this.pending = pending;
+    try {
+      if (this.availability) await this.availability.requireReady(source.kind === 'rtsp' ? 'rtsp' : 'motion');
+      this.sourceStartGate.assertCanStart(source.kind);
+    } catch {
+      if (this.pending === pending) this.pending = undefined;
+      deferred.reject(new LiveStreamUnavailableError());
+      return;
+    }
+    if (pending.cancelled || this.pending !== pending) {
+      deferred.reject(new LiveStreamUnavailableError());
+      return;
+    }
 
     const start = Promise.resolve().then(() =>
       this.gateway.start({ session: pending.provisionalSession, source }),
@@ -594,6 +599,7 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
     const grantId = randomUUID();
     const token = createViewerToken(randomBytes(32));
     const tokenHash = createHash('sha256').update(token).digest('hex');
+    await this.requireSourceReady(active.sourceKind);
     await this.withOperationTimeout(
       Promise.resolve().then(() =>
         this.gateway.addViewer({
@@ -613,6 +619,11 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
       registerMessageReference: (reference) =>
         this.registerMessageReference(active.session.id, telegramId, grantId, reference),
     };
+  }
+
+  private async requireSourceReady(kind: LiveStreamSource['kind']): Promise<void> {
+    if (this.availability) await this.availability.requireReady(kind === 'rtsp' ? 'rtsp' : 'motion');
+    this.sourceStartGate.assertCanStart(kind);
   }
 
   private async expireIfDue(): Promise<void> {

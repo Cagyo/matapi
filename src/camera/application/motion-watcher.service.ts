@@ -37,6 +37,7 @@ export class MotionWatcherService
   private readonly logger = new Logger(MotionWatcherService.name);
   private timer?: NodeJS.Timeout;
   private backoffTimer?: NodeJS.Timeout;
+  private resolveBackoff?: () => void;
   private degraded = false;
   private wanted = false;
   private stopped = false;
@@ -51,15 +52,22 @@ export class MotionWatcherService
     @Inject(FEATURE_AVAILABILITY) private readonly availability?: FeatureAvailabilityPort,
   ) {}
 
-  onApplicationBootstrap(): void { void this.start(); }
+  onApplicationBootstrap(): void {
+    void this.start().catch(() => undefined);
+  }
 
   async start(): Promise<void> {
     if (this.mode !== 'real' || this.wanted) return;
-    await this.availability?.requireReady('motion');
-    if (this.mode !== 'real' || this.wanted) return;
+    const generation = ++this.generation;
     this.wanted = true;
     this.stopped = false;
-    const generation = this.generation;
+    try {
+      await this.availability?.requireReady('motion');
+    } catch (error) {
+      if (this.isCurrent(generation)) this.wanted = false;
+      throw error;
+    }
+    if (this.mode !== 'real' || !this.wanted || !this.isCurrent(generation)) return;
 
     const interval = this.resolveInterval();
     this.timer = setInterval(() => {
@@ -79,6 +87,8 @@ export class MotionWatcherService
     this.timer = undefined;
     if (this.backoffTimer) clearTimeout(this.backoffTimer);
     this.backoffTimer = undefined;
+    this.resolveBackoff?.();
+    this.resolveBackoff = undefined;
     await this.inFlight;
   }
 
@@ -191,9 +201,11 @@ export class MotionWatcherService
 
   private sleep(ms: number, generation: number): Promise<void> {
     return new Promise((resolve) => {
+      this.resolveBackoff = resolve;
       this.backoffTimer = setTimeout(() => {
         this.backoffTimer = undefined;
-        if (this.isCurrent(generation)) resolve();
+        this.resolveBackoff = undefined;
+        resolve();
       }, ms);
     });
   }

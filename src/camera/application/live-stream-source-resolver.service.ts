@@ -10,6 +10,7 @@ import {
   LIVE_SOURCE_REPOSITORY,
   type LiveSourceRepositoryPort,
 } from '../domain/ports/live-source-repository.port';
+import { FEATURE_AVAILABILITY, type FeatureAvailabilityPort } from '../../features/domain/ports/feature-availability.port';
 
 const MOTION_MJPEG_UPSTREAM = 'http://127.0.0.1:8081/?action=stream';
 
@@ -20,6 +21,8 @@ export class LiveStreamSourceResolverService {
     @Inject(MEDIA_REPOSITORY) private readonly media: MediaRepositoryPort,
     @Optional() @Inject(LIVE_SOURCE_REPOSITORY)
     private readonly liveSources?: LiveSourceRepositoryPort,
+    @Optional() @Inject(FEATURE_AVAILABILITY)
+    private readonly availability?: FeatureAvailabilityPort,
   ) {}
 
   async resolve(cameraName?: string): Promise<LiveStreamSource> {
@@ -29,8 +32,10 @@ export class LiveStreamSourceResolverService {
         camera = await this.media.findCameraByName(cameraName);
       } else {
         const cameras = await this.media.listCameras();
-        camera = cameras.find((candidate) => candidate.enabled && candidate.type === 'motion') ?? null;
-        if (!camera && this.liveSources) {
+        camera = await this.isReady('motion')
+          ? cameras.find((candidate) => candidate.enabled && candidate.type === 'motion') ?? null
+          : null;
+        if (!camera && this.liveSources && await this.isReady('rtsp')) {
           for (const candidate of cameras) {
             if (candidate.enabled && await this.liveSources.isReady(candidate.id)) {
               camera = candidate;
@@ -62,11 +67,11 @@ export class LiveStreamSourceResolverService {
       throw new LiveStreamSourceUnavailableError();
     }
 
-    if (this.liveSources && await this.liveSources.isReady(camera.id)) {
+    if (this.liveSources && await this.liveSources.isReady(camera.id) && await this.isReady('rtsp')) {
       return { kind: 'rtsp', cameraId: camera.id, cameraName: camera.name };
     }
 
-    if (camera.type !== 'motion') throw new LiveStreamSourceUnavailableError();
+    if (camera.type !== 'motion' || !(await this.isReady('motion'))) throw new LiveStreamSourceUnavailableError();
 
     return {
       kind: 'motion-mjpeg',
@@ -74,5 +79,12 @@ export class LiveStreamSourceResolverService {
       cameraName: camera.name,
       upstreamUrl: MOTION_MJPEG_UPSTREAM,
     };
+  }
+
+  private async isReady(name: 'motion' | 'rtsp'): Promise<boolean> {
+    try {
+      await this.availability?.requireReady(name);
+      return true;
+    } catch { return false; }
   }
 }

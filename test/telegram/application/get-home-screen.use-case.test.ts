@@ -4,6 +4,7 @@ import type { HomeSummary } from '../../../src/telegram/application/get-home-sum
 import { GetHomeScreenUseCase } from '../../../src/telegram/application/get-home-screen.use-case';
 import { homeViewForScreen } from '../../../src/telegram/application/home-screen';
 import { AdminHomeViewForbiddenError } from '../../../src/telegram/domain/errors/admin-home-view-forbidden.error';
+import type { FeatureAvailabilityPort } from '../../../src/features/domain/ports/feature-availability.port';
 
 const summary: HomeSummary = {
   verdict: 'normal',
@@ -37,10 +38,33 @@ describe('GetHomeScreenUseCase', () => {
       chatId: 70,
       role: 'user',
       view: { kind: 'home', checking: true },
-    })).resolves.toEqual({ kind: 'home', summary, checking: true });
+    })).resolves.toEqual({ kind: 'home', summary, checking: true, cameraAvailable: true });
     expect(getSummary.execute).toHaveBeenCalledTimes(1);
     expect(getSummary.execute).toHaveBeenCalledWith(7);
     expect(sensors.listDashboardPage).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['motion only', true, false, true],
+    ['rtsp only', false, true, true],
+    ['both', true, true, true],
+    ['neither', false, false, false],
+  ])('sets camera availability for %s', async (_case, motionReady, rtspReady, cameraAvailable) => {
+    const status = (name: 'motion' | 'rtsp', ready: boolean) => ({
+      name, installed: ready, enabled: ready, ready, busy: false, attentionReason: null,
+      display: ready ? 'enabled' : 'installed-off', action: null,
+    }) as never;
+    const availability: FeatureAvailabilityPort = {
+      awaitInitialVerification: vi.fn(), requireReady: vi.fn(),
+      inspect: vi.fn(async (name) => status(name as 'motion' | 'rtsp', name === 'motion' ? motionReady : rtspReady)),
+    };
+    const useCase = new GetHomeScreenUseCase(
+      { execute: vi.fn().mockResolvedValue(summary) }, { listDashboardPage: vi.fn() },
+      { execute: vi.fn() }, { listEnabled: vi.fn() }, undefined, availability,
+    );
+
+    await expect(useCase.execute({ userId: 7, chatId: 70, role: 'user', view: { kind: 'home', checking: false } }))
+      .resolves.toMatchObject({ kind: 'home', cameraAvailable });
   });
 
   it('adds the clamped eight-row Sensors page while retaining the global summary and role capability', async () => {

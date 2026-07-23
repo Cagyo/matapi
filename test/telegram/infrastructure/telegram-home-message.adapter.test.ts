@@ -25,7 +25,7 @@ const summary: HomeSummary = {
   notificationState: { kind: 'normal' },
 };
 
-const screen: HomeScreen = { kind: 'home', summary, checking: false };
+const screen: HomeScreen = { kind: 'home', summary, checking: false, cameraAvailable: true };
 
 function fakeBot() {
   const api = {

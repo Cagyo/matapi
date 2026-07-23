@@ -142,6 +142,7 @@ describe('renderHomeMessage', () => {
     for (const verdict of ['attention', 'unavailable', 'normal'] as const) {
       const rendered = renderHomeMessage(catalog, identity, {
         kind: 'home',
+        cameraAvailable: true,
         summary: summary({ verdict }),
         checking: false,
       });

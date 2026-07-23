@@ -43,9 +43,7 @@ export class GetHomeScreenUseCase {
       ]);
       const operational = (status: Awaited<ReturnType<FeatureAvailabilityPort['inspect']>> | undefined) =>
         Boolean(status?.installed && status.enabled && status.ready && !status.busy && status.attentionReason === null);
-      return this.availability
-        ? { kind: 'home', summary, checking: input.view.checking, cameraAvailable: operational(motion) || operational(rtsp) }
-        : { kind: 'home', summary, checking: input.view.checking };
+      return { kind: 'home', summary, checking: input.view.checking, cameraAvailable: this.availability ? operational(motion) || operational(rtsp) : true };
     }
     if (input.view.kind === 'sensors') {
       const summary = await this.summary.execute(input.userId);

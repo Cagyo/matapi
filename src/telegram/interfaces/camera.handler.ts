@@ -270,6 +270,7 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
   }
 
   private async browseMenu(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<void> {
+    if (!(await this.requireFeature(ctx, receipt, 'motion'))) return;
     this.clearBrowse(ctx, receipt.id);
     const keyboard = new InlineKeyboard()
       .text(en.camera.browse.buttons.today, callback(receipt.id, 'bt'))
@@ -286,6 +287,7 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
   }
 
   private async browsePickDate(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<void> {
+    if (!(await this.requireFeature(ctx, receipt, 'motion'))) return;
     this.clearBrowse(ctx, receipt.id);
     this.inputs.set(this.key(ctx, receipt.id), {
       kind: 'date',
@@ -305,6 +307,7 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
     receipt: WorkflowReturnReceipt,
     mode: 'today' | 'yesterday',
   ): Promise<void> {
+    if (!(await this.requireFeature(ctx, receipt, 'motion'))) return;
     const date = new Date();
     if (mode === 'yesterday') date.setDate(date.getDate() - 1);
     this.clearBrowse(ctx, receipt.id);
@@ -369,6 +372,7 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
   }
 
   private async browseLatest(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<void> {
+    if (!(await this.requireFeature(ctx, receipt, 'motion'))) return;
     const result = await this.browseEvents.latest();
     await this.replyBrowseResults(ctx, receipt, result.events, en.camera.browse.latestHeader(result.events.length));
   }
@@ -398,6 +402,7 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
   }
 
   private async browseEvent(ctx: TelegramContext, receipt: WorkflowReturnReceipt, rawId: string): Promise<void> {
+    if (!(await this.requireFeature(ctx, receipt, 'motion'))) return;
     const id = parseEventId(rawId);
     const event = id === null ? undefined : this.currentEvent(ctx, receipt, id);
     if (!event) {
@@ -416,6 +421,7 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
   }
 
   private async browseVideo(ctx: TelegramContext, receipt: WorkflowReturnReceipt, rawId: string): Promise<void> {
+    if (!(await this.requireFeature(ctx, receipt, 'motion'))) return;
     const id = parseEventId(rawId);
     if (id === null || !this.currentEvent(ctx, receipt, id)) {
       await this.complete(ctx, receipt, () => ctx.reply(en.camera.browse.resultsExpired));
@@ -424,6 +430,7 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
     await this.deliverVideo(ctx, receipt, id, this.browseNavigation(receipt));
   }
   private async browsePhoto(ctx: TelegramContext, receipt: WorkflowReturnReceipt, rawId: string): Promise<void> {
+    if (!(await this.requireFeature(ctx, receipt, 'motion'))) return;
     const id = parseEventId(rawId);
     if (id === null || !this.currentEvent(ctx, receipt, id)) {
       await this.complete(ctx, receipt, () => ctx.reply(en.camera.browse.resultsExpired));
@@ -519,6 +526,7 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
     id: number,
     keyboard?: InlineKeyboard,
   ): Promise<void> {
+    if (!(await this.requireFeature(ctx, receipt, 'motion'))) return;
     if (!(await this.workflows.markRunning(ctx, receipt))) return;
     const delivery = await this.video.execute(id);
     if (delivery.kind === 'drive') {
@@ -640,8 +648,9 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
       return true;
     } catch (error) {
       if (error instanceof FeatureUnavailableError) {
-        const copy = this.catalog(ctx).feature.stale;
-        const label = name === 'motion' ? 'Motion' : 'RTSP';
+        const feature = this.catalog(ctx).feature;
+        const copy = feature.stale;
+        const label = feature.names[name];
         const message = error.state === 'installed-off' ? copy.disabled(label)
           : error.state === 'needs-attention' ? copy.attention(label)
             : error.state === 'installing' ? copy.installing(label) : copy.unavailable(label);

@@ -691,6 +691,7 @@ const ukCatalog = {
     },
   },
   feature: {
+    names: { motion: 'Камера Motion', rtsp: 'Камера RTSP' },
     stale: {
       disabled: (name: string) => `${name} вимкнено.`,
       attention: (name: string) => `${name} потребує уваги.`,

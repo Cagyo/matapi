@@ -3,6 +3,8 @@ import { ListLiveSourcesUseCase } from '../../../src/camera/application/list-liv
 import { RemoveLiveSourceUseCase } from '../../../src/camera/application/remove-live-source.use-case';
 import type { LiveSourceRepositoryPort } from '../../../src/camera/domain/ports/live-source-repository.port';
 import type { LiveSourceSessionControlPort } from '../../../src/camera/domain/ports/live-source-session-control.port';
+import { FeatureUnavailableError } from '../../../src/features/domain/errors/feature-unavailable.error';
+import type { FeatureAvailabilityPort } from '../../../src/features/domain/ports/feature-availability.port';
 
 describe('live source list/remove use cases', () => {
   it('returns only the repository redacted read model', async () => {
@@ -26,5 +28,20 @@ describe('live source list/remove use cases', () => {
     vi.mocked(sessions.stopActiveSession).mockRejectedValueOnce(new Error('busy'));
     await expect(useCase.execute('c1')).rejects.toThrow('busy');
     expect(repository.remove).toHaveBeenCalledOnce();
+  });
+
+  it('does not remove metadata when RTSP becomes unavailable during teardown', async () => {
+    const sessions = { stopActiveSession: vi.fn().mockResolvedValue(undefined) } as unknown as LiveSourceSessionControlPort;
+    const repository = { remove: vi.fn() } as unknown as LiveSourceRepositoryPort;
+    const availability: FeatureAvailabilityPort = {
+      awaitInitialVerification: vi.fn(), inspect: vi.fn(),
+      requireReady: vi.fn()
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new FeatureUnavailableError('rtsp', 'installed-off')),
+    };
+
+    await expect(new RemoveLiveSourceUseCase(sessions, repository, availability).execute('c1'))
+      .rejects.toBeInstanceOf(FeatureUnavailableError);
+    expect(repository.remove).not.toHaveBeenCalled();
   });
 });

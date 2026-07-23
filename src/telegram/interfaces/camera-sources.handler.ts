@@ -14,6 +14,7 @@ import type { TelegramContext } from './telegram-context';
 import { WorkflowEntryCoordinator, type WorkflowLaunch } from './workflow-entry.coordinator';
 import { WorkflowNavigationHandler } from './workflow-navigation.handler';
 import { FeatureUnavailableError } from '../../features/domain/errors/feature-unavailable.error';
+import { FEATURE_AVAILABILITY, type FeatureAvailabilityPort } from '../../features/domain/ports/feature-availability.port';
 
 const SOURCE_STATE_TTL_MS = 10 * 60_000;
 const SELECTOR_LENGTH = 12;
@@ -48,6 +49,7 @@ export class CameraSourcesHandler {
     @Inject(CLOCK) private readonly clock: ClockPort,
     private readonly workflows: WorkflowEntryCoordinator,
     @Optional() private readonly navigation?: WorkflowNavigationHandler,
+    @Optional() @Inject(FEATURE_AVAILABILITY) private readonly availability?: FeatureAvailabilityPort,
   ) {}
 
   cancelPending(userId: number, chatId: number, receiptId?: string): void {
@@ -73,6 +75,7 @@ export class CameraSourcesHandler {
   async handleEntry(ctx: TelegramContext, launch?: WorkflowLaunch): Promise<void> {
     const receipt = launch?.receipt ?? (await this.workflows.begin(ctx, 'camera', { source: 'natural-parent' }));
     if (!receipt || !(await this.requireAdmin(ctx, receipt))) return;
+    if (!(await this.requireRtsp(ctx, receipt))) return;
     this.clear(ctx, receipt.id);
     const copy = this.copy(ctx);
     const keyboard = new InlineKeyboard()
@@ -98,6 +101,7 @@ export class CameraSourcesHandler {
       await this.complete(ctx, receipt, () => ctx.reply(copy.cancelled));
       return;
     }
+    if (!(await this.requireRtsp(ctx, receipt))) return;
     if (action === 'a') {
       this.set(ctx, { kind: 'camera', receipt, createdAtMs: this.now() });
       await ctx.reply(copy.cameraPrompt, {
@@ -156,6 +160,7 @@ export class CameraSourcesHandler {
     const state = await this.activeStateFor(ctx);
     if (!state) return false;
     if (!(await this.requireAdmin(ctx, state.receipt))) return true;
+    if (!(await this.requireRtsp(ctx, state.receipt))) return true;
     const copy = this.copy(ctx);
     if (this.now() - state.createdAtMs > SOURCE_STATE_TTL_MS) {
       this.states.delete(this.keyFor(state));
@@ -291,13 +296,23 @@ export class CameraSourcesHandler {
   }
   private async replyUnavailable(ctx: TelegramContext, receipt: WorkflowReturnReceipt, error: unknown): Promise<boolean> {
     if (!(error instanceof FeatureUnavailableError)) return false;
-    const stale = this.catalog(ctx).feature.stale;
-    const name = 'RTSP';
+    const feature = this.catalog(ctx).feature;
+    const stale = feature.stale;
+    const name = feature.names.rtsp;
     const message = error.state === 'installed-off' ? stale.disabled(name)
       : error.state === 'needs-attention' ? stale.attention(name)
         : error.state === 'installing' ? stale.installing(name) : stale.unavailable(name);
     await this.complete(ctx, receipt, () => ctx.reply(message));
     return true;
+  }
+  private async requireRtsp(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<boolean> {
+    try {
+      await this.availability?.requireReady('rtsp');
+      return true;
+    } catch (error) {
+      await this.replyUnavailable(ctx, receipt, error);
+      return false;
+    }
   }
 
   private async complete(

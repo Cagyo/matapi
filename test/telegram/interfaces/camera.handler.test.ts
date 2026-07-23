@@ -13,6 +13,8 @@ import { CameraSourcesHandler } from '../../../src/telegram/interfaces/camera-so
 import { RoleMiddleware } from '../../../src/telegram/interfaces/role.middleware';
 import type { WorkflowEntryCoordinator } from '../../../src/telegram/interfaces/workflow-entry.coordinator';
 import type { WorkflowNavigationHandler } from '../../../src/telegram/interfaces/workflow-navigation.handler';
+import type { FeatureAvailabilityPort } from '../../../src/features/domain/ports/feature-availability.port';
+import { FeatureUnavailableError } from '../../../src/features/domain/errors/feature-unavailable.error';
 
 const receipt = {
   id: 'abcdefghijklmnop',
@@ -36,7 +38,7 @@ const activeReceipt = {
 
 type Handler = (ctx: Record<string, unknown>, next?: () => Promise<void>) => Promise<void>;
 
-function setup() {
+function setup(availability?: FeatureAvailabilityPort) {
   const snapshot = {
     execute: vi.fn().mockResolvedValue({
       buffer: Buffer.from('x'),
@@ -98,6 +100,7 @@ function setup() {
     workflows as unknown as WorkflowEntryCoordinator,
     drafts as never,
     navigation as unknown as WorkflowNavigationHandler,
+    availability,
   );
   const commands = new Map<string, Handler>();
   let callback: Handler | undefined;
@@ -260,6 +263,40 @@ describe('camera contextual callbacks', () => {
     expect(sources.cancelPending.mock.invocationCallOrder[0]).toBeLessThan(
       snapshot.execute.mock.invocationCallOrder[0],
     );
+  });
+
+  it('localizes a stale Motion callback without marking the workflow running', async () => {
+    const availability: FeatureAvailabilityPort = {
+      awaitInitialVerification: vi.fn(), inspect: vi.fn(),
+      requireReady: vi.fn().mockRejectedValue(new FeatureUnavailableError('motion', 'installed-off')),
+    };
+    const { callback, handler, snapshot, workflows } = setup(availability);
+    await handler.handleDashboard(context() as never, { receipt });
+    const ctx = context({ data: 'cam:abcdefghijklmnop:s' });
+
+    await callback(ctx);
+
+    expect(snapshot.execute).not.toHaveBeenCalled();
+    expect(workflows.markRunning).not.toHaveBeenCalled();
+    expect(ctx.reply).toHaveBeenCalledWith(catalogFor('en').feature.stale.disabled(catalogFor('en').feature.names.motion));
+  });
+
+  it('uses the active non-English catalog for stale callbacks', async () => {
+    const availability: FeatureAvailabilityPort = {
+      awaitInitialVerification: vi.fn(), inspect: vi.fn(),
+      requireReady: vi.fn().mockRejectedValue(new FeatureUnavailableError('motion', 'needs-attention')),
+    };
+    const { callback, handler, workflows } = setup(availability);
+    const dashboard = context();
+    dashboard.localeState.catalog = catalogFor('uk');
+    await handler.handleDashboard(dashboard as never, { receipt });
+    const ctx = context({ data: 'cam:abcdefghijklmnop:s' });
+    ctx.localeState.catalog = catalogFor('uk');
+
+    await callback(ctx);
+
+    expect(workflows.markRunning).not.toHaveBeenCalled();
+    expect(ctx.reply).toHaveBeenCalledWith(catalogFor('uk').feature.stale.attention(catalogFor('uk').feature.names.motion));
   });
 
   it('preserves browse results while navigating within the browse workflow', async () => {

@@ -11,6 +11,7 @@ import {
   type LiveStreamSource,
 } from '../../../src/camera/domain/live-stream.entity';
 import { RtspSourceStartGate } from '../../../src/camera/application/rtsp-source-start-gate.service';
+import type { FeatureAvailabilityPort } from '../../../src/features/domain/ports/feature-availability.port';
 
 describe('LiveStreamSessionService', () => {
   afterEach(() => {
@@ -27,6 +28,28 @@ describe('LiveStreamSessionService', () => {
 
     expect(second.remainingMs).toBe(180_000);
     expect(second.expiresMonotonicMs).toBe(first.expiresMonotonicMs);
+  });
+
+  it('serializes deferred readiness without dropping a queued joiner', async () => {
+    let release!: () => void;
+    const availability: FeatureAvailabilityPort = {
+      awaitInitialVerification: vi.fn(), inspect: vi.fn(),
+      requireReady: vi.fn()
+        .mockImplementationOnce(() => new Promise<void>((resolve) => { release = resolve; }))
+        .mockResolvedValue(undefined),
+    };
+    const gateway = new DeferredGateway();
+    const service = createService({ gateway, availability });
+
+    const first = service.open(source('front'), 1);
+    const joining = service.open(source('front'), 2);
+    await vi.waitFor(() => expect(availability.requireReady).toHaveBeenCalledOnce());
+    release();
+    await vi.waitFor(() => expect(gateway.startCalls).toHaveLength(1));
+    gateway.resolveStart();
+
+    await expect(Promise.all([first, joining])).resolves.toHaveLength(2);
+    expect(gateway.startCalls).toHaveLength(1);
   });
 
   it('starts the full session deadline only after tunnel readiness succeeds', async () => {
@@ -1221,6 +1244,7 @@ function createService(input: {
   durationMs?: number;
   operationTimeoutMs?: number;
   sourceStartGate?: RtspSourceStartGate;
+  availability?: FeatureAvailabilityPort;
 } = {}): LiveStreamSessionService {
   return new LiveStreamSessionService(
     input.gateway ?? new FakeGateway(),
@@ -1232,6 +1256,7 @@ function createService(input: {
     input.operationTimeoutMs ?? 30_000,
     2,
     input.sourceStartGate,
+    input.availability,
   );
 }
 

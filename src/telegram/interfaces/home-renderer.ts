@@ -149,7 +149,7 @@ function notificationText(catalog: LocaleCatalog, summary: HomeSummary): string 
   }
 }
 
-function homeRows(catalog: LocaleCatalog, identity: PendingHomeIdentity, cameraAvailable = true): readonly HomeButton[][] {
+function homeRows(catalog: LocaleCatalog, identity: PendingHomeIdentity, cameraAvailable: boolean): readonly HomeButton[][] {
   const primary = [button(catalog.home.buttons.sensors, identity, { kind: 'sensors', page: 0 })];
   if (cameraAvailable) primary.push(button(catalog.home.buttons.camera, identity, { kind: 'camera' }));
   return [

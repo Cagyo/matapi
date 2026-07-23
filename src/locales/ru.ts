@@ -691,6 +691,7 @@ const ruCatalog = {
     },
   },
   feature: {
+    names: { motion: 'Камера Motion', rtsp: 'Камера RTSP' },
     stale: {
       disabled: (name: string) => `${name} отключена.`,
       attention: (name: string) => `${name} требует внимания.`,
