@@ -7,6 +7,7 @@ import { SensorNameExistsError } from '../../../src/sensors/domain/errors/sensor
 import { SensorNotFoundError } from '../../../src/sensors/domain/errors/sensor-not-found.error';
 import { Sensor } from '../../../src/sensors/domain/sensor';
 import { InMemorySensorRepository } from '../../../src/sensors/infrastructure/in-memory-sensor.repository';
+import { FeatureUnavailableError } from '../../../src/features/domain/errors/feature-unavailable.error';
 
 const clock: ClockPort = { now: () => new Date('2030-02-01T00:00:00.000Z') };
 
@@ -24,12 +25,17 @@ function digital(id: string, name: string, pin: number): Sensor {
   };
 }
 
-function makeUseCase(seed: Sensor[] = []) {
+function makeUseCase(seed: Sensor[] = [], available = true) {
   const repo = new InMemorySensorRepository(seed);
   const reload = {
     execute: vi.fn().mockResolvedValue(undefined),
   } as unknown as ReloadSensorsUseCase;
-  return { useCase: new ModifySensorUseCase(repo, clock, reload), repo, reload };
+  const availability = {
+    requireReady: vi.fn().mockImplementation(async () => {
+      if (!available) throw new FeatureUnavailableError('digital', 'installed-off');
+    }),
+  };
+  return { useCase: new ModifySensorUseCase(repo, clock, reload, availability as never), repo, reload };
 }
 
 describe('ModifySensorUseCase', () => {
@@ -78,5 +84,16 @@ describe('ModifySensorUseCase', () => {
     await expect(
       useCase.execute({ currentName: 'ghost', patch: { severity: 'info' } }),
     ).rejects.toBeInstanceOf(SensorNotFoundError);
+  });
+
+  it('does not update a mapped sensor while its feature is unavailable', async () => {
+    const { useCase, repo } = makeUseCase([digital('a', 'front_door', 17)], false);
+
+    await expect(useCase.execute({
+      currentName: 'front_door',
+      patch: { severity: 'critical' },
+    })).rejects.toBeInstanceOf(FeatureUnavailableError);
+
+    expect((await repo.findByName('front_door'))?.severity).toBe('info');
   });
 });

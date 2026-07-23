@@ -10,6 +10,12 @@ import {
 } from '../domain/ports/sensor-repository.port';
 import { Sensor } from '../domain/sensor';
 import { ReloadSensorsUseCase } from './reload-sensors.use-case';
+import {
+  FEATURE_AVAILABILITY,
+  type FeatureAvailabilityPort,
+} from '../../features/domain/ports/feature-availability.port';
+import type { ManageableFeatureName } from '../../features/domain/manageable-feature';
+import { featureForSensorType } from './feature-for-sensor-type';
 
 /** One changed sensor in the import summary, with a short human reason. */
 export interface ImportUpdateSummary {
@@ -28,6 +34,7 @@ export interface ImportSummary {
 export interface ImportPlan {
   batch: SensorImportBatch;
   summary: ImportSummary;
+  affectedFeatures: readonly ManageableFeatureName[];
 }
 
 /**
@@ -49,6 +56,8 @@ export class ImportSensorsUseCase {
     @Inject(CLOCK) private readonly clock: ClockPort,
     @Inject(forwardRef(() => ReloadSensorsUseCase))
     private readonly reload: ReloadSensorsUseCase,
+    @Inject(FEATURE_AVAILABILITY)
+    private readonly availability: Pick<FeatureAvailabilityPort, 'requireReady'> = alwaysAvailable,
   ) {}
 
   async prepare(imported: ImportedSensor[]): Promise<ImportPlan> {
@@ -95,18 +104,44 @@ export class ImportSensorsUseCase {
     const removed = current.filter((s) => !importedNames.has(s.name));
     const archives = removed.map((s) => ({ id: s.id, archivedAt: now }));
     const archived = removed.map((s) => s.name);
+    const affectedFeatures = uniqueMappedFeatures([
+      ...inserts.map((sensor) => sensor.type),
+      ...updates.map((update) => current.find((sensor) => sensor.id === update.id)?.type),
+      ...removed.map((sensor) => sensor.type),
+    ]);
+    await this.requireFeaturesReady(affectedFeatures);
 
     return {
       batch: { inserts, updates, archives },
       summary: { added, updated, archived },
+      affectedFeatures,
     };
   }
 
   async commit(plan: ImportPlan): Promise<ImportSummary> {
+    await this.requireFeaturesReady(plan.affectedFeatures);
     await this.repository.applyImport(plan.batch);
     await this.reload.execute();
     return plan.summary;
   }
+
+  private async requireFeaturesReady(features: readonly ManageableFeatureName[]): Promise<void> {
+    await Promise.all(features.map((feature) => this.availability.requireReady(feature)));
+  }
+}
+
+const alwaysAvailable: Pick<FeatureAvailabilityPort, 'requireReady'> = {
+  requireReady: async () => undefined,
+};
+
+function uniqueMappedFeatures(types: readonly (Sensor['type'] | undefined)[]): ManageableFeatureName[] {
+  const features = new Set<ManageableFeatureName>();
+  for (const type of types) {
+    if (!type) continue;
+    const feature = featureForSensorType(type);
+    if (feature) features.add(feature);
+  }
+  return [...features];
 }
 
 /** Build a short reason describing how `entry` differs from `existing`, or `null`. */

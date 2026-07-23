@@ -74,6 +74,13 @@ describe('PigpioGateway', () => {
     expect(() => new PigpioGateway().gpio(17)).toThrow('pigpiod not connected');
   });
 
+  it('does not expose eager module initialization connection', () => {
+    const gateway = new PigpioGateway(pigpioClient);
+
+    expect('onModuleInit' in gateway).toBe(false);
+    expect(pigpioClient.pigpio).not.toHaveBeenCalled();
+  });
+
   it('connects through pigpio-client and returns gpio handles after connection', async () => {
     process.env.PIGPIOD_HOST = 'pi.local';
     process.env.PIGPIOD_PORT = '9999';

@@ -15,6 +15,11 @@ import {
 } from '../domain/ports/sensor-repository.port';
 import { isDigitalStepType, Sensor, SensorSeverity } from '../domain/sensor';
 import { ReloadSensorsUseCase } from './reload-sensors.use-case';
+import {
+  FEATURE_AVAILABILITY,
+  type FeatureAvailabilityPort,
+} from '../../features/domain/ports/feature-availability.port';
+import { featureForSensorType } from './feature-for-sensor-type';
 
 export interface ModifySensorInput {
   /** Current sensor name (used to locate the row). */
@@ -41,6 +46,8 @@ export class ModifySensorUseCase {
     @Inject(CLOCK) private readonly clock: ClockPort,
     @Inject(forwardRef(() => ReloadSensorsUseCase))
     private readonly reload: ReloadSensorsUseCase,
+    @Inject(FEATURE_AVAILABILITY)
+    private readonly availability: Pick<FeatureAvailabilityPort, 'requireReady'> = alwaysAvailable,
   ) {}
 
   async execute(input: ModifySensorInput): Promise<Sensor> {
@@ -70,6 +77,8 @@ export class ModifySensorUseCase {
       validateDigitalConfigExtras(input.patch.config);
     }
 
+    const feature = featureForSensorType(current.type);
+    if (feature) await this.availability.requireReady(feature);
     const updated = await this.repository.update(current.id, {
       ...input.patch,
       updatedAt: this.clock.now(),
@@ -78,6 +87,10 @@ export class ModifySensorUseCase {
     return updated;
   }
 }
+
+const alwaysAvailable: Pick<FeatureAvailabilityPort, 'requireReady'> = {
+  requireReady: async () => undefined,
+};
 
 function validateDigitalConfigExtras(config: Record<string, unknown>): void {
   const stepType = config?.stepType;

@@ -7,6 +7,8 @@ import { InMemorySensorRepository } from '../../../src/sensors/infrastructure/in
 import { MockGpioAdapter } from '../../../src/sensors/infrastructure/mock-gpio.adapter';
 import { DriverUnavailableError } from '../../../src/sensors/domain/errors/driver-unavailable.error';
 import { SensorEvent } from '../../../src/sensors/domain/sensor-event';
+import type { FeatureAvailabilityPort } from '../../../src/features/domain/ports/feature-availability.port';
+import { FeatureUnavailableError } from '../../../src/features/domain/errors/feature-unavailable.error';
 
 function digitalSensor(over: Partial<Sensor> = {}): Sensor {
   return {
@@ -23,8 +25,24 @@ function digitalSensor(over: Partial<Sensor> = {}): Sensor {
   };
 }
 
-function makeRegistry(repo: InMemorySensorRepository, factory: (type: string) => SensorDriverPort) {
-  return new SensorRegistryService(repo, factory);
+function availableFeatures(): FeatureAvailabilityPort {
+  return {
+    awaitInitialVerification: vi.fn().mockResolvedValue(undefined),
+    inspect: vi.fn(),
+    requireReady: vi.fn().mockResolvedValue(undefined),
+  } as unknown as FeatureAvailabilityPort;
+}
+
+function makeRegistry(
+  repo: InMemorySensorRepository,
+  factory: (type: string) => SensorDriverPort,
+  availability = availableFeatures(),
+) {
+  return new SensorRegistryService(repo, factory, availability);
+}
+
+async function flushEvents(): Promise<void> {
+  for (let i = 0; i < 8; i += 1) await Promise.resolve();
 }
 
 describe('SensorRegistryService', () => {
@@ -43,9 +61,7 @@ describe('SensorRegistryService', () => {
     vi.useFakeTimers();
     vi.setSystemTime(now);
     driver.simulateChange(1);
-    // persistState is fire-and-forget — wait a microtask
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushEvents();
 
     expect(listener).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -56,6 +72,131 @@ describe('SensorRegistryService', () => {
       }),
     );
     expect(repo.lastValueFor('front_door')).toEqual({ lastValue: '1', lastValueAt: now });
+  });
+
+  it('awaits initial feature verification before constructing a mapped driver', async () => {
+    const repo = new InMemorySensorRepository([digitalSensor()]);
+    let release!: () => void;
+    const availability = availableFeatures();
+    vi.mocked(availability.awaitInitialVerification).mockImplementation(
+      () => new Promise<void>((resolve) => { release = resolve; }),
+    );
+    const factory = vi.fn(() => new MockGpioAdapter());
+    const registry = makeRegistry(repo, factory, availability);
+
+    const reload = registry.reload();
+    await Promise.resolve();
+    expect(factory).not.toHaveBeenCalled();
+
+    release();
+    await reload;
+    expect(factory).toHaveBeenCalledOnce();
+  });
+
+  it('does not construct unavailable mapped drivers but leaves camera drivers unaffected', async () => {
+    const repo = new InMemorySensorRepository([
+      digitalSensor(),
+      digitalSensor({ id: 'camera', name: 'Camera', type: 'camera', config: { source: 'usb' } }),
+    ]);
+    const availability = availableFeatures();
+    vi.mocked(availability.requireReady).mockImplementation(async (name) => {
+      if (name === 'digital') throw new FeatureUnavailableError('digital', 'installed-off');
+    });
+    const factory = vi.fn(() => new MockGpioAdapter());
+    const registry = makeRegistry(repo, factory, availability);
+
+    await registry.reload();
+
+    expect(factory).toHaveBeenCalledTimes(1);
+    expect(factory).toHaveBeenCalledWith('camera');
+    expect(registry.list().map(({ id }) => id)).toEqual(['camera']);
+  });
+
+  it('destroys active drivers when their mapped feature becomes unavailable', async () => {
+    const repo = new InMemorySensorRepository([digitalSensor()]);
+    const driver = new MockGpioAdapter();
+    const destroy = vi.spyOn(driver, 'destroy');
+    const availability = availableFeatures();
+    const registry = makeRegistry(repo, () => driver, availability);
+    await registry.reload();
+    vi.mocked(availability.requireReady).mockRejectedValueOnce(
+      new FeatureUnavailableError('digital', 'installed-off'),
+    );
+
+    await registry.reload();
+
+    expect(destroy).toHaveBeenCalledOnce();
+    expect(registry.list()).toHaveLength(0);
+  });
+
+  it('blocks stopped features from being recreated until they are resumed', async () => {
+    const repo = new InMemorySensorRepository([digitalSensor()]);
+    const first = new MockGpioAdapter();
+    const second = new MockGpioAdapter();
+    const firstDestroy = vi.spyOn(first, 'destroy');
+    const factory = vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second);
+    const registry = makeRegistry(repo, factory);
+    await registry.reload();
+
+    await registry.stopFeature('digital');
+    await registry.reload();
+    expect(firstDestroy).toHaveBeenCalledOnce();
+    expect(factory).toHaveBeenCalledOnce();
+
+    await registry.resumeFeature('digital');
+    expect(factory).toHaveBeenCalledTimes(2);
+    expect(registry.getDriver('front_door')).toBe(second);
+  });
+
+  it('drops stale or unavailable driver callbacks before persistence and listeners', async () => {
+    const repo = new InMemorySensorRepository([digitalSensor()]);
+    const first = new MockGpioAdapter();
+    const second = new MockGpioAdapter();
+    const factory = vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second);
+    const availability = availableFeatures();
+    const registry = makeRegistry(repo, factory, availability);
+    const listener = vi.fn();
+    registry.onEvent(listener);
+    await registry.reload();
+    repo.setSensors([digitalSensor({ config: { pin: 18 } })]);
+    await registry.reload();
+
+    first.simulateChange(1);
+    await flushEvents();
+    expect(listener).not.toHaveBeenCalled();
+    expect(repo.lastValueFor('front_door')).toEqual({ lastValue: null, lastValueAt: null });
+
+    vi.mocked(availability.requireReady).mockRejectedValueOnce(
+      new FeatureUnavailableError('digital', 'installed-off'),
+    );
+    second.simulateChange(1);
+    await flushEvents();
+    expect(listener).not.toHaveBeenCalled();
+    expect(repo.lastValueFor('front_door')).toEqual({ lastValue: null, lastValueAt: null });
+  });
+
+  it('drops listeners when availability changes while an event is being persisted', async () => {
+    const repo = new InMemorySensorRepository([digitalSensor()]);
+    const driver = new MockGpioAdapter();
+    const availability = availableFeatures();
+    let ready = true;
+    vi.mocked(availability.requireReady).mockImplementation(async () => {
+      if (!ready) throw new FeatureUnavailableError('digital', 'installed-off');
+    });
+    const updateState = vi.spyOn(repo, 'updateState').mockImplementation(async (...args) => {
+      ready = false;
+      return InMemorySensorRepository.prototype.updateState.apply(repo, args);
+    });
+    const registry = makeRegistry(repo, () => driver, availability);
+    const listener = vi.fn();
+    registry.onEvent(listener);
+    await registry.reload();
+
+    driver.simulateChange(1);
+    await flushEvents();
+
+    expect(updateState).toHaveBeenCalledOnce();
+    expect(listener).not.toHaveBeenCalled();
   });
 
   it('persists the current UART ppm rather than a threshold event level', async () => {
@@ -87,8 +228,7 @@ describe('SensorRegistryService', () => {
       newValue: 'critical',
       timestamp,
     });
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushEvents();
 
     expect(repo.lastValueFor('co2')).toEqual({ lastValue: '1250.5', lastValueAt: timestamp });
   });
@@ -122,8 +262,7 @@ describe('SensorRegistryService', () => {
       newValue: 'warning',
       timestamp,
     });
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushEvents();
 
     expect(repo.lastValueFor('co2')).toEqual({ lastValue: '1e-7', lastValueAt: timestamp });
   });
@@ -234,7 +373,7 @@ describe('SensorRegistryService', () => {
       newValue: true,
       timestamp: new Date('2030-01-01T00:00:00.000Z'),
     });
-    await Promise.resolve();
+    await flushEvents();
 
     expect(registry.getDriver('front_door')).toBe(driver);
     expect(driver.onEvent).toHaveBeenCalledTimes(1);
@@ -339,6 +478,7 @@ describe('SensorRegistryService', () => {
     await registry.reload();
 
     driver.simulateChange(1);
+    await flushEvents();
 
     expect(bad).toHaveBeenCalled();
     expect(good).toHaveBeenCalled();

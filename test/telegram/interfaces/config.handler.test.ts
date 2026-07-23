@@ -4,6 +4,7 @@ import { en } from '../../../src/locales/en';
 import { catalogFor } from '../../../src/locales';
 import { WorkflowDraftRegistry } from '../../../src/telegram/interfaces/workflow-draft.registry';
 import type { WorkflowReturnReceipt } from '../../../src/telegram/domain/workflow-return';
+import { FeatureUnavailableError } from '../../../src/features/domain/errors/feature-unavailable.error';
 
 function localeState(locale: 'en' | 'uk' = 'en') {
   return { catalog: catalogFor(locale) };
@@ -86,6 +87,19 @@ describe('ConfigHandler', () => {
         await drafts.cancelExact(launch.receipt);
       }),
     };
+    const availability = {
+      inspect: vi.fn().mockImplementation(async (name: 'digital' | 'uart') => ({
+        name,
+        installed: true,
+        enabled: true,
+        ready: true,
+        busy: false,
+        attentionReason: null,
+        display: 'enabled',
+        action: 'disable',
+      })),
+      requireReady: vi.fn().mockResolvedValue(undefined),
+    };
     const handler = new ConfigHandler(
       sensors,
       addSensor,
@@ -95,6 +109,7 @@ describe('ConfigHandler', () => {
       workflows as never,
       drafts,
       navigation as never,
+      availability as never,
     );
 
     const commandCallbacks: Record<string, (...args: any[]) => any> = {};
@@ -133,6 +148,7 @@ describe('ConfigHandler', () => {
       workflows,
       drafts,
       navigation,
+      availability,
       commandCallbacks,
       callbackQueryCallbacks,
       messageCallbacks,
@@ -183,6 +199,49 @@ describe('ConfigHandler', () => {
     expect(keyboard).toContain(configData(500, 'pin:22'));
     expect(keyboard).not.toContain(configData(500, 'pin:4'));
     expect(keyboard).not.toContain(configData(500, 'pin:17'));
+  });
+
+  it('renders only fully available sensor types in the add picker', async () => {
+    const { handler, availability } = createTestSetup();
+    vi.mocked(availability.inspect).mockImplementation(async (name) => ({
+      name,
+      installed: name === 'uart',
+      enabled: name === 'uart',
+      ready: name === 'uart',
+      busy: false,
+      attentionReason: null,
+      display: name === 'uart' ? 'enabled' : 'installed-off',
+      action: name === 'uart' ? 'disable' : 'enable',
+    }));
+    const reply = vi.fn().mockResolvedValue(true);
+
+    await handler.handleSubcommand({ from: { id: 499 }, reply } as never, 'add');
+
+    expect(callbackData(reply)).toContain(configData(499, 'type:uart'));
+    expect(callbackData(reply)).not.toContain(configData(499, 'type:digital'));
+  });
+
+  it('rejects a stale unavailable type callback without advancing the wizard', async () => {
+    const { handler, callbackQueryCallbacks, availability } = createTestSetup();
+    vi.mocked(availability.requireReady).mockRejectedValueOnce(
+      new FeatureUnavailableError('digital', 'installed-off'),
+    );
+    const reply = vi.fn().mockResolvedValue(true);
+    const answerCallbackQuery = vi.fn().mockResolvedValue(true);
+    const editMessageReplyMarkup = vi.fn().mockResolvedValue(true);
+
+    await handler.handleSubcommand({ from: { id: 498 }, reply, localeState: localeState('uk') } as never, 'add');
+    await callbackQueryCallbacks[0].fn({
+      from: { id: 498 },
+      callbackQuery: { data: configData(498, 'type:digital') },
+      answerCallbackQuery,
+      editMessageReplyMarkup,
+      reply,
+      localeState: localeState('uk'),
+    } as never);
+
+    expect(reply).toHaveBeenCalledWith(catalogFor('uk').home.recovery.unavailable, expect.anything());
+    expect(reply).not.toHaveBeenCalledWith(expect.stringContaining('Крок 2'), expect.anything());
   });
 
   it('supports smart default creation from step 4 of digital sensor setup', async () => {

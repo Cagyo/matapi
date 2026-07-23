@@ -1,4 +1,6 @@
 import { Module } from '@nestjs/common';
+import { FeatureModule } from '../features/feature.module';
+import { FEATURE_RUNTIME_LIFECYCLE, type FeatureRuntimeLifecycleRegistryPort } from '../features/domain/ports/feature-runtime-lifecycle.port';
 import { CLOCK } from '../events/domain/ports/clock.port';
 import { SystemClockAdapter } from '../events/infrastructure/system-clock.adapter';
 import { AddSensorUseCase } from './application/add-sensor.use-case';
@@ -9,6 +11,7 @@ import { ModifySensorUseCase } from './application/modify-sensor.use-case';
 import { ReloadSensorsUseCase } from './application/reload-sensors.use-case';
 import { RemoveSensorUseCase } from './application/remove-sensor.use-case';
 import { SensorRegistryService } from './application/sensor-registry.service';
+import { FeatureSensorRuntimeLifecycleService } from './application/feature-sensor-runtime-lifecycle.service';
 import { SimulateSensorUseCase } from './application/simulate-sensor.use-case';
 import { ReadSensorLogHistoryUseCase } from './application/read-sensor-log-history.use-case';
 import { SENSOR_HEALTH } from './application/ports/sensor-health.port';
@@ -39,10 +42,25 @@ const devControllers =
   process.env.NODE_ENV === 'development' ? [DevSimulatorController] : [];
 
 @Module({
+  imports: [FeatureModule],
   controllers: devControllers,
   providers: [
     DevSeederService,
     SensorRegistryService,
+    {
+      provide: FeatureSensorRuntimeLifecycleService,
+      useFactory: (
+        lifecycleRegistry: FeatureRuntimeLifecycleRegistryPort,
+        registry: SensorRegistryService,
+      ) => {
+        const lifecycle = new FeatureSensorRuntimeLifecycleService(registry);
+        lifecycleRegistry.register('digital', lifecycle.forFeature('digital'));
+        lifecycleRegistry.register('uart', lifecycle.forFeature('uart'));
+        lifecycleRegistry.register('zigbee', lifecycle.forFeature('zigbee'));
+        return lifecycle;
+      },
+      inject: [FEATURE_RUNTIME_LIFECYCLE, SensorRegistryService],
+    },
     ReloadSensorsUseCase,
     AddSensorUseCase,
     ModifySensorUseCase,

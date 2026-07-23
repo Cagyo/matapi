@@ -18,6 +18,12 @@ import { SensorNameExistsError } from '../../sensors/domain/errors/sensor-name-e
 import { SensorNotFoundError } from '../../sensors/domain/errors/sensor-not-found.error';
 import { UartConfigInvalidError } from '../../sensors/domain/errors/uart-config-invalid.error';
 import { Sensor, SensorSeverity, SensorType } from '../../sensors/domain/sensor';
+import { FeatureUnavailableError } from '../../features/domain/errors/feature-unavailable.error';
+import {
+  FEATURE_AVAILABILITY,
+  type FeatureAvailabilityPort,
+} from '../../features/domain/ports/feature-availability.port';
+import { featureForSensorType } from '../../sensors/application/feature-for-sensor-type';
 import { DEFAULT_DIGITAL_DEBOUNCE_MS } from '../../sensors/domain/default-debounce';
 import {
   SENSOR_QUERY,
@@ -132,6 +138,8 @@ export class ConfigHandler implements TelegramHandler, WorkflowDraftCanceller {
     private readonly workflows: WorkflowEntryCoordinator,
     private readonly drafts: WorkflowDraftRegistry,
     @Optional() private readonly navigation?: WorkflowNavigationHandler,
+    @Inject(FEATURE_AVAILABILITY)
+    private readonly availability: Pick<FeatureAvailabilityPort, 'inspect' | 'requireReady'> = alwaysAvailable,
   ) {
     const defaults = loadDefaults().sensor_defaults;
     this.digitalDefaults = {
@@ -282,7 +290,7 @@ export class ConfigHandler implements TelegramHandler, WorkflowDraftCanceller {
     if (sub === 'add') {
       const state = this.setInitialState(receipt, { kind: 'addType' });
       await ctx.reply(en.config.step1, {
-        reply_markup: this.workflowKeyboard(ctx, state, typeKeyboard()),
+        reply_markup: this.workflowKeyboard(ctx, state, typeKeyboard(await this.availableAddTypes())),
       });
       return;
     }
@@ -381,6 +389,7 @@ export class ConfigHandler implements TelegramHandler, WorkflowDraftCanceller {
     if (state.kind === 'addType' && action.startsWith('type:')) {
       const type = action.slice('type:'.length) as AddType;
       if (type !== 'digital' && type !== 'uart') return;
+      await this.availability.requireReady(featureForSensorType(type)!);
       const next = this.setState(state, { kind: 'addName', type });
       await ctx.reply(en.config.step2(type), {
         reply_markup: this.workflowKeyboard(ctx, next, backCancelKeyboard('addType')),
@@ -829,7 +838,7 @@ export class ConfigHandler implements TelegramHandler, WorkflowDraftCanceller {
       case 'addType': {
         const next = this.setState(state, { kind: 'addType' });
         await ctx.reply(en.config.step1, {
-          reply_markup: this.workflowKeyboard(ctx, next, typeKeyboard()),
+          reply_markup: this.workflowKeyboard(ctx, next, typeKeyboard(await this.availableAddTypes())),
         });
         break;
       }
@@ -966,6 +975,14 @@ export class ConfigHandler implements TelegramHandler, WorkflowDraftCanceller {
     return ctx.localeState?.catalog ?? en;
   }
 
+  private async availableAddTypes(): Promise<AddType[]> {
+    const types: AddType[] = ['digital', 'uart'];
+    const statuses = await Promise.all(types.map((type) =>
+      this.availability.inspect(featureForSensorType(type)!),
+    ));
+    return types.filter((_, index) => isFullyAvailable(statuses[index]));
+  }
+
   private async reply(ctx: TelegramContext, text: string): Promise<void> {
     await ctx.reply(text);
   }
@@ -1024,6 +1041,10 @@ export class ConfigHandler implements TelegramHandler, WorkflowDraftCanceller {
       await ctx.reply(`❌ ${err.message}`, options);
       return;
     }
+    if (err instanceof FeatureUnavailableError) {
+      await ctx.reply(this.catalog(ctx).home.recovery.unavailable, options);
+      return;
+    }
     this.logger.error(`/config failed: ${(err as Error).message}`, (err as Error).stack);
     const message = en.common.error('process /config', 'internal error');
     if (state) {
@@ -1040,11 +1061,34 @@ export class ConfigHandler implements TelegramHandler, WorkflowDraftCanceller {
 
 // ───────── keyboards ─────────
 
-function typeKeyboard(): InlineKeyboard {
-  return new InlineKeyboard()
-    .text('Digital', 'cfg:type:digital')
-    .text('UART', 'cfg:type:uart');
+function typeKeyboard(types: readonly AddType[]): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  if (types.includes('digital')) keyboard.text('Digital', 'cfg:type:digital');
+  if (types.includes('uart')) keyboard.text('UART', 'cfg:type:uart');
+  return keyboard;
 }
+
+function isFullyAvailable(status: Awaited<ReturnType<FeatureAvailabilityPort['inspect']>>): boolean {
+  return status.installed
+    && status.enabled
+    && status.ready
+    && !status.busy
+    && status.attentionReason === null;
+}
+
+const alwaysAvailable: Pick<FeatureAvailabilityPort, 'inspect' | 'requireReady'> = {
+  inspect: async (name) => ({
+    name,
+    installed: true,
+    enabled: true,
+    ready: true,
+    busy: false,
+    attentionReason: null,
+    display: 'enabled',
+    action: 'disable',
+  }),
+  requireReady: async () => undefined,
+};
 
 function backCancelKeyboard(backTarget: string): InlineKeyboard {
   return new InlineKeyboard().text(en.common.backButton, `cfg:back:${backTarget}`);

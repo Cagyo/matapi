@@ -5,6 +5,7 @@ import { ImportSensorsUseCase } from '../../../src/sensors/application/import-se
 import { ReloadSensorsUseCase } from '../../../src/sensors/application/reload-sensors.use-case';
 import { Sensor } from '../../../src/sensors/domain/sensor';
 import { InMemorySensorRepository } from '../../../src/sensors/infrastructure/in-memory-sensor.repository';
+import { FeatureUnavailableError } from '../../../src/features/domain/errors/feature-unavailable.error';
 
 const clock: ClockPort = { now: () => new Date('2030-01-01T00:00:00.000Z') };
 
@@ -22,7 +23,7 @@ function makeSensor(overrides: Partial<Sensor> & Pick<Sensor, 'name'>): Sensor {
   };
 }
 
-function makeUseCase(seed: Sensor[] = []): {
+function makeUseCase(seed: Sensor[] = [], available = true): {
   useCase: ImportSensorsUseCase;
   repo: InMemorySensorRepository;
   reload: ReloadSensorsUseCase;
@@ -31,8 +32,13 @@ function makeUseCase(seed: Sensor[] = []): {
   const reload = {
     execute: vi.fn().mockResolvedValue(undefined),
   } as unknown as ReloadSensorsUseCase;
-  const useCase = new ImportSensorsUseCase(repo, clock, reload);
-  return { useCase, repo, reload };
+  const availability = {
+    requireReady: vi.fn().mockImplementation(async () => {
+      if (!available) throw new FeatureUnavailableError('digital', 'installed-off');
+    }),
+  };
+  const useCase = new ImportSensorsUseCase(repo, clock, reload, availability as never);
+  return { useCase, repo, reload, availability };
 }
 
 const importedDigital: ImportedSensor = {
@@ -121,5 +127,17 @@ describe('ImportSensorsUseCase', () => {
     ]);
 
     expect(plan.summary.updated[0].detail).toContain('thresholds changed');
+  });
+
+  it('rechecks planned feature availability immediately before applying an import', async () => {
+    const { useCase, repo, availability } = makeUseCase();
+    const plan = await useCase.prepare([importedDigital]);
+    vi.mocked(availability.requireReady).mockRejectedValueOnce(
+      new FeatureUnavailableError('digital', 'installed-off'),
+    );
+
+    await expect(useCase.commit(plan)).rejects.toBeInstanceOf(FeatureUnavailableError);
+
+    expect(await repo.findByName('front_door')).toBeNull();
   });
 });

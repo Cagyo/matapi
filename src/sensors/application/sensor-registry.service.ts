@@ -24,6 +24,13 @@ import { Sensor, SensorType } from '../domain/sensor';
 import { SensorEvent } from '../domain/sensor-event';
 import { DriverUnavailableError } from '../domain/errors/driver-unavailable.error';
 import { isValidPpm } from '../domain/co2';
+import {
+  FEATURE_AVAILABILITY,
+  type FeatureAvailabilityPort,
+} from '../../features/domain/ports/feature-availability.port';
+import { FeatureUnavailableError } from '../../features/domain/errors/feature-unavailable.error';
+import type { ManageableFeatureName } from '../../features/domain/manageable-feature';
+import { featureForSensorType } from './feature-for-sensor-type';
 
 const DRIVER_SHUTDOWN_TIMEOUT_MS = 5_000;
 
@@ -46,6 +53,7 @@ export class SensorRegistryService
   private readonly activeConfigKeys = new Map<string, string>();
   private readonly activeHealthChecks = new Map<string, Promise<boolean>>();
   private readonly listeners: ((event: SensorEvent) => void)[] = [];
+  private readonly blockedFeatures = new Set<ManageableFeatureName>();
   private reloadChain: Promise<void> = Promise.resolve();
   private shuttingDown = false;
   private shutdownPromise: Promise<void> | null = null;
@@ -55,6 +63,8 @@ export class SensorRegistryService
     private readonly repository: SensorRepositoryPort,
     @Inject(SENSOR_DRIVER_FACTORY)
     private readonly driverFactory: SensorDriverFactory,
+    @Inject(FEATURE_AVAILABILITY)
+    private readonly availability: FeatureAvailabilityPort = alwaysAvailable,
   ) {}
 
   onEvent(callback: (event: SensorEvent) => void): void {
@@ -122,40 +132,52 @@ export class SensorRegistryService
     return this.reloadChain;
   }
 
+  /** Prevent recreation synchronously, then detach and tear down its drivers. */
+  stopFeature(name: ManageableFeatureName): Promise<void> {
+    this.blockedFeatures.add(name);
+    if (this.shuttingDown) return Promise.resolve();
+    this.reloadChain = this.reloadChain.then(
+      () => this.stopFeatureDrivers(name),
+      () => this.stopFeatureDrivers(name),
+    );
+    return this.reloadChain;
+  }
+
+  /** Enables a previously stopped runtime and reloads its persisted sensors. */
+  resumeFeature(name: ManageableFeatureName): Promise<void> {
+    this.blockedFeatures.delete(name);
+    return this.reload();
+  }
+
   /** Sync in-memory drivers to the repository's enabled set. */
   private async doReload(): Promise<void> {
+    await this.availability.awaitInitialVerification();
     const wanted = await this.repository.loadEnabled();
-    const wantedIds = new Set(wanted.map((s) => s.id));
+    const eligibility = await this.eligibleFeatures(wanted);
+    const eligibleWanted = wanted.filter((sensor) => this.isEligible(sensor, eligibility));
+    const wantedIds = new Set(eligibleWanted.map((s) => s.id));
 
     for (const id of [...this.active.keys()]) {
       if (!wantedIds.has(id)) {
-        await this.active.get(id)?.destroy().catch(() => undefined);
-        this.active.delete(id);
-        this.activeTypes.delete(id);
-        this.activeConfigKeys.delete(id);
-        this.activeHealthChecks.delete(id);
+        await this.detachAndDestroy(id);
       }
     }
 
     // A driver holds a snapshot of the sensor configuration from `init`.
     // Replace it when a config edit changes that snapshot (e.g. GPIO pin),
     // otherwise `/config modify` would only take effect after a process restart.
-    for (const sensor of wanted) {
+    for (const sensor of eligibleWanted) {
       if (
         this.active.has(sensor.id) &&
         this.activeConfigKeys.get(sensor.id) !== driverConfigKey(sensor)
       ) {
-        await this.active.get(sensor.id)?.destroy().catch(() => undefined);
-        this.active.delete(sensor.id);
-        this.activeTypes.delete(sensor.id);
-        this.activeConfigKeys.delete(sensor.id);
-        this.activeHealthChecks.delete(sensor.id);
+        await this.detachAndDestroy(sensor.id);
       }
     }
 
     // Digital pin uniqueness — first sensor wins, subsequent skipped + logged.
     const pinOwners = new Map<number, string>();
-    for (const sensor of wanted) {
+    for (const sensor of eligibleWanted) {
       if (sensor.type !== 'digital') continue;
       const pin = extractPin(sensor.config);
       if (pin === null) continue;
@@ -169,7 +191,7 @@ export class SensorRegistryService
       pinOwners.set(pin, sensor.name);
     }
 
-    for (const sensor of wanted) {
+    for (const sensor of eligibleWanted) {
       if (this.active.has(sensor.id)) continue;
       if (sensor.type === 'digital') {
         const pin = extractPin(sensor.config);
@@ -186,13 +208,13 @@ export class SensorRegistryService
           debounceMs: sensor.debounceMs,
           severity: sensor.severity,
         });
-        driver.onEvent((event) => this.fanOut(event));
+        driver.onEvent((event) => void this.fanOut(driver, event));
         this.active.set(sensor.id, driver);
         this.activeTypes.set(sensor.id, sensor.type);
         this.activeConfigKeys.set(sensor.id, driverConfigKey(sensor));
       } catch (err) {
         if (err instanceof DriverUnavailableError) {
-          driver.onEvent((event) => this.fanOut(event));
+          driver.onEvent((event) => void this.fanOut(driver, event));
           this.active.set(sensor.id, driver);
           this.activeTypes.set(sensor.id, sensor.type);
           this.activeConfigKeys.set(sensor.id, driverConfigKey(sensor));
@@ -203,6 +225,54 @@ export class SensorRegistryService
         }
         this.logger.error(`Failed to init "${sensor.name}"`);
       }
+    }
+  }
+
+  private async eligibleFeatures(sensors: readonly Sensor[]): Promise<Map<ManageableFeatureName, boolean>> {
+    const features = new Set<ManageableFeatureName>();
+    for (const sensor of sensors) {
+      const feature = featureForSensorType(sensor.type);
+      if (feature) features.add(feature);
+    }
+    const entries = await Promise.all([...features].map(async (feature) => [
+      feature,
+      !this.blockedFeatures.has(feature) && await this.isFeatureReady(feature),
+    ] as const));
+    return new Map(entries);
+  }
+
+  private isEligible(sensor: Sensor, eligibility: ReadonlyMap<ManageableFeatureName, boolean>): boolean {
+    const feature = featureForSensorType(sensor.type);
+    return feature === null || eligibility.get(feature) === true;
+  }
+
+  private async isFeatureReady(name: ManageableFeatureName): Promise<boolean> {
+    try {
+      await this.availability.requireReady(name);
+      return true;
+    } catch (error) {
+      if (error instanceof FeatureUnavailableError) return false;
+      throw error;
+    }
+  }
+
+  private async stopFeatureDrivers(name: ManageableFeatureName): Promise<void> {
+    for (const [id, type] of [...this.activeTypes.entries()]) {
+      if (featureForSensorType(type) === name) await this.detachAndDestroy(id);
+    }
+  }
+
+  private async detachAndDestroy(id: string): Promise<void> {
+    const driver = this.active.get(id);
+    this.active.delete(id);
+    this.activeTypes.delete(id);
+    this.activeConfigKeys.delete(id);
+    this.activeHealthChecks.delete(id);
+    if (!driver) return;
+    try {
+      await this.destroyDriver(driver);
+    } catch {
+      this.logger.warn('Driver destroy failed during reload');
     }
   }
 
@@ -264,9 +334,14 @@ export class SensorRegistryService
     return check;
   }
 
-  private fanOut(event: SensorEvent): void {
-    if (this.shuttingDown) return;
-    void this.persistState(event);
+  private async fanOut(source: SensorDriverPort, event: SensorEvent): Promise<void> {
+    const type = this.activeTypes.get(event.sensorId);
+    const feature = type ? featureForSensorType(type) : null;
+    if (feature && !await this.isFeatureReady(feature)) return;
+    if (!this.isCurrentEventSource(source, event.sensorId, feature)) return;
+    await this.persistState(event);
+    if (feature && !await this.isFeatureReady(feature)) return;
+    if (!this.isCurrentEventSource(source, event.sensorId, feature)) return;
     for (const cb of this.listeners) {
       try {
         cb(event);
@@ -274,6 +349,16 @@ export class SensorRegistryService
         this.logger.error('Sensor event listener failed');
       }
     }
+  }
+
+  private isCurrentEventSource(
+    source: SensorDriverPort,
+    sensorId: string,
+    feature: ManageableFeatureName | null,
+  ): boolean {
+    return !this.shuttingDown
+      && this.active.get(sensorId) === source
+      && (feature === null || !this.blockedFeatures.has(feature));
   }
 
   private async persistState(event: SensorEvent): Promise<void> {
@@ -299,6 +384,14 @@ export class SensorRegistryService
     return typeof ppm === 'number' && isValidPpm(ppm) ? String(ppm) : null;
   }
 }
+
+const alwaysAvailable: FeatureAvailabilityPort = {
+  awaitInitialVerification: async () => undefined,
+  inspect: async () => {
+    throw new Error('Feature availability is unavailable');
+  },
+  requireReady: async () => undefined,
+};
 
 function extractPin(rawConfig: Record<string, unknown> | null | undefined): number | null {
   const pin = rawConfig?.pin;

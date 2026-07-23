@@ -31,6 +31,7 @@ describe('SimulateSensorUseCase', () => {
     await registry.reload();
 
     new SimulateSensorUseCase(registry).execute('front_door', 1);
+    for (let i = 0; i < 8; i += 1) await Promise.resolve();
 
     expect(listener).toHaveBeenCalledWith(
       expect.objectContaining({

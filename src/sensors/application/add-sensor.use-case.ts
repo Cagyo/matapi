@@ -15,6 +15,11 @@ import {
 } from '../domain/ports/sensor-repository.port';
 import { isDigitalStepType, Sensor, SensorSeverity, SensorType } from '../domain/sensor';
 import { ReloadSensorsUseCase } from './reload-sensors.use-case';
+import {
+  FEATURE_AVAILABILITY,
+  type FeatureAvailabilityPort,
+} from '../../features/domain/ports/feature-availability.port';
+import { featureForSensorType } from './feature-for-sensor-type';
 
 export interface AddSensorInput {
   name: string;
@@ -42,6 +47,8 @@ export class AddSensorUseCase {
     @Inject(CLOCK) private readonly clock: ClockPort,
     @Inject(forwardRef(() => ReloadSensorsUseCase))
     private readonly reload: ReloadSensorsUseCase,
+    @Inject(FEATURE_AVAILABILITY)
+    private readonly availability: Pick<FeatureAvailabilityPort, 'requireReady'> = alwaysAvailable,
   ) {}
 
   async execute(input: AddSensorInput): Promise<Sensor> {
@@ -61,6 +68,8 @@ export class AddSensorUseCase {
     }
 
     const now = this.clock.now();
+    const feature = featureForSensorType(input.type);
+    if (feature) await this.availability.requireReady(feature);
     const created = await this.repository.create({
       id: randomUUID(),
       name: input.name,
@@ -75,6 +84,10 @@ export class AddSensorUseCase {
     return created;
   }
 }
+
+const alwaysAvailable: Pick<FeatureAvailabilityPort, 'requireReady'> = {
+  requireReady: async () => undefined,
+};
 
 function readPin(raw: Record<string, unknown>): number {
   const pin = raw?.pin;

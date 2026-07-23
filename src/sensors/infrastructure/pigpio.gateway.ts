@@ -2,7 +2,6 @@ import {
   Inject,
   Injectable,
   Logger,
-  OnModuleInit,
   Optional,
 } from '@nestjs/common';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -46,7 +45,7 @@ export interface PigpioConnectionState {
  * one socket to pigpiod. Connection is established lazily and re-used.
  */
 @Injectable()
-export class PigpioGateway implements OnModuleInit {
+export class PigpioGateway {
   private readonly logger = new Logger(PigpioGateway.name);
   private client: PigpioRoot | null = null;
   private connected = false;
@@ -67,22 +66,6 @@ export class PigpioGateway implements OnModuleInit {
     @Inject(PIGPIO_CLIENT)
     private readonly pigpioClient: PigpioClientLib = defaultPigpioClientLib,
   ) {}
-
-  async onModuleInit(): Promise<void> {
-    if (
-      process.env.NODE_ENV === 'development' ||
-      process.env.NODE_ENV === 'test' ||
-      process.env.PIGPIOD_ENABLED === 'false'
-    ) {
-      return;
-    }
-    // Best-effort: don't crash app if pigpiod is down on Pi-less dev hosts.
-    try {
-      await this.connect();
-    } catch (err) {
-      this.logger.warn(`pigpiod connect failed: ${(err as Error).message}`);
-    }
-  }
 
   close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
