@@ -1,4 +1,3 @@
-import { constants } from 'node:fs';
 import { unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { isManageableFeature, parseFeatureInstallRequest, parseFeatureInstallResult, type FeatureInstallResultV1, type ManageableFeatureName } from '../domain/manageable-feature';

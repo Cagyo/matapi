@@ -7,7 +7,7 @@ import { FeatureNotInstalledError } from '../domain/errors/feature-not-installed
 import { FeatureRestartDispatchError } from '../domain/errors/feature-restart-dispatch.error';
 import { FeatureStateChangedError } from '../domain/errors/feature-state-changed.error';
 import { UnknownFeatureError } from '../domain/errors/unknown-feature.error';
-import { isManageableFeature, type FeatureAttentionReason, type ManageableFeatureName } from '../domain/manageable-feature';
+import { isManageableFeature, type ManageableFeatureName } from '../domain/manageable-feature';
 import { FEATURE_INSTALL_JOB_REPOSITORY, type FeatureInstallJobRepositoryPort } from '../domain/ports/feature-install-job.repository.port';
 import { FEATURE_REPOSITORY, type FeatureRepositoryPort } from '../domain/ports/feature-repository.port';
 import { FEATURE_RESTART, type FeatureRestartPort } from '../domain/ports/feature-restart.port';
