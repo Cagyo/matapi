@@ -9,30 +9,17 @@ const DEFAULT_REQUEST_DIRECTORY = '/var/lib/home-worker/feature-install-requests
 const MAX_BYTES = 4_096;
 const O_CLOEXEC = (constants as unknown as Record<string, number>).O_CLOEXEC ?? 0;
 
-export interface FeatureInstallRequestSpoolOptions {
-  requestDirectory?: string;
-  expectedOwnerUid?: number;
-  expectedGroupGid?: number;
-}
-
 /** Publishes a closed-schema request without ever following a spool entry. */
 export class FsFeatureInstallRequestAdapter implements FeatureInstallRequestPort {
-  readonly #directory: string;
-  readonly #uid: number;
-  readonly #gid: number;
-
-  constructor(options: FeatureInstallRequestSpoolOptions = {}) {
-    this.#directory = options.requestDirectory ?? DEFAULT_REQUEST_DIRECTORY;
-    this.#uid = options.expectedOwnerUid ?? process.getuid?.() ?? -1;
-    this.#gid = options.expectedGroupGid ?? process.getgid?.() ?? -1;
-  }
-
   async publish(request: FeatureInstallRequestV1): Promise<'published' | 'already-published'> {
     // This assertion must run before a caller-controlled job ID reaches join().
     const canonical = assertFeatureInstallRequest(request);
     const body = `${JSON.stringify({ feature: canonical.feature, jobId: canonical.jobId, version: 1 })}\n`;
-    const target = join(this.#directory, `${canonical.jobId}.json`);
-    const temporary = join(this.#directory, `.${canonical.jobId}.${randomUUID()}.tmp`);
+    const uid = process.getuid?.() ?? -1;
+    const gid = process.getgid?.() ?? -1;
+    await validateSpoolDirectory(DEFAULT_REQUEST_DIRECTORY, 0, gid, 0o730);
+    const target = join(DEFAULT_REQUEST_DIRECTORY, `${canonical.jobId}.json`);
+    const temporary = join(DEFAULT_REQUEST_DIRECTORY, `.${canonical.jobId}.${randomUUID()}.tmp`);
     let handle: Awaited<ReturnType<typeof open>> | undefined;
     try {
       handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | O_CLOEXEC, 0o600);
@@ -45,11 +32,11 @@ export class FsFeatureInstallRequestAdapter implements FeatureInstallRequestPort
         // link(2) provides the no-replace atomicity that rename(2) lacks.
         await link(temporary, target);
         await unlink(temporary);
-        await syncDirectory(this.#directory);
+        await syncDirectory(DEFAULT_REQUEST_DIRECTORY);
         return 'published';
       } catch (error: unknown) {
         if (!isCode(error, 'EEXIST')) throw error;
-        const current = await readSafeRequest(target, this.#uid, this.#gid);
+        const current = await readSafeRequest(target, uid, gid);
         if (current === body) return 'already-published';
         throw new RangeError('Feature request conflicts with an existing spool entry');
       }
@@ -89,6 +76,16 @@ export async function readBounded(handle: Awaited<ReturnType<typeof open>>, size
 export async function syncDirectory(directory: string): Promise<void> {
   const descriptor = await open(directory, constants.O_RDONLY | constants.O_DIRECTORY | O_CLOEXEC);
   try { await descriptor.sync(); } finally { await descriptor.close(); }
+}
+
+export async function validateSpoolDirectory(directory: string, uid: number, gid: number, mode: number): Promise<void> {
+  const descriptor = await open(directory, constants.O_RDONLY | constants.O_DIRECTORY | O_CLOEXEC | constants.O_NOFOLLOW);
+  try {
+    const value = await descriptor.stat();
+    if (!value.isDirectory() || value.uid !== uid || value.gid !== gid || (value.mode & 0o777) !== mode) {
+      throw new RangeError('Feature spool directory is unsafe');
+    }
+  } finally { await descriptor.close(); }
 }
 
 function isCode(error: unknown, code: string): boolean {

@@ -185,6 +185,13 @@ describe('manageable feature domain', () => {
     ).toThrow(RangeError);
   });
 
+  it('rejects failed results that claim privileged readiness or a restart', () => {
+    expect(() => parseFeatureInstallResult(JSON.stringify({
+      version: 1, jobId: 'abcdefghijklmnop', feature: 'digital', outcome: 'failed',
+      failureCode: 'interrupted', privilegedReady: true, restartScope: 'worker',
+    }))).toThrow(RangeError);
+  });
+
   it('rejects duplicate and non-closed request schema at the runtime boundary', () => {
     expect(() => parseFeatureInstallRequest(
       '{"version":1,"jobId":"abcdefghijklmnop","feature":"digital","feature":"rtsp"}',

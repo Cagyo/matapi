@@ -8,7 +8,10 @@ if [ "${HOME_WORKER_PRIVILEGED:-0}" = "1" ]; then
   USER="homeworker"
   SCRIPT_DIR="/usr/lib/home-worker"
   INSTALL_DIR="/usr/lib/home-worker"
-  sudo() { "$@"; }
+  # Keep the fixed routines byte-for-byte command compatible: several of them
+  # intentionally switch to the fixed homeworker account. Root sudo performs
+  # that transition while retaining the routine's literal argv.
+  sudo() { /usr/bin/sudo "$@"; }
 else
   USER="${HOME_WORKER_USER:-homeworker}"
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -155,7 +155,9 @@ export function parseFeatureInstallResult(raw: string): FeatureInstallResultV1 {
   }
   if (
     value.outcome === 'failed' &&
-    FAILURE_CODES.has(value.failureCode as FeatureInstallFailureCode)
+    FAILURE_CODES.has(value.failureCode as FeatureInstallFailureCode) &&
+    value.privilegedReady === false &&
+    value.restartScope === null
   ) {
     return value as FeatureInstallResultV1;
   }

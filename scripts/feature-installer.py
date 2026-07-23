@@ -5,8 +5,8 @@ All production locations are constants.  Tests import this module and patch
 the constants/functions directly; this program deliberately has no test-mode
 environment overrides.
 """
-import errno
 import fcntl
+import grp
 import json
 import os
 import pwd
@@ -15,7 +15,6 @@ import signal
 import stat
 import subprocess
 import sys
-import time
 import uuid
 
 INSTALL_ROOT = '/var/lib/home-worker'
@@ -27,6 +26,7 @@ ROUTINES_PATH = '/usr/lib/home-worker/install-feature-routines'
 WORKER_NAME = 'homeworker'
 MAX_BYTES = 4096
 TIMEOUT_SECONDS = 30 * 60
+CHECK_TIMEOUT_SECONDS = 15
 JOB_ID = re.compile(r'^[A-Za-z0-9_-]{16}$')
 ENTRY_NAME = re.compile(r'^([A-Za-z0-9_-]{16})\.json$')
 FEATURES = frozenset(('digital', 'uart', 'zigbee', 'motion', 'rtsp'))
@@ -52,22 +52,36 @@ def fsync_directory(fd):
     os.fsync(fd)
 
 
-def directory_fd(path):
+def validate_parent(path):
+    parent = os.path.dirname(path)
+    while True:
+        value = os.stat(parent, follow_symlinks=False)
+        if (not stat.S_ISDIR(value.st_mode) or value.st_uid != 0
+                or (stat.S_IMODE(value.st_mode) & 0o022)):
+            raise RuntimeError('unsafe spool parent')
+        if parent == '/':
+            return
+        parent = os.path.dirname(parent)
+
+
+def directory_fd(path, expected_uid, expected_gid, expected_mode):
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
     current = os.fstat(fd)
-    if not stat.S_ISDIR(current.st_mode) or current.st_uid != 0 or current.st_nlink < 1:
+    if (not stat.S_ISDIR(current.st_mode) or current.st_uid != expected_uid
+            or current.st_gid != expected_gid or stat.S_IMODE(current.st_mode) != expected_mode):
         os.close(fd)
         raise RuntimeError('unsafe spool directory')
     return fd
 
 
 def validate_layout(worker_uid, worker_gid):
+    validate_parent(INSTALL_ROOT)
     root = os.stat(INSTALL_ROOT, follow_symlinks=False)
     if not stat.S_ISDIR(root.st_mode) or root.st_uid != 0 or (stat.S_IMODE(root.st_mode) & 0o022):
         raise RuntimeError('unsafe install root')
-    expected = ((REQUEST_DIRECTORY, worker_uid, worker_gid, 0o730),
+    expected = ((REQUEST_DIRECTORY, 0, worker_gid, 0o730),
                 (CLAIM_DIRECTORY, 0, 0, 0o700),
-                (RESULT_DIRECTORY, worker_uid, worker_gid, 0o730))
+                (RESULT_DIRECTORY, 0, worker_gid, 0o730))
     for path, uid, gid, mode in expected:
         value = os.stat(path, follow_symlinks=False)
         if (not stat.S_ISDIR(value.st_mode) or value.st_uid != uid or value.st_gid != gid
@@ -103,8 +117,10 @@ def claim_next(request_fd, claim_fd):
     for name in exact_entries(request_fd):
         try:
             os.rename(name, name, src_dir_fd=request_fd, dst_dir_fd=claim_fd)
-            fsync_directory(request_fd)
+            # Persist the destination first: only then may the source removal
+            # be considered durable across a cross-directory rename.
             fsync_directory(claim_fd)
+            fsync_directory(request_fd)
             return name
         except FileNotFoundError:
             continue
@@ -208,7 +224,8 @@ def parse_result(data, request):
         if value['failureCode'] is not None or not value['privilegedReady'] or value['restartScope'] not in ('worker', 'supervisor', 'host'):
             raise InvalidRequest('result success')
     elif value['outcome'] == 'failed':
-        if value['failureCode'] not in ('request-invalid', 'dependency-install-failed', 'privileged-verification-failed', 'interrupted') or value['restartScope'] is not None:
+        if (value['failureCode'] not in ('request-invalid', 'dependency-install-failed', 'privileged-verification-failed', 'interrupted')
+                or value['privilegedReady'] is not False or value['restartScope'] is not None):
             raise InvalidRequest('result failure')
     else:
         raise InvalidRequest('result outcome')
@@ -276,24 +293,67 @@ def run_routine(feature):
 
 def verify_feature(feature):
     commands = {
-        'digital': (('/usr/bin/which', 'pigpiod'), ('/bin/systemctl', 'is-active', '--quiet', 'pigpiod.service')),
+        'digital': (('/usr/bin/which', 'pigpiod'), ('/bin/systemctl', 'is-active', '--quiet', 'pigpiod.service'), ('/usr/bin/pigs', 't')),
         'uart': (('/usr/bin/test', '-e', '/dev/serial0'),),
         'zigbee': (('/usr/bin/which', 'mosquitto'), ('/bin/systemctl', 'is-active', '--quiet', 'mosquitto.service')),
-        'motion': (('/usr/bin/which', 'motion'), ('/usr/bin/which', 'ffmpeg')),
-        'rtsp': (('/usr/bin/which', 'ffmpeg'), ('/usr/bin/which', 'cloudflared')),
+        'motion': (('/usr/bin/which', 'motion'), ('/usr/bin/which', 'ffmpeg'), ('/usr/bin/test', '-f', '/etc/motion/motion.conf'), ('/usr/bin/test', '-d', '/home/pi/motion/videos'), ('/bin/systemctl', 'is-active', '--quiet', 'motion.service')),
+        'rtsp': (('/usr/bin/which', 'ffmpeg'), ('/usr/bin/which', 'cloudflared'), ('/usr/bin/test', '-f', '/etc/home-worker/live-stream-policy.json'), ('/usr/bin/test', '-f', '/etc/systemd/system/homeworker-stream-net.service'), ('/bin/systemctl', 'is-active', '--quiet', 'homeworker-stream-net.service')),
     }[feature]
-    return all(subprocess.run(command, cwd='/', env=SAFE_ENV, shell=False,
-                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                              stderr=subprocess.DEVNULL, check=False).returncode == 0 for command in commands)
+    try:
+        commands_ok = all(subprocess.run(command, cwd='/', env=SAFE_ENV, shell=False,
+                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, check=False,
+                                  timeout=CHECK_TIMEOUT_SECONDS).returncode == 0 for command in commands)
+        if not commands_ok:
+            return False
+        if feature == 'motion':
+            motion_uid = pwd.getpwnam('motion').pw_uid
+            motion_gid = grp.getgrnam('motion').gr_gid
+            return (owned_regular('/etc/motion/motion.conf', 0, 0, 0o644)
+                    and owned_directory('/home/pi/motion/videos', motion_uid, motion_gid, 0o775))
+        if feature == 'rtsp':
+            return (owned_regular('/etc/home-worker/live-stream-policy.json', 0, 0, 0o600)
+                    and owned_regular('/etc/systemd/system/homeworker-stream-net.service', 0, 0, 0o644))
+        return True
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def owned_regular(path, uid, gid, mode):
+    value = os.stat(path, follow_symlinks=False)
+    return (stat.S_ISREG(value.st_mode) and value.st_nlink == 1 and value.st_uid == uid
+            and value.st_gid == gid and stat.S_IMODE(value.st_mode) == mode)
+
+
+def owned_directory(path, uid, gid, mode):
+    value = os.stat(path, follow_symlinks=False)
+    return (stat.S_ISDIR(value.st_mode) and value.st_uid == uid and value.st_gid == gid
+            and stat.S_IMODE(value.st_mode) == mode)
+
+
+def recover_committed_markers(result_fd, worker_uid, worker_gid):
+    """Clear a marker left after terminal+claim commit but before marker unlink."""
+    for name in sorted(entry for entry in os.listdir(result_fd) if entry.endswith('.running')):
+        job_id = name[:-8]
+        if not JOB_ID.fullmatch(job_id):
+            continue
+        try:
+            request = parse_request(open_checked_result(result_fd, name, worker_uid, worker_gid), job_id + '.json')
+            terminal = open_checked_result(result_fd, job_id + '.json', worker_uid, worker_gid)
+            parse_result(terminal, request)
+        except (FileNotFoundError, InvalidRequest):
+            continue
+        remove_entry(result_fd, name)
 
 
 def process_one():
     worker_uid, worker_gid = worker_ids()
     validate_layout(worker_uid, worker_gid)
-    request_fd = directory_fd(REQUEST_DIRECTORY)
-    claim_fd = directory_fd(CLAIM_DIRECTORY)
-    result_fd = directory_fd(RESULT_DIRECTORY)
+    request_fd = directory_fd(REQUEST_DIRECTORY, 0, worker_gid, 0o730)
+    claim_fd = directory_fd(CLAIM_DIRECTORY, 0, 0, 0o700)
+    result_fd = directory_fd(RESULT_DIRECTORY, 0, worker_gid, 0o730)
     try:
+        recover_committed_markers(result_fd, worker_uid, worker_gid)
         name = claim_next(request_fd, claim_fd)
         if name is None:
             return False

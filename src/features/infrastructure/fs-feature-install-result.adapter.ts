@@ -3,40 +3,28 @@ import { unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { isManageableFeature, parseFeatureInstallRequest, parseFeatureInstallResult, type FeatureInstallResultV1, type ManageableFeatureName } from '../domain/manageable-feature';
 import type { FeatureInstallResultPort } from '../domain/ports/feature-install-result.port';
-import { openNoFollow, readBounded } from './fs-feature-install-request.adapter';
+import { openNoFollow, readBounded, validateSpoolDirectory } from './fs-feature-install-request.adapter';
 
 const DEFAULT_RESULT_DIRECTORY = '/var/lib/home-worker/feature-install-results';
 
-export interface FeatureInstallResultSpoolOptions {
-  resultDirectory?: string;
-  expectedOwnerUid?: number;
-  expectedGroupGid?: number;
-}
-
 export class FsFeatureInstallResultAdapter implements FeatureInstallResultPort {
-  readonly #directory: string;
-  readonly #uid: number;
-  readonly #gid: number;
-
-  constructor(options: FeatureInstallResultSpoolOptions = {}) {
-    this.#directory = options.resultDirectory ?? DEFAULT_RESULT_DIRECTORY;
-    this.#uid = options.expectedOwnerUid ?? 0;
-    this.#gid = options.expectedGroupGid ?? process.getgid?.() ?? -1;
-  }
-
   async readState(jobId: string, feature: ManageableFeatureName): Promise<
     | { kind: 'absent' } | { kind: 'running' } | { kind: 'terminal'; result: FeatureInstallResultV1 }
   > {
     if (!/^[A-Za-z0-9_-]{16}$/u.test(jobId) || !isManageableFeature(feature)) throw new RangeError('result-invalid');
+    await validateSpoolDirectory(DEFAULT_RESULT_DIRECTORY, 0, process.getgid?.() ?? -1, 0o730)
+      .catch(() => { throw new RangeError('result-invalid'); });
     // A durable marker is a commit barrier: do not observe an early result.
-    const marker = await this.readMarker(join(this.#directory, `${jobId}.running`), jobId, feature);
-    if (marker === 'absent') return this.readTerminal(join(this.#directory, `${jobId}.json`), jobId, feature);
+    const marker = await this.readMarker(join(DEFAULT_RESULT_DIRECTORY, `${jobId}.running`), jobId, feature);
+    if (marker === 'absent') return this.readTerminal(join(DEFAULT_RESULT_DIRECTORY, `${jobId}.json`), jobId, feature);
     return { kind: 'running' };
   }
 
   async removeTerminal(jobId: string): Promise<void> {
     if (!/^[A-Za-z0-9_-]{16}$/u.test(jobId)) throw new RangeError('result-invalid');
-    const path = join(this.#directory, `${jobId}.json`);
+    await validateSpoolDirectory(DEFAULT_RESULT_DIRECTORY, 0, process.getgid?.() ?? -1, 0o730)
+      .catch(() => { throw new RangeError('result-invalid'); });
+    const path = join(DEFAULT_RESULT_DIRECTORY, `${jobId}.json`);
     // Validate the exact terminal entry before deleting it after Task 8 commits.
     await this.readTerminal(path, jobId, undefined);
     await unlink(path).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; });
@@ -69,7 +57,7 @@ export class FsFeatureInstallResultAdapter implements FeatureInstallResultPort {
     const handle = await openNoFollow(path);
     try {
       const stat = await handle.stat();
-      if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== this.#uid || stat.gid !== this.#gid || (stat.mode & 0o777) !== 0o640 || stat.size < 1 || stat.size > 4_096) {
+      if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== 0 || stat.gid !== (process.getgid?.() ?? -1) || (stat.mode & 0o777) !== 0o640 || stat.size < 1 || stat.size > 4_096) {
         throw new RangeError('result-invalid');
       }
       return new TextDecoder('utf-8', { fatal: true }).decode(await readBounded(handle, stat.size));
