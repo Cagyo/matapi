@@ -23,15 +23,23 @@ helper_update_required() {
   exit 3
 }
 
-require_current_feature_helper() {
-  local expected
-  expected="$(tr -d '\r\n' < "$INSTALL_DIR/config/feature-installer.version" 2>/dev/null || true)"
-  [[ "$expected" =~ ^[0-9]+$ ]] || helper_update_required
+require_valid_feature_helper() {
   [[ -x "$FEATURE_HELPER" && -r "$FEATURE_HELPER_VERSION" && -r "$FEATURE_HELPER_MANIFEST" ]] || helper_update_required
-  [[ "$(cat "$FEATURE_HELPER_VERSION" 2>/dev/null || true)" == "$expected" ]] || helper_update_required
   # The executable is root-owned and independently validates every manifest
   # entry. This update process intentionally has no sudo capability.
   "$FEATURE_HELPER" --validate-installation >/dev/null 2>&1 || helper_update_required
+}
+
+require_feature_helper_version() {
+  local expected="$1"
+  [[ "$expected" =~ ^[0-9]+$ ]] || helper_update_required
+  require_valid_feature_helper
+  [[ "$(cat "$FEATURE_HELPER_VERSION" 2>/dev/null || true)" == "$expected" ]] || helper_update_required
+}
+
+candidate_helper_version() {
+  local file="$1"
+  tr -d '\r\n' < "$file" 2>/dev/null || true
 }
 
 configured_database_path() {
@@ -60,7 +68,7 @@ echo "$$" > "$LOCKFILE"
 trap 'rm -f "$LOCKFILE"' EXIT
 
 cd "$INSTALL_DIR"
-require_current_feature_helper
+require_valid_feature_helper
 
 # Write key/value into system_meta. Uses sqlite3 if available, otherwise
 # falls back to better-sqlite3 via a tiny node one-liner.
@@ -187,6 +195,7 @@ ROLLBACK_TAG=""
 
 LOCAL_SOURCE="${HOME_WORKER_REPO#file://}"
 if [[ -n "${HOME_WORKER_REPO:-}" ]] && [[ -d "$LOCAL_SOURCE" ]] && [[ "$LOCAL_SOURCE" != "$INSTALL_DIR" ]] && [[ -f "$LOCAL_SOURCE/package.json" ]]; then
+  require_feature_helper_version "$(candidate_helper_version "$LOCAL_SOURCE/config/feature-installer.version")"
   echo "Syncing local development update from $LOCAL_SOURCE over $INSTALL_DIR..."
   rsync -av --delete --exclude="data" --exclude="node_modules" --exclude=".git" --exclude=".yarn" --exclude=".env" --exclude=".env.*" --exclude="features.json" "$LOCAL_SOURCE/" "$INSTALL_DIR/"
   UPDATED_VIA="local"
@@ -200,6 +209,7 @@ elif [[ -n "$RELEASE_URL" ]] && curl --output /dev/null --silent --head --fail "
   if curl -fsSL "$RELEASE_URL" -o "$TMP_TAR" && tar -tzf "$TMP_TAR" >/dev/null 2>&1; then
     mkdir -p "$STAGING_DIR"
     tar -xzf "$TMP_TAR" -C "$STAGING_DIR"
+    require_feature_helper_version "$(candidate_helper_version "$STAGING_DIR/config/feature-installer.version")"
     echo "Syncing staged release over $INSTALL_DIR..."
     rsync -av --delete --exclude="data" --exclude="node_modules" --exclude=".git" "$STAGING_DIR/" "$INSTALL_DIR/"
     rm -rf "$STAGING_DIR" "$TMP_TAR"
@@ -234,15 +244,13 @@ if [[ "$UPDATED_VIA" == "git" ]]; then
     rm -f "$ROLLBACK_SNAPSHOT"
     exit 0
   fi
+  CANDIDATE_HELPER_VERSION="$(git show "$REMOTE_COMMIT:config/feature-installer.version" 2>/dev/null | tr -d '\r\n' || true)"
+  require_feature_helper_version "$CANDIDATE_HELPER_VERSION"
   ROLLBACK_TAG="rollback-$(date +%s)"
   git tag "$ROLLBACK_TAG" "$CURRENT_COMMIT"
   git reset --hard "origin/$BRANCH"
   NEW_COMMIT="$(git rev-parse HEAD)"
 fi
-
-# A new application release may require a newer root helper bundle. Stop here
-# instead of attempting to install worker-writable sources with sudo.
-require_current_feature_helper
 
 write_meta "restart_reason" "ota_update"
 write_meta "update_commit" "$NEW_COMMIT"

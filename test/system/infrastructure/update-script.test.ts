@@ -58,4 +58,12 @@ describe('update.sh repository URL normalization', () => {
 
     expect(healthCheck).toContain('| APP_NAME="$APP_NAME" node -e');
   });
+
+  it('checks the fetched helper requirement before resetting to a candidate commit', () => {
+    const script = readFileSync(resolve('scripts/update.sh'), 'utf8');
+    const candidateCheck = script.indexOf('require_feature_helper_version "$CANDIDATE_HELPER_VERSION"');
+    const reset = script.indexOf('git reset --hard "origin/$BRANCH"');
+    expect(candidateCheck).toBeGreaterThan(-1);
+    expect(reset).toBeGreaterThan(candidateCheck);
+  });
 });

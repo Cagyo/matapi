@@ -26,6 +26,14 @@ apt_get() {
   sudo apt-get -o "DPkg::Lock::Timeout=${APT_LOCK_TIMEOUT_SECONDS}" "$@"
 }
 
+install_root_asset_if_distinct() {
+  local source="$1" target="$2" mode="$3"
+  # Privileged routines run from the already-validated root bundle. Reinstalling
+  # a bundle executable over itself fails on some systems and is unnecessary.
+  [ "$source" = "$target" ] && return 0
+  sudo install -m "$mode" -o root -g root "$source" "$target"
+}
+
 install_rtsp_runtime() {
   local stream_user="homeworker-stream"
   local stream_group="homeworker-stream"
@@ -151,8 +159,8 @@ PY
   sudo install -d -m 0755 -o root -g root "$policy_dir" /etc/home-worker/ca /usr/lib/home-worker /etc/polkit-1/rules.d /etc/tmpfiles.d
   sudo install -m 0600 -o root -g root "$policy_tmp" "$policy_file"
   rm -f "$policy_tmp"
-  sudo install -m 0755 -o root -g root "$SCRIPT_DIR/live-stream-net-helper" /usr/lib/home-worker/live-stream-net-helper
-  sudo install -m 0755 -o root -g root "$SCRIPT_DIR/live-stream-ffmpeg-runner" /usr/lib/home-worker/live-stream-ffmpeg-runner
+  install_root_asset_if_distinct "$SCRIPT_DIR/live-stream-net-helper" /usr/lib/home-worker/live-stream-net-helper 0755
+  install_root_asset_if_distinct "$SCRIPT_DIR/live-stream-ffmpeg-runner" /usr/lib/home-worker/live-stream-ffmpeg-runner 0755
   sudo install -m 0644 -o root -g root "$ROOT_BUNDLE_DIR/systemd/homeworker-ffmpeg-stream@.service" /etc/systemd/system/homeworker-ffmpeg-stream@.service
   sudo install -m 0644 -o root -g root "$ROOT_BUNDLE_DIR/systemd/homeworker-stream-net.service" /etc/systemd/system/homeworker-stream-net.service
   local polkit_tmp

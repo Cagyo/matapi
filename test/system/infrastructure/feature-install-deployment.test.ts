@@ -31,7 +31,8 @@ describe('feature-management deployment boundary', () => {
 
   it('keeps an unprivileged updater fail-closed and free of root artifact installation', () => {
     expect(update).toContain('helper-update-required');
-    expect(update).toContain('require_current_feature_helper');
+    expect(update).toContain('require_valid_feature_helper');
+    expect(update).toContain('require_feature_helper_version');
     expect(update).not.toMatch(/sudo\s+(?:install|mv|chown|systemctl\s+daemon-reload)/);
   });
 

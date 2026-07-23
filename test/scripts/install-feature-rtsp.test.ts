@@ -117,6 +117,43 @@ describe('restricted RTSP runtime installation', () => {
     execFileSync('python3', ['-m', 'py_compile', resolve('scripts/live-stream-ffmpeg-runner')]);
   });
 
+  it('runs the privileged RTSP routine through policy and unit activation without self-copying bundle executables', () => {
+    const root = mkdtempSync(join(tmpdir(), 'rtsp-privileged-routine-'));
+    const bin = join(root, 'bin');
+    const bundle = join(root, 'bundle');
+    const app = join(root, 'app');
+    const log = join(root, 'commands.log');
+    try {
+      execFileSync('mkdir', ['-p', bin, join(bundle, 'systemd'), app]);
+      writeFileSync(join(app, '.env'), 'RTSP_ALLOWED_CIDRS=192.168.0.0/16\n', { mode: 0o600 });
+      for (const name of ['homeworker-ffmpeg-stream@.service', 'homeworker-stream-net.service', 'homeworker-stream-systemd.rules']) {
+        writeFileSync(join(bundle, 'systemd', name), '@HOME_WORKER_USER@\n');
+      }
+      writeFileSync(join(bin, 'getent'), '#!/bin/sh\nexit 0\n');
+      writeFileSync(join(bin, 'id'), `#!/bin/sh\nif [ "$1" = "-u" ]; then /usr/bin/id -u; else exit 1; fi\n`);
+      writeFileSync(join(bin, 'sudo'), `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(log)}\ncase "$1" in python3) shift; exec python3 "$@";; *) exit 0;; esac\n`);
+      chmodSync(join(bin, 'getent'), 0o755); chmodSync(join(bin, 'id'), 0o755); chmodSync(join(bin, 'sudo'), 0o755);
+      const prelude = installFeature.split(/^case "\$FEATURE" in/m)[0]
+        .replaceAll('/usr/bin/sudo', join(bin, 'sudo'))
+        .replaceAll('/usr/lib/home-worker', bundle)
+        .replaceAll('/opt/home-worker', app)
+        .replace('"$(id -u "$stream_user")"', '"99999"')
+        .replace('sudo() { ' + join(bin, 'sudo') + ' "$@"; }', 'sudo() { ' + join(bin, 'sudo') + ' "$@"; }');
+      const harness = join(root, 'run.sh');
+      writeFileSync(harness, `#!/bin/bash\nset -euo pipefail\nexport PATH=${JSON.stringify(bin)}:$PATH\nHOME_WORKER_PRIVILEGED=1\n${prelude}\ninstall_rtsp_runtime\n`);
+      chmodSync(harness, 0o755);
+      execFileSync('bash', [harness]);
+      const commands = readFileSync(log, 'utf8');
+      expect(commands).toContain('systemctl daemon-reload');
+      expect(commands).toContain('systemctl restart homeworker-stream-net.service');
+      expect(commands).toContain('systemctl is-active --quiet homeworker-stream-net.service');
+      expect(commands).not.toContain(`install -m 0755 -o root -g root ${bundle}/live-stream-net-helper ${bundle}/live-stream-net-helper`);
+      expect(commands).not.toContain(`install -m 0755 -o root -g root ${bundle}/live-stream-ffmpeg-runner ${bundle}/live-stream-ffmpeg-runner`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('authorizes only UUID stream instances and start/stop verbs through Polkit', () => {
     const rule = readFileSync(resolve('systemd/homeworker-stream-systemd.rules'), 'utf8');
     expect(rule).toContain('org.freedesktop.systemd1.manage-units');

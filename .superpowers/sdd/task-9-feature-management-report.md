@@ -26,3 +26,8 @@ Also passed: `yarn build` and `git diff --check`.
 
 - No SSH or Raspberry Pi deployment was performed.
 - A release that changes the helper bundle version requires a local trusted root run of `scripts/install.sh` before an OTA update can continue; this is intentional fail-closed behavior.
+
+## Review follow-up
+
+- The privileged RTSP routine now skips copying root-bundle executables when source and destination are identical; an executable mocked-command test covers policy and unit activation.
+- Git, local-source, and release-tarball updates validate the candidate helper version before mutating the installed application. This preserves the old checkout after a helper mismatch, so a trusted helper deployment followed by retry can complete normally.
