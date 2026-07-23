@@ -1,34 +1,16 @@
-import { Inject, Injectable } from '@nestjs/common';
-import { FEATURE_CATALOG } from '../domain/feature-catalog';
-import { deriveFeatureStatus, FeatureStatus } from '../domain/feature-status';
-import {
-  FEATURE_QUERY,
-  FeatureQueryPort,
-} from '../domain/ports/feature-query.port';
+import { Injectable } from '@nestjs/common';
+import type { FeatureStatus } from '../domain/feature-status';
+import { ListManageableFeaturesUseCase } from './list-manageable-features.use-case';
 
-/**
- * Spec 17 — `/feature list` (admin only). Merges the fixed feature catalogue
- * with persisted state, so every catalogue entry is reported even when the
- * `features` table has no row for it yet (rendered as not installed).
- */
+/** Temporary compatibility facade for the legacy feature-list handler. */
 @Injectable()
 export class ListFeaturesUseCase {
   constructor(
-    @Inject(FEATURE_QUERY) private readonly features: FeatureQueryPort,
+    private readonly list: ListManageableFeaturesUseCase,
+    _legacyDescriptionResolver?: unknown,
   ) {}
 
-  async execute(): Promise<FeatureStatus[]> {
-    const rows = await this.features.listAll();
-    const byName = new Map(rows.map((row) => [row.name, row]));
-    return FEATURE_CATALOG.map((entry) => {
-      const row = byName.get(entry.name);
-      return deriveFeatureStatus({
-        name: entry.name,
-        enabled: row?.enabled ?? false,
-        installed: row?.installed ?? false,
-        config: row?.config ?? null,
-        attentionReason: row?.attentionReason ?? null,
-      }, null);
-    });
+  execute(): Promise<FeatureStatus[]> {
+    return this.list.execute();
   }
 }

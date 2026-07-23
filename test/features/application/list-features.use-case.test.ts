@@ -1,66 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import { ListFeaturesUseCase } from '../../../src/features/application/list-features.use-case';
-import { FEATURE_CATALOG } from '../../../src/features/domain/feature-catalog';
-import { InMemoryFeatureQuery } from '../../../src/features/infrastructure/in-memory-feature.query';
+import { ListManageableFeaturesUseCase } from '../../../src/features/application/list-manageable-features.use-case';
+import type { FeatureAvailabilityPort } from '../../../src/features/domain/ports/feature-availability.port';
 
 describe('ListFeaturesUseCase', () => {
-  it('reports every catalogue feature, merging persisted state', async () => {
-    const query = new InMemoryFeatureQuery([
-      {
-        name: 'digital',
-        enabled: true,
-        installed: true,
-        config: null,
-        attentionReason: null,
-      },
-      {
-        name: 'uart',
-        enabled: false,
-        installed: true,
-        config: null,
-        attentionReason: null,
-      },
-    ]);
-    const useCase = new ListFeaturesUseCase(query);
+  it('delegates to the published manageable-feature projection', async () => {
+    const availability: FeatureAvailabilityPort = {
+      awaitInitialVerification: async () => undefined,
+      inspect: async (name) => ({ name, enabled: false, installed: false, ready: false, busy: false, attentionReason: null, display: 'not-installed', action: 'install' }),
+      requireReady: async () => undefined,
+    };
+    const useCase = new ListFeaturesUseCase(new ListManageableFeaturesUseCase(availability));
 
     const result = await useCase.execute();
 
-    expect(result).toHaveLength(FEATURE_CATALOG.length);
-    expect(result.find((f) => f.name === 'digital')).toMatchObject({
-      enabled: true,
-      installed: true,
-      ready: true,
-      busy: false,
-      attentionReason: null,
-      display: 'enabled',
-      action: 'disable',
-    });
-    expect(result.find((f) => f.name === 'uart')).toMatchObject({
-      enabled: false,
-      installed: true,
-      ready: true,
-      busy: false,
-      attentionReason: null,
-      display: 'installed-off',
-      action: 'enable',
-    });
-  });
-
-  it('defaults features with no row to disabled and not installed', async () => {
-    const useCase = new ListFeaturesUseCase(new InMemoryFeatureQuery());
-
-    const result = await useCase.execute();
-
-    expect(result.every((f) => !f.enabled && !f.installed)).toBe(true);
-    expect(result.find((f) => f.name === 'zigbee')).toEqual({
-      name: 'zigbee',
-      enabled: false,
-      installed: false,
-      ready: false,
-      busy: false,
-      attentionReason: null,
-      display: 'not-installed',
-      action: 'install',
-    });
+    expect(result.map((feature) => feature.name)).toEqual(['digital', 'uart', 'zigbee', 'motion', 'rtsp']);
   });
 });

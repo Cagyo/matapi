@@ -29,6 +29,13 @@ Two things in the same file: the **token** (Symbol, exported as `UPPER_SNAKE`) a
 
 Status legend: ✅ canonical · 🚧 in transition · 📝 planned
 
+### Features context
+
+| Port | Adapters | Status | Source |
+|---|---|---|---|
+| `FeatureReadinessPort` (`FEATURE_READINESS`) | `FeatureReadinessRouter` over the fixed Digital, UART, Zigbee, Motion, and RTSP adapters; `InMemoryFeatureReadinessAdapter` (tests/dev) | ✅ canonical — each production probe uses fixed executable/argument arrays, a sanitized PATH, a five-second timeout, and a 4 KiB command-output limit. | [feature-readiness.port.ts](../src/features/domain/ports/feature-readiness.port.ts) |
+| `FeatureAvailabilityPort` (`FEATURE_AVAILABILITY`) | `FeatureAvailabilityService` | ✅ canonical — published boot-gated state projection. `inspect` and `requireReady` await the shared initial verification pass and derive status from one feature row plus its active install job. | [feature-availability.port.ts](../src/features/domain/ports/feature-availability.port.ts) |
+
 ### Sensors context
 
 | Port | Adapters | Status | Source |
