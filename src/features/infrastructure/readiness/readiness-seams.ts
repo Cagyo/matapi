@@ -1,4 +1,5 @@
 import { execFile as nodeExecFile } from 'node:child_process';
+import { constants } from 'node:fs';
 import { access, open, readFile, stat } from 'node:fs/promises';
 import { createConnection } from 'node:net';
 import { promisify } from 'node:util';
@@ -18,6 +19,7 @@ export type FixedExecFile = (
 
 export interface FileStat {
   uid: number;
+  gid: number;
   mode: number;
   isDirectory(): boolean;
 }
@@ -37,13 +39,15 @@ export async function openTcp(host: string, port: number): Promise<void> {
 
 export const nodeReadinessFiles = {
   readFile: (path: string) => readFile(path, 'utf8'),
-  access: (path: string) => access(path),
+  access: (path: string, mode: number) => access(path, mode),
   stat: (path: string) => stat(path),
   openReadWrite: async (path: string) => {
     const handle = await open(path, 'r+');
     await handle.close();
   },
 };
+
+export const READINESS_MEDIA_DIRECTORY_ACCESS = constants.W_OK | constants.X_OK;
 
 export function hasGroups(output: string, required: readonly string[]): boolean {
   const groups = new Set(output.trim().split(/\s+/u).filter(Boolean));

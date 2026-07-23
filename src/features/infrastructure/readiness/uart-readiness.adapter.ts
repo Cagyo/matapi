@@ -8,6 +8,14 @@ interface UartFiles {
   openReadWrite(path: string): Promise<void>;
 }
 
+const SERIAL_GETTY_UNITS = [
+  'serial-getty@serial0.service',
+  'serial-getty@ttyAMA0.service',
+  'serial-getty@ttyS0.service',
+  'serial-getty@ttyAMA10.service',
+] as const;
+const SERIAL_CONSOLE_PATTERN = /(?:^|\s)console=(?:serial0|ttyAMA0|ttyS0|ttyAMA10)(?:,[^\s]*)?(?=\s|$)/u;
+
 export interface UartReadinessDependencies {
   execFile?: FixedExecFile;
   files?: UartFiles;
@@ -33,6 +41,8 @@ export class UartReadinessAdapter implements FeatureReadinessPort {
       if (!/^\s*enable_uart\s*=\s*1\s*$/mu.test(config)) throw new Error('UART disabled');
       check = 'serial console';
       await this.assertConsoleDisabled();
+      const cmdline = await this.readBootCmdline();
+      if (SERIAL_CONSOLE_PATTERN.test(cmdline)) throw new Error('serial console remains in cmdline');
       check = 'serial device access';
       await this.files.openReadWrite(this.serialDevice);
       return { ready: true, restartScope: 'worker' };
@@ -50,12 +60,31 @@ export class UartReadinessAdapter implements FeatureReadinessPort {
     }
   }
 
-  private async assertConsoleDisabled(): Promise<void> {
+  private async readBootCmdline(): Promise<string> {
     try {
-      await this.execFile('/bin/systemctl', ['is-enabled', 'serial-getty@serial0.service'], READINESS_COMMAND_OPTIONS);
+      return await this.files.readFile('/boot/firmware/cmdline.txt');
     } catch {
-      return;
+      return this.files.readFile('/boot/cmdline.txt');
     }
-    throw new Error('serial console enabled');
+  }
+
+  private async assertConsoleDisabled(): Promise<void> {
+    for (const unit of SERIAL_GETTY_UNITS) {
+      const state = await this.execFile(
+        '/bin/systemctl',
+        ['show', unit, '--property=LoadState,UnitFileState'],
+        READINESS_COMMAND_OPTIONS,
+      );
+      const values = new Map(
+        state.stdout.trim().split(/\r?\n/u).flatMap((line) => {
+          const separator = line.indexOf('=');
+          return separator > 0 ? [[line.slice(0, separator), line.slice(separator + 1)]] : [];
+        }),
+      );
+      if (values.get('LoadState') === 'not-found') continue;
+      if (values.get('LoadState') !== 'loaded' || values.get('UnitFileState') !== 'disabled') {
+        throw new Error('serial console enabled or unavailable');
+      }
+    }
   }
 }

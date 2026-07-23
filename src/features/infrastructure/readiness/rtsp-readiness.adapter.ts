@@ -37,9 +37,13 @@ export class RtspReadinessAdapter implements FeatureReadinessPort {
       check = 'cloudflared executable';
       await this.execFile('/usr/bin/which', ['cloudflared'], READINESS_COMMAND_OPTIONS);
       check = 'root runtime artifacts';
-      await this.assertRootFiles(ROOT_FILES, false);
+      await this.assertRootFiles(ROOT_FILES, false, 0);
+      check = 'stream group';
+      const streamGroup = await this.execFile('/usr/bin/getent', ['group', 'homeworker-stream'], READINESS_COMMAND_OPTIONS);
+      const streamGroupId = groupId(streamGroup.stdout, 'homeworker-stream');
+      if (streamGroupId === null) throw new Error('stream group unresolved');
       check = 'runtime directories';
-      await this.assertRootFiles(RUNTIME_DIRECTORIES, true);
+      await this.assertRootFiles(RUNTIME_DIRECTORIES, true, streamGroupId);
       check = 'worker groups';
       const groups = await this.execFile('/usr/bin/id', ['-nG'], READINESS_COMMAND_OPTIONS);
       if (!hasGroups(groups.stdout, ['homeworker-stream'])) throw new Error('worker group incomplete');
@@ -50,10 +54,17 @@ export class RtspReadinessAdapter implements FeatureReadinessPort {
     }
   }
 
-  private async assertRootFiles(entries: ReadonlyArray<readonly [string, number]>, directories: boolean): Promise<void> {
+  private async assertRootFiles(entries: ReadonlyArray<readonly [string, number]>, directories: boolean, expectedGid: number): Promise<void> {
     for (const [path, expectedMode] of entries) {
       const file = await this.files.stat(path);
-      if (file.uid !== 0 || modeOf(file) !== expectedMode || file.isDirectory() !== directories) throw new Error('runtime ownership or mode mismatch');
+      if (file.uid !== 0 || file.gid !== expectedGid || modeOf(file) !== expectedMode || file.isDirectory() !== directories) throw new Error('runtime ownership or mode mismatch');
     }
   }
+}
+
+function groupId(output: string, name: string): number | null {
+  const match = new RegExp(`^${name}:[^:\\r\\n]*:(\\d+):[^\\r\\n]*$`, 'm').exec(output.trim());
+  if (!match) return null;
+  const gid = Number(match[1]);
+  return Number.isSafeInteger(gid) && gid >= 0 ? gid : null;
 }
