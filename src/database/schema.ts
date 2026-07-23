@@ -268,7 +268,7 @@ export const featureInstallJobs = sqliteTable(
     index('idx_feature_install_jobs_receipt').on(table.workflowReceiptId),
     check('feature_install_jobs_status_check', sql`${table.status} in ('queued', 'running', 'succeeded', 'failed')`),
     check('feature_install_jobs_active_slot_check', sql`(
-      (${table.status} in ('queued', 'running') and ${table.activeSlot} = 1)
+      (${table.status} in ('queued', 'running') and ${table.activeSlot} is 1)
       or (${table.status} in ('succeeded', 'failed') and ${table.activeSlot} is null)
     )`),
     check('feature_install_jobs_restart_scope_check', sql`${table.restartScope} is null or ${table.restartScope} in ('worker', 'supervisor', 'host')`),

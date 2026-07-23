@@ -50,6 +50,13 @@
       "when": 1784749666530,
       "tag": "0006_public_doctor_faustus",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1784785942508,
+      "tag": "0007_flashy_golden_guardian",
+      "breakpoints": true
     }
   ]
 }
