@@ -93,6 +93,22 @@ describe('EnableFeatureUseCase', () => {
     await expect(useCase.execute({ name: 'digital', expected })).rejects.toBeInstanceOf(FeatureStateChangedError);
   });
 
+  it('preserves concurrent attention written during mutation readiness and skips effects', async () => {
+    const { useCase, features, readiness, lifecycle, restart } = setup();
+    readiness.verify = async () => {
+      await features.setAttention('digital', 'partial-state-uncertain');
+      return { ready: true, restartScope: 'worker' };
+    };
+
+    await expect(useCase.execute({ name: 'digital', expected })).rejects.toBeInstanceOf(FeatureStateChangedError);
+    expect(await features.findByName('digital')).toMatchObject({
+      enabled: false,
+      attentionReason: 'partial-state-uncertain',
+    });
+    expect(lifecycle.afterEnable).not.toHaveBeenCalled();
+    expect(restart.dispatch).not.toHaveBeenCalled();
+  });
+
   it('compensates a failed reload by tearing down and returning to disabled', async () => {
     const { useCase, features, lifecycle, restart } = setup();
     const failure = new Error('reload failed');

@@ -5,14 +5,24 @@ import { InMemoryFeatureReadinessAdapter } from '../../../src/features/infrastru
 import { InMemoryFeatureRepository } from '../../../src/features/infrastructure/in-memory-feature.repository';
 
 describe('VerifyFeatureReadinessUseCase', () => {
-  it('clears attention only when application-visible readiness succeeds', async () => {
+  it('clears attention when initial readiness succeeds', async () => {
     const features = new InMemoryFeatureRepository([{ name: 'digital', installed: true, enabled: true, config: null, attentionReason: 'readiness-failed' }]);
     const readiness = new InMemoryFeatureReadinessAdapter();
     readiness.set('digital', { ready: true, restartScope: 'worker' });
 
-    await new VerifyFeatureReadinessUseCase(features, readiness).execute({ name: 'digital', source: 'manual' });
+    await new VerifyFeatureReadinessUseCase(features, readiness).execute({ name: 'digital', source: 'boot' });
 
     expect((await features.findByName('digital'))?.attentionReason).toBeNull();
+  });
+
+  it('preserves attention during a successful mutation readiness check', async () => {
+    const features = new InMemoryFeatureRepository([{ name: 'digital', installed: true, enabled: false, config: null, attentionReason: 'partial-state-uncertain' }]);
+    const readiness = new InMemoryFeatureReadinessAdapter();
+    readiness.set('digital', { ready: true, restartScope: 'worker' });
+
+    await new VerifyFeatureReadinessUseCase(features, readiness).execute({ name: 'digital', source: 'mutation' });
+
+    expect((await features.findByName('digital'))?.attentionReason).toBe('partial-state-uncertain');
   });
 
   it('marks only the failed feature and leaves unrelated availability intact', async () => {
