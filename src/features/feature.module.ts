@@ -1,7 +1,6 @@
 import { Module } from '@nestjs/common';
 import { DisableFeatureUseCase } from './application/disable-feature.use-case';
 import { EnableFeatureUseCase } from './application/enable-feature.use-case';
-import { ListFeaturesUseCase } from './application/list-features.use-case';
 import { ListManageableFeaturesUseCase } from './application/list-manageable-features.use-case';
 import { GetFeatureDetailUseCase } from './application/get-feature-detail.use-case';
 import { VerifyFeatureReadinessUseCase } from './application/verify-feature-readiness.use-case';
@@ -100,7 +99,6 @@ const systemMode = resolveSystemMode();
     { provide: FEATURE_AVAILABILITY, useExisting: FeatureAvailabilityService },
     ListManageableFeaturesUseCase,
     GetFeatureDetailUseCase,
-    ListFeaturesUseCase,
     FeatureSeederService,
     ReconcileFeatureInstallUseCase,
     FeatureInstallRecoveryService,
@@ -113,10 +111,10 @@ const systemMode = resolveSystemMode();
     FEATURE_INSTALL_OUTCOME_REGISTRY,
     EnableFeatureUseCase,
     DisableFeatureUseCase,
-    ListFeaturesUseCase,
     ListManageableFeaturesUseCase,
     GetFeatureDetailUseCase,
     BeginFeatureInstallUseCase,
+    VerifyFeatureReadinessUseCase,
     ReconcileFeatureInstallUseCase,
     FeatureInstallRecoveryService,
   ],

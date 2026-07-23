@@ -2,7 +2,6 @@ import { format } from 'date-fns';
 import type { DbRecovery } from '../database/integrity';
 import type { SensorSeverity, SensorType } from '../sensors/domain/sensor';
 import type { ImportSummary } from '../sensors/application/import-sensors.use-case';
-import type { FeatureStatus } from '../features/domain/feature-status';
 import type { DepUpdate } from '../system/domain/ports/system-deps.port';
 import type { User } from '../telegram/domain/user.entity';
 import type { LocaleCatalog } from './catalog';
@@ -638,6 +637,7 @@ const ukCatalog = {
       storage: '💾 Сховище та резервні копії',
       system: '🖥 Система',
       invite: '👤 Створити запрошення',
+      features: '🔧 Можливості',
     },
     adminSensorSetup: {
       title: '⚙️ Налаштування датчиків',
@@ -691,34 +691,24 @@ const ukCatalog = {
     },
   },
   feature: {
-    names: { motion: 'Камера Motion', rtsp: 'Камера RTSP' },
-    stale: {
-      disabled: (name: string) => `${name} вимкнено.`,
-      attention: (name: string) => `${name} потребує уваги.`,
-      installing: (name: string) => `${name} ще встановлюється.`,
-      unavailable: (name: string) => `${name} недоступно.`,
-    },
-    usage: '❌ Використання: /feature enable|disable|list [назва_можливості]',
+    names: { digital: 'Цифрові входи', uart: 'Датчик CO₂ UART', zigbee: 'Zigbee', motion: 'Камера Motion', rtsp: 'Камера RTSP' },
+    stale: { disabled: (name: string) => `${name} вимкнено.`, attention: (name: string) => `${name} потребує уваги.`, installing: (name: string) => `${name} ще встановлюється.`, unavailable: (name: string) => `${name} недоступно.` },
+    state: { 'not-installed': 'не встановлено', 'installed-off': 'вимкнено', enabled: 'увімкнено', 'needs-attention': 'потребує уваги', installing: 'встановлюється' },
+    impact: { dependencies: { pigpiod: 'pigpiod', uart: 'підтримка UART', mosquitto: 'Mosquitto', motion: 'Motion', 'rtsp-runtime': 'середовище RTSP' }, controls: { 'digital-sensors': 'цифрові датчики', 'uart-sensors': 'датчики UART', 'mqtt-sensors': 'датчики MQTT', 'motion-camera': 'камеру Motion', 'live-streams': 'прямі трансляції' }, monitoring: { 'sensor-work': 'моніторинг датчиків', 'camera-work': 'моніторинг камер' } },
+    attention: { 'inconsistent-state': 'стан неузгоджений', 'readiness-failed': 'перевірку готовності не пройдено', 'install-failed': 'встановлення не вдалося', 'partial-state-uncertain': 'стан потребує відновлення', 'restart-required': 'потрібен перезапуск', 'helper-update-required': 'потрібно оновити встановлювач' },
+    usage: '❌ Використання: /feature list|install|enable|disable <назва>',
     listHeader: '🔧 Можливості',
-    listLine(f: FeatureStatus): string {
-      const icon = !f.installed ? '⬜' : f.enabled ? '✅' : '❌';
-      const state = f.enabled ? 'увімкнено' : 'вимкнено';
-      const install = f.installed ? 'установлено' : 'не встановлено';
-      return `${icon} ${f.name} — ${state} (${install})`;
-    },
-    enabled: (name: string) =>
-      `✅ Можливість '${name}' увімкнено.\nℹ️ Перезапустіть застосунок, щоб повністю її завантажити.`,
-    disabled: (name: string) =>
-      `✅ Можливість '${name}' вимкнено.\nℹ️ Перезапустіть застосунок, щоб повністю її вивантажити.`,
+    listButton: (name: string, state: string) => `${name} — ${state}`,
+    listBack: '« Можливості',
+    detail: ({ name, state, dependencies, controls, monitoring, attention }: { name: string; state: string; dependencies: string; controls: string; monitoring: string; attention: string | null }) => [name, `Стан: ${state}`, `Залежності: ${dependencies}`, `Керує: ${controls}`, `Моніторинг: ${monitoring}`, attention ? `Увага: ${attention}` : ''].filter(Boolean).join('\n'),
+    confirmation: { install: (name: string, scope: string) => `Встановити ${name} (перезапуск: ${scope})`, enable: (name: string, scope: string) => `Увімкнути ${name} (перезапуск: ${scope})`, disable: (name: string, scope: string) => `Вимкнути ${name} (перезапуск: ${scope})`, verify: (name: string, _scope: string) => `Перевірити ${name}` },
+    progress: { installing: (name: string) => `⏳ Встановлюється ${name}. Результат буде надіслано пізніше.` },
+    outcome: { success: (name: string) => `✅ ${name}: виконано.`, failure: (name: string, reason: string) => `❌ ${name}: помилка (${reason}).`, genericFailure: (name: string) => `❌ Не вдалося завершити ${name}.`, recovered: (name: string) => `Відновлено результат для ${name}.` },
+    recovery: { stale: 'Ця кнопка можливостей більше не актуальна. Відкрийте список знову.', unavailable: 'Керування можливостями тимчасово недоступне.' },
+    busy: (name: string) => `${name} уже встановлюється.`,
+    verificationFailed: (name: string) => `❌ ${name} не пройшла перевірку готовності.`,
     unknown: (name: string) =>
       `❌ Невідома можливість '${name}'. Скористайтеся /feature list.`,
-    notInstalled: (name: string) =>
-      `❌ Для можливості '${name}' потрібні системні залежності. Повторно запустіть скрипт встановлення з увімкненою ${name}.`,
-    alreadyEnabled: (name: string) => `ℹ️ Можливість '${name}' уже ввімкнено`,
-    alreadyDisabled: (name: string) =>
-      `ℹ️ Можливість '${name}' уже вимкнено`,
-    enableFailed: '❌ Не вдалося ввімкнути можливість',
-    disableFailed: '❌ Не вдалося вимкнути можливість',
     listFailed: '❌ Не вдалося отримати перелік можливостей',
   },
   setupWizard: {

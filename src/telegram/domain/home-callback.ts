@@ -30,6 +30,7 @@ export type HomeAction =
   | { kind: 'settings' }
   | { kind: 'help' }
   | { kind: 'admin-tools' }
+  | { kind: 'features' }
   | { kind: 'admin-sensor-setup' }
   | { kind: 'admin-storage' }
   | { kind: 'admin-system' }
@@ -141,6 +142,8 @@ function actionParts(action: HomeAction): string[] {
       return ['he'];
     case 'admin-tools':
       return ['at'];
+    case 'features':
+      return ['fe'];
     case 'admin-sensor-setup':
       return ['as'];
     case 'admin-storage':
@@ -272,6 +275,7 @@ export function parseHomeCallback(data: string): ParsedHomeCallback | null {
       case 'st': return parts.length === 4 ? { token, revision, action: { kind: 'settings' } } : null;
       case 'he': return parts.length === 4 ? { token, revision, action: { kind: 'help' } } : null;
       case 'at': return parts.length === 4 ? { token, revision, action: { kind: 'admin-tools' } } : null;
+      case 'fe': return parts.length === 4 ? { token, revision, action: { kind: 'features' } } : null;
       case 'as': return parts.length === 4 ? { token, revision, action: { kind: 'admin-sensor-setup' } } : null;
       case 'ab': return parts.length === 4 ? { token, revision, action: { kind: 'admin-storage' } } : null;
       case 'ay': return parts.length === 4 ? { token, revision, action: { kind: 'admin-system' } } : null;

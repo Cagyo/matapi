@@ -40,6 +40,7 @@ describe('Home callback codec', () => {
       { kind: 'settings' },
       { kind: 'help' },
       { kind: 'admin-tools' },
+      { kind: 'features' },
       { kind: 'admin-sensor-setup' },
       { kind: 'admin-storage' },
       { kind: 'admin-system' },

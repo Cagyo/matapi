@@ -316,6 +316,7 @@ describe('renderHomeMessage', () => {
     expect(rowActions(adminTools)).toEqual([
       [{ kind: 'admin-sensor-setup' }, { kind: 'admin-storage' }],
       [{ kind: 'admin-system' }, { kind: 'invite' }],
+      [{ kind: 'features' }],
       [{ kind: 'back' }, { kind: 'home' }],
     ]);
   });

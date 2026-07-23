@@ -308,6 +308,7 @@ function renderAdminTools(catalog: LocaleCatalog, identity: PendingHomeIdentity)
     rows: [
       [button(catalog.home.adminTools.sensorSetup, identity, { kind: 'admin-sensor-setup' }), button(catalog.home.adminTools.storage, identity, { kind: 'admin-storage' })],
       [button(catalog.home.adminTools.system, identity, { kind: 'admin-system' }), button(catalog.home.adminTools.invite, identity, { kind: 'invite' })],
+      [button(catalog.home.adminTools.features, identity, { kind: 'features' })],
       ...navigationRows(catalog, identity, 'more'),
     ],
   };

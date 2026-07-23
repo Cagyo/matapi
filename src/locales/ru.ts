@@ -2,7 +2,6 @@ import { format } from 'date-fns';
 import type { DbRecovery } from '../database/integrity';
 import type { SensorSeverity, SensorType } from '../sensors/domain/sensor';
 import type { ImportSummary } from '../sensors/application/import-sensors.use-case';
-import type { FeatureStatus } from '../features/domain/feature-status';
 import type { DepUpdate } from '../system/domain/ports/system-deps.port';
 import type { User } from '../telegram/domain/user.entity';
 import type { LocaleCatalog } from './catalog';
@@ -638,6 +637,7 @@ const ruCatalog = {
       storage: '💾 Хранилище и резервные копии',
       system: '🖥 Система',
       invite: '👤 Создать приглашение',
+      features: '🔧 Функции',
     },
     adminSensorSetup: {
       title: '⚙️ Настройка датчиков',
@@ -691,34 +691,24 @@ const ruCatalog = {
     },
   },
   feature: {
-    names: { motion: 'Камера Motion', rtsp: 'Камера RTSP' },
-    stale: {
-      disabled: (name: string) => `${name} отключена.`,
-      attention: (name: string) => `${name} требует внимания.`,
-      installing: (name: string) => `${name} ещё устанавливается.`,
-      unavailable: (name: string) => `${name} недоступна.`,
-    },
-    usage: '❌ Использование: /feature enable|disable|list [имя_функции]',
+    names: { digital: 'Цифровые входы', uart: 'Датчик CO₂ UART', zigbee: 'Zigbee', motion: 'Камера Motion', rtsp: 'Камера RTSP' },
+    stale: { disabled: (name: string) => `${name} отключена.`, attention: (name: string) => `${name} требует внимания.`, installing: (name: string) => `${name} ещё устанавливается.`, unavailable: (name: string) => `${name} недоступна.` },
+    state: { 'not-installed': 'не установлена', 'installed-off': 'выключена', enabled: 'включена', 'needs-attention': 'требует внимания', installing: 'устанавливается' },
+    impact: { dependencies: { pigpiod: 'pigpiod', uart: 'поддержка UART', mosquitto: 'Mosquitto', motion: 'Motion', 'rtsp-runtime': 'среда RTSP' }, controls: { 'digital-sensors': 'цифровые датчики', 'uart-sensors': 'датчики UART', 'mqtt-sensors': 'датчики MQTT', 'motion-camera': 'камеру Motion', 'live-streams': 'прямые трансляции' }, monitoring: { 'sensor-work': 'мониторинг датчиков', 'camera-work': 'мониторинг камер' } },
+    attention: { 'inconsistent-state': 'несогласованное состояние', 'readiness-failed': 'проверка готовности не прошла', 'install-failed': 'установка не удалась', 'partial-state-uncertain': 'состояние требует восстановления', 'restart-required': 'нужен перезапуск', 'helper-update-required': 'нужно обновить установщик' },
+    usage: '❌ Использование: /feature list|install|enable|disable <имя>',
     listHeader: '🔧 Дополнительные функции',
-    listLine(f: FeatureStatus): string {
-      const icon = !f.installed ? '⬜' : f.enabled ? '✅' : '❌';
-      const state = f.enabled ? 'включена' : 'выключена';
-      const install = f.installed ? 'установлена' : 'не установлена';
-      return `${icon} ${f.name} — ${state} (${install})`;
-    },
-    enabled: (name: string) =>
-      `✅ Функция «${name}» включена.\nℹ️ Перезапустите сервис, чтобы полностью её загрузить.`,
-    disabled: (name: string) =>
-      `✅ Функция «${name}» выключена.\nℹ️ Перезапустите сервис, чтобы полностью её выгрузить.`,
+    listButton: (name: string, state: string) => `${name} — ${state}`,
+    listBack: '« Функции',
+    detail: ({ name, state, dependencies, controls, monitoring, attention }: { name: string; state: string; dependencies: string; controls: string; monitoring: string; attention: string | null }) => [name, `Состояние: ${state}`, `Зависимости: ${dependencies}`, `Управляет: ${controls}`, `Мониторинг: ${monitoring}`, attention ? `Внимание: ${attention}` : ''].filter(Boolean).join('\n'),
+    confirmation: { install: (name: string, scope: string) => `Установить ${name} (перезапуск: ${scope})`, enable: (name: string, scope: string) => `Включить ${name} (перезапуск: ${scope})`, disable: (name: string, scope: string) => `Выключить ${name} (перезапуск: ${scope})`, verify: (name: string, _scope: string) => `Проверить ${name}` },
+    progress: { installing: (name: string) => `⏳ Устанавливается ${name}. Результат будет отправлен позже.` },
+    outcome: { success: (name: string) => `✅ ${name}: готово.`, failure: (name: string, reason: string) => `❌ ${name}: ошибка (${reason}).`, genericFailure: (name: string) => `❌ Не удалось завершить ${name}.`, recovered: (name: string) => `Восстановлен результат для ${name}.` },
+    recovery: { stale: 'Эта кнопка функций больше не актуальна. Откройте список снова.', unavailable: 'Управление функциями временно недоступно.' },
+    busy: (name: string) => `${name} уже устанавливается.`,
+    verificationFailed: (name: string) => `❌ ${name} не прошла проверку готовности.`,
     unknown: (name: string) =>
       `❌ Неизвестная функция «${name}». Используйте /feature list.`,
-    notInstalled: (name: string) =>
-      `❌ Для функции «${name}» требуются системные зависимости. Повторно запустите скрипт установки с включённой ${name}.`,
-    alreadyEnabled: (name: string) => `ℹ️ Функция «${name}» уже включена`,
-    alreadyDisabled: (name: string) =>
-      `ℹ️ Функция «${name}» уже выключена`,
-    enableFailed: '❌ Не удалось включить функцию',
-    disableFailed: '❌ Не удалось выключить функцию',
     listFailed: '❌ Не удалось получить список функций',
   },
   setupWizard: {

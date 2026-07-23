@@ -21,7 +21,8 @@ type HomeExternalDestination =
   | 'drive-connect'
   | 'system-health'
   | 'system-packages'
-  | 'invite';
+  | 'invite'
+  | 'features';
 
 type HomeRecoveryReason =
   | 'expired'
@@ -145,6 +146,7 @@ export class HomeNavigationUseCase {
     if (action.kind === 'settings' && view.kind === 'more') return { kind: 'external', destination: 'settings' };
     if (action.kind === 'help' && view.kind === 'more') return { kind: 'external', destination: 'help' };
     if (action.kind === 'invite' && view.kind === 'admin-tools' && input.role === 'admin') return { kind: 'external', destination: 'invite' };
+    if (action.kind === 'features' && view.kind === 'admin-tools' && input.role === 'admin') return { kind: 'external', destination: 'features' };
 
     const adminExternal: Record<string, Exclude<HomeExternalDestination, 'camera' | 'history-logs' | 'history-csv' | 'settings' | 'help' | 'invite'>> = {
       'config-add': 'config-add', 'config-modify': 'config-modify', 'config-remove': 'config-remove', 'config-import': 'config-import', 'config-export': 'config-export',

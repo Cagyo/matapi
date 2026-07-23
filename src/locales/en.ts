@@ -2,7 +2,6 @@ import { format } from 'date-fns';
 import type { DbRecovery } from '../database/integrity';
 import type { SensorSeverity, SensorType } from '../sensors/domain/sensor';
 import type { ImportSummary } from '../sensors/application/import-sensors.use-case';
-import type { FeatureStatus } from '../features/domain/feature-status';
 import type { DepUpdate } from '../system/domain/ports/system-deps.port';
 import type { User } from '../telegram/domain/user.entity';
 import { deepFreeze } from './freeze';
@@ -633,6 +632,7 @@ const enCatalog = {
       storage: '💾 Storage & backup',
       system: '🖥 System',
       invite: '👤 Create invite',
+      features: '🔧 Features',
     },
     adminSensorSetup: {
       title: '⚙️ Sensor setup',
@@ -686,34 +686,24 @@ const enCatalog = {
     },
   },
   feature: {
-    names: { motion: 'Motion camera', rtsp: 'RTSP camera' },
-    stale: {
-      disabled: (name: string) => `${name} is disabled.`,
-      attention: (name: string) => `${name} needs attention.`,
-      installing: (name: string) => `${name} is still installing.`,
-      unavailable: (name: string) => `${name} is unavailable.`,
-    },
-    usage: '❌ Usage: /feature enable|disable|list [feature_name]',
+    names: { digital: 'Digital inputs', uart: 'UART CO₂ sensor', zigbee: 'Zigbee', motion: 'Motion camera', rtsp: 'RTSP camera' },
+    stale: { disabled: (name: string) => `${name} is disabled.`, attention: (name: string) => `${name} needs attention.`, installing: (name: string) => `${name} is still installing.`, unavailable: (name: string) => `${name} is unavailable.` },
+    state: { 'not-installed': 'not installed', 'installed-off': 'disabled', enabled: 'enabled', 'needs-attention': 'needs attention', installing: 'installing' },
+    impact: { dependencies: { pigpiod: 'pigpiod', uart: 'UART support', mosquitto: 'Mosquitto', motion: 'Motion', 'rtsp-runtime': 'RTSP runtime' }, controls: { 'digital-sensors': 'digital sensors', 'uart-sensors': 'UART sensors', 'mqtt-sensors': 'MQTT sensors', 'motion-camera': 'motion camera', 'live-streams': 'live streams' }, monitoring: { 'sensor-work': 'sensor monitoring', 'camera-work': 'camera monitoring' } },
+    attention: { 'inconsistent-state': 'state is inconsistent', 'readiness-failed': 'readiness check failed', 'install-failed': 'installation failed', 'partial-state-uncertain': 'state needs repair', 'restart-required': 'restart required', 'helper-update-required': 'installer update required' },
+    usage: '❌ Usage: /feature list|install|enable|disable <name>',
     listHeader: '🔧 Features',
-    listLine(f: FeatureStatus): string {
-      const icon = !f.installed ? '⬜' : f.enabled ? '✅' : '❌';
-      const state = f.enabled ? 'enabled' : 'disabled';
-      const install = f.installed ? 'installed' : 'not installed';
-      return `${icon} ${f.name} — ${state} (${install})`;
-    },
-    enabled: (name: string) =>
-      `✅ Feature '${name}' enabled.\nℹ️ Restart the worker to fully load it.`,
-    disabled: (name: string) =>
-      `✅ Feature '${name}' disabled.\nℹ️ Restart the worker to fully unload it.`,
+    listButton: (name: string, state: string) => `${name} — ${state}`,
+    listBack: '« Features',
+    detail: ({ name, state, dependencies, controls, monitoring, attention }: { name: string; state: string; dependencies: string; controls: string; monitoring: string; attention: string | null }) => [name, `State: ${state}`, `Dependencies: ${dependencies}`, `Controls: ${controls}`, `Monitoring: ${monitoring}`, attention ? `Attention: ${attention}` : ''].filter(Boolean).join('\n'),
+    confirmation: { install: (name: string, scope: string) => `Install ${name} (${scope} restart)`, enable: (name: string, scope: string) => `Enable ${name} (${scope} restart)`, disable: (name: string, scope: string) => `Disable ${name} (${scope} restart)`, verify: (name: string, _scope: string) => `Verify ${name}` },
+    progress: { installing: (name: string) => `⏳ Installing ${name}. You will receive the outcome when it is ready.` },
+    outcome: { success: (name: string) => `✅ ${name} completed.`, failure: (name: string, reason: string) => `❌ ${name} failed (${reason}).`, genericFailure: (name: string) => `❌ ${name} could not be completed.`, recovered: (name: string) => `Feature outcome for ${name} was recovered.` },
+    recovery: { stale: 'This feature control is no longer current. Open Features again.', unavailable: 'Feature workflow is temporarily unavailable.' },
+    busy: (name: string) => `${name} already has an installation in progress.`,
+    verificationFailed: (name: string) => `❌ ${name} did not pass readiness verification.`,
     unknown: (name: string) =>
       `❌ Unknown feature '${name}'. Use /feature list.`,
-    notInstalled: (name: string) =>
-      `❌ Feature '${name}' requires system dependencies. Re-run the install script with ${name} enabled.`,
-    alreadyEnabled: (name: string) => `ℹ️ Feature '${name}' is already enabled`,
-    alreadyDisabled: (name: string) =>
-      `ℹ️ Feature '${name}' is already disabled`,
-    enableFailed: '❌ Failed to enable feature',
-    disableFailed: '❌ Failed to disable feature',
     listFailed: '❌ Failed to list features',
   },
   setupWizard: {

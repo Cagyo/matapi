@@ -36,6 +36,7 @@ import { TelegramContext, type LocaleState } from './telegram-context';
 import { TelegramHandler } from './telegram-handler';
 import { WorkflowEntryCoordinator, type WorkflowLaunch } from './workflow-entry.coordinator';
 import { WorkflowNavigationHandler } from './workflow-navigation.handler';
+import { FeatureHandler } from './feature.handler';
 
 type HomeEffectOutcome =
   | Extract<HomeNavigationResult, { kind: 'render' | 'restart' | 'recovery' }>
@@ -72,6 +73,7 @@ export class HomeHandler implements TelegramHandler {
     @Inject(CLOCK) private readonly clock?: ClockPort,
     @Optional() @Inject(WorkflowEntryCoordinator) private readonly workflows?: WorkflowEntryCoordinator,
     @Optional() private readonly workflowNavigation?: WorkflowNavigationHandler,
+    @Optional() private readonly feature?: FeatureHandler,
   ) {}
 
   register(composer: Composer<TelegramContext>): void {
@@ -379,6 +381,11 @@ export class HomeHandler implements TelegramHandler {
         if (!this.invite) return this.recover(ctx, 'unavailable');
         const launch = await this.beginWorkflow(ctx, 'invite', active, view);
         return launch ? this.invite.handleCommand(ctx, launch) : this.recover(ctx, 'unavailable');
+      }
+      case 'features': {
+        if (!this.feature) return this.recover(ctx, 'unavailable');
+        const launch = await this.beginWorkflow(ctx, 'feature', active, { kind: 'admin-tools' });
+        return launch ? this.feature.handleList(ctx, launch) : this.recover(ctx, 'unavailable');
       }
       default: return this.recover(ctx, 'unavailable');
     }
