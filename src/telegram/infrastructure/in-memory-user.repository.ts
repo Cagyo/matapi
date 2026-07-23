@@ -71,6 +71,11 @@ export class InMemoryUserRepository
     return this.store.get(telegramId) ?? null;
   }
 
+  /** Shared-transaction read seam for the paired Home-action test adapter. */
+  readRoleForHomeAction(telegramId: number): Role | null {
+    return this.store.get(telegramId)?.role ?? null;
+  }
+
   async findByName(name: string): Promise<User[]> {
     const needle = name.replace(/^@/, '').toLowerCase();
     if (!needle) return [];

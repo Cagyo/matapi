@@ -5,7 +5,8 @@ import {
   HOME_TOKEN_GENERATOR,
   type HomeTokenGeneratorPort,
 } from '../domain/ports/home-token-generator.port';
-import type { ExternalWorkflow, WorkflowReturnReceipt } from '../domain/workflow-return';
+import type { ExternalWorkflow, FeatureWorkflowOperation, WorkflowReturnReceipt } from '../domain/workflow-return';
+import type { WorkflowReturnPayload } from '../domain/home-action-receipt';
 import {
   HOME_ACTION_REPOSITORY,
   type HomeActionRepositoryPort,
@@ -20,6 +21,8 @@ export interface BeginWorkflowReturnInput {
   origin: HomeView;
   originSource: 'captured' | 'natural-parent';
   sessionToken: string | null;
+  /** Feature mutations are receipt-bound; a feature list deliberately omits it. */
+  operation?: FeatureWorkflowOperation;
 }
 
 export interface BeginWorkflowReturnResult {
@@ -36,7 +39,24 @@ export class BeginWorkflowReturnUseCase {
   ) {}
 
   async execute(input: BeginWorkflowReturnInput): Promise<BeginWorkflowReturnResult> {
+    if (input.operation && input.workflow !== 'feature') {
+      throw new RangeError('Feature operations require the feature workflow');
+    }
     const now = this.clock.now();
+    const payload: WorkflowReturnPayload = input.workflow === 'feature'
+      ? input.operation
+        ? {
+          workflow: 'feature', phase: 'cancellable', originSource: input.originSource,
+          origin: input.origin, operation: input.operation, deliveryStage: 'pending',
+        }
+        : {
+          workflow: 'feature', phase: 'cancellable', originSource: input.originSource,
+          origin: input.origin, deliveryStage: 'pending',
+        }
+      : {
+        workflow: input.workflow, phase: 'cancellable', originSource: input.originSource,
+        origin: input.origin, deliveryStage: 'pending',
+      };
     const receipt: WorkflowReturnReceipt = {
       id: this.tokens.generate(),
       userId: input.userId,
@@ -45,13 +65,7 @@ export class BeginWorkflowReturnUseCase {
       sessionToken: input.sessionToken,
       status: 'pending',
       expiresAt: new Date(now.getTime() + WORKFLOW_RETURN_TTL_MS),
-      payload: {
-        workflow: input.workflow,
-        phase: 'cancellable',
-        originSource: input.originSource,
-        origin: input.origin,
-        deliveryStage: 'pending',
-      },
+      payload,
     };
     const replaced = await this.actions.beginWorkflowReturn(receipt);
     return { receipt, replaced };

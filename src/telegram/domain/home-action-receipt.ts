@@ -4,6 +4,7 @@ import {
   isWorkflowDeliveryStage,
   isWorkflowReturnPhase,
   type ExternalWorkflow,
+  type FeatureWorkflowOperation,
   type WorkflowDeliveryStage,
   type WorkflowReturnPhase,
 } from './workflow-return';
@@ -21,15 +22,34 @@ export type HomeActionReceipt =
     sessionToken: string | null;
     status: 'pending' | 'executing' | 'returned' | 'completed';
     expiresAt: Date;
-    payload: {
-      workflow: ExternalWorkflow;
-      phase: WorkflowReturnPhase;
-      originSource: 'captured' | 'natural-parent';
-      origin: HomeView;
-      /** Absent on receipts written before durable outcome delivery existed. */
-      deliveryStage?: WorkflowDeliveryStage;
-    };
+    payload: WorkflowReturnPayload;
   };
+
+interface WorkflowReturnPayloadBase {
+  phase: WorkflowReturnPhase;
+  originSource: 'captured' | 'natural-parent';
+  origin: HomeView;
+}
+
+/** Strict workflow discriminator: only feature receipts may carry an operation. */
+export type WorkflowReturnPayload =
+  | (WorkflowReturnPayloadBase & {
+    workflow: Exclude<ExternalWorkflow, 'feature'>;
+    /** Absent on receipts written before durable outcome delivery existed. */
+    deliveryStage?: WorkflowDeliveryStage;
+    operation?: never;
+  })
+  | (WorkflowReturnPayloadBase & {
+    workflow: 'feature';
+    /** New feature receipts always persist delivery recovery state. */
+    deliveryStage: WorkflowDeliveryStage;
+    operation?: never;
+  })
+  | (WorkflowReturnPayloadBase & {
+    workflow: 'feature';
+    deliveryStage: WorkflowDeliveryStage;
+    operation: FeatureWorkflowOperation;
+  });
 
 export interface ClaimedExternalAction {
   id: string;
@@ -53,6 +73,7 @@ export function isHomeActionReceipt(value: unknown): value is HomeActionReceipt 
       && hasWorkflowReturnPayloadKeys(value.payload)
       && isExternalWorkflow(value.payload.workflow)
       && isWorkflowReturnPhase(value.payload.phase)
+      && isWorkflowPayloadShape(value.payload)
       && (value.payload.deliveryStage === undefined || isWorkflowDeliveryStage(value.payload.deliveryStage))
       && (value.payload.originSource === 'captured' || value.payload.originSource === 'natural-parent')
       && isCanonicalHomeView(value.payload.origin);
@@ -95,8 +116,31 @@ function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): b
 }
 
 function hasWorkflowReturnPayloadKeys(value: Record<string, unknown>): boolean {
+  if (value.workflow === 'feature') {
+    return hasKeys(value, ['workflow', 'phase', 'originSource', 'origin', 'deliveryStage'])
+      || hasKeys(value, ['workflow', 'phase', 'originSource', 'origin', 'operation', 'deliveryStage']);
+  }
   return hasKeys(value, ['workflow', 'phase', 'originSource', 'origin'])
     || hasKeys(value, ['workflow', 'phase', 'originSource', 'origin', 'deliveryStage']);
+}
+
+function isWorkflowPayloadShape(value: Record<string, unknown>): boolean {
+  if (value.workflow !== 'feature') return value.operation === undefined;
+  return value.operation === undefined || isFeatureWorkflowOperation(value.operation);
+}
+
+function isFeatureWorkflowOperation(value: unknown): value is FeatureWorkflowOperation {
+  return isRecord(value)
+    && hasKeys(value, ['kind', 'feature', 'action', 'expectedInstalled', 'expectedEnabled', 'expectedAttentionReason'])
+    && value.kind === 'feature-mutation'
+    && (value.feature === 'digital' || value.feature === 'uart' || value.feature === 'zigbee' || value.feature === 'motion' || value.feature === 'rtsp')
+    && (value.action === 'install' || value.action === 'enable' || value.action === 'disable' || value.action === 'verify')
+    && typeof value.expectedInstalled === 'boolean'
+    && typeof value.expectedEnabled === 'boolean'
+    && (value.expectedAttentionReason === null || value.expectedAttentionReason === 'install-failed'
+      || value.expectedAttentionReason === 'partial-state-uncertain'
+      || value.expectedAttentionReason === 'readiness-failed'
+      || value.expectedAttentionReason === 'restart-required');
 }
 
 function isSafeInteger(value: unknown): value is number {

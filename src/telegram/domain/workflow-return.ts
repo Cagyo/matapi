@@ -4,7 +4,23 @@ export type ExternalWorkflow =
   | 'logs' | 'csv' | 'language' | 'help' | 'sensor-add'
   | 'sensor-modify' | 'sensor-remove' | 'sensor-import' | 'sensor-export'
   | 'drive-status' | 'drive-setup' | 'storage-cleanup' | 'health'
-  | 'system-update' | 'system-restart' | 'invite' | 'camera';
+  | 'system-update' | 'system-restart' | 'invite' | 'camera' | 'feature';
+
+/** Telegram's receipt boundary deliberately mirrors, but does not import, Feature state. */
+export type FeatureAttentionReason =
+  | 'install-failed'
+  | 'partial-state-uncertain'
+  | 'readiness-failed'
+  | 'restart-required';
+
+export interface FeatureWorkflowOperation {
+  kind: 'feature-mutation';
+  feature: 'digital' | 'uart' | 'zigbee' | 'motion' | 'rtsp';
+  action: 'install' | 'enable' | 'disable' | 'verify';
+  expectedInstalled: boolean;
+  expectedEnabled: boolean;
+  expectedAttentionReason: FeatureAttentionReason | null;
+}
 
 export type WorkflowReturnPhase = 'cancellable' | 'running';
 export type WorkflowReturnDestination = 'origin' | 'home';
@@ -36,6 +52,7 @@ const WORKFLOWS = new Set<ExternalWorkflow>([
   'sensor-modify', 'sensor-remove', 'sensor-import', 'sensor-export',
   'drive-status', 'drive-setup', 'storage-cleanup', 'health',
   'system-update', 'system-restart', 'invite', 'camera',
+  'feature',
 ]);
 
 export function workflowReturnCallback(

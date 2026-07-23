@@ -40,6 +40,7 @@ import { CompareAndSetQuietHoursUseCase } from './application/compare-and-set-qu
 import { SetAutoCleanThresholdUseCase } from './application/set-auto-clean-threshold.use-case';
 import { HomeNavigationUseCase } from './application/home-navigation.use-case';
 import { BeginWorkflowReturnUseCase } from './application/begin-workflow-return.use-case';
+import { ClaimFeatureMutationUseCase } from './application/claim-feature-mutation.use-case';
 import { ClaimWorkflowReturnUseCase } from './application/claim-workflow-return.use-case';
 import { CompleteWorkflowReturnUseCase } from './application/complete-workflow-return.use-case';
 import { ResolveWorkflowOriginUseCase } from './application/resolve-workflow-origin.use-case';
@@ -232,6 +233,7 @@ const mode = resolveBotMode();
     SetAutoCleanThresholdUseCase,
     HomeNavigationUseCase,
     BeginWorkflowReturnUseCase,
+    ClaimFeatureMutationUseCase,
     UpdateWorkflowReturnUseCase,
     ClaimWorkflowReturnUseCase,
     CompleteWorkflowReturnUseCase,

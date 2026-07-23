@@ -151,6 +151,20 @@ describe('WorkflowEntryCoordinator', () => {
     await expect(coordinator.validateCurrent(context(), receipt)).resolves.toBe(false);
   });
 
+  it('loads only the matching current pending or executing workflow receipt', async () => {
+    const actions = { findWorkflowReturn: vi.fn().mockResolvedValue(receipt) };
+    const coordinator = new WorkflowEntryCoordinator(
+      { execute: vi.fn() } as unknown as BeginWorkflowReturnUseCase,
+      new WorkflowDraftRegistry(), new WorkflowOperationQueue(), actions as never,
+      { now: () => new Date('2030-01-01T00:00:00.000Z') },
+    );
+
+    await expect(coordinator.loadCurrent(context(), receipt.id, 'camera')).resolves.toEqual(receipt);
+    await expect(coordinator.loadCurrent(context(), receipt.id, 'feature')).resolves.toBeNull();
+    actions.findWorkflowReturn.mockResolvedValueOnce({ ...receipt, status: 'returned' });
+    await expect(coordinator.loadCurrent(context(), receipt.id, 'camera')).resolves.toBeNull();
+  });
+
   it('cleans an atomically replaced cancellable draft only after replacement', async () => {
     const replaced = { ...receipt, id: 'qrstuvwxyzabcdef' } satisfies WorkflowReturnReceipt;
     const { coordinator, registry, execute } = setup({ receipt, replaced });

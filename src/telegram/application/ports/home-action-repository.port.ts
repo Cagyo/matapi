@@ -1,5 +1,5 @@
 import type { ClaimedExternalAction, HomeActionReceipt, UndoReceiptKind } from '../../domain/home-action-receipt';
-import type { WorkflowDeliveryStage, WorkflowReturnPhase, WorkflowReturnReceipt } from '../../domain/workflow-return';
+import type { FeatureWorkflowOperation, WorkflowDeliveryStage, WorkflowReturnPhase, WorkflowReturnReceipt } from '../../domain/workflow-return';
 
 export const HOME_ACTION_REPOSITORY = Symbol('HOME_ACTION_REPOSITORY');
 
@@ -7,6 +7,10 @@ export type WorkflowClaimResult =
   | { kind: 'claimed' | 'resumable'; receipt: WorkflowReturnReceipt }
   | { kind: 'returned'; receipt: WorkflowReturnReceipt }
   | { kind: 'expired' | 'superseded' | 'terminal' };
+
+export type FeatureMutationClaimResult =
+  | { kind: 'claimed'; receipt: WorkflowReturnReceipt; operation: FeatureWorkflowOperation }
+  | { kind: 'expired' | 'superseded' | 'terminal' | 'unauthorized' | 'mismatched' };
 
 export interface HomeActionRepositoryPort {
   create(receipt: HomeActionReceipt): Promise<void>;
@@ -21,8 +25,11 @@ export interface HomeActionRepositoryPort {
   finishExternal(input: { action: ClaimedExternalAction; outcome: 'completed' | 'failed'; now: Date }): Promise<void>;
   beginWorkflowReturn(receipt: WorkflowReturnReceipt): Promise<WorkflowReturnReceipt | null>;
   findWorkflowReturn(input: { userId: number; chatId: number; now: Date }): Promise<WorkflowReturnReceipt | null>;
+  findWorkflowReturnExact(input: { userId: number; chatId: number; id: string; now: Date }): Promise<WorkflowReturnReceipt | null>;
   updateWorkflowReturnPhase(input: { userId: number; chatId: number; id: string; phase: WorkflowReturnPhase; expiresAt: Date; now: Date }): Promise<'updated' | 'expired' | 'superseded' | 'terminal'>;
   updateWorkflowReturnDeliveryStage(input: { userId: number; chatId: number; id: string; stage: Exclude<WorkflowDeliveryStage, 'pending'>; now: Date }): Promise<'updated' | 'expired' | 'superseded' | 'terminal'>;
   claimWorkflowReturn(input: { userId: number; chatId: number; id: string; now: Date }): Promise<WorkflowClaimResult>;
+  claimWorkflowReturnExact(input: { userId: number; chatId: number; id: string; now: Date }): Promise<WorkflowClaimResult>;
+  claimFeatureMutation(input: { userId: number; chatId: number; id: string; now: Date }): Promise<FeatureMutationClaimResult>;
   finishWorkflowReturn(input: { userId: number; chatId: number; id: string; outcome: 'returned' | 'completed'; now: Date }): Promise<'finished' | 'superseded' | 'terminal'>;
 }

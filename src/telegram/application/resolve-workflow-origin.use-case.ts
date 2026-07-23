@@ -27,7 +27,7 @@ export function naturalWorkflowOrigin(workflow: ExternalWorkflow): HomeView {
       return { kind: 'admin-storage' };
     case 'health': case 'system-update': case 'system-restart':
       return { kind: 'admin-system' };
-    case 'invite': return { kind: 'admin-tools' };
+    case 'invite': case 'feature': return { kind: 'admin-tools' };
     case 'camera': return { kind: 'home', checking: false };
   }
 }

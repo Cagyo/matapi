@@ -5,6 +5,7 @@ import {
 } from '../../../src/telegram/domain/home-action-receipt';
 import type {
   ExternalWorkflow,
+  FeatureWorkflowOperation,
   WorkflowReturnPhase,
   WorkflowReturnReceipt,
 } from '../../../src/telegram/domain/workflow-return';
@@ -155,6 +156,51 @@ describe('Workflow return receipt validation', () => {
   it('rejects unknown receipt and payload keys', () => {
     expect(isHomeActionReceipt({ ...receipt(), unknown: true })).toBe(false);
     expect(isHomeActionReceipt({ ...receipt(), payload: { ...receipt().payload, unknown: true } })).toBe(false);
+  });
+
+  it('accepts a strictly shaped feature mutation operation', () => {
+    const operation: FeatureWorkflowOperation = {
+      kind: 'feature-mutation',
+      feature: 'digital',
+      action: 'enable',
+      expectedInstalled: true,
+      expectedEnabled: false,
+      expectedAttentionReason: null,
+    };
+    const feature = receipt({
+      payload: {
+        ...receipt().payload,
+        workflow: 'feature',
+        operation,
+        deliveryStage: 'pending',
+      },
+    });
+
+    expect(isHomeActionReceipt(feature)).toBe(true);
+    expect(isHomeActionReceipt({
+      ...feature,
+      payload: {
+        ...feature.payload,
+        operation: { ...operation, command: 'apt' },
+      },
+    })).toBe(false);
+  });
+
+  it('allows a feature list receipt but rejects operations on another workflow', () => {
+    const operation = {
+      kind: 'feature-mutation',
+      feature: 'digital',
+      action: 'enable',
+      expectedInstalled: true,
+      expectedEnabled: false,
+      expectedAttentionReason: null,
+    } as const;
+    expect(isHomeActionReceipt(receipt({
+      payload: { ...receipt().payload, workflow: 'feature', deliveryStage: 'pending' },
+    }))).toBe(true);
+    expect(isHomeActionReceipt(receipt({
+      payload: { ...receipt().payload, operation },
+    } as Partial<WorkflowReturnReceipt>))).toBe(false);
   });
 
   it('keeps the workflow return receipt assignable to the shared receipt union', () => {

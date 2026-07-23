@@ -4,6 +4,7 @@ import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import * as schema from '../../../src/database/schema';
 import { DrizzleHomeActionRepository } from '../../../src/telegram/infrastructure/drizzle-home-action.repository';
+import type { WorkflowReturnReceipt } from '../../../src/telegram/domain/workflow-return';
 
 const NOW = new Date('2030-01-01T00:00:00.000Z');
 const LATER = new Date('2030-01-01T00:01:00.000Z');
@@ -35,6 +36,34 @@ describe('DrizzleHomeActionRepository', () => {
   it('fails closed for a persisted mismatched kind, status, token, or payload', async () => {
     sqlite.prepare(`INSERT INTO home_action_receipts (user_id, chat_id, kind, id, session_token, status, payload, expires_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(100, 200, 'cleanup-confirmation', '1234567890abcdef', null, 'pending', '{}', LATER.getTime() / 1000, NOW.getTime() / 1000);
     await expect(repository.claimExternal({ userId: 100, chatId: 200, token: 'token-a', kind: 'cleanup-confirmation', id: '1234567890abcdef', now: NOW })).resolves.toEqual({ kind: 'superseded' });
+  });
+
+  it('atomically claims only the exact pending feature mutation for a current admin', async () => {
+    sqlite.prepare("UPDATE users SET role = 'admin' WHERE telegram_id = 100").run();
+    const receipt: WorkflowReturnReceipt = {
+      id: 'AbCdEf0123_-xyZ9', userId: 100, chatId: 200, kind: 'workflow-return',
+      sessionToken: null, status: 'pending', expiresAt: LATER,
+      payload: {
+        workflow: 'feature', phase: 'cancellable', originSource: 'natural-parent',
+        origin: { kind: 'admin-tools' },
+        operation: {
+          kind: 'feature-mutation', feature: 'digital', action: 'enable',
+          expectedInstalled: true, expectedEnabled: false, expectedAttentionReason: null,
+        },
+        deliveryStage: 'pending',
+      },
+    };
+    await repository.beginWorkflowReturn(receipt);
+
+    const claims = await Promise.all([
+      repository.claimFeatureMutation({ userId: 100, chatId: 200, id: receipt.id, now: NOW }),
+      repository.claimFeatureMutation({ userId: 100, chatId: 200, id: receipt.id, now: NOW }),
+    ]);
+    expect(claims).toContainEqual(expect.objectContaining({
+      kind: 'claimed', receipt: expect.objectContaining({ id: receipt.id, status: 'executing' }),
+      operation: expect.objectContaining({ feature: 'digital', action: 'enable' }),
+    }));
+    expect(claims).toContainEqual({ kind: 'terminal' });
   });
 
   it('atomically confirms a pause with its foundation receipt and Home undo', async () => {

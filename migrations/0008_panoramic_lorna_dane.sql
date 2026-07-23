@@ -1,0 +1,1 @@
+ALTER TABLE `home_action_receipts` ADD `current_slot` integer DEFAULT 1;

@@ -57,6 +57,20 @@
       "when": 1784785942508,
       "tag": "0007_flashy_golden_guardian",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1784833716420,
+      "tag": "0008_panoramic_lorna_dane",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1784833728046,
+      "tag": "0009_bored_silhouette",
+      "breakpoints": true
     }
   ]
 }

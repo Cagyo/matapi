@@ -153,8 +153,8 @@ export const homeSessions = sqliteTable(
 );
 
 // ─── Home Action Receipts ───
-// One current receipt per Home action kind/user/chat. Replacing a receipt is a
-// bounded invalidation mechanism; terminal external work stays inspectable.
+// Current receipt selection is separate from receipt identity. Replacements
+// demote the old current row so in-flight work can finish against its exact ID.
 export const homeActionReceipts = sqliteTable(
   'home_action_receipts',
   {
@@ -162,13 +162,20 @@ export const homeActionReceipts = sqliteTable(
     chatId: integer('chat_id').notNull(),
     kind: text('kind').notNull(),
     id: text('id').notNull(),
+    /** `1` for the sole current receipt; `NULL` keeps historical rows unique-safe. */
+    currentSlot: integer('current_slot').default(1),
     sessionToken: text('session_token'),
     status: text('status').notNull(),
     payload: text('payload').notNull(),
     expiresAt: integer('expires_at', { mode: 'timestamp' }).notNull(),
     updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
   },
-  (table) => [primaryKey({ columns: [table.userId, table.chatId, table.kind] })],
+  (table) => [
+    primaryKey({ columns: [table.userId, table.chatId, table.kind, table.id] }),
+    uniqueIndex('uq_home_action_receipts_current')
+      .on(table.userId, table.chatId, table.kind, table.currentSlot),
+    index('idx_home_action_receipts_identity').on(table.userId, table.chatId, table.kind, table.id),
+  ],
 );
 
 // ─── Invite Codes ───

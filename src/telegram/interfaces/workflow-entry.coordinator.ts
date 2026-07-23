@@ -13,6 +13,7 @@ import type { Locale } from '../domain/locale';
 import type { Role } from '../domain/role';
 import type {
   ExternalWorkflow,
+  FeatureWorkflowOperation,
   WorkflowDeliveryStage,
   WorkflowReturnReceipt,
 } from '../domain/workflow-return';
@@ -54,6 +55,7 @@ export class WorkflowEntryCoordinator {
     ctx: TelegramContext,
     workflow: ExternalWorkflow,
     origin: WorkflowOrigin,
+    operation?: FeatureWorkflowOperation,
   ): Promise<WorkflowReturnReceipt | null> {
     const identity = currentWorkflowIdentity(ctx);
     if (!identity) return null;
@@ -66,6 +68,7 @@ export class WorkflowEntryCoordinator {
         origin: origin.source === 'captured' ? origin.view : naturalWorkflowOrigin(workflow),
         originSource: origin.source,
         sessionToken: origin.source === 'captured' ? origin.sessionToken : null,
+        ...(operation ? { operation } : {}),
       });
       if (result.replaced?.payload.phase === 'cancellable') {
         await this.drafts.cancelExact(result.replaced);
@@ -88,15 +91,28 @@ export class WorkflowEntryCoordinator {
     if (!identity) return false;
     if (receipt.userId !== identity.userId || receipt.chatId !== identity.chatId) return false;
 
+    return (await this.loadCurrent(ctx, receipt.id, receipt.payload.workflow)) !== null;
+  }
+
+  /** Durable callback/recovery lookup: only the current receipt may reopen UI. */
+  async loadCurrent(
+    ctx: TelegramContext,
+    receiptId: string,
+    workflow: ExternalWorkflow,
+  ): Promise<WorkflowReturnReceipt | null> {
+    const identity = currentWorkflowIdentity(ctx);
+    if (!identity) return null;
     return this.operations.run(identity.userId, identity.chatId, async () => {
-      const current = await this.actions.findWorkflowReturn({
+      const receipt = await this.actions.findWorkflowReturn({
         userId: identity.userId,
         chatId: identity.chatId,
         now: this.clock.now(),
       });
-      return current?.id === receipt.id
-        && current.payload.workflow === receipt.payload.workflow
-        && (current.status === 'pending' || current.status === 'executing');
+      return receipt?.id === receiptId
+        && receipt.payload.workflow === workflow
+        && (receipt.status === 'pending' || receipt.status === 'executing')
+        ? receipt
+        : null;
     });
   }
 
@@ -179,6 +195,8 @@ export class WorkflowEntryCoordinator {
   async completeHeadless(input: {
     identity: CurrentWorkflowIdentity;
     workflow: ExternalWorkflow;
+    /** Recovery supplies the durable job-bound receipt, never a newer current workflow. */
+    receiptId?: string;
     deliver(): Promise<void>;
     /**
      * A resumable receipt may have lost its one direct delivery attempt.
@@ -190,20 +208,23 @@ export class WorkflowEntryCoordinator {
   }): Promise<HeadlessWorkflowCompletionResult> {
     const { identity } = input;
     return this.operations.run(identity.userId, identity.chatId, async () => {
-      const current = await this.actions.findWorkflowReturn({
-        userId: identity.userId,
-        chatId: identity.chatId,
-        now: this.clock.now(),
-      });
+      const current = input.receiptId
+        ? await this.actions.findWorkflowReturnExact({
+          userId: identity.userId, chatId: identity.chatId, id: input.receiptId, now: this.clock.now(),
+        })
+        : await this.actions.findWorkflowReturn({
+          userId: identity.userId, chatId: identity.chatId, now: this.clock.now(),
+        });
       if (!current) return 'no-workflow';
       if (current.payload.workflow !== input.workflow) return 'no-workflow';
 
-      const claim = await this.actions.claimWorkflowReturn({
-        userId: identity.userId,
-        chatId: identity.chatId,
-        id: current.id,
-        now: this.clock.now(),
-      });
+      const claim = input.receiptId
+        ? await this.actions.claimWorkflowReturnExact({
+          userId: identity.userId, chatId: identity.chatId, id: current.id, now: this.clock.now(),
+        })
+        : await this.actions.claimWorkflowReturn({
+          userId: identity.userId, chatId: identity.chatId, id: current.id, now: this.clock.now(),
+        });
       if (claim.kind === 'expired' || claim.kind === 'superseded' || claim.kind === 'terminal') {
         return 'no-workflow';
       }

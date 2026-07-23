@@ -106,7 +106,7 @@ function describeWorkflowReturnRepositoryContract(
       await expect(harness.repository.beginWorkflowReturn(replacement)).resolves.toEqual(first);
       await expect(harness.repository.findWorkflowReturn({ userId: 100, chatId: 200, now: NOW }))
         .resolves.toEqual(replacement);
-      await expect(harness.countRows('workflow-return')).resolves.toBe(1);
+      await expect(harness.countRows('workflow-return')).resolves.toBe(2);
       await expect(harness.countRows('cleanup-confirmation')).resolves.toBe(1);
     });
 
@@ -214,6 +214,33 @@ function describeWorkflowReturnRepositoryContract(
       await expect(harness.repository.claimWorkflowReturn({
         userId: 100, chatId: 200, id: pending.id, now: NOW,
       })).resolves.toEqual({ kind: 'resumable', receipt: { ...pending, status: 'executing' } });
+    });
+
+    it('keeps an executing receipt deliverable by exact ID after a new current workflow starts', async () => {
+      const executing = workflowReceipt();
+      const replacement = workflowReceipt('ZyXwVu9876_-tsR5', {
+        payload: { ...executing.payload, workflow: 'camera' },
+      });
+      await harness.repository.beginWorkflowReturn(executing);
+      await harness.repository.claimWorkflowReturn({
+        userId: 100, chatId: 200, id: executing.id, now: NOW,
+      });
+      await harness.repository.beginWorkflowReturn(replacement);
+
+      await expect(harness.repository.findWorkflowReturnExact({
+        userId: 100, chatId: 200, id: executing.id, now: new Date('2030-01-03T00:00:00.000Z'),
+      })).resolves.toMatchObject({ id: executing.id, status: 'executing' });
+      await expect(harness.repository.claimWorkflowReturnExact({
+        userId: 100, chatId: 200, id: executing.id, now: NOW,
+      })).resolves.toMatchObject({ kind: 'resumable', receipt: { id: executing.id } });
+      await expect(harness.repository.updateWorkflowReturnDeliveryStage({
+        userId: 100, chatId: 200, id: executing.id, stage: 'direct-attempted', now: NOW,
+      })).resolves.toBe('updated');
+      await expect(harness.repository.finishWorkflowReturn({
+        userId: 100, chatId: 200, id: executing.id, outcome: 'completed', now: NOW,
+      })).resolves.toBe('finished');
+      await expect(harness.repository.findWorkflowReturn({ userId: 100, chatId: 200, now: NOW }))
+        .resolves.toEqual(replacement);
     });
 
     it('CAS-transitions a stage-less receipt through its durable direct attempt', async () => {
@@ -439,16 +466,20 @@ describeWorkflowReturnRepositoryContract('InMemoryHomeActionRepository', () => {
   const repository = new InMemoryHomeActionRepository();
   const storage = new FailOnceMap<string, unknown>();
   (repository as unknown as { receipts: Map<string, unknown> }).receipts = storage;
+  const current = new Map<string, string>();
+  (repository as unknown as { current: Map<string, string> }).current = current;
   return {
     repository,
     countRows: async (kind) => [...storage.values()].filter((receipt) => (
       typeof receipt === 'object' && receipt !== null && 'kind' in receipt && receipt.kind === kind
     )).length,
     injectMalformedWorkflowRow: async () => {
-      storage.set('100:200:workflow-return', {
+      const identity = '100:200:workflow-return:AbCdEf0123_-xyZ9';
+      storage.set(identity, {
         id: 'AbCdEf0123_-xyZ9', userId: 100, chatId: 200, kind: 'workflow-return',
         sessionToken: null, status: 'pending', expiresAt: LATER, payload: '{malformed',
       });
+      current.set('100:200:workflow-return', identity);
     },
     failNextWorkflowWrite: async () => storage.arm(),
     dispose: () => undefined,
