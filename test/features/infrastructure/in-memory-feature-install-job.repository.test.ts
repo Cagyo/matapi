@@ -38,6 +38,76 @@ describe('InMemoryFeatureInstallJobRepository', () => {
     });
   });
 
+  it('owns queued timestamps independently of caller and returned jobs', async () => {
+    const features = new InMemoryFeatureRepository([feature('motion')]);
+    const jobs = new InMemoryFeatureInstallJobRepository(features);
+    const createdAt = new Date('2030-01-02T03:04:05.000Z');
+    const queued = await jobs.createQueued({
+      id: 'abcdefghijklmnop',
+      feature: 'motion',
+      requestedByUserId: 11,
+      requestedInChatId: 22,
+      workflowReceiptId: 'receipt-abcdefghijklmnop',
+      expected: { installed: false, enabled: false },
+      now: createdAt,
+    });
+
+    expect(queued.createdAt).not.toBe(queued.updatedAt);
+
+    createdAt.setTime(new Date('2040-01-01T00:00:00.000Z').getTime());
+    queued.createdAt.setTime(new Date('2041-01-01T00:00:00.000Z').getTime());
+    queued.updatedAt.setTime(new Date('2042-01-01T00:00:00.000Z').getTime());
+
+    const found = await jobs.findById(queued.id);
+    expect(found).toMatchObject({
+      createdAt: new Date('2030-01-02T03:04:05.000Z'),
+      updatedAt: new Date('2030-01-02T03:04:05.000Z'),
+    });
+
+    found?.createdAt.setTime(new Date('2043-01-01T00:00:00.000Z').getTime());
+    found?.updatedAt.setTime(new Date('2044-01-01T00:00:00.000Z').getTime());
+
+    const active = await jobs.findActive();
+    expect(active).toMatchObject({
+      createdAt: new Date('2030-01-02T03:04:05.000Z'),
+      updatedAt: new Date('2030-01-02T03:04:05.000Z'),
+    });
+  });
+
+  it('owns transition timestamps and terminal-job results independently', async () => {
+    const features = new InMemoryFeatureRepository([feature('motion')]);
+    const jobs = new InMemoryFeatureInstallJobRepository(features);
+    const queued = await create(jobs, 'abcdefghijklmnop', 'motion');
+    const runningAt = new Date('2030-01-02T03:05:05.000Z');
+    const running = await jobs.markRunning(queued.id, runningAt);
+
+    runningAt.setTime(new Date('2040-01-01T00:00:00.000Z').getTime());
+    running.updatedAt.setTime(new Date('2041-01-01T00:00:00.000Z').getTime());
+
+    await expect(jobs.findById(queued.id)).resolves.toMatchObject({
+      updatedAt: new Date('2030-01-02T03:05:05.000Z'),
+    });
+
+    const completedAt = new Date('2030-01-02T03:06:05.000Z');
+    const completed = await jobs.terminalizeSuccess({ id: queued.id, restartScope: 'worker', now: completedAt });
+
+    completedAt.setTime(new Date('2042-01-01T00:00:00.000Z').getTime());
+    completed.createdAt.setTime(new Date('2043-01-01T00:00:00.000Z').getTime());
+    completed.updatedAt.setTime(new Date('2044-01-01T00:00:00.000Z').getTime());
+
+    const [recent] = await jobs.listRecentTerminal(1);
+    expect(recent).toMatchObject({
+      createdAt: now,
+      updatedAt: new Date('2030-01-02T03:06:05.000Z'),
+    });
+
+    recent.updatedAt.setTime(new Date('2045-01-01T00:00:00.000Z').getTime());
+    await expect(jobs.findById(queued.id)).resolves.toMatchObject({
+      createdAt: now,
+      updatedAt: new Date('2030-01-02T03:06:05.000Z'),
+    });
+  });
+
   it('keeps a running job active and restores the feature when success cannot enable it', async () => {
     const features = new CompareAndSetFailureFeatureRepository(feature('motion'));
     const jobs = new InMemoryFeatureInstallJobRepository(features);

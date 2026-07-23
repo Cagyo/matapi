@@ -40,22 +40,22 @@ export class InMemoryFeatureInstallJobRepository implements FeatureInstallJobRep
         previousEnabled: feature.enabled,
         restartScope: null,
         failureCode: null,
-        createdAt: input.now,
-        updatedAt: input.now,
+        createdAt: cloneDate(input.now),
+        updatedAt: cloneDate(input.now),
       };
       this.jobs.set(job.id, job);
-      return { ...job };
+      return cloneJob(job);
     });
   }
 
   async findById(id: string): Promise<FeatureInstallJob | null> {
     const job = this.jobs.get(id);
-    return job ? { ...job } : null;
+    return job ? cloneJob(job) : null;
   }
 
   async findActive(): Promise<FeatureInstallJob | null> {
     const job = [...this.jobs.values()].find((candidate) => candidate.activeSlot === 1);
-    return job ? { ...job } : null;
+    return job ? cloneJob(job) : null;
   }
 
   async listRecentTerminal(limit: number): Promise<readonly FeatureInstallJob[]> {
@@ -63,15 +63,15 @@ export class InMemoryFeatureInstallJobRepository implements FeatureInstallJobRep
       .filter((job) => job.status === 'succeeded' || job.status === 'failed')
       .sort((left, right) => right.updatedAt.getTime() - left.updatedAt.getTime())
       .slice(0, limit)
-      .map((job) => ({ ...job }));
+      .map(cloneJob);
   }
 
   async markRunning(id: string, now: Date): Promise<FeatureInstallJob> {
     return this.serialize(async () => {
       const job = this.requireQueued(id);
       job.status = 'running';
-      job.updatedAt = now;
-      return { ...job };
+      job.updatedAt = cloneDate(now);
+      return cloneJob(job);
     });
   }
 
@@ -88,8 +88,8 @@ export class InMemoryFeatureInstallJobRepository implements FeatureInstallJobRep
       job.activeSlot = null;
       job.restartScope = input.restartScope;
       job.failureCode = null;
-      job.updatedAt = input.now;
-      return { ...job };
+      job.updatedAt = cloneDate(input.now);
+      return cloneJob(job);
     });
   }
 
@@ -119,8 +119,8 @@ export class InMemoryFeatureInstallJobRepository implements FeatureInstallJobRep
       job.activeSlot = null;
       job.restartScope = null;
       job.failureCode = input.failureCode;
-      job.updatedAt = input.now;
-      return { ...job };
+      job.updatedAt = cloneDate(input.now);
+      return cloneJob(job);
     });
   }
 
@@ -190,4 +190,16 @@ export class InMemoryFeatureInstallJobRepository implements FeatureInstallJobRep
     this.stateChanges = result.then(() => undefined, () => undefined);
     return result;
   }
+}
+
+function cloneJob(job: FeatureInstallJob): FeatureInstallJob {
+  return {
+    ...job,
+    createdAt: cloneDate(job.createdAt),
+    updatedAt: cloneDate(job.updatedAt),
+  };
+}
+
+function cloneDate(date: Date): Date {
+  return new Date(date.getTime());
 }

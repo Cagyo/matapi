@@ -173,3 +173,27 @@ git diff --check
 ```
 
 Passed: persistence suite 4 files, 15 tests; TypeScript check and whitespace check both exited with code 0.
+
+## Final review follow-up: in-memory job timestamp ownership
+
+### RED evidence
+
+Added regression tests that mutate the `Date` supplied to queued creation and running/success transitions, then mutate timestamps from returned queued, running, completed, found, active, and terminal-history jobs. Ran:
+
+```sh
+yarn vitest run test/features/infrastructure/in-memory-feature-install-job.repository.test.ts
+```
+
+It failed as expected: queued `createdAt` and `updatedAt` were the same object, and mutating the returned running job changed the persisted `updatedAt` to `2041-01-01T00:00:00.000Z`.
+
+### GREEN evidence
+
+The in-memory adapter now clones every timestamp on ingress and returns jobs through a shared `cloneJob` helper that also clones both timestamp fields. This preserves the existing state-machine and serialization behavior while matching SQLite's value-style timestamp boundary.
+
+```sh
+yarn test test/database/feature-management-migration.test.ts test/features/infrastructure/drizzle-feature-install-job.repository.test.ts test/features/infrastructure/drizzle-feature.query.test.ts test/features/infrastructure/in-memory-feature-install-job.repository.test.ts
+yarn tsc --noEmit
+git diff --check
+```
+
+Passed: persistence suite 4 files, 17 tests; TypeScript and whitespace checks exited with code 0.
