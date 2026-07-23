@@ -938,7 +938,18 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
 
   /** Settles every waiter associated with an abandoned preflight atomically. */
   private discardPending(pending: PendingOpen): void {
-    if (this.pending === pending) this.pending = undefined;
+    if (this.pending === pending) {
+      this.pending = undefined;
+      this.rejectPending(pending);
+      // A different-camera open that arrived while readiness was pending is
+      // the current last-switch-wins replacement. Preserve it; explicit stop
+      // and shutdown clear this field before the preflight resumes.
+      if (pending.replacement) {
+        this.beginReplacement(pending);
+        return;
+      }
+      return;
+    }
     this.rejectPending(pending);
     this.rejectReplacement(pending);
   }

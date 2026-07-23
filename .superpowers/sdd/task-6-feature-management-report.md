@@ -10,7 +10,7 @@ Result: failed because `FeatureCameraRuntimeLifecycleService` did not exist.
 
 `yarn test test/camera/application test/telegram/application/get-home-screen.use-case.test.ts test/telegram/interfaces/camera.handler.test.ts test/telegram/interfaces/camera-sources.handler.test.ts test/telegram/interfaces/home-renderer.test.ts test/camera/camera-composition.test.ts test/camera/camera-runtime-composition.test.ts`
 
-Result: 31 files passed, 256 tests passed.
+Result: 31 files passed, 257 tests passed.
 
 `yarn tsc --noEmit`
 
@@ -35,5 +35,6 @@ Result: passed.
 - Stale callbacks use the active locale and do not mark workflows running.
 - Replacement start rejection settles every pending request, while browse/source continuations and Home availability now fail closed.
 - A cancelled replacement preflight settles its joined waiters after readiness resolves and cannot block a later open.
+- A different-camera supersession during deferred preflight preserves last-switch-wins without starting the abandoned source.
 
 No bootstrap limitation remains: the Camera module registers both keyed lifecycle entries directly.

@@ -85,6 +85,38 @@ describe('LiveStreamSessionService', () => {
     await expect(later).resolves.toMatchObject({ cameraName: 'later' });
   });
 
+  it('starts the last superseding camera after a cancelled replacement preflight', async () => {
+    let release!: () => void;
+    const availability: FeatureAvailabilityPort = {
+      awaitInitialVerification: vi.fn(), inspect: vi.fn(),
+      requireReady: vi.fn()
+        .mockResolvedValueOnce(undefined)
+        .mockImplementationOnce(() => new Promise<void>((resolve) => { release = resolve; }))
+        .mockResolvedValue(undefined),
+    };
+    const gateway = new DeferredGateway();
+    const service = createService({ gateway, availability });
+    const first = service.open(source('front'), 1);
+    await vi.waitFor(() => expect(gateway.startCalls).toHaveLength(1));
+    const replacement = service.open(source('garden'), 2);
+    gateway.resolveStart();
+    await expect(first).rejects.toMatchObject({ code: 'LIVE_STREAM_UNAVAILABLE' });
+    await vi.waitFor(() => expect(availability.requireReady).toHaveBeenCalledTimes(2));
+    const joiner = service.open(source('garden'), 3);
+    const superseding = service.open(source('patio'), 4);
+    await vi.waitFor(() => expect((service as unknown as { pending?: { replacement?: { source: LiveStreamSource } } }).pending?.replacement?.source.cameraId).toBe('patio'));
+    release();
+
+    await expect(Promise.allSettled([replacement, joiner])).resolves.toEqual([
+      expect.objectContaining({ status: 'rejected' }),
+      expect.objectContaining({ status: 'rejected' }),
+    ]);
+    await vi.waitFor(() => expect(gateway.startCalls).toHaveLength(2));
+    expect(gateway.startCalls[1].source.cameraId).toBe('patio');
+    gateway.resolveStart();
+    await expect(superseding).resolves.toMatchObject({ cameraName: 'patio' });
+  });
+
   it('starts the full session deadline only after tunnel readiness succeeds', async () => {
     vi.useFakeTimers();
     const clock = new FakeMonotonicClock(1_000);
