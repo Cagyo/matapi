@@ -327,6 +327,7 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
   }
 
   private async handleBrowseText(ctx: TelegramContext, input: BrowseInput, text: string): Promise<void> {
+    if (!(await this.requireFeature(ctx, input.receipt, 'motion'))) return;
     if (Date.now() - input.createdAtMs > CAMERA_BROWSE_TTL_MS) {
       this.clearBrowse(ctx, input.receipt.id);
       await this.complete(ctx, input.receipt, () => ctx.reply(en.camera.browse.expiredInput));
@@ -648,17 +649,24 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
       return true;
     } catch (error) {
       if (error instanceof FeatureUnavailableError) {
-        const feature = this.catalog(ctx).feature;
-        const copy = feature.stale;
-        const label = feature.names[name];
-        const message = error.state === 'installed-off' ? copy.disabled(label)
-          : error.state === 'needs-attention' ? copy.attention(label)
-            : error.state === 'installing' ? copy.installing(label) : copy.unavailable(label);
-        await this.complete(ctx, receipt, () => ctx.reply(message));
+        await this.replyFeatureUnavailable(ctx, receipt, error);
         return false;
       }
       throw error;
     }
+  }
+  private async replyFeatureUnavailable(
+    ctx: TelegramContext,
+    receipt: WorkflowReturnReceipt,
+    error: FeatureUnavailableError,
+  ): Promise<void> {
+    const feature = this.catalog(ctx).feature;
+    const copy = feature.stale;
+    const label = feature.names[error.feature === 'rtsp' ? 'rtsp' : 'motion'];
+    const message = error.state === 'installed-off' ? copy.disabled(label)
+      : error.state === 'needs-attention' ? copy.attention(label)
+        : error.state === 'installing' ? copy.installing(label) : copy.unavailable(label);
+    await this.complete(ctx, receipt, () => ctx.reply(message));
   }
   private async complete(
     ctx: TelegramContext,
@@ -691,6 +699,10 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
     error: unknown,
     action: string,
   ): Promise<void> {
+    if (error instanceof FeatureUnavailableError) {
+      await this.replyFeatureUnavailable(ctx, receipt, error);
+      return;
+    }
     const live = this.catalog(ctx).camera.live;
     if (error instanceof LiveStreamSourceUnavailableError) {
       await this.complete(ctx, receipt, () => ctx.reply(live.sourceUnavailable));

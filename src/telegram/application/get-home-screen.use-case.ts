@@ -38,12 +38,18 @@ export class GetHomeScreenUseCase {
     }
     if (input.view.kind === 'home') {
       const summary = await this.summary.execute(input.userId);
-      const [motion, rtsp] = await Promise.all([
-        this.availability?.inspect('motion'), this.availability?.inspect('rtsp'),
-      ]);
+      let motion: Awaited<ReturnType<FeatureAvailabilityPort['inspect']>> | undefined;
+      let rtsp: Awaited<ReturnType<FeatureAvailabilityPort['inspect']>> | undefined;
+      try {
+        [motion, rtsp] = await Promise.all([
+          this.availability?.inspect('motion'), this.availability?.inspect('rtsp'),
+        ]);
+      } catch {
+        // A failed availability projection must not expose camera controls.
+      }
       const operational = (status: Awaited<ReturnType<FeatureAvailabilityPort['inspect']>> | undefined) =>
         Boolean(status?.installed && status.enabled && status.ready && !status.busy && status.attentionReason === null);
-      return { kind: 'home', summary, checking: input.view.checking, cameraAvailable: this.availability ? operational(motion) || operational(rtsp) : true };
+      return { kind: 'home', summary, checking: input.view.checking, cameraAvailable: operational(motion) || operational(rtsp) };
     }
     if (input.view.kind === 'sensors') {
       const summary = await this.summary.execute(input.userId);

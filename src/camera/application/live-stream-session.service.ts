@@ -424,8 +424,13 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
       if (this.availability) await this.availability.requireReady(source.kind === 'rtsp' ? 'rtsp' : 'motion');
       this.sourceStartGate.assertCanStart(source.kind);
     } catch {
-      if (this.pending === pending) this.pending = undefined;
-      deferred.reject(new LiveStreamUnavailableError());
+      if (this.pending === pending) {
+        this.pending = undefined;
+        this.rejectPending(pending);
+        this.rejectReplacement(pending);
+      } else {
+        deferred.reject(new LiveStreamUnavailableError());
+      }
       return;
     }
     if (pending.cancelled || this.pending !== pending) {

@@ -38,7 +38,7 @@ describe('GetHomeScreenUseCase', () => {
       chatId: 70,
       role: 'user',
       view: { kind: 'home', checking: true },
-    })).resolves.toEqual({ kind: 'home', summary, checking: true, cameraAvailable: true });
+    })).resolves.toEqual({ kind: 'home', summary, checking: true, cameraAvailable: false });
     expect(getSummary.execute).toHaveBeenCalledTimes(1);
     expect(getSummary.execute).toHaveBeenCalledWith(7);
     expect(sensors.listDashboardPage).not.toHaveBeenCalled();

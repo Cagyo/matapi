@@ -33,5 +33,6 @@ Result: passed.
 - Deferred live-stream readiness creates pending state before awaiting and preserves a queued joiner.
 - RTSP source removal rechecks availability after session teardown; Home tests cover Motion-only, RTSP-only, both, and neither.
 - Stale callbacks use the active locale and do not mark workflows running.
+- Replacement start rejection settles every pending request, while browse/source continuations and Home availability now fail closed.
 
 No bootstrap limitation remains: the Camera module registers both keyed lifecycle entries directly.

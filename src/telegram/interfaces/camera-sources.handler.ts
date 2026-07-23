@@ -135,7 +135,8 @@ export class CameraSourcesHandler {
       try {
         await this.remove.execute(source.cameraId);
         await this.complete(ctx, receipt, () => ctx.reply(copy.removed(source.cameraName)));
-      } catch {
+      } catch (error) {
+        if (await this.replyUnavailable(ctx, receipt, error)) return;
         await this.complete(ctx, receipt, () => ctx.reply(copy.removeFailed));
       }
       return;
@@ -160,7 +161,6 @@ export class CameraSourcesHandler {
     const state = await this.activeStateFor(ctx);
     if (!state) return false;
     if (!(await this.requireAdmin(ctx, state.receipt))) return true;
-    if (!(await this.requireRtsp(ctx, state.receipt))) return true;
     const copy = this.copy(ctx);
     if (this.now() - state.createdAtMs > SOURCE_STATE_TTL_MS) {
       this.states.delete(this.keyFor(state));
@@ -174,6 +174,7 @@ export class CameraSourcesHandler {
       await this.complete(ctx, state.receipt, () => ctx.reply(copy.cancelled));
       return true;
     }
+    if (!(await this.requireRtsp(ctx, state.receipt))) return true;
     if (state.kind === 'camera') {
       if (text.length > 64 || hasControlCharacter(text)) {
         await ctx.reply(copy.invalidCamera, {
