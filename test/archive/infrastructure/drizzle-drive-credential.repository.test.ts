@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import * as schema from '../../../src/database/schema';
 import { AesGcmArchiveSecretAdapter } from '../../../src/archive/infrastructure/persistence/aes-gcm-archive-secret.adapter';
 import { DrizzleDriveCredentialRepository } from '../../../src/archive/infrastructure/persistence/drizzle-drive-credential.repository';
+import { DriveObjectConflictError } from '../../../src/archive/domain/errors/drive-object-conflict.error';
 
 describe('DrizzleDriveCredentialRepository', () => {
   let sqlite: Database.Database;
@@ -32,8 +33,22 @@ describe('DrizzleDriveCredentialRepository', () => {
   it('rejects a second staged slot without changing the existing staged generation', async () => {
     await repository.stage(staged('generation-1'));
 
-    await expect(repository.stage(staged('generation-2'))).rejects.toThrow();
+    await expect(repository.stage(staged('generation-2'))).rejects.toBeInstanceOf(DriveObjectConflictError);
     expect((await repository.loadStaged('receipt-1'))?.id).toBe('generation-1');
+  });
+
+  it('stores an allowlisted neutral error code rather than a provider response', async () => {
+    await repository.stage(staged('generation-1'));
+    await repository.storeExchangedTokens('generation-1', 0, tokens('old'));
+    const { active } = await repository.activate(activation('generation-1', 1, 'permission-1'));
+
+    await expect(repository.requireReauthorization(
+      active.id, active.revision, 'Bearer eyJhbGciOiJIUzI1NiJ9.provider-error-detail', 30,
+    )).resolves.toBe(true);
+
+    const row = sqlite.prepare('SELECT error_code FROM drive_connections WHERE id = ?').get(active.id) as { error_code: string | null };
+    expect(row.error_code).toBe('unknown');
+    expect(row.error_code).not.toContain('eyJhbGciOiJIUzI1NiJ9');
   });
 
   it('activates a different confirmed identity and retires the previous generation', async () => {

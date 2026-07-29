@@ -19,11 +19,24 @@ describe('AesGcmArchiveSecretAdapter', () => {
     await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
   });
 
-  it('rejects a valid envelope transplanted to another secret field', async () => {
+  it('rejects a valid envelope outside its installation, row, and secret-kind context', async () => {
     const cipher = new AesGcmArchiveSecretAdapter(await keyPath(temporaryDirectories));
     const envelope = await cipher.encrypt(Buffer.from('secret'), context);
 
+    await expect(cipher.decrypt(envelope, { ...context, installationId: 'install-2' })).rejects.toThrow(DriveCredentialCorruptError);
+    await expect(cipher.decrypt(envelope, { ...context, rowId: 'generation-2' })).rejects.toThrow(DriveCredentialCorruptError);
     await expect(cipher.decrypt(envelope, { ...context, kind: 'oauth-client' })).rejects.toThrow(DriveCredentialCorruptError);
+  });
+
+  it('rejects identity contexts whose NUL-delimited representations would collide', async () => {
+    const cipher = new AesGcmArchiveSecretAdapter(await keyPath(temporaryDirectories));
+    const envelope = await cipher.encrypt(Buffer.from('secret'), {
+      installationId: 'install-1\u0000generation-1', rowId: 'row-1', kind: 'oauth-token', schemaVersion: 1,
+    });
+
+    await expect(cipher.decrypt(envelope, {
+      installationId: 'install-1', rowId: 'generation-1\u0000row-1', kind: 'oauth-token', schemaVersion: 1,
+    })).rejects.toThrow(DriveCredentialCorruptError);
   });
 
   it('never creates a replacement key when the configured key is missing', async () => {

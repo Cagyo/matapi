@@ -60,10 +60,30 @@ export class AesGcmArchiveSecretAdapter implements ArchiveSecretCipherPort {
 }
 
 function associatedData(context: ArchiveSecretContext): Buffer {
-  if (!context.installationId || !context.rowId || !Number.isSafeInteger(context.schemaVersion) || context.schemaVersion < 1) {
+  if (!context.installationId
+    || !context.rowId
+    || (context.kind !== 'oauth-client' && context.kind !== 'oauth-token')
+    || !Number.isSafeInteger(context.schemaVersion)
+    || context.schemaVersion < 1) {
     throw new DriveCredentialCorruptError();
   }
-  return Buffer.from(`${context.installationId}\u0000${context.rowId}\u0000${context.kind}\u0000${context.schemaVersion}`, 'utf8');
+  return encodeTuple([
+    context.installationId,
+    context.rowId,
+    context.kind,
+    String(context.schemaVersion),
+  ]);
+}
+
+function encodeTuple(values: readonly string[]): Buffer {
+  const encoded = values.map((value) => {
+    const bytes = Buffer.from(value, 'utf8');
+    if (bytes.toString('utf8') !== value || bytes.length > 0xffff_ffff) throw new DriveCredentialCorruptError();
+    const length = Buffer.allocUnsafe(4);
+    length.writeUInt32BE(bytes.length);
+    return Buffer.concat([length, bytes]);
+  });
+  return Buffer.concat(encoded);
 }
 
 function decodeBase64(value: unknown): Buffer {

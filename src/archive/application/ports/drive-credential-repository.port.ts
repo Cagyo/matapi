@@ -45,6 +45,17 @@ export interface MergeRefreshedTokens {
   refreshedAtMs: number;
 }
 
+export const DRIVE_CREDENTIAL_ERROR_CODES = [
+  'authorization_required',
+  'access_denied',
+  'temporarily_unavailable',
+  'rate_limited',
+  'network_unavailable',
+  'unknown',
+] as const;
+
+export type DriveCredentialErrorCode = (typeof DRIVE_CREDENTIAL_ERROR_CODES)[number];
+
 export type DriveConnectionTerminalStatus = Extract<
   DriveConnectionStatus,
   'retired_unmanaged' | 'disconnected'

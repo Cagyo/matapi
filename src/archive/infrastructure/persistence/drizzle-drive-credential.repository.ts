@@ -11,6 +11,7 @@ import type {
   OAuthTokenSet,
   StageDriveConnection,
 } from '../../application/ports/drive-credential-repository.port';
+import type { DriveCredentialErrorCode } from '../../application/ports/drive-credential-repository.port';
 import {
   ARCHIVE_SECRET_CIPHER,
   type ArchiveSecretCipherPort,
@@ -37,36 +38,41 @@ export class DrizzleDriveCredentialRepository implements DriveCredentialReposito
       this.encryptTokens(emptyTokens(), input.installationId, input.id),
     ]);
     const connection = DriveConnection.stage({ id: input.id, installationId: input.installationId, nowMs: input.createdAtMs });
-    this.db.insert(driveConnections).values({
-      id: input.id,
-      installationId: input.installationId,
-      status: connection.status,
-      revision: connection.revision,
-      clientIdHash: input.clientIdHash,
-      clientEnvelope: stringifyEnvelope(clientEnvelope),
-      tokenEnvelope: stringifyEnvelope(tokenEnvelope),
-      currentSlot: null,
-      stagedSlot: 1,
-      permissionId: null,
-      email: null,
-      displayName: null,
-      rootFolderId: null,
-      motionFolderId: null,
-      backupsFolderId: null,
-      adminUserId: input.adminUserId,
-      chatId: input.chatId,
-      workflowReceiptId: input.receiptId,
-      workflowExpiresAt: input.expiresAtMs,
-      createdAt: input.createdAtMs,
-      updatedAt: input.createdAtMs,
-      activatedAt: null,
-      retiredAt: null,
-      errorCode: null,
-      alertCooldowns: {},
-      quotaReclamationStartedAt: null,
-      quotaReclaimedAt: null,
-      quotaReclamationErrorCode: null,
-    }).run();
+    try {
+      this.db.insert(driveConnections).values({
+        id: input.id,
+        installationId: input.installationId,
+        status: connection.status,
+        revision: connection.revision,
+        clientIdHash: input.clientIdHash,
+        clientEnvelope: stringifyEnvelope(clientEnvelope),
+        tokenEnvelope: stringifyEnvelope(tokenEnvelope),
+        currentSlot: null,
+        stagedSlot: 1,
+        permissionId: null,
+        email: null,
+        displayName: null,
+        rootFolderId: null,
+        motionFolderId: null,
+        backupsFolderId: null,
+        adminUserId: input.adminUserId,
+        chatId: input.chatId,
+        workflowReceiptId: input.receiptId,
+        workflowExpiresAt: input.expiresAtMs,
+        createdAt: input.createdAtMs,
+        updatedAt: input.createdAtMs,
+        activatedAt: null,
+        retiredAt: null,
+        errorCode: null,
+        alertCooldowns: {},
+        quotaReclamationStartedAt: null,
+        quotaReclaimedAt: null,
+        quotaReclamationErrorCode: null,
+      }).run();
+    } catch (error) {
+      if (isStagedSlotUniqueViolation(error)) throw conflict('A Drive setup is already staged');
+      throw error;
+    }
     return connection;
   }
 
@@ -226,7 +232,7 @@ export class DrizzleDriveCredentialRepository implements DriveCredentialReposito
         status: reauthorizationRequired.status,
         revision: reauthorizationRequired.revision,
         updatedAt: reauthorizationRequired.updatedAtMs,
-        errorCode: sanitizeErrorCode(errorCode),
+        errorCode: mapProviderErrorCode(errorCode),
       }).where(and(eq(driveConnections.id, generationId), eq(driveConnections.revision, expectedRevision), eq(driveConnections.currentSlot, 1), eq(driveConnections.status, 'active'))).run();
       return updated.changes === 1;
     });
@@ -261,7 +267,7 @@ export class DrizzleDriveCredentialRepository implements DriveCredentialReposito
         retiredAt: completed.retiredAtMs,
         clientEnvelope: null,
         tokenEnvelope: null,
-        errorCode: revocationErrorCode === null ? null : sanitizeErrorCode(revocationErrorCode),
+        errorCode: revocationErrorCode === null ? null : mapProviderErrorCode(revocationErrorCode),
       }).where(and(eq(driveConnections.id, generationId), eq(driveConnections.status, row.status), eq(driveConnections.revision, row.revision))).run();
       if (result.changes !== 1) throw conflict('Drive connection changed during secret removal');
     });
@@ -414,9 +420,41 @@ function isNullableString(value: unknown): value is string | null {
   return value === null || typeof value === 'string';
 }
 
-function sanitizeErrorCode(value: string): string {
-  const sanitized = value.replace(/[^A-Za-z0-9_.-]/g, '_').slice(0, 120);
-  return sanitized || 'unknown';
+function mapProviderErrorCode(value: unknown): DriveCredentialErrorCode {
+  if (typeof value !== 'string') return 'unknown';
+  switch (value.toLowerCase()) {
+    case 'authorization_required':
+    case 'invalid_grant':
+    case 'invalid_token':
+    case 'invalid_credentials':
+      return 'authorization_required';
+    case 'access_denied':
+    case 'insufficient_permissions':
+    case 'forbidden':
+      return 'access_denied';
+    case 'temporarily_unavailable':
+    case 'server_error':
+    case 'service_unavailable':
+      return 'temporarily_unavailable';
+    case 'rate_limited':
+    case 'rate_limit_exceeded':
+    case 'resource_exhausted':
+      return 'rate_limited';
+    case 'network_unavailable':
+    case 'network_error':
+    case 'econnreset':
+    case 'etimedout':
+      return 'network_unavailable';
+    default:
+      return 'unknown';
+  }
+}
+
+function isStagedSlotUniqueViolation(error: unknown): boolean {
+  return isRecord(error)
+    && error.code === 'SQLITE_CONSTRAINT_UNIQUE'
+    && typeof error.message === 'string'
+    && error.message.includes('drive_connections.staged_slot');
 }
 
 function conflict(message: string): DriveObjectConflictError {
