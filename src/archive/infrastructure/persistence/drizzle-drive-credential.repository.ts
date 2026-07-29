@@ -1,0 +1,424 @@
+import { Inject, Injectable } from '@nestjs/common';
+import { and, eq, inArray, lte } from 'drizzle-orm';
+import { AppDatabase, DB } from '../../../database/database.module';
+import { driveConnections } from '../../../database/schema';
+import type {
+  ActivateDriveConnection,
+  DriveClientCredentials,
+  DriveConnectionTerminalStatus,
+  DriveCredentialRepositoryPort,
+  MergeRefreshedTokens,
+  OAuthTokenSet,
+  StageDriveConnection,
+} from '../../application/ports/drive-credential-repository.port';
+import {
+  ARCHIVE_SECRET_CIPHER,
+  type ArchiveSecretCipherPort,
+  type ArchiveSecretEnvelope,
+} from '../../application/ports/archive-secret-cipher.port';
+import { DriveConnection, type DriveConnectionStatus } from '../../domain/drive-connection.entity';
+import { DriveCredentialCorruptError } from '../../domain/errors/drive-credential-corrupt.error';
+import { DriveObjectConflictError } from '../../domain/errors/drive-object-conflict.error';
+
+type ConnectionRow = typeof driveConnections.$inferSelect;
+type ConnectionWriter = Pick<AppDatabase, 'delete' | 'insert' | 'select' | 'update'>;
+
+/** Persistent encrypted Drive-credential generations with immediate fenced transitions. */
+@Injectable()
+export class DrizzleDriveCredentialRepository implements DriveCredentialRepositoryPort {
+  constructor(
+    @Inject(DB) private readonly db: AppDatabase,
+    @Inject(ARCHIVE_SECRET_CIPHER) private readonly cipher: ArchiveSecretCipherPort,
+  ) {}
+
+  async stage(input: StageDriveConnection): Promise<DriveConnection> {
+    const [clientEnvelope, tokenEnvelope] = await Promise.all([
+      this.encryptClient(input.client, input.installationId, input.id),
+      this.encryptTokens(emptyTokens(), input.installationId, input.id),
+    ]);
+    const connection = DriveConnection.stage({ id: input.id, installationId: input.installationId, nowMs: input.createdAtMs });
+    this.db.insert(driveConnections).values({
+      id: input.id,
+      installationId: input.installationId,
+      status: connection.status,
+      revision: connection.revision,
+      clientIdHash: input.clientIdHash,
+      clientEnvelope: stringifyEnvelope(clientEnvelope),
+      tokenEnvelope: stringifyEnvelope(tokenEnvelope),
+      currentSlot: null,
+      stagedSlot: 1,
+      permissionId: null,
+      email: null,
+      displayName: null,
+      rootFolderId: null,
+      motionFolderId: null,
+      backupsFolderId: null,
+      adminUserId: input.adminUserId,
+      chatId: input.chatId,
+      workflowReceiptId: input.receiptId,
+      workflowExpiresAt: input.expiresAtMs,
+      createdAt: input.createdAtMs,
+      updatedAt: input.createdAtMs,
+      activatedAt: null,
+      retiredAt: null,
+      errorCode: null,
+      alertCooldowns: {},
+      quotaReclamationStartedAt: null,
+      quotaReclaimedAt: null,
+      quotaReclamationErrorCode: null,
+    }).run();
+    return connection;
+  }
+
+  async loadStaged(receiptId: string): Promise<DriveConnection | null> {
+    const row = this.db.select().from(driveConnections)
+      .where(and(eq(driveConnections.status, 'staged'), eq(driveConnections.workflowReceiptId, receiptId)))
+      .get();
+    return row ? toConnection(row) : null;
+  }
+
+  async storeExchangedTokens(id: string, expectedRevision: number, tokens: OAuthTokenSet): Promise<boolean> {
+    const row = this.db.select().from(driveConnections)
+      .where(and(eq(driveConnections.id, id), eq(driveConnections.revision, expectedRevision), eq(driveConnections.status, 'staged')))
+      .get();
+    if (!row) return false;
+    const tokenEnvelope = await this.encryptTokens(tokens, row.installationId, row.id);
+    const updated = this.db.update(driveConnections)
+      .set({ tokenEnvelope: stringifyEnvelope(tokenEnvelope), revision: expectedRevision + 1, updatedAt: Date.now() })
+      .where(and(eq(driveConnections.id, id), eq(driveConnections.revision, expectedRevision), eq(driveConnections.status, 'staged')))
+      .run();
+    return updated.changes === 1;
+  }
+
+  async activate(input: ActivateDriveConnection): Promise<{ active: DriveConnection; retiringId: string | null }> {
+    // A cipher envelope is bound to its generation ID. Re-encrypt before the
+    // immediate transaction, then fence the transaction against both rows so a
+    // retry, rather than a cross-generation envelope transplant, wins a race.
+    const stagedForTransfer = this.db.select().from(driveConnections)
+      .where(and(eq(driveConnections.id, input.stagedId), eq(driveConnections.status, 'staged'), eq(driveConnections.revision, input.expectedRevision)))
+      .get();
+    const currentForTransfer = this.db.select().from(driveConnections).where(eq(driveConnections.currentSlot, 1)).get();
+    const transfer = stagedForTransfer && currentForTransfer
+      && currentForTransfer.clientIdHash === stagedForTransfer.clientIdHash
+      && currentForTransfer.permissionId === input.permissionId
+      && currentForTransfer.installationId === stagedForTransfer.installationId
+      ? await this.reencryptForGeneration(stagedForTransfer, currentForTransfer)
+      : null;
+    return this.immediate((tx) => {
+      const staged = tx.select().from(driveConnections)
+        .where(and(eq(driveConnections.id, input.stagedId), eq(driveConnections.status, 'staged'), eq(driveConnections.revision, input.expectedRevision)))
+        .get();
+      if (!staged) throw conflict('Staged Drive connection changed before activation');
+      const current = tx.select().from(driveConnections).where(eq(driveConnections.currentSlot, 1)).get();
+      if (current && current.clientIdHash === staged.clientIdHash && current.permissionId === input.permissionId && current.installationId === staged.installationId) {
+        if (!transfer || transfer.stagedId !== staged.id || transfer.currentId !== current.id) {
+          throw conflict('Drive connection changed before encrypted credential replacement');
+        }
+        const currentConnection = toConnection(current);
+        const active = current.status === 'reauth_required'
+          ? currentConnection.activate({ ...input, nowMs: input.activatedAtMs })
+          : revise(currentConnection, current.revision + 1, input.activatedAtMs);
+        const updated = tx.update(driveConnections).set({
+          clientEnvelope: transfer.clientEnvelope,
+          tokenEnvelope: transfer.tokenEnvelope,
+          status: active.status,
+          revision: active.revision,
+          updatedAt: active.updatedAtMs,
+          activatedAt: active.activatedAtMs,
+          email: active.email,
+          displayName: active.displayName,
+          rootFolderId: active.folders?.rootId,
+          motionFolderId: active.folders?.motionId,
+          backupsFolderId: active.folders?.backupsId,
+          errorCode: null,
+        }).where(and(eq(driveConnections.id, current.id), eq(driveConnections.revision, current.revision), eq(driveConnections.currentSlot, 1))).run();
+        if (updated.changes !== 1) throw conflict('Current Drive connection changed during activation');
+        tx.delete(driveConnections).where(and(eq(driveConnections.id, staged.id), eq(driveConnections.stagedSlot, 1))).run();
+        return { active, retiringId: null };
+      }
+
+      if (current) {
+        const retiring = toConnection(current).beginRetirement(input.activatedAtMs);
+        const retired = tx.update(driveConnections).set({
+          status: retiring.status,
+          currentSlot: null,
+          revision: retiring.revision,
+          updatedAt: retiring.updatedAtMs,
+        }).where(and(eq(driveConnections.id, current.id), eq(driveConnections.revision, current.revision), eq(driveConnections.currentSlot, 1))).run();
+        if (retired.changes !== 1) throw conflict('Current Drive connection changed during activation');
+      }
+
+      const active = toConnection(staged).activate({ ...input, nowMs: input.activatedAtMs });
+      const activated = tx.update(driveConnections).set({
+        status: active.status,
+        revision: active.revision,
+        currentSlot: 1,
+        stagedSlot: null,
+        permissionId: active.permissionId,
+        email: active.email,
+        displayName: active.displayName,
+        rootFolderId: active.folders?.rootId,
+        motionFolderId: active.folders?.motionId,
+        backupsFolderId: active.folders?.backupsId,
+        workflowReceiptId: null,
+        workflowExpiresAt: null,
+        updatedAt: active.updatedAtMs,
+        activatedAt: active.activatedAtMs,
+      }).where(and(eq(driveConnections.id, staged.id), eq(driveConnections.revision, staged.revision), eq(driveConnections.stagedSlot, 1))).run();
+      if (activated.changes !== 1) throw conflict('Staged Drive connection changed during activation');
+      return { active, retiringId: current?.id ?? null };
+    });
+  }
+
+  async loadActive(): Promise<DriveConnection | null> {
+    const row = this.db.select().from(driveConnections).where(eq(driveConnections.currentSlot, 1)).get();
+    return row ? toConnection(row) : null;
+  }
+
+  async loadCredentials(generationId: string): Promise<{ client: DriveClientCredentials; tokens: OAuthTokenSet; revision: number } | null> {
+    const row = this.db.select().from(driveConnections).where(eq(driveConnections.id, generationId)).get();
+    if (!row || !row.clientEnvelope || !row.tokenEnvelope) return null;
+    const [client, tokens] = await Promise.all([
+      this.decryptClient(row.clientEnvelope, row.installationId, row.id),
+      this.decryptTokens(row.tokenEnvelope, row.installationId, row.id),
+    ]);
+    return { client, tokens, revision: row.revision };
+  }
+
+  async replaceCredentials(generationId: string, expectedRevision: number, client: DriveClientCredentials, tokens: OAuthTokenSet): Promise<DriveConnection> {
+    const row = this.db.select().from(driveConnections)
+      .where(and(eq(driveConnections.id, generationId), eq(driveConnections.revision, expectedRevision)))
+      .get();
+    if (!row) throw conflict('Drive connection credentials changed before replacement');
+    const [clientEnvelope, tokenEnvelope] = await Promise.all([
+      this.encryptClient(client, row.installationId, row.id),
+      this.encryptTokens(tokens, row.installationId, row.id),
+    ]);
+    const revision = expectedRevision + 1;
+    const updatedAt = Date.now();
+    const updated = this.db.update(driveConnections).set({
+      clientEnvelope: stringifyEnvelope(clientEnvelope), tokenEnvelope: stringifyEnvelope(tokenEnvelope), revision, updatedAt,
+    }).where(and(eq(driveConnections.id, generationId), eq(driveConnections.revision, expectedRevision))).run();
+    if (updated.changes !== 1) throw conflict('Drive connection credentials changed during replacement');
+    return toConnection({ ...row, clientEnvelope: stringifyEnvelope(clientEnvelope), tokenEnvelope: stringifyEnvelope(tokenEnvelope), revision, updatedAt });
+  }
+
+  async mergeRefreshedTokens(input: MergeRefreshedTokens): Promise<boolean> {
+    const row = this.db.select().from(driveConnections)
+      .where(and(eq(driveConnections.id, input.generationId), eq(driveConnections.revision, input.expectedRevision), eq(driveConnections.currentSlot, 1)))
+      .get();
+    if (!row || !row.tokenEnvelope) return false;
+    const existing = await this.decryptTokens(row.tokenEnvelope, row.installationId, row.id);
+    const tokens: OAuthTokenSet = { ...input.tokens, refreshToken: input.tokens.refreshToken ?? existing.refreshToken };
+    const envelope = await this.encryptTokens(tokens, row.installationId, row.id);
+    const updated = this.db.update(driveConnections).set({
+      tokenEnvelope: stringifyEnvelope(envelope), revision: input.expectedRevision + 1, updatedAt: input.refreshedAtMs,
+    }).where(and(eq(driveConnections.id, input.generationId), eq(driveConnections.revision, input.expectedRevision), eq(driveConnections.currentSlot, 1))).run();
+    return updated.changes === 1;
+  }
+
+  async requireReauthorization(generationId: string, expectedRevision: number, errorCode: string, atMs: number): Promise<boolean> {
+    return this.immediate((tx) => {
+      const row = tx.select().from(driveConnections).where(and(eq(driveConnections.id, generationId), eq(driveConnections.revision, expectedRevision), eq(driveConnections.currentSlot, 1))).get();
+      if (!row || row.status !== 'active') return false;
+      const reauthorizationRequired = toConnection(row).requireReauthorization(atMs);
+      const updated = tx.update(driveConnections).set({
+        status: reauthorizationRequired.status,
+        revision: reauthorizationRequired.revision,
+        updatedAt: reauthorizationRequired.updatedAtMs,
+        errorCode: sanitizeErrorCode(errorCode),
+      }).where(and(eq(driveConnections.id, generationId), eq(driveConnections.revision, expectedRevision), eq(driveConnections.currentSlot, 1), eq(driveConnections.status, 'active'))).run();
+      return updated.changes === 1;
+    });
+  }
+
+  async beginDisconnect(generationId: string, expectedRevision: number): Promise<DriveConnection> {
+    return this.immediate((tx) => {
+      const row = tx.select().from(driveConnections).where(and(eq(driveConnections.id, generationId), eq(driveConnections.revision, expectedRevision), eq(driveConnections.currentSlot, 1))).get();
+      if (!row) throw conflict('Drive connection changed before disconnection');
+      const disconnecting = toConnection(row).beginDisconnect(Date.now());
+      const updated = tx.update(driveConnections).set({
+        status: disconnecting.status,
+        currentSlot: null,
+        revision: disconnecting.revision,
+        updatedAt: disconnecting.updatedAtMs,
+      }).where(and(eq(driveConnections.id, generationId), eq(driveConnections.revision, expectedRevision), eq(driveConnections.currentSlot, 1))).run();
+      if (updated.changes !== 1) throw conflict('Drive connection changed during disconnection');
+      return disconnecting;
+    });
+  }
+
+  async completeSecretRemoval(generationId: string, terminal: DriveConnectionTerminalStatus, atMs: number, revocationErrorCode: string | null): Promise<void> {
+    this.immediate((tx) => {
+      const row = tx.select().from(driveConnections).where(eq(driveConnections.id, generationId)).get();
+      if (!row) return;
+      const connection = toConnection(row);
+      const completed = terminal === 'retired_unmanaged' ? connection.retireUnmanaged(atMs) : connection.disconnect(atMs);
+      const result = tx.update(driveConnections).set({
+        status: completed.status,
+        revision: completed.revision,
+        updatedAt: completed.updatedAtMs,
+        retiredAt: completed.retiredAtMs,
+        clientEnvelope: null,
+        tokenEnvelope: null,
+        errorCode: revocationErrorCode === null ? null : sanitizeErrorCode(revocationErrorCode),
+      }).where(and(eq(driveConnections.id, generationId), eq(driveConnections.status, row.status), eq(driveConnections.revision, row.revision))).run();
+      if (result.changes !== 1) throw conflict('Drive connection changed during secret removal');
+    });
+  }
+
+  async listInterruptedMaintenance(): Promise<readonly DriveConnection[]> {
+    return this.db.select().from(driveConnections)
+      .where(inArray(driveConnections.status, ['retiring', 'disconnecting']))
+      .all()
+      .map(toConnection);
+  }
+
+  async expireStaged(nowMs: number): Promise<readonly string[]> {
+    return this.immediate((tx) => {
+      const rows = tx.select({ id: driveConnections.id }).from(driveConnections)
+        .where(and(eq(driveConnections.status, 'staged'), lte(driveConnections.workflowExpiresAt, nowMs)))
+        .all();
+      if (rows.length > 0) tx.delete(driveConnections).where(inArray(driveConnections.id, rows.map(({ id }) => id))).run();
+      return rows.map(({ id }) => id);
+    });
+  }
+
+  private async encryptClient(value: DriveClientCredentials, installationId: string, rowId: string): Promise<ArchiveSecretEnvelope> {
+    assertClient(value);
+    return this.cipher.encrypt(Buffer.from(JSON.stringify(value), 'utf8'), { installationId, rowId, kind: 'oauth-client', schemaVersion: 1 });
+  }
+
+  private async encryptTokens(value: OAuthTokenSet, installationId: string, rowId: string): Promise<ArchiveSecretEnvelope> {
+    assertTokens(value);
+    return this.cipher.encrypt(Buffer.from(JSON.stringify(value), 'utf8'), { installationId, rowId, kind: 'oauth-token', schemaVersion: 1 });
+  }
+
+  private async decryptClient(value: string, installationId: string, rowId: string): Promise<DriveClientCredentials> {
+    const parsed = parseJson(await this.cipher.decrypt(parseEnvelope(value), { installationId, rowId, kind: 'oauth-client', schemaVersion: 1 }));
+    assertClient(parsed);
+    return parsed;
+  }
+
+  private async decryptTokens(value: string, installationId: string, rowId: string): Promise<OAuthTokenSet> {
+    const parsed = parseJson(await this.cipher.decrypt(parseEnvelope(value), { installationId, rowId, kind: 'oauth-token', schemaVersion: 1 }));
+    assertTokens(parsed);
+    return parsed;
+  }
+
+  private async reencryptForGeneration(staged: ConnectionRow, current: ConnectionRow): Promise<{
+    stagedId: string;
+    currentId: string;
+    clientEnvelope: string;
+    tokenEnvelope: string;
+  }> {
+    if (!staged.clientEnvelope || !staged.tokenEnvelope) throw new DriveCredentialCorruptError();
+    const [client, tokens] = await Promise.all([
+      this.decryptClient(staged.clientEnvelope, staged.installationId, staged.id),
+      this.decryptTokens(staged.tokenEnvelope, staged.installationId, staged.id),
+    ]);
+    const [clientEnvelope, tokenEnvelope] = await Promise.all([
+      this.encryptClient(client, current.installationId, current.id),
+      this.encryptTokens(tokens, current.installationId, current.id),
+    ]);
+    return {
+      stagedId: staged.id,
+      currentId: current.id,
+      clientEnvelope: stringifyEnvelope(clientEnvelope),
+      tokenEnvelope: stringifyEnvelope(tokenEnvelope),
+    };
+  }
+
+  private immediate<T>(operation: (tx: ConnectionWriter) => T): T {
+    return this.db.transaction((tx) => operation(tx), { behavior: 'immediate' });
+  }
+}
+
+function toConnection(row: ConnectionRow): DriveConnection {
+  return DriveConnection.restore({
+    id: row.id,
+    installationId: row.installationId,
+    status: row.status as DriveConnectionStatus,
+    revision: row.revision,
+    permissionId: row.permissionId,
+    email: row.email,
+    displayName: row.displayName,
+    folders: row.rootFolderId && row.motionFolderId && row.backupsFolderId
+      ? { rootId: row.rootFolderId, motionId: row.motionFolderId, backupsId: row.backupsFolderId }
+      : null,
+    createdAtMs: row.createdAt,
+    updatedAtMs: row.updatedAt,
+    activatedAtMs: row.activatedAt,
+    retiredAtMs: row.retiredAt,
+  });
+}
+
+function emptyTokens(): OAuthTokenSet {
+  return { accessToken: null, refreshToken: null, expiryDateMs: null, tokenType: null, scope: null };
+}
+
+function revise(connection: DriveConnection, revision: number, updatedAtMs: number): DriveConnection {
+  return DriveConnection.restore({ ...connection, revision, updatedAtMs });
+}
+
+function stringifyEnvelope(value: ArchiveSecretEnvelope): string {
+  return JSON.stringify(value);
+}
+
+function parseEnvelope(value: string): ArchiveSecretEnvelope {
+  const parsed = parseJson(Buffer.from(value, 'utf8'));
+  if (!isEnvelope(parsed)) {
+    throw new DriveCredentialCorruptError();
+  }
+  return parsed;
+}
+
+function parseJson(value: Buffer): unknown {
+  try {
+    return JSON.parse(value.toString('utf8'));
+  } catch {
+    throw new DriveCredentialCorruptError();
+  }
+}
+
+function assertClient(value: unknown): asserts value is DriveClientCredentials {
+  if (!isRecord(value) || typeof value.clientId !== 'string' || value.clientId.length === 0 || typeof value.clientSecret !== 'string' || value.clientSecret.length === 0) {
+    throw new DriveCredentialCorruptError();
+  }
+}
+
+function assertTokens(value: unknown): asserts value is OAuthTokenSet {
+  if (!isRecord(value)
+    || !isNullableString(value.accessToken)
+    || !isNullableString(value.refreshToken)
+    || !isNullableString(value.tokenType)
+    || !isNullableString(value.scope)
+    || !(value.expiryDateMs === null || (typeof value.expiryDateMs === 'number' && Number.isSafeInteger(value.expiryDateMs) && value.expiryDateMs >= 0))) {
+    throw new DriveCredentialCorruptError();
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isEnvelope(value: unknown): value is ArchiveSecretEnvelope {
+  return isRecord(value)
+    && value.version === 1
+    && typeof value.iv === 'string'
+    && typeof value.ciphertext === 'string'
+    && typeof value.authTag === 'string';
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === 'string';
+}
+
+function sanitizeErrorCode(value: string): string {
+  const sanitized = value.replace(/[^A-Za-z0-9_.-]/g, '_').slice(0, 120);
+  return sanitized || 'unknown';
+}
+
+function conflict(message: string): DriveObjectConflictError {
+  return new DriveObjectConflictError(message);
+}

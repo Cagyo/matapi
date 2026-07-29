@@ -1,0 +1,137 @@
+import type {
+  ActivateDriveConnection,
+  DriveClientCredentials,
+  DriveConnectionTerminalStatus,
+  DriveCredentialRepositoryPort,
+  MergeRefreshedTokens,
+  OAuthTokenSet,
+  StageDriveConnection,
+} from '../../application/ports/drive-credential-repository.port';
+import { DriveConnection } from '../../domain/drive-connection.entity';
+import { DriveObjectConflictError } from '../../domain/errors/drive-object-conflict.error';
+
+interface Entry {
+  connection: DriveConnection;
+  clientIdHash: string;
+  client: DriveClientCredentials | null;
+  tokens: OAuthTokenSet | null;
+  receiptId: string | null;
+  expiresAtMs: number | null;
+}
+
+/** In-memory parity adapter for isolated use-case tests. */
+export class InMemoryDriveCredentialRepository implements DriveCredentialRepositoryPort {
+  private readonly entries = new Map<string, Entry>();
+
+  async stage(input: StageDriveConnection): Promise<DriveConnection> {
+    if ([...this.entries.values()].some(({ connection }) => connection.status === 'staged')) throw conflict('A Drive setup is already staged');
+    const connection = DriveConnection.stage({ id: input.id, installationId: input.installationId, nowMs: input.createdAtMs });
+    this.entries.set(input.id, { connection, clientIdHash: input.clientIdHash, client: { ...input.client }, tokens: emptyTokens(), receiptId: input.receiptId, expiresAtMs: input.expiresAtMs });
+    return connection;
+  }
+
+  async loadStaged(receiptId: string): Promise<DriveConnection | null> {
+    return [...this.entries.values()].find((entry) => entry.connection.status === 'staged' && entry.receiptId === receiptId)?.connection ?? null;
+  }
+
+  async storeExchangedTokens(id: string, expectedRevision: number, tokens: OAuthTokenSet): Promise<boolean> {
+    const entry = this.entries.get(id);
+    if (!entry || entry.connection.status !== 'staged' || entry.connection.revision !== expectedRevision) return false;
+    entry.tokens = { ...tokens };
+    entry.connection = revise(entry.connection, expectedRevision + 1, Date.now());
+    return true;
+  }
+
+  async activate(input: ActivateDriveConnection): Promise<{ active: DriveConnection; retiringId: string | null }> {
+    const staged = this.entries.get(input.stagedId);
+    if (!staged || staged.connection.status !== 'staged' || staged.connection.revision !== input.expectedRevision) throw conflict('Staged Drive connection changed before activation');
+    const current = [...this.entries.values()].find(({ connection }) => connection.status === 'active' || connection.status === 'reauth_required');
+    if (current && current.clientIdHash === staged.clientIdHash && current.connection.permissionId === input.permissionId && current.connection.installationId === staged.connection.installationId) {
+      current.client = staged.client && { ...staged.client };
+      current.tokens = staged.tokens && { ...staged.tokens };
+      current.connection = current.connection.status === 'reauth_required'
+        ? current.connection.activate({ ...input, nowMs: input.activatedAtMs })
+        : revise(current.connection, current.connection.revision + 1, input.activatedAtMs);
+      this.entries.delete(input.stagedId);
+      return { active: current.connection, retiringId: null };
+    }
+    if (current) current.connection = current.connection.beginRetirement(input.activatedAtMs);
+    staged.connection = staged.connection.activate({ ...input, nowMs: input.activatedAtMs });
+    staged.receiptId = null;
+    staged.expiresAtMs = null;
+    return { active: staged.connection, retiringId: current?.connection.id ?? null };
+  }
+
+  async loadActive(): Promise<DriveConnection | null> {
+    return [...this.entries.values()].find(({ connection }) => connection.status === 'active' || connection.status === 'reauth_required')?.connection ?? null;
+  }
+
+  async loadCredentials(generationId: string): Promise<{ client: DriveClientCredentials; tokens: OAuthTokenSet; revision: number } | null> {
+    const entry = this.entries.get(generationId);
+    if (!entry?.client || !entry.tokens) return null;
+    return { client: { ...entry.client }, tokens: { ...entry.tokens }, revision: entry.connection.revision };
+  }
+
+  async replaceCredentials(generationId: string, expectedRevision: number, client: DriveClientCredentials, tokens: OAuthTokenSet): Promise<DriveConnection> {
+    const entry = this.entries.get(generationId);
+    if (!entry || entry.connection.revision !== expectedRevision) throw conflict('Drive connection credentials changed before replacement');
+    entry.client = { ...client };
+    entry.tokens = { ...tokens };
+    entry.connection = revise(entry.connection, expectedRevision + 1, Date.now());
+    return entry.connection;
+  }
+
+  async mergeRefreshedTokens(input: MergeRefreshedTokens): Promise<boolean> {
+    const entry = this.entries.get(input.generationId);
+    if (!entry || (entry.connection.status !== 'active' && entry.connection.status !== 'reauth_required') || entry.connection.revision !== input.expectedRevision || !entry.tokens) return false;
+    entry.tokens = { ...input.tokens, refreshToken: input.tokens.refreshToken ?? entry.tokens.refreshToken };
+    entry.connection = revise(entry.connection, input.expectedRevision + 1, input.refreshedAtMs);
+    return true;
+  }
+
+  async requireReauthorization(generationId: string, expectedRevision: number, _errorCode: string, atMs: number): Promise<boolean> {
+    const entry = this.entries.get(generationId);
+    if (!entry || entry.connection.status !== 'active' || entry.connection.revision !== expectedRevision) return false;
+    entry.connection = entry.connection.requireReauthorization(atMs);
+    return true;
+  }
+
+  async beginDisconnect(generationId: string, expectedRevision: number): Promise<DriveConnection> {
+    const entry = this.entries.get(generationId);
+    if (!entry || entry.connection.revision !== expectedRevision || (entry.connection.status !== 'active' && entry.connection.status !== 'reauth_required')) throw conflict('Drive connection changed before disconnection');
+    entry.connection = entry.connection.beginDisconnect(Date.now());
+    return entry.connection;
+  }
+
+  async completeSecretRemoval(generationId: string, terminal: DriveConnectionTerminalStatus, atMs: number, _revocationErrorCode: string | null): Promise<void> {
+    const entry = this.entries.get(generationId);
+    if (!entry) return;
+    entry.connection = terminal === 'retired_unmanaged' ? entry.connection.retireUnmanaged(atMs) : entry.connection.disconnect(atMs);
+    entry.client = null;
+    entry.tokens = null;
+  }
+
+  async listInterruptedMaintenance(): Promise<readonly DriveConnection[]> {
+    return [...this.entries.values()]
+      .filter(({ connection }) => connection.status === 'retiring' || connection.status === 'disconnecting')
+      .map(({ connection }) => connection);
+  }
+
+  async expireStaged(nowMs: number): Promise<readonly string[]> {
+    const expired = [...this.entries.values()].filter(({ connection, expiresAtMs }) => connection.status === 'staged' && expiresAtMs !== null && expiresAtMs <= nowMs);
+    for (const { connection } of expired) this.entries.delete(connection.id);
+    return expired.map(({ connection }) => connection.id);
+  }
+}
+
+function revise(connection: DriveConnection, revision: number, updatedAtMs: number): DriveConnection {
+  return DriveConnection.restore({ ...connection, revision, updatedAtMs });
+}
+
+function emptyTokens(): OAuthTokenSet {
+  return { accessToken: null, refreshToken: null, expiryDateMs: null, tokenType: null, scope: null };
+}
+
+function conflict(message: string): DriveObjectConflictError {
+  return new DriveObjectConflictError(message);
+}

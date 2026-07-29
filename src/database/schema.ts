@@ -221,6 +221,60 @@ export const cameraLiveCredentials = sqliteTable('camera_live_credentials', {
   keyVersion: integer('key_version').notNull(),
 });
 
+// ─── Google Drive connection generations ───
+// A nullable slot value makes a SQLite unique index enforce a single live
+// generation and a single OAuth setup workflow without retaining a historical
+// row in either slot.
+export const driveConnections = sqliteTable(
+  'drive_connections',
+  {
+    id: text('id').primaryKey(),
+    installationId: text('installation_id').notNull(),
+    status: text('status').notNull(),
+    revision: integer('revision').notNull(),
+    clientIdHash: text('client_id_hash').notNull(),
+    clientEnvelope: text('client_envelope'),
+    tokenEnvelope: text('token_envelope'),
+    currentSlot: integer('current_slot'),
+    stagedSlot: integer('staged_slot'),
+    permissionId: text('permission_id'),
+    email: text('email'),
+    displayName: text('display_name'),
+    rootFolderId: text('root_folder_id'),
+    motionFolderId: text('motion_folder_id'),
+    backupsFolderId: text('backups_folder_id'),
+    adminUserId: integer('admin_user_id'),
+    chatId: integer('chat_id'),
+    workflowReceiptId: text('workflow_receipt_id'),
+    workflowExpiresAt: integer('workflow_expires_at'),
+    createdAt: integer('created_at').notNull(),
+    updatedAt: integer('updated_at').notNull(),
+    activatedAt: integer('activated_at'),
+    retiredAt: integer('retired_at'),
+    errorCode: text('error_code'),
+    alertCooldowns: text('alert_cooldowns', { mode: 'json' }),
+    quotaReclamationStartedAt: integer('quota_reclamation_started_at'),
+    quotaReclaimedAt: integer('quota_reclaimed_at'),
+    quotaReclamationErrorCode: text('quota_reclamation_error_code'),
+  },
+  (table) => [
+    uniqueIndex('uq_drive_connections_current_slot').on(table.currentSlot),
+    uniqueIndex('uq_drive_connections_staged_slot').on(table.stagedSlot),
+    index('idx_drive_connections_staged_expiry').on(table.stagedSlot, table.workflowExpiresAt),
+    check('drive_connections_status_check', sql`${table.status} in ('staged', 'active', 'reauth_required', 'retiring', 'retired_unmanaged', 'disconnecting', 'disconnected')`),
+    check('drive_connections_revision_check', sql`${table.revision} >= 0`),
+    check('drive_connections_current_slot_check', sql`${table.currentSlot} is null or ${table.currentSlot} = 1`),
+    check('drive_connections_staged_slot_check', sql`${table.stagedSlot} is null or ${table.stagedSlot} = 1`),
+    check('drive_connections_slot_status_check', sql`(
+      (${table.status} = 'staged' and ${table.stagedSlot} = 1 and ${table.currentSlot} is null)
+      or
+      (${table.status} in ('active', 'reauth_required') and ${table.currentSlot} = 1 and ${table.stagedSlot} is null)
+      or
+      (${table.status} in ('retiring', 'retired_unmanaged', 'disconnecting', 'disconnected') and ${table.currentSlot} is null and ${table.stagedSlot} is null)
+    )`),
+  ],
+);
+
 // ─── Motion Events ───
 export const motionEvents = sqliteTable(
   'motion_events',
