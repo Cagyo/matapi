@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, eq, gte, inArray, isNotNull, isNull, lte, or } from 'drizzle-orm';
+import { and, asc, eq, gte, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../../database/database.module';
 import { archiveArtifacts, archiveSchedulerState, driveObjectAttempts } from '../../../database/schema';
 import type {
-  ArchiveArtifactRepositoryPort, ArchiveSchedulerState, ArchiveSchedulerUpdate, AttemptLease, ClaimAttempt,
-  ClaimedAttempt, EncryptedUploadSession,
+  ArchiveArtifactRepositoryPort, ArchiveObjectAttempt, ArchiveSchedulerState, ArchiveSchedulerUpdate, AttemptLease, ClaimAttempt,
+  ClaimedAttempt, EncryptedUploadSession, ReconciliationSelection, RetentionSelection, VerifiedArchiveObject,
 } from '../../application/ports/archive-artifact-repository.port';
 import { ArchiveArtifact, type ArchiveArtifactKind, type RegisterArchiveArtifact } from '../../domain/archive-artifact.entity';
 import { DriveObjectAttempt, type DriveAttemptState } from '../../domain/drive-object-attempt.entity';
@@ -17,7 +17,7 @@ type ArtifactRow = typeof archiveArtifacts.$inferSelect;
 type AttemptRow = typeof driveObjectAttempts.$inferSelect;
 type Writer = Pick<AppDatabase, 'insert' | 'select' | 'update'>;
 
-/** SQLite manifest adapter. Lease-changing writes are revision- and owner-fenced. */
+/** SQLite manifest adapter. Every lease-owned mutation is expiry- and revision-fenced. */
 @Injectable()
 export class DrizzleArchiveArtifactRepository implements ArchiveArtifactRepositoryPort {
   constructor(@Inject(DB) private readonly db: AppDatabase) {}
@@ -43,31 +43,36 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
     return row ? toArtifact(row) : null;
   }
 
-  async createAttempt(artifactId: string, generationId: string, remoteFileId: string, parentId: string, nowMs: number): Promise<DriveObjectAttempt> {
+  async createAttempt(artifactId: string, generationId: string, remoteObjectId: string, containerId: string, nowMs: number): Promise<ArchiveObjectAttempt> {
     if (!this.db.select({ id: archiveArtifacts.id }).from(archiveArtifacts).where(eq(archiveArtifacts.id, artifactId)).get()) {
       throw new DriveObjectConflictError('Archive artifact does not exist');
     }
-    const attempt = DriveObjectAttempt.reserve({ id: randomUUID(), artifactId, generationId, remoteFileId, parentId, nowMs });
+    const attempt = DriveObjectAttempt.reserve({ id: randomUUID(), artifactId, generationId, remoteFileId: remoteObjectId, parentId: containerId, nowMs });
     try {
       this.db.insert(driveObjectAttempts).values(attemptRow(attempt)).run();
     } catch (error) {
-      if (isUniqueViolation(error)) throw new DriveObjectConflictError('Reserved Drive ID already exists');
+      if (isUniqueViolation(error)) throw new DriveObjectConflictError('Reserved remote object ID already exists');
       throw error;
     }
-    return attempt;
+    return project(attempt, { nextAttemptMs: nowMs, retryCount: 0, errorCode: null, session: null });
   }
 
   async claimNextAttempt(input: ClaimAttempt): Promise<ClaimedAttempt | null> {
+    validateClaim(input);
     return this.immediate((tx) => {
-      const row = tx.select().from(driveObjectAttempts)
+      this.recoverExpiredInTransaction(tx, input.nowMs);
+      const row = tx.select({ attempt: driveObjectAttempts, kind: archiveArtifacts.kind }).from(driveObjectAttempts)
+        .innerJoin(archiveArtifacts, eq(driveObjectAttempts.artifactId, archiveArtifacts.id))
         .where(and(inArray(driveObjectAttempts.state, ['pending', 'retryable']), lte(driveObjectAttempts.nextAttemptAt, input.nowMs),
           or(isNull(driveObjectAttempts.leaseExpiresAt), lte(driveObjectAttempts.leaseExpiresAt, input.nowMs))))
-        .orderBy(asc(driveObjectAttempts.createdAt), asc(driveObjectAttempts.id)).limit(1).get();
-      return row ? this.claim(tx, row, input, true) : null;
+        .orderBy(asc(queuePriority(input)), asc(driveObjectAttempts.nextAttemptAt), asc(driveObjectAttempts.createdAt), asc(driveObjectAttempts.id))
+        .limit(1).get();
+      return row ? this.claim(tx, row.attempt, input, true) : null;
     });
   }
 
   async claimExpiredAttempt(attemptId: string, input: ClaimAttempt): Promise<ClaimedAttempt> {
+    validateClaim(input);
     return this.immediate((tx) => {
       const row = tx.select().from(driveObjectAttempts).where(and(eq(driveObjectAttempts.id, attemptId), lte(driveObjectAttempts.leaseExpiresAt, input.nowMs))).get();
       if (!row) throw new DriveAttemptLeaseLostError();
@@ -75,7 +80,12 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
     });
   }
 
+  async recoverExpiredLeases(nowMs: number): Promise<number> {
+    return this.immediate((tx) => this.recoverExpiredInTransaction(tx, nowMs));
+  }
+
   async renewLease(attemptId: string, lease: AttemptLease, nowMs: number, leaseMs: number): Promise<AttemptLease> {
+    validateLeaseDuration(leaseMs);
     const revision = lease.revision + 1;
     const result = this.db.update(driveObjectAttempts).set({ revision, updatedAt: nowMs, leaseExpiresAt: nowMs + leaseMs })
       .where(this.fenced(attemptId, lease, nowMs)).run();
@@ -83,14 +93,14 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
     return { owner: lease.owner, revision, expiresAtMs: nowMs + leaseMs };
   }
 
-  async saveSession(attemptId: string, lease: AttemptLease, session: EncryptedUploadSession): Promise<AttemptLease> {
+  async saveSession(attemptId: string, lease: AttemptLease, session: EncryptedUploadSession, nowMs: number): Promise<AttemptLease> {
     validateSession(session);
     const revision = lease.revision + 1;
     const result = this.db.update(driveObjectAttempts).set({
-      revision, updatedAt: session.createdAtMs, sessionCiphertext: session.ciphertext, sessionNonce: session.nonce,
+      revision, updatedAt: nowMs, sessionCiphertext: session.ciphertext, sessionNonce: session.nonce,
       sessionAuthTag: session.authTag, sessionKeyVersion: session.keyVersion, sessionFormatVersion: session.formatVersion,
       sessionCreatedAt: session.createdAtMs, sessionExpiresAt: session.expiresAtMs, confirmedOffset: session.confirmedOffset,
-    }).where(this.fenced(attemptId, lease)).run();
+    }).where(this.fenced(attemptId, lease, nowMs)).run();
     if (result.changes !== 1) throw new DriveAttemptLeaseLostError();
     return { ...lease, revision };
   }
@@ -104,19 +114,19 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
     return { ...lease, revision };
   }
 
-  async markRetryable(attemptId: string, lease: AttemptLease, errorCode: string, nextAttemptMs: number): Promise<void> {
-    const row = this.requireFencedAttempt(attemptId, lease);
-    const next = toAttempt(row).markRetryable(nextAttemptMs);
-    const result = this.db.update(driveObjectAttempts).set({ state: next.state, revision: next.revision, updatedAt: next.updatedAtMs,
-      nextAttemptAt: nextAttemptMs, errorCode, leaseOwner: null, leaseExpiresAt: null }).where(this.fenced(attemptId, lease)).run();
+  async markRetryable(attemptId: string, lease: AttemptLease, errorCode: string, nextAttemptMs: number, nowMs: number): Promise<void> {
+    const row = this.requireFencedAttempt(attemptId, lease, nowMs);
+    const next = toAttempt(row).markRetryable(nowMs);
+    const result = this.db.update(driveObjectAttempts).set({ state: next.state, revision: next.revision, updatedAt: nowMs,
+      nextAttemptAt: nextAttemptMs, retryCount: row.retryCount + 1, errorCode, leaseOwner: null, leaseExpiresAt: null }).where(this.fenced(attemptId, lease, nowMs)).run();
     if (result.changes !== 1) throw new DriveAttemptLeaseLostError();
   }
 
-  async markVerified(attemptId: string, lease: AttemptLease, remote: VerifiedDriveObject, nowMs: number): Promise<void> {
+  async markVerified(attemptId: string, lease: AttemptLease, remote: VerifiedArchiveObject, nowMs: number): Promise<void> {
     this.immediate((tx) => {
       const row = tx.select().from(driveObjectAttempts).where(this.fenced(attemptId, lease, nowMs)).get();
       if (!row) throw new DriveAttemptLeaseLostError();
-      const attempt = toAttempt(row).verify(remote, nowMs);
+      const attempt = toAttempt(row).verify(toDriveObject(remote), nowMs);
       const artifactRow = tx.select().from(archiveArtifacts).where(eq(archiveArtifacts.id, attempt.artifactId)).get();
       if (!artifactRow) throw new DriveObjectConflictError('Archive artifact does not exist');
       const artifact = toArtifact(artifactRow).markVerified(attempt.id, nowMs);
@@ -130,28 +140,33 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
   }
 
   async markMissing(attemptId: string, expectedRevision: number, reason: string, nowMs: number): Promise<void> {
-    this.transitionWithoutLease(attemptId, expectedRevision, (attempt) => attempt.markMissing(reason, nowMs));
+    this.transitionWithoutLease(attemptId, expectedRevision, nowMs, (attempt) => attempt.markMissing(reason, nowMs));
   }
 
   async markDetached(attemptId: string, expectedRevision: number, reason: string, nowMs: number): Promise<void> {
-    this.transitionWithoutLease(attemptId, expectedRevision, (attempt) => attempt.detach(reason, nowMs));
+    this.transitionWithoutLease(attemptId, expectedRevision, nowMs, (attempt) => attempt.detach(reason, nowMs));
   }
 
-  async listAttempts(artifactId: string): Promise<readonly DriveObjectAttempt[]> {
+  async listAttempts(artifactId: string): Promise<readonly ArchiveObjectAttempt[]> {
     return this.db.select().from(driveObjectAttempts).where(eq(driveObjectAttempts.artifactId, artifactId))
-      .orderBy(asc(driveObjectAttempts.createdAt), asc(driveObjectAttempts.id)).all().map(toAttempt);
+      .orderBy(asc(driveObjectAttempts.createdAt), asc(driveObjectAttempts.id)).all().map(projectRow);
   }
 
-  async listReconciliationBatch(limit: number): Promise<readonly DriveObjectAttempt[]> {
-    return this.db.select().from(driveObjectAttempts).where(eq(driveObjectAttempts.state, 'verified'))
-      .orderBy(asc(driveObjectAttempts.verifiedAt), asc(driveObjectAttempts.id)).limit(limit).all().map(toAttempt);
+  async listReconciliationBatch(selection: ReconciliationSelection): Promise<readonly ArchiveObjectAttempt[]> {
+    validateLimit(selection.limit);
+    const conditions = [eq(driveObjectAttempts.state, 'verified')];
+    if (selection.generationId) conditions.push(eq(driveObjectAttempts.generationId, selection.generationId));
+    return this.db.select().from(driveObjectAttempts).where(and(...conditions))
+      .orderBy(asc(driveObjectAttempts.verifiedAt), asc(driveObjectAttempts.id)).limit(selection.limit).all().map(projectRow);
   }
 
-  async listRetentionCandidates(kind: ArchiveArtifactKind, limit: number): Promise<readonly DriveObjectAttempt[]> {
+  async listRetentionCandidates(selection: RetentionSelection): Promise<readonly ArchiveObjectAttempt[]> {
+    validateLimit(selection.limit);
+    const conditions = [eq(driveObjectAttempts.state, 'verified'), eq(archiveArtifacts.kind, selection.kind)];
+    if (selection.providerCreatedBeforeMs !== undefined) conditions.push(lte(driveObjectAttempts.verifiedCreatedTime, selection.providerCreatedBeforeMs));
     return this.db.select({ attempt: driveObjectAttempts }).from(driveObjectAttempts)
-      .innerJoin(archiveArtifacts, eq(driveObjectAttempts.artifactId, archiveArtifacts.id))
-      .where(and(eq(driveObjectAttempts.state, 'verified'), eq(archiveArtifacts.kind, kind)))
-      .orderBy(asc(driveObjectAttempts.createdAt), asc(driveObjectAttempts.id)).limit(limit).all().map(({ attempt }) => toAttempt(attempt));
+      .innerJoin(archiveArtifacts, eq(driveObjectAttempts.artifactId, archiveArtifacts.id)).where(and(...conditions))
+      .orderBy(asc(driveObjectAttempts.verifiedCreatedTime), asc(driveObjectAttempts.id)).limit(selection.limit).all().map(({ attempt }) => projectRow(attempt));
   }
 
   async readSchedulerState(): Promise<ArchiveSchedulerState> {
@@ -175,46 +190,78 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
     this.immediate((tx) => {
       const rows = tx.select().from(driveObjectAttempts).where(and(eq(driveObjectAttempts.generationId, generationId), isNotNull(driveObjectAttempts.leaseOwner))).all();
       for (const row of rows) {
+        if (row.leaseOwner === null || row.leaseExpiresAt === null) continue;
         const attempt = toAttempt(row);
         const next = attempt.state === 'uploading' ? attempt.markRetryable(nowMs) : revise(attempt, nowMs);
-        tx.update(driveObjectAttempts).set({ state: next.state, revision: next.revision, updatedAt: next.updatedAtMs,
-          nextAttemptAt: nowMs, leaseOwner: null, leaseExpiresAt: null }).where(and(eq(driveObjectAttempts.id, row.id), eq(driveObjectAttempts.revision, row.revision), eq(driveObjectAttempts.leaseOwner, row.leaseOwner!))).run();
+        const result = tx.update(driveObjectAttempts).set({ state: next.state, revision: next.revision, updatedAt: nowMs,
+          nextAttemptAt: attempt.state === 'uploading' ? nowMs : row.nextAttemptAt, retryCount: attempt.state === 'uploading' ? row.retryCount + 1 : row.retryCount,
+          leaseOwner: null, leaseExpiresAt: null }).where(and(eq(driveObjectAttempts.id, row.id), eq(driveObjectAttempts.revision, row.revision),
+          eq(driveObjectAttempts.leaseOwner, row.leaseOwner), eq(driveObjectAttempts.leaseExpiresAt, row.leaseExpiresAt))).run();
+        if (result.changes !== 1) throw new DriveAttemptLeaseLostError();
       }
     });
   }
 
   private claim(tx: Writer, row: AttemptRow, input: ClaimAttempt, transition: boolean): ClaimedAttempt {
-    validateClaim(input);
     const attempt = transition ? toAttempt(row).markUploading(input.nowMs) : revise(toAttempt(row), input.nowMs);
     const result = tx.update(driveObjectAttempts).set({ state: attempt.state, revision: attempt.revision, uploadedAt: attempt.uploadedAtMs,
       updatedAt: attempt.updatedAtMs, leaseOwner: input.owner, leaseExpiresAt: input.nowMs + input.leaseMs })
-      .where(and(eq(driveObjectAttempts.id, row.id), eq(driveObjectAttempts.revision, row.revision),
-        transition ? inArray(driveObjectAttempts.state, ['pending', 'retryable']) : lte(driveObjectAttempts.leaseExpiresAt, input.nowMs))).run();
+      .where(and(eq(driveObjectAttempts.id, row.id), eq(driveObjectAttempts.revision, row.revision), transition
+        ? and(inArray(driveObjectAttempts.state, ['pending', 'retryable']), or(isNull(driveObjectAttempts.leaseExpiresAt), lte(driveObjectAttempts.leaseExpiresAt, input.nowMs)))
+        : lte(driveObjectAttempts.leaseExpiresAt, input.nowMs))).run();
     if (result.changes !== 1) throw new DriveAttemptLeaseLostError();
     const artifact = tx.select().from(archiveArtifacts).where(eq(archiveArtifacts.id, attempt.artifactId)).get();
     if (!artifact) throw new DriveObjectConflictError('Archive artifact does not exist');
-    return { artifact: toArtifact(artifact), attempt, lease: { owner: input.owner, revision: attempt.revision, expiresAtMs: input.nowMs + input.leaseMs } };
+    return {
+      artifact: toArtifact(artifact),
+      attempt: project(attempt, { nextAttemptMs: row.nextAttemptAt, retryCount: row.retryCount, errorCode: row.errorCode, session: sessionFromRow(row) }),
+      lease: { owner: input.owner, revision: attempt.revision, expiresAtMs: input.nowMs + input.leaseMs },
+    };
   }
 
-  private requireFencedAttempt(attemptId: string, lease: AttemptLease): AttemptRow {
-    const row = this.db.select().from(driveObjectAttempts).where(this.fenced(attemptId, lease)).get();
+  private recoverExpiredInTransaction(tx: Writer, nowMs: number): number {
+    const rows = tx.select().from(driveObjectAttempts).where(and(eq(driveObjectAttempts.state, 'uploading'), lte(driveObjectAttempts.leaseExpiresAt, nowMs))).all();
+    let recovered = 0;
+    for (const row of rows) {
+      const next = toAttempt(row).markRetryable(nowMs);
+      const result = tx.update(driveObjectAttempts).set({ state: next.state, revision: next.revision, updatedAt: nowMs, nextAttemptAt: nowMs,
+        retryCount: row.retryCount + 1, leaseOwner: null, leaseExpiresAt: null }).where(and(eq(driveObjectAttempts.id, row.id), eq(driveObjectAttempts.revision, row.revision),
+        eq(driveObjectAttempts.leaseOwner, row.leaseOwner!), eq(driveObjectAttempts.leaseExpiresAt, row.leaseExpiresAt!))).run();
+      if (result.changes !== 1) throw new DriveAttemptLeaseLostError();
+      recovered += 1;
+    }
+    return recovered;
+  }
+
+  private requireFencedAttempt(attemptId: string, lease: AttemptLease, nowMs: number): AttemptRow {
+    const row = this.db.select().from(driveObjectAttempts).where(this.fenced(attemptId, lease, nowMs)).get();
     if (!row) throw new DriveAttemptLeaseLostError();
     return row;
   }
 
-  private transitionWithoutLease(attemptId: string, expectedRevision: number, transition: (attempt: DriveObjectAttempt) => DriveObjectAttempt): void {
-    const row = this.db.select().from(driveObjectAttempts).where(and(eq(driveObjectAttempts.id, attemptId), eq(driveObjectAttempts.revision, expectedRevision))).get();
-    if (!row) throw new DriveObjectConflictError('Drive attempt changed before transition');
-    const next = transition(toAttempt(row));
-    const result = this.db.update(driveObjectAttempts).set({ state: next.state, revision: next.revision, updatedAt: next.updatedAtMs,
-      missingReason: next.missingReason, detachedReason: next.detachedReason, leaseOwner: null, leaseExpiresAt: null }).where(and(eq(driveObjectAttempts.id, attemptId), eq(driveObjectAttempts.revision, expectedRevision))).run();
-    if (result.changes !== 1) throw new DriveObjectConflictError('Drive attempt changed before transition');
+  private transitionWithoutLease(attemptId: string, expectedRevision: number, nowMs: number, transition: (attempt: DriveObjectAttempt) => DriveObjectAttempt): void {
+    this.immediate((tx) => {
+      const availability = or(isNull(driveObjectAttempts.leaseExpiresAt), lte(driveObjectAttempts.leaseExpiresAt, nowMs));
+      const row = tx.select().from(driveObjectAttempts).where(and(eq(driveObjectAttempts.id, attemptId), eq(driveObjectAttempts.revision, expectedRevision), availability)).get();
+      if (!row) throw new DriveObjectConflictError('Drive attempt changed before transition');
+      const next = transition(toAttempt(row));
+      const result = tx.update(driveObjectAttempts).set({ state: next.state, revision: next.revision, updatedAt: nowMs,
+        missingReason: next.missingReason, detachedReason: next.detachedReason, leaseOwner: null, leaseExpiresAt: null, ...clearedSession() })
+        .where(and(eq(driveObjectAttempts.id, attemptId), eq(driveObjectAttempts.revision, expectedRevision), availability)).run();
+      if (result.changes !== 1) throw new DriveObjectConflictError('Drive attempt changed before transition');
+      const artifactRow = tx.select().from(archiveArtifacts).where(eq(archiveArtifacts.id, row.artifactId)).get();
+      if (!artifactRow) throw new DriveObjectConflictError('Archive artifact does not exist');
+      if (artifactRow.currentVerifiedAttemptId !== attemptId) return;
+      const artifact = toArtifact(artifactRow).markCurrentVerificationUnavailable(attemptId, nowMs);
+      const updatedArtifact = tx.update(archiveArtifacts).set({ state: artifact.state, currentVerifiedAttemptId: artifact.currentVerifiedAttemptId,
+        updatedAt: artifact.updatedAtMs, revision: artifact.revision }).where(and(eq(archiveArtifacts.id, artifact.id), eq(archiveArtifacts.revision, artifactRow.revision))).run();
+      if (updatedArtifact.changes !== 1) throw new DriveObjectConflictError('Archive artifact changed before transition');
+    });
   }
 
-  private fenced(attemptId: string, lease: AttemptLease, nowMs?: number) {
-    const predicates = [eq(driveObjectAttempts.id, attemptId), eq(driveObjectAttempts.revision, lease.revision), eq(driveObjectAttempts.leaseOwner, lease.owner), eq(driveObjectAttempts.leaseExpiresAt, lease.expiresAtMs)];
-    if (nowMs !== undefined) predicates.push(gte(driveObjectAttempts.leaseExpiresAt, nowMs));
-    return and(...predicates);
+  private fenced(attemptId: string, lease: AttemptLease, nowMs: number) {
+    return and(eq(driveObjectAttempts.id, attemptId), eq(driveObjectAttempts.revision, lease.revision), eq(driveObjectAttempts.leaseOwner, lease.owner),
+      eq(driveObjectAttempts.leaseExpiresAt, lease.expiresAtMs), gte(driveObjectAttempts.leaseExpiresAt, nowMs));
   }
 
   private immediate<T>(operation: (tx: Writer) => T): T {
@@ -233,8 +280,8 @@ function artifactRow(artifact: ArchiveArtifact) {
 function attemptRow(attempt: DriveObjectAttempt) {
   return { id: attempt.id, artifactId: attempt.artifactId, generationId: attempt.generationId, remoteFileId: attempt.remoteFileId,
     parentId: attempt.parentId, reservedAt: attempt.nowMs, state: attempt.state, revision: attempt.revision, nextAttemptAt: attempt.createdAtMs,
-    leaseOwner: null, leaseExpiresAt: null, sessionCiphertext: null, sessionNonce: null, sessionAuthTag: null, sessionKeyVersion: null,
-    sessionFormatVersion: null, sessionCreatedAt: null, sessionExpiresAt: null, confirmedOffset: null, errorCode: null,
+    retryCount: 0, leaseOwner: null, leaseExpiresAt: null, sessionCiphertext: null, sessionNonce: null, sessionAuthTag: null,
+    sessionKeyVersion: null, sessionFormatVersion: null, sessionCreatedAt: null, sessionExpiresAt: null, confirmedOffset: null, errorCode: null,
     detachedReason: null, missingReason: null, uploadedAt: null, verifiedAt: null, deletedAt: null, verifiedName: null,
     verifiedMimeType: null, verifiedSize: null, verifiedSha256: null, verifiedMd5: null, verifiedCreatedTime: null,
     verifiedHeadRevisionId: null, verifiedVersion: null, verifiedOwnedByMe: null, verifiedCanDelete: null, verifiedTrashed: null,
@@ -249,7 +296,12 @@ function verifiedAttemptUpdate(attempt: DriveObjectAttempt) {
     verifiedMd5: metadata.md5, verifiedCreatedTime: metadata.createdTimeMs, verifiedHeadRevisionId: metadata.headRevisionId,
     verifiedVersion: metadata.version, verifiedOwnedByMe: metadata.ownedByMe, verifiedCanDelete: metadata.canDelete,
     verifiedTrashed: metadata.trashed, verifiedAppProperties: JSON.stringify(metadata.appProperties), verifiedSharing: JSON.stringify(metadata.sharing),
-    verifiedWebViewLink: metadata.webViewLink, leaseOwner: null, leaseExpiresAt: null };
+    verifiedWebViewLink: metadata.webViewLink, leaseOwner: null, leaseExpiresAt: null, ...clearedSession() };
+}
+
+function clearedSession() {
+  return { sessionCiphertext: null, sessionNonce: null, sessionAuthTag: null, sessionKeyVersion: null, sessionFormatVersion: null,
+    sessionCreatedAt: null, sessionExpiresAt: null, confirmedOffset: null };
 }
 
 function toArtifact(row: ArtifactRow): ArchiveArtifact {
@@ -274,8 +326,57 @@ function toAttempt(row: AttemptRow): DriveObjectAttempt {
     verifiedAtMs: row.verifiedAt, deletedAtMs: row.deletedAt, revision: row.revision });
 }
 
+function projectRow(row: AttemptRow): ArchiveObjectAttempt {
+  return project(toAttempt(row), { nextAttemptMs: row.nextAttemptAt, retryCount: row.retryCount, errorCode: row.errorCode, session: sessionFromRow(row) });
+}
+
+function project(attempt: DriveObjectAttempt, persistence: { nextAttemptMs: number; retryCount: number; errorCode: string | null; session: EncryptedUploadSession | null }): ArchiveObjectAttempt {
+  const metadata = attempt.verifiedMetadata;
+  return {
+    id: attempt.id, artifactId: attempt.artifactId, generationId: attempt.generationId, remoteObjectId: attempt.remoteFileId,
+    containerId: attempt.parentId, state: attempt.state, createdAtMs: attempt.createdAtMs, updatedAtMs: attempt.updatedAtMs,
+    uploadedAtMs: attempt.uploadedAtMs, verifiedAtMs: attempt.verifiedAtMs, deletedAtMs: attempt.deletedAtMs, revision: attempt.revision,
+    nextAttemptMs: persistence.nextAttemptMs, retryCount: persistence.retryCount, errorCode: persistence.errorCode,
+    detachedReason: attempt.detachedReason, missingReason: attempt.missingReason, session: persistence.session,
+    verifiedObject: metadata === null ? null : {
+      objectId: metadata.id, name: metadata.name, containerId: metadata.parentId, contentType: metadata.mimeType, size: metadata.size,
+      sha256: metadata.sha256, md5: metadata.md5, providerCreatedAtMs: metadata.createdTimeMs, revisionId: metadata.headRevisionId,
+      version: metadata.version, ownedByInstallation: metadata.ownedByMe, canDelete: metadata.canDelete, trashed: metadata.trashed,
+      attributes: metadata.appProperties, sharing: metadata.sharing, webViewLink: metadata.webViewLink,
+    },
+  };
+}
+
+function sessionFromRow(row: AttemptRow): EncryptedUploadSession | null {
+  if (row.sessionCiphertext === null) return null;
+  if (row.sessionNonce === null || row.sessionAuthTag === null || row.sessionKeyVersion === null || row.sessionFormatVersion !== 1
+    || row.sessionCreatedAt === null || row.sessionExpiresAt === null || row.confirmedOffset === null) {
+    throw new DriveObjectConflictError('Persisted upload session is incomplete');
+  }
+  return { ciphertext: row.sessionCiphertext, nonce: row.sessionNonce, authTag: row.sessionAuthTag, keyVersion: row.sessionKeyVersion,
+    formatVersion: 1, createdAtMs: row.sessionCreatedAt, expiresAtMs: row.sessionExpiresAt, confirmedOffset: row.confirmedOffset };
+}
+
+function toDriveObject(remote: VerifiedArchiveObject): VerifiedDriveObject {
+  return { id: remote.objectId, name: remote.name, parentId: remote.containerId, mimeType: remote.contentType, size: remote.size,
+    sha256: remote.sha256, md5: remote.md5, createdTimeMs: remote.providerCreatedAtMs, headRevisionId: remote.revisionId,
+    version: remote.version, ownedByMe: remote.ownedByInstallation, canDelete: remote.canDelete, trashed: remote.trashed,
+    appProperties: remote.attributes, sharing: remote.sharing, webViewLink: remote.webViewLink };
+}
+
 function revise(attempt: DriveObjectAttempt, nowMs: number): DriveObjectAttempt {
   return DriveObjectAttempt.restore({ ...attempt, revision: attempt.revision + 1, updatedAtMs: nowMs });
+}
+
+function queuePriority(input: ClaimAttempt) {
+  if (input.preferBackups !== false && input.forceVideoRetryBeforeMs !== undefined) {
+    return sql<number>`case when ${archiveArtifacts.kind} = 'database_backup' then 0 when ${archiveArtifacts.kind} = 'motion_video' and ${driveObjectAttempts.state} = 'retryable' and ${driveObjectAttempts.nextAttemptAt} <= ${input.forceVideoRetryBeforeMs} then 1 else 2 end`;
+  }
+  if (input.preferBackups !== false) return sql<number>`case when ${archiveArtifacts.kind} = 'database_backup' then 0 else 1 end`;
+  if (input.forceVideoRetryBeforeMs !== undefined) {
+    return sql<number>`case when ${archiveArtifacts.kind} = 'motion_video' and ${driveObjectAttempts.state} = 'retryable' and ${driveObjectAttempts.nextAttemptAt} <= ${input.forceVideoRetryBeforeMs} then 0 else 1 end`;
+  }
+  return sql<number>`0`;
 }
 
 function emptySchedulerState(): ArchiveSchedulerState {
@@ -298,6 +399,14 @@ function validateClaim(input: ClaimAttempt): void {
   if (!input.owner || !Number.isSafeInteger(input.nowMs) || !Number.isSafeInteger(input.leaseMs) || input.leaseMs <= 0) {
     throw new DriveObjectConflictError('Attempt lease is malformed');
   }
+}
+
+function validateLeaseDuration(leaseMs: number): void {
+  if (!Number.isSafeInteger(leaseMs) || leaseMs <= 0) throw new DriveObjectConflictError('Attempt lease is malformed');
+}
+
+function validateLimit(limit: number): void {
+  if (!Number.isSafeInteger(limit) || limit <= 0) throw new DriveObjectConflictError('Archive selection limit is malformed');
 }
 
 function validateSession(session: EncryptedUploadSession): void {

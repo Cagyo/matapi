@@ -106,6 +106,22 @@ export class ArchiveArtifact implements ArchiveArtifactSnapshot {
     });
   }
 
+  /**
+   * A missing or detached current remote object must not strand the artifact:
+   * its historical attempt remains immutable while a newly reserved object can
+   * become the next verified copy.
+   */
+  markCurrentVerificationUnavailable(
+    attemptId: string,
+    nowMs: number,
+  ): ArchiveArtifact {
+    requireText(attemptId, "Verified attempt ID");
+    if (this.currentVerifiedAttemptId !== attemptId) return this;
+    return this.transition("pending", nowMs, {
+      currentVerifiedAttemptId: null,
+    });
+  }
+
   markLocalMissing(nowMs: number): ArchiveArtifact {
     return this.transition("local_missing", nowMs, { localDeletedAtMs: nowMs });
   }
@@ -129,7 +145,7 @@ export class ArchiveArtifact implements ArchiveArtifactSnapshot {
       {
         stabilizing: ["pending", "superseded"],
         pending: ["stabilizing", "verified", "local_missing", "superseded"],
-        verified: ["local_missing", "superseded"],
+        verified: ["pending", "local_missing", "superseded"],
         local_missing: ["superseded"],
         superseded: [],
       };

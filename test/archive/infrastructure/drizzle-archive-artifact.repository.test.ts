@@ -26,7 +26,7 @@ describe('DrizzleArchiveArtifactRepository', () => {
     await repository.markMissing(first.id, first.revision, 'remote_missing', 101);
     await repository.createAttempt(artifact.id, 'generation-1', 'file-2', 'folder-1', 102);
 
-    expect((await repository.listAttempts(artifact.id)).map((attempt) => attempt.remoteFileId))
+    expect((await repository.listAttempts(artifact.id)).map((attempt) => attempt.remoteObjectId))
       .toEqual(['file-1', 'file-2']);
   });
 
@@ -51,10 +51,122 @@ describe('DrizzleArchiveArtifactRepository', () => {
     await repository.markVerified(claim.attempt.id, claim.lease, verifiedObject('file-1', 'folder-1'), 1_100);
 
     const verified = (await repository.listAttempts(artifact.id))[0];
-    expect(verified).toMatchObject({ state: 'verified', verifiedMetadata: { id: 'file-1', parentId: 'folder-1' } });
+    expect(verified).toMatchObject({ state: 'verified', verifiedObject: { objectId: 'file-1', containerId: 'folder-1' } });
     const state = await repository.readSchedulerState();
     expect(await repository.compareAndSetSchedulerState(state.revision, { lastUploadSuccessMs: 1_100 })).toBe(true);
     expect(await repository.compareAndSetSchedulerState(state.revision, { lastUploadSuccessMs: 1_200 })).toBe(false);
+  });
+
+  it('returns a persisted resumable session and clears it when verification terminalizes the attempt', async () => {
+    const artifact = await repository.register(artifactFixture());
+    await repository.createAttempt(artifact.id, 'generation-1', 'file-1', 'folder-1', 100);
+    const claim = await repository.claimNextAttempt({ owner: 'worker-a', nowMs: 1_000, leaseMs: 5_000 });
+    if (!claim) throw new Error('expected claim');
+
+    const lease = await repository.saveSession(claim.attempt.id, claim.lease, sessionFixture(1_100), 1_100);
+    const resumed = await repository.claimExpiredAttempt(claim.attempt.id, { owner: 'worker-b', nowMs: 6_000, leaseMs: 5_000 });
+
+    expect(resumed).toMatchObject({ attempt: { session: sessionFixture(1_100) } });
+    await repository.markVerified(resumed.attempt.id, resumed.lease, verifiedObject('file-1', 'folder-1'), 6_100);
+    expect((await repository.listAttempts(artifact.id))[0]).toMatchObject({ session: null });
+    expect(lease.revision).toBeGreaterThan(claim.lease.revision);
+  });
+
+  it.each(['missing', 'detached'] as const)('allows a verified artifact to receive a replacement after its old object is %s', async (terminalState) => {
+    const artifact = await repository.register(artifactFixture());
+    const first = await repository.createAttempt(artifact.id, 'generation-1', 'file-1', 'folder-1', 100);
+    const firstClaim = await repository.claimNextAttempt({ owner: 'worker-a', nowMs: 1_000, leaseMs: 5_000 });
+    if (!firstClaim) throw new Error('expected first claim');
+    await repository.markVerified(firstClaim.attempt.id, firstClaim.lease, verifiedObject('file-1', 'folder-1'), 1_100);
+
+    const verified = (await repository.listAttempts(artifact.id))[0];
+    if (terminalState === 'missing') {
+      await repository.markMissing(first.id, verified.revision, 'remote_missing', 1_200);
+    } else {
+      await repository.markDetached(first.id, verified.revision, 'remote_detached', 1_200);
+    }
+    await repository.createAttempt(artifact.id, 'generation-1', 'file-2', 'folder-1', 1_300);
+    const replacement = await repository.claimNextAttempt({ owner: 'worker-b', nowMs: 1_300, leaseMs: 5_000 });
+    if (!replacement) throw new Error('expected replacement claim');
+
+    await expect(repository.markVerified(replacement.attempt.id, replacement.lease, verifiedObject('file-2', 'folder-1'), 1_400))
+      .resolves.toBeUndefined();
+  });
+
+  it('recovers an expired uploading lease globally when selecting the next attempt', async () => {
+    const artifact = await repository.register(artifactFixture());
+    await repository.createAttempt(artifact.id, 'generation-1', 'file-1', 'folder-1', 100);
+    const first = await repository.claimNextAttempt({ owner: 'worker-a', nowMs: 1_000, leaseMs: 5_000 });
+    if (!first) throw new Error('expected first claim');
+
+    const recovered = await repository.claimNextAttempt({ owner: 'worker-b', nowMs: 6_000, leaseMs: 5_000 });
+
+    expect(recovered).toMatchObject({ attempt: { id: first.attempt.id, state: 'uploading' }, lease: { owner: 'worker-b' } });
+  });
+
+  it('rejects every lease-owned write after the lease expires', async () => {
+    const artifact = await repository.register(artifactFixture());
+    await repository.createAttempt(artifact.id, 'generation-1', 'file-1', 'folder-1', 100);
+    const claim = await repository.claimNextAttempt({ owner: 'worker-a', nowMs: 1_000, leaseMs: 5_000 });
+    if (!claim) throw new Error('expected claim');
+
+    const savedLease = await repository.saveSession(claim.attempt.id, claim.lease, sessionFixture(1_100), 1_100);
+
+    await expect(repository.renewLease(claim.attempt.id, savedLease, 6_001, 5_000))
+      .rejects.toBeInstanceOf(DriveAttemptLeaseLostError);
+    await expect(repository.saveSession(claim.attempt.id, savedLease, sessionFixture(1_100), 6_001))
+      .rejects.toBeInstanceOf(DriveAttemptLeaseLostError);
+    await expect(repository.confirmOffset(claim.attempt.id, savedLease, 1, 6_001))
+      .rejects.toBeInstanceOf(DriveAttemptLeaseLostError);
+    await expect(repository.markRetryable(claim.attempt.id, savedLease, 'temporary', 6_100, 6_001))
+      .rejects.toBeInstanceOf(DriveAttemptLeaseLostError);
+    await expect(repository.markVerified(claim.attempt.id, savedLease, verifiedObject('file-1', 'folder-1'), 6_001))
+      .rejects.toBeInstanceOf(DriveAttemptLeaseLostError);
+  });
+
+  it('stores retry count and the retry mutation timestamp rather than its scheduled retry time', async () => {
+    const artifact = await repository.register(artifactFixture());
+    await repository.createAttempt(artifact.id, 'generation-1', 'file-1', 'folder-1', 100);
+    const claim = await repository.claimNextAttempt({ owner: 'worker-a', nowMs: 1_000, leaseMs: 5_000 });
+    if (!claim) throw new Error('expected claim');
+
+    await repository.markRetryable(claim.attempt.id, claim.lease, 'temporarily_unavailable', 9_000, 1_100);
+
+    expect((await repository.listAttempts(artifact.id))[0]).toMatchObject({ retryCount: 1, updatedAtMs: 1_100 });
+  });
+
+  it('selects a due backup before a video and admits an eligible older video retry when fairness is due', async () => {
+    const video = await repository.register(artifactFixture());
+    const backup = await repository.register({ ...artifactFixture(), kind: 'database_backup', sourceFingerprint: 'c'.repeat(64) });
+    await repository.createAttempt(video.id, 'generation-1', 'video-new', 'folder-1', 200);
+    await repository.createAttempt(backup.id, 'generation-1', 'backup-1', 'folder-2', 300);
+
+    const backupClaim = await repository.claimNextAttempt({ owner: 'worker-a', nowMs: 1_000, leaseMs: 5_000, preferBackups: true });
+    expect(backupClaim?.attempt.remoteObjectId).toBe('backup-1');
+
+    const retryClaim = await repository.claimNextAttempt({ owner: 'worker-b', nowMs: 1_000, leaseMs: 5_000 });
+    if (!retryClaim) throw new Error('expected video claim');
+    await repository.markRetryable(retryClaim.attempt.id, retryClaim.lease, 'temporary', 1_010, 1_005);
+    await repository.createAttempt(video.id, 'generation-1', 'video-newer', 'folder-1', 1_006);
+
+    const fairClaim = await repository.claimNextAttempt({ owner: 'worker-c', nowMs: 1_010, leaseMs: 5_000, forceVideoRetryBeforeMs: 1_010 });
+    expect(fairClaim?.attempt.remoteObjectId).toBe('video-new');
+  });
+
+  it('orders retention candidates by provider creation time, not local attempt creation time', async () => {
+    const firstArtifact = await repository.register(artifactFixture());
+    const secondArtifact = await repository.register({ ...artifactFixture(), sourceFingerprint: 'c'.repeat(64), relativePath: 'motion/second.mp4' });
+    await repository.createAttempt(firstArtifact.id, 'generation-1', 'file-later-provider', 'folder-1', 100);
+    await repository.createAttempt(secondArtifact.id, 'generation-1', 'file-earlier-provider', 'folder-1', 200);
+    const first = await repository.claimNextAttempt({ owner: 'worker-a', nowMs: 1_000, leaseMs: 5_000 });
+    if (!first) throw new Error('expected first claim');
+    await repository.markVerified(first.attempt.id, first.lease, { ...verifiedObject('file-later-provider', 'folder-1'), providerCreatedAtMs: 2_000 }, 1_100);
+    const second = await repository.claimNextAttempt({ owner: 'worker-b', nowMs: 1_000, leaseMs: 5_000 });
+    if (!second) throw new Error('expected second claim');
+    await repository.markVerified(second.attempt.id, second.lease, { ...verifiedObject('file-earlier-provider', 'folder-1'), providerCreatedAtMs: 1_000 }, 1_200);
+
+    expect((await repository.listRetentionCandidates({ kind: 'motion_video', limit: 2 })).map((attempt) => attempt.remoteObjectId))
+      .toEqual(['file-earlier-provider', 'file-later-provider']);
   });
 });
 
@@ -75,21 +187,34 @@ function artifactFixture() {
 
 function verifiedObject(id: string, parentId: string) {
   return {
-    id,
+    objectId: id,
     name: 'clip.mp4',
-    parentId,
-    mimeType: 'video/mp4',
+    containerId: parentId,
+    contentType: 'video/mp4',
     size: 42,
     sha256: 'a'.repeat(64),
     md5: 'c'.repeat(32),
-    createdTimeMs: 1_000,
-    headRevisionId: 'revision-1',
+    providerCreatedAtMs: 1_000,
+    revisionId: 'revision-1',
     version: '1',
-    ownedByMe: true,
+    ownedByInstallation: true,
     canDelete: true,
     trashed: false,
-    appProperties: { artifact: 'archive-1' },
+    attributes: { artifact: 'archive-1' },
     sharing: { ownerPermissionId: 'owner-1', shared: false, permissionIds: ['owner-1'] },
     webViewLink: null,
+  };
+}
+
+function sessionFixture(createdAtMs: number) {
+  return {
+    ciphertext: 'ciphertext',
+    nonce: 'nonce',
+    authTag: 'auth-tag',
+    keyVersion: 1,
+    formatVersion: 1 as const,
+    createdAtMs,
+    expiresAtMs: createdAtMs + 10_000,
+    confirmedOffset: 0,
   };
 }

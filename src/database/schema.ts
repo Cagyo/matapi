@@ -323,6 +323,7 @@ export const driveObjectAttempts = sqliteTable(
     state: text('state').notNull(),
     revision: integer('revision').notNull(),
     nextAttemptAt: integer('next_attempt_at').notNull(),
+    retryCount: integer('retry_count').notNull().default(0),
     leaseOwner: text('lease_owner'),
     leaseExpiresAt: integer('lease_expires_at'),
     sessionCiphertext: text('session_ciphertext'),
@@ -358,7 +359,7 @@ export const driveObjectAttempts = sqliteTable(
   },
   (table) => [
     uniqueIndex('uq_drive_object_attempts_remote_file_id').on(table.remoteFileId),
-    index('idx_drive_object_attempts_queue').on(table.state, table.nextAttemptAt, table.createdAt),
+    index('idx_drive_object_attempts_queue').on(table.state, table.nextAttemptAt, table.retryCount, table.createdAt),
     index('idx_drive_object_attempts_lease_expiry').on(table.leaseExpiresAt),
     index('idx_drive_object_attempts_generation').on(table.generationId),
     index('idx_drive_object_attempts_artifact').on(table.artifactId, table.createdAt),
