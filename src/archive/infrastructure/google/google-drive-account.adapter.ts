@@ -4,10 +4,14 @@ import type {
   DriveQuota,
   ManagedDriveFolders,
 } from "../../application/ports/drive-account.port";
+import type { DriveCredentialRepositoryPort, ManagedFolderReservation } from "../../application/ports/drive-credential-repository.port";
 import type { DriveConnection } from "../../domain/drive-connection.entity";
 import { DriveFolderAmbiguousError } from "../../domain/errors/drive-folder-ambiguous.error";
+import { DriveObjectConflictError } from "../../domain/errors/drive-object-conflict.error";
 import {
   GoogleDriveGateway,
+  GoogleDrivePageTokenRejectedError,
+  mapGoogleDriveFailure,
   type GoogleDriveFolder,
   type GoogleDriveFolderRole,
 } from "./google-drive.gateway";
@@ -17,10 +21,13 @@ const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
 
 /** Resolves account state and private managed folders from exact Google Drive metadata. */
 export class GoogleDriveAccountAdapter implements DriveAccountPort {
-  constructor(private readonly drive: GoogleDriveGateway) {}
+  constructor(
+    private readonly drive: GoogleDriveGateway,
+    private readonly generations: Pick<DriveCredentialRepositoryPort, "loadManagedFolderReservation" | "reserveManagedFolder">,
+  ) {}
 
   async resolveAccount(connection: DriveConnection, signal: AbortSignal): Promise<DriveAccountIdentity> {
-    const about = await this.drive.loadAbout(signal);
+    const about = await this.callDrive(() => this.drive.loadAbout(signal));
     const permissionId = about.user?.permissionId;
     if (!isText(permissionId)) {
       throw new DriveFolderAmbiguousError("Google Drive account permission ID is missing");
@@ -36,7 +43,7 @@ export class GoogleDriveAccountAdapter implements DriveAccountPort {
   }
 
   async readQuota(_connection: DriveConnection, signal: AbortSignal): Promise<DriveQuota> {
-    const about = await this.drive.loadAbout(signal);
+    const about = await this.callDrive(() => this.drive.loadAbout(signal));
     const quota = about.storageQuota;
     if (quota === null) throw new DriveFolderAmbiguousError("Google Drive storage quota is missing");
     const usageBytes = parseInt64(quota.usage, "usage");
@@ -51,36 +58,44 @@ export class GoogleDriveAccountAdapter implements DriveAccountPort {
 
   async resolveManagedFolders(connection: DriveConnection, signal: AbortSignal): Promise<ManagedDriveFolders> {
     const account = await this.resolveAccount(connection, signal);
+    const reservation = await this.generations.loadManagedFolderReservation(connection.id);
+    const state: FolderResolutionState = {
+      reservation,
+      expectedRevision: reservation?.revision ?? connection.revision,
+    };
     const rootId = await this.resolveFolder({
       connection,
       accountPermissionId: account.permissionId,
       role: "root",
       parentId: ROOT_PARENT_ID,
-      storedId: connection.folders?.rootId ?? null,
+      storedId: connection.folders?.rootId ?? reservation?.rootId ?? null,
       signal,
+      state,
     });
     const motionId = await this.resolveFolder({
       connection,
       accountPermissionId: account.permissionId,
       role: "motion",
       parentId: rootId,
-      storedId: connection.folders?.motionId ?? null,
+      storedId: connection.folders?.motionId ?? reservation?.motionId ?? null,
       signal,
+      state,
     });
     const backupsId = await this.resolveFolder({
       connection,
       accountPermissionId: account.permissionId,
       role: "backups",
       parentId: rootId,
-      storedId: connection.folders?.backupsId ?? null,
+      storedId: connection.folders?.backupsId ?? reservation?.backupsId ?? null,
       signal,
+      state,
     });
     return { rootId, motionId, backupsId };
   }
 
   private async resolveFolder(input: ResolveFolderInput): Promise<string> {
     if (input.storedId !== null) {
-      const stored = await this.drive.loadFolder(input.storedId, input.signal);
+      const stored = await this.callDrive(() => this.drive.loadFolder(input.storedId!, input.signal));
       if (stored !== null && isExpectedFolder(stored, input)) return stored.id;
     }
 
@@ -90,7 +105,16 @@ export class GoogleDriveAccountAdapter implements DriveAccountPort {
     }
     if (candidates.length === 1) return candidates[0].id;
 
-    const id = await this.drive.generateFolderId(input.signal);
+    const id = await this.callDrive(() => this.drive.generateFolderId(input.signal));
+    const reservation = await this.generations.reserveManagedFolder({
+      generationId: input.connection.id,
+      expectedRevision: input.state.expectedRevision,
+      role: input.role,
+      folderId: id,
+    });
+    if (reservation === null) throw new DriveObjectConflictError("Drive folder reservation changed before creation");
+    input.state.reservation = reservation;
+    input.state.expectedRevision = reservation.revision;
     const create = {
       id,
       name: folderName(input.role),
@@ -100,14 +124,14 @@ export class GoogleDriveAccountAdapter implements DriveAccountPort {
       signal: input.signal,
     };
     try {
-      const created = await this.drive.createFolder(create);
+      const created = await this.callDrive(() => this.drive.createFolder(create));
       if (!isExpectedFolder(created, input)) {
         throw new DriveFolderAmbiguousError("Google Drive created folder metadata is not private and exact");
       }
       return created.id;
     } catch (error) {
       if (error instanceof DriveFolderAmbiguousError) throw error;
-      const recovered = await this.drive.loadFolder(id, input.signal);
+      const recovered = await this.callDrive(() => this.drive.loadFolder(id, input.signal));
       if (recovered !== null && isExpectedFolder(recovered, input)) return recovered.id;
       throw error;
     }
@@ -129,13 +153,13 @@ export class GoogleDriveAccountAdapter implements DriveAccountPort {
           signal: input.signal,
         });
       } catch (error) {
-        if (!restarted && isRejectedPageToken(error)) {
+        if (!restarted && (error instanceof GoogleDrivePageTokenRejectedError || isRejectedPageToken(error))) {
           restarted = true;
           pageToken = null;
           candidates.length = 0;
           continue;
         }
-        throw error;
+        throw mapGoogleDriveFailure(error);
       }
       if (page.incompleteSearch) {
         throw new DriveFolderAmbiguousError("Google Drive folder search was incomplete");
@@ -143,6 +167,14 @@ export class GoogleDriveAccountAdapter implements DriveAccountPort {
       candidates.push(...page.files.filter((file) => isExpectedFolder(file, input)));
       if (page.nextPageToken === null) return candidates;
       pageToken = page.nextPageToken;
+    }
+  }
+
+  private async callDrive<T>(operation: () => Promise<T>): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      throw mapGoogleDriveFailure(error);
     }
   }
 }
@@ -154,6 +186,12 @@ interface ResolveFolderInput {
   parentId: string;
   storedId: string | null;
   signal: AbortSignal;
+  state: FolderResolutionState;
+}
+
+interface FolderResolutionState {
+  reservation: ManagedFolderReservation | null;
+  expectedRevision: number;
 }
 
 function isExpectedFolder(file: GoogleDriveFolder, input: ResolveFolderInput): boolean {

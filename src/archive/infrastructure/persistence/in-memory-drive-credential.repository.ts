@@ -4,7 +4,10 @@ import type {
   DriveConnectionTerminalStatus,
   DriveCredentialRepositoryPort,
   MergeRefreshedTokens,
+  ManagedFolderReservation,
+  ManagedFolderRole,
   OAuthTokenSet,
+  ReserveManagedFolder,
   StageDriveConnection,
 } from '../../application/ports/drive-credential-repository.port';
 import { DriveConnection } from '../../domain/drive-connection.entity';
@@ -17,6 +20,7 @@ interface Entry {
   tokens: OAuthTokenSet | null;
   receiptId: string | null;
   expiresAtMs: number | null;
+  reservations: Omit<ManagedFolderReservation, 'revision'>;
 }
 
 /** In-memory parity adapter for isolated use-case tests. */
@@ -26,7 +30,7 @@ export class InMemoryDriveCredentialRepository implements DriveCredentialReposit
   async stage(input: StageDriveConnection): Promise<DriveConnection> {
     if ([...this.entries.values()].some(({ connection }) => connection.status === 'staged')) throw conflict('A Drive setup is already staged');
     const connection = DriveConnection.stage({ id: input.id, installationId: input.installationId, nowMs: input.createdAtMs });
-    this.entries.set(input.id, { connection, clientIdHash: input.clientIdHash, client: { ...input.client }, tokens: emptyTokens(), receiptId: input.receiptId, expiresAtMs: input.expiresAtMs });
+    this.entries.set(input.id, { connection, clientIdHash: input.clientIdHash, client: { ...input.client }, tokens: emptyTokens(), receiptId: input.receiptId, expiresAtMs: input.expiresAtMs, reservations: emptyReservations() });
     return connection;
   }
 
@@ -40,6 +44,22 @@ export class InMemoryDriveCredentialRepository implements DriveCredentialReposit
     entry.tokens = { ...tokens };
     entry.connection = revise(entry.connection, expectedRevision + 1, Date.now());
     return true;
+  }
+
+  async loadManagedFolderReservation(generationId: string): Promise<ManagedFolderReservation | null> {
+    const entry = this.entries.get(generationId);
+    if (!entry || entry.connection.status !== 'staged') return null;
+    return { revision: entry.connection.revision, ...entry.reservations };
+  }
+
+  async reserveManagedFolder(input: ReserveManagedFolder): Promise<ManagedFolderReservation | null> {
+    const entry = this.entries.get(input.generationId);
+    if (!entry || entry.connection.status !== 'staged' || entry.connection.revision !== input.expectedRevision) return null;
+    const key = reservationKey(input.role);
+    const existing = entry.reservations[key];
+    if (existing !== null) return existing === input.folderId ? { revision: entry.connection.revision, ...entry.reservations } : null;
+    entry.reservations[key] = input.folderId;
+    return { revision: entry.connection.revision, ...entry.reservations };
   }
 
   async activate(input: ActivateDriveConnection): Promise<{ active: DriveConnection; retiringId: string | null }> {
@@ -130,6 +150,14 @@ function revise(connection: DriveConnection, revision: number, updatedAtMs: numb
 
 function emptyTokens(): OAuthTokenSet {
   return { accessToken: null, refreshToken: null, expiryDateMs: null, tokenType: null, scope: null };
+}
+
+function emptyReservations(): Omit<ManagedFolderReservation, 'revision'> {
+  return { rootId: null, motionId: null, backupsId: null };
+}
+
+function reservationKey(role: ManagedFolderRole): keyof Omit<ManagedFolderReservation, 'revision'> {
+  return role === 'root' ? 'rootId' : role === 'motion' ? 'motionId' : 'backupsId';
 }
 
 function conflict(message: string): DriveObjectConflictError {

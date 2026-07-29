@@ -45,6 +45,23 @@ export interface MergeRefreshedTokens {
   refreshedAtMs: number;
 }
 
+export type ManagedFolderRole = 'root' | 'motion' | 'backups';
+
+/** Partial exact-ID reservations survive a provider timeout before activation. */
+export interface ManagedFolderReservation {
+  revision: number;
+  rootId: string | null;
+  motionId: string | null;
+  backupsId: string | null;
+}
+
+export interface ReserveManagedFolder {
+  generationId: string;
+  expectedRevision: number;
+  role: ManagedFolderRole;
+  folderId: string;
+}
+
 export const DRIVE_CREDENTIAL_ERROR_CODES = [
   'authorization_required',
   'access_denied',
@@ -65,6 +82,8 @@ export interface DriveCredentialRepositoryPort {
   stage(input: StageDriveConnection): Promise<DriveConnection>;
   loadStaged(receiptId: string): Promise<DriveConnection | null>;
   storeExchangedTokens(id: string, expectedRevision: number, tokens: OAuthTokenSet): Promise<boolean>;
+  loadManagedFolderReservation(generationId: string): Promise<ManagedFolderReservation | null>;
+  reserveManagedFolder(input: ReserveManagedFolder): Promise<ManagedFolderReservation | null>;
   activate(input: ActivateDriveConnection): Promise<{ active: DriveConnection; retiringId: string | null }>;
   loadActive(): Promise<DriveConnection | null>;
   loadCredentials(generationId: string): Promise<{ client: DriveClientCredentials; tokens: OAuthTokenSet; revision: number } | null>;

@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { DriveConnection } from "../../../src/archive/domain/drive-connection.entity";
 import { DriveFolderAmbiguousError } from "../../../src/archive/domain/errors/drive-folder-ambiguous.error";
+import { DriveTemporaryUnavailableError } from "../../../src/archive/domain/errors/drive-temporary-unavailable.error";
 import { GoogleDriveAccountAdapter } from "../../../src/archive/infrastructure/google/google-drive-account.adapter";
-import type {
+import {
   GoogleDriveGateway,
-  GoogleDriveFolder,
-  GoogleDriveFolderPage,
+  type GoogleDriveFolder,
+  type GoogleDriveFolderPage,
 } from "../../../src/archive/infrastructure/google/google-drive.gateway";
 
 const signal = new AbortController().signal;
@@ -90,6 +91,45 @@ describe("GoogleDriveAccountAdapter", () => {
     expect(drive.created.map(({ id }) => id)).toEqual(["root-created"]);
   });
 
+  it("durably reserves each generated folder ID before its provider create", async () => {
+    const journal: string[] = [];
+    const drive = new DriveStub(journal);
+    const reservations = new ReservationStub(journal);
+    const adapter = adapterFor(drive, reservations);
+    drive.folderPages = [page([]), page([]), page([])];
+    drive.generatedIds = ["root-created", "motion-created", "backups-created"];
+
+    await expect(adapter.resolveManagedFolders(connection(), signal)).resolves.toEqual({
+      rootId: "root-created",
+      motionId: "motion-created",
+      backupsId: "backups-created",
+    });
+    expect(journal).toEqual([
+      "reserve:root:root-created", "create:root-created",
+      "reserve:motion:motion-created", "create:motion-created",
+      "reserve:backups:backups-created", "create:backups-created",
+    ]);
+  });
+
+  it("recovers a persisted generated ID after the create response is lost", async () => {
+    const drive = new DriveStub();
+    const reservations = new ReservationStub();
+    const adapter = adapterFor(drive, reservations);
+    drive.folderPages = [page([])];
+    drive.generatedIds = ["root-reserved"];
+    drive.createFailures.set("root-reserved", providerFailure(503, "backendError"));
+
+    await expect(adapter.resolveManagedFolders(connection(), signal)).rejects.toThrow(DriveTemporaryUnavailableError);
+    expect(reservations.ids).toEqual({ rootId: "root-reserved", motionId: null, backupsId: null });
+
+    drive.files.set("root-reserved", folder("root-reserved", "root", "root"));
+    drive.folderPages = [page([folder("motion-folder", "motion", "root-reserved")]), page([folder("backups-folder", "backups", "root-reserved")])];
+    await expect(adapter.resolveManagedFolders(connection(), signal)).resolves.toEqual({
+      rootId: "root-reserved", motionId: "motion-folder", backupsId: "backups-folder",
+    });
+    expect(drive.generatedIds).toEqual([]);
+  });
+
   it("paginates candidates to exhaustion before accepting the only valid match", async () => {
     const drive = new DriveStub();
     const adapter = adapterFor(drive);
@@ -125,6 +165,45 @@ describe("GoogleDriveAccountAdapter", () => {
     await expect(adapter.resolveManagedFolders(connection(), signal)).rejects.toThrow(DriveFolderAmbiguousError);
     expect(drive.listStarts).toEqual([null, null]);
   });
+
+  it("redacts provider tokens while retaining only a safe failure status and reason", async () => {
+    const drive = new DriveStub();
+    drive.aboutError = providerFailure(503, "backendError", "access_token=secret-token");
+    const adapter = adapterFor(drive);
+
+    await expect(adapter.resolveAccount(connection(), signal)).rejects.toMatchObject({
+      name: "DriveTemporaryUnavailableError",
+      code: "DRIVE_TEMPORARY_UNAVAILABLE",
+      message: "Google Drive request failed (503: backendError)",
+    });
+  });
+});
+
+describe("GoogleDriveGateway", () => {
+  it.each([
+    ["about", (gateway: GoogleDriveGateway) => gateway.loadAbout(signal)],
+    ["list", (gateway: GoogleDriveGateway) => gateway.listFolders({ installationId: "installation-1", generationId: "generation-1", role: "root", parentId: "root", pageToken: null, signal })],
+    ["generate", (gateway: GoogleDriveGateway) => gateway.generateFolderId(signal)],
+    ["create", (gateway: GoogleDriveGateway) => gateway.createFolder({ id: "folder-1", name: "Folder", role: "root", parentId: "root", appProperties: {}, signal })],
+    ["get", (gateway: GoogleDriveGateway) => gateway.loadFolder("folder-1", signal)],
+  ])("maps raw provider errors from %s without exposing token-bearing messages", async (_operation, invoke) => {
+    const failure = providerFailure(503, "backendError", "refresh_token=secret-token");
+    const gateway = new GoogleDriveGateway({
+      about: { get: async () => { throw failure; } },
+      files: {
+        list: async () => { throw failure; },
+        generateIds: async () => { throw failure; },
+        create: async () => { throw failure; },
+        get: async () => { throw failure; },
+      },
+    } as unknown as ConstructorParameters<typeof GoogleDriveGateway>[0]);
+
+    await expect(invoke(gateway)).rejects.toMatchObject({
+      name: "DriveTemporaryUnavailableError",
+      code: "DRIVE_TEMPORARY_UNAVAILABLE",
+      message: "Google Drive request failed (503: backendError)",
+    });
+  });
 });
 
 class DriveStub {
@@ -136,8 +215,14 @@ class DriveStub {
   listStarts: Array<string | null> = [];
   created: Array<{ id: string; role: string; parentId: string }> = [];
   deletedIds: string[] = [];
+  aboutError: Error | null = null;
 
-  async loadAbout(): Promise<typeof this.about> { return this.about; }
+  constructor(private readonly journal: string[] = []) {}
+
+  async loadAbout(): Promise<typeof this.about> {
+    if (this.aboutError) throw this.aboutError;
+    return this.about;
+  }
 
   async loadFolder(id: string): Promise<GoogleDriveFolder | null> {
     return this.files.get(id) ?? null;
@@ -157,6 +242,7 @@ class DriveStub {
   }
 
   async createFolder(input: { id: string; role: string; parentId: string }): Promise<GoogleDriveFolder> {
+    this.journal.push(`create:${input.id}`);
     this.created.push(input);
     const failure = this.createFailures.get(input.id);
     if (failure) throw failure;
@@ -166,8 +252,27 @@ class DriveStub {
   }
 }
 
-function adapterFor(drive: DriveStub): GoogleDriveAccountAdapter {
-  return new GoogleDriveAccountAdapter(drive as unknown as GoogleDriveGateway);
+class ReservationStub {
+  ids = { rootId: null as string | null, motionId: null as string | null, backupsId: null as string | null };
+  private revision = 0;
+
+  constructor(private readonly journal: string[] = []) {}
+
+  async loadManagedFolderReservation(): Promise<{ revision: number; rootId: string | null; motionId: string | null; backupsId: string | null }> {
+    return { revision: this.revision, ...this.ids };
+  }
+
+  async reserveManagedFolder(input: { role: string; folderId: string; expectedRevision: number }): Promise<{ revision: number; rootId: string | null; motionId: string | null; backupsId: string | null } | null> {
+    if (input.expectedRevision !== this.revision) return null;
+    const key = input.role === "root" ? "rootId" : input.role === "motion" ? "motionId" : "backupsId";
+    this.ids[key] = input.folderId;
+    this.journal.push(`reserve:${input.role}:${input.folderId}`);
+    return { revision: this.revision, ...this.ids };
+  }
+}
+
+function adapterFor(drive: DriveStub, reservations?: ReservationStub): GoogleDriveAccountAdapter {
+  return new GoogleDriveAccountAdapter(drive as unknown as GoogleDriveGateway, (reservations ?? new ReservationStub()) as never);
 }
 
 function connection(folders: { rootId: string; motionId: string; backupsId: string } | null = null): DriveConnection {
@@ -226,4 +331,8 @@ function page(
 
 function pageTokenRejected(): Error {
   return Object.assign(new Error("Invalid page token"), { response: { status: 400, data: { error: { message: "Invalid page token" } } } });
+}
+
+function providerFailure(status: number, reason: string, rawMessage = "provider failure"): Error {
+  return Object.assign(new Error(rawMessage), { response: { status, data: { error: { message: rawMessage, errors: [{ reason }] } } } });
 }

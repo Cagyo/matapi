@@ -119,6 +119,19 @@ describe('DrizzleDriveCredentialRepository', () => {
     expect(row.client_envelope).not.toContain('client-secret');
     expect(row.token_envelope).not.toContain('old-refresh');
   });
+
+  it('durably reserves generated folder IDs in role order before activation', async () => {
+    await repository.stage(staged('generation-1'));
+
+    const root = await repository.reserveManagedFolder({ generationId: 'generation-1', expectedRevision: 0, role: 'root', folderId: 'root-reserved' });
+    expect(root).toEqual({ revision: 0, rootId: 'root-reserved', motionId: null, backupsId: null });
+    const motion = await repository.reserveManagedFolder({ generationId: 'generation-1', expectedRevision: 0, role: 'motion', folderId: 'motion-reserved' });
+    expect(motion).toEqual({ revision: 0, rootId: 'root-reserved', motionId: 'motion-reserved', backupsId: null });
+    expect(await repository.loadManagedFolderReservation('generation-1')).toEqual(motion);
+
+    const row = sqlite.prepare('SELECT root_folder_id, motion_folder_id, backups_folder_id FROM drive_connections WHERE id = ?').get('generation-1');
+    expect(row).toEqual({ root_folder_id: 'root-reserved', motion_folder_id: 'motion-reserved', backups_folder_id: null });
+  });
 });
 
 function client() {

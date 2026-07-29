@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq, inArray, lte } from 'drizzle-orm';
+import { and, eq, inArray, isNull, lte } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../../database/database.module';
 import { driveConnections } from '../../../database/schema';
 import type {
@@ -8,7 +8,10 @@ import type {
   DriveConnectionTerminalStatus,
   DriveCredentialRepositoryPort,
   MergeRefreshedTokens,
+  ManagedFolderReservation,
+  ManagedFolderRole,
   OAuthTokenSet,
+  ReserveManagedFolder,
   StageDriveConnection,
 } from '../../application/ports/drive-credential-repository.port';
 import type { DriveCredentialErrorCode } from '../../application/ports/drive-credential-repository.port';
@@ -94,6 +97,40 @@ export class DrizzleDriveCredentialRepository implements DriveCredentialReposito
       .where(and(eq(driveConnections.id, id), eq(driveConnections.revision, expectedRevision), eq(driveConnections.status, 'staged')))
       .run();
     return updated.changes === 1;
+  }
+
+  async loadManagedFolderReservation(generationId: string): Promise<ManagedFolderReservation | null> {
+    const row = this.db.select({
+      revision: driveConnections.revision,
+      rootId: driveConnections.rootFolderId,
+      motionId: driveConnections.motionFolderId,
+      backupsId: driveConnections.backupsFolderId,
+    }).from(driveConnections).where(and(eq(driveConnections.id, generationId), eq(driveConnections.status, 'staged'))).get();
+    return row === undefined ? null : row;
+  }
+
+  async reserveManagedFolder(input: ReserveManagedFolder): Promise<ManagedFolderReservation | null> {
+    const column = reservationColumn(input.role);
+    const resultKey = reservationResultKey(input.role);
+    return this.immediate((tx) => {
+      const row = tx.select({
+        revision: driveConnections.revision,
+        rootId: driveConnections.rootFolderId,
+        motionId: driveConnections.motionFolderId,
+        backupsId: driveConnections.backupsFolderId,
+      }).from(driveConnections).where(and(eq(driveConnections.id, input.generationId), eq(driveConnections.status, 'staged'), eq(driveConnections.revision, input.expectedRevision))).get();
+      if (!row) return null;
+      const existing = row[resultKey];
+      if (existing !== null) return existing === input.folderId ? row : null;
+      const updated = tx.update(driveConnections).set({ [column]: input.folderId, updatedAt: Date.now() })
+        .where(and(
+          eq(driveConnections.id, input.generationId),
+          eq(driveConnections.status, 'staged'),
+          eq(driveConnections.revision, input.expectedRevision),
+          reservationIsEmpty(input.role),
+        )).run();
+      return updated.changes === 1 ? { ...row, [resultKey]: input.folderId } : null;
+    });
   }
 
   async activate(input: ActivateDriveConnection): Promise<{ active: DriveConnection; retiringId: string | null }> {
@@ -365,6 +402,22 @@ function emptyTokens(): OAuthTokenSet {
 
 function revise(connection: DriveConnection, revision: number, updatedAtMs: number): DriveConnection {
   return DriveConnection.restore({ ...connection, revision, updatedAtMs });
+}
+
+function reservationColumn(role: ManagedFolderRole): 'rootFolderId' | 'motionFolderId' | 'backupsFolderId' {
+  return role === 'root' ? 'rootFolderId' : role === 'motion' ? 'motionFolderId' : 'backupsFolderId';
+}
+
+function reservationResultKey(role: ManagedFolderRole): 'rootId' | 'motionId' | 'backupsId' {
+  return role === 'root' ? 'rootId' : role === 'motion' ? 'motionId' : 'backupsId';
+}
+
+function reservationIsEmpty(role: ManagedFolderRole) {
+  return role === 'root'
+    ? isNull(driveConnections.rootFolderId)
+    : role === 'motion'
+      ? isNull(driveConnections.motionFolderId)
+      : isNull(driveConnections.backupsFolderId);
 }
 
 function stringifyEnvelope(value: ArchiveSecretEnvelope): string {

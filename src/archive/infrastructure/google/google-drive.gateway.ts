@@ -1,5 +1,11 @@
 import type { drive_v3 } from "@googleapis/drive";
+import { DriveConfigurationError } from "../../domain/errors/drive-configuration.error";
 import { DriveFolderAmbiguousError } from "../../domain/errors/drive-folder-ambiguous.error";
+import { DrivePolicyBlockedError } from "../../domain/errors/drive-policy-blocked.error";
+import { DriveQuotaExceededError } from "../../domain/errors/drive-quota-exceeded.error";
+import { DriveRateLimitedError } from "../../domain/errors/drive-rate-limited.error";
+import { DriveReauthorizationRequiredError } from "../../domain/errors/drive-reauthorization-required.error";
+import { DriveTemporaryUnavailableError } from "../../domain/errors/drive-temporary-unavailable.error";
 
 const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
 const FOLDER_FIELDS = "id,name,mimeType,parents,appProperties,driveId,ownedByMe,owners(permissionId),permissionIds,shared,trashed";
@@ -58,30 +64,42 @@ export interface GoogleDriveFolderCreate {
   signal: AbortSignal;
 }
 
+/** Internal-only signal that lets the adapter restart a rejected list token once. */
+export class GoogleDrivePageTokenRejectedError extends Error {
+  constructor() {
+    super("Google Drive page token was rejected");
+    this.name = "GoogleDrivePageTokenRejectedError";
+  }
+}
+
 /** Narrow Google SDK boundary; application code never sees SDK resource types. */
 export class GoogleDriveGateway {
   constructor(private readonly drive: drive_v3.Drive) {}
 
   async loadAbout(signal: AbortSignal): Promise<GoogleDriveAbout> {
-    const response = await this.drive.about.get(
-      { fields: "user(permissionId,emailAddress,displayName),storageQuota(limit,usage,usageInDrive,usageInDriveTrash)" },
-      { signal },
-    );
-    const user = response.data.user;
-    const quota = response.data.storageQuota;
-    return {
-      user: user === undefined || user === null ? null : {
-        permissionId: nullableText(user.permissionId),
-        emailAddress: nullableText(user.emailAddress),
-        displayName: nullableText(user.displayName),
-      },
-      storageQuota: quota === undefined || quota === null ? null : {
-        limit: nullableText(quota.limit),
-        usage: nullableText(quota.usage),
-        usageInDrive: nullableText(quota.usageInDrive),
-        usageInDriveTrash: nullableText(quota.usageInDriveTrash),
-      },
-    };
+    try {
+      const response = await this.drive.about.get(
+        { fields: "user(permissionId,emailAddress,displayName),storageQuota(limit,usage,usageInDrive,usageInDriveTrash)" },
+        { signal },
+      );
+      const user = response.data.user;
+      const quota = response.data.storageQuota;
+      return {
+        user: user === undefined || user === null ? null : {
+          permissionId: nullableText(user.permissionId),
+          emailAddress: nullableText(user.emailAddress),
+          displayName: nullableText(user.displayName),
+        },
+        storageQuota: quota === undefined || quota === null ? null : {
+          limit: nullableText(quota.limit),
+          usage: nullableText(quota.usage),
+          usageInDrive: nullableText(quota.usageInDrive),
+          usageInDriveTrash: nullableText(quota.usageInDriveTrash),
+        },
+      };
+    } catch (error) {
+      throw mapGoogleDriveFailure(error);
+    }
   }
 
   async loadFolder(id: string, signal: AbortSignal): Promise<GoogleDriveFolder | null> {
@@ -90,47 +108,60 @@ export class GoogleDriveGateway {
       return toFolder(response.data);
     } catch (error) {
       if (providerStatus(error) === 404) return null;
-      throw error;
+      throw mapGoogleDriveFailure(error);
     }
   }
 
   async listFolders(input: GoogleDriveFolderList): Promise<GoogleDriveFolderPage> {
-    const response = await this.drive.files.list({
-      corpora: "user",
-      spaces: "drive",
-      pageToken: input.pageToken ?? undefined,
-      q: folderQuery(input),
-      fields: `nextPageToken,incompleteSearch,files(${FOLDER_FIELDS})`,
-    }, { signal: input.signal });
-    return {
-      files: (response.data.files ?? []).map(toFolder),
-      nextPageToken: nullableText(response.data.nextPageToken),
-      incompleteSearch: response.data.incompleteSearch === true,
-    };
+    try {
+      const response = await this.drive.files.list({
+        corpora: "user",
+        spaces: "drive",
+        pageToken: input.pageToken ?? undefined,
+        q: folderQuery(input),
+        fields: `nextPageToken,incompleteSearch,files(${FOLDER_FIELDS})`,
+      }, { signal: input.signal });
+      return {
+        files: (response.data.files ?? []).map(toFolder),
+        nextPageToken: nullableText(response.data.nextPageToken),
+        incompleteSearch: response.data.incompleteSearch === true,
+      };
+    } catch (error) {
+      if (isRejectedPageToken(error)) throw new GoogleDrivePageTokenRejectedError();
+      throw mapGoogleDriveFailure(error);
+    }
   }
 
   async generateFolderId(signal: AbortSignal): Promise<string> {
-    const response = await this.drive.files.generateIds({ count: 1, space: "drive", fields: "ids" }, { signal });
-    const ids = response.data.ids;
-    if (!Array.isArray(ids) || ids.length !== 1 || !isText(ids[0])) {
-      throw new DriveFolderAmbiguousError("Google Drive did not reserve exactly one folder ID");
+    try {
+      const response = await this.drive.files.generateIds({ count: 1, space: "drive", fields: "ids" }, { signal });
+      const ids = response.data.ids;
+      if (!Array.isArray(ids) || ids.length !== 1 || !isText(ids[0])) {
+        throw new DriveFolderAmbiguousError("Google Drive did not reserve exactly one folder ID");
+      }
+      return ids[0];
+    } catch (error) {
+      throw mapGoogleDriveFailure(error);
     }
-    return ids[0];
   }
 
   async createFolder(input: GoogleDriveFolderCreate): Promise<GoogleDriveFolder> {
-    const response = await this.drive.files.create({
-      ignoreDefaultVisibility: true,
-      fields: FOLDER_FIELDS,
-      requestBody: {
-        id: input.id,
-        name: input.name,
-        mimeType: FOLDER_MIME_TYPE,
-        parents: [input.parentId],
-        appProperties: { ...input.appProperties },
-      },
-    }, { signal: input.signal });
-    return toFolder(response.data);
+    try {
+      const response = await this.drive.files.create({
+        ignoreDefaultVisibility: true,
+        fields: FOLDER_FIELDS,
+        requestBody: {
+          id: input.id,
+          name: input.name,
+          mimeType: FOLDER_MIME_TYPE,
+          parents: [input.parentId],
+          appProperties: { ...input.appProperties },
+        },
+      }, { signal: input.signal });
+      return toFolder(response.data);
+    } catch (error) {
+      throw mapGoogleDriveFailure(error);
+    }
   }
 }
 
@@ -195,3 +226,76 @@ function providerStatus(value: unknown): number | null {
   const status = (response as { status?: unknown }).status;
   return typeof status === "number" ? status : null;
 }
+
+export function mapGoogleDriveFailure(value: unknown): Error {
+  if (isDomainError(value)) return value;
+  const status = providerStatus(value);
+  const reason = safeProviderReason(value);
+  const message = safeFailureMessage(status, reason);
+  if (status === 401 || reason === "authError" || reason === "invalidCredentials") return new DriveReauthorizationRequiredError(message);
+  if (status === 429 || reason === "rateLimitExceeded" || reason === "userRateLimitExceeded" || reason === "dailyLimitExceeded") return new DriveRateLimitedError(message);
+  if (reason === "storageQuotaExceeded") return new DriveQuotaExceededError(message);
+  if (reason === "domainPolicy" || reason === "accessNotConfigured" || reason === "insufficientFilePermissions" || status === 403) return new DrivePolicyBlockedError(message);
+  if (status === 400 || reason === "invalidArgument" || reason === "badRequest") return new DriveConfigurationError(message);
+  return new DriveTemporaryUnavailableError(message);
+}
+
+function isRejectedPageToken(value: unknown): boolean {
+  if (providerStatus(value) !== 400) return false;
+  const message = providerMessage(value);
+  return typeof message === "string" && /page\s*token/iu.test(message);
+}
+
+function safeProviderReason(value: unknown): string | null {
+  const error = providerError(value);
+  const candidate = typeof error?.reason === "string"
+    ? error.reason
+    : Array.isArray(error?.errors) && typeof error.errors[0]?.reason === "string"
+      ? error.errors[0].reason
+      : null;
+  return candidate !== null && SAFE_REASONS.has(candidate) ? candidate : null;
+}
+
+function providerMessage(value: unknown): unknown {
+  return providerError(value)?.message;
+}
+
+function providerError(value: unknown): { reason?: unknown; errors?: Array<{ reason?: unknown }>; message?: unknown } | null {
+  if (typeof value !== "object" || value === null) return null;
+  const response = (value as { response?: unknown }).response;
+  if (typeof response !== "object" || response === null) return null;
+  const data = (response as { data?: unknown }).data;
+  if (typeof data !== "object" || data === null) return null;
+  const error = (data as { error?: unknown }).error;
+  return typeof error === "object" && error !== null ? error as { reason?: unknown; errors?: Array<{ reason?: unknown }>; message?: unknown } : null;
+}
+
+function safeFailureMessage(status: number | null, reason: string | null): string {
+  const detail = [status === null ? null : String(status), reason].filter((value): value is string => value !== null).join(": ");
+  return detail ? `Google Drive request failed (${detail})` : "Google Drive request failed";
+}
+
+function isDomainError(value: unknown): value is Error {
+  return value instanceof DriveFolderAmbiguousError
+    || value instanceof DriveConfigurationError
+    || value instanceof DrivePolicyBlockedError
+    || value instanceof DriveQuotaExceededError
+    || value instanceof DriveRateLimitedError
+    || value instanceof DriveReauthorizationRequiredError
+    || value instanceof DriveTemporaryUnavailableError;
+}
+
+const SAFE_REASONS = new Set([
+  "accessNotConfigured",
+  "authError",
+  "backendError",
+  "badRequest",
+  "dailyLimitExceeded",
+  "domainPolicy",
+  "insufficientFilePermissions",
+  "invalidArgument",
+  "invalidCredentials",
+  "rateLimitExceeded",
+  "storageQuotaExceeded",
+  "userRateLimitExceeded",
+]);
