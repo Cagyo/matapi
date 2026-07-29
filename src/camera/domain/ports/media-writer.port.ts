@@ -11,6 +11,13 @@ export const MEDIA_WRITER = Symbol('MEDIA_WRITER');
 export interface MediaWriterPort {
   /** Open a new event row when motion starts. Returns the created event. */
   createEvent(cameraId: string | null, startedAt: Date): Promise<MotionEvent>;
+  /** Creates a recovered standalone event for a stable file missed by Motion hooks. */
+  createCompletedEvent(
+    cameraId: string | null,
+    startedAt: Date,
+    endedAt: Date,
+    videoPath: string,
+  ): Promise<MotionEvent>;
   /**
    * Close the most recent still-open (no `endedAt`) event for a camera,
    * recording its end time and video path. Returns the updated event, or
@@ -27,6 +34,10 @@ export interface MediaWriterPort {
    * disambiguate. Returns the updated event, or `null` when none is open.
    */
   setSnapshotForLatestOpenEvent(snapshotPath: string): Promise<MotionEvent | null>;
+  /** Atomically associates every matching event row with an archive artifact. */
+  attachArchiveArtifact(eventIds: number[], archiveArtifactId: string): Promise<void>;
+  /** Keeps an unstable hook candidate eligible for the next bounded reconciliation. */
+  deferArchiveRegistration(eventIds: number[]): Promise<void>;
   /**
    * Mark an event as uploaded to Drive, recording its remote path (spec 21).
    * Sets `uploadedToGdrive = true` and `gdriveFileId = remotePath`.

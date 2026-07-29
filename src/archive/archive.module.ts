@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { EventModule } from '../events/event.module';
 import { ARCHIVE_ARTIFACT_REPOSITORY } from './application/ports/archive-artifact-repository.port';
+import { ARCHIVE_REGISTRATION } from './application/ports/archive-registration.port';
 import { ARCHIVE_SECRET_CIPHER } from './application/ports/archive-secret-cipher.port';
 import { DRIVE_ACCOUNT } from './application/ports/drive-account.port';
 import { DRIVE_CREDENTIAL_REPOSITORY } from './application/ports/drive-credential-repository.port';
@@ -10,6 +11,7 @@ import { GoogleDeviceAuthorizationAdapter } from './infrastructure/google/google
 import { AesGcmArchiveSecretAdapter } from './infrastructure/persistence/aes-gcm-archive-secret.adapter';
 import { DrizzleArchiveArtifactRepository } from './infrastructure/persistence/drizzle-archive-artifact.repository';
 import { DrizzleDriveCredentialRepository } from './infrastructure/persistence/drizzle-drive-credential.repository';
+import { RegisterArchiveArtifactUseCase } from './application/use-cases/register-archive-artifact.use-case';
 
 /** Archive-owned provider bindings consumed through ports by Telegram and later schedulers. */
 @Module({
@@ -20,10 +22,12 @@ import { DrizzleDriveCredentialRepository } from './infrastructure/persistence/d
     { provide: DRIVE_CREDENTIAL_REPOSITORY, useExisting: DrizzleDriveCredentialRepository },
     DrizzleArchiveArtifactRepository,
     { provide: ARCHIVE_ARTIFACT_REPOSITORY, useExisting: DrizzleArchiveArtifactRepository },
+    RegisterArchiveArtifactUseCase,
+    { provide: ARCHIVE_REGISTRATION, useExisting: RegisterArchiveArtifactUseCase },
     { provide: DRIVE_DEVICE_AUTHORIZATION, useClass: GoogleDeviceAuthorizationAdapter },
     GoogleDriveConnectionAccountAdapter,
     { provide: DRIVE_ACCOUNT, useExisting: GoogleDriveConnectionAccountAdapter },
   ],
-  exports: [DRIVE_CREDENTIAL_REPOSITORY, ARCHIVE_ARTIFACT_REPOSITORY, DRIVE_DEVICE_AUTHORIZATION, DRIVE_ACCOUNT],
+  exports: [DRIVE_CREDENTIAL_REPOSITORY, ARCHIVE_ARTIFACT_REPOSITORY, ARCHIVE_REGISTRATION, DRIVE_DEVICE_AUTHORIZATION, DRIVE_ACCOUNT],
 })
 export class ArchiveModule {}

@@ -33,6 +33,7 @@ export class InMemoryMediaRepository implements MediaRepositoryPort, MediaWriter
       endedAt: null,
       videoPath: null,
       snapshotPath: null,
+      archiveArtifactId: null,
       uploadedToGdrive: false,
       gdriveFileId: null,
       localDeleted: false,
@@ -51,6 +52,21 @@ export class InMemoryMediaRepository implements MediaRepositoryPort, MediaWriter
     open.endedAt = endedAt;
     open.videoPath = videoPath;
     return open;
+  }
+
+  async createCompletedEvent(
+    cameraId: string | null,
+    startedAt: Date,
+    endedAt: Date,
+    videoPath: string,
+  ): Promise<MotionEvent> {
+    const event: MotionEvent = {
+      id: this.nextId++, cameraId, startedAt, endedAt, videoPath,
+      snapshotPath: null, archiveArtifactId: null, uploadedToGdrive: false,
+      gdriveFileId: null, localDeleted: false,
+    };
+    this.events.push(event);
+    return event;
   }
 
   async setSnapshotForLatestOpenEvent(
@@ -84,6 +100,19 @@ export class InMemoryMediaRepository implements MediaRepositoryPort, MediaWriter
 
   async findEventById(id: number): Promise<MotionEvent | null> {
     return this.events.find((e) => e.id === id) ?? null;
+  }
+
+  async findUnarchivedCompletedVideos(limit: number): Promise<MotionEvent[]> {
+    return this.events
+      .filter((event) => event.endedAt !== null && event.videoPath !== null && event.archiveArtifactId === null)
+      .sort((left, right) => (left.startedAt?.getTime() ?? 0) - (right.startedAt?.getTime() ?? 0))
+      .slice(0, limit);
+  }
+
+  async findCompletedEventsByVideoPath(videoPath: string): Promise<MotionEvent[]> {
+    return this.events.filter((event) =>
+      event.endedAt !== null && event.videoPath === videoPath && event.archiveArtifactId === null,
+    );
   }
 
   async listEventsOnDay(day: Date): Promise<MotionEvent[]> {
@@ -172,6 +201,18 @@ export class InMemoryMediaRepository implements MediaRepositoryPort, MediaWriter
       event.uploadedToGdrive = true;
       event.gdriveFileId = remotePath;
     }
+  }
+
+  async attachArchiveArtifact(eventIds: number[], archiveArtifactId: string): Promise<void> {
+    for (const event of this.events) {
+      if (eventIds.includes(event.id) && event.archiveArtifactId === null) {
+        event.archiveArtifactId = archiveArtifactId;
+      }
+    }
+  }
+
+  async deferArchiveRegistration(_eventIds: number[]): Promise<void> {
+    // Keeping the nullable reference untouched makes the row eligible for recovery.
   }
 
   async markLocalDeleted(id: number): Promise<void> {

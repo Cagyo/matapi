@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, desc, eq, gte, isNotNull, isNull, lt } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../database/database.module';
 import { cameras, motionEvents } from '../../database/schema';
 import { Camera } from '../domain/camera.entity';
@@ -26,7 +26,21 @@ export class DrizzleMediaRepository implements MediaRepositoryPort, MediaWriterP
   async createEvent(cameraId: string | null, startedAt: Date): Promise<MotionEvent> {
     const row = this.db
       .insert(motionEvents)
-      .values({ cameraId, startedAt, uploadedToGdrive: false, localDeleted: false })
+      .values({ cameraId, startedAt, localDeleted: false })
+      .returning()
+      .get();
+    return this.toEvent(row);
+  }
+
+  async createCompletedEvent(
+    cameraId: string | null,
+    startedAt: Date,
+    endedAt: Date,
+    videoPath: string,
+  ): Promise<MotionEvent> {
+    const row = this.db
+      .insert(motionEvents)
+      .values({ cameraId, startedAt, endedAt, videoPath, localDeleted: false })
       .returning()
       .get();
     return this.toEvent(row);
@@ -105,6 +119,34 @@ export class DrizzleMediaRepository implements MediaRepositoryPort, MediaWriterP
     return row ? this.toEvent(row) : null;
   }
 
+  async findUnarchivedCompletedVideos(limit: number): Promise<MotionEvent[]> {
+    return this.db
+      .select()
+      .from(motionEvents)
+      .where(and(
+        isNotNull(motionEvents.endedAt),
+        isNotNull(motionEvents.videoPath),
+        isNull(motionEvents.archiveArtifactId),
+      ))
+      .orderBy(asc(motionEvents.startedAt))
+      .limit(limit)
+      .all()
+      .map((row) => this.toEvent(row));
+  }
+
+  async findCompletedEventsByVideoPath(videoPath: string): Promise<MotionEvent[]> {
+    return this.db
+      .select()
+      .from(motionEvents)
+      .where(and(
+        eq(motionEvents.videoPath, videoPath),
+        isNotNull(motionEvents.endedAt),
+        isNull(motionEvents.archiveArtifactId),
+      ))
+      .all()
+      .map((row) => this.toEvent(row));
+  }
+
   async listEventsOnDay(day: Date): Promise<MotionEvent[]> {
     const { start, end } = dayBounds(day);
     return this.db
@@ -162,7 +204,7 @@ export class DrizzleMediaRepository implements MediaRepositoryPort, MediaWriterP
     const pending = this.db
       .select()
       .from(motionEvents)
-      .where(eq(motionEvents.uploadedToGdrive, false))
+      .where(isNull(motionEvents.archiveArtifactId))
       .all()
       .filter((row) => row.videoPath !== null && row.localDeleted !== true).length;
 
@@ -175,7 +217,7 @@ export class DrizzleMediaRepository implements MediaRepositoryPort, MediaWriterP
       .from(motionEvents)
       .where(
         and(
-          eq(motionEvents.uploadedToGdrive, false),
+          isNull(motionEvents.archiveArtifactId),
           eq(motionEvents.localDeleted, false),
           isNotNull(motionEvents.videoPath),
           isNotNull(motionEvents.endedAt),
@@ -192,7 +234,7 @@ export class DrizzleMediaRepository implements MediaRepositoryPort, MediaWriterP
       .from(motionEvents)
       .where(
         and(
-          eq(motionEvents.uploadedToGdrive, true),
+          isNotNull(motionEvents.archiveArtifactId),
           eq(motionEvents.localDeleted, false),
         ),
       )
@@ -215,11 +257,23 @@ export class DrizzleMediaRepository implements MediaRepositoryPort, MediaWriterP
   }
 
   async markUploaded(id: number, remotePath: string): Promise<void> {
+    void id;
+    void remotePath;
+    // Archive attempt verification owns remote state; this compatibility seam
+    // is removed with the legacy rclone scheduler migration.
+  }
+
+  async attachArchiveArtifact(eventIds: number[], archiveArtifactId: string): Promise<void> {
+    if (eventIds.length === 0) return;
     this.db
       .update(motionEvents)
-      .set({ uploadedToGdrive: true, gdriveFileId: remotePath })
-      .where(eq(motionEvents.id, id))
+      .set({ archiveArtifactId })
+      .where(and(inArray(motionEvents.id, eventIds), isNull(motionEvents.archiveArtifactId)))
       .run();
+  }
+
+  async deferArchiveRegistration(_eventIds: number[]): Promise<void> {
+    // A null reference is the durable deferred state and is picked up by reconcile().
   }
 
   async markLocalDeleted(id: number): Promise<void> {
@@ -231,14 +285,8 @@ export class DrizzleMediaRepository implements MediaRepositoryPort, MediaWriterP
   }
 
   async clearGdriveForEventsOlderThan(cutoff: Date): Promise<number> {
-    const result = this.db
-      .update(motionEvents)
-      .set({ gdriveFileId: null })
-      .where(
-        and(lt(motionEvents.startedAt, cutoff), isNotNull(motionEvents.gdriveFileId)),
-      )
-      .run();
-    return result.changes;
+    void cutoff;
+    return 0;
   }
 
   private toCamera(row: CameraRow): Camera {
@@ -259,8 +307,9 @@ export class DrizzleMediaRepository implements MediaRepositoryPort, MediaWriterP
       endedAt: row.endedAt,
       videoPath: row.videoPath,
       snapshotPath: row.snapshotPath,
-      uploadedToGdrive: row.uploadedToGdrive ?? false,
-      gdriveFileId: row.gdriveFileId,
+      archiveArtifactId: row.archiveArtifactId,
+      uploadedToGdrive: false,
+      gdriveFileId: null,
       localDeleted: row.localDeleted ?? false,
     };
   }

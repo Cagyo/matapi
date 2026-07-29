@@ -6,6 +6,8 @@ export interface MotionEvent {
   endedAt: Date | null;
   videoPath: string | null;
   snapshotPath: string | null;
+  /** Durable archive manifest entry for this completed video, when registered. */
+  archiveArtifactId: string | null;
   uploadedToGdrive: boolean;
   gdriveFileId: string | null;
   localDeleted: boolean;

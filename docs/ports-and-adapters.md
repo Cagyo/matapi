@@ -103,6 +103,12 @@ and directs the user to localized `/menu` usage only.
 | `HomeHealthSnapshotPort` (`HOME_HEALTH_SNAPSHOT`) | `InMemoryHomeHealthSnapshotAdapter` (all modes/tests) | ✅ canonical — bounded process-local cache for reporting-health snapshots only; persisted sensor state is always reread. A complete snapshot is fresh for two minutes, and changing enabled IDs makes it insufficient for a normal verdict. | [home-health-snapshot.port.ts](../src/telegram/application/ports/home-health-snapshot.port.ts) |
 | `RolePort` | `DrizzleRoleRepository` | 📝 | [role.guard.ts](../src/telegram/guards/role.guard.ts) |
 
+### Archive context
+
+| Port | Adapters | Status | Source |
+|---|---|---|---|
+| `ArchiveRegistrationPort` (`ARCHIVE_REGISTRATION`) | `RegisterArchiveArtifactUseCase` over `ArchiveArtifactRepositoryPort` | ✅ provider-neutral cross-context artifact registration; callers supply only a validated immutable descriptor and never receive persistence access. | [archive-registration.port.ts](../src/archive/application/ports/archive-registration.port.ts) |
+
 ### Camera context
 
 | Port | Adapters | Status | Source |
@@ -123,6 +129,7 @@ and directs the user to localized `/menu` usage only.
 | `DbBackupPort` (`DB_BACKUP`) | `SqliteDbBackupAdapter` (SQLite online backup), `StubDbBackupAdapter` (dev) | ✅ daily DB backup (spec 21) | [db-backup.port.ts](../src/camera/domain/ports/db-backup.port.ts) |
 | `MediaRepositoryPort` (`MEDIA_REPOSITORY`) | `DrizzleMediaRepository`, `InMemoryMediaRepository` (dev) | ✅ read model | [drizzle-media.repository.ts](../src/camera/infrastructure/drizzle-media.repository.ts) |
 | `MediaWriterPort` (`MEDIA_WRITER`) | `DrizzleMediaRepository`, `InMemoryMediaRepository` (dev) — same instance, aliased | ✅ write side for motion hooks (spec 20) | [media-writer.port.ts](../src/camera/domain/ports/media-writer.port.ts) |
+| `CompletedMotionVideoPort` (`COMPLETED_MOTION_VIDEO`) | `FsCompletedMotionVideoAdapter` | ✅ exact-root, no-follow Motion video validation with 60-second stability and bounded streaming SHA-256 before archive registration. | [completed-motion-video.port.ts](../src/camera/domain/ports/completed-motion-video.port.ts) |
 | `SnapshotPort` (`SNAPSHOT`) | `FfmpegSnapshotAdapter` (caches via TTL), `StubSnapshotAdapter` (dev) | ✅ | [snapshot.port.ts](../src/camera/domain/ports/snapshot.port.ts) |
 | `MotionAlertPort` (`MOTION_ALERT`) | `EventsMotionAlertAdapter` (delegates to events `NotificationService`), `StubMotionAlertAdapter` (dev) | ✅ motion notification (spec 19, 20) | [motion-alert.port.ts](../src/camera/domain/ports/motion-alert.port.ts) |
 | `AdminAlertPort` (`ADMIN_ALERT`) | `AdminAlertService` (register/clear seam) ← `TelegramAdminAlertAdapter` registered at bot bootstrap | ✅ daemon up/down + Drive-sync / emergency-disk alerts (specs 20, 21) | [admin-alert.port.ts](../src/camera/domain/ports/admin-alert.port.ts) |

@@ -1,4 +1,7 @@
 import { Module } from '@nestjs/common';
+import { readFileSync } from 'node:fs';
+import { ArchiveModule } from '../archive/archive.module';
+import { ARCHIVE_REGISTRATION, type ArchiveRegistrationPort } from '../archive/application/ports/archive-registration.port';
 import { EventModule } from '../events/event.module';
 import { FeatureModule } from '../features/feature.module';
 import {
@@ -44,6 +47,7 @@ import { RtspSourceStartGate } from './application/rtsp-source-start-gate.servic
 import { RecordMotionEndUseCase } from './application/record-motion-end.use-case';
 import { RecordMotionStartUseCase } from './application/record-motion-start.use-case';
 import { RecordSnapshotUseCase } from './application/record-snapshot.use-case';
+import { RegisterCompletedMotionVideosUseCase } from './application/register-completed-motion-videos.use-case';
 import { StopLiveStreamUseCase } from './application/stop-live-stream.use-case';
 import { TriggerCleanUseCase } from './application/trigger-clean.use-case';
 import { UploadMotionUseCase } from './application/upload-motion.use-case';
@@ -95,6 +99,7 @@ import {
   type MediaRepositoryPort,
 } from './domain/ports/media-repository.port';
 import { MEDIA_WRITER } from './domain/ports/media-writer.port';
+import { COMPLETED_MOTION_VIDEO, type CompletedMotionVideoPort } from './domain/ports/completed-motion-video.port';
 import { MOTION_ALERT } from './domain/ports/motion-alert.port';
 import { MOTION_CONTROL } from './domain/ports/motion-control.port';
 import {
@@ -131,6 +136,7 @@ import { FeatureLiveStreamCapabilityAdapter } from './infrastructure/feature-liv
 import { FsLiveStreamLeaseAdapter } from './infrastructure/fs-live-stream-lease.adapter';
 import { FsLocalStorageAdapter } from './infrastructure/fs-local-storage.adapter';
 import { FsMediaFileAdapter } from './infrastructure/fs-media-file.adapter';
+import { FsCompletedMotionVideoAdapter } from './infrastructure/fs-completed-motion-video.adapter';
 import { InMemoryGdriveSyncHealth } from './infrastructure/in-memory-gdrive-sync-health';
 import { InMemoryLiveStreamGatewayAdapter } from './infrastructure/in-memory-live-stream-gateway.adapter';
 import { InMemoryLiveStreamLeaseAdapter } from './infrastructure/in-memory-live-stream-lease.adapter';
@@ -172,6 +178,21 @@ function resolveCameraMode(): CameraMode {
 const mode = resolveCameraMode();
 const liveStreamOptions = liveStreamOptionsFromEnv(process.env);
 
+function cameraInstallationId(): string {
+  const direct = process.env.HOME_WORKER_INSTALLATION_ID?.trim();
+  if (direct) return direct;
+  try {
+    const persisted = readFileSync(
+      process.env.HOME_WORKER_INSTALLATION_ID_PATH ?? '/etc/home-worker/installation-id',
+      'utf8',
+    ).trim();
+    if (persisted) return persisted;
+  } catch {
+    // Development and test composition do not install the root-owned state file.
+  }
+  return 'local-development-installation';
+}
+
 /**
  * Camera composition root (specs 14, 15, 20, 21).
  *
@@ -181,7 +202,7 @@ const liveStreamOptions = liveStreamOptionsFromEnv(process.env);
  * without those binaries installed.
  */
 @Module({
-  imports: [EventModule, FeatureModule, SystemModule],
+  imports: [ArchiveModule, EventModule, FeatureModule, SystemModule],
   controllers: [MotionHooksController],
   providers: [
     { provide: CAMERA_MODE, useValue: mode },
@@ -194,6 +215,24 @@ const liveStreamOptions = liveStreamOptionsFromEnv(process.env);
     {
       provide: MEDIA_WRITER,
       useExisting: mode === 'stub' ? InMemoryMediaRepository : DrizzleMediaRepository,
+    },
+    FsCompletedMotionVideoAdapter,
+    { provide: COMPLETED_MOTION_VIDEO, useExisting: FsCompletedMotionVideoAdapter },
+    {
+      provide: RegisterCompletedMotionVideosUseCase,
+      useFactory: (
+        media: MediaRepositoryPort,
+        writer: import('./domain/ports/media-writer.port').MediaWriterPort,
+        completedVideos: CompletedMotionVideoPort,
+        archive: ArchiveRegistrationPort,
+      ) => new RegisterCompletedMotionVideosUseCase(
+        media,
+        completedVideos,
+        archive,
+        cameraInstallationId(),
+        writer,
+      ),
+      inject: [MEDIA_REPOSITORY, MEDIA_WRITER, COMPLETED_MOTION_VIDEO, ARCHIVE_REGISTRATION],
     },
     {
       provide: MOTION_CONTROL,
@@ -429,7 +468,16 @@ const liveStreamOptions = liveStreamOptionsFromEnv(process.env);
     GdriveStatusUseCase,
     ListCamerasUseCase,
     RecordMotionStartUseCase,
-    RecordMotionEndUseCase,
+    {
+      provide: RecordMotionEndUseCase,
+      useFactory: (
+        media: MediaRepositoryPort,
+        writer: import('./domain/ports/media-writer.port').MediaWriterPort,
+        availability: FeatureAvailabilityPort,
+        registration: RegisterCompletedMotionVideosUseCase,
+      ) => new RecordMotionEndUseCase(media, writer, availability, registration),
+      inject: [MEDIA_REPOSITORY, MEDIA_WRITER, FEATURE_AVAILABILITY, RegisterCompletedMotionVideosUseCase],
+    },
     RecordSnapshotUseCase,
     MotionWatcherService,
     UploadMotionUseCase,

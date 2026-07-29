@@ -28,6 +28,10 @@ export interface MediaRepositoryPort {
    */
   findCameraByName(name: string): Promise<Camera | null>;
   findEventById(id: number): Promise<MotionEvent | null>;
+  /** Closed videos not yet attached to an archive artifact, oldest first. */
+  findUnarchivedCompletedVideos(limit: number): Promise<MotionEvent[]>;
+  /** Closed event rows pointing at the exact Motion path and not yet attached. */
+  findCompletedEventsByVideoPath(videoPath: string): Promise<MotionEvent[]>;
   /** Events whose `startedAt` falls within the local-time day of `day`. */
   listEventsOnDay(day: Date): Promise<MotionEvent[]>;
   /**

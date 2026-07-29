@@ -6,6 +6,7 @@ import {
 } from '../domain/ports/media-repository.port';
 import { MEDIA_WRITER, MediaWriterPort } from '../domain/ports/media-writer.port';
 import { FEATURE_AVAILABILITY, type FeatureAvailabilityPort } from '../../features/domain/ports/feature-availability.port';
+import { RegisterCompletedMotionVideosUseCase } from './register-completed-motion-videos.use-case';
 
 /**
  * Records the end of a motion event (spec 20). Invoked by Motion's
@@ -22,6 +23,7 @@ export class RecordMotionEndUseCase {
     @Inject(MEDIA_REPOSITORY) private readonly media: MediaRepositoryPort,
     @Inject(MEDIA_WRITER) private readonly writer: MediaWriterPort,
     @Inject(FEATURE_AVAILABILITY) private readonly availability?: FeatureAvailabilityPort,
+    private readonly registerCompletedVideos?: RegisterCompletedMotionVideosUseCase,
   ) {}
 
   async execute(cameraRef: string | undefined, videoPath: string): Promise<void> {
@@ -42,6 +44,7 @@ export class RecordMotionEndUseCase {
       videoPath,
     );
     if (closed) {
+      await this.registerCompletedVideos?.executeForEvent(closed.id);
       return;
     }
 
@@ -49,7 +52,8 @@ export class RecordMotionEndUseCase {
     await this.availability?.requireReady('motion');
     await this.writer.createEvent(camera.id, startedAt);
     await this.availability?.requireReady('motion');
-    await this.writer.closeLatestOpenEvent(camera.id, endedAt, videoPath);
+    const standalone = await this.writer.closeLatestOpenEvent(camera.id, endedAt, videoPath);
+    if (standalone) await this.registerCompletedVideos?.executeForEvent(standalone.id);
     this.logger.log(
       `Motion end for ${camera.name} with no open event — created standalone video event ${videoPath}`,
     );
