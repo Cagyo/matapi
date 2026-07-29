@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, eq, gte, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
+import { and, asc, eq, gt, gte, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../../database/database.module';
 import { archiveArtifacts, archiveSchedulerState, driveObjectAttempts } from '../../../database/schema';
 import type {
@@ -245,23 +245,24 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
       const row = tx.select().from(driveObjectAttempts).where(and(eq(driveObjectAttempts.id, attemptId), eq(driveObjectAttempts.revision, expectedRevision), availability)).get();
       if (!row) throw new DriveObjectConflictError('Drive attempt changed before transition');
       const next = transition(toAttempt(row));
+      const artifactRow = tx.select().from(archiveArtifacts).where(eq(archiveArtifacts.id, row.artifactId)).get();
+      if (!artifactRow) throw new DriveObjectConflictError('Archive artifact does not exist');
+      if (artifactRow.currentVerifiedAttemptId === attemptId) {
+        const artifact = toArtifact(artifactRow).markCurrentVerificationUnavailable(attemptId, nowMs);
+        const updatedArtifact = tx.update(archiveArtifacts).set({ state: artifact.state, currentVerifiedAttemptId: artifact.currentVerifiedAttemptId,
+          updatedAt: artifact.updatedAtMs, revision: artifact.revision }).where(and(eq(archiveArtifacts.id, artifact.id), eq(archiveArtifacts.revision, artifactRow.revision))).run();
+        if (updatedArtifact.changes !== 1) throw new DriveObjectConflictError('Archive artifact changed before transition');
+      }
       const result = tx.update(driveObjectAttempts).set({ state: next.state, revision: next.revision, updatedAt: nowMs,
         missingReason: next.missingReason, detachedReason: next.detachedReason, leaseOwner: null, leaseExpiresAt: null, ...clearedSession() })
         .where(and(eq(driveObjectAttempts.id, attemptId), eq(driveObjectAttempts.revision, expectedRevision), availability)).run();
       if (result.changes !== 1) throw new DriveObjectConflictError('Drive attempt changed before transition');
-      const artifactRow = tx.select().from(archiveArtifacts).where(eq(archiveArtifacts.id, row.artifactId)).get();
-      if (!artifactRow) throw new DriveObjectConflictError('Archive artifact does not exist');
-      if (artifactRow.currentVerifiedAttemptId !== attemptId) return;
-      const artifact = toArtifact(artifactRow).markCurrentVerificationUnavailable(attemptId, nowMs);
-      const updatedArtifact = tx.update(archiveArtifacts).set({ state: artifact.state, currentVerifiedAttemptId: artifact.currentVerifiedAttemptId,
-        updatedAt: artifact.updatedAtMs, revision: artifact.revision }).where(and(eq(archiveArtifacts.id, artifact.id), eq(archiveArtifacts.revision, artifactRow.revision))).run();
-      if (updatedArtifact.changes !== 1) throw new DriveObjectConflictError('Archive artifact changed before transition');
     });
   }
 
   private fenced(attemptId: string, lease: AttemptLease, nowMs: number) {
     return and(eq(driveObjectAttempts.id, attemptId), eq(driveObjectAttempts.revision, lease.revision), eq(driveObjectAttempts.leaseOwner, lease.owner),
-      eq(driveObjectAttempts.leaseExpiresAt, lease.expiresAtMs), gte(driveObjectAttempts.leaseExpiresAt, nowMs));
+      eq(driveObjectAttempts.leaseExpiresAt, lease.expiresAtMs), gt(driveObjectAttempts.leaseExpiresAt, nowMs));
   }
 
   private immediate<T>(operation: (tx: Writer) => T): T {

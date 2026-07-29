@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { check, sqliteTable, text, integer, index, primaryKey, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import { check, sqliteTable, text, integer, index, primaryKey, type AnySQLiteColumn, uniqueIndex } from 'drizzle-orm/sqlite-core';
 import { DEFAULT_LOCALE } from '../telegram/domain/locale';
 import type { LiveSourceSettings } from '../camera/domain/live-source.entity';
 
@@ -293,7 +293,7 @@ export const archiveArtifacts = sqliteTable(
     sha256: text('sha256').notNull(),
     sourceFingerprint: text('source_fingerprint').notNull(),
     state: text('state').notNull(),
-    currentVerifiedAttemptId: text('current_verified_attempt_id'),
+    currentVerifiedAttemptId: text('current_verified_attempt_id').references((): AnySQLiteColumn => driveObjectAttempts.id),
     createdAt: integer('created_at').notNull(),
     updatedAt: integer('updated_at').notNull(),
     localDeletedAt: integer('local_deleted_at'),
@@ -307,7 +307,7 @@ export const archiveArtifacts = sqliteTable(
     check('archive_artifacts_state_check', sql`${table.state} in ('stabilizing', 'pending', 'verified', 'local_missing', 'superseded')`),
     check('archive_artifacts_revision_check', sql`${table.revision} >= 0`),
     check('archive_artifacts_size_check', sql`${table.size} >= 0`),
-    check('archive_artifacts_verified_check', sql`${table.state} != 'verified' or ${table.currentVerifiedAttemptId} is not null`),
+    check('archive_artifacts_verified_check', sql`(${table.state} = 'verified' and ${table.currentVerifiedAttemptId} is not null) or (${table.state} != 'verified' and ${table.currentVerifiedAttemptId} is null)`),
   ],
 );
 

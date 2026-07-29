@@ -225,7 +225,7 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
   private requireLease(attemptId: string, lease: AttemptLease, nowMs: number): Entry {
     const entry = this.attempts.get(attemptId);
     if (!entry || !entry.lease || entry.lease.owner !== lease.owner || entry.lease.revision !== lease.revision
-      || entry.lease.expiresAtMs !== lease.expiresAtMs || lease.expiresAtMs < nowMs) {
+      || entry.lease.expiresAtMs !== lease.expiresAtMs || lease.expiresAtMs <= nowMs) {
       throw new DriveAttemptLeaseLostError();
     }
     return entry;

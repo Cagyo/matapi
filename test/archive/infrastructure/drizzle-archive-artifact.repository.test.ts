@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import * as schema from '../../../src/database/schema';
 import { DriveAttemptLeaseLostError } from '../../../src/archive/domain/errors/drive-attempt-lease-lost.error';
 import { DrizzleArchiveArtifactRepository } from '../../../src/archive/infrastructure/persistence/drizzle-archive-artifact.repository';
+import { InMemoryArchiveArtifactRepository } from '../../../src/archive/infrastructure/persistence/in-memory-archive-artifact.repository';
 
 describe('DrizzleArchiveArtifactRepository', () => {
   let sqlite: Database.Database;
@@ -121,6 +122,27 @@ describe('DrizzleArchiveArtifactRepository', () => {
     await expect(repository.markRetryable(claim.attempt.id, savedLease, 'temporary', 6_100, 6_001))
       .rejects.toBeInstanceOf(DriveAttemptLeaseLostError);
     await expect(repository.markVerified(claim.attempt.id, savedLease, verifiedObject('file-1', 'folder-1'), 6_001))
+      .rejects.toBeInstanceOf(DriveAttemptLeaseLostError);
+  });
+
+  it('rejects the original owner exactly when its lease expires', async () => {
+    const artifact = await repository.register(artifactFixture());
+    await repository.createAttempt(artifact.id, 'generation-1', 'file-1', 'folder-1', 100);
+    const claim = await repository.claimNextAttempt({ owner: 'worker-a', nowMs: 1_000, leaseMs: 5_000 });
+    if (!claim) throw new Error('expected claim');
+
+    await expect(repository.markVerified(claim.attempt.id, claim.lease, verifiedObject('file-1', 'folder-1'), 6_000))
+      .rejects.toBeInstanceOf(DriveAttemptLeaseLostError);
+  });
+
+  it('keeps the in-memory adapter fenced at the exact lease-expiry boundary', async () => {
+    const inMemory = new InMemoryArchiveArtifactRepository();
+    const artifact = await inMemory.register(artifactFixture());
+    await inMemory.createAttempt(artifact.id, 'generation-1', 'file-1', 'folder-1', 100);
+    const claim = await inMemory.claimNextAttempt({ owner: 'worker-a', nowMs: 1_000, leaseMs: 5_000 });
+    if (!claim) throw new Error('expected claim');
+
+    await expect(inMemory.markVerified(claim.attempt.id, claim.lease, verifiedObject('file-1', 'folder-1'), 6_000))
       .rejects.toBeInstanceOf(DriveAttemptLeaseLostError);
   });
 
