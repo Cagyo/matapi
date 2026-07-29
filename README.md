@@ -7,7 +7,7 @@ See `docs/` for the full specification, starting at [docs/00-overview.md](docs/0
 
 ## Quick start (development)
 
-Requires Node.js 20 with [Corepack](https://nodejs.org/api/corepack.html) enabled (`corepack enable`). Yarn 4.13 is pinned in `package.json`.
+Requires Node.js 22 with [Corepack](https://nodejs.org/api/corepack.html) enabled (`corepack enable`). Yarn 4.13 is pinned in `package.json`.
 
 ```bash
 cp .env.example .env

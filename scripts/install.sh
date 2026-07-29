@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO="${HOME_WORKER_REPO:-https://github.com/CHANGE_ME/home-worker.git}"
 INSTALL_DIR="${HOME_WORKER_INSTALL_DIR:-/opt/home-worker}"
-NODE_VERSION="${HOME_WORKER_NODE_VERSION:-20}"
+NODE_VERSION="${HOME_WORKER_NODE_VERSION:-22}"
 USER="${HOME_WORKER_USER:-homeworker}"
 APT_LOCK_TIMEOUT_SECONDS=300
 RTSP_GROUP_REFRESH_REQUIRED=0
@@ -20,6 +20,7 @@ main() {
   check_raspberry_pi
   setup_hardware_resources
   create_user
+  provision_archive_installation_state
   install_system_deps
   install_node
   install_app
@@ -115,6 +116,59 @@ create_user() {
     sudo mkdir -p "/home/$USER"
     sudo chown "$USER:$USER" "/home/$USER"
   fi
+}
+
+provision_archive_installation_state() {
+  local ARCHIVE_STATE_DIR="/etc/home-worker"
+  local ARCHIVE_KEY_PATH="/etc/home-worker/archive.key"
+  local INSTALLATION_ID_PATH="/etc/home-worker/installation-id"
+
+  sudo install -d -m 0750 -o root -g "$USER" "$ARCHIVE_STATE_DIR"
+
+  if [ ! -f "$ARCHIVE_KEY_PATH" ]; then
+    create_immutable_archive_state_file "$ARCHIVE_KEY_PATH" archive-key
+  fi
+  if [ ! -f "$INSTALLATION_ID_PATH" ]; then
+    create_immutable_archive_state_file "$INSTALLATION_ID_PATH" installation-id
+  fi
+}
+
+create_immutable_archive_state_file() {
+  local target="$1" kind="$2" temporary root_temporary
+  temporary="$(mktemp)"
+  if [ "$kind" = "archive-key" ]; then
+    python3 - "$temporary" <<'PY'
+import os
+import sys
+
+with open(sys.argv[1], 'xb') as stream:
+    stream.write(os.urandom(32))
+PY
+  else
+    python3 - "$temporary" <<'PY'
+import sys
+import uuid
+
+with open(sys.argv[1], 'x', encoding='ascii') as stream:
+    stream.write(f'{uuid.uuid4()}\n')
+PY
+  fi
+
+  root_temporary="$(sudo mktemp "/etc/home-worker/.state.XXXXXX")"
+  sudo install -m 640 -o root -g "$USER" "$temporary" "$root_temporary"
+  rm -f "$temporary"
+
+  # Linking the prepared root-owned file publishes it only when absent. A
+  # concurrent or repeat installer keeps the original installation secret.
+  if ! sudo ln "$root_temporary" "$target"; then
+    sudo rm -f "$root_temporary"
+    if sudo test -e "$target"; then
+      return 0
+    fi
+    echo "ERROR: could not provision immutable archive installation state" >&2
+    return 1
+  fi
+  sudo rm -f "$root_temporary"
 }
 
 install_system_deps() {

@@ -4,7 +4,7 @@
 # Desired Node.js major version. `/system_update` applies apt/rclone updates
 # automatically and reports Node major mismatches with manual upgrade
 # instructions (spec 18 / spec 24).
-node: "20"
+node: "22"
 
 core:
   apt:

@@ -1,7 +1,7 @@
 # Home Worker — Agent Guide
 
 NestJS worker + grammY Telegram bot for home automation/security on Raspberry Pi.
-Single-package repo. Target runtime: Raspberry Pi 3+ / Raspbian / Node 20 / PM2.
+Single-package repo. Target runtime: Raspberry Pi 3+ / Raspbian / Node 22 / PM2.
 
 **Architecture:** Hexagonal (ports & adapters), feature-sliced under `src/<context>/{domain,application,infrastructure}/`. Non-negotiable for new modules — see [docs/architecture.md](docs/architecture.md).
 
@@ -11,7 +11,7 @@ Single-package repo. Target runtime: Raspberry Pi 3+ / Raspbian / Node 20 / PM2.
 
 | Layer | Tech |
 |---|---|
-| Runtime | Node.js 20 (LTS, pinned) |
+| Runtime | Node.js 22 (LTS, pinned) |
 | Package manager | Yarn 4.13 (via Corepack; pinned in `package.json` → `packageManager`) |
 | Framework | NestJS 10 |
 | DB | SQLite (better-sqlite3) + Drizzle ORM, WAL mode |
