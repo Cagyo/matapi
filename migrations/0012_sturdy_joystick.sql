@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX `uq_archive_artifacts_current_verified_attempt` ON `archive_artifacts` (`current_verified_attempt_id`);

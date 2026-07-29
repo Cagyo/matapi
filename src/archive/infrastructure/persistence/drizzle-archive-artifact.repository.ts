@@ -1,0 +1,337 @@
+import { randomUUID } from 'node:crypto';
+import { Inject, Injectable } from '@nestjs/common';
+import { and, asc, eq, gte, inArray, isNotNull, isNull, lte, or } from 'drizzle-orm';
+import { AppDatabase, DB } from '../../../database/database.module';
+import { archiveArtifacts, archiveSchedulerState, driveObjectAttempts } from '../../../database/schema';
+import type {
+  ArchiveArtifactRepositoryPort, ArchiveSchedulerState, ArchiveSchedulerUpdate, AttemptLease, ClaimAttempt,
+  ClaimedAttempt, EncryptedUploadSession,
+} from '../../application/ports/archive-artifact-repository.port';
+import { ArchiveArtifact, type ArchiveArtifactKind, type RegisterArchiveArtifact } from '../../domain/archive-artifact.entity';
+import { DriveObjectAttempt, type DriveAttemptState } from '../../domain/drive-object-attempt.entity';
+import type { CanonicalSharingState, VerifiedDriveObject } from '../../domain/drive-object-metadata.value-object';
+import { DriveAttemptLeaseLostError } from '../../domain/errors/drive-attempt-lease-lost.error';
+import { DriveObjectConflictError } from '../../domain/errors/drive-object-conflict.error';
+
+type ArtifactRow = typeof archiveArtifacts.$inferSelect;
+type AttemptRow = typeof driveObjectAttempts.$inferSelect;
+type Writer = Pick<AppDatabase, 'insert' | 'select' | 'update'>;
+
+/** SQLite manifest adapter. Lease-changing writes are revision- and owner-fenced. */
+@Injectable()
+export class DrizzleArchiveArtifactRepository implements ArchiveArtifactRepositoryPort {
+  constructor(@Inject(DB) private readonly db: AppDatabase) {}
+
+  async register(input: RegisterArchiveArtifact): Promise<ArchiveArtifact> {
+    const artifact = ArchiveArtifact.register(input, { id: randomUUID(), nowMs: Date.now() });
+    try {
+      this.db.insert(archiveArtifacts).values(artifactRow(artifact)).run();
+    } catch (error) {
+      if (isUniqueViolation(error)) throw new DriveObjectConflictError('Archive source fingerprint already exists');
+      throw error;
+    }
+    return artifact;
+  }
+
+  async loadArtifact(id: string): Promise<ArchiveArtifact | null> {
+    const row = this.db.select().from(archiveArtifacts).where(eq(archiveArtifacts.id, id)).get();
+    return row ? toArtifact(row) : null;
+  }
+
+  async findByFingerprint(fingerprint: string): Promise<ArchiveArtifact | null> {
+    const row = this.db.select().from(archiveArtifacts).where(eq(archiveArtifacts.sourceFingerprint, fingerprint)).get();
+    return row ? toArtifact(row) : null;
+  }
+
+  async createAttempt(artifactId: string, generationId: string, remoteFileId: string, parentId: string, nowMs: number): Promise<DriveObjectAttempt> {
+    if (!this.db.select({ id: archiveArtifacts.id }).from(archiveArtifacts).where(eq(archiveArtifacts.id, artifactId)).get()) {
+      throw new DriveObjectConflictError('Archive artifact does not exist');
+    }
+    const attempt = DriveObjectAttempt.reserve({ id: randomUUID(), artifactId, generationId, remoteFileId, parentId, nowMs });
+    try {
+      this.db.insert(driveObjectAttempts).values(attemptRow(attempt)).run();
+    } catch (error) {
+      if (isUniqueViolation(error)) throw new DriveObjectConflictError('Reserved Drive ID already exists');
+      throw error;
+    }
+    return attempt;
+  }
+
+  async claimNextAttempt(input: ClaimAttempt): Promise<ClaimedAttempt | null> {
+    return this.immediate((tx) => {
+      const row = tx.select().from(driveObjectAttempts)
+        .where(and(inArray(driveObjectAttempts.state, ['pending', 'retryable']), lte(driveObjectAttempts.nextAttemptAt, input.nowMs),
+          or(isNull(driveObjectAttempts.leaseExpiresAt), lte(driveObjectAttempts.leaseExpiresAt, input.nowMs))))
+        .orderBy(asc(driveObjectAttempts.createdAt), asc(driveObjectAttempts.id)).limit(1).get();
+      return row ? this.claim(tx, row, input, true) : null;
+    });
+  }
+
+  async claimExpiredAttempt(attemptId: string, input: ClaimAttempt): Promise<ClaimedAttempt> {
+    return this.immediate((tx) => {
+      const row = tx.select().from(driveObjectAttempts).where(and(eq(driveObjectAttempts.id, attemptId), lte(driveObjectAttempts.leaseExpiresAt, input.nowMs))).get();
+      if (!row) throw new DriveAttemptLeaseLostError();
+      return this.claim(tx, row, input, false);
+    });
+  }
+
+  async renewLease(attemptId: string, lease: AttemptLease, nowMs: number, leaseMs: number): Promise<AttemptLease> {
+    const revision = lease.revision + 1;
+    const result = this.db.update(driveObjectAttempts).set({ revision, updatedAt: nowMs, leaseExpiresAt: nowMs + leaseMs })
+      .where(this.fenced(attemptId, lease, nowMs)).run();
+    if (result.changes !== 1) throw new DriveAttemptLeaseLostError();
+    return { owner: lease.owner, revision, expiresAtMs: nowMs + leaseMs };
+  }
+
+  async saveSession(attemptId: string, lease: AttemptLease, session: EncryptedUploadSession): Promise<AttemptLease> {
+    validateSession(session);
+    const revision = lease.revision + 1;
+    const result = this.db.update(driveObjectAttempts).set({
+      revision, updatedAt: session.createdAtMs, sessionCiphertext: session.ciphertext, sessionNonce: session.nonce,
+      sessionAuthTag: session.authTag, sessionKeyVersion: session.keyVersion, sessionFormatVersion: session.formatVersion,
+      sessionCreatedAt: session.createdAtMs, sessionExpiresAt: session.expiresAtMs, confirmedOffset: session.confirmedOffset,
+    }).where(this.fenced(attemptId, lease)).run();
+    if (result.changes !== 1) throw new DriveAttemptLeaseLostError();
+    return { ...lease, revision };
+  }
+
+  async confirmOffset(attemptId: string, lease: AttemptLease, offset: number, nowMs: number): Promise<AttemptLease> {
+    if (!Number.isSafeInteger(offset) || offset < 0) throw new DriveObjectConflictError('Confirmed upload offset is malformed');
+    const revision = lease.revision + 1;
+    const result = this.db.update(driveObjectAttempts).set({ revision, updatedAt: nowMs, confirmedOffset: offset })
+      .where(and(this.fenced(attemptId, lease, nowMs), gte(driveObjectAttempts.sessionExpiresAt, nowMs))).run();
+    if (result.changes !== 1) throw new DriveAttemptLeaseLostError();
+    return { ...lease, revision };
+  }
+
+  async markRetryable(attemptId: string, lease: AttemptLease, errorCode: string, nextAttemptMs: number): Promise<void> {
+    const row = this.requireFencedAttempt(attemptId, lease);
+    const next = toAttempt(row).markRetryable(nextAttemptMs);
+    const result = this.db.update(driveObjectAttempts).set({ state: next.state, revision: next.revision, updatedAt: next.updatedAtMs,
+      nextAttemptAt: nextAttemptMs, errorCode, leaseOwner: null, leaseExpiresAt: null }).where(this.fenced(attemptId, lease)).run();
+    if (result.changes !== 1) throw new DriveAttemptLeaseLostError();
+  }
+
+  async markVerified(attemptId: string, lease: AttemptLease, remote: VerifiedDriveObject, nowMs: number): Promise<void> {
+    this.immediate((tx) => {
+      const row = tx.select().from(driveObjectAttempts).where(this.fenced(attemptId, lease, nowMs)).get();
+      if (!row) throw new DriveAttemptLeaseLostError();
+      const attempt = toAttempt(row).verify(remote, nowMs);
+      const artifactRow = tx.select().from(archiveArtifacts).where(eq(archiveArtifacts.id, attempt.artifactId)).get();
+      if (!artifactRow) throw new DriveObjectConflictError('Archive artifact does not exist');
+      const artifact = toArtifact(artifactRow).markVerified(attempt.id, nowMs);
+      const updatedAttempt = tx.update(driveObjectAttempts).set(verifiedAttemptUpdate(attempt))
+        .where(this.fenced(attemptId, lease, nowMs)).run();
+      if (updatedAttempt.changes !== 1) throw new DriveAttemptLeaseLostError();
+      const updatedArtifact = tx.update(archiveArtifacts).set({ state: artifact.state, currentVerifiedAttemptId: artifact.currentVerifiedAttemptId,
+        updatedAt: artifact.updatedAtMs, revision: artifact.revision }).where(and(eq(archiveArtifacts.id, artifact.id), eq(archiveArtifacts.revision, artifactRow.revision))).run();
+      if (updatedArtifact.changes !== 1) throw new DriveObjectConflictError('Archive artifact changed before verification');
+    });
+  }
+
+  async markMissing(attemptId: string, expectedRevision: number, reason: string, nowMs: number): Promise<void> {
+    this.transitionWithoutLease(attemptId, expectedRevision, (attempt) => attempt.markMissing(reason, nowMs));
+  }
+
+  async markDetached(attemptId: string, expectedRevision: number, reason: string, nowMs: number): Promise<void> {
+    this.transitionWithoutLease(attemptId, expectedRevision, (attempt) => attempt.detach(reason, nowMs));
+  }
+
+  async listAttempts(artifactId: string): Promise<readonly DriveObjectAttempt[]> {
+    return this.db.select().from(driveObjectAttempts).where(eq(driveObjectAttempts.artifactId, artifactId))
+      .orderBy(asc(driveObjectAttempts.createdAt), asc(driveObjectAttempts.id)).all().map(toAttempt);
+  }
+
+  async listReconciliationBatch(limit: number): Promise<readonly DriveObjectAttempt[]> {
+    return this.db.select().from(driveObjectAttempts).where(eq(driveObjectAttempts.state, 'verified'))
+      .orderBy(asc(driveObjectAttempts.verifiedAt), asc(driveObjectAttempts.id)).limit(limit).all().map(toAttempt);
+  }
+
+  async listRetentionCandidates(kind: ArchiveArtifactKind, limit: number): Promise<readonly DriveObjectAttempt[]> {
+    return this.db.select({ attempt: driveObjectAttempts }).from(driveObjectAttempts)
+      .innerJoin(archiveArtifacts, eq(driveObjectAttempts.artifactId, archiveArtifacts.id))
+      .where(and(eq(driveObjectAttempts.state, 'verified'), eq(archiveArtifacts.kind, kind)))
+      .orderBy(asc(driveObjectAttempts.createdAt), asc(driveObjectAttempts.id)).limit(limit).all().map(({ attempt }) => toAttempt(attempt));
+  }
+
+  async readSchedulerState(): Promise<ArchiveSchedulerState> {
+    this.db.insert(archiveSchedulerState).values(schedulerRow(emptySchedulerState())).onConflictDoNothing().run();
+    const row = this.db.select().from(archiveSchedulerState).where(eq(archiveSchedulerState.id, 1)).get();
+    if (!row) throw new DriveObjectConflictError('Archive scheduler state is missing');
+    return toScheduler(row);
+  }
+
+  async compareAndSetSchedulerState(expectedRevision: number, update: ArchiveSchedulerUpdate): Promise<boolean> {
+    const current = await this.readSchedulerState();
+    if (current.revision !== expectedRevision) return false;
+    const next = { ...current, ...update, revision: expectedRevision + 1 };
+    validateScheduler(next);
+    const result = this.db.update(archiveSchedulerState).set(schedulerRow(next))
+      .where(and(eq(archiveSchedulerState.id, 1), eq(archiveSchedulerState.revision, expectedRevision))).run();
+    return result.changes === 1;
+  }
+
+  async releaseGenerationLeases(generationId: string, nowMs: number): Promise<void> {
+    this.immediate((tx) => {
+      const rows = tx.select().from(driveObjectAttempts).where(and(eq(driveObjectAttempts.generationId, generationId), isNotNull(driveObjectAttempts.leaseOwner))).all();
+      for (const row of rows) {
+        const attempt = toAttempt(row);
+        const next = attempt.state === 'uploading' ? attempt.markRetryable(nowMs) : revise(attempt, nowMs);
+        tx.update(driveObjectAttempts).set({ state: next.state, revision: next.revision, updatedAt: next.updatedAtMs,
+          nextAttemptAt: nowMs, leaseOwner: null, leaseExpiresAt: null }).where(and(eq(driveObjectAttempts.id, row.id), eq(driveObjectAttempts.revision, row.revision), eq(driveObjectAttempts.leaseOwner, row.leaseOwner!))).run();
+      }
+    });
+  }
+
+  private claim(tx: Writer, row: AttemptRow, input: ClaimAttempt, transition: boolean): ClaimedAttempt {
+    validateClaim(input);
+    const attempt = transition ? toAttempt(row).markUploading(input.nowMs) : revise(toAttempt(row), input.nowMs);
+    const result = tx.update(driveObjectAttempts).set({ state: attempt.state, revision: attempt.revision, uploadedAt: attempt.uploadedAtMs,
+      updatedAt: attempt.updatedAtMs, leaseOwner: input.owner, leaseExpiresAt: input.nowMs + input.leaseMs })
+      .where(and(eq(driveObjectAttempts.id, row.id), eq(driveObjectAttempts.revision, row.revision),
+        transition ? inArray(driveObjectAttempts.state, ['pending', 'retryable']) : lte(driveObjectAttempts.leaseExpiresAt, input.nowMs))).run();
+    if (result.changes !== 1) throw new DriveAttemptLeaseLostError();
+    const artifact = tx.select().from(archiveArtifacts).where(eq(archiveArtifacts.id, attempt.artifactId)).get();
+    if (!artifact) throw new DriveObjectConflictError('Archive artifact does not exist');
+    return { artifact: toArtifact(artifact), attempt, lease: { owner: input.owner, revision: attempt.revision, expiresAtMs: input.nowMs + input.leaseMs } };
+  }
+
+  private requireFencedAttempt(attemptId: string, lease: AttemptLease): AttemptRow {
+    const row = this.db.select().from(driveObjectAttempts).where(this.fenced(attemptId, lease)).get();
+    if (!row) throw new DriveAttemptLeaseLostError();
+    return row;
+  }
+
+  private transitionWithoutLease(attemptId: string, expectedRevision: number, transition: (attempt: DriveObjectAttempt) => DriveObjectAttempt): void {
+    const row = this.db.select().from(driveObjectAttempts).where(and(eq(driveObjectAttempts.id, attemptId), eq(driveObjectAttempts.revision, expectedRevision))).get();
+    if (!row) throw new DriveObjectConflictError('Drive attempt changed before transition');
+    const next = transition(toAttempt(row));
+    const result = this.db.update(driveObjectAttempts).set({ state: next.state, revision: next.revision, updatedAt: next.updatedAtMs,
+      missingReason: next.missingReason, detachedReason: next.detachedReason, leaseOwner: null, leaseExpiresAt: null }).where(and(eq(driveObjectAttempts.id, attemptId), eq(driveObjectAttempts.revision, expectedRevision))).run();
+    if (result.changes !== 1) throw new DriveObjectConflictError('Drive attempt changed before transition');
+  }
+
+  private fenced(attemptId: string, lease: AttemptLease, nowMs?: number) {
+    const predicates = [eq(driveObjectAttempts.id, attemptId), eq(driveObjectAttempts.revision, lease.revision), eq(driveObjectAttempts.leaseOwner, lease.owner), eq(driveObjectAttempts.leaseExpiresAt, lease.expiresAtMs)];
+    if (nowMs !== undefined) predicates.push(gte(driveObjectAttempts.leaseExpiresAt, nowMs));
+    return and(...predicates);
+  }
+
+  private immediate<T>(operation: (tx: Writer) => T): T {
+    return this.db.transaction((tx) => operation(tx), { behavior: 'immediate' });
+  }
+}
+
+function artifactRow(artifact: ArchiveArtifact) {
+  return { id: artifact.id, installationId: artifact.installationId, kind: artifact.kind, sourceIdentity: artifact.sourceIdentity,
+    trustedPath: artifact.trustedPath, relativePath: artifact.relativePath, size: artifact.size, mtimeNs: artifact.mtimeNs,
+    sourceTimeMs: artifact.sourceTimeMs, sha256: artifact.sha256, sourceFingerprint: artifact.sourceFingerprint, state: artifact.state,
+    currentVerifiedAttemptId: artifact.currentVerifiedAttemptId, createdAt: artifact.createdAtMs, updatedAt: artifact.updatedAtMs,
+    localDeletedAt: artifact.localDeletedAtMs, revision: artifact.revision };
+}
+
+function attemptRow(attempt: DriveObjectAttempt) {
+  return { id: attempt.id, artifactId: attempt.artifactId, generationId: attempt.generationId, remoteFileId: attempt.remoteFileId,
+    parentId: attempt.parentId, reservedAt: attempt.nowMs, state: attempt.state, revision: attempt.revision, nextAttemptAt: attempt.createdAtMs,
+    leaseOwner: null, leaseExpiresAt: null, sessionCiphertext: null, sessionNonce: null, sessionAuthTag: null, sessionKeyVersion: null,
+    sessionFormatVersion: null, sessionCreatedAt: null, sessionExpiresAt: null, confirmedOffset: null, errorCode: null,
+    detachedReason: null, missingReason: null, uploadedAt: null, verifiedAt: null, deletedAt: null, verifiedName: null,
+    verifiedMimeType: null, verifiedSize: null, verifiedSha256: null, verifiedMd5: null, verifiedCreatedTime: null,
+    verifiedHeadRevisionId: null, verifiedVersion: null, verifiedOwnedByMe: null, verifiedCanDelete: null, verifiedTrashed: null,
+    verifiedAppProperties: null, verifiedSharing: null, verifiedWebViewLink: null, createdAt: attempt.createdAtMs, updatedAt: attempt.updatedAtMs };
+}
+
+function verifiedAttemptUpdate(attempt: DriveObjectAttempt) {
+  const metadata = attempt.verifiedMetadata;
+  if (!metadata) throw new DriveObjectConflictError('Drive verification metadata is missing');
+  return { state: attempt.state, revision: attempt.revision, updatedAt: attempt.updatedAtMs, verifiedAt: attempt.verifiedAtMs,
+    verifiedName: metadata.name, verifiedMimeType: metadata.mimeType, verifiedSize: metadata.size, verifiedSha256: metadata.sha256,
+    verifiedMd5: metadata.md5, verifiedCreatedTime: metadata.createdTimeMs, verifiedHeadRevisionId: metadata.headRevisionId,
+    verifiedVersion: metadata.version, verifiedOwnedByMe: metadata.ownedByMe, verifiedCanDelete: metadata.canDelete,
+    verifiedTrashed: metadata.trashed, verifiedAppProperties: JSON.stringify(metadata.appProperties), verifiedSharing: JSON.stringify(metadata.sharing),
+    verifiedWebViewLink: metadata.webViewLink, leaseOwner: null, leaseExpiresAt: null };
+}
+
+function toArtifact(row: ArtifactRow): ArchiveArtifact {
+  return ArchiveArtifact.restore({ id: row.id, installationId: row.installationId, kind: row.kind as ArchiveArtifactKind,
+    sourceIdentity: row.sourceIdentity, trustedPath: row.trustedPath, relativePath: row.relativePath, size: row.size, mtimeNs: row.mtimeNs,
+    sourceTimeMs: row.sourceTimeMs, sha256: row.sha256, sourceFingerprint: row.sourceFingerprint, state: row.state as ArchiveArtifact['state'],
+    currentVerifiedAttemptId: row.currentVerifiedAttemptId, createdAtMs: row.createdAt, updatedAtMs: row.updatedAt,
+    localDeletedAtMs: row.localDeletedAt, revision: row.revision });
+}
+
+function toAttempt(row: AttemptRow): DriveObjectAttempt {
+  const verifiedMetadata = row.verifiedAt === null ? null : {
+    id: row.remoteFileId, name: required(row.verifiedName), parentId: row.parentId, mimeType: required(row.verifiedMimeType),
+    size: required(row.verifiedSize), sha256: required(row.verifiedSha256), md5: row.verifiedMd5, createdTimeMs: required(row.verifiedCreatedTime),
+    headRevisionId: required(row.verifiedHeadRevisionId), version: required(row.verifiedVersion), ownedByMe: required(row.verifiedOwnedByMe),
+    canDelete: required(row.verifiedCanDelete), trashed: required(row.verifiedTrashed), appProperties: parseRecord(row.verifiedAppProperties),
+    sharing: parseSharing(row.verifiedSharing), webViewLink: row.verifiedWebViewLink,
+  };
+  return DriveObjectAttempt.restore({ id: row.id, artifactId: row.artifactId, generationId: row.generationId, remoteFileId: row.remoteFileId,
+    parentId: row.parentId, nowMs: row.reservedAt, state: row.state as DriveAttemptState, verifiedMetadata, detachedReason: row.detachedReason,
+    missingReason: row.missingReason, createdAtMs: row.createdAt, updatedAtMs: row.updatedAt, uploadedAtMs: row.uploadedAt,
+    verifiedAtMs: row.verifiedAt, deletedAtMs: row.deletedAt, revision: row.revision });
+}
+
+function revise(attempt: DriveObjectAttempt, nowMs: number): DriveObjectAttempt {
+  return DriveObjectAttempt.restore({ ...attempt, revision: attempt.revision + 1, updatedAtMs: nowMs });
+}
+
+function emptySchedulerState(): ArchiveSchedulerState {
+  return { revision: 0, backupLeaseOwner: null, backupLeaseExpiresAtMs: null, lastBackupSuccessMs: null, lastUploadSuccessMs: null, lastReconcileSuccessMs: null, lastCleanupSuccessMs: null };
+}
+
+function schedulerRow(state: ArchiveSchedulerState) {
+  return { id: 1, revision: state.revision, backupLeaseOwner: state.backupLeaseOwner, backupLeaseExpiresAt: state.backupLeaseExpiresAtMs,
+    lastBackupSuccessMs: state.lastBackupSuccessMs, lastUploadSuccessMs: state.lastUploadSuccessMs,
+    lastReconcileSuccessMs: state.lastReconcileSuccessMs, lastCleanupSuccessMs: state.lastCleanupSuccessMs };
+}
+
+function toScheduler(row: typeof archiveSchedulerState.$inferSelect): ArchiveSchedulerState {
+  return { revision: row.revision, backupLeaseOwner: row.backupLeaseOwner, backupLeaseExpiresAtMs: row.backupLeaseExpiresAt,
+    lastBackupSuccessMs: row.lastBackupSuccessMs, lastUploadSuccessMs: row.lastUploadSuccessMs,
+    lastReconcileSuccessMs: row.lastReconcileSuccessMs, lastCleanupSuccessMs: row.lastCleanupSuccessMs };
+}
+
+function validateClaim(input: ClaimAttempt): void {
+  if (!input.owner || !Number.isSafeInteger(input.nowMs) || !Number.isSafeInteger(input.leaseMs) || input.leaseMs <= 0) {
+    throw new DriveObjectConflictError('Attempt lease is malformed');
+  }
+}
+
+function validateSession(session: EncryptedUploadSession): void {
+  if (!session.ciphertext || !session.nonce || !session.authTag || session.formatVersion !== 1
+    || !Number.isSafeInteger(session.keyVersion) || !Number.isSafeInteger(session.confirmedOffset) || session.confirmedOffset < 0) {
+    throw new DriveObjectConflictError('Encrypted upload session is malformed');
+  }
+}
+
+function validateScheduler(state: ArchiveSchedulerState): void {
+  if ((state.backupLeaseOwner === null) !== (state.backupLeaseExpiresAtMs === null)) {
+    throw new DriveObjectConflictError('Backup scheduler lease is malformed');
+  }
+}
+
+function required<T>(value: T | null): T {
+  if (value === null) throw new DriveObjectConflictError('Persisted Drive verification metadata is incomplete');
+  return value;
+}
+
+function parseRecord(value: string | null): Readonly<Record<string, string>> {
+  const parsed: unknown = value === null ? null : JSON.parse(value);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || Object.values(parsed).some((entry) => typeof entry !== 'string')) {
+    throw new DriveObjectConflictError('Persisted Drive app properties are malformed');
+  }
+  return parsed as Record<string, string>;
+}
+
+function parseSharing(value: string | null): CanonicalSharingState {
+  const parsed: unknown = value === null ? null : JSON.parse(value);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new DriveObjectConflictError('Persisted Drive sharing metadata is malformed');
+  return parsed as CanonicalSharingState;
+}
+
+function isUniqueViolation(error: unknown): boolean {
+  return !!error && typeof error === 'object' && (error as { code?: unknown }).code === 'SQLITE_CONSTRAINT_UNIQUE';
+}
