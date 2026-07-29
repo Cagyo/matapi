@@ -53,13 +53,15 @@ export class GoogleDeviceAuthorizationAdapter
     client: DriveClientCredentials,
     signal: AbortSignal,
   ): Promise<DeviceAuthorizationChallenge> {
+    throwIfAborted(signal);
     const discovery = await this.discover(signal);
     const response = await this.postForm(
       discovery.deviceAuthorizationEndpoint,
       { client_id: client.clientId, scope: DRIVE_FILE_SCOPE },
       signal,
     );
-    const body = await readObject(response);
+    const body = await readObject(response, signal);
+    throwIfAborted(signal);
     if (!response.ok) throw mapOAuthFailure(response.status, body.error);
 
     const deviceCode = readNonEmptyString(body.device_code);
@@ -89,41 +91,53 @@ export class GoogleDeviceAuthorizationAdapter
     challenge: DeviceAuthorizationChallenge,
     signal: AbortSignal,
   ): Promise<OAuthTokenSet> {
-    const discovery = await this.discover(signal);
-    let intervalMs = challenge.intervalMs || DEFAULT_INTERVAL_MS;
-    while (true) {
-      throwIfAborted(signal);
-      if (this.clock.now() >= challenge.expiresAtMs) {
+    throwIfLive(challenge, this.clock.now());
+    const deadline = AbortSignal.timeout(challenge.expiresAtMs - this.clock.now());
+    const operationSignal = AbortSignal.any([signal, deadline]);
+    try {
+      const discovery = await this.discover(operationSignal);
+      let intervalMs = challenge.intervalMs || DEFAULT_INTERVAL_MS;
+      while (true) {
+        throwIfAborted(signal);
+        throwIfLive(challenge, this.clock.now());
+        const response = await this.postForm(
+          discovery.tokenEndpoint,
+          {
+            client_id: client.clientId,
+            client_secret: client.clientSecret,
+            device_code: challenge.deviceCode,
+            grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+          },
+          operationSignal,
+        );
+        const body = await readObject(response, operationSignal);
+        throwIfAborted(signal);
+        throwIfLive(challenge, this.clock.now());
+        if (response.ok) return parseTokens(body, this.clock.now());
+
+        switch (body.error) {
+          case 'authorization_pending':
+            await this.clock.sleep(remainingSleep(intervalMs, challenge, this.clock.now()), operationSignal);
+            continue;
+          case 'slow_down':
+            intervalMs += 5_000;
+            await this.clock.sleep(remainingSleep(intervalMs, challenge, this.clock.now()), operationSignal);
+            continue;
+          default:
+            throw mapOAuthFailure(response.status, body.error);
+        }
+      }
+    } catch (error) {
+      if (signal.aborted) throw abortError(signal);
+      if (deadline.aborted || this.clock.now() >= challenge.expiresAtMs) {
         throw new DriveReauthorizationRequiredError('Google device authorization expired');
       }
-      const response = await this.postForm(
-        discovery.tokenEndpoint,
-        {
-          client_id: client.clientId,
-          client_secret: client.clientSecret,
-          device_code: challenge.deviceCode,
-          grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
-        },
-        signal,
-      );
-      const body = await readObject(response);
-      if (response.ok) return parseTokens(body, this.clock.now());
-
-      switch (body.error) {
-        case 'authorization_pending':
-          await this.clock.sleep(intervalMs, signal);
-          continue;
-        case 'slow_down':
-          intervalMs += 5_000;
-          await this.clock.sleep(intervalMs, signal);
-          continue;
-        default:
-          throw mapOAuthFailure(response.status, body.error);
-      }
+      throw error;
     }
   }
 
   async revoke(token: string, signal: AbortSignal): Promise<void> {
+    throwIfAborted(signal);
     const discovery = await this.discover(signal);
     const response = await this.postForm(
       discovery.revocationEndpoint,
@@ -131,11 +145,12 @@ export class GoogleDeviceAuthorizationAdapter
       signal,
     );
     if (response.ok) return;
-    const body = await readObject(response);
+    const body = await readObject(response, signal);
     throw mapOAuthFailure(response.status, body.error);
   }
 
   private async discover(signal: AbortSignal): Promise<DiscoveryDocument> {
+    throwIfAborted(signal);
     let response: Response;
     try {
       response = await this.request(DISCOVERY_URL, {
@@ -148,7 +163,7 @@ export class GoogleDeviceAuthorizationAdapter
     }
     rejectRedirect(response);
     if (!response.ok) throw new DriveTemporaryUnavailableError();
-    const body = await readObject(response);
+    const body = await readObject(response, signal);
     const document = {
       deviceAuthorizationEndpoint: readNonEmptyString(body.device_authorization_endpoint),
       tokenEndpoint: readNonEmptyString(body.token_endpoint),
@@ -169,6 +184,7 @@ export class GoogleDeviceAuthorizationAdapter
     values: Record<string, string>,
     signal: AbortSignal,
   ): Promise<Response> {
+    throwIfAborted(signal);
     let response: Response;
     try {
       response = await this.request(url, {
@@ -186,12 +202,21 @@ export class GoogleDeviceAuthorizationAdapter
   }
 }
 
-async function readObject(response: Response): Promise<Record<string, unknown>> {
+async function readObject(response: Response, signal: AbortSignal): Promise<Record<string, unknown>> {
+  throwIfAborted(signal);
+  let onAbort: (() => void) | undefined;
   try {
-    const value: unknown = await response.json();
+    const aborted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(abortError(signal));
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    const value: unknown = await Promise.race([response.json(), aborted]);
     return isRecord(value) ? value : {};
-  } catch {
+  } catch (error) {
+    if (signal.aborted || isAbortError(error)) throw abortError(signal, error);
     return {};
+  } finally {
+    if (onAbort) signal.removeEventListener('abort', onAbort);
   }
 }
 
@@ -230,7 +255,7 @@ function mapOAuthFailure(status: number, error: unknown): Error {
 }
 
 function mapTransportFailure(error: unknown, signal: AbortSignal): Error {
-  if (signal.aborted) return error instanceof Error ? error : new DOMException('Aborted', 'AbortError');
+  if (signal.aborted || isAbortError(error)) return abortError(signal, error);
   return new DriveTemporaryUnavailableError();
 }
 
@@ -257,7 +282,29 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function throwIfAborted(signal: AbortSignal): void {
-  if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new DOMException('Aborted', 'AbortError');
+  if (signal.aborted) throw abortError(signal);
+}
+
+function throwIfLive(challenge: DeviceAuthorizationChallenge, nowMs: number): void {
+  if (nowMs >= challenge.expiresAtMs) {
+    throw new DriveReauthorizationRequiredError('Google device authorization expired');
+  }
+}
+
+function remainingSleep(intervalMs: number, challenge: DeviceAuthorizationChallenge, nowMs: number): number {
+  const remaining = challenge.expiresAtMs - nowMs;
+  if (remaining <= 0) throw new DriveReauthorizationRequiredError('Google device authorization expired');
+  return Math.min(intervalMs, remaining);
+}
+
+function abortError(signal: AbortSignal, fallback?: unknown): Error {
+  if (signal.reason instanceof Error) return signal.reason;
+  if (fallback instanceof Error && isAbortError(fallback)) return fallback;
+  return new DOMException('Aborted', 'AbortError');
+}
+
+function isAbortError(value: unknown): value is Error {
+  return value instanceof Error && value.name === 'AbortError';
 }
 
 function systemClock(): DeviceAuthorizationClock {

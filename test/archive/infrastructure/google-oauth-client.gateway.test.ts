@@ -23,7 +23,7 @@ describe('GoogleOAuthClientGateway', () => {
   it('merges token events with the captured generation revision and retains a missing refresh token', async () => {
     const client = new Client();
     const repository = repositoryStub();
-    const gateway = new GoogleOAuthClientGateway(repository, { create: () => client } as OAuth2ClientFactory, { now: () => 1_700_000_000_000 });
+    const gateway = new GoogleOAuthClientGateway(repository, vi.fn().mockResolvedValue(undefined), { create: () => client } as OAuth2ClientFactory, { now: () => 1_700_000_000_000 });
     const active = gateway.create({ generationId: 'generation-1', revision: 4, client: { clientId: 'id', clientSecret: 'secret' }, tokens: tokens('old-access') });
 
     client.emit({ access_token: 'new-access', expiry_date: 1_700_007_200_000, token_type: 'Bearer', scope: 'https://www.googleapis.com/auth/drive.file' });
@@ -41,7 +41,7 @@ describe('GoogleOAuthClientGateway', () => {
     repository.mergeRefreshedTokens.mockResolvedValue(false);
     repository.requireReauthorization.mockResolvedValue(true);
     const alert = vi.fn().mockResolvedValue(undefined);
-    const gateway = new GoogleOAuthClientGateway(repository, { create: () => client } as OAuth2ClientFactory, { now: () => 1_700_000_000_000 }, alert);
+    const gateway = new GoogleOAuthClientGateway(repository, alert, { create: () => client } as OAuth2ClientFactory, { now: () => 1_700_000_000_000 });
     const active = gateway.create({ generationId: 'generation-1', revision: 4, client: { clientId: 'id', clientSecret: 'secret' }, tokens: tokens('old-access') });
 
     client.emit({ access_token: 'late-access' });
@@ -51,6 +51,45 @@ describe('GoogleOAuthClientGateway', () => {
     await expect(active.getAccessToken()).rejects.toThrow(DriveReauthorizationRequiredError);
     expect(alert).toHaveBeenCalledTimes(1);
     expect(repository.requireReauthorization).toHaveBeenCalledWith('generation-1', 4, 'invalid_grant', 1_700_000_000_000);
+  });
+
+  it('waits for a successful refresh merge before transitioning concurrent invalid_grant failures once', async () => {
+    const client = new Client();
+    const repository = repositoryStub();
+    const alert = vi.fn().mockResolvedValue(undefined);
+    let releaseMerge: ((value: boolean) => void) | undefined;
+    repository.mergeRefreshedTokens.mockImplementation(() => new Promise<boolean>((resolve) => { releaseMerge = resolve; }));
+    repository.requireReauthorization.mockResolvedValue(true);
+    const gateway = new GoogleOAuthClientGateway(repository, alert, { create: () => client } as OAuth2ClientFactory, { now: () => 1_700_000_000_000 });
+    const active = gateway.create({ generationId: 'generation-1', revision: 4, client: { clientId: 'id', clientSecret: 'secret' }, tokens: tokens('old-access') });
+    client.emit({ access_token: 'new-access' });
+    client.fail = { response: { status: 400, data: { error: 'invalid_grant' } } };
+
+    const first = active.getAccessToken();
+    const second = active.getAccessToken();
+    await vi.waitFor(() => expect(releaseMerge).toBeTypeOf('function'));
+    releaseMerge?.(true);
+
+    await expect(Promise.all([first, second])).rejects.toThrow(DriveReauthorizationRequiredError);
+    expect(repository.requireReauthorization).toHaveBeenCalledTimes(1);
+    expect(repository.requireReauthorization).toHaveBeenCalledWith('generation-1', 5, 'invalid_grant', 1_700_000_000_000);
+    expect(alert).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries a later invalid_grant when a stale CAS transition loses', async () => {
+    const client = new Client();
+    const repository = repositoryStub();
+    const alert = vi.fn().mockResolvedValue(undefined);
+    repository.requireReauthorization.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    const gateway = new GoogleOAuthClientGateway(repository, alert, { create: () => client } as OAuth2ClientFactory, { now: () => 1_700_000_000_000 });
+    const active = gateway.create({ generationId: 'generation-1', revision: 4, client: { clientId: 'id', clientSecret: 'secret' }, tokens: tokens('old-access') });
+    client.fail = { response: { status: 400, data: { error: 'invalid_grant' } } };
+
+    await expect(active.getAccessToken()).rejects.toThrow(DriveReauthorizationRequiredError);
+    await expect(active.getAccessToken()).rejects.toThrow(DriveReauthorizationRequiredError);
+
+    expect(repository.requireReauthorization).toHaveBeenCalledTimes(2);
+    expect(alert).toHaveBeenCalledTimes(1);
   });
 });
 

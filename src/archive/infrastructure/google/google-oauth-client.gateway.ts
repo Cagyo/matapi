@@ -40,9 +40,9 @@ export interface CreateGoogleOAuthClient {
 export class GoogleOAuthClientGateway {
   constructor(
     private readonly credentials: Pick<DriveCredentialRepositoryPort, 'mergeRefreshedTokens' | 'requireReauthorization'>,
+    private readonly alertReauthorizationRequired: (generationId: string) => Promise<void>,
     private readonly factory: OAuth2ClientFactory = { create: (client) => new OAuth2Client({ clientId: client.clientId, clientSecret: client.clientSecret }) },
     private readonly clock: OAuthGatewayClock = { now: () => Date.now() },
-    private readonly alertReauthorizationRequired: (generationId: string) => Promise<void> = async () => undefined,
   ) {}
 
   create(input: CreateGoogleOAuthClient): ActiveGoogleOAuthClient {
@@ -64,7 +64,8 @@ class ActiveClient implements ActiveGoogleOAuthClient {
   private revision: number;
   private tokens: OAuthTokenSet;
   private persistence = Promise.resolve();
-  private reauthorizationRequested = false;
+  private reauthorizationCompleted = false;
+  private reauthorizationTransition: Promise<boolean> | undefined;
 
   constructor(
     private readonly client: OAuth2ClientLike,
@@ -116,15 +117,41 @@ class ActiveClient implements ActiveGoogleOAuthClient {
   }
 
   private async requireReauthorization(_error: unknown): Promise<void> {
-    if (this.reauthorizationRequested) return;
-    this.reauthorizationRequested = true;
+    await this.persistence;
+    if (this.reauthorizationCompleted) return;
+    const transition = this.reauthorizationTransition ?? this.startReauthorizationTransition();
+    await transition;
+  }
+
+  private startReauthorizationTransition(): Promise<boolean> {
+    const transition = this.runReauthorizationTransition();
+    this.reauthorizationTransition = transition;
+    void transition.then(
+      (transitioned) => {
+        if (!transitioned && this.reauthorizationTransition === transition) {
+          this.reauthorizationTransition = undefined;
+        }
+      },
+      () => {
+        if (this.reauthorizationTransition === transition) {
+          this.reauthorizationTransition = undefined;
+        }
+      },
+    );
+    return transition;
+  }
+
+  private async runReauthorizationTransition(): Promise<boolean> {
     const transitioned = await this.credentials.requireReauthorization(
       this.generationId,
       this.revision,
       'invalid_grant',
       this.clock.now(),
     );
-    if (transitioned) await this.alertReauthorizationRequired(this.generationId);
+    if (!transitioned) return false;
+    this.reauthorizationCompleted = true;
+    await this.alertReauthorizationRequired(this.generationId).catch(() => undefined);
+    return true;
   }
 }
 

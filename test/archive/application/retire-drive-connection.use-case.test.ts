@@ -18,6 +18,22 @@ describe('RetireDriveConnectionUseCase', () => {
     expect(credentials.completeSecretRemoval)
       .toHaveBeenCalledWith('old-generation', 'retired_unmanaged', 1_700_000_000_000, 'DRIVE_TEMPORARY_UNAVAILABLE');
   });
+
+  it('passes a bounded signal to its single revocation attempt', async () => {
+    const credentials = {
+      loadCredentials: vi.fn().mockResolvedValue({ client: { clientId: 'id', clientSecret: 'secret' }, tokens: { accessToken: 'access', refreshToken: 'refresh', expiryDateMs: null, tokenType: null, scope: null }, revision: 2 }),
+      completeSecretRemoval: vi.fn().mockResolvedValue(undefined),
+    };
+    const revoke = vi.fn().mockResolvedValue(undefined);
+    const caller = new AbortController().signal;
+    const useCase = new RetireDriveConnectionUseCase(credentials as never, { revoke } as never, { now: () => new Date(1_700_000_000_000) });
+
+    await useCase.execute(retiringConnection(), caller);
+
+    expect(revoke).toHaveBeenCalledTimes(1);
+    expect(revoke.mock.calls[0][1]).toBeInstanceOf(AbortSignal);
+    expect(revoke.mock.calls[0][1]).not.toBe(caller);
+  });
 });
 
 function retiringConnection(): DriveConnection {
