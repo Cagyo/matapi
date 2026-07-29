@@ -9,6 +9,7 @@ export type DriveAuthorizationOutcome =
     receiptId: string;
     adminUserId: number;
     chatId: number;
+    account: { permissionId: string; email: string | null; displayName: string | null };
   }
   | {
     kind: 'failed';

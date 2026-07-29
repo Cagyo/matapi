@@ -202,6 +202,22 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
     });
   }
 
+  async clearGenerationSessions(generationId: string, nowMs: number): Promise<void> {
+    this.immediate((tx) => {
+      const rows = tx.select().from(driveObjectAttempts)
+        .where(and(eq(driveObjectAttempts.generationId, generationId), isNotNull(driveObjectAttempts.sessionCiphertext)))
+        .all();
+      for (const row of rows) {
+        const result = tx.update(driveObjectAttempts).set({
+          revision: row.revision + 1,
+          updatedAt: nowMs,
+          ...clearedSession(),
+        }).where(and(eq(driveObjectAttempts.id, row.id), eq(driveObjectAttempts.revision, row.revision))).run();
+        if (result.changes !== 1) throw new DriveAttemptLeaseLostError();
+      }
+    });
+  }
+
   private claim(tx: Writer, row: AttemptRow, input: ClaimAttempt, transition: boolean): ClaimedAttempt {
     const attempt = transition ? toAttempt(row).markUploading(input.nowMs) : revise(toAttempt(row), input.nowMs);
     const result = tx.update(driveObjectAttempts).set({ state: attempt.state, revision: attempt.revision, uploadedAt: attempt.uploadedAtMs,

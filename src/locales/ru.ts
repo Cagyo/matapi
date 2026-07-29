@@ -1316,6 +1316,10 @@ const ruCatalog = {
     disconnectConfirm: 'Отключить',
     disconnected: 'Google Drive отключён. Существующие архивы сохранены.',
     notConnected: 'Google Drive не подключён.',
+    authorizationReady: (account: string) => `Авторизация Google завершена для ${account}. Вернитесь к сообщению с подтверждением, чтобы закончить подключение.`,
+    authorizationPending: 'Авторизация Google ещё выполняется. Завершите её в браузере и попробуйте снова.',
+    authorizationFailed: 'Авторизация Google не завершена. Предыдущее подключение сохранено.',
+    accountUnavailable: 'выбранного аккаунта Google',
   },
 
   gdriveAuth: {

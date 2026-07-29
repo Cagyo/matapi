@@ -146,4 +146,5 @@ export interface ArchiveArtifactRepositoryPort {
   readSchedulerState(): Promise<ArchiveSchedulerState>;
   compareAndSetSchedulerState(expectedRevision: number, update: ArchiveSchedulerUpdate): Promise<boolean>;
   releaseGenerationLeases(generationId: string, nowMs: number): Promise<void>;
+  clearGenerationSessions(generationId: string, nowMs: number): Promise<void>;
 }

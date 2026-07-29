@@ -6,14 +6,18 @@ import { DriveConfigurationError } from '../../domain/errors/drive-configuration
 /** Binds the approved account to the exact staged receipt and activates it atomically. */
 export class ConfirmDriveAccountUseCase {
   constructor(
-    private readonly credentials: Pick<DriveCredentialRepositoryPort, 'loadStaged' | 'activate' | 'discardStaged'>,
+    private readonly credentials: Pick<DriveCredentialRepositoryPort, 'loadStaged' | 'loadCredentials' | 'activate' | 'discardStaged'>,
     private readonly accounts: DriveAccountPort,
     private readonly clock: ClockPort,
   ) {}
 
-  async execute(input: { generationId: string; receiptId: string; adminUserId: number; chatId: number; signal: AbortSignal }): Promise<'activated' | 'stale'> {
+  async execute(input: { generationId: string; receiptId: string; adminUserId: number; chatId: number; signal: AbortSignal }): Promise<'activated' | 'pending' | 'stale'> {
     const staged = await this.loadBound(input);
     if (!staged) return 'stale';
+    const material = await this.credentials.loadCredentials(staged.id);
+    // Confirmation may happen before the background poll exchanges tokens.
+    // Keep the exact staged generation intact until credentials exist.
+    if (!material?.tokens.accessToken && !material?.tokens.refreshToken) return 'pending';
     try {
       const account = await this.accounts.resolveAccount(staged, input.signal);
       const folders = await this.accounts.resolveManagedFolders(staged, input.signal);

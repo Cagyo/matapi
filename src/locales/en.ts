@@ -1353,6 +1353,10 @@ const enCatalog = {
     disconnectConfirm: 'Disconnect',
     disconnected: 'Google Drive disconnected. Existing archives were kept.',
     notConnected: 'Google Drive is not connected.',
+    authorizationReady: (account: string) => `Google authorization completed for ${account}. Return to the confirmation message to finish connecting.`,
+    authorizationPending: 'Google authorization is still in progress. Complete it in the browser, then try again.',
+    authorizationFailed: 'Google authorization did not complete. Your previous connection was kept.',
+    accountUnavailable: 'the selected Google account',
   },
 
   gdriveAuth: {

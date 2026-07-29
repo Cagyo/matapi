@@ -1312,6 +1312,10 @@ const ukCatalog = {
     disconnectConfirm: 'Відключити',
     disconnected: 'Google Drive відключено. Наявні архіви збережено.',
     notConnected: 'Google Drive не підключено.',
+    authorizationReady: (account: string) => `Авторизацію Google завершено для ${account}. Поверніться до повідомлення з підтвердженням, щоб завершити підключення.`,
+    authorizationPending: 'Авторизація Google ще триває. Завершіть її у браузері та спробуйте знову.',
+    authorizationFailed: 'Авторизацію Google не завершено. Попереднє підключення збережено.',
+    accountUnavailable: 'вибраного облікового запису Google',
   },
 
   gdriveAuth: {

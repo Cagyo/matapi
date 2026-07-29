@@ -38,3 +38,45 @@ export class TelegramDriveClientDocumentAdapter {
     return text;
   }
 }
+
+/** Telegram Bot API stream gateway. URLs and the bot token stay inside this adapter. */
+export class TelegramHttpDriveClientDocumentGateway implements TelegramDriveClientDocumentGateway {
+  constructor(
+    private readonly token: string | undefined = process.env.TELEGRAM_BOT_TOKEN,
+    private readonly request: typeof fetch = globalThis.fetch,
+  ) {}
+
+  async *download(fileId: string, maxBytes: number, signal: AbortSignal): AsyncIterable<Uint8Array> {
+    if (!this.token || !fileId) throw new DriveConfigurationError('Drive client document cannot be downloaded');
+    let path: string;
+    try {
+      const metadata = await this.request(`https://api.telegram.org/bot${this.token}/getFile`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ file_id: fileId }), signal,
+      });
+      const payload: unknown = await metadata.json();
+      if (!metadata.ok || !isFilePayload(payload)) throw new DriveConfigurationError('Drive client document cannot be downloaded');
+      path = payload.result.file_path;
+      const response = await this.request(`https://api.telegram.org/file/bot${this.token}/${path}`, {
+        headers: { range: `bytes=0-${maxBytes - 1}` }, signal,
+      });
+      if (!response.ok || !response.body) throw new DriveConfigurationError('Drive client document cannot be downloaded');
+      const reader = response.body.getReader();
+      try {
+        while (true) {
+          const next = await reader.read();
+          if (next.done) return;
+          yield next.value;
+        }
+      } finally { reader.releaseLock(); }
+    } catch (error) {
+      if (error instanceof DriveConfigurationError) throw error;
+      throw new DriveConfigurationError('Drive client document cannot be downloaded');
+    }
+  }
+}
+
+function isFilePayload(value: unknown): value is { result: { file_path: string } } {
+  return typeof value === 'object' && value !== null
+    && 'result' in value && typeof value.result === 'object' && value.result !== null
+    && 'file_path' in value.result && typeof value.result.file_path === 'string';
+}

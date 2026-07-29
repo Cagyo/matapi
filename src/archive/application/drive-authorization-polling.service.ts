@@ -2,6 +2,7 @@ import type { OnModuleInit } from '@nestjs/common';
 import type { DriveAuthorizationOutcomePort } from './ports/drive-authorization-outcome.port';
 import type { DriveDeviceAuthorizationPort, DeviceAuthorizationChallenge } from './ports/drive-device-authorization.port';
 import type { DriveClientCredentials, DriveCredentialRepositoryPort } from './ports/drive-credential-repository.port';
+import type { DriveAccountPort } from './ports/drive-account.port';
 import { DriveAuthorizationDeniedError } from '../domain/errors/drive-authorization-denied.error';
 import { DriveReauthorizationRequiredError } from '../domain/errors/drive-reauthorization-required.error';
 
@@ -24,7 +25,8 @@ export class DriveAuthorizationPollingService implements OnModuleInit {
 
   constructor(
     private readonly authorization: DriveDeviceAuthorizationPort,
-    private readonly credentials: Pick<DriveCredentialRepositoryPort, 'storeExchangedTokens' | 'discardStaged' | 'expireStaged'>,
+    private readonly credentials: Pick<DriveCredentialRepositoryPort, 'storeExchangedTokens' | 'discardStaged' | 'expireStaged' | 'loadStaged'>,
+    private readonly accounts: Pick<DriveAccountPort, 'resolveAccount'>,
     private readonly outcomes: DriveAuthorizationOutcomePort,
   ) {}
 
@@ -60,12 +62,20 @@ export class DriveAuthorizationPollingService implements OnModuleInit {
       if (controller.signal.aborted) return;
       const stored = await this.credentials.storeExchangedTokens(input.generationId, input.expectedRevision, tokens);
       if (!stored) return;
+      const staged = await this.credentials.loadStaged(input.receiptId, {
+        generationId: input.generationId,
+        adminUserId: input.adminUserId,
+        chatId: input.chatId,
+      });
+      if (!staged) return;
+      const account = await this.accounts.resolveAccount(staged, controller.signal);
       await this.outcomes.publish({
         kind: 'authorized',
         generationId: input.generationId,
         receiptId: input.receiptId,
         adminUserId: input.adminUserId,
         chatId: input.chatId,
+        account,
       });
     } catch (error) {
       if (controller.signal.aborted) return;

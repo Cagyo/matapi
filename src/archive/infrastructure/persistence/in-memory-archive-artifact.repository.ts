@@ -173,6 +173,14 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
     }
   }
 
+  async clearGenerationSessions(generationId: string, nowMs: number): Promise<void> {
+    for (const entry of this.attempts.values()) {
+      if (entry.attempt.generationId !== generationId || entry.session === null) continue;
+      entry.attempt = revise(entry.attempt, nowMs);
+      entry.session = null;
+    }
+  }
+
   private claim(id: string, entry: Entry, input: ClaimAttempt, transition: boolean): ClaimedAttempt {
     entry.attempt = transition ? entry.attempt.markUploading(input.nowMs) : revise(entry.attempt, input.nowMs);
     entry.lease = { owner: input.owner, revision: entry.attempt.revision, expiresAtMs: input.nowMs + input.leaseMs };

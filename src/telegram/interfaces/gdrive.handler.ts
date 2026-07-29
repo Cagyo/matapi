@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Composer, InlineKeyboard } from 'grammy';
 import { randomBytes } from 'node:crypto';
 import { BeginDriveConnectionUseCase, type PendingDriveConnection } from '../../archive/application/use-cases/begin-drive-connection.use-case';
@@ -38,14 +38,14 @@ export class GdriveHandler implements TelegramHandler {
     private readonly status: GdriveStatusUseCase,
     private readonly guard: RoleMiddleware,
     private readonly workflows: WorkflowEntryCoordinator,
-    @Optional() private readonly navigation?: WorkflowNavigationHandler,
-    @Optional() @Inject(TELEGRAM_DRIVE_CLIENT_DOCUMENT_READER)
-    private readonly documents?: Pick<TelegramDriveClientDocumentAdapter, 'read'>,
-    @Optional() private readonly beginConnection?: BeginDriveConnectionUseCase,
-    @Optional() private readonly submitClient?: SubmitDriveClientUseCase,
-    @Optional() private readonly confirmAccount?: ConfirmDriveAccountUseCase,
-    @Optional() private readonly cancelConnection?: CancelDriveConnectionUseCase,
-    @Optional() private readonly disconnect?: DisconnectDriveUseCase,
+    @Inject(WorkflowNavigationHandler) private readonly navigation: WorkflowNavigationHandler | undefined,
+    @Inject(TELEGRAM_DRIVE_CLIENT_DOCUMENT_READER)
+    private readonly documents: Pick<TelegramDriveClientDocumentAdapter, 'read'>,
+    private readonly beginConnection: BeginDriveConnectionUseCase,
+    private readonly submitClient: SubmitDriveClientUseCase,
+    private readonly confirmAccount: ConfirmDriveAccountUseCase,
+    private readonly cancelConnection: CancelDriveConnectionUseCase,
+    private readonly disconnect: DisconnectDriveUseCase,
   ) {}
 
   register(composer: Composer<TelegramContext>): void {
@@ -75,11 +75,18 @@ export class GdriveHandler implements TelegramHandler {
   async handleConnect(ctx: TelegramContext, launch?: WorkflowLaunch): Promise<void> {
     const current = this.currentAdmin(ctx);
     const catalog = ctx.localeState?.catalog ?? en;
-    if (!current || !this.beginConnection) {
+    if (!current) {
       if (ctx.chat?.type === 'private') await ctx.reply(catalog.common.adminRequired);
       return;
     }
-    const pending = this.beginConnection.execute({ adminUserId: current.userId, chatId: current.chatId, receiptId: launch?.receipt.id });
+    await this.cancelPendingConnections();
+    let pending: PendingDriveConnection;
+    try {
+      pending = this.beginConnection.execute({ adminUserId: current.userId, chatId: current.chatId, receiptId: launch?.receipt.id });
+    } catch {
+      await ctx.reply(catalog.gdriveConnection.connectionFailed);
+      return;
+    }
     this.pending.set(bindingKey(current.userId, current.chatId), pending);
     await ctx.reply(catalog.gdriveConnection.uploadPrompt, {
       reply_markup: new InlineKeyboard().text(catalog.gdriveConnection.cancel, callback('c', pending.receiptId, pending.generationId)),
@@ -89,17 +96,22 @@ export class GdriveHandler implements TelegramHandler {
   /** Security gate intentionally precedes the first document read. */
   async handleDocument(ctx: TelegramContext): Promise<void> {
     const current = this.currentAdmin(ctx);
-    if (!current || !ctx.message?.document) return;
+    if (!current) {
+      await this.cancelDocumentAfterRoleLoss(ctx);
+      return;
+    }
+    if (!ctx.message?.document || ctx.message.forward_origin) return;
     const catalog = ctx.localeState?.catalog ?? en;
     const pending = this.pending.get(bindingKey(current.userId, current.chatId));
-    if (!pending || !this.documents || !this.submitClient) return;
+    if (!pending) return;
+    let read = false;
     try {
       const document = await this.documents.read({
         fileId: ctx.message.document.file_id,
         fileSize: ctx.message.document.file_size,
       }, AbortSignal.timeout(30_000));
+      read = true;
       const result = await this.submitClient.execute({ pending, document, signal: AbortSignal.timeout(30_000) });
-      await this.deleteClientMessage(ctx, catalog.gdriveConnection.manualDelete);
       await ctx.reply(catalog.gdriveConnection.authorize(result.verificationUri, result.userCode), {
         reply_markup: new InlineKeyboard()
           .text(catalog.gdriveConnection.confirm, callback('a', pending.receiptId, pending.generationId))
@@ -108,12 +120,14 @@ export class GdriveHandler implements TelegramHandler {
     } catch (error) {
       this.logger.warn(`Drive client document rejected: ${error instanceof Error ? error.name : 'unknown'}`);
       await ctx.reply(catalog.gdriveConnection.invalidClient);
+    } finally {
+      if (read) await this.deleteClientMessage(ctx, catalog.gdriveConnection.manualDelete);
     }
   }
 
   private async handleDisconnect(ctx: TelegramContext): Promise<void> {
     const current = this.currentAdmin(ctx);
-    if (!current || !this.disconnect) return;
+    if (!current) return;
     const catalog = ctx.localeState?.catalog ?? en;
     const receiptId = randomReceipt();
     const generationId = await this.disconnect.activeGeneration();
@@ -140,7 +154,6 @@ export class GdriveHandler implements TelegramHandler {
       if (!requested || requested.generationId !== parsed.generationId || requested.userId !== current.userId || requested.chatId !== current.chatId) return;
       this.disconnects.delete(parsed.receiptId);
       if (parsed.action === 'x') { await ctx.reply(catalog.gdriveConnection.cancelled); return; }
-      if (!this.disconnect) return;
       const result = await this.disconnect.execute(requested.generationId, AbortSignal.timeout(5_000));
       await ctx.reply(result === 'disconnected' ? catalog.gdriveConnection.disconnected : catalog.gdriveConnection.notConnected);
       return;
@@ -149,18 +162,18 @@ export class GdriveHandler implements TelegramHandler {
     if (!pending || pending.receiptId !== parsed.receiptId || pending.generationId !== parsed.generationId) return;
     if (parsed.action === 'c') {
       this.pending.delete(bindingKey(current.userId, current.chatId));
-      const result = this.cancelConnection
-        ? await this.cancelConnection.execute({ generationId: pending.generationId, receiptId: pending.receiptId, adminUserId: current.userId, chatId: current.chatId })
-        : 'stale';
+      const result = await this.cancelConnection.execute({ generationId: pending.generationId, receiptId: pending.receiptId, adminUserId: current.userId, chatId: current.chatId });
       if (result === 'cancelled') await ctx.reply(catalog.gdriveConnection.cancelled);
       return;
     }
-    if (parsed.action !== 'a' || !this.confirmAccount) return;
+    if (parsed.action !== 'a') return;
     try {
       const result = await this.confirmAccount.execute({ generationId: pending.generationId, receiptId: pending.receiptId, adminUserId: current.userId, chatId: current.chatId, signal: AbortSignal.timeout(30_000) });
       if (result === 'activated') {
         this.pending.delete(bindingKey(current.userId, current.chatId));
         await ctx.reply(catalog.gdriveConnection.connected);
+      } else if (result === 'pending') {
+        await ctx.reply(catalog.gdriveConnection.authorizationPending);
       }
     } catch {
       this.pending.delete(bindingKey(current.userId, current.chatId));
@@ -178,12 +191,36 @@ export class GdriveHandler implements TelegramHandler {
     const pending = this.pending.get(bindingKey(ctx.from.id, ctx.chat.id));
     if (!pending || pending.receiptId !== parsed.receiptId || pending.generationId !== parsed.generationId) return;
     this.pending.delete(bindingKey(ctx.from.id, ctx.chat.id));
-    this.documents && this.cancelConnection && await this.cancelConnection.execute({
+    await this.cancelConnection.execute({
       generationId: pending.generationId,
       receiptId: pending.receiptId,
       adminUserId: ctx.from.id,
       chatId: ctx.chat.id,
     });
+  }
+
+  private async cancelDocumentAfterRoleLoss(ctx: TelegramContext): Promise<void> {
+    if (ctx.chat?.type !== 'private' || !ctx.from) return;
+    const pending = this.pending.get(bindingKey(ctx.from.id, ctx.chat.id));
+    if (!pending) return;
+    this.pending.delete(bindingKey(ctx.from.id, ctx.chat.id));
+    await this.cancelConnection.execute({
+      generationId: pending.generationId,
+      receiptId: pending.receiptId,
+      adminUserId: ctx.from.id,
+      chatId: ctx.chat.id,
+    });
+  }
+
+  private async cancelPendingConnections(): Promise<void> {
+    const pending = [...this.pending.values()];
+    this.pending.clear();
+    await Promise.all(pending.map((connection) => this.cancelConnection.execute({
+      generationId: connection.generationId,
+      receiptId: connection.receiptId,
+      adminUserId: connection.adminUserId,
+      chatId: connection.chatId,
+    }).catch(() => 'stale')));
   }
 
   private async deleteClientMessage(ctx: TelegramContext, warning: string): Promise<void> {

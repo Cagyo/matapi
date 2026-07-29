@@ -18,19 +18,20 @@ export interface PendingDriveConnection {
 export class BeginDriveConnectionUseCase {
   constructor(
     private readonly clock: ClockPort,
-    private readonly installationId: string,
+    private readonly installationId: string | (() => string),
     private readonly generateId: () => string = () => randomBytes(12).toString('base64url'),
   ) {}
 
   execute(input: { adminUserId: number; chatId: number; receiptId?: string }): PendingDriveConnection {
-    if (!Number.isSafeInteger(input.adminUserId) || !Number.isSafeInteger(input.chatId) || !this.installationId) {
+    const installationId = typeof this.installationId === 'function' ? this.installationId() : this.installationId;
+    if (!Number.isSafeInteger(input.adminUserId) || !Number.isSafeInteger(input.chatId) || !installationId) {
       throw new DriveConfigurationError('Drive connection binding is invalid');
     }
     const createdAtMs = this.clock.now().getTime();
     const receiptId = input.receiptId ?? this.generateId();
     const generationId = this.generateId();
     if (!isReceipt(receiptId) || !isReceipt(generationId)) throw new DriveConfigurationError('Drive receipt generator is invalid');
-    return { generationId, receiptId, adminUserId: input.adminUserId, chatId: input.chatId, installationId: this.installationId, createdAtMs, expiresAtMs: createdAtMs + RECEIPT_TTL_MS };
+    return { generationId, receiptId, adminUserId: input.adminUserId, chatId: input.chatId, installationId, createdAtMs, expiresAtMs: createdAtMs + RECEIPT_TTL_MS };
   }
 }
 

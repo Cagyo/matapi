@@ -10,12 +10,13 @@ describe('TelegramDriveClientDocumentAdapter', () => {
         const chunk = Buffer.alloc(maxBytes);
         consumed += chunk.length;
         yield chunk;
-        throw new DriveConfigurationError('Drive client document is too large');
+        consumed += 1;
+        yield Buffer.alloc(1);
       },
     });
 
     await expect(reader.read({ fileId: 'file-1', fileSize: 100 }, new AbortController().signal))
       .rejects.toThrow(DriveConfigurationError);
-    expect(consumed).toBeLessThanOrEqual(64 * 1024);
+    expect(consumed).toBe(64 * 1024 + 1);
   });
 });
