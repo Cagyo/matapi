@@ -18,7 +18,6 @@ import { SettingsHandler } from './settings.handler';
 import { HelpHandler } from './help.handler';
 import { ConfigHandler } from './config.handler';
 import { GdriveHandler } from './gdrive.handler';
-import { GdriveAuthHandler } from './gdrive-auth.handler';
 import { HealthHandler } from './health.handler';
 import { InviteHandler } from './invite.handler';
 import { ImportConfigHandler } from './import-config.handler';
@@ -59,7 +58,10 @@ export class HomeHandler implements TelegramHandler {
     private readonly help?: HelpHandler,
     private readonly config?: ConfigHandler,
     private readonly drive?: GdriveHandler,
-    private readonly driveAuth?: GdriveAuthHandler,
+    // Kept as a positional compatibility slot while the removed legacy
+    // `/gdrive_auth` handler is replaced by GdriveHandler.handleConnect.
+    @Optional() @Inject(GdriveHandler)
+    private readonly driveConnection?: GdriveHandler,
     private readonly health?: HealthHandler,
     private readonly invite?: InviteHandler,
     private readonly importConfig?: ImportConfigHandler,
@@ -363,9 +365,9 @@ export class HomeHandler implements TelegramHandler {
           : this.recover(ctx, 'unavailable');
       }
       case 'drive-connect': {
-        if (!this.driveAuth) return this.recover(ctx, 'unavailable');
+        if (!this.drive) return this.recover(ctx, 'unavailable');
         const launch = await this.beginWorkflow(ctx, 'drive-setup', active, view);
-        return launch ? this.driveAuth.handleCommand(ctx, launch) : this.recover(ctx, 'unavailable');
+        return launch ? this.drive.handleConnect(ctx, launch) : this.recover(ctx, 'unavailable');
       }
       case 'system-health': {
         if (!this.health) return this.recover(ctx, 'unavailable');

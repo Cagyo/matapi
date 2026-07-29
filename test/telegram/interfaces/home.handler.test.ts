@@ -108,7 +108,7 @@ function setup(overrides: {
   settings?: { handleCommand: ReturnType<typeof vi.fn> };
   config?: { handleSubcommand: ReturnType<typeof vi.fn> };
   help?: { handleCommand: ReturnType<typeof vi.fn> };
-  drive?: { handleStatus: ReturnType<typeof vi.fn> };
+  drive?: { handleStatus?: ReturnType<typeof vi.fn>; handleConnect?: ReturnType<typeof vi.fn> };
   driveAuth?: { handleCommand: ReturnType<typeof vi.fn> };
   health?: { handleCommand: ReturnType<typeof vi.fn> };
   invite?: { handleCommand: ReturnType<typeof vi.fn> };
@@ -506,7 +506,7 @@ describe('HomeHandler', () => {
     ['config-import', 'sensor-import', 'importConfig', 'handleCommand'],
     ['config-export', 'sensor-export', 'exportConfig', 'handleCommand'],
     ['drive-status', 'drive-status', 'drive', 'handleStatus'],
-    ['drive-connect', 'drive-setup', 'driveAuth', 'handleCommand'],
+    ['drive-connect', 'drive-setup', 'drive', 'handleConnect'],
     ['system-health', 'health', 'health', 'handleCommand'],
     ['system-packages', 'system-update', 'systemUpdate', 'handleCommand'],
     ['invite', 'invite', 'invite', 'handleCommand'],
@@ -532,6 +532,8 @@ describe('HomeHandler', () => {
     });
     if (destination === 'drive-status') {
       expect(target.handleStatus).toHaveBeenCalledWith(ctx, { includeCleanupAction: false }, { receipt: workflowReceipt });
+    } else if (destination === 'drive-connect') {
+      expect(target.handleConnect).toHaveBeenCalledWith(ctx, { receipt: workflowReceipt });
     } else {
       expect(target[method]).toHaveBeenCalledWith(ctx, { receipt: workflowReceipt });
     }

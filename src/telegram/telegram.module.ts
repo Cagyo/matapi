@@ -101,7 +101,6 @@ import { DemoteHandler } from './interfaces/demote.handler';
 import { ExportConfigHandler } from './interfaces/export-config.handler';
 import { FeatureHandler } from './interfaces/feature.handler';
 import { GdriveHandler } from './interfaces/gdrive.handler';
-import { GdriveAuthHandler } from './interfaces/gdrive-auth.handler';
 import { HealthHandler } from './interfaces/health.handler';
 import { HelpHandler } from './interfaces/help.handler';
 import { ImportConfigHandler } from './interfaces/import-config.handler';
@@ -284,7 +283,6 @@ const mode = resolveBotMode();
     CameraHandler,
     CameraSourcesHandler,
     GdriveHandler,
-    GdriveAuthHandler,
     ExportConfigHandler,
     ImportConfigHandler,
     FeatureHandler,
@@ -306,6 +304,6 @@ const mode = resolveBotMode();
     TelegramRecipientDirectoryAdapter,
     GrammyBotGateway,
   ],
-  exports: [GrammyBotGateway, USER_REPOSITORY, HOME_SESSION_STORE, HOME_ACTION_REPOSITORY, GdriveAuthHandler],
+  exports: [GrammyBotGateway, USER_REPOSITORY, HOME_SESSION_STORE, HOME_ACTION_REPOSITORY],
 })
 export class TelegramModule {}

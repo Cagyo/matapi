@@ -380,14 +380,8 @@ export const commands: CommandDescriptor[] = [
   },
   {
     command: 'gdrive',
-    description: 'Стан синхронізації з Google Drive',
-    usage: '/gdrive status — стан синхронізації з Google Drive',
-    scope: 'admin',
-  },
-  {
-    command: 'gdrive_auth',
-    description: 'Налаштувати автентифікацію Google Drive',
-    usage: '/gdrive_auth — налаштувати або замінити облікові дані Google Drive',
+    description: 'Підключити, перевірити або відключити Google Drive',
+    usage: '/gdrive connect|status|disconnect — керування Google Drive',
     scope: 'admin',
   },
   {
@@ -1281,7 +1275,7 @@ const ukCatalog = {
   },
 
   gdrive: {
-    usage: 'Використання: /gdrive status',
+    usage: 'Використання: /gdrive connect|status|disconnect',
     header: '☁️ Стан Google Drive',
     body: (v: GdriveStatusView): string => {
       const lines = [
@@ -1302,6 +1296,22 @@ const ukCatalog = {
     notConfigured: '❌ Google Drive не налаштовано. Запустіть rclone config.',
     statusFailed: (reason: string) => `❌ Не вдалося перевірити стан Drive: ${reason}`,
     cleanButton: '🧹 Запустити очищення зараз',
+  },
+
+  gdriveConnection: {
+    uploadPrompt: '☁️ Надішліть JSON-файл Google OAuth для встановленого клієнта як документ. Після зчитування його буде видалено.',
+    authorize: (url: string, code: string) => `Відкрийте ${url} і введіть код: ${code}. Потім натисніть «Підтвердити».`,
+    confirm: '✅ Підтвердити обліковий запис',
+    cancel: 'Скасувати',
+    cancelled: 'Підключення Google Drive скасовано.',
+    invalidClient: '❌ Завантажений файл не є коректним JSON для встановленого клієнта Google.',
+    manualDelete: '⚠️ Не вдалося видалити документ із даними. Видаліть його вручну.',
+    connected: '✅ Google Drive підключено.',
+    connectionFailed: '❌ Не вдалося завершити підключення Google Drive. Попереднє підключення збережено.',
+    disconnectPrompt: 'Відключити Google Drive? Наявні архівні файли не буде видалено.',
+    disconnectConfirm: 'Відключити',
+    disconnected: 'Google Drive відключено. Наявні архіви збережено.',
+    notConnected: 'Google Drive не підключено.',
   },
 
   gdriveAuth: {

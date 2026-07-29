@@ -80,7 +80,9 @@ export type DriveConnectionTerminalStatus = Extract<
 
 export interface DriveCredentialRepositoryPort {
   stage(input: StageDriveConnection): Promise<DriveConnection>;
-  loadStaged(receiptId: string): Promise<DriveConnection | null>;
+  loadStaged(receiptId: string, binding?: { generationId?: string; adminUserId: number; chatId: number }): Promise<DriveConnection | null>;
+  /** Removes a still-staged generation and its encrypted material by its exact receipt binding. */
+  discardStaged(id: string, receiptId: string): Promise<boolean>;
   storeExchangedTokens(id: string, expectedRevision: number, tokens: OAuthTokenSet): Promise<boolean>;
   loadManagedFolderReservation(generationId: string): Promise<ManagedFolderReservation | null>;
   reserveManagedFolder(input: ReserveManagedFolder): Promise<ManagedFolderReservation | null>;

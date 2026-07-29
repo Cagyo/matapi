@@ -19,7 +19,11 @@ function setup() {
   }) };
   const handler = new GdriveHandler(status as never, {} as never, workflows as never, navigation as never);
   const commands: Record<string, (ctx: object) => Promise<void>> = {};
-  handler.register({ command: vi.fn((name, _guard, fn) => { commands[name] = fn; }) } as never);
+  handler.register({
+    command: vi.fn((name, _guard, fn) => { commands[name] = fn; }),
+    on: vi.fn(),
+    callbackQuery: vi.fn(),
+  } as never);
   const ctx = {
     from: { id: 42 }, chat: { id: 42, type: 'private' }, match: 'status',
     localeState: { locale: 'en', catalog: catalogFor('en'), user: { telegramId: 42, role: 'admin' } },
@@ -52,5 +56,30 @@ describe('GdriveHandler', () => {
     expect(ctx.reply).toHaveBeenCalledWith(catalogFor('en').gdrive.notConfigured);
     expect(navigation.complete).toHaveBeenCalledOnce();
     expect(events).toEqual(['result', 'restore']);
+  });
+});
+
+describe('GdriveHandler Drive client uploads', () => {
+  it.each(['group', 'supergroup', 'channel'])('rejects %s before reading a document', async (type) => {
+    const { GdriveHandler: DriveSetupHandler } = await import('../../../src/telegram/interfaces/gdrive.handler');
+    const documentReader = { read: vi.fn() };
+    const handler = new DriveSetupHandler(
+      {} as never,
+      {} as never,
+      {} as never,
+      undefined,
+      documentReader as never,
+    );
+    const ctx = {
+      from: { id: 7 },
+      chat: { id: 9, type },
+      message: { document: { file_id: 'file-1', file_size: 20 } },
+      localeState: { locale: 'en', catalog: catalogFor('en'), user: { telegramId: 7, role: 'admin' } },
+      reply: vi.fn(),
+    };
+
+    await handler.handleDocument(ctx as never);
+
+    expect(documentReader.read).not.toHaveBeenCalled();
   });
 });

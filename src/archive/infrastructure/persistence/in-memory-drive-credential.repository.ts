@@ -19,6 +19,8 @@ interface Entry {
   client: DriveClientCredentials | null;
   tokens: OAuthTokenSet | null;
   receiptId: string | null;
+  adminUserId: number | null;
+  chatId: number | null;
   expiresAtMs: number | null;
   reservations: Omit<ManagedFolderReservation, 'revision'>;
 }
@@ -30,12 +32,22 @@ export class InMemoryDriveCredentialRepository implements DriveCredentialReposit
   async stage(input: StageDriveConnection): Promise<DriveConnection> {
     if ([...this.entries.values()].some(({ connection }) => connection.status === 'staged')) throw conflict('A Drive setup is already staged');
     const connection = DriveConnection.stage({ id: input.id, installationId: input.installationId, nowMs: input.createdAtMs });
-    this.entries.set(input.id, { connection, clientIdHash: input.clientIdHash, client: { ...input.client }, tokens: emptyTokens(), receiptId: input.receiptId, expiresAtMs: input.expiresAtMs, reservations: emptyReservations() });
+    this.entries.set(input.id, { connection, clientIdHash: input.clientIdHash, client: { ...input.client }, tokens: emptyTokens(), receiptId: input.receiptId, adminUserId: input.adminUserId, chatId: input.chatId, expiresAtMs: input.expiresAtMs, reservations: emptyReservations() });
     return connection;
   }
 
-  async loadStaged(receiptId: string): Promise<DriveConnection | null> {
-    return [...this.entries.values()].find((entry) => entry.connection.status === 'staged' && entry.receiptId === receiptId)?.connection ?? null;
+  async loadStaged(receiptId: string, binding?: { generationId?: string; adminUserId: number; chatId: number }): Promise<DriveConnection | null> {
+    return [...this.entries.values()].find((entry) => entry.connection.status === 'staged'
+      && entry.receiptId === receiptId
+      && (binding === undefined || (entry.connection.id === (binding.generationId ?? entry.connection.id)
+        && entry.adminUserId === binding.adminUserId && entry.chatId === binding.chatId)))?.connection ?? null;
+  }
+
+  async discardStaged(id: string, receiptId: string): Promise<boolean> {
+    const entry = this.entries.get(id);
+    if (!entry || entry.connection.status !== 'staged' || entry.receiptId !== receiptId) return false;
+    this.entries.delete(id);
+    return true;
   }
 
   async storeExchangedTokens(id: string, expectedRevision: number, tokens: OAuthTokenSet): Promise<boolean> {

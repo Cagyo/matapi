@@ -375,14 +375,8 @@ export const commands: CommandDescriptor[] = [
   },
   {
     command: 'gdrive',
-    description: 'Google Drive sync status',
-    usage: '/gdrive status — Google Drive sync status',
-    scope: 'admin',
-  },
-  {
-    command: 'gdrive_auth',
-    description: 'Set up Google Drive authentication',
-    usage: '/gdrive_auth — set up or replace Google Drive credentials',
+    description: 'Connect, inspect, or disconnect Google Drive',
+    usage: '/gdrive connect|status|disconnect — manage Google Drive',
     scope: 'admin',
   },
   {
@@ -1322,7 +1316,7 @@ const enCatalog = {
   },
 
   gdrive: {
-    usage: 'Usage: /gdrive status',
+    usage: 'Usage: /gdrive connect|status|disconnect',
     header: '☁️ Google Drive Status',
     body: (v: GdriveStatusView): string => {
       const lines = [
@@ -1343,6 +1337,22 @@ const enCatalog = {
     notConfigured: '❌ Google Drive is not configured. Run rclone config.',
     statusFailed: (reason: string) => `❌ Failed to check Drive status: ${reason}`,
     cleanButton: '🧹 Trigger Clean Now',
+  },
+
+  gdriveConnection: {
+    uploadPrompt: '☁️ Send the Google OAuth installed-client JSON file as a document. It will be deleted after it is read.',
+    authorize: (url: string, code: string) => `Open ${url} and enter this code: ${code}. Then tap Confirm.`,
+    confirm: '✅ Confirm account',
+    cancel: 'Cancel',
+    cancelled: 'Google Drive connection cancelled.',
+    invalidClient: '❌ The uploaded file is not a valid Google installed-client JSON document.',
+    manualDelete: '⚠️ Could not delete the credential document. Please delete it manually.',
+    connected: '✅ Google Drive connected.',
+    connectionFailed: '❌ Google Drive connection could not be completed. Your previous connection was kept.',
+    disconnectPrompt: 'Disconnect Google Drive? Existing archived files will not be deleted.',
+    disconnectConfirm: 'Disconnect',
+    disconnected: 'Google Drive disconnected. Existing archives were kept.',
+    notConnected: 'Google Drive is not connected.',
   },
 
   gdriveAuth: {

@@ -79,11 +79,31 @@ export class DrizzleDriveCredentialRepository implements DriveCredentialReposito
     return connection;
   }
 
-  async loadStaged(receiptId: string): Promise<DriveConnection | null> {
+  async loadStaged(receiptId: string, binding?: { generationId?: string; adminUserId: number; chatId: number }): Promise<DriveConnection | null> {
     const row = this.db.select().from(driveConnections)
-      .where(and(eq(driveConnections.status, 'staged'), eq(driveConnections.workflowReceiptId, receiptId)))
+      .where(and(
+        eq(driveConnections.status, 'staged'),
+        eq(driveConnections.workflowReceiptId, receiptId),
+        ...(binding ? [
+          eq(driveConnections.adminUserId, binding.adminUserId),
+          eq(driveConnections.chatId, binding.chatId),
+          ...(binding.generationId ? [eq(driveConnections.id, binding.generationId)] : []),
+        ] : []),
+      ))
       .get();
     return row ? toConnection(row) : null;
+  }
+
+  async discardStaged(id: string, receiptId: string): Promise<boolean> {
+    const result = this.db.delete(driveConnections)
+      .where(and(
+        eq(driveConnections.id, id),
+        eq(driveConnections.status, 'staged'),
+        eq(driveConnections.workflowReceiptId, receiptId),
+        eq(driveConnections.stagedSlot, 1),
+      ))
+      .run();
+    return result.changes === 1;
   }
 
   async storeExchangedTokens(id: string, expectedRevision: number, tokens: OAuthTokenSet): Promise<boolean> {

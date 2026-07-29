@@ -380,14 +380,8 @@ export const commands: CommandDescriptor[] = [
   },
   {
     command: 'gdrive',
-    description: 'Состояние синхронизации с Google Drive',
-    usage: '/gdrive status — состояние синхронизации с Google Drive',
-    scope: 'admin',
-  },
-  {
-    command: 'gdrive_auth',
-    description: 'Настроить аутентификацию Google Drive',
-    usage: '/gdrive_auth — настроить или заменить учётные данные Google Drive',
+    description: 'Подключить, проверить или отключить Google Drive',
+    usage: '/gdrive connect|status|disconnect — управление Google Drive',
     scope: 'admin',
   },
   {
@@ -1285,7 +1279,7 @@ const ruCatalog = {
   },
 
   gdrive: {
-    usage: 'Использование: /gdrive status',
+    usage: 'Использование: /gdrive connect|status|disconnect',
     header: '☁️ Состояние Google Drive',
     body: (v: GdriveStatusView): string => {
       const lines = [
@@ -1306,6 +1300,22 @@ const ruCatalog = {
     notConfigured: '❌ Google Drive не настроен. Запустите rclone config.',
     statusFailed: (reason: string) => `❌ Не удалось проверить состояние Drive: ${reason}`,
     cleanButton: '🧹 Запустить очистку',
+  },
+
+  gdriveConnection: {
+    uploadPrompt: '☁️ Отправьте JSON-файл OAuth установленного клиента Google как документ. После чтения он будет удалён.',
+    authorize: (url: string, code: string) => `Откройте ${url} и введите код: ${code}. Затем нажмите «Подтвердить».`,
+    confirm: '✅ Подтвердить аккаунт',
+    cancel: 'Отмена',
+    cancelled: 'Подключение Google Drive отменено.',
+    invalidClient: '❌ Загруженный файл не является корректным JSON установленного клиента Google.',
+    manualDelete: '⚠️ Не удалось удалить документ с данными. Удалите его вручную.',
+    connected: '✅ Google Drive подключён.',
+    connectionFailed: '❌ Не удалось завершить подключение Google Drive. Предыдущее подключение сохранено.',
+    disconnectPrompt: 'Отключить Google Drive? Существующие архивные файлы не будут удалены.',
+    disconnectConfirm: 'Отключить',
+    disconnected: 'Google Drive отключён. Существующие архивы сохранены.',
+    notConnected: 'Google Drive не подключён.',
   },
 
   gdriveAuth: {

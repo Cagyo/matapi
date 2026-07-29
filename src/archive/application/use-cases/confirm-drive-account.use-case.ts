@@ -1,0 +1,41 @@
+import type { ClockPort } from '../../../events/domain/ports/clock.port';
+import type { DriveAccountPort } from '../ports/drive-account.port';
+import type { DriveCredentialRepositoryPort } from '../ports/drive-credential-repository.port';
+import { DriveConfigurationError } from '../../domain/errors/drive-configuration.error';
+
+/** Binds the approved account to the exact staged receipt and activates it atomically. */
+export class ConfirmDriveAccountUseCase {
+  constructor(
+    private readonly credentials: Pick<DriveCredentialRepositoryPort, 'loadStaged' | 'activate' | 'discardStaged'>,
+    private readonly accounts: DriveAccountPort,
+    private readonly clock: ClockPort,
+  ) {}
+
+  async execute(input: { generationId: string; receiptId: string; adminUserId: number; chatId: number; signal: AbortSignal }): Promise<'activated' | 'stale'> {
+    const staged = await this.loadBound(input);
+    if (!staged) return 'stale';
+    try {
+      const account = await this.accounts.resolveAccount(staged, input.signal);
+      const folders = await this.accounts.resolveManagedFolders(staged, input.signal);
+      await this.credentials.activate({ stagedId: staged.id, expectedRevision: staged.revision, ...account, folders, activatedAtMs: this.clock.now().getTime() });
+      return 'activated';
+    } catch (error) {
+      await this.credentials.discardStaged(staged.id, input.receiptId);
+      throw error;
+    }
+  }
+
+  async rejectAccount(input: { generationId?: string; receiptId: string; adminUserId: number; chatId: number }): Promise<void> {
+    const staged = await this.loadBound(input);
+    if (staged) await this.credentials.discardStaged(staged.id, input.receiptId);
+  }
+
+  private async loadBound(input: { generationId?: string; receiptId: string; adminUserId: number; chatId: number }) {
+    const staged = await this.credentials.loadStaged(input.receiptId, input);
+    if (!staged) return null;
+    if (!Number.isSafeInteger(input.adminUserId) || !Number.isSafeInteger(input.chatId)) {
+      throw new DriveConfigurationError('Drive confirmation binding is invalid');
+    }
+    return staged;
+  }
+}

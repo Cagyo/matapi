@@ -49,7 +49,6 @@ import { LegacyMenuHandler } from '../interfaces/legacy-menu.handler';
 import { SettingsHandler } from '../interfaces/settings.handler';
 import { CleanHandler } from '../interfaces/clean.handler';
 import { WorkflowNavigationHandler } from '../interfaces/workflow-navigation.handler';
-import { GdriveAuthHandler } from '../interfaces/gdrive-auth.handler';
 import { LocaleMiddleware } from '../interfaces/locale.middleware';
 import { homeCallbackAckMiddleware } from '../interfaces/home-callback-ack.middleware';
 import { TelegramContext } from '../interfaces/telegram-context';
@@ -167,8 +166,6 @@ export class GrammyBotGateway
     private readonly importConfig: ImportConfigHandler,
     @Inject(forwardRef(() => FeatureHandler))
     private readonly feature: FeatureHandler,
-    @Inject(forwardRef(() => GdriveAuthHandler))
-    private readonly gdriveAuth: GdriveAuthHandler,
     @Inject(forwardRef(() => CsvHandler))
     private readonly csv: CsvHandler,
     @Inject(forwardRef(() => HomeHandler))
@@ -356,7 +353,6 @@ export class GrammyBotGateway
       this.exportConfig,
       this.importConfig,
       this.feature,
-      this.gdriveAuth,
       this.csv,
       this.home,
       this.legacyMenu,

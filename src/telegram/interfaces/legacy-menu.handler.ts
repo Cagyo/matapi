@@ -20,7 +20,6 @@ import { RestartHandler } from './restart.handler';
 import { QuietHoursHandler } from './quiet-hours.handler';
 import { SettingsHandler } from './settings.handler';
 import { CleanHandler } from './clean.handler';
-import { GdriveAuthHandler } from './gdrive-auth.handler';
 import { CsvHandler } from './csv.handler';
 import { LEGACY_WORKFLOW_RETURN_CALLBACK } from './home-callback-ack.middleware';
 
@@ -44,7 +43,6 @@ export class LegacyMenuHandler implements TelegramHandler {
     private readonly quietHoursHandler: QuietHoursHandler,
     private readonly settingsHandler: SettingsHandler,
     private readonly cleanHandler: CleanHandler,
-    private readonly gdriveAuthHandler: GdriveAuthHandler,
     private readonly csvHandler: CsvHandler,
   ) {}
 
@@ -132,8 +130,6 @@ export class LegacyMenuHandler implements TelegramHandler {
               .row()
               .text(catalog.menu.submenus.systemInvite, 'legacy-menu:invite')
               .row()
-              .text(catalog.gdriveAuth.button, 'legacy-menu:gdrive_auth')
-              .row()
               .text(catalog.menu.submenus.backToMenu, 'legacy-menu:top');
             await this.renderSubmenu(ctx, catalog.menu.submenus.systemTitle, kb);
             break;
@@ -169,13 +165,6 @@ export class LegacyMenuHandler implements TelegramHandler {
               break;
             }
             await this.gdriveHandler.handleStatus(ctx);
-            break;
-          case 'gdrive_auth':
-            if (role !== 'admin') {
-              await ctx.reply(catalog.common.adminRequired);
-              break;
-            }
-            await this.gdriveAuthHandler.handleCommand(ctx);
             break;
           case 'settings':
             await this.settingsHandler.handleCommand(ctx);
