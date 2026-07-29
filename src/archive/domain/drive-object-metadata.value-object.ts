@@ -67,6 +67,25 @@ export function createVerifiedDriveObjectMetadata(
   });
 }
 
+export function requirePrivateOwnedDriveObjectMetadata(
+  remote: VerifiedDriveObject,
+): VerifiedDriveObjectMetadata {
+  const metadata = createVerifiedDriveObjectMetadata(remote);
+  if (
+    !metadata.ownedByMe ||
+    !metadata.canDelete ||
+    metadata.trashed ||
+    metadata.sharing.shared ||
+    metadata.sharing.permissionIds.length !== 1 ||
+    metadata.sharing.permissionIds[0] !== metadata.sharing.ownerPermissionId
+  ) {
+    throw new DriveObjectConflictError(
+      "Drive verification does not establish private ownership",
+    );
+  }
+  return metadata;
+}
+
 export function canonicalSharingState(
   sharing: CanonicalSharingState,
 ): Readonly<CanonicalSharingState> {
@@ -88,9 +107,11 @@ export function canonicalSharingState(
     new Set(permissionIds).size !== permissionIds.length ||
     permissionIds.some((permissionId, index) =>
       index > 0
-        ? permissionIds[index - 1].localeCompare(permissionId) >= 0
+        ? compareOpaqueIds(permissionIds[index - 1], permissionId) >= 0
         : false,
-    )
+    ) ||
+    !permissionIds.includes(sharing.ownerPermissionId) ||
+    sharing.shared !== permissionIds.length > 1
   ) {
     throw new DriveObjectConflictError(
       "Drive permission IDs are not canonical",
@@ -101,6 +122,12 @@ export function canonicalSharingState(
     shared: sharing.shared,
     permissionIds: Object.freeze(permissionIds),
   });
+}
+
+function compareOpaqueIds(left: string, right: string): number {
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
 }
 
 function canonicalAppProperties(

@@ -1,5 +1,5 @@
 import {
-  createVerifiedDriveObjectMetadata,
+  requirePrivateOwnedDriveObjectMetadata,
   type VerifiedDriveObject,
   type VerifiedDriveObjectMetadata,
 } from "./drive-object-metadata.value-object";
@@ -63,8 +63,7 @@ export class DriveObjectAttempt implements DriveObjectAttemptSnapshot {
   readonly revision!: number;
 
   private constructor(snapshot: DriveObjectAttemptSnapshot) {
-    validateAttemptSnapshot(snapshot);
-    Object.assign(this, snapshot);
+    Object.assign(this, normalizeAttemptSnapshot(snapshot));
     Object.freeze(this);
   }
 
@@ -108,23 +107,13 @@ export class DriveObjectAttempt implements DriveObjectAttemptSnapshot {
     remote: VerifiedDriveObject,
     nowMs = this.updatedAtMs,
   ): DriveObjectAttempt {
-    const metadata = createVerifiedDriveObjectMetadata(remote);
+    const metadata = requirePrivateOwnedDriveObjectMetadata(remote);
     if (
       metadata.id !== this.remoteFileId ||
       metadata.parentId !== this.parentId
     ) {
       throw new DriveObjectConflictError(
         "Drive verification does not match the reserved object",
-      );
-    }
-    if (
-      !metadata.ownedByMe ||
-      !metadata.canDelete ||
-      metadata.trashed ||
-      metadata.sharing.shared
-    ) {
-      throw new DriveObjectConflictError(
-        "Drive verification does not establish private ownership",
       );
     }
     if (this.verifiedMetadata !== null) {
@@ -234,7 +223,9 @@ export class DriveObjectAttempt implements DriveObjectAttemptSnapshot {
   }
 }
 
-function validateAttemptSnapshot(snapshot: DriveObjectAttemptSnapshot): void {
+function normalizeAttemptSnapshot(
+  snapshot: DriveObjectAttemptSnapshot,
+): DriveObjectAttemptSnapshot {
   requireText(snapshot.id, "Drive attempt ID");
   requireText(snapshot.artifactId, "Archive artifact ID");
   requireText(snapshot.generationId, "Drive generation ID");
@@ -257,13 +248,14 @@ function validateAttemptSnapshot(snapshot: DriveObjectAttemptSnapshot): void {
   ] as const) {
     if (value !== null) requireNonNegativeInteger(value, label);
   }
-  if (snapshot.verifiedMetadata !== null) {
-    const metadata = createVerifiedDriveObjectMetadata(
-      snapshot.verifiedMetadata,
-    );
+  const verifiedMetadata =
+    snapshot.verifiedMetadata === null
+      ? null
+      : requirePrivateOwnedDriveObjectMetadata(snapshot.verifiedMetadata);
+  if (verifiedMetadata !== null) {
     if (
-      metadata.id !== snapshot.remoteFileId ||
-      metadata.parentId !== snapshot.parentId ||
+      verifiedMetadata.id !== snapshot.remoteFileId ||
+      verifiedMetadata.parentId !== snapshot.parentId ||
       snapshot.verifiedAtMs === null
     ) {
       throw new DriveObjectConflictError(
@@ -271,7 +263,7 @@ function validateAttemptSnapshot(snapshot: DriveObjectAttemptSnapshot): void {
       );
     }
   }
-  if (snapshot.state === "verified" && snapshot.verifiedMetadata === null) {
+  if (snapshot.state === "verified" && verifiedMetadata === null) {
     throw new DriveObjectConflictError(
       "Verified Drive attempt lacks verified metadata",
     );
@@ -280,6 +272,10 @@ function validateAttemptSnapshot(snapshot: DriveObjectAttemptSnapshot): void {
     requireText(snapshot.detachedReason, "Detach reason");
   if (snapshot.state === "missing")
     requireText(snapshot.missingReason, "Missing reason");
+  return {
+    ...snapshot,
+    verifiedMetadata,
+  };
 }
 
 function sameVerifiedMetadata(

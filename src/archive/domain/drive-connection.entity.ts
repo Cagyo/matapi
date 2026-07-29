@@ -47,8 +47,7 @@ export class DriveConnection implements DriveConnectionSnapshot {
   readonly retiredAtMs!: number | null;
 
   private constructor(snapshot: DriveConnectionSnapshot) {
-    validateConnection(snapshot);
-    Object.assign(this, snapshot);
+    Object.assign(this, normalizeConnection(snapshot));
     Object.freeze(this);
   }
 
@@ -83,6 +82,15 @@ export class DriveConnection implements DriveConnectionSnapshot {
     folders: { rootId: string; motionId: string; backupsId: string };
     nowMs: number;
   }): DriveConnection {
+    if (
+      this.status === "reauth_required" &&
+      (this.permissionId !== input.permissionId ||
+        !sameFolders(this.folders, input.folders))
+    ) {
+      throw new DriveObjectConflictError(
+        "Reauthorization cannot change the Drive account or managed folders",
+      );
+    }
     return this.transition("active", input.nowMs, {
       permissionId: input.permissionId,
       email: input.email,
@@ -154,7 +162,9 @@ export class DriveConnection implements DriveConnectionSnapshot {
   }
 }
 
-function validateConnection(snapshot: DriveConnectionSnapshot): void {
+function normalizeConnection(
+  snapshot: DriveConnectionSnapshot,
+): DriveConnectionSnapshot {
   requireText(snapshot.id, "Drive connection ID");
   requireText(snapshot.installationId, "Installation ID");
   if (!isConnectionStatus(snapshot.status)) {
@@ -184,6 +194,23 @@ function validateConnection(snapshot: DriveConnectionSnapshot): void {
     requireText(snapshot.folders.motionId, "Drive motion folder ID");
     requireText(snapshot.folders.backupsId, "Drive backups folder ID");
   }
+  return {
+    ...snapshot,
+    folders:
+      snapshot.folders === null ? null : Object.freeze({ ...snapshot.folders }),
+  };
+}
+
+function sameFolders(
+  current: DriveConnectionSnapshot["folders"],
+  next: NonNullable<DriveConnectionSnapshot["folders"]>,
+): boolean {
+  return (
+    current !== null &&
+    current.rootId === next.rootId &&
+    current.motionId === next.motionId &&
+    current.backupsId === next.backupsId
+  );
 }
 
 function isConnectionStatus(value: unknown): value is DriveConnectionStatus {
