@@ -20,8 +20,8 @@ main() {
   check_raspberry_pi
   setup_hardware_resources
   create_user
-  provision_archive_installation_state
   install_system_deps
+  provision_archive_installation_state
   install_node
   install_app
   setup_pigpiod
@@ -120,43 +120,50 @@ create_user() {
 
 provision_archive_installation_state() {
   local ARCHIVE_STATE_DIR="/etc/home-worker"
-  local ARCHIVE_KEY_PATH="/etc/home-worker/archive.key"
-  local INSTALLATION_ID_PATH="/etc/home-worker/installation-id"
+  if [ "${HOME_WORKER_INSTALL_LIBRARY:-0}" = "1" ]; then
+    ARCHIVE_STATE_DIR="${HOME_WORKER_ARCHIVE_STATE_DIR:?HOME_WORKER_ARCHIVE_STATE_DIR is required for installer tests}"
+  fi
+  local ARCHIVE_KEY_PATH="$ARCHIVE_STATE_DIR/archive.key"
+  local INSTALLATION_ID_PATH="$ARCHIVE_STATE_DIR/installation-id"
 
   sudo install -d -m 0750 -o root -g "$USER" "$ARCHIVE_STATE_DIR"
 
-  if [ ! -f "$ARCHIVE_KEY_PATH" ]; then
-    create_immutable_archive_state_file "$ARCHIVE_KEY_PATH" archive-key
+  if [ ! -e "$ARCHIVE_KEY_PATH" ] && [ ! -L "$ARCHIVE_KEY_PATH" ]; then
+    create_immutable_archive_state_file "$ARCHIVE_STATE_DIR" "$ARCHIVE_KEY_PATH" archive-key
   fi
-  if [ ! -f "$INSTALLATION_ID_PATH" ]; then
-    create_immutable_archive_state_file "$INSTALLATION_ID_PATH" installation-id
+  if [ ! -e "$INSTALLATION_ID_PATH" ] && [ ! -L "$INSTALLATION_ID_PATH" ]; then
+    create_immutable_archive_state_file "$ARCHIVE_STATE_DIR" "$INSTALLATION_ID_PATH" installation-id
   fi
+
+  validate_archive_installation_state "$ARCHIVE_KEY_PATH" archive-key || return 1
+  validate_archive_installation_state "$INSTALLATION_ID_PATH" installation-id || return 1
 }
 
 create_immutable_archive_state_file() {
-  local target="$1" kind="$2" temporary root_temporary
-  temporary="$(mktemp)"
-  if [ "$kind" = "archive-key" ]; then
-    python3 - "$temporary" <<'PY'
+  local state_dir="$1" target="$2" kind="$3" root_temporary
+  root_temporary="$(sudo mktemp "$state_dir/.state.XXXXXX")"
+  if ! sudo python3 - "$root_temporary" "$kind" <<'PY'
 import os
-import sys
-
-with open(sys.argv[1], 'xb') as stream:
-    stream.write(os.urandom(32))
-PY
-  else
-    python3 - "$temporary" <<'PY'
 import sys
 import uuid
 
-with open(sys.argv[1], 'x', encoding='ascii') as stream:
-    stream.write(f'{uuid.uuid4()}\n')
+path, kind = sys.argv[1:]
+with open(path, 'wb') as stream:
+    if kind == 'archive-key':
+        stream.write(os.urandom(32))
+    else:
+        stream.write(f'{uuid.uuid4()}\n'.encode('ascii'))
+    stream.flush()
+    os.fsync(stream.fileno())
 PY
+  then
+    sudo rm -f "$root_temporary"
+    return 1
   fi
-
-  root_temporary="$(sudo mktemp "/etc/home-worker/.state.XXXXXX")"
-  sudo install -m 640 -o root -g "$USER" "$temporary" "$root_temporary"
-  rm -f "$temporary"
+  if ! sudo chown root:"$USER" "$root_temporary" || ! sudo chmod 0640 "$root_temporary"; then
+    sudo rm -f "$root_temporary"
+    return 1
+  fi
 
   # Linking the prepared root-owned file publishes it only when absent. A
   # concurrent or repeat installer keeps the original installation secret.
@@ -169,6 +176,48 @@ PY
     return 1
   fi
   sudo rm -f "$root_temporary"
+}
+
+validate_archive_installation_state() {
+  local path="$1" kind="$2" expected_uid=0 expected_gid
+  if [ "${HOME_WORKER_INSTALL_LIBRARY:-0}" = "1" ]; then
+    expected_uid="$(id -u)"
+    expected_gid="$(id -g)"
+  else
+    expected_gid="$(id -g "$USER")"
+  fi
+  sudo python3 - "$path" "$kind" "$expected_uid" "$expected_gid" <<'PY'
+import os
+import stat
+import sys
+import uuid
+
+path, kind, uid_text, gid_text = sys.argv[1:]
+try:
+    expected_uid, expected_gid = int(uid_text), int(gid_text)
+    metadata = os.lstat(path)
+except (OSError, ValueError):
+    raise SystemExit('invalid archive installation state')
+if (not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_nlink != 1 or metadata.st_uid != expected_uid
+        or metadata.st_gid != expected_gid or stat.S_IMODE(metadata.st_mode) != 0o640):
+    raise SystemExit('invalid archive installation state')
+with open(path, 'rb') as stream:
+    value = stream.read(128)
+    if stream.read(1):
+        raise SystemExit('invalid archive installation state')
+if kind == 'archive-key':
+    valid = len(value) == 32
+else:
+    try:
+        text = value.decode('ascii')
+        parsed = uuid.UUID(text.rstrip('\n'))
+        valid = text == f'{parsed}\n'
+    except (UnicodeDecodeError, ValueError):
+        valid = False
+if not valid:
+    raise SystemExit('invalid archive installation state')
+PY
 }
 
 install_system_deps() {
@@ -826,4 +875,6 @@ reboot_system() {
   sudo reboot
 }
 
-main "$@"
+if [ "${HOME_WORKER_INSTALL_LIBRARY:-0}" != "1" ]; then
+  main "$@"
+fi
