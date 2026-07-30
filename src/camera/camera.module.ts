@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { readFileSync } from 'node:fs';
 import { ArchiveModule } from '../archive/archive.module';
 import { ARCHIVE_REGISTRATION, type ArchiveRegistrationPort } from '../archive/application/ports/archive-registration.port';
+import { DatabaseModule } from '../database/database.module';
 import { EventModule } from '../events/event.module';
 import { FeatureModule } from '../features/feature.module';
 import {
@@ -48,6 +49,7 @@ import { RecordMotionEndUseCase } from './application/record-motion-end.use-case
 import { RecordMotionStartUseCase } from './application/record-motion-start.use-case';
 import { RecordSnapshotUseCase } from './application/record-snapshot.use-case';
 import { RegisterCompletedMotionVideosUseCase } from './application/register-completed-motion-videos.use-case';
+import { CompletedMotionVideoRecoveryScheduler } from './application/completed-motion-video-recovery.scheduler';
 import { StopLiveStreamUseCase } from './application/stop-live-stream.use-case';
 import { TriggerCleanUseCase } from './application/trigger-clean.use-case';
 import { UploadMotionUseCase } from './application/upload-motion.use-case';
@@ -178,19 +180,26 @@ function resolveCameraMode(): CameraMode {
 const mode = resolveCameraMode();
 const liveStreamOptions = liveStreamOptionsFromEnv(process.env);
 
-function cameraInstallationId(): string {
+function cameraInstallationId(cameraMode: CameraMode): string | null {
   const direct = process.env.HOME_WORKER_INSTALLATION_ID?.trim();
-  if (direct) return direct;
+  if (isInstallationId(direct)) return direct;
   try {
     const persisted = readFileSync(
       process.env.HOME_WORKER_INSTALLATION_ID_PATH ?? '/etc/home-worker/installation-id',
       'utf8',
     ).trim();
-    if (persisted) return persisted;
+    if (isInstallationId(persisted)) return persisted;
   } catch {
     // Development and test composition do not install the root-owned state file.
   }
-  return 'local-development-installation';
+  return cameraMode === 'stub'
+    ? '00000000-0000-4000-8000-000000000000'
+    : null;
+}
+
+function isInstallationId(value: string | undefined): value is string {
+  return typeof value === 'string'
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value);
 }
 
 /**
@@ -202,7 +211,7 @@ function cameraInstallationId(): string {
  * without those binaries installed.
  */
 @Module({
-  imports: [ArchiveModule, EventModule, FeatureModule, SystemModule],
+  imports: [DatabaseModule, ArchiveModule, EventModule, FeatureModule, SystemModule],
   controllers: [MotionHooksController],
   providers: [
     { provide: CAMERA_MODE, useValue: mode },
@@ -216,8 +225,12 @@ function cameraInstallationId(): string {
       provide: MEDIA_WRITER,
       useExisting: mode === 'stub' ? InMemoryMediaRepository : DrizzleMediaRepository,
     },
-    FsCompletedMotionVideoAdapter,
-    { provide: COMPLETED_MOTION_VIDEO, useExisting: FsCompletedMotionVideoAdapter },
+    {
+      provide: COMPLETED_MOTION_VIDEO,
+      useFactory: (): CompletedMotionVideoPort => new FsCompletedMotionVideoAdapter({
+        installationId: cameraInstallationId(mode) ?? undefined,
+      }),
+    },
     {
       provide: RegisterCompletedMotionVideosUseCase,
       useFactory: (
@@ -229,11 +242,12 @@ function cameraInstallationId(): string {
         media,
         completedVideos,
         archive,
-        cameraInstallationId(),
+        cameraInstallationId(mode),
         writer,
       ),
       inject: [MEDIA_REPOSITORY, MEDIA_WRITER, COMPLETED_MOTION_VIDEO, ARCHIVE_REGISTRATION],
     },
+    CompletedMotionVideoRecoveryScheduler,
     {
       provide: MOTION_CONTROL,
       useClass: mode === 'stub' ? StubMotionControlAdapter : MotionDaemonAdapter,

@@ -27,7 +27,11 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
     try {
       this.db.insert(archiveArtifacts).values(artifactRow(artifact)).run();
     } catch (error) {
-      if (isUniqueViolation(error)) throw new DriveObjectConflictError('Archive source fingerprint already exists');
+      if (isUniqueViolation(error)) {
+        const existing = await this.findByFingerprint(input.sourceFingerprint);
+        if (existing && sameRegistration(existing, input)) return existing;
+        throw new DriveObjectConflictError('Archive source fingerprint conflicts with an immutable artifact');
+      }
       throw error;
     }
     return artifact;
@@ -284,6 +288,14 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
   private immediate<T>(operation: (tx: Writer) => T): T {
     return this.db.transaction((tx) => operation(tx), { behavior: 'immediate' });
   }
+}
+
+function sameRegistration(artifact: ArchiveArtifact, input: RegisterArchiveArtifact): boolean {
+  return artifact.installationId === input.installationId && artifact.kind === input.kind
+    && artifact.sourceIdentity === input.sourceIdentity && artifact.trustedPath === input.trustedPath
+    && artifact.relativePath === input.relativePath && artifact.size === input.size
+    && artifact.mtimeNs === input.mtimeNs && artifact.sourceTimeMs === input.sourceTimeMs
+    && artifact.sha256 === input.sha256 && artifact.sourceFingerprint === input.sourceFingerprint;
 }
 
 function artifactRow(artifact: ArchiveArtifact) {

@@ -115,6 +115,10 @@ export class InMemoryMediaRepository implements MediaRepositoryPort, MediaWriter
     );
   }
 
+  async findEventsByVideoPath(videoPath: string): Promise<MotionEvent[]> {
+    return this.events.filter((event) => event.endedAt !== null && event.videoPath === videoPath);
+  }
+
   async listEventsOnDay(day: Date): Promise<MotionEvent[]> {
     const { start, end } = dayBounds(day);
     return this.events

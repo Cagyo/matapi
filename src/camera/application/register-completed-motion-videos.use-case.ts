@@ -25,10 +25,10 @@ const RECONCILIATION_LIMIT = 64;
 export class RegisterCompletedMotionVideosUseCase {
   constructor(
     @Inject(MEDIA_REPOSITORY) private readonly media: Pick<MediaRepositoryPort,
-      'findEventById' | 'findUnarchivedCompletedVideos' | 'findCompletedEventsByVideoPath'>,
+      'findEventById' | 'findUnarchivedCompletedVideos' | 'findCompletedEventsByVideoPath' | 'findEventsByVideoPath'>,
     @Inject(COMPLETED_MOTION_VIDEO) private readonly completedVideos: CompletedMotionVideoPort,
     @Inject(ARCHIVE_REGISTRATION) private readonly archive: ArchiveRegistrationPort,
-    private readonly installationId: string,
+    private readonly installationId: string | null,
     @Inject(MEDIA_WRITER) private readonly writer?: Pick<MediaWriterPort,
       'createCompletedEvent' | 'attachArchiveArtifact' | 'deferArchiveRegistration'>,
   ) {}
@@ -55,6 +55,7 @@ export class RegisterCompletedMotionVideosUseCase {
         continue;
       }
       const matching = await this.media.findCompletedEventsByVideoPath(descriptor.trustedPath);
+      if (await this.hasReferencedEvent(descriptor.trustedPath)) continue;
       this.groupDescriptor(
         grouped,
         descriptor,
@@ -66,6 +67,7 @@ export class RegisterCompletedMotionVideosUseCase {
       if (processedPaths.has(descriptor.trustedPath)) continue;
       processedPaths.add(descriptor.trustedPath);
       const matching = await this.media.findCompletedEventsByVideoPath(descriptor.trustedPath);
+      if (await this.hasReferencedEvent(descriptor.trustedPath)) continue;
       const eventIds = matching.map((event) => event.id);
       if (eventIds.length === 0) {
         const created = await this.requireWriter().createCompletedEvent(
@@ -91,6 +93,7 @@ export class RegisterCompletedMotionVideosUseCase {
       return;
     }
     const matching = await this.media.findCompletedEventsByVideoPath(descriptor.trustedPath);
+    if (await this.hasReferencedEvent(descriptor.trustedPath)) return;
     await this.registerDescriptor(descriptor, matching.length > 0 ? matching.map((event) => event.id) : fallbackEventIds);
   }
 
@@ -115,7 +118,14 @@ export class RegisterCompletedMotionVideosUseCase {
     groups.set(descriptor.sourceFingerprint, { descriptor, eventIds: new Set(eventIds) });
   }
 
+  private async hasReferencedEvent(videoPath: string): Promise<boolean> {
+    return (await this.media.findEventsByVideoPath(videoPath)).some(
+      (event) => event.archiveArtifactId !== null,
+    );
+  }
+
   private toArchiveArtifact(descriptor: CompletedMotionVideoDescriptor): RegisterArchiveArtifact {
+    if (!this.installationId) throw new Error('Archive installation identity is unavailable');
     return { installationId: this.installationId, ...descriptor };
   }
 

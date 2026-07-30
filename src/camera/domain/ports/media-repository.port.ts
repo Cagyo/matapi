@@ -32,6 +32,8 @@ export interface MediaRepositoryPort {
   findUnarchivedCompletedVideos(limit: number): Promise<MotionEvent[]>;
   /** Closed event rows pointing at the exact Motion path and not yet attached. */
   findCompletedEventsByVideoPath(videoPath: string): Promise<MotionEvent[]>;
+  /** Every completed event for the exact path, including already-referenced rows. */
+  findEventsByVideoPath(videoPath: string): Promise<MotionEvent[]>;
   /** Events whose `startedAt` falls within the local-time day of `day`. */
   listEventsOnDay(day: Date): Promise<MotionEvent[]>;
   /**

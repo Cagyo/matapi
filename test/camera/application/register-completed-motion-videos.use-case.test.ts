@@ -88,6 +88,35 @@ describe('RegisterCompletedMotionVideosUseCase', () => {
     expect(archive.register).toHaveBeenCalledTimes(1);
     expect(repository.attachArchiveArtifact).toHaveBeenCalledWith([1, 2], 'artifact-1');
   });
+
+  it('converges after registration succeeded before attaching the event rows', async () => {
+    const completed: CompletedMotionVideoPort = { resolve: vi.fn().mockResolvedValue(descriptor), scan: vi.fn().mockResolvedValue([]) };
+    const repository = media([event(1)]);
+    repository.attachArchiveArtifact.mockRejectedValueOnce(new Error('interrupted')).mockResolvedValue(undefined);
+    const artifact = { id: 'artifact-1' } as ArchiveArtifact;
+    const archive = { register: vi.fn().mockResolvedValue(artifact) };
+    const useCase = new RegisterCompletedMotionVideosUseCase(repository, completed, archive, 'install-1', repository);
+
+    await expect(useCase.executeForEvent(1)).rejects.toThrow('interrupted');
+    await expect(useCase.executeForEvent(1)).resolves.toBeUndefined();
+
+    expect(archive.register).toHaveBeenCalledTimes(2);
+    expect(repository.attachArchiveArtifact).toHaveBeenLastCalledWith([1], artifact.id);
+    expect(repository.createCompletedEvent).not.toHaveBeenCalled();
+  });
+
+  it('does not create a phantom event for an already referenced Motion path', async () => {
+    const referenced = { ...event(9), archiveArtifactId: 'already-registered' };
+    const completed: CompletedMotionVideoPort = { resolve: vi.fn().mockResolvedValue(descriptor), scan: vi.fn().mockResolvedValue([descriptor]) };
+    const repository = media([referenced]);
+    const archive = { register: vi.fn() };
+    const useCase = new RegisterCompletedMotionVideosUseCase(repository, completed, archive, 'install-1', repository);
+
+    await useCase.reconcile();
+
+    expect(repository.createCompletedEvent).not.toHaveBeenCalled();
+    expect(archive.register).not.toHaveBeenCalled();
+  });
 });
 
 function media(events: ReturnType<typeof event>[]) {
@@ -95,6 +124,7 @@ function media(events: ReturnType<typeof event>[]) {
     findEventById: vi.fn(async (id: number) => events.find((current) => current.id === id) ?? null),
     findUnarchivedCompletedVideos: vi.fn(async () => events),
     findCompletedEventsByVideoPath: vi.fn(async (path: string) => events.filter((current) => current.videoPath === path)),
+    findEventsByVideoPath: vi.fn(async (path: string) => events.filter((current) => current.videoPath === path)),
     createCompletedEvent: vi.fn(),
     attachArchiveArtifact: vi.fn(),
     deferArchiveRegistration: vi.fn(),

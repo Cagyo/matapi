@@ -1,8 +1,12 @@
-import { mkdtemp, mkdir, symlink, unlink, utimes, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rename, symlink, unlink, utimes, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { FsCompletedMotionVideoAdapter } from '../../../src/camera/infrastructure/fs-completed-motion-video.adapter';
+import { canonicalSourceFingerprintInput } from '../../../src/archive/domain/archive-artifact.entity';
+
+const installationId = '00000000-0000-4000-8000-000000000001';
 
 describe('FsCompletedMotionVideoAdapter', () => {
   const directories: string[] = [];
@@ -29,7 +33,7 @@ describe('FsCompletedMotionVideoAdapter', () => {
     return {
       root,
       file,
-      adapter: new FsCompletedMotionVideoAdapter({ root, now: () => Date.now() }),
+      adapter: new FsCompletedMotionVideoAdapter({ root, now: () => Date.now(), installationId }),
     };
   }
 
@@ -81,5 +85,79 @@ describe('FsCompletedMotionVideoAdapter', () => {
     });
     expect(descriptor?.sha256).toMatch(/^[a-f0-9]{64}$/);
     expect(descriptor?.sourceFingerprint).toMatch(/^[a-f0-9]{64}$/);
+    expect(descriptor?.sourceFingerprint).toBe(createHash('sha256').update(
+      canonicalSourceFingerprintInput({
+        installationId,
+        kind: 'motion_video',
+        relativePath: '2026/07/29/120000-12345.mp4',
+        size: 'completed video'.length,
+        mtimeNs: descriptor!.mtimeNs,
+        sha256: descriptor!.sha256,
+      }),
+      'utf8',
+    ).digest('hex'));
+  });
+
+  it('fails closed when production installation identity is missing or malformed', async () => {
+    const { root, file } = await fixture();
+
+    expect(await new FsCompletedMotionVideoAdapter({ root, now: () => Date.now() }).resolve(file)).toBeNull();
+    expect(await new FsCompletedMotionVideoAdapter({ root, now: () => Date.now(), installationId: 'not-a-uuid' }).resolve(file)).toBeNull();
+  });
+
+  it('rejects a same-size, same-mtime replacement after hashing', async () => {
+    const { root, file } = await fixture();
+    const original = await import('node:fs/promises').then(({ stat }) => stat(file));
+    const adapter = new FsCompletedMotionVideoAdapter({
+      root,
+      now: () => Date.now(),
+      installationId,
+      afterHash: async () => {
+        const moved = `${file}.old`;
+        await rename(file, moved);
+        await writeFile(file, 'different video');
+        await utimes(file, original.atime, original.mtime);
+      },
+    });
+
+    expect(await adapter.resolve(file)).toBeNull();
+  });
+
+  it('rejects a Motion-root swap after hashing', async () => {
+    const { root, file } = await fixture();
+    const adapter = new FsCompletedMotionVideoAdapter({
+      root,
+      now: () => Date.now(),
+      installationId,
+      afterHash: async () => {
+        await rename(root, `${root}.old`);
+        await mkdir(join(root, '2026', '07', '29'), { recursive: true });
+        await writeFile(join(root, '2026', '07', '29', '120000-12345.mp4'), 'completed video');
+      },
+    });
+
+    expect(await adapter.resolve(file)).toBeNull();
+  });
+
+  it('rotates bounded scan work so later entries are eventually observed', async () => {
+    const { root } = await fixture('120000-first.mp4');
+    const directory = join(root, '2026', '07', '29');
+    const second = join(directory, '120001-second.mp4');
+    await writeFile(second, 'completed video');
+    const stableAt = new Date(Date.now() - 61_000);
+    await utimes(second, stableAt, stableAt);
+    const adapter = new FsCompletedMotionVideoAdapter({
+      root, now: () => Date.now(), installationId, scanMultiplier: 1,
+    });
+
+    const observed = new Set<string>();
+    for (let index = 0; index < 12; index += 1) {
+      (await adapter.scan(1)).forEach((descriptor) => observed.add(descriptor.relativePath));
+    }
+
+    expect(observed).toEqual(new Set([
+      '2026/07/29/120000-first.mp4',
+      '2026/07/29/120001-second.mp4',
+    ]));
   });
 });

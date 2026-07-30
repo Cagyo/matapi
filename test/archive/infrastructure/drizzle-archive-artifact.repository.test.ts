@@ -31,6 +31,18 @@ describe('DrizzleArchiveArtifactRepository', () => {
       .toEqual(['file-1', 'file-2']);
   });
 
+  it('returns the existing immutable artifact for a concurrent duplicate registration', async () => {
+    const input = artifactFixture();
+
+    const [first, second] = await Promise.all([
+      repository.register(input),
+      repository.register(input),
+    ]);
+
+    expect(first.id).toBe(second.id);
+    expect(await repository.findByFingerprint(input.sourceFingerprint)).toMatchObject({ id: first.id });
+  });
+
   it('prevents an expired lease owner from verifying an attempt', async () => {
     const artifact = await repository.register(artifactFixture());
     await repository.createAttempt(artifact.id, 'generation-1', 'file-1', 'folder-1', 100);

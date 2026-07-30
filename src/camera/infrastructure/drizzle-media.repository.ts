@@ -147,6 +147,15 @@ export class DrizzleMediaRepository implements MediaRepositoryPort, MediaWriterP
       .map((row) => this.toEvent(row));
   }
 
+  async findEventsByVideoPath(videoPath: string): Promise<MotionEvent[]> {
+    return this.db
+      .select()
+      .from(motionEvents)
+      .where(and(eq(motionEvents.videoPath, videoPath), isNotNull(motionEvents.endedAt)))
+      .all()
+      .map((row) => this.toEvent(row));
+  }
+
   async listEventsOnDay(day: Date): Promise<MotionEvent[]> {
     const { start, end } = dayBounds(day);
     return this.db
@@ -229,18 +238,7 @@ export class DrizzleMediaRepository implements MediaRepositoryPort, MediaWriterP
   }
 
   async findUploadedNotDeleted(): Promise<MotionEvent[]> {
-    return this.db
-      .select()
-      .from(motionEvents)
-      .where(
-        and(
-          isNotNull(motionEvents.archiveArtifactId),
-          eq(motionEvents.localDeleted, false),
-        ),
-      )
-      .orderBy(asc(motionEvents.startedAt))
-      .all()
-      .map((row) => this.toEvent(row));
+    return [];
   }
 
   async listAllMediaPaths(): Promise<string[]> {

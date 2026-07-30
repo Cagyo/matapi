@@ -29,6 +29,10 @@ export class CleanupDriveUseCase {
   ) {}
 
   async execute(customThreshold?: number): Promise<{ thresholdUsed: number }> {
+    if (legacyRcloneIsDisabled()) {
+      this.logger.warn('Legacy rclone Drive cleanup is disabled until archive retention owns remote deletion');
+      return { thresholdUsed: 0 };
+    }
     const threshold = await this.resolveThreshold(customThreshold);
     const quota = await this.status.about();
     if (quota.totalBytes <= 0) return { thresholdUsed: threshold };
@@ -69,4 +73,9 @@ export class CleanupDriveUseCase {
     const raw = Number(process.env.GDRIVE_CLEANUP_MIN_AGE_DAYS);
     return Number.isFinite(raw) && raw > 0 ? Math.trunc(raw) : DEFAULT_MIN_AGE_DAYS;
   }
+}
+
+/** Deliberately fail closed until archive retention replaces rclone cleanup. */
+function legacyRcloneIsDisabled(): boolean {
+  return true;
 }

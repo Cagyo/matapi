@@ -44,6 +44,10 @@ export class UploadMotionUseCase {
   ) {}
 
   async execute(): Promise<void> {
+    if (legacyRcloneIsDisabled()) {
+      this.logger.warn('Legacy rclone Motion upload is disabled until archive transfer scheduling owns uploads');
+      return;
+    }
     const now = new Date();
     const cutoffMs = now.getTime() - UPLOAD_MIN_AGE_MS;
     const pending = await this.media.findPendingUploads();
@@ -103,4 +107,9 @@ export class UploadMotionUseCase {
     const suffix = rel && !rel.startsWith('..') ? rel : posix.basename(localPath);
     return posix.join(this.remotePath, suffix);
   }
+}
+
+/** Deliberately fail closed until archive transfer scheduling replaces rclone. */
+function legacyRcloneIsDisabled(): boolean {
+  return true;
 }

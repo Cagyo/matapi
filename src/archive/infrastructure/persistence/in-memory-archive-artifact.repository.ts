@@ -25,8 +25,10 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
   private scheduler: ArchiveSchedulerState = emptySchedulerState();
 
   async register(input: RegisterArchiveArtifact): Promise<ArchiveArtifact> {
-    if ([...this.artifacts.values()].some((artifact) => artifact.sourceFingerprint === input.sourceFingerprint)) {
-      throw new DriveObjectConflictError('Archive source fingerprint already exists');
+    const existing = [...this.artifacts.values()].find((artifact) => artifact.sourceFingerprint === input.sourceFingerprint);
+    if (existing) {
+      if (sameRegistration(existing, input)) return existing;
+      throw new DriveObjectConflictError('Archive source fingerprint conflicts with an immutable artifact');
     }
     const artifact = ArchiveArtifact.register(input, { id: randomUUID(), nowMs: Date.now() });
     this.artifacts.set(artifact.id, artifact);
@@ -238,6 +240,14 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
     }
     return entry;
   }
+}
+
+function sameRegistration(artifact: ArchiveArtifact, input: RegisterArchiveArtifact): boolean {
+  return artifact.installationId === input.installationId && artifact.kind === input.kind
+    && artifact.sourceIdentity === input.sourceIdentity && artifact.trustedPath === input.trustedPath
+    && artifact.relativePath === input.relativePath && artifact.size === input.size
+    && artifact.mtimeNs === input.mtimeNs && artifact.sourceTimeMs === input.sourceTimeMs
+    && artifact.sha256 === input.sha256 && artifact.sourceFingerprint === input.sourceFingerprint;
 }
 
 function project(entry: Entry): ArchiveObjectAttempt {
