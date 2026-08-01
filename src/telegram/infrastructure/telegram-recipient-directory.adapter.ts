@@ -38,6 +38,17 @@ export class TelegramRecipientDirectoryAdapter implements RecipientDirectoryPort
     }));
   }
 
+  async listAdmins(): Promise<NotificationRecipient[]> {
+    const users = await this.users.listRecipients();
+    return users.filter((user) => user.role === 'admin').map((user) => ({
+      telegramId: user.telegramId,
+      muted: user.muted,
+      nonCriticalPausedUntil: user.nonCriticalPausedUntil,
+      quietStart: user.quietStart,
+      quietEnd: user.quietEnd,
+    }));
+  }
+
   async isSensorMuted(telegramId: number, sensorId: string): Promise<boolean> {
     return this.mutes.isMuted(telegramId, { kind: 'sensor', id: sensorId });
   }

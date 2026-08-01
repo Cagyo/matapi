@@ -5,6 +5,7 @@ import { ReconcileDriveUseCase } from '../../../src/archive/application/use-case
 import { encodeArchiveAppProperties } from '../../../src/archive/domain/app-properties';
 import { DriveConnection } from '../../../src/archive/domain/drive-connection.entity';
 import type { VerifiedDriveObject } from '../../../src/archive/domain/drive-object-metadata.value-object';
+import { DriveObjectConflictError } from '../../../src/archive/domain/errors/drive-object-conflict.error';
 import { InMemoryArchiveArtifactRepository } from '../../../src/archive/infrastructure/persistence/in-memory-archive-artifact.repository';
 
 const NOW = 2_000;
@@ -65,10 +66,11 @@ function remote(overrides: Partial<VerifiedDriveObject> = {}): VerifiedDriveObje
 
 class FakeDrive implements DriveArchivePort {
   object: VerifiedDriveObject | null = remote();
+  readonly objects = new Map<string, VerifiedDriveObject>();
   listed: VerifiedDriveObject[][] = [];
   readonly generatedIds: string[] = [];
   readonly loadObject = vi.fn(async (_connection, fileId: string) =>
-    this.object?.id === fileId ? this.object : null,
+    this.objects.get(fileId) ?? (this.object?.id === fileId ? this.object : null),
   );
   async generateFileId() {
     const id = `replacement-${this.generatedIds.length + 1}`;
@@ -218,6 +220,50 @@ describe('ReconcileDriveUseCase', () => {
       .toBe('verified');
   });
 
+  it('atomically preserves the verified attempt when inserting the reserved replacement fails', async () => {
+    const fixtureValue = await fixture();
+    fixtureValue.drive.object = null;
+    const conflicting = await registerPending(
+      fixtureValue.repository,
+      fixtureValue.active,
+      'conflicting',
+      'c'.repeat(64),
+    );
+    await fixtureValue.repository.createAttempt(
+      conflicting.id,
+      fixtureValue.active.id,
+      'already-reserved',
+      fixtureValue.active.folders!.motionId,
+      1_500,
+    );
+    vi.spyOn(fixtureValue.drive, 'generateFileId').mockResolvedValueOnce('already-reserved');
+
+    await expect(fixtureValue.reconcile.execute({ limit: 20 }, signal))
+      .rejects.toThrow('Reserved remote object ID already exists');
+
+    expect((await fixtureValue.repository.listAttempts(fixtureValue.artifact.id))[0].state)
+      .toBe('verified');
+  });
+
+  it('keeps a missing object runnable until its mandatory durable alert is accepted', async () => {
+    const fixtureValue = await fixture(false);
+    fixtureValue.drive.object = null;
+    const failing = new ReconcileDriveUseCase(
+      fixtureValue.repository,
+      { loadActive: async () => fixtureValue.active },
+      fixtureValue.drive,
+      source(false),
+      { alert: async () => { throw new Error('durable alert unavailable'); } },
+      { now: () => NOW, pageSize: 2, maxPages: 4 },
+    );
+
+    await expect(failing.execute({ limit: 20 }, signal))
+      .rejects.toThrow('durable alert unavailable');
+
+    expect((await fixtureValue.repository.listAttempts(fixtureValue.artifact.id))[0].state)
+      .toBe('verified');
+  });
+
   it('treats Trash as missing and never calls Drive deletion', async () => {
     const fixtureValue = await fixture();
     fixtureValue.drive.object = remote({ trashed: true });
@@ -262,7 +308,171 @@ describe('ReconcileDriveUseCase', () => {
     expect((await fixtureValue.repository.listAttempts(fixtureValue.artifact.id)).map((entry) => entry.remoteObjectId))
       .toEqual(['file-1']);
   });
+
+  it('never re-adopts a remote ID recorded in terminal immutable history', async () => {
+    const fixtureValue = await fixture();
+    const [historical] = await fixtureValue.repository.listAttempts(fixtureValue.artifact.id);
+    await fixtureValue.repository.markMissing(
+      historical.id,
+      historical.revision,
+      'remote_missing',
+      NOW,
+    );
+    const second = await registerPending(
+      fixtureValue.repository,
+      fixtureValue.active,
+      'second',
+      'd'.repeat(64),
+    );
+    fixtureValue.drive.object = null;
+    fixtureValue.drive.listed = [[
+      remote({ id: 'file-1' }),
+      managedRemote(second, 'restored-second'),
+    ]];
+
+    await fixtureValue.reconcile.execute({ limit: 20 }, signal);
+
+    expect((await fixtureValue.repository.listAttempts(fixtureValue.artifact.id))[0].state)
+      .toBe('missing');
+    expect((await fixtureValue.repository.listAttempts(second.id)).at(-1)).toMatchObject({
+      remoteObjectId: 'restored-second',
+      state: 'verified',
+    });
+  });
+
+  it('isolates one restoration CAS conflict so later artifacts are still recovered', async () => {
+    const fixtureValue = await fixture();
+    const [original] = await fixtureValue.repository.listAttempts(fixtureValue.artifact.id);
+    await fixtureValue.repository.markMissing(original.id, original.revision, 'remote_missing', NOW);
+    const first = await registerPending(
+      fixtureValue.repository,
+      fixtureValue.active,
+      'first-restore',
+      'd'.repeat(64),
+    );
+    const second = await registerPending(
+      fixtureValue.repository,
+      fixtureValue.active,
+      'second-restore',
+      'e'.repeat(64),
+    );
+    const [conflictedArtifact, recoveredArtifact] = [first, second].sort(
+      (left, right) => left.createdAtMs - right.createdAtMs || left.id.localeCompare(right.id),
+    );
+    fixtureValue.drive.object = null;
+    fixtureValue.drive.listed = [[
+      managedRemote(conflictedArtifact, 'restore-conflict'),
+      managedRemote(recoveredArtifact, 'restore-success'),
+    ]];
+    const adopt = fixtureValue.repository.adoptVerifiedObject.bind(fixtureValue.repository);
+    let conflictPending = true;
+    vi.spyOn(fixtureValue.repository, 'adoptVerifiedObject').mockImplementation(async (...args) => {
+      if (conflictPending) {
+        conflictPending = false;
+        throw new DriveObjectConflictError('simulated concurrent restoration');
+      }
+      return adopt(...args);
+    });
+
+    await fixtureValue.reconcile.execute({ limit: 20 }, signal);
+
+    expect(await fixtureValue.repository.listAttempts(conflictedArtifact.id)).toEqual([]);
+    expect((await fixtureValue.repository.listAttempts(recoveredArtifact.id)).at(-1)).toMatchObject({
+      remoteObjectId: 'restore-success',
+      state: 'verified',
+    });
+  });
+
+  it('durably rotates a fixed reconciliation limit across all verified attempts', async () => {
+    const repository = new InMemoryArchiveArtifactRepository();
+    const active = connection();
+    const drive = new FakeDrive();
+    drive.object = null;
+    for (let index = 1; index <= 3; index += 1) {
+      const artifact = await registerPending(
+        repository,
+        active,
+        `fair-${index}`,
+        String(index).repeat(64),
+      );
+      const value = managedRemote(artifact, `fair-file-${index}`);
+      drive.objects.set(value.id, value);
+      const attempt = await repository.createAttempt(
+        artifact.id,
+        active.id,
+        value.id,
+        active.folders!.motionId,
+        1_000 + index,
+      );
+      const claimed = await repository.claimAttempt(attempt.id, {
+        owner: `upload-${index}`,
+        nowMs: 1_100 + index,
+        leaseMs: 100_000,
+      });
+      await repository.markVerified(
+        attempt.id,
+        claimed.lease,
+        archiveObject(value),
+        1_000 + index * 10_000,
+      );
+    }
+    let now = 500;
+    const reconcile = new ReconcileDriveUseCase(
+      repository,
+      { loadActive: async () => active },
+      drive,
+      source(),
+      { alert: async () => undefined },
+      { now: () => now++, pageSize: 2, maxPages: 4 },
+    );
+
+    await reconcile.execute({ limit: 1 }, signal);
+    await reconcile.execute({ limit: 1 }, signal);
+
+    expect(drive.loadObject.mock.calls.map((call) => call[1]))
+      .toEqual(['fair-file-1', 'fair-file-2']);
+  });
 });
+
+async function registerPending(
+  repository: InMemoryArchiveArtifactRepository,
+  active: ReturnType<typeof connection>,
+  suffix: string,
+  fingerprint: string,
+) {
+  return repository.register({
+    installationId: active.installationId,
+    kind: 'motion_video',
+    sourceIdentity: `motion:${suffix}`,
+    trustedPath: `/motion/${suffix}.mp4`,
+    relativePath: `${suffix}.mp4`,
+    size: 5,
+    mtimeNs: '500000000',
+    sourceTimeMs: 500,
+    sha256: DIGEST,
+    sourceFingerprint: fingerprint,
+  });
+}
+
+function managedRemote(
+  artifact: Awaited<ReturnType<typeof registerPending>>,
+  id: string,
+): VerifiedDriveObject {
+  return remote({
+    id,
+    name: artifact.relativePath,
+    appProperties: encodeArchiveAppProperties({
+      installationId: artifact.installationId,
+      generationId: 'generation-1',
+      kind: artifact.kind,
+      sourceFingerprint: artifact.sourceFingerprint,
+      sha256: artifact.sha256,
+      sourceTimeMs: artifact.sourceTimeMs,
+      schemaVersion: 1,
+    }),
+    webViewLink: `https://drive.example/${id}`,
+  });
+}
 
 function archiveObject(value: VerifiedDriveObject) {
   return {

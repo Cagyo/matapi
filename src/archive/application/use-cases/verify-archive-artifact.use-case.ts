@@ -23,6 +23,7 @@ import {
   classifyRemoteObject,
   hasUnchangedTrustedSource,
 } from '../archive-object-verification';
+import { ArchiveRemoteMutationLockService } from '../archive-remote-mutation-lock.service';
 
 /** Fresh exact-ID verification used at every local-cleanup/link decision. */
 @Injectable()
@@ -30,13 +31,16 @@ export class VerifyArchiveArtifactUseCase implements ArchiveVerificationPort {
   constructor(
     @Inject(ARCHIVE_ARTIFACT_REPOSITORY)
     private readonly repository: Pick<ArchiveArtifactRepositoryPort,
-      'loadArtifact' | 'loadAttempt' | 'listAttempts'>,
+      'loadArtifact' | 'loadAttempt' | 'listAttempts' | 'markDetached' |
+      'acceptReconciledRename'>,
     @Inject(DRIVE_CREDENTIAL_REPOSITORY)
     private readonly credentials: Pick<DriveCredentialRepositoryPort, 'loadActive'>,
     @Inject(DRIVE_ARCHIVE)
     private readonly drive: Pick<DriveArchivePort, 'loadObject'>,
     @Inject(ARCHIVE_UPLOAD_SOURCE)
     private readonly source: ArchiveUploadSourcePort,
+    private readonly lock: Pick<ArchiveRemoteMutationLockService, 'runExclusive'> =
+      new ArchiveRemoteMutationLockService(),
   ) {}
 
   async inspect(artifactId: string): Promise<ArchiveVerification> {
@@ -73,7 +77,24 @@ export class VerifyArchiveArtifactUseCase implements ArchiveVerificationPort {
     const remote = await this.drive.loadObject(active, attempt.remoteObjectId, signal);
     const classification = classifyRemoteObject(artifact, attempt, active, remote);
     if (classification === 'missing') return this.result(artifactId, 'missing');
-    if (classification !== 'exact') return this.result(artifactId, 'detached');
+    if (classification === 'detached') {
+      await this.lock.runExclusive(() => this.repository.markDetached(
+        attempt.id,
+        attempt.revision,
+        'remote_metadata_changed',
+        Date.now(),
+      ));
+      return this.result(artifactId, 'detached');
+    }
+    if (classification === 'rename' && remote !== null) {
+      await this.lock.runExclusive(() => this.repository.acceptReconciledRename(
+        attempt.id,
+        attempt.revision,
+        remote.name,
+        remote.version,
+        Date.now(),
+      ));
+    }
     const webViewLink = remote?.webViewLink ?? null;
     if (!(await hasUnchangedTrustedSource(artifact, this.source, signal))) {
       return {

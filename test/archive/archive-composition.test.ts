@@ -6,6 +6,9 @@ import { CameraModule } from '../../src/camera/camera.module';
 import { TelegramModule } from '../../src/telegram/telegram.module';
 import { ARCHIVE_REGISTRATION } from '../../src/archive/application/ports/archive-registration.port';
 import { ARCHIVE_VERIFICATION } from '../../src/archive/application/ports/archive-verification.port';
+import { ARCHIVE_ADMIN_ALERT } from '../../src/archive/application/ports/archive-admin-alert.port';
+import { ArchiveRemoteMutationLockService } from '../../src/archive/application/archive-remote-mutation-lock.service';
+import { ReconcileDriveUseCase } from '../../src/archive/application/use-cases/reconcile-drive.use-case';
 import { ArchiveRuntimeLifecycleService } from '../../src/archive/application/archive-runtime-lifecycle.service';
 import { ArchiveSchedulerHooksService } from '../../src/archive/application/archive-scheduler.service';
 import {
@@ -36,8 +39,23 @@ describe('ArchiveModule composition', () => {
       DisconnectDriveUseCase,
       ArchiveRuntimeLifecycleService,
       ArchiveSchedulerHooksService,
+      ArchiveRemoteMutationLockService,
       DriveAuthorizationOutcomeRegistrationService,
     ]));
     expect(exports.some((value) => typeof value === 'function' && /Adapter|Repository/u.test(value.name))).toBe(false);
+  });
+
+  it('binds a mandatory durable admin-alert adapter into reconciliation', () => {
+    const providers = Reflect.getMetadata('providers', ArchiveModule) as {
+      provide?: unknown;
+      inject?: unknown[];
+    }[];
+    expect(providers.some(
+      (provider) => provider.provide === ARCHIVE_ADMIN_ALERT,
+    )).toBe(true);
+    const reconcile = providers.find(
+      (provider) => provider.provide === ReconcileDriveUseCase,
+    );
+    expect(reconcile).toMatchObject({ inject: expect.arrayContaining([ARCHIVE_ADMIN_ALERT]) });
   });
 });

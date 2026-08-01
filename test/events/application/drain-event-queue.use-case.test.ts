@@ -62,6 +62,38 @@ function makeUseCase(options: Partial<EventQueueOptions> = {}) {
 }
 
 describe('DrainEventQueueUseCase', () => {
+  it('routes queued archive alerts through administrator-only delivery instead of broadcast', async () => {
+    const repository = new InMemoryEventRepository();
+    const notifier = new RecordingNotifier();
+    const delivered: number[] = [];
+    const useCase = new (DrainEventQueueUseCase as unknown as new (
+      ...args: unknown[]
+    ) => DrainEventQueueUseCase)(
+      repository,
+      notifier,
+      { now: () => new Date('2030-01-01T00:00:00.000Z') },
+      baseOptions,
+      {
+        process: async (event: { id: number }) => {
+          delivered.push(event.id);
+          await repository.markSent([event.id], new Date('2030-01-01T00:00:00.000Z'));
+        },
+      },
+    );
+    const queued = await repository.enqueue({
+      sensorId: null,
+      type: 'archive_admin_alert',
+      payload: { message: 'Archive recovery requires attention.' },
+      createdAt: new Date('2029-12-31T23:59:00.000Z'),
+    });
+
+    await useCase.execute();
+
+    expect(delivered).toEqual([queued.id]);
+    expect(notifier.messages).toEqual([]);
+    expect(await repository.pending()).toEqual([]);
+  });
+
   it('sends one event summary and marks it sent with the clock time', async () => {
     const { repository, notifier, sentAt, useCase } = makeUseCase();
     const queued = await repository.enqueue({

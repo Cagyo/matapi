@@ -11,6 +11,8 @@ import {
   type DatabaseBackupSnapshotPort,
 } from '../database/application/ports/database-backup-snapshot.port';
 import { EventModule } from '../events/event.module';
+import { EventQueueService } from '../events/application/event-queue.service';
+import { NotificationService } from '../events/application/notification.service';
 import { CLOCK, type ClockPort } from '../events/domain/ports/clock.port';
 import { SystemModule } from '../system/system.module';
 import { BootRecoveryService } from '../system/application/boot-recovery.service';
@@ -31,6 +33,10 @@ import {
   ARCHIVE_ARTIFACT_REPOSITORY,
   type ArchiveArtifactRepositoryPort,
 } from './application/ports/archive-artifact-repository.port';
+import {
+  ARCHIVE_ADMIN_ALERT,
+  type ArchiveAdminAlertPort,
+} from './application/ports/archive-admin-alert.port';
 import { ARCHIVE_REGISTRATION } from './application/ports/archive-registration.port';
 import { ARCHIVE_VERIFICATION } from './application/ports/archive-verification.port';
 import { ARCHIVE_SECRET_CIPHER } from './application/ports/archive-secret-cipher.port';
@@ -69,6 +75,7 @@ import { DrizzleDriveCredentialRepository } from './infrastructure/persistence/d
 import { FsArchiveUploadSourceAdapter } from './infrastructure/persistence/fs-archive-upload-source.adapter';
 import { InMemoryArchiveArtifactRepository } from './infrastructure/persistence/in-memory-archive-artifact.repository';
 import { InMemoryDriveCredentialRepository } from './infrastructure/persistence/in-memory-drive-credential.repository';
+import { DurableArchiveAdminAlertAdapter } from './infrastructure/events/durable-archive-admin-alert.adapter';
 
 const ARCHIVE_BOOT_RECOVERY_REGISTRATION = Symbol('ARCHIVE_BOOT_RECOVERY_REGISTRATION');
 const ARCHIVE_REMOTE_MAINTENANCE_REGISTRATION = Symbol('ARCHIVE_REMOTE_MAINTENANCE_REGISTRATION');
@@ -113,18 +120,29 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
     FsArchiveUploadSourceAdapter,
     { provide: ARCHIVE_UPLOAD_SOURCE, useExisting: FsArchiveUploadSourceAdapter },
     {
+      provide: ARCHIVE_ADMIN_ALERT,
+      useFactory: (
+        queue: EventQueueService,
+        notifications: NotificationService,
+        clock: ClockPort,
+      ) => new DurableArchiveAdminAlertAdapter(queue, notifications, clock),
+      inject: [EventQueueService, NotificationService, CLOCK],
+    },
+    {
       provide: VerifyArchiveArtifactUseCase,
       useFactory: (
         repository: ArchiveArtifactRepositoryPort,
         credentials: DriveCredentialRepositoryPort,
         drive: DriveArchivePort,
         source: ArchiveUploadSourcePort,
-      ) => new VerifyArchiveArtifactUseCase(repository, credentials, drive, source),
+        lock: ArchiveRemoteMutationLockService,
+      ) => new VerifyArchiveArtifactUseCase(repository, credentials, drive, source, lock),
       inject: [
         ARCHIVE_ARTIFACT_REPOSITORY,
         DRIVE_CREDENTIAL_REPOSITORY,
         DRIVE_ARCHIVE,
         ARCHIVE_UPLOAD_SOURCE,
+        ArchiveRemoteMutationLockService,
       ],
     },
     { provide: ARCHIVE_VERIFICATION, useExisting: VerifyArchiveArtifactUseCase },
@@ -135,12 +153,14 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         credentials: DriveCredentialRepositoryPort,
         drive: DriveArchivePort,
         source: ArchiveUploadSourcePort,
-      ) => new ReconcileDriveUseCase(repository, credentials, drive, source),
+        alerts: ArchiveAdminAlertPort,
+      ) => new ReconcileDriveUseCase(repository, credentials, drive, source, alerts),
       inject: [
         ARCHIVE_ARTIFACT_REPOSITORY,
         DRIVE_CREDENTIAL_REPOSITORY,
         DRIVE_ARCHIVE,
         ARCHIVE_UPLOAD_SOURCE,
+        ARCHIVE_ADMIN_ALERT,
       ],
     },
     {
@@ -257,8 +277,9 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         cipher: AesGcmArchiveSecretAdapter,
         source: ArchiveUploadSourcePort,
         semaphore: ArchiveTransferSemaphoreService,
+        activityGate: ArchiveRemoteMutationLockService,
       ) => new UploadDriveObjectAttemptUseCase(
-        repository, credentials, drive, cipher, source, semaphore,
+        repository, credentials, drive, cipher, source, semaphore, { activityGate },
       ),
       inject: [
         ARCHIVE_ARTIFACT_REPOSITORY,
@@ -267,6 +288,7 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         ARCHIVE_SECRET_CIPHER,
         ARCHIVE_UPLOAD_SOURCE,
         ArchiveTransferSemaphoreService,
+        ArchiveRemoteMutationLockService,
       ],
     },
     {
@@ -358,6 +380,7 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
     DriveAuthorizationPollingService,
     DriveAuthorizationOutcomeRegistrationService,
     ArchiveSchedulerHooksService,
+    ArchiveRemoteMutationLockService,
     ArchiveRuntimeLifecycleService,
   ],
 })

@@ -177,8 +177,76 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
     this.transitionWithoutLease(attemptId, expectedRevision, nowMs, (attempt) => attempt.markMissing(reason, nowMs));
   }
 
+  async replaceMissingWithReservedAttempt(
+    attemptId: string,
+    expectedRevision: number,
+    reason: string,
+    replacementRemoteObjectId: string,
+    containerId: string,
+    nowMs: number,
+  ): Promise<ArchiveObjectAttempt> {
+    const entry = this.attempts.get(attemptId);
+    if (entry?.attempt.revision !== expectedRevision
+      || (entry.lease?.expiresAtMs ?? -1) > nowMs) {
+      throw new DriveObjectConflictError('Drive attempt changed before missing replacement');
+    }
+    if ([...this.attempts.values()].some(
+      ({ attempt }) => attempt.remoteFileId === replacementRemoteObjectId,
+    )) {
+      throw new DriveObjectConflictError('Reserved remote object ID already exists');
+    }
+    const artifact = this.artifacts.get(entry.attempt.artifactId);
+    if (artifact?.currentVerifiedAttemptId !== attemptId) {
+      throw new DriveObjectConflictError('Archive artifact changed before missing replacement');
+    }
+    const missing = entry.attempt.markMissing(reason, nowMs);
+    const replacement = DriveObjectAttempt.reserve({
+      id: randomUUID(),
+      artifactId: artifact.id,
+      generationId: entry.attempt.generationId,
+      remoteFileId: replacementRemoteObjectId,
+      parentId: containerId,
+      nowMs,
+    });
+    const replacementEntry: Entry = {
+      attempt: replacement,
+      lease: null,
+      session: null,
+      nextAttemptMs: nowMs,
+      retryCount: 0,
+      errorCode: null,
+    };
+    entry.attempt = missing;
+    entry.lease = null;
+    entry.session = null;
+    this.artifacts.set(
+      artifact.id,
+      artifact.markCurrentVerificationUnavailable(attemptId, nowMs),
+    );
+    this.attempts.set(replacement.id, replacementEntry);
+    return project(replacementEntry);
+  }
+
   async markDetached(attemptId: string, expectedRevision: number, reason: string, nowMs: number): Promise<void> {
     this.transitionWithoutLease(attemptId, expectedRevision, nowMs, (attempt) => attempt.detach(reason, nowMs));
+  }
+
+  async markReconciled(
+    attemptId: string,
+    expectedRevision: number,
+    nowMs: number,
+  ): Promise<void> {
+    const entry = this.attempts.get(attemptId);
+    if (entry?.attempt.state !== 'verified'
+      || entry.attempt.revision !== expectedRevision
+      || (entry.lease?.expiresAtMs ?? -1) > nowMs) {
+      throw new DriveObjectConflictError('Drive attempt changed before reconciliation');
+    }
+    const newestInGeneration = Math.max(...[...this.attempts.values()]
+      .filter(({ attempt }) => attempt.state === 'verified'
+        && attempt.generationId === entry.attempt.generationId)
+      .map(({ attempt }) => attempt.updatedAtMs));
+    entry.attempt = revise(entry.attempt, Math.max(nowMs, newestInGeneration + 1));
   }
 
   async acceptReconciledRename(
@@ -266,7 +334,7 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
   async listReconciliationBatch(selection: ReconciliationSelection): Promise<readonly ArchiveObjectAttempt[]> {
     return [...this.attempts.values()]
       .filter(({ attempt }) => attempt.state === 'verified' && (!selection.generationId || attempt.generationId === selection.generationId))
-      .sort((left, right) => left.attempt.verifiedAtMs! - right.attempt.verifiedAtMs! || left.attempt.id.localeCompare(right.attempt.id))
+      .sort((left, right) => left.attempt.updatedAtMs - right.attempt.updatedAtMs || left.attempt.id.localeCompare(right.attempt.id))
       .slice(0, selection.limit).map(project);
   }
 

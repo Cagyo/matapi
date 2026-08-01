@@ -24,6 +24,8 @@ export interface NotificationRecipient {
 export interface RecipientDirectoryPort {
   /** All registered users eligible to receive notifications. */
   listRecipients(): Promise<NotificationRecipient[]>;
+  /** Administrators eligible for mandatory operational alerts. */
+  listAdmins(): Promise<NotificationRecipient[]>;
   /** Whether a user has muted this specific sensor (`/mute <sensor>`). */
   isSensorMuted(telegramId: number, sensorId: string): Promise<boolean>;
 }

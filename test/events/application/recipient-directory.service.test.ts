@@ -12,6 +12,7 @@ const stub: RecipientDirectoryPort = {
       quietEnd: null,
     },
   ],
+  listAdmins: async () => [],
   isSensorMuted: async (telegramId, sensorId) =>
     telegramId === 1 && sensorId === 'front_door',
 };

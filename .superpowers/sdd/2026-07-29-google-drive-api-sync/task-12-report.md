@@ -49,3 +49,21 @@ GREEN verification:
 ## Worktree Hygiene
 
 The worktree contained unrelated edits and an unrelated pre-existing deletion. They were preserved and excluded from the Task 12 commit by staging explicit paths only.
+
+## Review Repair Pass
+
+All Task 12 review findings were repaired test-first:
+
+- The repository now atomically replaces a missing verified attempt with a reserved replacement attempt; insert conflicts roll back without losing the verified record.
+- Cleanup now uses the shared archive activity fence and fails closed while upload or reconciliation work is active.
+- Remote metadata drift is detached with CAS semantics under the archive lock, making the decision sticky.
+- Restoration excludes every non-adoptable historical ID and isolates conflicts per artifact instead of aborting the whole batch.
+- Reconciliation fairness is durable in repository state and remains monotonic when the wall clock moves backward.
+- A missing object without a trusted source must durably enqueue an administrator-only alert before transitioning to missing; delivery failure leaves it runnable.
+
+Additional RED evidence was observed for all six findings, including the admin-only event delivery path. Final repair verification passed:
+
+- Focused repair suite: `9` test files, `108` tests passed.
+- Broader archive/camera/events/Telegram suite: `46` test files, `324` tests passed.
+- Integration-focused suite: `14` test files, `134` tests passed.
+- A general application-smoke run still has two unrelated pre-existing `FeatureUnavailableError` failures for sensor-add and snapshot features; the camera startup and Telegram composition portions passed.

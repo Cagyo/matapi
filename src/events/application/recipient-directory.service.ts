@@ -28,6 +28,10 @@ export class RecipientDirectoryService implements RecipientDirectoryPort {
     return this.directory ? this.directory.listRecipients() : [];
   }
 
+  async listAdmins(): Promise<NotificationRecipient[]> {
+    return this.directory ? this.directory.listAdmins() : [];
+  }
+
   async isSensorMuted(telegramId: number, sensorId: string): Promise<boolean> {
     return this.directory
       ? this.directory.isSensorMuted(telegramId, sensorId)

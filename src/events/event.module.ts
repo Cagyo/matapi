@@ -41,7 +41,23 @@ import { SystemClockAdapter } from './infrastructure/system-clock.adapter';
   imports: [ConfigModule, SensorModule],
   providers: [
     DebounceService,
-    DrainEventQueueUseCase,
+    {
+      provide: DrainEventQueueUseCase,
+      useFactory: (
+        repository: import('./domain/ports/event-repository.port').EventRepositoryPort,
+        notifier: import('./domain/ports/notifier.port').NotifierPort,
+        clock: import('./domain/ports/clock.port').ClockPort,
+        options: EventQueueOptions,
+        notifications: NotificationService,
+      ) => new DrainEventQueueUseCase(
+        repository,
+        notifier,
+        clock,
+        options,
+        notifications,
+      ),
+      inject: [EVENT_REPOSITORY, NOTIFIER, CLOCK, EVENT_QUEUE_OPTIONS, NotificationService],
+    },
     EventNotifierService,
     EventProcessorService,
     EventQueueService,

@@ -33,4 +33,17 @@ export class EventQueueService {
       createdAt: event.timestamp,
     });
   }
+
+  async enqueueSystemEvent(input: {
+    type: string;
+    payload: Record<string, unknown>;
+    createdAt: Date;
+  }): Promise<QueuedEvent> {
+    return this.eventRepository.enqueue({
+      sensorId: null,
+      type: input.type,
+      payload: input.payload,
+      createdAt: input.createdAt,
+    });
+  }
 }

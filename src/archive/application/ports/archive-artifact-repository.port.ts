@@ -151,7 +151,18 @@ export interface ArchiveArtifactRepositoryPort {
   replaceConflictingAttempt(attemptId: string, lease: AttemptLease, replacementRemoteObjectId: string, errorCode: string, nowMs: number): Promise<ArchiveObjectAttempt>;
   markVerified(attemptId: string, lease: AttemptLease, remote: VerifiedArchiveObject, nowMs: number): Promise<void>;
   markMissing(attemptId: string, expectedRevision: number, reason: string, nowMs: number): Promise<void>;
+  /** Atomically terminalizes the old exact ID and persists its already-reserved replacement. */
+  replaceMissingWithReservedAttempt(
+    attemptId: string,
+    expectedRevision: number,
+    reason: string,
+    replacementRemoteObjectId: string,
+    containerId: string,
+    nowMs: number,
+  ): Promise<ArchiveObjectAttempt>;
   markDetached(attemptId: string, expectedRevision: number, reason: string, nowMs: number): Promise<void>;
+  /** Advances the durable fairness order after an exact reconciliation read. */
+  markReconciled(attemptId: string, expectedRevision: number, nowMs: number): Promise<void>;
   acceptReconciledRename(attemptId: string, expectedRevision: number, name: string, version: string, nowMs: number): Promise<void>;
   /** Restores one exact managed object without overwriting a terminal historical attempt. */
   adoptVerifiedObject(artifactId: string, generationId: string, remote: VerifiedArchiveObject, nowMs: number): Promise<ArchiveObjectAttempt>;

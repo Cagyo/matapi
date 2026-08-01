@@ -117,6 +117,7 @@ interface Overrides {
   meta?: SystemMetaRepositoryPort;
   health?: GdriveSyncHealthPort;
   archive?: ArchiveVerificationPort;
+  activityGate?: { tryRunCleanup<T>(operation: () => Promise<T>): Promise<T | null> };
 }
 
 function build(overrides: Overrides = {}) {
@@ -134,7 +135,9 @@ function build(overrides: Overrides = {}) {
       reason: 'verified' as const,
     })),
   };
-  const useCase = new CleanupLocalStorageUseCase(
+  const useCase = new (CleanupLocalStorageUseCase as unknown as new (
+    ...args: unknown[]
+  ) => CleanupLocalStorageUseCase)(
     storage,
     repo,
     repo,
@@ -144,6 +147,7 @@ function build(overrides: Overrides = {}) {
     meta,
     overrides.health ?? fakeHealth(),
     archive,
+    overrides.activityGate,
   );
   return { useCase, storage, repo, retention, motion, alert, meta, archive };
 }
@@ -184,6 +188,21 @@ describe('CleanupLocalStorageUseCase', () => {
     expect(storage.pruneEmptyDirs).toHaveBeenCalled();
     expect(motion.stop).not.toHaveBeenCalled();
     expect(alert.alert).not.toHaveBeenCalled();
+  });
+
+  it('does not delete when the shared archive activity gate reports an active upload', async () => {
+    const repo = new InMemoryMediaRepository();
+    repo.seedEvents([uploadedEvent(1)]);
+    const { useCase, storage } = build({
+      repo,
+      storage: fakeStorage([85, 60]),
+      activityGate: { tryRunCleanup: async () => null },
+    });
+
+    await useCase.execute();
+
+    expect(storage.deleteFile).not.toHaveBeenCalled();
+    expect((await repo.findUploadedNotDeleted()).map((event) => event.id)).toEqual([1]);
   });
 
   it('never deletes local media from a legacy rclone success heuristic', async () => {

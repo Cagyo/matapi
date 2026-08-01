@@ -30,6 +30,7 @@ import { DriveConfigurationError } from '../../domain/errors/drive-configuration
 import { DriveLocalSourceChangedError } from '../../domain/errors/drive-local-source-changed.error';
 import { DriveObjectConflictError } from '../../domain/errors/drive-object-conflict.error';
 import { ArchiveTransferSemaphoreService } from '../archive-transfer-semaphore.service';
+import type { ArchiveRemoteMutationLockService } from '../archive-remote-mutation-lock.service';
 
 const CHUNK_SIZE = 256 * 1024;
 const DEFAULT_LEASE_MS = 5 * 60 * 1_000;
@@ -57,6 +58,7 @@ export interface UploadDriveObjectAttemptOptions {
   owner?: () => string;
   leaseMs?: number;
   retryDelayMs?: number;
+  activityGate?: Pick<ArchiveRemoteMutationLockService, 'runActivity'>;
 }
 
 /** Streams or resumes one immutable exact-ID Drive object attempt. */
@@ -66,6 +68,7 @@ export class UploadDriveObjectAttemptUseCase {
   private readonly owner: () => string;
   private readonly leaseMs: number;
   private readonly retryDelayMs: number;
+  private readonly activityGate?: Pick<ArchiveRemoteMutationLockService, 'runActivity'>;
 
   constructor(
     @Inject(ARCHIVE_ARTIFACT_REPOSITORY)
@@ -85,9 +88,17 @@ export class UploadDriveObjectAttemptUseCase {
     this.owner = options.owner ?? randomUUID;
     this.leaseMs = options.leaseMs ?? DEFAULT_LEASE_MS;
     this.retryDelayMs = options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
+    this.activityGate = options.activityGate;
   }
 
   async execute(id: string, signal: AbortSignal): Promise<UploadDriveObjectAttemptResult> {
+    if (this.activityGate !== undefined) {
+      return this.activityGate.runActivity(() => this.executeActive(id, signal));
+    }
+    return this.executeActive(id, signal);
+  }
+
+  private async executeActive(id: string, signal: AbortSignal): Promise<UploadDriveObjectAttemptResult> {
     throwIfAborted(signal);
     const connection = await this.requireActiveConnection();
     let attempt = await this.repository.loadAttempt(id);
@@ -113,6 +124,16 @@ export class UploadDriveObjectAttemptUseCase {
 
   /** Runs a scheduler-owned short-CAS claim without attempting to claim it twice. */
   async executeClaimed(
+    claimed: ClaimedAttempt,
+    signal: AbortSignal,
+  ): Promise<UploadDriveObjectAttemptResult> {
+    if (this.activityGate !== undefined) {
+      return this.activityGate.runActivity(() => this.executeClaimedActive(claimed, signal));
+    }
+    return this.executeClaimedActive(claimed, signal);
+  }
+
+  private async executeClaimedActive(
     claimed: ClaimedAttempt,
     signal: AbortSignal,
   ): Promise<UploadDriveObjectAttemptResult> {

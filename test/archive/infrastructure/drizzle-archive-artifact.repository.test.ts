@@ -60,6 +60,95 @@ describe('DrizzleArchiveArtifactRepository', () => {
       .resolves.toMatchObject({ lease: { owner: 'worker-b' } });
   });
 
+  it('rolls back a missing transition when its reserved replacement cannot be inserted', async () => {
+    const artifact = await repository.register(artifactFixture());
+    const first = await repository.createAttempt(
+      artifact.id,
+      'generation-1',
+      'file-1',
+      'folder-1',
+      100,
+    );
+    const claim = await repository.claimAttempt(first.id, {
+      owner: 'worker-a', nowMs: 1_000, leaseMs: 5_000,
+    });
+    await repository.markVerified(
+      first.id,
+      claim.lease,
+      verifiedObject('file-1', 'folder-1'),
+      1_100,
+    );
+    const other = await repository.register({
+      ...artifactFixture(),
+      sourceIdentity: 'camera-2',
+      trustedPath: '/var/lib/home-worker/motion/other.mp4',
+      relativePath: 'motion/other.mp4',
+      sourceFingerprint: 'd'.repeat(64),
+    });
+    await repository.createAttempt(
+      other.id,
+      'generation-1',
+      'file-2',
+      'folder-1',
+      1_150,
+    );
+    const verified = await repository.loadAttempt(first.id);
+    if (!verified) throw new Error('expected verified attempt');
+
+    await expect(repository.replaceMissingWithReservedAttempt(
+      first.id,
+      verified.revision,
+      'remote_missing',
+      'file-2',
+      'folder-1',
+      1_200,
+    )).rejects.toThrow('Reserved remote object ID already exists');
+
+    expect(await repository.loadAttempt(first.id)).toMatchObject({ state: 'verified' });
+    expect(await repository.loadArtifact(artifact.id)).toMatchObject({
+      state: 'verified',
+      currentVerifiedAttemptId: first.id,
+    });
+  });
+
+  it('moves an exact reconciliation behind newer verified attempts despite clock rollback', async () => {
+    const firstArtifact = await repository.register(artifactFixture());
+    const secondArtifact = await repository.register({
+      ...artifactFixture(),
+      sourceIdentity: 'camera-2',
+      trustedPath: '/var/lib/home-worker/motion/other.mp4',
+      relativePath: 'motion/other.mp4',
+      sourceFingerprint: 'd'.repeat(64),
+    });
+    const first = await repository.createAttempt(
+      firstArtifact.id, 'generation-1', 'file-1', 'folder-1', 100,
+    );
+    const second = await repository.createAttempt(
+      secondArtifact.id, 'generation-1', 'file-2', 'folder-1', 101,
+    );
+    const firstClaim = await repository.claimAttempt(first.id, {
+      owner: 'worker-a', nowMs: 1_000, leaseMs: 100_000,
+    });
+    const secondClaim = await repository.claimAttempt(second.id, {
+      owner: 'worker-b', nowMs: 1_001, leaseMs: 100_000,
+    });
+    await repository.markVerified(
+      first.id, firstClaim.lease, verifiedObject('file-1', 'folder-1'), 10_000,
+    );
+    await repository.markVerified(
+      second.id, secondClaim.lease, verifiedObject('file-2', 'folder-1'), 20_000,
+    );
+    const [selected] = await repository.listReconciliationBatch({
+      generationId: 'generation-1', limit: 1,
+    });
+
+    await repository.markReconciled(selected.id, selected.revision, 500);
+
+    expect((await repository.listReconciliationBatch({
+      generationId: 'generation-1', limit: 1,
+    }))[0].remoteObjectId).toBe('file-2');
+  });
+
   it('returns the existing immutable artifact for a concurrent duplicate registration', async () => {
     const input = artifactFixture();
 

@@ -64,6 +64,11 @@ export class NotificationService {
     // Notifier offline → leave queued; the drain delivers on reconnect.
     if (!this.notifier.isReady()) return;
 
+    if (event.type === 'archive_admin_alert') {
+      await this.notifyAdmins(event);
+      return;
+    }
+
     const sensorId = event.sensorId;
     if (!sensorId) {
       // System events without a sensor: broadcast, no per-user filtering.
@@ -143,6 +148,25 @@ export class NotificationService {
     if (delivered === 0 && failures > 0) return;
 
     await this.markSent(event);
+  }
+
+  private async notifyAdmins(event: QueuedEvent): Promise<void> {
+    const message = (event.payload as { message?: unknown } | null)?.message;
+    if (typeof message !== 'string' || message.length === 0) return;
+    const admins = await this.recipients.listAdmins();
+    if (admins.length === 0) return;
+    let failed = false;
+    await forEachWithConcurrency(admins, SEND_CONCURRENCY, async (admin) => {
+      try {
+        await this.notifier.notifyUser(admin.telegramId, { text: message, asFile: false });
+      } catch (error) {
+        failed = true;
+        this.logger.warn(
+          `Admin notification to ${admin.telegramId} failed: ${(error as Error).message}`,
+        );
+      }
+    });
+    if (!failed) await this.markSent(event);
   }
 
   /**

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, eq, gt, gte, inArray, isNotNull, isNull, lte, ne, or, sql } from 'drizzle-orm';
+import { and, asc, eq, gt, gte, inArray, isNotNull, isNull, lte, max, ne, or, sql } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../../database/database.module';
 import { archiveArtifacts, archiveSchedulerState, driveObjectAttempts } from '../../../database/schema';
 import type {
@@ -212,8 +212,130 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
     this.transitionWithoutLease(attemptId, expectedRevision, nowMs, (attempt) => attempt.markMissing(reason, nowMs));
   }
 
+  async replaceMissingWithReservedAttempt(
+    attemptId: string,
+    expectedRevision: number,
+    reason: string,
+    replacementRemoteObjectId: string,
+    containerId: string,
+    nowMs: number,
+  ): Promise<ArchiveObjectAttempt> {
+    try {
+      return this.immediate((tx) => {
+        const availability = or(
+          isNull(driveObjectAttempts.leaseExpiresAt),
+          lte(driveObjectAttempts.leaseExpiresAt, nowMs),
+        );
+        const row = tx.select().from(driveObjectAttempts).where(and(
+          eq(driveObjectAttempts.id, attemptId),
+          eq(driveObjectAttempts.revision, expectedRevision),
+          availability,
+        )).get();
+        if (!row) {
+          throw new DriveObjectConflictError('Drive attempt changed before missing replacement');
+        }
+        const artifactRow = tx.select().from(archiveArtifacts).where(and(
+          eq(archiveArtifacts.id, row.artifactId),
+          eq(archiveArtifacts.currentVerifiedAttemptId, attemptId),
+        )).get();
+        if (!artifactRow) {
+          throw new DriveObjectConflictError('Archive artifact changed before missing replacement');
+        }
+        const missing = toAttempt(row).markMissing(reason, nowMs);
+        const replacement = DriveObjectAttempt.reserve({
+          id: randomUUID(),
+          artifactId: row.artifactId,
+          generationId: row.generationId,
+          remoteFileId: replacementRemoteObjectId,
+          parentId: containerId,
+          nowMs,
+        });
+        tx.insert(driveObjectAttempts).values(attemptRow(replacement)).run();
+        const artifact = toArtifact(artifactRow)
+          .markCurrentVerificationUnavailable(attemptId, nowMs);
+        const artifactResult = tx.update(archiveArtifacts).set({
+          state: artifact.state,
+          currentVerifiedAttemptId: artifact.currentVerifiedAttemptId,
+          updatedAt: artifact.updatedAtMs,
+          revision: artifact.revision,
+        }).where(and(
+          eq(archiveArtifacts.id, artifact.id),
+          eq(archiveArtifacts.revision, artifactRow.revision),
+        )).run();
+        if (artifactResult.changes !== 1) {
+          throw new DriveObjectConflictError('Archive artifact changed before missing replacement');
+        }
+        const attemptResult = tx.update(driveObjectAttempts).set({
+          state: missing.state,
+          revision: missing.revision,
+          updatedAt: missing.updatedAtMs,
+          missingReason: missing.missingReason,
+          leaseOwner: null,
+          leaseExpiresAt: null,
+          ...clearedSession(),
+        }).where(and(
+          eq(driveObjectAttempts.id, attemptId),
+          eq(driveObjectAttempts.revision, expectedRevision),
+          availability,
+        )).run();
+        if (attemptResult.changes !== 1) {
+          throw new DriveObjectConflictError('Drive attempt changed before missing replacement');
+        }
+        return project(replacement, {
+          nextAttemptMs: nowMs,
+          retryCount: 0,
+          errorCode: null,
+          session: null,
+        });
+      });
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        throw new DriveObjectConflictError('Reserved remote object ID already exists');
+      }
+      throw error;
+    }
+  }
+
   async markDetached(attemptId: string, expectedRevision: number, reason: string, nowMs: number): Promise<void> {
     this.transitionWithoutLease(attemptId, expectedRevision, nowMs, (attempt) => attempt.detach(reason, nowMs));
+  }
+
+  async markReconciled(
+    attemptId: string,
+    expectedRevision: number,
+    nowMs: number,
+  ): Promise<void> {
+    const availability = or(
+      isNull(driveObjectAttempts.leaseExpiresAt),
+      lte(driveObjectAttempts.leaseExpiresAt, nowMs),
+    );
+    const row = this.db.select({
+      generationId: driveObjectAttempts.generationId,
+    })
+      .from(driveObjectAttempts).where(and(
+        eq(driveObjectAttempts.id, attemptId),
+        eq(driveObjectAttempts.state, 'verified'),
+        eq(driveObjectAttempts.revision, expectedRevision),
+        availability,
+    )).get();
+    if (!row) throw new DriveObjectConflictError('Drive attempt changed before reconciliation');
+    const newest = this.db.select({ value: max(driveObjectAttempts.updatedAt) })
+      .from(driveObjectAttempts).where(and(
+        eq(driveObjectAttempts.state, 'verified'),
+        eq(driveObjectAttempts.generationId, row.generationId),
+      )).get()?.value ?? nowMs;
+    const result = this.db.update(driveObjectAttempts).set({
+      revision: expectedRevision + 1,
+      updatedAt: Math.max(nowMs, newest + 1),
+    }).where(and(
+      eq(driveObjectAttempts.id, attemptId),
+      eq(driveObjectAttempts.state, 'verified'),
+      eq(driveObjectAttempts.revision, expectedRevision),
+      availability,
+    )).run();
+    if (result.changes !== 1) {
+      throw new DriveObjectConflictError('Drive attempt changed before reconciliation');
+    }
   }
 
   async acceptReconciledRename(
@@ -344,7 +466,7 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
     const conditions = [eq(driveObjectAttempts.state, 'verified')];
     if (selection.generationId) conditions.push(eq(driveObjectAttempts.generationId, selection.generationId));
     return this.db.select().from(driveObjectAttempts).where(and(...conditions))
-      .orderBy(asc(driveObjectAttempts.verifiedAt), asc(driveObjectAttempts.id)).limit(selection.limit).all().map(projectRow);
+      .orderBy(asc(driveObjectAttempts.updatedAt), asc(driveObjectAttempts.id)).limit(selection.limit).all().map(projectRow);
   }
 
   async listRestorationCandidates(limit: number): Promise<readonly ArchiveArtifact[]> {

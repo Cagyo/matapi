@@ -43,7 +43,7 @@ describe('VerifyArchiveArtifactUseCase', () => {
     expect(fixture.loadedIds).toEqual([]);
   });
 
-  it('returns detached when any exact remote metadata no longer matches', async () => {
+  it('sticky-detaches observed remote drift under the archive mutation lock', async () => {
     const fixture = await setup();
     fixture.remote.version = '2';
 
@@ -52,6 +52,9 @@ describe('VerifyArchiveArtifactUseCase', () => {
       webViewLink: null,
       reason: 'detached',
     });
+    expect(fixture.lockCalls).toBe(1);
+    expect((await fixture.repository.listAttempts(fixture.artifactId))[0].state)
+      .toBe('detached');
   });
 });
 
@@ -80,19 +83,28 @@ async function setup(local = 'local', activeGeneration = 'generation-1') {
     sharing: remote.sharing, webViewLink: remote.webViewLink,
   }, 1_200);
   const loadedIds: string[] = [];
+  let lockCalls = 0;
   const source: ArchiveUploadSourcePort = {
     stat: async () => ({ size: 5, mtimeNs: '500000000' }),
     open: async function* () { yield Buffer.from(local); },
   };
-  const verification = new VerifyArchiveArtifactUseCase(
+  const verification = new (VerifyArchiveArtifactUseCase as unknown as new (
+    ...args: unknown[]
+  ) => VerifyArchiveArtifactUseCase)(
     repository,
     { loadActive: async () => active },
     {
       loadObject: async (_connection, id) => { loadedIds.push(id); return remote; },
     },
     source,
+    {
+      runExclusive: async <T>(operation: () => Promise<T>) => {
+        lockCalls += 1;
+        return operation();
+      },
+    },
   );
-  return { verification, artifactId: artifact.id, remote, loadedIds };
+  return { verification, repository, artifactId: artifact.id, remote, loadedIds, get lockCalls() { return lockCalls; } };
 }
 
 function remoteObject(): VerifiedDriveObject {

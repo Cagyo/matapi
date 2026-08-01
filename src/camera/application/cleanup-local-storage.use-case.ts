@@ -3,6 +3,7 @@ import {
   ARCHIVE_VERIFICATION,
   type ArchiveVerificationPort,
 } from '../../archive/application/ports/archive-verification.port';
+import { ArchiveRemoteMutationLockService } from '../../archive/application/archive-remote-mutation-lock.service';
 import {
   SYSTEM_META_REPOSITORY,
   SystemMetaRepositoryPort,
@@ -70,6 +71,9 @@ export class CleanupLocalStorageUseCase {
     @Inject(SYSTEM_META_REPOSITORY) private readonly meta: SystemMetaRepositoryPort,
     @Inject(GDRIVE_SYNC_HEALTH) _legacyHealth: GdriveSyncHealthPort,
     @Inject(ARCHIVE_VERIFICATION) private readonly archive: ArchiveVerificationPort,
+    @Inject(ArchiveRemoteMutationLockService)
+    private readonly activityGate: Pick<ArchiveRemoteMutationLockService, 'tryRunCleanup'> =
+      new ArchiveRemoteMutationLockService(),
   ) {}
 
   async execute(
@@ -95,26 +99,27 @@ export class CleanupLocalStorageUseCase {
       return { thresholdUsed: critical };
     }
 
-    this.logger.warn(`Disk at ${usage}% (critical ${critical}%) — cleaning uploaded media`);
-    await this.deleteUploadedUntilBelow(
-      Math.max(critical - TARGET_HYSTERESIS, 10),
-      signal,
-    );
-    throwIfAborted(signal);
-    await this.storage.pruneEmptyDirs();
-    throwIfAborted(signal);
+    const cleanup = await this.activityGate.tryRunCleanup(async () => {
+      this.logger.warn(`Disk at ${usage}% (critical ${critical}%) — cleaning uploaded media`);
+      await this.deleteUploadedUntilBelow(
+        Math.max(critical - TARGET_HYSTERESIS, 10),
+        signal,
+      );
+      throwIfAborted(signal);
+      await this.storage.pruneEmptyDirs();
+      throwIfAborted(signal);
 
-    const emergency = this.percentEnv(
-      'DISK_EMERGENCY_PERCENT',
-      DEFAULT_EMERGENCY_PERCENT,
-    );
-    // Re-measure: the deletions above may already have de-escalated the disk.
-    const usageAfter = await this.storage.usagePercent();
-    throwIfAborted(signal);
-    if (usageAfter < emergency) return { thresholdUsed: critical };
-
-    await this.runEmergency(signal);
-    return { thresholdUsed: critical };
+      const emergency = this.percentEnv(
+        'DISK_EMERGENCY_PERCENT',
+        DEFAULT_EMERGENCY_PERCENT,
+      );
+      // Re-measure: the deletions above may already have de-escalated the disk.
+      const usageAfter = await this.storage.usagePercent();
+      throwIfAborted(signal);
+      if (usageAfter >= emergency) await this.runEmergency(signal);
+      return { thresholdUsed: critical };
+    });
+    return cleanup ?? { thresholdUsed: critical };
   }
 
   /** Oldest-first deletion with per-event re-measurement, stopping at target. */

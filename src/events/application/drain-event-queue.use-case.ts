@@ -10,6 +10,7 @@ import {
   EVENT_QUEUE_OPTIONS,
   EventQueueOptions,
 } from './ports/event-queue-options.port';
+import type { NotificationService } from './notification.service';
 
 /**
  * Drains the unsent event queue at-least-once. Inter-batch pacing and
@@ -30,6 +31,7 @@ export class DrainEventQueueUseCase {
     private readonly clock: ClockPort,
     @Inject(EVENT_QUEUE_OPTIONS)
     private readonly options: EventQueueOptions,
+    private readonly adminAlerts?: Pick<NotificationService, 'process'>,
   ) {}
 
   async execute(): Promise<void> {
@@ -43,6 +45,16 @@ export class DrainEventQueueUseCase {
 
         const batch = await this.eventRepository.pending(this.options.batchSize);
         if (batch.length === 0) break;
+
+        const adminAlert = batch.find((event) => event.type === 'archive_admin_alert');
+        if (adminAlert !== undefined) {
+          if (this.adminAlerts === undefined) break;
+          await this.adminAlerts.process(adminAlert);
+          const stillPending = (await this.eventRepository.pending(this.options.batchSize))
+            .some((event) => event.id === adminAlert.id);
+          if (stillPending) break;
+          continue;
+        }
 
         const forceFile = backlog >= this.options.maxQueueBeforeForceAggregate;
 

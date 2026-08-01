@@ -86,6 +86,7 @@ class FakeDirectory implements RecipientDirectoryPort {
   constructor(
     private readonly recipients: NotificationRecipient[],
     private readonly sensorMutes: { telegramId: number; sensorId: string }[] = [],
+    private readonly admins: NotificationRecipient[] = [],
   ) {}
   async listRecipients(): Promise<NotificationRecipient[]> {
     return this.recipients;
@@ -95,6 +96,9 @@ class FakeDirectory implements RecipientDirectoryPort {
     return this.sensorMutes.some(
       (m) => m.telegramId === telegramId && m.sensorId === sensorId,
     );
+  }
+  async listAdmins(): Promise<NotificationRecipient[]> {
+    return this.admins;
   }
 }
 
@@ -119,12 +123,17 @@ async function setup(opts: {
   sensor?: Sensor | null;
   recipients?: NotificationRecipient[];
   sensorMutes?: { telegramId: number; sensorId: string }[];
+  admins?: NotificationRecipient[];
 }) {
   const repo = new InMemoryEventRepository();
   const sensor = opts.sensor === undefined ? makeSensor() : opts.sensor;
   const sensorQuery = new StubSensorQuery(sensor);
   const notifier = new FakeNotifier();
-  const directory = new FakeDirectory(opts.recipients ?? [], opts.sensorMutes ?? []);
+  const directory = new FakeDirectory(
+    opts.recipients ?? [],
+    opts.sensorMutes ?? [],
+    opts.admins ?? [],
+  );
   const clock: ClockPort = { now: () => FIXED_NOW };
   const debounce = new DebounceService(sensorQuery, clock);
   const service = new NotificationService(
@@ -152,6 +161,29 @@ async function enqueueStateChange(
 }
 
 describe('NotificationService', () => {
+  it('delivers durable archive alerts only to administrators', async () => {
+    const admin = recipient({ telegramId: 7 });
+    const { repo, notifier, service } = await setup({
+      recipients: [recipient({ telegramId: 7 }), recipient({ telegramId: 8 })],
+      admins: [admin],
+    });
+    const event = await repo.enqueue({
+      sensorId: null,
+      type: 'archive_admin_alert',
+      payload: { message: 'Archive recovery requires attention.' },
+      createdAt: FIXED_NOW,
+    });
+
+    await service.process(event);
+
+    expect(notifier.broadcasts).toEqual([]);
+    expect(notifier.userSends).toEqual([{
+      telegramId: 7,
+      message: { text: 'Archive recovery requires attention.', asFile: false },
+    }]);
+    expect(repo.sentAtFor(event.id)).toBe(FIXED_NOW);
+  });
+
   it('delivers to every eligible recipient and marks the event sent', async () => {
     const { repo, notifier, service } = await setup({
       recipients: [recipient({ telegramId: 1 }), recipient({ telegramId: 2 })],
