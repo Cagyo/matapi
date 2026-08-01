@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CameraModule } from '../camera/camera.module';
@@ -8,18 +7,9 @@ import { EventModule } from '../events/event.module';
 import { FeatureModule } from '../features/feature.module';
 import { NetworkModule } from '../network/network.module';
 import { ArchiveModule } from '../archive/archive.module';
-import { DriveAuthorizationPollingService } from '../archive/application/drive-authorization-polling.service';
-import { DRIVE_AUTHORIZATION_OUTCOME } from '../archive/application/ports/drive-authorization-outcome.port';
-import { ARCHIVE_ARTIFACT_REPOSITORY } from '../archive/application/ports/archive-artifact-repository.port';
-import { DRIVE_ACCOUNT } from '../archive/application/ports/drive-account.port';
-import { DRIVE_CREDENTIAL_REPOSITORY } from '../archive/application/ports/drive-credential-repository.port';
-import { DRIVE_DEVICE_AUTHORIZATION } from '../archive/application/ports/drive-device-authorization.port';
-import { BeginDriveConnectionUseCase } from '../archive/application/use-cases/begin-drive-connection.use-case';
-import { CancelDriveConnectionUseCase } from '../archive/application/use-cases/cancel-drive-connection.use-case';
-import { ConfirmDriveAccountUseCase } from '../archive/application/use-cases/confirm-drive-account.use-case';
-import { DisconnectDriveUseCase } from '../archive/application/use-cases/disconnect-drive.use-case';
-import { SubmitDriveClientUseCase } from '../archive/application/use-cases/submit-drive-client.use-case';
-import { CLOCK } from '../events/domain/ports/clock.port';
+import {
+  DriveAuthorizationOutcomeRegistrationService,
+} from '../archive/application/drive-authorization-polling.service';
 import { SensorModule } from '../sensors/sensor.module';
 import { SystemModule } from '../system/system.module';
 import { ClaimAdminUseCase } from './application/claim-admin.use-case';
@@ -241,57 +231,20 @@ const mode = resolveBotMode();
     TelegramDirectMessenger,
     { provide: DIRECT_MESSENGER, useExisting: TelegramDirectMessenger },
     TelegramDriveAuthorizationOutcomeAdapter,
-    { provide: DRIVE_AUTHORIZATION_OUTCOME, useExisting: TelegramDriveAuthorizationOutcomeAdapter },
+    {
+      provide: 'TELEGRAM_DRIVE_AUTHORIZATION_OUTCOME_REGISTRATION',
+      useFactory: (
+        outcomes: DriveAuthorizationOutcomeRegistrationService,
+        telegram: TelegramDriveAuthorizationOutcomeAdapter,
+      ) => {
+        outcomes.register(telegram);
+        return outcomes;
+      },
+      inject: [DriveAuthorizationOutcomeRegistrationService, TelegramDriveAuthorizationOutcomeAdapter],
+    },
     {
       provide: TELEGRAM_DRIVE_CLIENT_DOCUMENT_READER,
       useFactory: () => new TelegramDriveClientDocumentAdapter(new TelegramHttpDriveClientDocumentGateway()),
-    },
-    {
-      provide: DriveAuthorizationPollingService,
-      useFactory: (authorization, credentials, accounts, outcomes) => new DriveAuthorizationPollingService(
-        authorization,
-        credentials,
-        accounts,
-        outcomes,
-      ),
-      inject: [DRIVE_DEVICE_AUTHORIZATION, DRIVE_CREDENTIAL_REPOSITORY, DRIVE_ACCOUNT, DRIVE_AUTHORIZATION_OUTCOME],
-    },
-    {
-      provide: BeginDriveConnectionUseCase,
-      useFactory: (clock) => new BeginDriveConnectionUseCase(
-        clock,
-        () => readFileSync(
-          process.env.HOME_WORKER_INSTALLATION_ID_PATH ?? '/etc/home-worker/installation-id',
-          'utf8',
-        ).trim(),
-      ),
-      inject: [CLOCK],
-    },
-    {
-      provide: SubmitDriveClientUseCase,
-      useFactory: (credentials, authorization, polling) => new SubmitDriveClientUseCase(credentials, authorization, polling),
-      inject: [DRIVE_CREDENTIAL_REPOSITORY, DRIVE_DEVICE_AUTHORIZATION, DriveAuthorizationPollingService],
-    },
-    {
-      provide: ConfirmDriveAccountUseCase,
-      useFactory: (credentials, accounts, clock) => new ConfirmDriveAccountUseCase(credentials, accounts, clock),
-      inject: [DRIVE_CREDENTIAL_REPOSITORY, DRIVE_ACCOUNT, CLOCK],
-    },
-    {
-      provide: CancelDriveConnectionUseCase,
-      useFactory: (credentials, polling) => new CancelDriveConnectionUseCase(credentials, polling),
-      inject: [DRIVE_CREDENTIAL_REPOSITORY, DriveAuthorizationPollingService],
-    },
-    {
-      provide: DisconnectDriveUseCase,
-      useFactory: (credentials, authorization, polling, archive, clock) => new DisconnectDriveUseCase(
-        credentials,
-        authorization,
-        polling,
-        archive,
-        clock,
-      ),
-      inject: [DRIVE_CREDENTIAL_REPOSITORY, DRIVE_DEVICE_AUTHORIZATION, DriveAuthorizationPollingService, ARCHIVE_ARTIFACT_REPOSITORY, CLOCK],
     },
     ClaimAdminUseCase,
     InviteUseCase,

@@ -82,7 +82,7 @@ export class ImportConfigHandler implements TelegramHandler, WorkflowDraftCancel
     private readonly guard: RoleMiddleware,
     @Inject(USER_REPOSITORY) private readonly users: UserRepositoryPort,
     private readonly workflows: WorkflowEntryCoordinator,
-    private readonly drafts: WorkflowDraftRegistry,
+    @Inject(WorkflowDraftRegistry) private readonly drafts: WorkflowDraftRegistry,
     @Optional() private readonly navigation?: WorkflowNavigationHandler,
   ) {
     this.drafts.register('sensor-import', this);

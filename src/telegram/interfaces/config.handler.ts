@@ -136,7 +136,7 @@ export class ConfigHandler implements TelegramHandler, WorkflowDraftCanceller {
     private readonly removeSensor: RemoveSensorUseCase,
     private readonly guard: RoleMiddleware,
     private readonly workflows: WorkflowEntryCoordinator,
-    private readonly drafts: WorkflowDraftRegistry,
+    @Inject(WorkflowDraftRegistry) private readonly drafts: WorkflowDraftRegistry,
     @Optional() private readonly navigation?: WorkflowNavigationHandler,
     @Inject(FEATURE_AVAILABILITY)
     private readonly availability: Pick<FeatureAvailabilityPort, 'inspect' | 'requireReady'> = alwaysAvailable,

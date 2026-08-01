@@ -21,13 +21,20 @@ export interface BootDiagnostics {
 @Injectable()
 export class BootRecoveryService {
   private readonly logger = new Logger(BootRecoveryService.name);
+  private archiveRecovery: (() => Promise<void>) | null = null;
 
   constructor(
     @Inject(CLOCK_SYNC_PROBE) private readonly clockSync: ClockSyncProbePort,
     private readonly recoveryState: DatabaseRecoveryState,
   ) {}
 
+  /** Registered by ArchiveModule without introducing a System→Archive cycle. */
+  registerArchiveRecovery(recover: () => Promise<void>): void {
+    this.archiveRecovery = recover;
+  }
+
   async run(): Promise<BootDiagnostics> {
+    await this.archiveRecovery?.();
     const dbRecovery = this.recoveryState.recovery;
     if (dbRecovery === 'restored_from_backup') {
       this.logger.warn('Database was restored from local backup after corruption');

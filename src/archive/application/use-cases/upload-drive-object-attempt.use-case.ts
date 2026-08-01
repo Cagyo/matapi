@@ -108,6 +108,25 @@ export class UploadDriveObjectAttemptUseCase {
     const claimed = await this.repository.claimAttempt(attempt.id, {
       owner: this.owner(), nowMs: this.now(), leaseMs: this.leaseMs,
     });
+    return this.runClaimed(claimed, connection, signal);
+  }
+
+  /** Runs a scheduler-owned short-CAS claim without attempting to claim it twice. */
+  async executeClaimed(
+    claimed: ClaimedAttempt,
+    signal: AbortSignal,
+  ): Promise<UploadDriveObjectAttemptResult> {
+    throwIfAborted(signal);
+    const connection = await this.requireActiveConnection();
+    this.requireConnection(claimed.artifact, connection, claimed.attempt);
+    return this.runClaimed(claimed, connection, signal);
+  }
+
+  private async runClaimed(
+    claimed: ClaimedAttempt,
+    connection: DriveConnection,
+    signal: AbortSignal,
+  ): Promise<UploadDriveObjectAttemptResult> {
     let lease = claimed.lease;
     let terminalized = false;
     let release: (() => void) | null = null;

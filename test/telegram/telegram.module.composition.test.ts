@@ -78,7 +78,10 @@ async function resolveHomeSummaryFromApplication(mode: 'mock' | 'real') {
   const { WorkflowNavigationPresenter } = await import('../../src/telegram/interfaces/workflow-navigation.presenter');
   let app: Awaited<ReturnType<typeof NestFactory.createApplicationContext>> | undefined;
   try {
-    app = await NestFactory.createApplicationContext(AppModule, { logger: false });
+    app = await NestFactory.createApplicationContext(AppModule, {
+      logger: false,
+      abortOnError: false,
+    });
     return {
       summary: app.get(GetHomeSummaryUseCase),
       targets: app.get(NotificationTargetDirectoryService),

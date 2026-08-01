@@ -41,7 +41,7 @@ export class SettingsHandler implements TelegramHandler, WorkflowDraftCanceller 
     private readonly botCommandsMenu: BotCommandsMenuService,
     private readonly guard: RoleMiddleware,
     private readonly workflows: WorkflowEntryCoordinator,
-    private readonly drafts: WorkflowDraftRegistry,
+    @Inject(WorkflowDraftRegistry) private readonly drafts: WorkflowDraftRegistry,
     @Optional() private readonly navigation?: WorkflowNavigationHandler,
   ) {
     this.drafts.register('language', this);

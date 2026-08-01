@@ -88,7 +88,7 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
     private readonly guard: RoleMiddleware,
     private readonly sources: CameraSourcesHandler,
     private readonly workflows: WorkflowEntryCoordinator,
-    private readonly drafts: WorkflowDraftRegistry,
+    @Inject(WorkflowDraftRegistry) private readonly drafts: WorkflowDraftRegistry,
     @Optional() private readonly navigation?: WorkflowNavigationHandler,
     @Optional() @Inject(FEATURE_AVAILABILITY) private readonly availability?: FeatureAvailabilityPort,
   ) {

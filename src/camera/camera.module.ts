@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { readFileSync } from 'node:fs';
 import { ArchiveModule } from '../archive/archive.module';
 import { ARCHIVE_REGISTRATION, type ArchiveRegistrationPort } from '../archive/application/ports/archive-registration.port';
+import { ArchiveSchedulerHooksService } from '../archive/application/archive-scheduler.service';
 import { DatabaseModule } from '../database/database.module';
 import { EventModule } from '../events/event.module';
 import { FeatureModule } from '../features/feature.module';
@@ -26,7 +27,6 @@ import { CleanupDriveUseCase } from './application/cleanup-drive.use-case';
 import { CleanupLocalStorageUseCase } from './application/cleanup-local-storage.use-case';
 import { DisableMotionUseCase } from './application/disable-motion.use-case';
 import { FeatureCameraRuntimeLifecycleService } from './application/feature-camera-runtime-lifecycle.service';
-import { DriveSyncScheduler } from './application/drive-sync.scheduler';
 import { EnableMotionUseCase } from './application/enable-motion.use-case';
 import { GdriveStatusUseCase } from './application/gdrive-status.use-case';
 import { GetMotionPhotoUseCase } from './application/get-motion-photo.use-case';
@@ -48,7 +48,6 @@ import { RecordMotionEndUseCase } from './application/record-motion-end.use-case
 import { RecordMotionStartUseCase } from './application/record-motion-start.use-case';
 import { RecordSnapshotUseCase } from './application/record-snapshot.use-case';
 import { RegisterCompletedMotionVideosUseCase } from './application/register-completed-motion-videos.use-case';
-import { CompletedMotionVideoRecoveryScheduler } from './application/completed-motion-video-recovery.scheduler';
 import { StopLiveStreamUseCase } from './application/stop-live-stream.use-case';
 import { TriggerCleanUseCase } from './application/trigger-clean.use-case';
 import { UploadMotionUseCase } from './application/upload-motion.use-case';
@@ -243,7 +242,25 @@ function isInstallationId(value: string | undefined): value is string {
       ),
       inject: [MEDIA_REPOSITORY, MEDIA_WRITER, COMPLETED_MOTION_VIDEO, ARCHIVE_REGISTRATION],
     },
-    CompletedMotionVideoRecoveryScheduler,
+    {
+      provide: 'ARCHIVE_CAMERA_SCHEDULER_HOOK_REGISTRATION',
+      useFactory: (
+        hooks: ArchiveSchedulerHooksService,
+        registration: RegisterCompletedMotionVideosUseCase,
+        cleanup: CleanupLocalStorageUseCase,
+      ) => {
+        hooks.registerCamera({
+          reconcileMotion: async () => registration.reconcile(),
+          cleanupLocal: async () => { await cleanup.execute(); },
+        });
+        return hooks;
+      },
+      inject: [
+        ArchiveSchedulerHooksService,
+        RegisterCompletedMotionVideosUseCase,
+        CleanupLocalStorageUseCase,
+      ],
+    },
     {
       provide: MOTION_CONTROL,
       useClass: mode === 'stub' ? StubMotionControlAdapter : MotionDaemonAdapter,
@@ -491,7 +508,6 @@ function isInstallationId(value: string | undefined): value is string {
     CleanupDriveUseCase,
     CleanupCoordinatorService,
     TriggerCleanUseCase,
-    DriveSyncScheduler,
     UpdateGdriveAuthUseCase,
   ],
   exports: [
@@ -520,6 +536,7 @@ function isInstallationId(value: string | undefined): value is string {
     StopLiveStreamUseCase,
     LiveStreamSessionService,
     LiveStreamMessageCleanupService,
+    RtspSourceStartGate,
   ],
 })
 export class CameraModule {}

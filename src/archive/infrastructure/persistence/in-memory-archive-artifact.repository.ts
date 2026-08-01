@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type {
   ArchiveArtifactRepositoryPort, ArchiveObjectAttempt, ArchiveSchedulerState, ArchiveSchedulerUpdate, AttemptLease, ClaimAttempt,
-  ClaimedAttempt, EncryptedUploadSession, ReconciliationSelection, RetentionSelection, VerifiedArchiveObject,
+  ClaimedAttempt, EncryptedUploadSession, ReconciliationSelection, RetentionSelection, UnattemptedArtifactSelection, VerifiedArchiveObject,
 } from '../../application/ports/archive-artifact-repository.port';
 import { ArchiveArtifact, type RegisterArchiveArtifact } from '../../domain/archive-artifact.entity';
 import { DriveObjectAttempt } from '../../domain/drive-object-attempt.entity';
@@ -74,7 +74,13 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
     validateClaim(input);
     this.recoverExpired(input.nowMs);
     const candidate = [...this.attempts.entries()]
-      .filter(([, entry]) => (entry.attempt.state === 'pending' || entry.attempt.state === 'retryable') && entry.nextAttemptMs <= input.nowMs)
+      .filter(([, entry]) => {
+        const artifact = this.artifacts.get(entry.attempt.artifactId);
+        return (entry.attempt.state === 'pending' || entry.attempt.state === 'retryable')
+          && entry.nextAttemptMs <= input.nowMs
+          && (input.kind === undefined || artifact?.kind === input.kind)
+          && (!input.retryOnly || entry.attempt.state === 'retryable');
+      })
       .sort(([leftId, left], [rightId, right]) => this.queueOrder(leftId, left, rightId, right, input))[0];
     if (!candidate) return null;
     return this.claim(candidate[0], candidate[1], input, true);
@@ -179,6 +185,20 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
     return [...this.attempts.values()].filter(({ attempt }) => attempt.artifactId === artifactId)
       .sort((left, right) => left.attempt.createdAtMs - right.attempt.createdAtMs || left.attempt.id.localeCompare(right.attempt.id))
       .map(project);
+  }
+
+  async listUnattemptedArtifacts(selection: UnattemptedArtifactSelection): Promise<readonly ArchiveArtifact[]> {
+    const attempted = new Set([...this.attempts.values()].map(({ attempt }) => attempt.artifactId));
+    return [...this.artifacts.values()]
+      .filter((artifact) => artifact.kind === selection.kind && artifact.state === 'pending' && !attempted.has(artifact.id))
+      .sort((left, right) => left.createdAtMs - right.createdAtMs || left.id.localeCompare(right.id))
+      .slice(0, selection.limit);
+  }
+
+  async listUnverifiedArtifactPaths(): Promise<readonly string[]> {
+    return [...this.artifacts.values()]
+      .filter((artifact) => artifact.state !== 'verified')
+      .map((artifact) => artifact.trustedPath);
   }
 
   async listReconciliationBatch(selection: ReconciliationSelection): Promise<readonly ArchiveObjectAttempt[]> {

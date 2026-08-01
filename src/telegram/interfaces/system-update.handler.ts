@@ -1,4 +1,4 @@
-import { Injectable, Logger, Optional } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { CallbackQueryContext, Composer, InlineKeyboard } from 'grammy';
 import { en } from '../../locales/en';
 import { SystemDepsCheckFailedError } from '../../system/domain/errors/system-deps-check-failed.error';
@@ -52,7 +52,7 @@ export class SystemUpdateHandler implements TelegramHandler, WorkflowDraftCancel
     private readonly systemUpdate: SystemUpdateUseCase,
     private readonly guard: RoleMiddleware,
     private readonly workflows: WorkflowEntryCoordinator,
-    private readonly drafts: WorkflowDraftRegistry,
+    @Inject(WorkflowDraftRegistry) private readonly drafts: WorkflowDraftRegistry,
     @Optional() private readonly navigation?: WorkflowNavigationHandler,
   ) {
     this.drafts.register('system-update', this);

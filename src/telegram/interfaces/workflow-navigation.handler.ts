@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { Composer } from 'grammy';
 import { ClaimWorkflowReturnUseCase } from '../application/claim-workflow-return.use-case';
 import { CompleteWorkflowReturnUseCase } from '../application/complete-workflow-return.use-case';
@@ -31,13 +31,13 @@ export interface WorkflowCompletionPresentation {
 @Injectable()
 export class WorkflowNavigationHandler implements TelegramHandler {
   constructor(
-    private readonly guard: RoleMiddleware,
-    private readonly claimWorkflow: ClaimWorkflowReturnUseCase,
-    private readonly completeWorkflow: CompleteWorkflowReturnUseCase,
-    private readonly restoreWorkflow: RestoreWorkflowOriginUseCase,
-    private readonly drafts: WorkflowDraftRegistry,
-    private readonly operations: WorkflowOperationQueue,
-    private readonly presenter: WorkflowNavigationPresenter,
+    @Inject(RoleMiddleware) private readonly guard: RoleMiddleware,
+    @Inject(ClaimWorkflowReturnUseCase) private readonly claimWorkflow: ClaimWorkflowReturnUseCase,
+    @Inject(CompleteWorkflowReturnUseCase) private readonly completeWorkflow: CompleteWorkflowReturnUseCase,
+    @Inject(RestoreWorkflowOriginUseCase) private readonly restoreWorkflow: RestoreWorkflowOriginUseCase,
+    @Inject(WorkflowDraftRegistry) private readonly drafts: WorkflowDraftRegistry,
+    @Inject(WorkflowOperationQueue) private readonly operations: WorkflowOperationQueue,
+    @Inject(WorkflowNavigationPresenter) private readonly presenter: WorkflowNavigationPresenter,
   ) {}
 
   register(composer: Composer<TelegramContext>): void {

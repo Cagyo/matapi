@@ -1,33 +1,325 @@
 import { Module } from '@nestjs/common';
+import { readFileSync } from 'node:fs';
+import { ConfigModule } from '../config/config.module';
+import {
+  TIMEZONE_OPTIONS,
+  type TimezoneOptions,
+} from '../config/application/ports/timezone-options.port';
+import { DatabaseModule } from '../database/database.module';
+import {
+  DATABASE_BACKUP_SNAPSHOT,
+  type DatabaseBackupSnapshotPort,
+} from '../database/application/ports/database-backup-snapshot.port';
 import { EventModule } from '../events/event.module';
-import { ARCHIVE_ARTIFACT_REPOSITORY } from './application/ports/archive-artifact-repository.port';
+import { CLOCK, type ClockPort } from '../events/domain/ports/clock.port';
+import { SystemModule } from '../system/system.module';
+import { BootRecoveryService } from '../system/application/boot-recovery.service';
+import {
+  ArchiveRuntimeLifecycleService,
+} from './application/archive-runtime-lifecycle.service';
+import { ArchiveRemoteMutationLockService } from './application/archive-remote-mutation-lock.service';
+import {
+  ArchiveSchedulerHooksService,
+  ArchiveSchedulerService,
+} from './application/archive-scheduler.service';
+import { ArchiveTransferSemaphoreService } from './application/archive-transfer-semaphore.service';
+import {
+  DriveAuthorizationOutcomeRegistrationService,
+  DriveAuthorizationPollingService,
+} from './application/drive-authorization-polling.service';
+import {
+  ARCHIVE_ARTIFACT_REPOSITORY,
+  type ArchiveArtifactRepositoryPort,
+} from './application/ports/archive-artifact-repository.port';
 import { ARCHIVE_REGISTRATION } from './application/ports/archive-registration.port';
 import { ARCHIVE_SECRET_CIPHER } from './application/ports/archive-secret-cipher.port';
-import { DRIVE_ACCOUNT } from './application/ports/drive-account.port';
-import { DRIVE_CREDENTIAL_REPOSITORY } from './application/ports/drive-credential-repository.port';
-import { DRIVE_DEVICE_AUTHORIZATION } from './application/ports/drive-device-authorization.port';
-import { GoogleDriveConnectionAccountAdapter } from './infrastructure/google/google-drive-connection-account.adapter';
+import { DRIVE_ACCOUNT, type DriveAccountPort } from './application/ports/drive-account.port';
+import { DRIVE_ARCHIVE, type DriveArchivePort } from './application/ports/drive-archive.port';
+import { DRIVE_AUTHORIZATION_OUTCOME } from './application/ports/drive-authorization-outcome.port';
+import {
+  DRIVE_CREDENTIAL_REPOSITORY,
+  type DriveCredentialRepositoryPort,
+} from './application/ports/drive-credential-repository.port';
+import {
+  DRIVE_DEVICE_AUTHORIZATION,
+  type DriveDeviceAuthorizationPort,
+} from './application/ports/drive-device-authorization.port';
+import { BeginDriveConnectionUseCase } from './application/use-cases/begin-drive-connection.use-case';
+import { CancelDriveConnectionUseCase } from './application/use-cases/cancel-drive-connection.use-case';
+import { ConfirmDriveAccountUseCase } from './application/use-cases/confirm-drive-account.use-case';
+import { CreateDatabaseBackupUseCase } from './application/use-cases/create-database-backup.use-case';
+import { DisconnectDriveUseCase } from './application/use-cases/disconnect-drive.use-case';
+import { RegisterArchiveArtifactUseCase } from './application/use-cases/register-archive-artifact.use-case';
+import { RetireDriveConnectionUseCase } from './application/use-cases/retire-drive-connection.use-case';
+import { SubmitDriveClientUseCase } from './application/use-cases/submit-drive-client.use-case';
+import {
+  ARCHIVE_UPLOAD_SOURCE,
+  UploadDriveObjectAttemptUseCase,
+  type ArchiveUploadSourcePort,
+} from './application/use-cases/upload-drive-object-attempt.use-case';
 import { GoogleDeviceAuthorizationAdapter } from './infrastructure/google/google-device-authorization.adapter';
+import { GoogleDriveArchiveAdapter } from './infrastructure/google/google-drive-archive.adapter';
+import { GoogleDriveConnectionAccountAdapter } from './infrastructure/google/google-drive-connection-account.adapter';
 import { AesGcmArchiveSecretAdapter } from './infrastructure/persistence/aes-gcm-archive-secret.adapter';
 import { DrizzleArchiveArtifactRepository } from './infrastructure/persistence/drizzle-archive-artifact.repository';
 import { DrizzleDriveCredentialRepository } from './infrastructure/persistence/drizzle-drive-credential.repository';
-import { RegisterArchiveArtifactUseCase } from './application/use-cases/register-archive-artifact.use-case';
+import { FsArchiveUploadSourceAdapter } from './infrastructure/persistence/fs-archive-upload-source.adapter';
+import { InMemoryArchiveArtifactRepository } from './infrastructure/persistence/in-memory-archive-artifact.repository';
+import { InMemoryDriveCredentialRepository } from './infrastructure/persistence/in-memory-drive-credential.repository';
 
-/** Archive-owned provider bindings consumed through ports by Telegram and later schedulers. */
+const ARCHIVE_BOOT_RECOVERY_REGISTRATION = Symbol('ARCHIVE_BOOT_RECOVERY_REGISTRATION');
+const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
+
+/** Archive composition root. Cross-context consumers receive only ports and application services. */
 @Module({
-  imports: [EventModule],
+  imports: [ConfigModule, DatabaseModule, EventModule, SystemModule],
   providers: [
-    { provide: ARCHIVE_SECRET_CIPHER, useFactory: () => new AesGcmArchiveSecretAdapter(process.env.HOME_WORKER_ARCHIVE_KEY_PATH ?? '/etc/home-worker/archive.key') },
-    DrizzleDriveCredentialRepository,
-    { provide: DRIVE_CREDENTIAL_REPOSITORY, useExisting: DrizzleDriveCredentialRepository },
-    DrizzleArchiveArtifactRepository,
-    { provide: ARCHIVE_ARTIFACT_REPOSITORY, useExisting: DrizzleArchiveArtifactRepository },
+    {
+      provide: ARCHIVE_SECRET_CIPHER,
+      useFactory: () => new AesGcmArchiveSecretAdapter(
+        process.env.HOME_WORKER_ARCHIVE_KEY_PATH ?? '/etc/home-worker/archive.key',
+      ),
+    },
+    archiveMode === 'memory' ? InMemoryDriveCredentialRepository : DrizzleDriveCredentialRepository,
+    {
+      provide: DRIVE_CREDENTIAL_REPOSITORY,
+      useExisting: archiveMode === 'memory'
+        ? InMemoryDriveCredentialRepository
+        : DrizzleDriveCredentialRepository,
+    },
+    archiveMode === 'memory' ? InMemoryArchiveArtifactRepository : DrizzleArchiveArtifactRepository,
+    {
+      provide: ARCHIVE_ARTIFACT_REPOSITORY,
+      useExisting: archiveMode === 'memory'
+        ? InMemoryArchiveArtifactRepository
+        : DrizzleArchiveArtifactRepository,
+    },
     RegisterArchiveArtifactUseCase,
     { provide: ARCHIVE_REGISTRATION, useExisting: RegisterArchiveArtifactUseCase },
-    { provide: DRIVE_DEVICE_AUTHORIZATION, useClass: GoogleDeviceAuthorizationAdapter },
+    { provide: DRIVE_DEVICE_AUTHORIZATION, useFactory: () => new GoogleDeviceAuthorizationAdapter() },
     GoogleDriveConnectionAccountAdapter,
     { provide: DRIVE_ACCOUNT, useExisting: GoogleDriveConnectionAccountAdapter },
+    {
+      provide: GoogleDriveArchiveAdapter,
+      useFactory: (credentials: DriveCredentialRepositoryPort) =>
+        new GoogleDriveArchiveAdapter(credentials),
+      inject: [DRIVE_CREDENTIAL_REPOSITORY],
+    },
+    { provide: DRIVE_ARCHIVE, useExisting: GoogleDriveArchiveAdapter },
+    FsArchiveUploadSourceAdapter,
+    { provide: ARCHIVE_UPLOAD_SOURCE, useExisting: FsArchiveUploadSourceAdapter },
+    {
+      provide: ArchiveTransferSemaphoreService,
+      useFactory: () => new ArchiveTransferSemaphoreService(),
+    },
+    ArchiveRemoteMutationLockService,
+    ArchiveSchedulerHooksService,
+    DriveAuthorizationOutcomeRegistrationService,
+    {
+      provide: DRIVE_AUTHORIZATION_OUTCOME,
+      useExisting: DriveAuthorizationOutcomeRegistrationService,
+    },
+    {
+      provide: DriveAuthorizationPollingService,
+      useFactory: (
+        authorization: DriveDeviceAuthorizationPort,
+        credentials: DriveCredentialRepositoryPort,
+        accounts: DriveAccountPort,
+        outcomes: DriveAuthorizationOutcomeRegistrationService,
+      ) => new DriveAuthorizationPollingService(authorization, credentials, accounts, outcomes),
+      inject: [
+        DRIVE_DEVICE_AUTHORIZATION,
+        DRIVE_CREDENTIAL_REPOSITORY,
+        DRIVE_ACCOUNT,
+        DriveAuthorizationOutcomeRegistrationService,
+      ],
+    },
+    {
+      provide: BeginDriveConnectionUseCase,
+      useFactory: (clock: ClockPort) =>
+        new BeginDriveConnectionUseCase(clock, archiveInstallationId),
+      inject: [CLOCK],
+    },
+    {
+      provide: SubmitDriveClientUseCase,
+      useFactory: (
+        credentials: DriveCredentialRepositoryPort,
+        authorization: DriveDeviceAuthorizationPort,
+        polling: DriveAuthorizationPollingService,
+      ) => new SubmitDriveClientUseCase(credentials, authorization, polling),
+      inject: [DRIVE_CREDENTIAL_REPOSITORY, DRIVE_DEVICE_AUTHORIZATION, DriveAuthorizationPollingService],
+    },
+    {
+      provide: ConfirmDriveAccountUseCase,
+      useFactory: (
+        credentials: DriveCredentialRepositoryPort,
+        account: DriveAccountPort,
+        clock: ClockPort,
+      ) => new ConfirmDriveAccountUseCase(credentials, account, clock),
+      inject: [DRIVE_CREDENTIAL_REPOSITORY, DRIVE_ACCOUNT, CLOCK],
+    },
+    {
+      provide: CancelDriveConnectionUseCase,
+      useFactory: (
+        credentials: DriveCredentialRepositoryPort,
+        polling: DriveAuthorizationPollingService,
+      ) => new CancelDriveConnectionUseCase(credentials, polling),
+      inject: [DRIVE_CREDENTIAL_REPOSITORY, DriveAuthorizationPollingService],
+    },
+    {
+      provide: DisconnectDriveUseCase,
+      useFactory: (
+        credentials: DriveCredentialRepositoryPort,
+        authorization: DriveDeviceAuthorizationPort,
+        polling: DriveAuthorizationPollingService,
+        repository: ArchiveArtifactRepositoryPort,
+        clock: ClockPort,
+      ) => new DisconnectDriveUseCase(credentials, authorization, polling, repository, clock),
+      inject: [
+        DRIVE_CREDENTIAL_REPOSITORY,
+        DRIVE_DEVICE_AUTHORIZATION,
+        DriveAuthorizationPollingService,
+        ARCHIVE_ARTIFACT_REPOSITORY,
+        CLOCK,
+      ],
+    },
+    {
+      provide: RetireDriveConnectionUseCase,
+      useFactory: (
+        credentials: DriveCredentialRepositoryPort,
+        authorization: DriveDeviceAuthorizationPort,
+        clock: ClockPort,
+      ) => new RetireDriveConnectionUseCase(credentials, authorization, clock),
+      inject: [DRIVE_CREDENTIAL_REPOSITORY, DRIVE_DEVICE_AUTHORIZATION, CLOCK],
+    },
+    {
+      provide: CreateDatabaseBackupUseCase,
+      useFactory: (
+        snapshots: DatabaseBackupSnapshotPort,
+        registration: RegisterArchiveArtifactUseCase,
+        repository: ArchiveArtifactRepositoryPort,
+        timezone: TimezoneOptions,
+      ) => new CreateDatabaseBackupUseCase(
+        snapshots,
+        registration,
+        repository,
+        archiveInstallationId,
+        timezone,
+      ),
+      inject: [
+        DATABASE_BACKUP_SNAPSHOT,
+        ARCHIVE_REGISTRATION,
+        ARCHIVE_ARTIFACT_REPOSITORY,
+        TIMEZONE_OPTIONS,
+      ],
+    },
+    {
+      provide: UploadDriveObjectAttemptUseCase,
+      useFactory: (
+        repository: ArchiveArtifactRepositoryPort,
+        credentials: DriveCredentialRepositoryPort,
+        drive: DriveArchivePort,
+        cipher: AesGcmArchiveSecretAdapter,
+        source: ArchiveUploadSourcePort,
+        semaphore: ArchiveTransferSemaphoreService,
+      ) => new UploadDriveObjectAttemptUseCase(
+        repository, credentials, drive, cipher, source, semaphore,
+      ),
+      inject: [
+        ARCHIVE_ARTIFACT_REPOSITORY,
+        DRIVE_CREDENTIAL_REPOSITORY,
+        DRIVE_ARCHIVE,
+        ARCHIVE_SECRET_CIPHER,
+        ARCHIVE_UPLOAD_SOURCE,
+        ArchiveTransferSemaphoreService,
+      ],
+    },
+    {
+      provide: ArchiveSchedulerService,
+      useFactory: (
+        repository: ArchiveArtifactRepositoryPort,
+        backups: CreateDatabaseBackupUseCase,
+        uploads: UploadDriveObjectAttemptUseCase,
+        hooks: ArchiveSchedulerHooksService,
+        lock: ArchiveRemoteMutationLockService,
+        clock: ClockPort,
+      ) => new ArchiveSchedulerService(repository, backups, uploads, hooks, lock, clock),
+      inject: [
+        ARCHIVE_ARTIFACT_REPOSITORY,
+        CreateDatabaseBackupUseCase,
+        UploadDriveObjectAttemptUseCase,
+        ArchiveSchedulerHooksService,
+        ArchiveRemoteMutationLockService,
+        CLOCK,
+      ],
+    },
+    {
+      provide: ArchiveRuntimeLifecycleService,
+      useFactory: (
+        credentials: DriveCredentialRepositoryPort,
+        repository: ArchiveArtifactRepositoryPort,
+        retire: RetireDriveConnectionUseCase,
+        polling: DriveAuthorizationPollingService,
+        snapshots: DatabaseBackupSnapshotPort,
+        backups: CreateDatabaseBackupUseCase,
+        scheduler: ArchiveSchedulerService,
+        hooks: ArchiveSchedulerHooksService,
+        clock: ClockPort,
+        lock: ArchiveRemoteMutationLockService,
+      ) => new ArchiveRuntimeLifecycleService(
+        credentials, repository, retire, polling, snapshots, backups,
+        scheduler, hooks, clock, lock,
+      ),
+      inject: [
+        DRIVE_CREDENTIAL_REPOSITORY,
+        ARCHIVE_ARTIFACT_REPOSITORY,
+        RetireDriveConnectionUseCase,
+        DriveAuthorizationPollingService,
+        DATABASE_BACKUP_SNAPSHOT,
+        CreateDatabaseBackupUseCase,
+        ArchiveSchedulerService,
+        ArchiveSchedulerHooksService,
+        CLOCK,
+        ArchiveRemoteMutationLockService,
+      ],
+    },
+    {
+      provide: ARCHIVE_BOOT_RECOVERY_REGISTRATION,
+      useFactory: (
+        lifecycle: ArchiveRuntimeLifecycleService,
+        bootRecovery: BootRecoveryService,
+      ) => {
+        bootRecovery.registerArchiveRecovery(() => lifecycle.start());
+        return lifecycle;
+      },
+      inject: [ArchiveRuntimeLifecycleService, BootRecoveryService],
+    },
   ],
-  exports: [DRIVE_CREDENTIAL_REPOSITORY, ARCHIVE_ARTIFACT_REPOSITORY, ARCHIVE_REGISTRATION, DRIVE_DEVICE_AUTHORIZATION, DRIVE_ACCOUNT],
+  exports: [
+    DRIVE_CREDENTIAL_REPOSITORY,
+    ARCHIVE_ARTIFACT_REPOSITORY,
+    ARCHIVE_REGISTRATION,
+    DRIVE_DEVICE_AUTHORIZATION,
+    DRIVE_ACCOUNT,
+    BeginDriveConnectionUseCase,
+    SubmitDriveClientUseCase,
+    ConfirmDriveAccountUseCase,
+    CancelDriveConnectionUseCase,
+    DisconnectDriveUseCase,
+    DriveAuthorizationPollingService,
+    DriveAuthorizationOutcomeRegistrationService,
+    ArchiveSchedulerHooksService,
+    ArchiveRuntimeLifecycleService,
+  ],
 })
 export class ArchiveModule {}
+
+function archiveInstallationId(): string {
+  if (process.env.NODE_ENV === 'test') return '00000000-0000-4000-8000-000000000000';
+  const direct = process.env.HOME_WORKER_INSTALLATION_ID?.trim();
+  if (direct) return direct;
+  return readFileSync(
+    process.env.HOME_WORKER_INSTALLATION_ID_PATH ?? '/etc/home-worker/installation-id',
+    'utf8',
+  ).trim();
+}

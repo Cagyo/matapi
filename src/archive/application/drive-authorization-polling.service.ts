@@ -1,10 +1,34 @@
-import type { OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import type { DriveAuthorizationOutcomePort } from './ports/drive-authorization-outcome.port';
 import type { DriveDeviceAuthorizationPort, DeviceAuthorizationChallenge } from './ports/drive-device-authorization.port';
 import type { DriveClientCredentials, DriveCredentialRepositoryPort } from './ports/drive-credential-repository.port';
 import type { DriveAccountPort } from './ports/drive-account.port';
 import { DriveAuthorizationDeniedError } from '../domain/errors/drive-authorization-denied.error';
 import { DriveReauthorizationRequiredError } from '../domain/errors/drive-reauthorization-required.error';
+
+/** Archive-owned runtime seam for Telegram authorization outcomes. */
+@Injectable()
+export class DriveAuthorizationOutcomeRegistrationService
+implements DriveAuthorizationOutcomePort {
+  private readonly logger = new Logger(DriveAuthorizationOutcomeRegistrationService.name);
+  private delegate: DriveAuthorizationOutcomePort | null = null;
+
+  register(delegate: DriveAuthorizationOutcomePort): void {
+    this.delegate = delegate;
+  }
+
+  clear(delegate?: DriveAuthorizationOutcomePort): void {
+    if (delegate === undefined || this.delegate === delegate) this.delegate = null;
+  }
+
+  async publish(outcome: Parameters<DriveAuthorizationOutcomePort['publish']>[0]): Promise<void> {
+    if (this.delegate === null) {
+      this.logger.warn('No Drive authorization outcome delegate is registered');
+      return;
+    }
+    await this.delegate.publish(outcome);
+  }
+}
 
 export interface StartDriveAuthorizationPolling {
   generationId: string;
@@ -20,6 +44,7 @@ export interface StartDriveAuthorizationPolling {
  * Owns process-memory-only device codes and starts a poll without awaiting it
  * from Telegram's update handler.
  */
+@Injectable()
 export class DriveAuthorizationPollingService implements OnModuleInit {
   private readonly requests = new Map<string, AbortController>();
 

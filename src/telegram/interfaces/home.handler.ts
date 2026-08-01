@@ -74,7 +74,8 @@ export class HomeHandler implements TelegramHandler {
     @Inject(HOME_ACTION_REPOSITORY) private readonly actions?: HomeActionRepositoryPort,
     @Inject(CLOCK) private readonly clock?: ClockPort,
     @Optional() @Inject(WorkflowEntryCoordinator) private readonly workflows?: WorkflowEntryCoordinator,
-    @Optional() private readonly workflowNavigation?: WorkflowNavigationHandler,
+    @Optional() @Inject(WorkflowNavigationHandler)
+    private readonly workflowNavigation?: WorkflowNavigationHandler,
     @Optional() private readonly feature?: FeatureHandler,
   ) {}
 

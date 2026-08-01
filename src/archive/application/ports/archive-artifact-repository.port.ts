@@ -85,6 +85,10 @@ export interface ClaimAttempt {
   preferBackups?: boolean;
   /** Admit due motion-video retries scheduled no later than this point. */
   forceVideoRetryBeforeMs?: number;
+  /** Restrict selection to one artifact class. */
+  kind?: ArchiveArtifactKind;
+  /** Restrict selection to attempts that have already failed at least once. */
+  retryOnly?: boolean;
 }
 
 export interface ClaimedAttempt {
@@ -103,6 +107,11 @@ export interface RetentionSelection {
   limit: number;
   /** Inclusive provider-created-time bound used by age-based retention. */
   providerCreatedBeforeMs?: number;
+}
+
+export interface UnattemptedArtifactSelection {
+  kind: ArchiveArtifactKind;
+  limit: number;
 }
 
 export interface ArchiveSchedulerState {
@@ -144,6 +153,10 @@ export interface ArchiveArtifactRepositoryPort {
   markMissing(attemptId: string, expectedRevision: number, reason: string, nowMs: number): Promise<void>;
   markDetached(attemptId: string, expectedRevision: number, reason: string, nowMs: number): Promise<void>;
   listAttempts(artifactId: string): Promise<readonly ArchiveObjectAttempt[]>;
+  /** Registered artifacts for which no immutable remote attempt exists yet. */
+  listUnattemptedArtifacts(selection: UnattemptedArtifactSelection): Promise<readonly ArchiveArtifact[]>;
+  /** Paths whose immutable local bytes must not be pruned before verification. */
+  listUnverifiedArtifactPaths(): Promise<readonly string[]>;
   listReconciliationBatch(selection: ReconciliationSelection): Promise<readonly ArchiveObjectAttempt[]>;
   listRetentionCandidates(selection: RetentionSelection): Promise<readonly ArchiveObjectAttempt[]>;
   readSchedulerState(): Promise<ArchiveSchedulerState>;

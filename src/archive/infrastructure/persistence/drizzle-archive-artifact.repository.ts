@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, eq, gt, gte, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
+import { and, asc, eq, gt, gte, inArray, isNotNull, isNull, lte, ne, or, sql } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../../database/database.module';
 import { archiveArtifacts, archiveSchedulerState, driveObjectAttempts } from '../../../database/schema';
 import type {
   ArchiveArtifactRepositoryPort, ArchiveObjectAttempt, ArchiveSchedulerState, ArchiveSchedulerUpdate, AttemptLease, ClaimAttempt,
-  ClaimedAttempt, EncryptedUploadSession, ReconciliationSelection, RetentionSelection, VerifiedArchiveObject,
+  ClaimedAttempt, EncryptedUploadSession, ReconciliationSelection, RetentionSelection, UnattemptedArtifactSelection, VerifiedArchiveObject,
 } from '../../application/ports/archive-artifact-repository.port';
 import { ArchiveArtifact, type ArchiveArtifactKind, type RegisterArchiveArtifact } from '../../domain/archive-artifact.entity';
 import { DriveObjectAttempt, type DriveAttemptState } from '../../domain/drive-object-attempt.entity';
@@ -85,10 +85,16 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
     validateClaim(input);
     return this.immediate((tx) => {
       this.recoverExpiredInTransaction(tx, input.nowMs);
+      const conditions = [
+        inArray(driveObjectAttempts.state, ['pending', 'retryable']),
+        lte(driveObjectAttempts.nextAttemptAt, input.nowMs),
+        or(isNull(driveObjectAttempts.leaseExpiresAt), lte(driveObjectAttempts.leaseExpiresAt, input.nowMs)),
+      ];
+      if (input.kind !== undefined) conditions.push(eq(archiveArtifacts.kind, input.kind));
+      if (input.retryOnly) conditions.push(eq(driveObjectAttempts.state, 'retryable'));
       const row = tx.select({ attempt: driveObjectAttempts, kind: archiveArtifacts.kind }).from(driveObjectAttempts)
         .innerJoin(archiveArtifacts, eq(driveObjectAttempts.artifactId, archiveArtifacts.id))
-        .where(and(inArray(driveObjectAttempts.state, ['pending', 'retryable']), lte(driveObjectAttempts.nextAttemptAt, input.nowMs),
-          or(isNull(driveObjectAttempts.leaseExpiresAt), lte(driveObjectAttempts.leaseExpiresAt, input.nowMs))))
+        .where(and(...conditions))
         .orderBy(asc(queuePriority(input)), asc(driveObjectAttempts.nextAttemptAt), asc(driveObjectAttempts.createdAt), asc(driveObjectAttempts.id))
         .limit(1).get();
       return row ? this.claim(tx, row.attempt, input, true) : null;
@@ -213,6 +219,24 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
   async listAttempts(artifactId: string): Promise<readonly ArchiveObjectAttempt[]> {
     return this.db.select().from(driveObjectAttempts).where(eq(driveObjectAttempts.artifactId, artifactId))
       .orderBy(asc(driveObjectAttempts.createdAt), asc(driveObjectAttempts.id)).all().map(projectRow);
+  }
+
+  async listUnattemptedArtifacts(selection: UnattemptedArtifactSelection): Promise<readonly ArchiveArtifact[]> {
+    validateLimit(selection.limit);
+    return this.db.select({ artifact: archiveArtifacts }).from(archiveArtifacts)
+      .leftJoin(driveObjectAttempts, eq(driveObjectAttempts.artifactId, archiveArtifacts.id))
+      .where(and(
+        eq(archiveArtifacts.kind, selection.kind),
+        eq(archiveArtifacts.state, 'pending'),
+        isNull(driveObjectAttempts.id),
+      ))
+      .orderBy(asc(archiveArtifacts.createdAt), asc(archiveArtifacts.id))
+      .limit(selection.limit).all().map(({ artifact }) => toArtifact(artifact));
+  }
+
+  async listUnverifiedArtifactPaths(): Promise<readonly string[]> {
+    return this.db.select({ trustedPath: archiveArtifacts.trustedPath }).from(archiveArtifacts)
+      .where(ne(archiveArtifacts.state, 'verified')).all().map((row) => row.trustedPath);
   }
 
   async listReconciliationBatch(selection: ReconciliationSelection): Promise<readonly ArchiveObjectAttempt[]> {

@@ -6,6 +6,7 @@ import { EventModule } from './events/event.module';
 import { TelegramModule } from './telegram/telegram.module';
 import { CameraModule } from './camera/camera.module';
 import { NetworkModule } from './network/network.module';
+import { ArchiveModule } from './archive/archive.module';
 
 @Module({
   imports: [
@@ -13,6 +14,7 @@ import { NetworkModule } from './network/network.module';
     DatabaseModule,
     SensorModule,
     EventModule,
+    ArchiveModule,
     TelegramModule,
     CameraModule,
     NetworkModule,
