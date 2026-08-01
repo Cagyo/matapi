@@ -1,4 +1,4 @@
-import type { ArchiveArtifactKind, ArchiveArtifact, RegisterArchiveArtifact } from '../../domain/archive-artifact.entity';
+import type { ArchiveArtifactKind, ArchiveArtifact, ArchiveArtifactState, RegisterArchiveArtifact } from '../../domain/archive-artifact.entity';
 
 export const ARCHIVE_ARTIFACT_REPOSITORY = Symbol('ARCHIVE_ARTIFACT_REPOSITORY');
 
@@ -135,6 +135,11 @@ export interface ArchiveSchedulerUpdate {
   lastCleanupSuccessMs?: number | null;
 }
 
+export interface ArchiveStatusCounts {
+  artifacts: Record<ArchiveArtifactState, number>;
+  attempts: Record<ArchiveAttemptState, number>;
+}
+
 /** Provider-neutral durable archive queue and scheduler state boundary. */
 export interface ArchiveArtifactRepositoryPort {
   register(input: RegisterArchiveArtifact): Promise<ArchiveArtifact>;
@@ -179,6 +184,8 @@ export interface ArchiveArtifactRepositoryPort {
   /** Artifacts whose current verification pointer can be recovered from Drive metadata. */
   listRestorationCandidates(limit: number): Promise<readonly ArchiveArtifact[]>;
   listRetentionCandidates(selection: RetentionSelection): Promise<readonly ArchiveObjectAttempt[]>;
+  /** Aggregate-only status read; source paths, IDs, metadata, and errors stay private. */
+  readStatusCounts(): Promise<ArchiveStatusCounts>;
   readSchedulerState(): Promise<ArchiveSchedulerState>;
   compareAndSetSchedulerState(expectedRevision: number, update: ArchiveSchedulerUpdate): Promise<boolean>;
   releaseGenerationLeases(generationId: string, nowMs: number): Promise<void>;

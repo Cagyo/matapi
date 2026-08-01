@@ -158,13 +158,16 @@ export interface CameraStatusView {
 }
 
 export interface GdriveStatusView {
-  usedBytes: number;
-  totalBytes: number;
-  lastUploadAt: Date | null;
-  pendingUploads: number;
-  failedUploads: number;
-  lastError: string | null;
-  cleanupMinAgeDays: number;
+  connection: { generationId: string; state: string; errorCode: string | null } | null;
+  account: { permissionId: string; email: string | null; displayName: string | null } | null;
+  folders: { root: string; motion: string; backups: string } | null;
+  last: { refreshAtMs: number | null; uploadAtMs: number | null; backupAtMs: number | null; reconcileAtMs: number | null; cleanupAtMs: number | null };
+  artifacts: Record<string, number>;
+  attempts: Record<string, number>;
+  generations: readonly { generationId: string; state: string; retiredAtMs: number | null }[];
+  quota: { limitBytes: number | null; usageBytes: number; usageInDriveBytes: number; usageInDriveTrashBytes: number } | null;
+  reclamation: { windowStartedMs: number | null; reclaimedBytes: number } | null;
+  requiredActions: readonly ('reauthorize' | 'check-clock' | 'manual-cleanup')[];
 }
 
 export interface SystemOnlineView {
@@ -1320,22 +1323,40 @@ const enCatalog = {
     header: '☁️ Google Drive Status',
     body: (v: GdriveStatusView): string => {
       const lines = [
-        `📦 Used: ${gb(v.usedBytes)} / ${gb(v.totalBytes)} (${percent(v.usedBytes, v.totalBytes)})`,
-        `📤 Last upload: ${fmtDate(v.lastUploadAt)}`,
-        `📋 Pending uploads: ${v.pendingUploads} file${v.pendingUploads === 1 ? '' : 's'}`,
-        v.failedUploads > 0 && v.lastError
-          ? `⚠️ Failed uploads: ${v.failedUploads} (last error: ${v.lastError})`
-          : `⚠️ Failed uploads: ${v.failedUploads}`,
-        `🗑️ Auto-cleanup: active (min age: ${v.cleanupMinAgeDays} days)`,
+        `Connection: ${v.connection?.state ?? 'not connected'}`,
+        v.account ? `Account permission: ${v.account.permissionId}` : 'Account: unavailable',
+        `📦 Used: ${gb(v.quota?.usageBytes ?? null)} / ${gb(v.quota?.limitBytes ?? null)} (${percent(v.quota?.usageBytes ?? null, v.quota?.limitBytes ?? null)})`,
+        `Drive / Trash: ${gb(v.quota?.usageInDriveBytes ?? null)} / ${gb(v.quota?.usageInDriveTrashBytes ?? null)}`,
+        `📤 Last upload: ${fmtDate(v.last.uploadAtMs === null ? null : new Date(v.last.uploadAtMs))}`,
+        `💾 Last backup: ${fmtDate(v.last.backupAtMs === null ? null : new Date(v.last.backupAtMs))}`,
+        `🔄 Last reconcile / cleanup: ${fmtDate(v.last.reconcileAtMs === null ? null : new Date(v.last.reconcileAtMs))} / ${fmtDate(v.last.cleanupAtMs === null ? null : new Date(v.last.cleanupAtMs))}`,
+        `📋 Artifacts: ${Object.values(v.artifacts).reduce((sum, count) => sum + count, 0)}; attempts: ${Object.values(v.attempts).reduce((sum, count) => sum + count, 0)}`,
+        `⚠️ Missing / detached: ${v.attempts.missing ?? 0} / ${v.attempts.detached ?? 0}`,
       ];
-      if (v.failedUploads >= 5) {
-        lines.push(`🚨 Sync unhealthy — ${v.failedUploads} consecutive failures`);
-      }
+      if (v.connection?.errorCode) lines.push(`⚠️ Archive status: ${v.connection.errorCode}`);
+      if (v.reclamation) lines.push(`🧹 Reclaimed: ${gb(v.reclamation.reclaimedBytes)} (window: ${fmtDate(v.reclamation.windowStartedMs === null ? null : new Date(v.reclamation.windowStartedMs))})`);
+      if (v.generations.length > 0) lines.push(`ℹ️ Retired or disconnected generations: ${v.generations.length}`);
+      if (v.folders) lines.push(`Private folders:\nRoot: ${v.folders.root}\nMotion: ${v.folders.motion}\nBackups: ${v.folders.backups}`);
+      if (v.requiredActions.length > 0) lines.push(`Required actions: ${v.requiredActions.map((action) => ({ reauthorize: 'reauthorize', 'check-clock': 'check system clock', 'manual-cleanup': 'review archive cleanup' })[action]).join(', ')}`);
       return lines.join('\n');
     },
-    notInstalled: '❌ rclone is not installed.',
-    notConfigured: '❌ Google Drive is not configured. Run rclone config.',
-    statusFailed: (reason: string) => `❌ Failed to check Drive status: ${reason}`,
+    notInstalled: '❌ Google Drive integration is unavailable.',
+    notConfigured: '❌ Google Drive is not configured.',
+    statusFailed: (_reason: string) => '❌ Failed to check Drive status.',
+    statusUnavailable: '❌ Google Drive status is temporarily unavailable.',
+    alerts: {
+      'reauthorization-required': '⚠️ Google Drive needs administrator reauthorization.',
+      'policy-rejected': '⚠️ Google Drive rejected an archive policy operation.',
+      'quota-reclamation-required': '⚠️ Google Drive storage needs manual review or reclamation.',
+      'remote-object-missing': '⚠️ An archive object is missing and cannot be restored automatically.',
+      'remote-object-detached': '⚠️ An archive object changed outside the worker and was detached safely.',
+      'retired-archive': '⚠️ A retired archive generation needs administrator review.',
+      'upload-failure-prolonged': '⚠️ Archive uploads have been failing for an extended period.',
+      'backup-failure-prolonged': '⚠️ Archive backups have been failing for an extended period.',
+      'credential-corrupt': '🚨 Google Drive credentials are unavailable or corrupted.',
+      'clock-unhealthy': '⚠️ System clock health prevents safe archive maintenance.',
+      'local-disk-pressure': '🚨 Local disk pressure threatens archive staging capacity.',
+    },
     cleanButton: '🧹 Trigger Clean Now',
   },
 

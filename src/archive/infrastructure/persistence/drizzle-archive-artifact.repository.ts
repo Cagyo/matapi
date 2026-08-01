@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, eq, gt, gte, inArray, isNotNull, isNull, lte, max, ne, or, sql } from 'drizzle-orm';
+import { and, asc, count, eq, gt, gte, inArray, isNotNull, isNull, lte, max, ne, or, sql } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../../database/database.module';
 import { archiveArtifacts, archiveSchedulerState, driveObjectAttempts } from '../../../database/schema';
 import type {
-  ArchiveArtifactRepositoryPort, ArchiveObjectAttempt, ArchiveSchedulerState, ArchiveSchedulerUpdate, AttemptLease, ClaimAttempt,
+  ArchiveArtifactRepositoryPort, ArchiveObjectAttempt, ArchiveSchedulerState, ArchiveSchedulerUpdate, ArchiveStatusCounts, AttemptLease, ClaimAttempt,
   ClaimedAttempt, EncryptedUploadSession, ReconciliationSelection, RetentionSelection, UnattemptedArtifactSelection, VerifiedArchiveObject,
 } from '../../application/ports/archive-artifact-repository.port';
 import { ArchiveArtifact, type ArchiveArtifactKind, type RegisterArchiveArtifact } from '../../domain/archive-artifact.entity';
@@ -490,6 +490,23 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
     return this.db.select({ attempt: driveObjectAttempts }).from(driveObjectAttempts)
       .innerJoin(archiveArtifacts, eq(driveObjectAttempts.artifactId, archiveArtifacts.id)).where(and(...conditions))
       .orderBy(asc(driveObjectAttempts.verifiedCreatedTime), asc(driveObjectAttempts.id)).limit(selection.limit).all().map(({ attempt }) => projectRow(attempt));
+  }
+
+  async readStatusCounts(): Promise<ArchiveStatusCounts> {
+    const artifacts: ArchiveStatusCounts['artifacts'] = {
+      stabilizing: 0, pending: 0, verified: 0, local_missing: 0, superseded: 0,
+    };
+    const attempts: ArchiveStatusCounts['attempts'] = {
+      pending: 0, uploading: 0, retryable: 0, verified: 0, missing: 0,
+      detached: 0, conflict: 0, abandoned: 0, deleted: 0,
+    };
+    const artifactRows = this.db.select({ state: archiveArtifacts.state, count: count() })
+      .from(archiveArtifacts).groupBy(archiveArtifacts.state).all();
+    const attemptRows = this.db.select({ state: driveObjectAttempts.state, count: count() })
+      .from(driveObjectAttempts).groupBy(driveObjectAttempts.state).all();
+    for (const row of artifactRows) artifacts[row.state as keyof typeof artifacts] = row.count;
+    for (const row of attemptRows) attempts[row.state as keyof typeof attempts] = row.count;
+    return { artifacts, attempts };
   }
 
   async readSchedulerState(): Promise<ArchiveSchedulerState> {

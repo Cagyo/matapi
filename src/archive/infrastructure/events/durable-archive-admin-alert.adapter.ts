@@ -5,6 +5,7 @@ import type { ClockPort } from '../../../events/domain/ports/clock.port';
 import { en } from '../../../locales/en';
 import type {
   ArchiveAdminAlert,
+  ArchiveAdminAlertKind,
   ArchiveAdminAlertPort,
 } from '../../application/ports/archive-admin-alert.port';
 
@@ -17,13 +18,17 @@ export class DurableArchiveAdminAlertAdapter implements ArchiveAdminAlertPort {
     private readonly clock: ClockPort,
   ) {}
 
-  async alert(alert: ArchiveAdminAlert): Promise<void> {
+  async alert(
+    kind: ArchiveAdminAlertKind,
+    context: Omit<ArchiveAdminAlert, 'kind'>,
+  ): Promise<void> {
+    const alert: ArchiveAdminAlert = { ...context, kind };
     const queued = await this.queue.enqueueSystemEvent({
       type: 'archive_admin_alert',
       payload: {
         artifactId: alert.artifactId,
         message: messageFor(alert),
-        reason: alert.reason,
+        reason: alert.kind,
       },
       createdAt: this.clock.now(),
     });
@@ -32,5 +37,5 @@ export class DurableArchiveAdminAlertAdapter implements ArchiveAdminAlertPort {
 }
 
 function messageFor(alert: ArchiveAdminAlert): string {
-  return en.camera.adminAlert.gdriveSyncFailing(alert.reason);
+  return en.gdrive.alerts[alert.kind];
 }

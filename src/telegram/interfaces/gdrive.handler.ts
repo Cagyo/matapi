@@ -10,10 +10,7 @@ import {
   TELEGRAM_DRIVE_CLIENT_DOCUMENT_READER,
   type TelegramDriveClientDocumentAdapter,
 } from '../infrastructure/telegram-drive-client-document.adapter';
-import { GdriveStatusUseCase } from '../../camera/application/gdrive-status.use-case';
-import { GdriveNotConfiguredError } from '../../camera/domain/errors/gdrive-not-configured.error';
-import { GdriveNotInstalledError } from '../../camera/domain/errors/gdrive-not-installed.error';
-import { GdriveStatusFailedError } from '../../camera/domain/errors/gdrive-status-failed.error';
+import { ReportDriveStatusUseCase } from '../../archive/application/use-cases/report-drive-status.use-case';
 import { en } from '../../locales/en';
 import { RoleMiddleware } from './role.middleware';
 import { TelegramHandler } from './telegram-handler';
@@ -25,8 +22,7 @@ import {
 import { WorkflowNavigationHandler } from './workflow-navigation.handler';
 
 /**
- * `/gdrive status` — spec 15. Admin-only. Reports Drive quota, pending and
- * failed uploads, last upload time, and auto-cleanup configuration.
+ * `/gdrive status` — private-admin only. Reports the sanitized archive state.
  */
 @Injectable()
 export class GdriveHandler implements TelegramHandler {
@@ -35,7 +31,7 @@ export class GdriveHandler implements TelegramHandler {
   private readonly disconnects = new Map<string, { receiptId: string; generationId: string; userId: number; chatId: number }>();
 
   constructor(
-    private readonly status: GdriveStatusUseCase,
+    private readonly status: ReportDriveStatusUseCase,
     private readonly guard: RoleMiddleware,
     private readonly workflows: WorkflowEntryCoordinator,
     @Inject(WorkflowNavigationHandler) private readonly navigation: WorkflowNavigationHandler | undefined,
@@ -151,7 +147,7 @@ export class GdriveHandler implements TelegramHandler {
     const catalog = ctx.localeState?.catalog ?? en;
     if (parsed.action === 'd' || parsed.action === 'x') {
       const requested = this.disconnects.get(parsed.receiptId);
-      if (!requested || requested.generationId !== parsed.generationId || requested.userId !== current.userId || requested.chatId !== current.chatId) return;
+      if (requested?.generationId !== parsed.generationId || requested.userId !== current.userId || requested.chatId !== current.chatId) return;
       this.disconnects.delete(parsed.receiptId);
       if (parsed.action === 'x') { await ctx.reply(catalog.gdriveConnection.cancelled); return; }
       const result = await this.disconnect.execute(requested.generationId, AbortSignal.timeout(5_000));
@@ -159,7 +155,7 @@ export class GdriveHandler implements TelegramHandler {
       return;
     }
     const pending = this.pending.get(bindingKey(current.userId, current.chatId));
-    if (!pending || pending.receiptId !== parsed.receiptId || pending.generationId !== parsed.generationId) return;
+    if (pending?.receiptId !== parsed.receiptId || pending.generationId !== parsed.generationId) return;
     if (parsed.action === 'c') {
       this.pending.delete(bindingKey(current.userId, current.chatId));
       const result = await this.cancelConnection.execute({ generationId: pending.generationId, receiptId: pending.receiptId, adminUserId: current.userId, chatId: current.chatId });
@@ -189,7 +185,7 @@ export class GdriveHandler implements TelegramHandler {
   private async cancelAfterRoleLoss(ctx: TelegramContext, parsed: { receiptId: string; generationId: string }): Promise<void> {
     if (ctx.chat?.type !== 'private' || !ctx.from) return;
     const pending = this.pending.get(bindingKey(ctx.from.id, ctx.chat.id));
-    if (!pending || pending.receiptId !== parsed.receiptId || pending.generationId !== parsed.generationId) return;
+    if (pending?.receiptId !== parsed.receiptId || pending.generationId !== parsed.generationId) return;
     this.pending.delete(bindingKey(ctx.from.id, ctx.chat.id));
     await this.cancelConnection.execute({
       generationId: pending.generationId,
@@ -236,6 +232,9 @@ export class GdriveHandler implements TelegramHandler {
     _options: { includeCleanupAction?: boolean } = {},
     launch?: WorkflowLaunch,
   ): Promise<void> {
+    // This method is also reached from Home, so retain the private-admin gate
+    // even when command middleware is bypassed in a direct call.
+    if (!this.currentAdmin(ctx)) return;
     const receipt = launch?.receipt ?? await this.workflows.begin(ctx, 'drive-status', {
       source: 'natural-parent',
     });
@@ -243,15 +242,7 @@ export class GdriveHandler implements TelegramHandler {
     const catalog = ctx.localeState?.catalog ?? en;
     try {
       const result = await this.status.execute();
-      const body = catalog.gdrive.body({
-        usedBytes: result.quota.usedBytes,
-        totalBytes: result.quota.totalBytes,
-        lastUploadAt: result.lastUploadAt,
-        pendingUploads: result.pendingUploads,
-        failedUploads: result.failedUploads,
-        lastError: result.lastError,
-        cleanupMinAgeDays: result.cleanupMinAgeDays,
-      });
+      const body = catalog.gdrive.body(result);
       await this.complete(ctx, receipt, () => ctx.reply(`${catalog.gdrive.header}\n\n${body}`));
     } catch (err) {
       await this.handleError(ctx, receipt, err);
@@ -261,26 +252,13 @@ export class GdriveHandler implements TelegramHandler {
   private async handleError(
     ctx: TelegramContext,
     receipt: WorkflowLaunch['receipt'],
-    err: unknown,
+    _err: unknown,
   ): Promise<void> {
     const catalog = ctx.localeState?.catalog ?? en;
-    if (err instanceof GdriveNotInstalledError) {
-      await this.complete(ctx, receipt, () => ctx.reply(catalog.gdrive.notInstalled));
-      return;
-    }
-    if (err instanceof GdriveNotConfiguredError) {
-      await this.complete(ctx, receipt, () => ctx.reply(catalog.gdrive.notConfigured));
-      return;
-    }
-    if (err instanceof GdriveStatusFailedError) {
-      await this.complete(ctx, receipt, () => ctx.reply(catalog.gdrive.statusFailed(err.reason)));
-      return;
-    }
-    this.logger.error(
-      `/gdrive status failed: ${(err as Error).message}`,
-      (err as Error).stack,
-    );
-    await this.complete(ctx, receipt, () => ctx.reply(catalog.common.error('/gdrive status', (err as Error).message)));
+    // Provider errors can contain credentials or private Drive URLs. Neither
+    // replies nor logs include the raw error value.
+    this.logger.error('/gdrive status failed');
+    await this.complete(ctx, receipt, () => ctx.reply(catalog.gdrive.statusUnavailable));
   }
 
   private async complete(

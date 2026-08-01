@@ -1,5 +1,5 @@
 import type { DriveConnectionStatus } from '../../domain/drive-connection.entity';
-import type { DriveConnection } from '../../domain/drive-connection.entity';
+import type { DriveConnection, DriveConnectionSnapshot } from '../../domain/drive-connection.entity';
 
 export const DRIVE_CREDENTIAL_REPOSITORY = Symbol('DRIVE_CREDENTIAL_REPOSITORY');
 
@@ -84,6 +84,11 @@ export const DRIVE_CREDENTIAL_ERROR_CODES = [
 
 export type DriveCredentialErrorCode = (typeof DRIVE_CREDENTIAL_ERROR_CODES)[number];
 
+/** Sanitized, credential-free connection projection used by private admin status. */
+export interface DriveStatusConnection extends DriveConnectionSnapshot {
+  errorCode: string | null;
+}
+
 export type DriveConnectionTerminalStatus = Extract<
   DriveConnectionStatus,
   'retired_unmanaged' | 'disconnected'
@@ -99,6 +104,13 @@ export interface DriveCredentialRepositoryPort {
   reserveManagedFolder(input: ReserveManagedFolder): Promise<ManagedFolderReservation | null>;
   activate(input: ActivateDriveConnection): Promise<{ active: DriveConnection; retiringId: string | null }>;
   loadActive(): Promise<DriveConnection | null>;
+  listStatusConnections(): Promise<readonly DriveStatusConnection[]>;
+  readAlertCooldowns(generationId: string): Promise<Readonly<Record<string, number>> | null>;
+  compareAndSetAlertCooldowns(input: {
+    generationId: string;
+    expected: Readonly<Record<string, number>>;
+    next: Readonly<Record<string, number>>;
+  }): Promise<boolean>;
   readQuotaReclamation(generationId: string): Promise<DriveQuotaReclamationState | null>;
   compareAndSetQuotaReclamation(input: CompareAndSetDriveQuotaReclamation): Promise<boolean>;
   loadCredentials(generationId: string): Promise<{ client: DriveClientCredentials; tokens: OAuthTokenSet; revision: number } | null>;

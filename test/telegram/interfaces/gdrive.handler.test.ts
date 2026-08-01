@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
 import { catalogFor } from '../../../src/locales';
-import { GdriveNotConfiguredError } from '../../../src/camera/domain/errors/gdrive-not-configured.error';
 import { GdriveHandler } from '../../../src/telegram/interfaces/gdrive.handler';
 
 const receipt = {
@@ -33,6 +32,20 @@ function setup() {
 }
 
 describe('GdriveHandler', () => {
+  it('never exposes secrets or private links to a group response', async () => {
+    const { handler, status } = setup();
+    const ctx = {
+      from: { id: 42 }, chat: { id: 42, type: 'group' }, match: 'status',
+      localeState: { locale: 'en', catalog: catalogFor('en'), user: { telegramId: 42, role: 'admin' } },
+      reply: vi.fn(),
+    };
+
+    await handler.handleStatus(ctx as never);
+
+    expect(status.execute).not.toHaveBeenCalled();
+    expect(ctx.reply).not.toHaveBeenCalled();
+  });
+
   it('begins the direct Storage workflow and delivers status before origin restoration', async () => {
     const { commands, ctx, status, workflows, events } = setup();
     status.execute.mockResolvedValue({
@@ -46,14 +59,14 @@ describe('GdriveHandler', () => {
     expect(events).toEqual(['result', 'restore']);
   });
 
-  it('uses a captured receipt once and restores after a typed failure', async () => {
+  it('uses a captured receipt once and restores after a sanitized failure', async () => {
     const { handler, ctx, status, workflows, navigation, events } = setup();
-    status.execute.mockRejectedValue(new GdriveNotConfiguredError());
+    status.execute.mockRejectedValue(new Error('token=https://drive.google.com/private'));
 
     await handler.handleStatus(ctx as never, {}, { receipt } as never);
 
     expect(workflows.begin).not.toHaveBeenCalled();
-    expect(ctx.reply).toHaveBeenCalledWith(catalogFor('en').gdrive.notConfigured);
+    expect(ctx.reply).toHaveBeenCalledWith(catalogFor('en').gdrive.statusUnavailable);
     expect(navigation.complete).toHaveBeenCalledOnce();
     expect(events).toEqual(['result', 'restore']);
   });
@@ -68,7 +81,7 @@ describe('GdriveHandler Drive client uploads', () => {
       {} as never,
       {} as never,
       undefined,
-      documentReader as never,
+      documentReader,
     );
     const ctx = {
       from: { id: 7 },
@@ -90,7 +103,7 @@ describe('GdriveHandler Drive client uploads', () => {
       generationId: 'generation-00001', receiptId: 'abcdefghijklmnop', adminUserId: 7, chatId: 9,
       installationId: 'installation-1', createdAtMs: 1, expiresAtMs: 2,
     }) };
-    const handler = new GdriveHandler({} as never, {} as never, {} as never, undefined, documents as never, begin as never, submit as never);
+    const handler = new GdriveHandler({} as never, {} as never, {} as never, undefined, documents, begin as never, submit as never);
     const ctx = {
       from: { id: 7 }, chat: { id: 9, type: 'private' },
       message: { message_id: 3, document: { file_id: 'file-1', file_size: 20 } },
@@ -108,7 +121,7 @@ describe('GdriveHandler Drive client uploads', () => {
 
   it('rejects forwarded credential documents before reading them', async () => {
     const documents = { read: vi.fn() };
-    const handler = new GdriveHandler({} as never, {} as never, {} as never, undefined, documents as never);
+    const handler = new GdriveHandler({} as never, {} as never, {} as never, undefined, documents);
     const ctx = {
       from: { id: 7 }, chat: { id: 9, type: 'private' },
       message: { forward_origin: {}, document: { file_id: 'file-1', file_size: 20 } },

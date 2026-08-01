@@ -3,13 +3,10 @@ import { ru } from '../../src/locales/ru';
 
 const date = new Date('2030-01-01T12:00:00Z');
 const gdrive = (count: number) => ru.gdrive.body({
-  usedBytes: 0,
-  totalBytes: 0,
-  lastUploadAt: null,
-  pendingUploads: count,
-  failedUploads: 0,
-  lastError: null,
-  cleanupMinAgeDays: count,
+  connection: null, account: null, folders: null,
+  last: { refreshAtMs: null, uploadAtMs: null, backupAtMs: null, reconcileAtMs: null, cleanupAtMs: null },
+  artifacts: { pending: count }, attempts: { pending: count, missing: 0, detached: 0 },
+  generations: [], quota: null, reclamation: null, requiredActions: [],
 });
 
 describe('Russian count-bearing formatters', () => {
@@ -48,11 +45,8 @@ describe('Russian count-bearing formatters', () => {
     expect(ru.camera.eventsFooter(2)).toContain('2 события');
     expect(ru.camera.eventsFooter(5)).toContain('5 событий');
 
-    expect(gdrive(1)).toContain('1 файл');
-    expect(gdrive(2)).toContain('2 файла');
-    expect(gdrive(5)).toContain('5 файлов');
-    expect(gdrive(1)).toContain('1 день');
-    expect(gdrive(2)).toContain('2 дня');
-    expect(gdrive(5)).toContain('5 дней');
+    expect(gdrive(1)).toContain('Артефактов: 1; попыток: 1');
+    expect(gdrive(2)).toContain('Артефактов: 2; попыток: 2');
+    expect(gdrive(5)).toContain('Артефактов: 5; попыток: 5');
   });
 });

@@ -75,6 +75,7 @@ import { HOME_ACTION_REPOSITORY } from './application/ports/home-action-reposito
 import { ConsoleNotifierAdapter } from './infrastructure/console-notifier.adapter';
 import { EnvAdminClaimCredentialAdapter } from './infrastructure/env-admin-claim-credential.adapter';
 import { TelegramAdminAlertAdapter } from './infrastructure/telegram-admin-alert.adapter';
+import { TelegramArchiveAdminAlertAdapter } from './infrastructure/telegram-archive-admin-alert.adapter';
 import { TelegramLiveStreamMessageCleanupAdapter } from './infrastructure/telegram-live-stream-message-cleanup.adapter';
 import { DrizzleInviteCodeRepository } from './infrastructure/drizzle-invite-code.repository';
 import { DrizzleUserRepository } from './infrastructure/drizzle-user.repository';
@@ -327,6 +328,7 @@ const mode = resolveBotMode();
     TelegramNotifierAdapter,
     ConsoleNotifierAdapter,
     TelegramAdminAlertAdapter,
+    TelegramArchiveAdminAlertAdapter,
     TelegramLiveStreamMessageCleanupAdapter,
     TelegramRecipientDirectoryAdapter,
     GrammyBotGateway,

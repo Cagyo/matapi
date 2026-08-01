@@ -3,13 +3,10 @@ import { uk } from '../../src/locales/uk';
 
 const date = new Date('2030-01-01T12:00:00Z');
 const gdrive = (count: number) => uk.gdrive.body({
-  usedBytes: 0,
-  totalBytes: 0,
-  lastUploadAt: null,
-  pendingUploads: count,
-  failedUploads: 0,
-  lastError: null,
-  cleanupMinAgeDays: count,
+  connection: null, account: null, folders: null,
+  last: { refreshAtMs: null, uploadAtMs: null, backupAtMs: null, reconcileAtMs: null, cleanupAtMs: null },
+  artifacts: { pending: count }, attempts: { pending: count, missing: 0, detached: 0 },
+  generations: [], quota: null, reclamation: null, requiredActions: [],
 });
 
 describe('Ukrainian count-bearing formatters', () => {
@@ -48,11 +45,8 @@ describe('Ukrainian count-bearing formatters', () => {
     expect(uk.camera.eventsFooter(2)).toContain('2 події');
     expect(uk.camera.eventsFooter(5)).toContain('5 подій');
 
-    expect(gdrive(1)).toContain('1 файл');
-    expect(gdrive(2)).toContain('2 файли');
-    expect(gdrive(5)).toContain('5 файлів');
-    expect(gdrive(1)).toContain('1 день');
-    expect(gdrive(2)).toContain('2 дні');
-    expect(gdrive(5)).toContain('5 днів');
+    expect(gdrive(1)).toContain('Артефактів: 1; спроб: 1');
+    expect(gdrive(2)).toContain('Артефактів: 2; спроб: 2');
+    expect(gdrive(5)).toContain('Артефактів: 5; спроб: 5');
   });
 });

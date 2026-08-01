@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq, inArray, isNull, lte, or } from 'drizzle-orm';
+import { and, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../../database/database.module';
 import { driveConnections } from '../../../database/schema';
 import type {
@@ -8,6 +8,7 @@ import type {
   DriveClientCredentials,
   DriveConnectionTerminalStatus,
   DriveCredentialRepositoryPort,
+  DriveStatusConnection,
   DriveQuotaReclamationState,
   MergeRefreshedTokens,
   ManagedFolderReservation,
@@ -128,7 +129,7 @@ export class DrizzleDriveCredentialRepository implements DriveCredentialReposito
       motionId: driveConnections.motionFolderId,
       backupsId: driveConnections.backupsFolderId,
     }).from(driveConnections).where(and(eq(driveConnections.id, generationId), eq(driveConnections.status, 'staged'))).get();
-    return row === undefined ? null : row;
+    return row ?? null;
   }
 
   async reserveManagedFolder(input: ReserveManagedFolder): Promise<ManagedFolderReservation | null> {
@@ -163,8 +164,7 @@ export class DrizzleDriveCredentialRepository implements DriveCredentialReposito
       .where(and(eq(driveConnections.id, input.stagedId), eq(driveConnections.status, 'staged'), eq(driveConnections.revision, input.expectedRevision)))
       .get();
     const currentForTransfer = this.db.select().from(driveConnections).where(eq(driveConnections.currentSlot, 1)).get();
-    const transfer = stagedForTransfer && currentForTransfer
-      && currentForTransfer.clientIdHash === stagedForTransfer.clientIdHash
+    const transfer = stagedForTransfer && currentForTransfer?.clientIdHash === stagedForTransfer.clientIdHash
       && currentForTransfer.permissionId === input.permissionId
       && currentForTransfer.installationId === stagedForTransfer.installationId
       ? await this.reencryptForGeneration(stagedForTransfer, currentForTransfer)
@@ -175,8 +175,8 @@ export class DrizzleDriveCredentialRepository implements DriveCredentialReposito
         .get();
       if (!staged) throw conflict('Staged Drive connection changed before activation');
       const current = tx.select().from(driveConnections).where(eq(driveConnections.currentSlot, 1)).get();
-      if (current && current.clientIdHash === staged.clientIdHash && current.permissionId === input.permissionId && current.installationId === staged.installationId) {
-        if (!transfer || transfer.stagedId !== staged.id || transfer.currentId !== current.id) {
+      if (current?.clientIdHash === staged.clientIdHash && current.permissionId === input.permissionId && current.installationId === staged.installationId) {
+        if (transfer?.stagedId !== staged.id || transfer.currentId !== current.id) {
           throw conflict('Drive connection changed before encrypted credential replacement');
         }
         const currentConnection = toConnection(current);
@@ -240,6 +240,30 @@ export class DrizzleDriveCredentialRepository implements DriveCredentialReposito
     return row ? toConnection(row) : null;
   }
 
+  async listStatusConnections(): Promise<readonly DriveStatusConnection[]> {
+    return this.db.select().from(driveConnections).all().map(toStatusConnection);
+  }
+
+  async readAlertCooldowns(generationId: string): Promise<Readonly<Record<string, number>> | null> {
+    const row = this.db.select({ alertCooldowns: driveConnections.alertCooldowns })
+      .from(driveConnections).where(eq(driveConnections.id, generationId)).get();
+    return row === undefined ? null : parseCooldowns(row.alertCooldowns);
+  }
+
+  async compareAndSetAlertCooldowns(input: {
+    generationId: string;
+    expected: Readonly<Record<string, number>>;
+    next: Readonly<Record<string, number>>;
+  }): Promise<boolean> {
+    if (!validCooldowns(input.expected) || !validCooldowns(input.next)) return false;
+    const result = this.db.update(driveConnections).set({ alertCooldowns: { ...input.next } })
+      .where(and(
+        eq(driveConnections.id, input.generationId),
+        sql`${driveConnections.alertCooldowns} = ${JSON.stringify(input.expected)}`,
+      )).run();
+    return result.changes === 1;
+  }
+
   async readQuotaReclamation(generationId: string): Promise<DriveQuotaReclamationState | null> {
     const row = this.db.select({
       windowStartedMs: driveConnections.quotaReclamationStartedAt,
@@ -275,7 +299,7 @@ export class DrizzleDriveCredentialRepository implements DriveCredentialReposito
 
   async loadCredentials(generationId: string): Promise<{ client: DriveClientCredentials; tokens: OAuthTokenSet; revision: number } | null> {
     const row = this.db.select().from(driveConnections).where(eq(driveConnections.id, generationId)).get();
-    if (!row || !row.clientEnvelope || !row.tokenEnvelope) return null;
+    if (!row?.clientEnvelope || !row.tokenEnvelope) return null;
     const [client, tokens] = await Promise.all([
       this.decryptClient(row.clientEnvelope, row.installationId, row.id),
       this.decryptTokens(row.tokenEnvelope, row.installationId, row.id),
@@ -305,7 +329,7 @@ export class DrizzleDriveCredentialRepository implements DriveCredentialReposito
     const row = this.db.select().from(driveConnections)
       .where(and(eq(driveConnections.id, input.generationId), eq(driveConnections.revision, input.expectedRevision), eq(driveConnections.currentSlot, 1)))
       .get();
-    if (!row || !row.tokenEnvelope) return false;
+    if (!row?.tokenEnvelope) return false;
     const existing = await this.decryptTokens(row.tokenEnvelope, row.installationId, row.id);
     const tokens: OAuthTokenSet = { ...input.tokens, refreshToken: input.tokens.refreshToken ?? existing.refreshToken };
     const envelope = await this.encryptTokens(tokens, row.installationId, row.id);
@@ -318,7 +342,7 @@ export class DrizzleDriveCredentialRepository implements DriveCredentialReposito
   async requireReauthorization(generationId: string, expectedRevision: number, errorCode: string, atMs: number): Promise<boolean> {
     return this.immediate((tx) => {
       const row = tx.select().from(driveConnections).where(and(eq(driveConnections.id, generationId), eq(driveConnections.revision, expectedRevision), eq(driveConnections.currentSlot, 1))).get();
-      if (!row || row.status !== 'active') return false;
+      if (row?.status !== 'active') return false;
       const reauthorizationRequired = toConnection(row).requireReauthorization(atMs);
       const updated = tx.update(driveConnections).set({
         status: reauthorizationRequired.status,
@@ -451,8 +475,25 @@ function toConnection(row: ConnectionRow): DriveConnection {
   });
 }
 
+function toStatusConnection(row: ConnectionRow): DriveStatusConnection {
+  return { ...toConnection(row), errorCode: row.errorCode };
+}
+
 function emptyTokens(): OAuthTokenSet {
   return { accessToken: null, refreshToken: null, expiryDateMs: null, tokenType: null, scope: null };
+}
+
+function parseCooldowns(value: unknown): Record<string, number> {
+  if (value === null || value === undefined) return {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const cooldowns = Object.fromEntries(Object.entries(value).filter(
+    ([key, entry]) => key.length > 0 && Number.isSafeInteger(entry) && entry >= 0,
+  ));
+  return cooldowns;
+}
+
+function validCooldowns(cooldowns: Readonly<Record<string, number>>): boolean {
+  return Object.entries(cooldowns).every(([key, value]) => key.length > 0 && Number.isSafeInteger(value) && value >= 0);
 }
 
 function revise(connection: DriveConnection, revision: number, updatedAtMs: number): DriveConnection {

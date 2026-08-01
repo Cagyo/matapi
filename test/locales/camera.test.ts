@@ -168,32 +168,35 @@ describe('en.camera', () => {
 
 describe('en.gdrive', () => {
   const base = {
-    usedBytes: 8.2 * 1024 ** 3,
-    totalBytes: 15 * 1024 ** 3,
-    lastUploadAt: new Date('2026-04-08T15:30:00'),
-    pendingUploads: 3,
-    failedUploads: 0,
-    lastError: null,
-    cleanupMinAgeDays: 30,
+    connection: { generationId: 'g1', state: 'active', errorCode: null },
+    account: { permissionId: 'perm-1', email: null, displayName: null },
+    folders: null,
+    last: { refreshAtMs: null, uploadAtMs: new Date('2026-04-08T15:30:00').getTime(), backupAtMs: null, reconcileAtMs: null, cleanupAtMs: null },
+    artifacts: { pending: 3 },
+    attempts: { pending: 3, missing: 0, detached: 0 },
+    generations: [],
+    quota: { usageBytes: 8.2 * 1024 ** 3, limitBytes: 15 * 1024 ** 3, usageInDriveBytes: 8 * 1024 ** 3, usageInDriveTrashBytes: .2 * 1024 ** 3 },
+    reclamation: null,
+    requiredActions: [],
   };
 
   it('renders a healthy status body', () => {
     const body = en.gdrive.body(base);
     expect(body).toContain('📦 Used: 8.2 GB / 15.0 GB (55%)');
-    expect(body).toContain('📋 Pending uploads: 3 files');
-    expect(body).toContain('⚠️ Failed uploads: 0');
-    expect(body).toContain('🗑️ Auto-cleanup: active (min age: 30 days)');
+    expect(body).toContain('Connection: active');
+    expect(body).toContain('Account permission: perm-1');
+    expect(body).toContain('📋 Artifacts: 3; attempts: 3');
     expect(body).not.toContain('🚨');
   });
 
-  it('adds an unhealthy banner past the failure threshold', () => {
+  it('renders private folder links and required actions only in the admin status view', () => {
     const body = en.gdrive.body({
       ...base,
-      failedUploads: 5,
-      lastError: 'auth token expired',
+      folders: { root: 'https://drive.google.com/root', motion: 'https://drive.google.com/motion', backups: 'https://drive.google.com/backups' },
+      requiredActions: ['reauthorize', 'manual-cleanup'],
     });
-    expect(body).toContain('⚠️ Failed uploads: 5 (last error: auth token expired)');
-    expect(body).toContain('🚨 Sync unhealthy — 5 consecutive failures');
+    expect(body).toContain('Private folders:');
+    expect(body).toContain('reauthorize');
   });
 });
 

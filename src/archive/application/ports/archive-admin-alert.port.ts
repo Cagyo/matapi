@@ -1,11 +1,37 @@
 export const ARCHIVE_ADMIN_ALERT = Symbol('ARCHIVE_ADMIN_ALERT');
 
+export const ARCHIVE_ADMIN_ALERT_KINDS = [
+  'reauthorization-required',
+  'policy-rejected',
+  'quota-reclamation-required',
+  'remote-object-missing',
+  'remote-object-detached',
+  'retired-archive',
+  'upload-failure-prolonged',
+  'backup-failure-prolonged',
+  'credential-corrupt',
+  'clock-unhealthy',
+  'local-disk-pressure',
+] as const;
+
+export type ArchiveAdminAlertKind = (typeof ARCHIVE_ADMIN_ALERT_KINDS)[number];
+
 export interface ArchiveAdminAlert {
-  artifactId: string;
-  reason: 'remote_missing_without_local_source' | 'remote_detached';
+  kind: ArchiveAdminAlertKind;
+  generationId: string;
+  artifactId?: string;
+  /** Sanitized code only. Provider messages, credentials, and links never cross this port. */
+  errorCode?: string;
 }
 
-/** Required at-least-once durable handoff for administrator-facing archive alerts. */
+export interface ArchiveAdminAlertDeliveryPort {
+  send(alert: ArchiveAdminAlert): Promise<void>;
+}
+
+/** Durable, rate-limited handoff for administrator-facing archive alerts. */
 export interface ArchiveAdminAlertPort {
-  alert(alert: ArchiveAdminAlert): Promise<void>;
+  alert(
+    kind: ArchiveAdminAlertKind,
+    context: Omit<ArchiveAdminAlert, 'kind'>,
+  ): Promise<void>;
 }

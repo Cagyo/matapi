@@ -140,9 +140,9 @@ export class ReconcileDriveUseCase {
           this.now(),
         ));
       } else {
-        await this.alerts.alert({
+        await this.alerts.alert('remote-object-missing', {
+          generationId: active.id,
           artifactId: artifact.id,
-          reason: 'remote_missing_without_local_source',
         });
         await exclusive(lock, () => this.repository.markMissing(
           attempt.id,
@@ -154,7 +154,10 @@ export class ReconcileDriveUseCase {
       result.missing += 1;
       return;
     }
-    await this.alerts.alert({ artifactId: artifact.id, reason: 'remote_detached' });
+    await this.alerts.alert('remote-object-detached', {
+      generationId: active.id,
+      artifactId: artifact.id,
+    });
     await exclusive(lock, () => this.repository.markDetached(
       attempt.id, attempt.revision, 'remote_metadata_changed', this.now(),
     ));

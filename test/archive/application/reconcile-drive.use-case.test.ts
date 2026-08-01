@@ -133,13 +133,13 @@ async function fixture(localAvailable = true) {
   });
   await repository.markVerified(attempt.id, claimed.lease, archiveObject(remote()), 1_200);
   const drive = new FakeDrive();
-  const alerts: { artifactId: string; reason: string }[] = [];
+  const alerts: { kind: string; generationId: string; artifactId?: string }[] = [];
   const reconcile = new ReconcileDriveUseCase(
     repository,
     { loadActive: async () => active },
     drive,
     source(localAvailable),
-    { alert: async (alert) => void alerts.push(alert) },
+    { alert: async (kind, context) => void alerts.push({ kind, ...context }) },
     { now: () => NOW, pageSize: 2, maxPages: 4 },
   );
   return { repository, artifact, drive, reconcile, alerts, active };
@@ -202,7 +202,7 @@ describe('ReconcileDriveUseCase', () => {
     expect(attempts.map((attempt) => attempt.state)).toEqual(['missing']);
     expect(fixtureValue.drive.generatedIds).toEqual([]);
     expect(fixtureValue.alerts).toEqual([
-      { artifactId: fixtureValue.artifact.id, reason: 'remote_missing_without_local_source' },
+      { kind: 'remote-object-missing', generationId: fixtureValue.active.id, artifactId: fixtureValue.artifact.id },
     ]);
   });
 

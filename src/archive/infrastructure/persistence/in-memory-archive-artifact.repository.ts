@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type {
-  ArchiveArtifactRepositoryPort, ArchiveObjectAttempt, ArchiveSchedulerState, ArchiveSchedulerUpdate, AttemptLease, ClaimAttempt,
+  ArchiveArtifactRepositoryPort, ArchiveObjectAttempt, ArchiveSchedulerState, ArchiveSchedulerUpdate, ArchiveStatusCounts, AttemptLease, ClaimAttempt,
   ClaimedAttempt, EncryptedUploadSession, ReconciliationSelection, RetentionSelection, UnattemptedArtifactSelection, VerifiedArchiveObject,
 } from '../../application/ports/archive-artifact-repository.port';
 import { ArchiveArtifact, type RegisterArchiveArtifact } from '../../domain/archive-artifact.entity';
@@ -356,6 +356,19 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
         && (selection.providerCreatedBeforeMs === undefined || attempt.verifiedMetadata!.createdTimeMs <= selection.providerCreatedBeforeMs))
       .sort((left, right) => left.attempt.verifiedMetadata!.createdTimeMs - right.attempt.verifiedMetadata!.createdTimeMs || left.attempt.id.localeCompare(right.attempt.id))
       .slice(0, selection.limit).map(project);
+  }
+
+  async readStatusCounts(): Promise<ArchiveStatusCounts> {
+    const artifacts: ArchiveStatusCounts['artifacts'] = {
+      stabilizing: 0, pending: 0, verified: 0, local_missing: 0, superseded: 0,
+    };
+    const attempts: ArchiveStatusCounts['attempts'] = {
+      pending: 0, uploading: 0, retryable: 0, verified: 0, missing: 0,
+      detached: 0, conflict: 0, abandoned: 0, deleted: 0,
+    };
+    for (const artifact of this.artifacts.values()) artifacts[artifact.state] += 1;
+    for (const { attempt } of this.attempts.values()) attempts[attempt.state] += 1;
+    return { artifacts, attempts };
   }
 
   async readSchedulerState(): Promise<ArchiveSchedulerState> {

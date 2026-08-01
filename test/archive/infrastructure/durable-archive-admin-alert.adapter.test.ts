@@ -15,9 +15,9 @@ describe('DurableArchiveAdminAlertAdapter', () => {
       { now: () => new Date('2030-01-01T00:00:00.000Z') },
     );
 
-    await expect(adapter.alert({
+    await expect(adapter.alert('remote-object-missing', {
+      generationId: 'generation-1',
       artifactId: 'artifact-1',
-      reason: 'remote_missing_without_local_source',
     })).rejects.toThrow('notifier offline');
 
     await expect(repository.pending()).resolves.toEqual([
@@ -26,8 +26,8 @@ describe('DurableArchiveAdminAlertAdapter', () => {
         type: 'archive_admin_alert',
         payload: {
           artifactId: 'artifact-1',
-          message: '⚠️ Google Drive sync failing: remote_missing_without_local_source',
-          reason: 'remote_missing_without_local_source',
+          message: '⚠️ An archive object is missing and cannot be restored automatically.',
+          reason: 'remote-object-missing',
         },
       }),
     ]);

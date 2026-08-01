@@ -5,6 +5,7 @@ import type {
   CompareAndSetDriveQuotaReclamation,
   DriveQuotaReclamationState,
   DriveCredentialRepositoryPort,
+  DriveStatusConnection,
   MergeRefreshedTokens,
   ManagedFolderReservation,
   ManagedFolderRole,
@@ -26,6 +27,7 @@ interface Entry {
   expiresAtMs: number | null;
   reservations: Omit<ManagedFolderReservation, 'revision'>;
   quotaReclamation: DriveQuotaReclamationState;
+  alertCooldowns: Record<string, number>;
 }
 
 /** In-memory parity adapter for isolated use-case tests. */
@@ -35,7 +37,7 @@ export class InMemoryDriveCredentialRepository implements DriveCredentialReposit
   async stage(input: StageDriveConnection): Promise<DriveConnection> {
     if ([...this.entries.values()].some(({ connection }) => connection.status === 'staged')) throw conflict('A Drive setup is already staged');
     const connection = DriveConnection.stage({ id: input.id, installationId: input.installationId, nowMs: input.createdAtMs });
-    this.entries.set(input.id, { connection, clientIdHash: input.clientIdHash, client: { ...input.client }, tokens: emptyTokens(), receiptId: input.receiptId, adminUserId: input.adminUserId, chatId: input.chatId, expiresAtMs: input.expiresAtMs, reservations: emptyReservations(), quotaReclamation: emptyQuotaReclamation() });
+    this.entries.set(input.id, { connection, clientIdHash: input.clientIdHash, client: { ...input.client }, tokens: emptyTokens(), receiptId: input.receiptId, adminUserId: input.adminUserId, chatId: input.chatId, expiresAtMs: input.expiresAtMs, reservations: emptyReservations(), quotaReclamation: emptyQuotaReclamation(), alertCooldowns: {} });
     return connection;
   }
 
@@ -48,14 +50,14 @@ export class InMemoryDriveCredentialRepository implements DriveCredentialReposit
 
   async discardStaged(id: string, receiptId: string): Promise<boolean> {
     const entry = this.entries.get(id);
-    if (!entry || entry.connection.status !== 'staged' || entry.receiptId !== receiptId) return false;
+    if (entry?.connection.status !== 'staged' || entry.receiptId !== receiptId) return false;
     this.entries.delete(id);
     return true;
   }
 
   async storeExchangedTokens(id: string, expectedRevision: number, tokens: OAuthTokenSet): Promise<boolean> {
     const entry = this.entries.get(id);
-    if (!entry || entry.connection.status !== 'staged' || entry.connection.revision !== expectedRevision) return false;
+    if (entry?.connection.status !== 'staged' || entry.connection.revision !== expectedRevision) return false;
     entry.tokens = { ...tokens };
     entry.connection = revise(entry.connection, expectedRevision + 1, Date.now());
     return true;
@@ -63,13 +65,13 @@ export class InMemoryDriveCredentialRepository implements DriveCredentialReposit
 
   async loadManagedFolderReservation(generationId: string): Promise<ManagedFolderReservation | null> {
     const entry = this.entries.get(generationId);
-    if (!entry || entry.connection.status !== 'staged') return null;
+    if (entry?.connection.status !== 'staged') return null;
     return { revision: entry.connection.revision, ...entry.reservations };
   }
 
   async reserveManagedFolder(input: ReserveManagedFolder): Promise<ManagedFolderReservation | null> {
     const entry = this.entries.get(input.generationId);
-    if (!entry || entry.connection.status !== 'staged' || entry.connection.revision !== input.expectedRevision) return null;
+    if (entry?.connection.status !== 'staged' || entry.connection.revision !== input.expectedRevision) return null;
     const key = reservationKey(input.role);
     const existing = entry.reservations[key];
     if (existing !== null) return existing === input.folderId ? { revision: entry.connection.revision, ...entry.reservations } : null;
@@ -79,9 +81,9 @@ export class InMemoryDriveCredentialRepository implements DriveCredentialReposit
 
   async activate(input: ActivateDriveConnection): Promise<{ active: DriveConnection; retiringId: string | null }> {
     const staged = this.entries.get(input.stagedId);
-    if (!staged || staged.connection.status !== 'staged' || staged.connection.revision !== input.expectedRevision) throw conflict('Staged Drive connection changed before activation');
+    if (staged?.connection.status !== 'staged' || staged.connection.revision !== input.expectedRevision) throw conflict('Staged Drive connection changed before activation');
     const current = [...this.entries.values()].find(({ connection }) => connection.status === 'active' || connection.status === 'reauth_required');
-    if (current && current.clientIdHash === staged.clientIdHash && current.connection.permissionId === input.permissionId && current.connection.installationId === staged.connection.installationId) {
+    if (current?.clientIdHash === staged.clientIdHash && current.connection.permissionId === input.permissionId && current.connection.installationId === staged.connection.installationId) {
       current.client = staged.client && { ...staged.client };
       current.tokens = staged.tokens && { ...staged.tokens };
       current.connection = current.connection.status === 'reauth_required'
@@ -99,6 +101,26 @@ export class InMemoryDriveCredentialRepository implements DriveCredentialReposit
 
   async loadActive(): Promise<DriveConnection | null> {
     return [...this.entries.values()].find(({ connection }) => connection.status === 'active' || connection.status === 'reauth_required')?.connection ?? null;
+  }
+
+  async listStatusConnections(): Promise<readonly DriveStatusConnection[]> {
+    return [...this.entries.values()].map(({ connection }) => ({ ...connection, errorCode: null }));
+  }
+
+  async readAlertCooldowns(generationId: string): Promise<Readonly<Record<string, number>> | null> {
+    const entry = this.entries.get(generationId);
+    return entry ? { ...entry.alertCooldowns } : null;
+  }
+
+  async compareAndSetAlertCooldowns(input: {
+    generationId: string;
+    expected: Readonly<Record<string, number>>;
+    next: Readonly<Record<string, number>>;
+  }): Promise<boolean> {
+    const entry = this.entries.get(input.generationId);
+    if (!entry || !sameCooldowns(entry.alertCooldowns, input.expected) || !validCooldowns(input.next)) return false;
+    entry.alertCooldowns = { ...input.next };
+    return true;
   }
 
   async readQuotaReclamation(generationId: string): Promise<DriveQuotaReclamationState | null> {
@@ -123,7 +145,7 @@ export class InMemoryDriveCredentialRepository implements DriveCredentialReposit
 
   async replaceCredentials(generationId: string, expectedRevision: number, client: DriveClientCredentials, tokens: OAuthTokenSet): Promise<DriveConnection> {
     const entry = this.entries.get(generationId);
-    if (!entry || entry.connection.revision !== expectedRevision) throw conflict('Drive connection credentials changed before replacement');
+    if (entry?.connection.revision !== expectedRevision) throw conflict('Drive connection credentials changed before replacement');
     entry.client = { ...client };
     entry.tokens = { ...tokens };
     entry.connection = revise(entry.connection, expectedRevision + 1, Date.now());
@@ -140,14 +162,14 @@ export class InMemoryDriveCredentialRepository implements DriveCredentialReposit
 
   async requireReauthorization(generationId: string, expectedRevision: number, _errorCode: string, atMs: number): Promise<boolean> {
     const entry = this.entries.get(generationId);
-    if (!entry || entry.connection.status !== 'active' || entry.connection.revision !== expectedRevision) return false;
+    if (entry?.connection.status !== 'active' || entry.connection.revision !== expectedRevision) return false;
     entry.connection = entry.connection.requireReauthorization(atMs);
     return true;
   }
 
   async beginDisconnect(generationId: string, expectedRevision: number): Promise<DriveConnection> {
     const entry = this.entries.get(generationId);
-    if (!entry || entry.connection.revision !== expectedRevision || (entry.connection.status !== 'active' && entry.connection.status !== 'reauth_required')) throw conflict('Drive connection changed before disconnection');
+    if (entry?.connection.revision !== expectedRevision || (entry.connection.status !== 'active' && entry.connection.status !== 'reauth_required')) throw conflict('Drive connection changed before disconnection');
     entry.connection = entry.connection.beginDisconnect(Date.now());
     return entry.connection;
   }
@@ -200,6 +222,14 @@ function validQuotaReclamation(state: DriveQuotaReclamationState): boolean {
   return (state.windowStartedMs === null || (Number.isSafeInteger(state.windowStartedMs) && state.windowStartedMs >= 0))
     && Number.isSafeInteger(state.reclaimedBytes) && state.reclaimedBytes >= 0
     && (state.windowStartedMs !== null || state.reclaimedBytes === 0);
+}
+
+function sameCooldowns(left: Readonly<Record<string, number>>, right: Readonly<Record<string, number>>): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function validCooldowns(cooldowns: Readonly<Record<string, number>>): boolean {
+  return Object.entries(cooldowns).every(([key, value]) => key.length > 0 && Number.isSafeInteger(value) && value >= 0);
 }
 
 function reservationKey(role: ManagedFolderRole): keyof Omit<ManagedFolderReservation, 'revision'> {

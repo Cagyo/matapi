@@ -11,8 +11,6 @@ import {
   type DatabaseBackupSnapshotPort,
 } from '../database/application/ports/database-backup-snapshot.port';
 import { EventModule } from '../events/event.module';
-import { EventQueueService } from '../events/application/event-queue.service';
-import { NotificationService } from '../events/application/notification.service';
 import { CLOCK, type ClockPort } from '../events/domain/ports/clock.port';
 import { SystemModule } from '../system/system.module';
 import { BootRecoveryService } from '../system/application/boot-recovery.service';
@@ -20,6 +18,7 @@ import {
   ArchiveRuntimeLifecycleService,
 } from './application/archive-runtime-lifecycle.service';
 import { ArchiveRemoteMutationLockService } from './application/archive-remote-mutation-lock.service';
+import { ArchiveAdminAlertService } from './application/archive-admin-alert.service';
 import {
   ArchiveSchedulerHooksService,
   ArchiveSchedulerService,
@@ -59,6 +58,7 @@ import { DisconnectDriveUseCase } from './application/use-cases/disconnect-drive
 import { RegisterArchiveArtifactUseCase } from './application/use-cases/register-archive-artifact.use-case';
 import { ReconcileDriveUseCase } from './application/use-cases/reconcile-drive.use-case';
 import { RetireDriveConnectionUseCase } from './application/use-cases/retire-drive-connection.use-case';
+import { ReportDriveStatusUseCase } from './application/use-cases/report-drive-status.use-case';
 import { SubmitDriveClientUseCase } from './application/use-cases/submit-drive-client.use-case';
 import { VerifyArchiveArtifactUseCase } from './application/use-cases/verify-archive-artifact.use-case';
 import {
@@ -75,7 +75,6 @@ import { DrizzleDriveCredentialRepository } from './infrastructure/persistence/d
 import { FsArchiveUploadSourceAdapter } from './infrastructure/persistence/fs-archive-upload-source.adapter';
 import { InMemoryArchiveArtifactRepository } from './infrastructure/persistence/in-memory-archive-artifact.repository';
 import { InMemoryDriveCredentialRepository } from './infrastructure/persistence/in-memory-drive-credential.repository';
-import { DurableArchiveAdminAlertAdapter } from './infrastructure/events/durable-archive-admin-alert.adapter';
 
 const ARCHIVE_BOOT_RECOVERY_REGISTRATION = Symbol('ARCHIVE_BOOT_RECOVERY_REGISTRATION');
 const ARCHIVE_REMOTE_MAINTENANCE_REGISTRATION = Symbol('ARCHIVE_REMOTE_MAINTENANCE_REGISTRATION');
@@ -119,14 +118,16 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
     { provide: DRIVE_ARCHIVE, useExisting: GoogleDriveArchiveAdapter },
     FsArchiveUploadSourceAdapter,
     { provide: ARCHIVE_UPLOAD_SOURCE, useExisting: FsArchiveUploadSourceAdapter },
+    ArchiveAdminAlertService,
+    { provide: ARCHIVE_ADMIN_ALERT, useExisting: ArchiveAdminAlertService },
     {
-      provide: ARCHIVE_ADMIN_ALERT,
+      provide: ReportDriveStatusUseCase,
       useFactory: (
-        queue: EventQueueService,
-        notifications: NotificationService,
-        clock: ClockPort,
-      ) => new DurableArchiveAdminAlertAdapter(queue, notifications, clock),
-      inject: [EventQueueService, NotificationService, CLOCK],
+        credentials: DriveCredentialRepositoryPort,
+        repository: ArchiveArtifactRepositoryPort,
+        account: DriveAccountPort,
+      ) => new ReportDriveStatusUseCase(credentials, repository, account),
+      inject: [DRIVE_CREDENTIAL_REPOSITORY, ARCHIVE_ARTIFACT_REPOSITORY, DRIVE_ACCOUNT],
     },
     {
       provide: VerifyArchiveArtifactUseCase,
@@ -170,6 +171,8 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
     ArchiveRemoteMutationLockService,
     ArchiveSchedulerHooksService,
     DriveAuthorizationOutcomeRegistrationService,
+    ArchiveAdminAlertService,
+    ReportDriveStatusUseCase,
     {
       provide: DRIVE_AUTHORIZATION_OUTCOME,
       useExisting: DriveAuthorizationOutcomeRegistrationService,

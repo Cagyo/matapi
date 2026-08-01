@@ -169,13 +169,16 @@ export interface CameraStatusView {
 }
 
 export interface GdriveStatusView {
-  usedBytes: number;
-  totalBytes: number;
-  lastUploadAt: Date | null;
-  pendingUploads: number;
-  failedUploads: number;
-  lastError: string | null;
-  cleanupMinAgeDays: number;
+  connection: { generationId: string; state: string; errorCode: string | null } | null;
+  account: { permissionId: string; email: string | null; displayName: string | null } | null;
+  folders: { root: string; motion: string; backups: string } | null;
+  last: { refreshAtMs: number | null; uploadAtMs: number | null; backupAtMs: number | null; reconcileAtMs: number | null; cleanupAtMs: number | null };
+  artifacts: Record<string, number>;
+  attempts: Record<string, number>;
+  generations: readonly { generationId: string; state: string; retiredAtMs: number | null }[];
+  quota: { limitBytes: number | null; usageBytes: number; usageInDriveBytes: number; usageInDriveTrashBytes: number } | null;
+  reclamation: { windowStartedMs: number | null; reclaimedBytes: number } | null;
+  requiredActions: readonly ('reauthorize' | 'check-clock' | 'manual-cleanup')[];
 }
 
 export interface SystemOnlineView {
@@ -1279,22 +1282,36 @@ const ukCatalog = {
     header: '☁️ Стан Google Drive',
     body: (v: GdriveStatusView): string => {
       const lines = [
-        `📦 Використано: ${gb(v.usedBytes)} / ${gb(v.totalBytes)} (${percent(v.usedBytes, v.totalBytes)})`,
-        `📤 Останнє завантаження: ${fmtDate(v.lastUploadAt)}`,
-        `📋 Очікують завантаження: ${v.pendingUploads} ${plural(v.pendingUploads, 'файл', 'файли', 'файлів')}`,
-        v.failedUploads > 0 && v.lastError
-          ? `⚠️ Невдалих завантажень: ${v.failedUploads} (остання помилка: ${v.lastError})`
-          : `⚠️ Невдалих завантажень: ${v.failedUploads}`,
-        `🗑️ Автоочищення: активне (мінімальний вік: ${v.cleanupMinAgeDays} ${plural(v.cleanupMinAgeDays, 'день', 'дні', 'днів')})`,
+        `Підключення: ${v.connection?.state ?? 'не підключено'}`,
+        v.account ? `Ідентифікатор дозволу: ${v.account.permissionId}` : 'Обліковий запис недоступний',
+        `📦 Використано: ${gb(v.quota?.usageBytes ?? null)} / ${gb(v.quota?.limitBytes ?? null)} (${percent(v.quota?.usageBytes ?? null, v.quota?.limitBytes ?? null)})`,
+        `📤 Останнє завантаження: ${fmtDate(v.last.uploadAtMs === null ? null : new Date(v.last.uploadAtMs))}`,
+        `💾 Остання резервна копія: ${fmtDate(v.last.backupAtMs === null ? null : new Date(v.last.backupAtMs))}`,
+        `📋 Артефактів: ${Object.values(v.artifacts).reduce((sum, count) => sum + count, 0)}; спроб: ${Object.values(v.attempts).reduce((sum, count) => sum + count, 0)}`,
+        `⚠️ Відсутні / відокремлені: ${v.attempts.missing ?? 0} / ${v.attempts.detached ?? 0}`,
       ];
-      if (v.failedUploads >= 5) {
-        lines.push(`🚨 Проблеми із синхронізацією — ${v.failedUploads} невдалих спроб поспіль`);
-      }
+      if (v.connection?.errorCode) lines.push(`⚠️ Стан архіву: ${v.connection.errorCode}`);
+      if (v.folders) lines.push(`Приватні папки:\nКорінь: ${v.folders.root}\nВідео: ${v.folders.motion}\nКопії: ${v.folders.backups}`);
+      if (v.requiredActions.length > 0) lines.push('Потрібна дія адміністратора.');
       return lines.join('\n');
     },
-    notInstalled: '❌ rclone не встановлено.',
-    notConfigured: '❌ Google Drive не налаштовано. Запустіть rclone config.',
-    statusFailed: (reason: string) => `❌ Не вдалося перевірити стан Drive: ${reason}`,
+    notInstalled: '❌ Інтеграція Google Drive недоступна.',
+    notConfigured: '❌ Google Drive не налаштовано.',
+    statusFailed: (_reason: string) => '❌ Не вдалося перевірити стан Drive.',
+    statusUnavailable: '❌ Стан Google Drive тимчасово недоступний.',
+    alerts: {
+      'reauthorization-required': '⚠️ Google Drive потребує повторної авторизації адміністратора.',
+      'policy-rejected': '⚠️ Google Drive відхилив операцію політики архіву.',
+      'quota-reclamation-required': '⚠️ Сховище Google Drive потребує перевірки або очищення.',
+      'remote-object-missing': '⚠️ Об’єкт архіву відсутній і не може бути відновлений автоматично.',
+      'remote-object-detached': '⚠️ Об’єкт архіву змінено поза worker і безпечно відокремлено.',
+      'retired-archive': '⚠️ Виведене з використання покоління архіву потребує перевірки.',
+      'upload-failure-prolonged': '⚠️ Завантаження архіву тривалий час не вдаються.',
+      'backup-failure-prolonged': '⚠️ Резервне копіювання архіву тривалий час не вдається.',
+      'credential-corrupt': '🚨 Облікові дані Google Drive недоступні або пошкоджені.',
+      'clock-unhealthy': '⚠️ Стан системного годинника не дозволяє безпечне обслуговування архіву.',
+      'local-disk-pressure': '🚨 Тиск на локальний диск загрожує проміжному сховищу архіву.',
+    },
     cleanButton: '🧹 Запустити очищення зараз',
   },
 
