@@ -83,7 +83,7 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
   async claimExpiredAttempt(attemptId: string, input: ClaimAttempt): Promise<ClaimedAttempt> {
     validateClaim(input);
     const entry = this.attempts.get(attemptId);
-    if (!entry || !entry.lease || entry.lease.expiresAtMs > input.nowMs) throw new DriveAttemptLeaseLostError();
+    if (!entry?.lease || entry.lease.expiresAtMs > input.nowMs) throw new DriveAttemptLeaseLostError();
     return this.claim(attemptId, entry, input, false);
   }
 
@@ -126,12 +126,35 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
     entry.retryCount += 1;
   }
 
-  async markConflict(attemptId: string, lease: AttemptLease, errorCode: string, nowMs: number): Promise<void> {
+  async replaceConflictingAttempt(
+    attemptId: string,
+    lease: AttemptLease,
+    replacementRemoteObjectId: string,
+    errorCode: string,
+    nowMs: number,
+  ): Promise<ArchiveObjectAttempt> {
     const entry = this.requireLease(attemptId, lease, nowMs);
-    entry.attempt = entry.attempt.markConflict(nowMs);
+    if ([...this.attempts.values()].some(({ attempt }) => attempt.remoteFileId === replacementRemoteObjectId)) {
+      throw new DriveObjectConflictError('Reserved remote object ID already exists');
+    }
+    const replacement = DriveObjectAttempt.reserve({
+      id: randomUUID(),
+      artifactId: entry.attempt.artifactId,
+      generationId: entry.attempt.generationId,
+      remoteFileId: replacementRemoteObjectId,
+      parentId: entry.attempt.parentId,
+      nowMs,
+    });
+    const conflict = entry.attempt.markConflict(nowMs);
+    const replacementEntry: Entry = {
+      attempt: replacement, lease: null, session: null, nextAttemptMs: nowMs, retryCount: 0, errorCode: null,
+    };
+    entry.attempt = conflict;
     entry.lease = null;
     entry.session = null;
     entry.errorCode = errorCode;
+    this.attempts.set(replacement.id, replacementEntry);
+    return project(replacementEntry);
   }
 
   async markVerified(attemptId: string, lease: AttemptLease, remote: VerifiedArchiveObject, nowMs: number): Promise<void> {
@@ -245,7 +268,7 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
 
   private transitionWithoutLease(attemptId: string, expectedRevision: number, nowMs: number, transition: (attempt: DriveObjectAttempt) => DriveObjectAttempt): void {
     const entry = this.attempts.get(attemptId);
-    if (!entry || entry.attempt.revision !== expectedRevision || (entry.lease && entry.lease.expiresAtMs > nowMs)) {
+    if (entry?.attempt.revision !== expectedRevision || (entry.lease?.expiresAtMs ?? -1) > nowMs) {
       throw new DriveObjectConflictError('Drive attempt changed before transition');
     }
     entry.attempt = transition(entry.attempt);
@@ -258,7 +281,7 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
 
   private requireLease(attemptId: string, lease: AttemptLease, nowMs: number): Entry {
     const entry = this.attempts.get(attemptId);
-    if (!entry || !entry.lease || entry.lease.owner !== lease.owner || entry.lease.revision !== lease.revision
+    if (entry?.lease?.owner !== lease.owner || entry.lease.revision !== lease.revision
       || entry.lease.expiresAtMs !== lease.expiresAtMs || lease.expiresAtMs <= nowMs) {
       throw new DriveAttemptLeaseLostError();
     }

@@ -139,7 +139,7 @@ export interface ArchiveArtifactRepositoryPort {
   saveSession(attemptId: string, lease: AttemptLease, session: EncryptedUploadSession, nowMs: number): Promise<AttemptLease>;
   confirmOffset(attemptId: string, lease: AttemptLease, offset: number, nowMs: number): Promise<AttemptLease>;
   markRetryable(attemptId: string, lease: AttemptLease, errorCode: string, nextAttemptMs: number, nowMs: number): Promise<void>;
-  markConflict(attemptId: string, lease: AttemptLease, errorCode: string, nowMs: number): Promise<void>;
+  replaceConflictingAttempt(attemptId: string, lease: AttemptLease, replacementRemoteObjectId: string, errorCode: string, nowMs: number): Promise<ArchiveObjectAttempt>;
   markVerified(attemptId: string, lease: AttemptLease, remote: VerifiedArchiveObject, nowMs: number): Promise<void>;
   markMissing(attemptId: string, expectedRevision: number, reason: string, nowMs: number): Promise<void>;
   markDetached(attemptId: string, expectedRevision: number, reason: string, nowMs: number): Promise<void>;

@@ -92,3 +92,51 @@ new files. Each was corrected and the identical scoped lint command then exited
 0. Existing unrelated worktree changes, including concurrent Task 9 manifest
 pinning hunks in shared repository files, were preserved and excluded from the
 Task 10 commit.
+
+## Review repair — conflict replacement and hash lease fencing
+
+Three regression groups were added before the repair. The focused RED run
+failed in five places: ambiguous creation with mismatching exact-ID metadata
+became retryable instead of producing a replacement; the repository had no
+atomic replacement operation in either success or rollback paths; and prefix
+plus full-file hashing lost their unrenewed leases as the test clock advanced.
+
+The repair makes replacement a single repository operation. The use case first
+generates the successor ID without changing the current attempt, then the
+repository transaction fences the current lease, inserts the already-generated
+successor, and terminalizes the old attempt as `conflict`. Any uniqueness,
+write, or fence failure rolls back both changes. Generation failure occurs
+before the transaction, while transaction failure leaves the original lease and
+state intact for retry or expiry recovery. The in-memory adapter performs the
+same validations before mutating either map entry.
+
+Ambiguous initiation now distinguishes a valid exact object from mismatching
+metadata. Valid metadata is verified without duplication; mismatching metadata
+uses the atomic successor transition instead of the generic retry path. The
+same safe path covers persisted-ID recovery before initiation and expired
+sessions.
+
+Resume-prefix hashing, authoritative-offset rehashing, and full verification
+hashing now renew the fenced attempt lease at one-third-lease intervals while
+streaming bounded source chunks. Every renewal updates the lease used by later
+offset, verification, retry, or replacement writes. A failed renewal stops
+hashing before upload and is not hidden by a stale retry mutation.
+
+Repair verification:
+
+```text
+yarn test test/archive/application/upload-drive-object-attempt.use-case.test.ts test/archive/infrastructure/drizzle-archive-artifact.repository.test.ts
+2 test files passed / 31 tests passed
+
+yarn test test/archive
+17 test files passed / 122 tests passed
+
+yarn build
+exit 0
+
+yarn eslint <Task 10 repair source and test paths>
+exit 0
+
+git -c core.fsmonitor=false diff --check
+exit 0
+```

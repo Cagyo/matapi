@@ -10,6 +10,7 @@ import {
 import { InMemoryArchiveArtifactRepository } from '../../../src/archive/infrastructure/persistence/in-memory-archive-artifact.repository';
 import { DriveConnection } from '../../../src/archive/domain/drive-connection.entity';
 import type { VerifiedDriveObject } from '../../../src/archive/domain/drive-object-metadata.value-object';
+import { DriveAttemptLeaseLostError } from '../../../src/archive/domain/errors/drive-attempt-lease-lost.error';
 
 const now = 1_000_000;
 const bytes = Buffer.alloc(700_000, 7);
@@ -86,6 +87,20 @@ describe('UploadDriveObjectAttemptUseCase', () => {
     expect(fixture.drive.loadIds).toContain('reserved-1');
   });
 
+  it('atomically replaces a reserved ID when ambiguous creation finds mismatching metadata', async () => {
+    const fixture = await setup();
+    fixture.drive.generatedIds.push('reserved-2');
+    fixture.drive.remoteOverride = { sha256: '0'.repeat(64) };
+    fixture.drive.failAfterRemoteCreate = true;
+
+    await expect(fixture.useCase.execute(fixture.artifactId, signal)).resolves.toEqual(expect.objectContaining({
+      kind: 'replaced', replacementFileId: 'reserved-2',
+    }));
+
+    expect((await fixture.repository.listAttempts(fixture.artifactId)).map((attempt) => [attempt.remoteObjectId, attempt.state]))
+      .toEqual(expect.arrayContaining([['reserved-1', 'conflict'], ['reserved-2', 'pending']]));
+  });
+
   it('preserves a conflicting reserved ID and reserves a new ID in a new row', async () => {
     const fixture = await setup();
     fixture.drive.generatedIds.push('reserved-2');
@@ -142,9 +157,49 @@ describe('UploadDriveObjectAttemptUseCase', () => {
     await expect(fixture.useCase.execute(fixture.attemptId(), signal)).rejects.toThrow('lease');
     expect(fixture.drive.beginCalls).toBe(0);
   });
+
+  it('renews the fenced lease while hashing a resumed local prefix', async () => {
+    const fixture = await setup({ createAttempt: true, leaseMs: 500 });
+    await fixture.seedSession(786_432);
+    fixture.drive.queryResult = { kind: 'resume', confirmedOffset: 262_144 };
+    fixture.source.onYield = (start) => { if (start === 0) fixture.clock.value += 200; };
+    const renew = vi.spyOn(fixture.repository, 'renewLease');
+
+    await fixture.useCase.execute(fixture.attemptId(), signal);
+
+    expect(renew.mock.calls.length).toBeGreaterThan(3);
+    expect(fixture.drive.uploadCalls).toBeGreaterThan(0);
+  });
+
+  it('renews the fenced lease throughout a full verification hash', async () => {
+    const fixture = await setup({ leaseMs: 500 });
+    fixture.drive.failAfterRemoteCreate = true;
+    fixture.source.onYield = () => { fixture.clock.value += 200; };
+    const renew = vi.spyOn(fixture.repository, 'renewLease');
+
+    await fixture.useCase.execute(fixture.artifactId, signal);
+
+    expect(renew.mock.calls.length).toBeGreaterThan(3);
+  });
+
+  it('stops before upload when lease renewal fails during prefix hashing', async () => {
+    const fixture = await setup({ createAttempt: true, leaseMs: 500 });
+    await fixture.seedSession(786_432);
+    fixture.drive.queryResult = { kind: 'resume', confirmedOffset: 262_144 };
+    fixture.source.onYield = (start) => { if (start === 0) fixture.clock.value += 200; };
+    const originalRenew = fixture.repository.renewLease.bind(fixture.repository);
+    vi.spyOn(fixture.repository, 'renewLease')
+      .mockImplementationOnce(originalRenew)
+      .mockRejectedValueOnce(new DriveAttemptLeaseLostError('lease renewal failed'));
+
+    await expect(fixture.useCase.execute(fixture.attemptId(), signal)).rejects.toThrow('lease renewal failed');
+
+    expect(fixture.drive.uploadCalls).toBe(0);
+    expect(await fixture.repository.loadAttempt(fixture.attemptId())).toMatchObject({ state: 'uploading' });
+  });
 });
 
-async function setup(options: { createAttempt?: boolean } = {}) {
+async function setup(options: { createAttempt?: boolean; leaseMs?: number } = {}) {
   const repository = new InMemoryArchiveArtifactRepository();
   const artifact = await repository.register({
     installationId: 'installation-1', kind: 'motion_video', sourceIdentity: 'motion:clip', trustedPath: '/motion/clip.mp4',
@@ -167,7 +222,7 @@ async function setup(options: { createAttempt?: boolean } = {}) {
   const credentials = { loadActive: vi.fn(async () => connection) };
   const create = () => new UploadDriveObjectAttemptUseCase(
     repository, credentials, drive, cipher, source, semaphore,
-    { now: () => clock.value, owner: () => 'worker-1', leaseMs: 1_000, retryDelayMs: 1_000 },
+    { now: () => clock.value, owner: () => 'worker-1', leaseMs: options.leaseMs ?? 1_000, retryDelayMs: 1_000 },
   );
   const fixture = {
     repository, artifactId: artifact.id, source, drive, cipher, semaphore, clock,
@@ -204,6 +259,7 @@ class FakeSource implements ArchiveUploadSourcePort {
   readonly openEnds: number[] = [];
   maxRequestedBytes = 0;
   mutateAfterRead = false;
+  onYield?: (start: number) => void;
   private reads = 0;
 
   constructor(private readonly content: Buffer) {}
@@ -218,8 +274,10 @@ class FakeSource implements ArchiveUploadSourcePort {
     this.maxRequestedBytes = Math.max(this.maxRequestedBytes, endExclusive - start);
     this.reads += 1;
     const content = this.content;
+    const onYield = this.onYield;
     return (async function* () {
       for (let offset = start; offset < endExclusive; offset += 64 * 1024) {
+        onYield?.(start);
         yield content.subarray(offset, Math.min(offset + 64 * 1024, endExclusive));
       }
     })();
@@ -233,6 +291,7 @@ class FakeDrive implements DriveArchivePort {
   readonly loadIds: string[] = [];
   readonly beginFileIds: string[] = [];
   beginCalls = 0;
+  uploadCalls = 0;
   lastAttemptId: string | null = null;
   queryResult: Awaited<ReturnType<DriveArchivePort['querySession']>> = { kind: 'resume', confirmedOffset: 0 };
   failAfterRemoteCreate = false;
@@ -267,6 +326,7 @@ class FakeDrive implements DriveArchivePort {
   async querySession() { return this.queryResult; }
 
   async uploadChunk(input: UploadChunk) {
+    this.uploadCalls += 1;
     await this.onChunk?.();
     if (this.failChunkOnce) { this.failChunkOnce = false; throw new Error('network'); }
     let read = 0;

@@ -152,12 +152,14 @@ export class UploadDriveObjectAttemptUseCase {
       if (attempt.session.expiresAtMs > this.now()) {
         const status = await this.drive.querySession({ connection, uri: session.uri, totalSize: artifact.size }, signal);
         if (status.kind === 'complete') {
-          return this.verify(attempt, artifact, connection, expectedProperties, lease, signal);
+          return this.verify(attempt, artifact, connection, expectedProperties, lease, signal, updateLease);
         }
         if (status.kind === 'resume') offset = status.confirmedOffset;
         if (status.kind === 'expired') {
           const recovered = await this.drive.loadObject(connection, attempt.remoteObjectId, signal);
-          if (recovered !== null) return this.verifyLoaded(attempt, artifact, expectedProperties, recovered, lease, signal);
+          if (recovered !== null) {
+            return this.verifyLoaded(attempt, artifact, connection, expectedProperties, recovered, lease, signal, updateLease, undefined, true);
+          }
           session = null;
         }
       } else {
@@ -165,7 +167,9 @@ export class UploadDriveObjectAttemptUseCase {
       }
     } else {
       const recovered = await this.drive.loadObject(connection, attempt.remoteObjectId, signal);
-      if (recovered !== null) return this.verifyLoaded(attempt, artifact, expectedProperties, recovered, lease, signal);
+      if (recovered !== null) {
+        return this.verifyLoaded(attempt, artifact, connection, expectedProperties, recovered, lease, signal, updateLease, undefined, true);
+      }
     }
 
     if (session === null) {
@@ -181,14 +185,11 @@ export class UploadDriveObjectAttemptUseCase {
         }, signal);
       } catch (error) {
         const recovered = await this.drive.loadObject(connection, attempt.remoteObjectId, signal);
-        if (recovered !== null) return this.verifyLoaded(attempt, artifact, expectedProperties, recovered, lease, signal);
+        if (recovered !== null) {
+          return this.verifyLoaded(attempt, artifact, connection, expectedProperties, recovered, lease, signal, updateLease, undefined, true);
+        }
         if (isConflict(error)) {
-          await this.repository.markConflict(attempt.id, lease, 'reserved_id_conflict', this.now());
-          const replacementFileId = await this.drive.generateFileId(connection, signal);
-          const replacement = await this.repository.createAttempt(
-            artifact.id, connection.id, replacementFileId, attempt.containerId, this.now(),
-          );
-          return { kind: 'replaced', attemptId: attempt.id, replacementAttemptId: replacement.id, replacementFileId };
+          return this.replaceConflict(attempt, connection, lease, signal);
         }
         throw error;
       }
@@ -208,7 +209,9 @@ export class UploadDriveObjectAttemptUseCase {
     }
 
     let hasher = createHash('sha256');
-    if (offset > 0) await this.hashRange(artifact, 0, offset, hasher, signal);
+    if (offset > 0) {
+      lease = await this.hashRange(attempt.id, artifact, 0, offset, hasher, lease, signal, updateLease);
+    }
     while (offset < artifact.size) {
       throwIfAborted(signal);
       lease = await this.renew(attempt.id, lease);
@@ -235,7 +238,9 @@ export class UploadDriveObjectAttemptUseCase {
       }
       if (confirmed !== endExclusive) {
         hasher = createHash('sha256');
-        if (confirmed > 0) await this.hashRange(artifact, 0, confirmed, hasher, signal);
+        if (confirmed > 0) {
+          lease = await this.hashRange(attempt.id, artifact, 0, confirmed, hasher, lease, signal, updateLease);
+        }
       }
       offset = confirmed;
       lease = await this.repository.confirmOffset(attempt.id, lease, offset, this.now());
@@ -244,7 +249,7 @@ export class UploadDriveObjectAttemptUseCase {
 
     const transferredDigest = hasher.digest('hex');
     if (transferredDigest !== artifact.sha256) throw new DriveLocalSourceChangedError('Transferred archive digest changed');
-    return this.verify(attempt, artifact, connection, expectedProperties, lease, signal, transferredDigest);
+    return this.verify(attempt, artifact, connection, expectedProperties, lease, signal, updateLease, transferredDigest);
   }
 
   private async verify(
@@ -254,23 +259,32 @@ export class UploadDriveObjectAttemptUseCase {
     expectedProperties: Readonly<Record<string, string>>,
     lease: AttemptLease,
     signal: AbortSignal,
+    updateLease: (lease: AttemptLease) => void,
     transferredDigest?: string,
   ): Promise<UploadDriveObjectAttemptResult> {
     const remote = await this.drive.loadObject(connection, attempt.remoteObjectId, signal);
     if (remote === null) throw new DriveObjectConflictError('Reserved Drive object is missing after upload');
-    return this.verifyLoaded(attempt, artifact, expectedProperties, remote, lease, signal, transferredDigest);
+    return this.verifyLoaded(attempt, artifact, connection, expectedProperties, remote, lease, signal, updateLease, transferredDigest);
   }
 
   private async verifyLoaded(
     attempt: ArchiveObjectAttempt,
     artifact: ArchiveArtifact,
+    connection: DriveConnection,
     expectedProperties: Readonly<Record<string, string>>,
     remote: VerifiedDriveObject,
     lease: AttemptLease,
     signal: AbortSignal,
+    updateLease: (lease: AttemptLease) => void,
     transferredDigest?: string,
+    replaceMismatch = false,
   ): Promise<UploadDriveObjectAttemptResult> {
-    const digest = transferredDigest ?? await this.digestWholeSource(artifact, signal);
+    let digest = transferredDigest;
+    if (digest === undefined) {
+      const hashed = await this.digestWholeSource(attempt.id, artifact, lease, signal, updateLease);
+      digest = hashed.digest;
+      lease = hashed.lease;
+    }
     await this.requireUnchangedSource(artifact, signal);
     if (digest !== artifact.sha256
       || remote.id !== attempt.remoteObjectId
@@ -284,27 +298,67 @@ export class UploadDriveObjectAttemptUseCase {
       || !remote.ownedByMe || !remote.canDelete || remote.trashed
       || remote.sharing.shared || remote.sharing.permissionIds.length !== 1
       || remote.sharing.permissionIds[0] !== remote.sharing.ownerPermissionId) {
+      if (replaceMismatch) return this.replaceConflict(attempt, connection, lease, signal);
       throw new DriveObjectConflictError('Drive object verification is not exact and private');
     }
     await this.repository.markVerified(attempt.id, lease, toArchiveObject(remote), this.now());
     return { kind: 'verified', attemptId: attempt.id, fileId: attempt.remoteObjectId };
   }
 
-  private async digestWholeSource(artifact: ArchiveArtifact, signal: AbortSignal): Promise<string> {
+  private async digestWholeSource(
+    attemptId: string,
+    artifact: ArchiveArtifact,
+    lease: AttemptLease,
+    signal: AbortSignal,
+    updateLease: (lease: AttemptLease) => void,
+  ): Promise<{ digest: string; lease: AttemptLease }> {
     const hash = createHash('sha256');
-    await this.hashRange(artifact, 0, artifact.size, hash, signal);
-    return hash.digest('hex');
+    const renewed = await this.hashRange(attemptId, artifact, 0, artifact.size, hash, lease, signal, updateLease);
+    return { digest: hash.digest('hex'), lease: renewed };
   }
 
-  private async hashRange(artifact: ArchiveArtifact, start: number, endExclusive: number, hash: Hash, signal: AbortSignal): Promise<void> {
+  private async hashRange(
+    attemptId: string,
+    artifact: ArchiveArtifact,
+    start: number,
+    endExclusive: number,
+    hash: Hash,
+    lease: AttemptLease,
+    signal: AbortSignal,
+    updateLease: (lease: AttemptLease) => void,
+  ): Promise<AttemptLease> {
     let bytes = 0;
+    let renewAtMs = this.nextHashRenewalMs(lease);
     for await (const part of this.source.open(artifact.trustedPath, start, endExclusive, signal)) {
       throwIfAborted(signal);
+      if (this.now() >= renewAtMs) {
+        lease = await this.renew(attemptId, lease);
+        updateLease(lease);
+        renewAtMs = this.nextHashRenewalMs(lease);
+      }
       bytes += part.byteLength;
       if (bytes > endExclusive - start) throw new DriveLocalSourceChangedError('Local archive source exceeded its immutable range');
       hash.update(part);
     }
     if (bytes !== endExclusive - start) throw new DriveLocalSourceChangedError('Local archive source ended during hashing');
+    return lease;
+  }
+
+  private nextHashRenewalMs(lease: AttemptLease): number {
+    return Math.min(lease.expiresAtMs - 1, this.now() + Math.max(1, Math.floor(this.leaseMs / 3)));
+  }
+
+  private async replaceConflict(
+    attempt: ArchiveObjectAttempt,
+    connection: DriveConnection,
+    lease: AttemptLease,
+    signal: AbortSignal,
+  ): Promise<UploadDriveObjectAttemptResult> {
+    const replacementFileId = await this.drive.generateFileId(connection, signal);
+    const replacement = await this.repository.replaceConflictingAttempt(
+      attempt.id, lease, replacementFileId, 'reserved_id_conflict', this.now(),
+    );
+    return { kind: 'replaced', attemptId: attempt.id, replacementAttemptId: replacement.id, replacementFileId };
   }
 
   private async requireUnchangedSource(artifact: ArchiveArtifact, signal: AbortSignal): Promise<void> {

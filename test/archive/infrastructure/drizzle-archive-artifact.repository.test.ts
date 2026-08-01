@@ -31,6 +31,35 @@ describe('DrizzleArchiveArtifactRepository', () => {
       .toEqual(['file-1', 'file-2']);
   });
 
+  it('atomically terminalizes a conflict with its already-generated replacement', async () => {
+    const artifact = await repository.register(artifactFixture());
+    const first = await repository.createAttempt(artifact.id, 'generation-1', 'file-1', 'folder-1', 100);
+    const claim = await repository.claimAttempt(first.id, { owner: 'worker-a', nowMs: 1_000, leaseMs: 5_000 });
+
+    const replacement = await repository.replaceConflictingAttempt(
+      first.id, claim.lease, 'file-2', 'reserved_id_conflict', 1_100,
+    );
+
+    expect(replacement).toMatchObject({ remoteObjectId: 'file-2', state: 'pending' });
+    expect((await repository.listAttempts(artifact.id)).map((attempt) => [attempt.remoteObjectId, attempt.state]))
+      .toEqual([['file-1', 'conflict'], ['file-2', 'pending']]);
+  });
+
+  it('rolls back conflict terminalization when replacement persistence fails', async () => {
+    const artifact = await repository.register(artifactFixture());
+    const first = await repository.createAttempt(artifact.id, 'generation-1', 'file-1', 'folder-1', 100);
+    await repository.createAttempt(artifact.id, 'generation-1', 'file-2', 'folder-1', 101);
+    const claim = await repository.claimAttempt(first.id, { owner: 'worker-a', nowMs: 1_000, leaseMs: 5_000 });
+
+    await expect(repository.replaceConflictingAttempt(
+      first.id, claim.lease, 'file-2', 'reserved_id_conflict', 1_100,
+    )).rejects.toThrow();
+
+    expect((await repository.loadAttempt(first.id))).toMatchObject({ state: 'uploading' });
+    await expect(repository.claimAttempt(first.id, { owner: 'worker-b', nowMs: 6_000, leaseMs: 5_000 }))
+      .resolves.toMatchObject({ lease: { owner: 'worker-b' } });
+  });
+
   it('returns the existing immutable artifact for a concurrent duplicate registration', async () => {
     const input = artifactFixture();
 

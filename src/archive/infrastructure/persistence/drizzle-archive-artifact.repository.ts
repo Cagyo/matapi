@@ -146,19 +146,43 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
     if (result.changes !== 1) throw new DriveAttemptLeaseLostError();
   }
 
-  async markConflict(attemptId: string, lease: AttemptLease, errorCode: string, nowMs: number): Promise<void> {
-    const row = this.requireFencedAttempt(attemptId, lease, nowMs);
-    const next = toAttempt(row).markConflict(nowMs);
-    const result = this.db.update(driveObjectAttempts).set({
-      state: next.state,
-      revision: next.revision,
-      updatedAt: nowMs,
-      errorCode,
-      leaseOwner: null,
-      leaseExpiresAt: null,
-      ...clearedSession(),
-    }).where(this.fenced(attemptId, lease, nowMs)).run();
-    if (result.changes !== 1) throw new DriveAttemptLeaseLostError();
+  async replaceConflictingAttempt(
+    attemptId: string,
+    lease: AttemptLease,
+    replacementRemoteObjectId: string,
+    errorCode: string,
+    nowMs: number,
+  ): Promise<ArchiveObjectAttempt> {
+    try {
+      return this.immediate((tx) => {
+        const row = tx.select().from(driveObjectAttempts).where(this.fenced(attemptId, lease, nowMs)).get();
+        if (!row) throw new DriveAttemptLeaseLostError();
+        const conflict = toAttempt(row).markConflict(nowMs);
+        const replacement = DriveObjectAttempt.reserve({
+          id: randomUUID(),
+          artifactId: row.artifactId,
+          generationId: row.generationId,
+          remoteFileId: replacementRemoteObjectId,
+          parentId: row.parentId,
+          nowMs,
+        });
+        tx.insert(driveObjectAttempts).values(attemptRow(replacement)).run();
+        const result = tx.update(driveObjectAttempts).set({
+          state: conflict.state,
+          revision: conflict.revision,
+          updatedAt: nowMs,
+          errorCode,
+          leaseOwner: null,
+          leaseExpiresAt: null,
+          ...clearedSession(),
+        }).where(this.fenced(attemptId, lease, nowMs)).run();
+        if (result.changes !== 1) throw new DriveAttemptLeaseLostError();
+        return project(replacement, { nextAttemptMs: nowMs, retryCount: 0, errorCode: null, session: null });
+      });
+    } catch (error) {
+      if (isUniqueViolation(error)) throw new DriveObjectConflictError('Reserved remote object ID already exists');
+      throw error;
+    }
   }
 
   async markVerified(attemptId: string, lease: AttemptLease, remote: VerifiedArchiveObject, nowMs: number): Promise<void> {
