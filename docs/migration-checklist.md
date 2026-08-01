@@ -330,7 +330,10 @@ Current files:
 
 - [src/camera/camera.module.ts](../src/camera/camera.module.ts)
 - [src/camera/motion.service.ts](../src/camera/motion.service.ts)
-- Drive sync (spec 21) is implemented under `application/` (`upload-motion`, `cleanup-local-storage`, `cleanup-drive`, `backup-upload`, `drive-sync.scheduler`) and `infrastructure/` (rclone/fs/drizzle/sqlite adapters + stubs); the old root `upload.service.ts` / `cleanup.service.ts` stubs were removed.
+- Camera owns Motion capture, completed-video discovery, archive registration,
+  and local cleanup. The Archive context owns direct Google authorization,
+  immutable attempts, resumable upload, verification, reconciliation, backup,
+  and exact-ID retention.
 
 Target shape:
 
@@ -342,17 +345,16 @@ src/camera/
     media-file.value-object.ts
     retention-policy.value-object.ts
     ports/motion-control.port.ts
-    ports/cloud-upload.port.ts
+    ports/completed-motion-video.port.ts
     ports/media-repository.port.ts
     ports/media-store.port.ts
   application/
     start-motion.use-case.ts
     stop-motion.use-case.ts
-    upload-pending-media.use-case.ts
     cleanup-media.use-case.ts
   infrastructure/
     motion-daemon.adapter.ts
-    rclone-gdrive-uploader.adapter.ts
+    fs-completed-motion-video.adapter.ts
     local-media-store.adapter.ts
     drizzle-motion-event.repository.ts
   camera.module.ts
@@ -360,15 +362,19 @@ src/camera/
 
 Checklist:
 
-- [ ] Do the folder split before replacing the current stubs with real `systemctl`, Motion, rclone, or filesystem calls.
+- [x] Keep direct Google Drive behavior in the Archive context; Camera depends
+  only on Archive registration/verification and scheduler-hook ports.
 - [ ] Define `MotionControlPort` before implementing [src/camera/motion.service.ts](../src/camera/motion.service.ts).
-- [x] Drive sync ports defined and implemented (spec 21): `DriveSyncPort`, `LocalStoragePort`, `RetentionPrunePort`, `DbBackupPort` (in addition to the existing `DriveStatusPort`).
+- [x] Remove the superseded Camera Drive ports; retain `LocalStoragePort`,
+  `RetentionPrunePort`, and the completed-motion registration seam.
 - [ ] Define `MediaRepositoryPort` for `motionEvents` rows before writing cleanup or upload state changes.
 - [ ] Define `MediaStorePort` for local file deletion and size calculations.
-- [ ] Keep process execution, filesystem paths, and rclone command details in infrastructure adapters.
+- [x] Keep filesystem and Google SDK/HTTP details in infrastructure adapters.
 - [ ] Add domain tests for retention policy and media file state transitions.
-- [ ] Add application tests for upload retry behavior and cleanup thresholds using in-memory adapters.
-- [ ] Adapter-test `systemctl` and rclone wrappers by mocking the child-process boundary; do not run real daemon commands in CI.
+- [x] Add application tests for immutable upload attempts, retry recovery,
+  exact-ID retention, and local cleanup using in-memory adapters.
+- [ ] Adapter-test `systemctl` wrappers by mocking the child-process boundary;
+  validate Motion daemon behavior on-device.
 
 ## Network
 

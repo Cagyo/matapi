@@ -34,6 +34,10 @@ describe('supported runtime contract', () => {
     expect(installer).toContain('if [ ! -e "$ARCHIVE_KEY_PATH" ] && [ ! -L "$ARCHIVE_KEY_PATH" ]; then');
     expect(installer).toContain('if [ ! -e "$INSTALLATION_ID_PATH" ] && [ ! -L "$INSTALLATION_ID_PATH" ]; then');
     expect(installer).toContain('sudo ln "$root_temporary" "$target"');
+    expect(installer).toContain("metadata.st_nlink != 1");
+    expect(installer).toContain("stream.write(os.urandom(32))");
+    expect(installer).toContain("metadata.st_uid != expected_uid");
+    expect(installer).toContain("metadata.st_gid != expected_gid");
   });
 
   it('creates valid archive state once and rejects malformed replacements', async () => {
@@ -64,6 +68,11 @@ cmp -s "$HOME_WORKER_ARCHIVE_STATE_DIR/installation-id.before" "$HOME_WORKER_ARC
 chmod 0600 "$HOME_WORKER_ARCHIVE_STATE_DIR/archive.key"
 if provision_archive_installation_state; then exit 41; fi
 chmod 0640 "$HOME_WORKER_ARCHIVE_STATE_DIR/archive.key"
+rm "$HOME_WORKER_ARCHIVE_STATE_DIR/archive.key"
+ln -s /dev/null "$HOME_WORKER_ARCHIVE_STATE_DIR/archive.key"
+if provision_archive_installation_state; then exit 44; fi
+rm "$HOME_WORKER_ARCHIVE_STATE_DIR/archive.key"
+mv "$HOME_WORKER_ARCHIVE_STATE_DIR/archive.key.before" "$HOME_WORKER_ARCHIVE_STATE_DIR/archive.key"
 printf 'not-a-uuid\n' > "$HOME_WORKER_ARCHIVE_STATE_DIR/installation-id"
 if provision_archive_installation_state; then exit 42; fi
 rm "$HOME_WORKER_ARCHIVE_STATE_DIR/installation-id"

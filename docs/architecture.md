@@ -10,7 +10,7 @@ This repo follows **hexagonal architecture** — also known as ports & adapters.
 interfaces  →  application  →  domain  ←  infrastructure
    (bot,        (use cases,      (entities,     (drizzle, pigpio,
     HTTP)        ports)           value objects,  grammY, motion,
-                                  domain errors)   rclone, serialport)
+                                  domain errors)   Google APIs, serialport)
 ```
 
 Arrows point in the direction a layer may import from. Concretely:
@@ -79,7 +79,7 @@ No I/O. No async unless the port itself is async. No Date.now() — inject a `Cl
 
 - One adapter per port per tech (`DigitalGpioAdapter` implements `SensorDriverPort` against pigpio; `MockGpioAdapter` implements it for dev).
 - Drizzle schemas, repositories, query builders.
-- grammY bot setup, rclone process management, Motion daemon control, serialport wrappers.
+- grammY bot setup, direct Google Drive gateways, Motion daemon control, serialport wrappers.
 - Maps DB rows / wire formats to domain types **at the boundary**.
 
 ### interfaces/

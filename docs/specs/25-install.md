@@ -20,7 +20,7 @@ set -euo pipefail
 
 REPO="https://github.com/<user>/home-worker.git"
 INSTALL_DIR="/opt/home-worker"
-NODE_VERSION="20"
+NODE_VERSION="22"
 USER="homeworker"
 
 main() {
@@ -303,8 +303,6 @@ install_feature() {
     motion)
       sudo apt-get install -y motion
       mkdir -p /home/pi/motion/videos
-      # Install rclone
-      curl https://rclone.org/install.sh | sudo bash
       # Configure sudoers for motion control
       SUDOERS_TMP="$(mktemp)"
       cat > "$SUDOERS_TMP" <<'EOF'
@@ -334,4 +332,15 @@ EOF
 }
 ```
 
-The initial installer and the runtime `/feature install` workflow use the same fixed per-feature routines. Runtime installation is allowed only through the root-owned, allowlisted helper defined in [the Telegram feature-management design](../superpowers/specs/2026-07-22-telegram-feature-management-design.md). `/feature enable` and `/feature disable` never run package installation.
+The initial installer and the runtime `/feature install` workflow use the same fixed per-feature routines. Runtime installation is allowed only through the root-owned, allowlisted helper defined in [the Telegram feature-management design](../superpowers/specs/2026-07-22-telegram-feature-management-design.md). `/feature enable` and `/feature disable` never run package installation. Motion installation does not install or alter a separate Drive utility or inspect user cloud configuration.
+
+### Immutable archive installation state
+
+Before the application starts, `install.sh` creates `/etc/home-worker` as
+`root:homeworker` mode `0750`. It publishes `archive.key` and `installation-id`
+atomically only when absent. The archive key is exactly 32 random bytes; both
+files are `root:homeworker` mode `0640`, regular, non-link, single-link files.
+Every reinstall and OTA validates type, link count, owner, group, mode, size,
+and value shape. Existing paths, including symlinks and malformed files, are
+rejected rather than replaced. The installer never reads or modifies a user's
+cloud-client configuration.

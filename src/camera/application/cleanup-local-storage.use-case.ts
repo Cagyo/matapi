@@ -11,10 +11,6 @@ import {
 import { MOTION_DESIRED_STATE_KEY } from '../domain/motion-desired-state';
 import { ADMIN_ALERT, AdminAlertPort } from '../domain/ports/admin-alert.port';
 import {
-  GDRIVE_SYNC_HEALTH,
-  type GdriveSyncHealthPort,
-} from '../domain/ports/gdrive-sync-health.port';
-import {
   LOCAL_STORAGE,
   LocalStoragePort,
 } from '../domain/ports/local-storage.port';
@@ -69,7 +65,6 @@ export class CleanupLocalStorageUseCase {
     @Inject(MOTION_CONTROL) private readonly motion: MotionControlPort,
     @Inject(ADMIN_ALERT) private readonly adminAlert: AdminAlertPort,
     @Inject(SYSTEM_META_REPOSITORY) private readonly meta: SystemMetaRepositoryPort,
-    @Inject(GDRIVE_SYNC_HEALTH) _legacyHealth: GdriveSyncHealthPort,
     @Inject(ARCHIVE_VERIFICATION) private readonly archive: ArchiveVerificationPort,
     @Inject(ArchiveRemoteMutationLockService)
     private readonly activityGate: Pick<ArchiveRemoteMutationLockService, 'tryRunCleanup'> =

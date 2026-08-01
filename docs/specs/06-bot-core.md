@@ -139,15 +139,15 @@ export function adminOnly(roles: RolePort, en: Locale) {
 
 Applied as middleware on admin-only commands.
 
-### Drive-auth continuations
+### Drive connection continuations
 
-Starting `/gdrive_auth` is not sufficient authorization for its later
-messages. Every Drive-auth continuation resolves the sender's **current** role
-before processing input: this includes both text snippets and uploaded
-configuration documents. A user demoted after starting the flow is rejected
-and their pending Drive-auth state is cleared. The role check is repeated
-immediately before the Drive configuration write as well. The remaining
-role-check-to-filesystem-write boundary is not atomic.
+Starting `/gdrive connect` is not sufficient authorization for later messages.
+Every continuation resolves the sender's **current** role before reading an
+uploaded installed-client JSON document, polling device authorization, or
+confirming the account. A user demoted after starting is rejected and their
+exact staged generation is cancelled without changing the active connection.
+The handler deletes credential documents after reading them and warns the
+administrator if Telegram prevents deletion.
 
 ## Admin Claim Flow (First Boot)
 

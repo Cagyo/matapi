@@ -29,3 +29,8 @@ sensor_defaults:
 notifications:
   quiet_hours_default: null
   max_queue_before_force_aggregate: 100
+
+archive:
+  scheduler_interval_ms: 120000
+  upload_lease_ms: 300000
+  newer_video_batch: 3

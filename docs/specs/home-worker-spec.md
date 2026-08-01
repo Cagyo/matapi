@@ -37,7 +37,7 @@ Raspberry Pi Pico was considered as a GPIO coprocessor but is deferred. With ≤
 
 | Layer | Technology | Notes |
 |-------|-----------|-------|
-| **Runtime** | Node.js 20 | LTS, pinned to major version |
+| **Runtime** | Node.js 22 | LTS, pinned to major version |
 | **Framework** | NestJS | Acceptable overhead on Pi 3+, already in use |
 | **Database** | SQLite via better-sqlite3 | WAL mode, synchronous=NORMAL, busy_timeout=5000 |
 | **ORM** | Drizzle ORM | Lightweight, TypeScript-first, uses better-sqlite3 under the hood |
@@ -47,7 +47,7 @@ Raspberry Pi Pico was considered as a GPIO coprocessor but is deferred. With ≤
 | **UART** | serialport npm | For CO2 sensor |
 | **Sidecar: MQTT** | Mosquitto (future) | For Zigbee2MQTT integration |
 | **Sidecar: Camera** | Motion daemon | Managed via systemd, worker controls via sudo |
-| **Cloud sync** | rclone | Google Drive, service account auth (no token expiry) |
+| **Cloud archive** | Direct Google Drive API | Device authorization and resumable streaming upload |
 
 ---
 
@@ -79,7 +79,7 @@ After MVP runs reliably for 2+ weeks.
 - `/logs`, `/health`, `/help`, `/ping`, `/restart` commands
 - OTA `/update` + `/rollback` commands
 - Motion camera module
-- Google Drive sync (rclone) + bidirectional cleanup
+- Direct Google Drive archive + separately authorized local/exact-ID cleanup
 - Database backup to Google Drive (daily)
 - YAML import/export for config (with schema validation)
 - Feature management (install-time selection plus guarded Telegram install/enable/disable)
@@ -117,13 +117,13 @@ After MVP runs reliably for 2+ weeks.
 │ (future)     │          │  │   └─ EventProcessor           │
 └──────────────┘          │  │                               │
                           │  ├─ TelegramModule               │
-┌──────────────┐  rclone  │  │   ├─ Commands                 │
+┌──────────────┐   HTTPS  │  │   ├─ Commands                 │
 │ Google Drive │◄─────────│  │   ├─ RoleGuard                │
 │              │          │  │   └─ FlowEngine (future)      │
 └──────────────┘          │  │                               │
                           │  ├─ CameraModule                 │
                           │  │   ├─ MotionService            │
-                          │  │   ├─ UploadService (rclone)   │
+                          │  │   ├─ Archive registration     │
                           │  │   └─ CleanupService           │
                           │  │                               │
                           │  ├─ NetworkModule                │
@@ -180,8 +180,9 @@ repo/
 │   ├── camera/
 │   │   ├── camera.module.ts
 │   │   ├── motion.service.ts           # motion daemon lifecycle
-│   │   ├── upload.service.ts           # rclone to Google Drive
-│   │   └── cleanup.service.ts          # local + Drive cleanup
+│   │   ├── register-completed-motion-videos.use-case.ts
+│   │   └── cleanup-local-storage.use-case.ts
+│   ├── archive/                         # Google authorization/upload/retention
 │   ├── network/
 │   │   ├── network.module.ts
 │   │   └── network.service.ts          # health checks, future 4G failover
@@ -255,24 +256,20 @@ MOTION_VIDEO_SEGMENT_SEC=30
 MOTION_LOCAL_DIR=/var/lib/motion
 
 # Google Drive
-GDRIVE_REMOTE_NAME=gdrive
-GDRIVE_REMOTE_PATH=home-security/motion
-GDRIVE_CLEANUP_MIN_AGE_DAYS=30
+HOME_WORKER_ARCHIVE_KEY_PATH=/etc/home-worker/archive.key
+HOME_WORKER_INSTALLATION_ID_PATH=/etc/home-worker/installation-id
+ARCHIVE_SCHEDULER_INTERVAL_MS=120000
+ARCHIVE_UPLOAD_LEASE_MS=300000
+ARCHIVE_NEWER_VIDEO_BATCH=3
 
 # Cleanup thresholds
 DISK_WARN_PERCENT=70
 DISK_CRITICAL_PERCENT=80
 DISK_EMERGENCY_PERCENT=95
-GDRIVE_CLEANUP_PERCENT=80
 
 # Backup
 BACKUP_CRON=0 3 * * *              # daily at 3 AM
 BACKUP_LOCAL_PATH=/opt/home-worker/data/backup.db
-BACKUP_TO_GDRIVE=true
-
-# rclone
-RCLONE_BW_LIMIT=1M
-RCLONE_TRANSFERS=2
 
 # PM2
 PM2_MAX_MEMORY_RESTART=512M
@@ -492,7 +489,7 @@ Queries against `sensors` table are always clean — no `WHERE deleted = false` 
 
 - SQLite WAL mode reduces write amplification
 - `PRAGMA synchronous=NORMAL` (not FULL) — acceptable tradeoff for performance
-- `PRAGMA busy_timeout=5000` — prevents SQLITE_BUSY when rclone causes I/O contention
+- `PRAGMA busy_timeout=5000` — bounds transient writer contention during background I/O
 - CO2 readings: buffer in memory, flush to DB every 60 seconds
 - Sensor events (digital): write immediately (low frequency, ~20/day)
 - Mount `/tmp` and `/var/log` as tmpfs to reduce non-essential SD writes
@@ -502,8 +499,8 @@ Queries against `sensors` table are always clean — no `WHERE deleted = false` 
 - Daily backup via SQLite Online Backup API (not `VACUUM INTO` — allows concurrent reads/writes during backup)
 - Scheduled at 3 AM (configurable via `BACKUP_CRON`) — low-activity window
 - Local backup: `/opt/home-worker/data/backup.db` (survives DB corruption, same SD card)
-- Remote backup: rclone upload to Google Drive `gdrive:home-security/backups/worker-YYYY-MM-DD.db`
-- Retention: keep last 7 backups on Drive, delete older
+- Remote backup: immutable `database_backup` artifacts use the same direct API upload pipeline
+- Retention: keep seven days, revalidating one exact active-generation ID before deletion
 - On corruption (detected by `PRAGMA integrity_check` on boot): attempt recovery from local backup, notify admin
 
 ---
@@ -915,34 +912,31 @@ Path format: `YYYY/MM/DD/HHMMSS.{mp4,jpg}`
 
 Videos are cut into 30-second segments by motion configuration. The nested directory structure means cleanup deletes entire day-directories when all files within are uploaded and past retention age.
 
-### 11.3 Google Drive Sync
+### 11.3 Google Drive Archive
 
-- Uses `rclone copy` (one-way, additive — never `rclone sync`)
-- Google Drive auth: service account (no OAuth token expiry)
-- Upload flow: motion event ends → worker logs in SQLite → queues upload → rclone uploads per-file → marks `uploaded_to_gdrive = true` on success, retries on failure
-- rclone spawned with `ionice -c3` for lowest I/O priority (prevents SQLite busy timeouts)
-
-```bash
-ionice -c3 rclone copy /var/lib/motion/ gdrive:home-security/motion/ \
-  --min-age 1m \
-  --transfers 2 \
-  --bwlimit 1M
-```
+- Administrator device authorization activates a permission-identified generation.
+- Stable completed videos become immutable manifest artifacts and attempts.
+- Uploads stream bounded byte ranges and durably resume or reconcile ambiguous responses.
+- Each object is verified by exact ID, parent, properties, digest, revision,
+  ownership, sharing, and delete capability before it can authorize cleanup.
 
 ### 11.4 Cleanup — Local
 
 - CleanupService runs on schedule (e.g., every hour)
 - Checks disk usage via `df`
-- If > 80% (`DISK_CRITICAL_PERCENT`): delete oldest local files WHERE `uploaded_to_gdrive = true`, clean empty day-directories
+- If above `DISK_CRITICAL_PERCENT`: delete oldest local copies only after a
+  current active-generation exact-ID verification, then clean empty directories
 - Update SQLite: `local_deleted = true`
-- **Critical rule:** never delete a file that hasn't been uploaded. If Drive sync is broken and disk fills up, alert via Telegram instead of losing footage.
+- **Critical rule:** legacy upload flags never authorize deletion. If exact
+  verification is unavailable and disk fills, alert instead of losing footage.
 
 ### 11.5 Cleanup — Google Drive
 
 - Free Google Drive quota: 15GB
 - `/gdrive status` reports remaining space
-- When Drive > 80% full (`GDRIVE_CLEANUP_PERCENT`): delete oldest files on Drive (minimum 30 days retention, configurable via `GDRIVE_CLEANUP_MIN_AGE_DAYS`)
-- Update SQLite: `gdrive_file_id = null`
+- Retention deletes only eligible verified attempts under a synchronized
+  plausible clock and exact active-generation revalidation.
+- Detached, ambiguous, moved, shared, trashed, and unrelated objects remain untouched.
 
 ### 11.6 Video Delivery via Telegram
 
@@ -1115,7 +1109,7 @@ On startup, worker writes its PID to `/tmp/home-worker.lock`. Before writing, it
 ### 14.1 General Principles
 
 - Every bot command has an error response: "❌ Failed to [action]: [reason]"
-- Every external service (pigpiod, motion, rclone, Telegram API) has a health status tracked in memory
+- Every external service (pigpiod, motion, Google Drive API, Telegram API) has a bounded health/status projection
 - If a service is down, related commands return a clear error instead of crashing
 - **No unhandled exception should ever crash the process** — catch at command handler and service level
 - Errors logged to `sensor_logs` (for sensor-related) or stdout/PM2 logs (for system-related)
@@ -1134,12 +1128,13 @@ On startup, worker writes its PID to `/tmp/home-worker.lock`. Before writing, it
 - On reconnect: drain queue with aggregated summary
 - grammY `auto-retry` plugin handles transient 429/5xx errors automatically
 
-### 14.4 rclone / Google Drive Failure
+### 14.4 Google Drive Failure
 
-- Individual file marked as not uploaded, retried on next cycle
-- After 5 consecutive failures: admin notified "⚠️ Google Drive sync failing: [error]"
-- Files never deleted locally if not uploaded (critical safety rule)
-- `/gdrive status` shows error state
+- Immutable attempts resume or reconcile on a later bounded cycle.
+- Prolonged failures emit a cooldown-deduplicated administrator alert.
+- Local deletion requires current exact-ID verification; remote deletion is a
+  separate immediately revalidated operation.
+- `/gdrive status` reports sanitized required action.
 
 ### 14.5 SQLite Corruption on Boot
 
@@ -1280,9 +1275,8 @@ Separate from app updates. Admin-triggered only. Shows diff before applying:
 ```
 Bot: System update available:
   • motion: 4.5.1 → 4.6.0
-  • rclone: 1.65 → 1.67
   • ffmpeg: no update
-  • node: 20.11 → 20.14 (minor)
+  • node: 22.11 (manual update policy)
 
 Proceed? [Yes] [Cancel]
 ```
@@ -1290,9 +1284,8 @@ Proceed? [Yes] [Cancel]
 System deps defined in `config/system-deps.yml`:
 
 ```yaml
-node: "20"
+node: "22"
 motion: "latest"
-rclone: "latest"
 ffmpeg: "latest"
 mosquitto: "latest"
 ```
@@ -1320,7 +1313,7 @@ Script is idempotent (safe to re-run). Each function checks current state before
 Key steps:
 1. Validate running on Raspberry Pi
 2. Install system deps: `git`, `sqlite3`, `pigpio`, `ffmpeg`, `pm2`, `pm2-logrotate`
-3. Install Node.js 20 (via nodesource)
+3. Install Node.js 22 (via NodeSource)
 4. Enable and start pigpiod
 5. Clone repo to `/opt/home-worker`
 6. `corepack yarn install --immutable`
@@ -1342,7 +1335,7 @@ Replaces terminal prompts with a web interface:
 3. Wizard steps:
    - Step 1: Telegram bot token (validates via Telegram `getMe` API)
    - Step 2: Feature selection checkboxes (Digital, UART, Zigbee, Motion, RTSP)
-   - Step 3: Feature-specific config (only for selected features — e.g., rclone auth for Motion)
+   - Step 3: Feature-specific config; Drive connection is completed later in Telegram
 4. Wizard writes `.env` + `features.json`, triggers feature dep installation
 5. Wizard starts NestJS worker, then shuts itself down
 6. Setup page displays: "Bot is running. Send /claim_admin to your bot."

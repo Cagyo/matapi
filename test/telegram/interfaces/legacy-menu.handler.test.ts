@@ -21,12 +21,12 @@ function setup() {
   const importConfig = { handleCommand: vi.fn() }; const systemUpdate = { handleCommand: vi.fn() };
   const restart = { handleCommand: vi.fn() }; const quiet = { handlePreset: vi.fn() };
   const settings = { handleCommand: vi.fn() }; const clean = { handleCommand: vi.fn() };
-  const gdriveAuth = { handleCommand: vi.fn() }; const csv = { handleEmpty: vi.fn() };
+  const csv = { handleEmpty: vi.fn() };
   const handler = new LegacyMenuHandler(
     guard, status as any, health as any, camera as any, gdrive as any, invite as any,
     exportConfig as any, logs as any, mute as any, unmute as any, config as any,
     importConfig as any, systemUpdate as any, restart as any, quiet as any,
-    settings as any, clean as any, gdriveAuth as any, csv as any,
+    settings as any, clean as any, csv as any,
   );
   const callbacks: { regex: RegExp; fn: (ctx: any) => Promise<void> }[] = [];
   const composer = {

@@ -53,7 +53,7 @@ Use this file to decide **which** `docs/*.md` to load. Each doc declares its own
 | [18](18-bot-cmd-system-update.md) | `/system_update` | OS-level apt update flow |
 | [19](19-bot-notifications.md) | Notifications | Severity routing, aggregation, quiet hours |
 | [20](20-camera.md) | Camera Module | Motion daemon control, segments |
-| [21](21-gdrive.md) | Google Drive Sync | rclone, service account, cleanup thresholds |
+| [21](21-gdrive.md) | Google Drive Archive | Direct API authorization, immutable uploads, exact-ID retention |
 | [22](22-network.md) | Network | Wi-Fi state, connectivity probing |
 | [23](23-reliability.md) | Reliability | Heartbeat, PID lock, watchdog, restart policy |
 | [24](24-ota.md) | OTA Updates | Update mechanism, atomic swap, rollback |

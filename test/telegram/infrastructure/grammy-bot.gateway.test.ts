@@ -66,7 +66,7 @@ describe('GrammyBotGateway handler registration', () => {
       status: handler, ping: handler, help: handler, logs: handler, health: handler,
       config: handler, invite: handler, promote: handler, demote: handler, camera: handler,
       gdrive: handler, exportConfig: handler, importConfig: handler, feature: handler,
-      gdriveAuth: handler, csv: handler, home: handler, workflowNavigation: handler, legacyMenu: handler, settings: handler, clean: handler,
+      csv: handler, home: handler, workflowNavigation: handler, legacyMenu: handler, settings: handler, clean: handler,
     });
 
     await gateway.onApplicationBootstrap();
@@ -99,7 +99,7 @@ describe('GrammyBotGateway handler registration', () => {
       claim: {}, mute: {}, unmute: {}, quietHours: {}, update: {}, systemUpdate: {},
       rollback: {}, restartHandler: {}, start: {}, status: {}, ping: {}, help: {},
       logs: {}, health: {}, config, invite: {}, promote: {}, demote: {}, camera,
-      gdrive, exportConfig: {}, importConfig: {}, feature: {}, gdriveAuth: {},
+      gdrive, exportConfig: {}, importConfig: {}, feature: {},
       csv, home, workflowNavigation, legacyMenu, settings, clean: {},
     });
 

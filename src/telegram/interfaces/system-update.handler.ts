@@ -37,7 +37,7 @@ const SYSTEM_UPDATE_CALLBACK = /^sysupd:([A-Za-z0-9_-]{16}):(a|c)$/;
  * `/import_config`:
  *  1. Compute the installed-vs-available diff and show it.
  *  2. Apply/Cancel via inline keyboard; Apply spawns the detached
- *     `system-update.sh` script (snapshot → apt → rclone → node →
+ *     `system-update.sh` script (snapshot → apt → Node notice →
  *     health check → curl-on-failure).
  *
  * Per-user confirmation state is in-memory only (lost on restart) and only

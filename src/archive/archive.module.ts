@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { readFileSync } from 'node:fs';
 import { ConfigModule } from '../config/config.module';
+import { loadDefaults } from '../config/config.loader';
 import {
   TIMEZONE_OPTIONS,
   type TimezoneOptions,
@@ -15,6 +16,10 @@ import { EventQueueService } from '../events/application/event-queue.service';
 import { CLOCK, type ClockPort } from '../events/domain/ports/clock.port';
 import { SystemModule } from '../system/system.module';
 import { BootRecoveryService } from '../system/application/boot-recovery.service';
+import {
+  CLOCK_SYNC_PROBE,
+  type ClockSyncProbePort,
+} from '../system/domain/ports/clock-sync.port';
 import {
   ArchiveRuntimeLifecycleService,
 } from './application/archive-runtime-lifecycle.service';
@@ -40,6 +45,10 @@ import {
 import { ARCHIVE_REGISTRATION } from './application/ports/archive-registration.port';
 import { ARCHIVE_VERIFICATION } from './application/ports/archive-verification.port';
 import { ARCHIVE_SECRET_CIPHER } from './application/ports/archive-secret-cipher.port';
+import {
+  ARCHIVE_CLOCK,
+  type ArchiveClockPort,
+} from './application/ports/archive-clock.port';
 import { DRIVE_ACCOUNT, type DriveAccountPort } from './application/ports/drive-account.port';
 import { DRIVE_ARCHIVE, type DriveArchivePort } from './application/ports/drive-archive.port';
 import { DRIVE_AUTHORIZATION_OUTCOME } from './application/ports/drive-authorization-outcome.port';
@@ -62,6 +71,8 @@ import { RetireDriveConnectionUseCase } from './application/use-cases/retire-dri
 import { ReportDriveStatusUseCase } from './application/use-cases/report-drive-status.use-case';
 import { SubmitDriveClientUseCase } from './application/use-cases/submit-drive-client.use-case';
 import { VerifyArchiveArtifactUseCase } from './application/use-cases/verify-archive-artifact.use-case';
+import { ApplyDriveRetentionUseCase } from './application/use-cases/apply-drive-retention.use-case';
+import { DriveClockUnhealthyError } from './domain/errors/drive-clock-unhealthy.error';
 import {
   ARCHIVE_UPLOAD_SOURCE,
   UploadDriveObjectAttemptUseCase,
@@ -77,6 +88,8 @@ import { FsArchiveUploadSourceAdapter } from './infrastructure/persistence/fs-ar
 import { DurableArchiveAdminAlertAdapter } from './infrastructure/events/durable-archive-admin-alert.adapter';
 import { InMemoryArchiveArtifactRepository } from './infrastructure/persistence/in-memory-archive-artifact.repository';
 import { InMemoryDriveCredentialRepository } from './infrastructure/persistence/in-memory-drive-credential.repository';
+import { SystemArchiveClockAdapter } from './infrastructure/system-archive-clock.adapter';
+import { archiveSchedulerOptionsFromConfig } from './infrastructure/archive-scheduler-options.adapter';
 
 const ARCHIVE_BOOT_RECOVERY_REGISTRATION = Symbol('ARCHIVE_BOOT_RECOVERY_REGISTRATION');
 const ARCHIVE_REMOTE_MAINTENANCE_REGISTRATION = Symbol('ARCHIVE_REMOTE_MAINTENANCE_REGISTRATION');
@@ -180,6 +193,13 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
       useFactory: () => new ArchiveTransferSemaphoreService(),
     },
     ArchiveRemoteMutationLockService,
+    {
+      provide: SystemArchiveClockAdapter,
+      useFactory: (clockSync: ClockSyncProbePort) =>
+        new SystemArchiveClockAdapter(clockSync),
+      inject: [CLOCK_SYNC_PROBE],
+    },
+    { provide: ARCHIVE_CLOCK, useExisting: SystemArchiveClockAdapter },
     ArchiveSchedulerHooksService,
     DriveAuthorizationOutcomeRegistrationService,
     {
@@ -304,6 +324,35 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
       ],
     },
     {
+      provide: ApplyDriveRetentionUseCase,
+      useFactory: (
+        repository: ArchiveArtifactRepositoryPort,
+        credentials: DriveCredentialRepositoryPort,
+        account: DriveAccountPort,
+        drive: DriveArchivePort,
+        source: ArchiveUploadSourcePort,
+        clock: ArchiveClockPort,
+        lock: ArchiveRemoteMutationLockService,
+      ) => new ApplyDriveRetentionUseCase(
+        repository,
+        credentials,
+        account,
+        drive,
+        source,
+        clock,
+        lock,
+      ),
+      inject: [
+        ARCHIVE_ARTIFACT_REPOSITORY,
+        DRIVE_CREDENTIAL_REPOSITORY,
+        DRIVE_ACCOUNT,
+        DRIVE_ARCHIVE,
+        ARCHIVE_UPLOAD_SOURCE,
+        ARCHIVE_CLOCK,
+        ArchiveRemoteMutationLockService,
+      ],
+    },
+    {
       provide: ArchiveSchedulerService,
       useFactory: (
         repository: ArchiveArtifactRepositoryPort,
@@ -312,7 +361,15 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         hooks: ArchiveSchedulerHooksService,
         lock: ArchiveRemoteMutationLockService,
         clock: ClockPort,
-      ) => new ArchiveSchedulerService(repository, backups, uploads, hooks, lock, clock),
+      ) => new ArchiveSchedulerService(
+        repository,
+        backups,
+        uploads,
+        hooks,
+        lock,
+        clock,
+        archiveSchedulerOptionsFromConfig(loadDefaults().archive, process.env),
+      ),
       inject: [
         ARCHIVE_ARTIFACT_REPOSITORY,
         CreateDatabaseBackupUseCase,
@@ -357,13 +414,30 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
       useFactory: (
         hooks: ArchiveSchedulerHooksService,
         reconcile: ReconcileDriveUseCase,
+        retention: ApplyDriveRetentionUseCase,
+        alerts: ArchiveAdminAlertPort,
       ) => {
         hooks.registerRemoteMaintenance(async (lock, signal) => {
           await reconcile.execute({ limit: 20 }, signal, lock);
+          if (signal.aborted) return;
+          try {
+            await retention.execute({ requiredBytes: 0 }, signal);
+          } catch (error) {
+            if (!(error instanceof DriveClockUnhealthyError)) throw error;
+            await alerts.alert('clock-unhealthy', {
+              generationId: '',
+              errorCode: error.code,
+            });
+          }
         });
         return reconcile;
       },
-      inject: [ArchiveSchedulerHooksService, ReconcileDriveUseCase],
+      inject: [
+        ArchiveSchedulerHooksService,
+        ReconcileDriveUseCase,
+        ApplyDriveRetentionUseCase,
+        ARCHIVE_ADMIN_ALERT,
+      ],
     },
     {
       provide: ARCHIVE_BOOT_RECOVERY_REGISTRATION,
@@ -393,6 +467,7 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
     DriveAuthorizationOutcomeRegistrationService,
     ArchiveSchedulerHooksService,
     ArchiveRemoteMutationLockService,
+    ApplyDriveRetentionUseCase,
     ArchiveRuntimeLifecycleService,
     ARCHIVE_ADMIN_ALERT,
     ArchiveAdminAlertService,

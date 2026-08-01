@@ -19,7 +19,7 @@ Single-package repo. Target runtime: Raspberry Pi 3+ / Raspbian / Node 22 / PM2.
 | GPIO | pigpio-client (socket to `pigpiod`) |
 | UART | serialport (CO2 sensor) |
 | Camera | Motion daemon (systemd, controlled via sudo) |
-| Cloud sync | rclone → Google Drive |
+| Cloud sync | Direct Google Drive API with resumable streaming uploads |
 | Process mgr | PM2 (`max_memory_restart=512M`, `instances=1`) |
 | Tests | Vitest |
 

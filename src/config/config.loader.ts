@@ -8,6 +8,11 @@ export interface DefaultsConfig {
     quiet_hours_default: string | null;
     max_queue_before_force_aggregate: number;
   };
+  archive: {
+    scheduler_interval_ms: number;
+    upload_lease_ms: number;
+    newer_video_batch: number;
+  };
 }
 
 let cached: DefaultsConfig | undefined;

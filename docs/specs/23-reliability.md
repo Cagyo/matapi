@@ -129,10 +129,10 @@ Additional protection: PM2 `instances: 1` in ecosystem.config.js.
 - On reconnect: drain with aggregated summary
 - grammY auto-retry handles 429/5xx
 
-### rclone / Google Drive Failure
-- Per-file retry on next cycle
-- 5 consecutive failures → notify admin
-- Files never deleted locally if not uploaded
+### Google Drive API Failure
+- Durable immutable attempts resume or reconcile on the next bounded cycle
+- Prolonged upload/backup failures create cooldown-deduplicated admin alerts
+- Files are never deleted locally without current exact-ID verification
 
 ### SQLite Corruption
 - `PRAGMA integrity_check` on boot

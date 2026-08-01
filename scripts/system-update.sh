@@ -3,7 +3,7 @@
 # Triggered by the /system_update bot command after admin confirmation.
 #
 # Sequence: snapshot current state -> apt upgrade (curated set) ->
-# rclone selfupdate -> print manual Node update instructions -> health check.
+# print manual Node update instructions -> health check.
 # Any failure records a terminal outcome, restarts the worker for receipt
 # recovery, then uses direct curl as a notification fallback.
 set -Eeuo pipefail
@@ -53,7 +53,6 @@ snapshot_current() {
   {
     dpkg -l | grep -E "motion|ffmpeg|mosquitto" || true
     node -v
-    rclone version 2>/dev/null || echo "rclone: not installed"
   } > "$SNAPSHOT"
 }
 
@@ -62,12 +61,6 @@ update_apt() {
   # /etc/sudoers.d/homeworker-sysupdate (written by install.sh) — args included.
   apt_get update
   apt_get install -y --only-upgrade motion ffmpeg mosquitto
-}
-
-update_rclone() {
-  if command -v rclone &>/dev/null; then
-    sudo rclone selfupdate
-  fi
 }
 
 update_node_minor() {
@@ -115,7 +108,6 @@ trap 'report_failure $?' ERR
 main() {
   snapshot_current
   update_apt
-  update_rclone
   update_node_minor
 
   if ! health_check; then

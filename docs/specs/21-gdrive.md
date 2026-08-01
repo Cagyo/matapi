@@ -1,123 +1,95 @@
-# 21 — Google Drive Sync
+# 21 — Google Drive Archive
 
 ## Dependencies
-- 01-database.md (motion_events table)
-- 20-camera.md (file structure, motion events)
-- 00-overview.md (.env rclone/gdrive settings)
+- 01-database.md (archive manifest, motion-event compatibility columns)
+- 20-camera.md (completed Motion files and local cleanup)
+- 00-overview.md (Node 22 and archive environment)
 
-## Overview
+## Ownership and authentication
 
-rclone uploads motion files to Google Drive. Cleanup runs on both local and Drive sides based on configurable thresholds.
+The `archive` bounded context owns Google Drive. An administrator uploads a
+Google OAuth installed-client JSON document through Telegram; the bot deletes
+the message document after reading it. Device authorization is polled in a
+bounded background operation, and account confirmation activates a new
+generation only after its permission identity and private folder tree are
+verified. Client secrets, device codes, tokens, and resumable-session URLs are
+never logged or shown by status commands.
 
-## Auth
+OAuth credentials are encrypted with AES-256-GCM. The encryption key is the
+immutable root-provisioned `/etc/home-worker/archive.key`; reinstall and OTA
+must validate it and never replace it. A missing or corrupt key makes Drive
+`reauth_required` without stopping Motion, Telegram, or local backups.
 
-Google Drive service account (no OAuth token expiry). Service account key stored in rclone config, not in `.env`.
+## Folder and object model
 
-## Upload Flow
+Each installation uses private `Home Worker`, `Motion`, and `Backups` folders.
+Every object is created under an immutable attempt row with installation,
+generation, kind, source fingerprint, digest, and source-time app properties.
+Replacement creates a new attempt; earlier Drive IDs and metadata remain audit
+history. Legacy `motion_events` upload columns remain readable for rollback but
+never authorize local or remote deletion.
 
-```
-Motion event ends
-       │
-       ▼
-Worker logs event in motion_events (uploaded_to_gdrive = false)
-       │
-       ▼
-UploadService queues upload job
-       │
-       ▼
-rclone copy (per-file, ionice -c3)
-       │
-       ├─ Success → uploaded_to_gdrive = true, store gdrive_file_id
-       └─ Failure → retry on next cycle
-```
+## Upload and recovery
 
-### rclone Command
+- Uploads stream in bounded byte ranges; the worker does not buffer videos.
+- Resumable-session state and authoritative offsets are durable.
+- Saved-session 200/201/308/404 outcomes reconcile before another attempt.
+- Ambiguous responses search only by immutable attempt identity; they never
+  adopt an unrelated object.
+- A stalled transfer does not block snapshots, Motion registration, status,
+  local cleanup, backups, or later non-overlapping scheduler work.
+- Shutdown aborts in-flight network work within the PM2 handoff window.
 
-```bash
-ionice -c3 rclone copy /home/pi/motion/videos/ gdrive:home-security/motion/ \
-  --min-age 1m \
-  --transfers 2 \
-  --bwlimit 1M
-```
+## Backup
 
-- `ionice -c3`: lowest I/O priority, prevents SQLite busy timeouts
-- `--min-age 1m`: don't upload files still being written
-- `--transfers 2`: limit parallel uploads
-- `--bwlimit 1M`: Pi-friendly bandwidth limit
+SQLite's online backup API creates and quick-checks an immutable local snapshot
+before archive registration. Backups use the same attempt/upload/verification
+pipeline as video. Local snapshot retention is seven days; remote backup
+retention deletes only an exact, immediately revalidated active-generation ID.
 
-All values configurable via `RCLONE_TRANSFERS` and `RCLONE_BW_LIMIT`.
+## Reconciliation and retention
 
-## Upload uses `rclone copy`, NOT `rclone sync`
+Reconciliation verifies parents, size, digest, app properties, revision,
+ownership, sharing, and delete capability. Moved, replaced, shared, missing, or
+otherwise ambiguous objects become detached audit records.
 
-`rclone copy` is one-way additive. It uploads new files without deleting anything on Drive. `rclone sync` would mirror local deletions to Drive — the **opposite** of what we want. Local cleanup should not trigger Drive deletion.
+Retention runs only with a synchronized plausible clock. It expires verified
+backups older than seven days, and quota reclamation considers old video only
+under the documented deficit policy. Every permanent deletion reloads the
+active generation, artifact, attempt, and exact object under the remote
+mutation lock immediately before `deleteExact`. Trash, detached objects,
+ambiguous objects, and unrelated account items are never bulk-listed or
+deleted. Local cleanup verifies the current active-generation attempt and
+never requests a remote deletion.
 
-## Failure Handling
+## Scheduling and configuration
 
-- Individual file failure: mark as not uploaded, retry next cycle
-- After 5 consecutive failures: notify admin "⚠️ Google Drive sync failing: [error]"
-- Failure counter reset on first successful upload
-- `/gdrive status` shows error state and failure count
+`ArchiveSchedulerService` owns one bounded dispatcher. Defaults live under
+`archive` in `config/defaults.yml`; optional environment overrides are bounded:
 
-## Local Cleanup
+| Variable | Bounds | Default |
+|---|---:|---:|
+| `ARCHIVE_SCHEDULER_INTERVAL_MS` | 30,000–3,600,000 | 120,000 |
+| `ARCHIVE_UPLOAD_LEASE_MS` | 60,000–86,400,000 | 300,000 |
+| `ARCHIVE_NEWER_VIDEO_BATCH` | 1–100 | 3 |
 
-CleanupService runs hourly:
+Archive paths use the existing `MOTION_LOCAL_DIR`, `BACKUP_LOCAL_PATH`,
+`HOME_WORKER_ARCHIVE_KEY_PATH`, and `HOME_WORKER_INSTALLATION_ID_PATH` seams.
+Invalid schedule overrides fall back to checked-in defaults.
 
-```
-Check disk usage (df)
-       │
-       ├─ < 80% → do nothing
-       │
-       ├─ ≥ 80% (DISK_CRITICAL_PERCENT):
-       │   ├─ Find oldest files WHERE uploaded_to_gdrive = true
-       │   ├─ Delete local files
-       │   ├─ Delete empty day-directories (YYYY/MM/DD)
-       │   └─ Update motion_events: local_deleted = true
-       │
-       └─ ≥ 95% (DISK_EMERGENCY_PERCENT):
-           ├─ All above, plus:
-           ├─ Prune sent events older than 1 day
-           ├─ Prune sensor_logs older than 1 day
-           ├─ Stop motion daemon
-           └─ Notify admin: "🚨 Emergency disk cleanup"
-```
+## Status and alerts
 
-**Critical rule:** NEVER delete a file that hasn't been uploaded. If Drive sync is broken and disk fills up, alert admin instead of losing footage.
+`/gdrive status` reports generation state, permission identity, quota, archive
+counts, last backup/upload/reconcile/cleanup times, reclamation accounting, and
+required actions. Durable, cooldown-deduplicated alerts cover reauthorization,
+policy rejection, quota review, remote detachment/missing objects, retired
+generations, prolonged upload/backup failure, corrupt credentials, clock
+health, and local disk pressure.
 
-## Google Drive Cleanup
+## Release evidence
 
-Runs when Drive quota exceeds 80% (`GDRIVE_CLEANUP_PERCENT`):
-
-```
-Check Drive quota (rclone about)
-       │
-       ├─ < 80% → do nothing
-       │
-       └─ ≥ 80%:
-           ├─ Find oldest files on Drive (minimum 30 days retention)
-           ├─ Delete from Drive
-           └─ Update motion_events: gdrive_file_id = null
-```
-
-- Minimum retention: 30 days (`GDRIVE_CLEANUP_MIN_AGE_DAYS`)
-- Free Google Drive: 15GB (~3 months at moderate motion frequency)
-
-## Database Backup Upload
-
-Separate from motion sync. Daily backup uploaded to `gdrive:home-security/backups/`:
-
-```bash
-ionice -c3 rclone copy /opt/home-worker/data/backup.db \
-  gdrive:home-security/backups/worker-$(date +%Y-%m-%d).db
-```
-
-- Keep last 7 backups on Drive
-- Delete older via `rclone delete --min-age 7d`
-
-## Health Monitoring
-
-`/gdrive status` reports:
-- Drive quota (used / total / percentage)
-- Last successful upload timestamp
-- Pending upload count
-- Failed upload count + last error
-- Auto-cleanup status
+Automated tests use in-memory repositories and fake Google gateways. Before a
+release, an operator must complete and record
+`test/archive/google-drive-live-smoke.md` on the actual supported Raspberry Pi
+hardware/OS/architecture combinations. CI evidence is not a substitute for
+that on-device and disposable-account record.

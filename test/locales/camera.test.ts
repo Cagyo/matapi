@@ -199,16 +199,3 @@ describe('en.gdrive', () => {
     expect(body).toContain('reauthorize');
   });
 });
-
-describe('en.gdriveAuth', () => {
-  it('shows the SSH command for configuring rclone on the Pi', () => {
-    const prompt = en.gdriveAuth.prompt('192.168.1.42');
-
-    expect(prompt).toContain('ssh pi@192.168.1.42');
-    expect(prompt).not.toContain('<pi-host>');
-    expect(prompt).toContain(
-      'sudo -H -u homeworker env RCLONE_CONFIG=/home/homeworker/.config/rclone/rclone.conf rclone config',
-    );
-    expect(prompt).toContain('rclone authorize "drive"');
-  });
-});

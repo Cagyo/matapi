@@ -18,8 +18,8 @@ const execAsync = promisify(exec);
  * apt packages eligible for `/system_update`. The set is the intersection of
  * the apt entries declared in `config/system-deps.yml` and this curated
  * allowlist — keeping the diff aligned with what `scripts/system-update.sh`
- * actually upgrades (spec 18 / spec 24). `rclone` and `node` are inspected
- * separately since they are not apt-managed in the same way.
+ * actually upgrades (spec 18 / spec 24). Node is inspected separately because
+ * major-version changes require manual native-module validation.
  */
 const UPGRADABLE_APT = ['motion', 'ffmpeg', 'mosquitto'] as const;
 
@@ -66,23 +66,6 @@ export function parseAptPolicy(name: string, stdout: string): DepUpdate {
   return { name, current: installed, available: candidate, kind: 'none' };
 }
 
-/** Extract the installed rclone version from `rclone version` output. */
-export function parseRcloneVersion(stdout: string): string | null {
-  return (/rclone\s+v?(\S+)/.exec(stdout))?.[1] ?? null;
-}
-
-/** Build an rclone diff from the installed version + `selfupdate --check`. */
-export function parseRcloneCheck(
-  current: string | null,
-  checkStdout: string,
-): DepUpdate {
-  const available = (/latest:\s*v?(\d[\w.+-]*)/i.exec(checkStdout))?.[1] ?? null;
-  if (available && current && available !== current) {
-    return { name: 'rclone', current, available, kind: 'upgrade' };
-  }
-  return { name: 'rclone', current, available: available ?? current, kind: 'none' };
-}
-
 /** Compare the installed node version against the desired major. */
 export function evaluateNode(
   current: string,
@@ -109,9 +92,9 @@ export function evaluateNode(
  * Shell-backed `SystemDepsPort` for Raspberry Pi / Linux hosts (spec 18).
  *
  * `check()` never mutates the system and degrades gracefully: on hosts
- * without apt/rclone (e.g. macOS dev box) each dependency reports `unknown`
- * rather than throwing. `applyUpdate()` delegates the snapshot → apt →
- * rclone → node → health-check sequence to `scripts/system-update.sh`.
+ * without apt (e.g. macOS dev box) each dependency reports `unknown` rather
+ * than throwing. `applyUpdate()` delegates the snapshot → apt → Node notice →
+ * health-check sequence to `scripts/system-update.sh`.
  */
 @Injectable()
 export class ShellSystemDepsAdapter implements SystemDepsPort {
@@ -140,10 +123,9 @@ export class ShellSystemDepsAdapter implements SystemDepsPort {
     const aptDeps = await Promise.all(
       aptPackages.map((name) => this.checkApt(name)),
     );
-    const rclone = await this.checkRclone();
     const node = await this.checkNode(config);
 
-    const deps: DepUpdate[] = [...aptDeps, rclone, node];
+    const deps: DepUpdate[] = [...aptDeps, node];
     const hasUpdates = deps.some(
       (d) => d.kind === 'upgrade' || d.kind === 'node-minor',
     );
@@ -184,26 +166,6 @@ export class ShellSystemDepsAdapter implements SystemDepsPort {
     } catch {
       // apt-cache absent (dev host) or package unknown.
       return { name, current: null, available: null, kind: 'unknown' };
-    }
-  }
-
-  private async checkRclone(): Promise<DepUpdate> {
-    let current: string | null = null;
-    try {
-      const { stdout } = await execAsync('rclone version', { timeout: 10_000 });
-      current = parseRcloneVersion(stdout);
-    } catch {
-      return { name: 'rclone', current: null, available: null, kind: 'not-installed' };
-    }
-
-    try {
-      const { stdout } = await execAsync('rclone selfupdate --check', {
-        timeout: 15_000,
-      });
-      return parseRcloneCheck(current, stdout);
-    } catch {
-      // selfupdate --check unavailable; report installed version only.
-      return { name: 'rclone', current, available: null, kind: 'unknown' };
     }
   }
 

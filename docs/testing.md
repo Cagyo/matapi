@@ -78,7 +78,8 @@ One adapter against the real underlying tech, isolated:
 | pigpio | `PigpioGateway` is the seam — mock the gateway, real driver above it (see [`digital.driver.test.ts`](../test/sensors/digital.driver.test.ts)) | Already in place |
 | serialport (UART) | `@serialport/binding-mock` virtual port | Per-test port |
 | grammY | grammY's own test transport | One bot instance per test |
-| rclone, motion, systemctl | **Do not** integration-test these from CI. Cover with adapter unit tests that mock the `child_process` boundary, then validate on-device manually. |
+| Motion / systemctl | **Do not** integration-test daemon control from CI. Cover with adapter unit tests that mock the `child_process` boundary, then validate on-device manually. |
+| Google Drive | Use fake HTTP/SDK gateways in CI; run the disposable-account procedure in `test/archive/google-drive-live-smoke.md` before release. |
 
 ```ts
 // test/events/infrastructure/drizzle-event.repository.test.ts

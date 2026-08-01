@@ -422,17 +422,13 @@ setup_tmpfs() {
 setup_system_update_sudoers() {
   # /system_update runs as $USER and shells these exact commands through sudo.
   # sudoers matches command paths AND arguments literally, so keep this list
-  # in lockstep with scripts/system-update.sh (the lockstep check in the plan's
-  # final verification greps both files). Both /usr/bin and /bin path variants
-  # are listed (usr-merged vs older images). rclone's official installer puts
-  # the binary in /usr/bin; if a future install lands in /usr/local/bin, add
-  # that variant here too.
+  # in lockstep with scripts/system-update.sh. Both /usr/bin and /bin path
+  # variants are listed for usr-merged and older images.
   local tmp
   tmp="$(mktemp)"
   cat > "$tmp" <<EOF
 $USER ALL=(ALL) NOPASSWD: /usr/bin/apt-get -o DPkg::Lock::Timeout=300 update, /bin/apt-get -o DPkg::Lock::Timeout=300 update
 $USER ALL=(ALL) NOPASSWD: /usr/bin/apt-get -o DPkg::Lock::Timeout=300 install -y --only-upgrade motion ffmpeg mosquitto, /bin/apt-get -o DPkg::Lock::Timeout=300 install -y --only-upgrade motion ffmpeg mosquitto
-$USER ALL=(ALL) NOPASSWD: /usr/bin/rclone selfupdate, /bin/rclone selfupdate
 EOF
   if sudo visudo -c -f "$tmp" >/dev/null; then
     sudo install -m 440 -o root -g root "$tmp" /etc/sudoers.d/homeworker-sysupdate

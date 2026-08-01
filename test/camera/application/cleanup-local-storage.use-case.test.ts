@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CleanupLocalStorageUseCase } from '../../../src/camera/application/cleanup-local-storage.use-case';
 import { MOTION_DESIRED_STATE_KEY } from '../../../src/camera/domain/motion-desired-state';
 import { CameraAdminAlert } from '../../../src/camera/domain/ports/admin-alert.port';
-import { GdriveSyncHealthPort } from '../../../src/camera/domain/ports/gdrive-sync-health.port';
 import { LocalStoragePort } from '../../../src/camera/domain/ports/local-storage.port';
 import { MotionControlPort } from '../../../src/camera/domain/ports/motion-control.port';
 import { RetentionPrunePort } from '../../../src/camera/domain/ports/retention-prune.port';
@@ -100,14 +99,6 @@ function memMeta(initial: Record<string, string> = {}) {
   return { meta, store };
 }
 
-function fakeHealth(lastSuccessAt: Date | null = null): GdriveSyncHealthPort {
-  return {
-    snapshot: () => ({ consecutiveFailures: 0, lastError: null, lastSuccessAt }),
-    recordSuccess: async () => undefined,
-    recordFailure: async () => undefined,
-  };
-}
-
 interface Overrides {
   storage?: ReturnType<typeof fakeStorage>;
   repo?: InMemoryMediaRepository;
@@ -115,7 +106,6 @@ interface Overrides {
   motion?: ReturnType<typeof fakeMotion>;
   alert?: ReturnType<typeof fakeAlert>;
   meta?: SystemMetaRepositoryPort;
-  health?: GdriveSyncHealthPort;
   archive?: ArchiveVerificationPort;
   activityGate?: { tryRunCleanup<T>(operation: () => Promise<T>): Promise<T | null> };
 }
@@ -145,7 +135,6 @@ function build(overrides: Overrides = {}) {
     motion,
     alert,
     meta,
-    overrides.health ?? fakeHealth(),
     archive,
     overrides.activityGate,
   );
@@ -205,7 +194,7 @@ describe('CleanupLocalStorageUseCase', () => {
     expect((await repo.findUploadedNotDeleted()).map((event) => event.id)).toEqual([1]);
   });
 
-  it('never deletes local media from a legacy rclone success heuristic', async () => {
+  it('never deletes local media without current exact-ID archive verification', async () => {
     const repo = new InMemoryMediaRepository();
     repo.seedEvents([uploadedEvent(1)]);
     const archive: ArchiveVerificationPort = {
@@ -220,7 +209,6 @@ describe('CleanupLocalStorageUseCase', () => {
       repo,
       archive,
       storage: fakeStorage([85, 60]),
-      health: fakeHealth(new Date()),
     });
 
     await useCase.execute();
@@ -451,7 +439,6 @@ describe('CleanupLocalStorageUseCase', () => {
       motion,
       alert,
       meta,
-      health: fakeHealth(new Date()),
     });
 
     await expect(useCase.execute()).resolves.toEqual({ thresholdUsed: 80 });
@@ -465,14 +452,14 @@ describe('CleanupLocalStorageUseCase', () => {
     expect(alert.calls).toEqual(['emergency-disk-cleanup']);
   });
 
-  it('never sweeps unreferenced files from a legacy bulk-copy timestamp', async () => {
+  it('never sweeps unreferenced files without manifest verification', async () => {
     const repo = new InMemoryMediaRepository();
     repo.seedEvents([uploadedEvent(1), notUploadedEvent(2)]);
     const storage = fakeStorage(
       [85, 60],
       ['/var/lib/motion/2026/01/01/999.mp4', '/var/lib/motion/2.mp4'],
     );
-    const { useCase } = build({ repo, storage, health: fakeHealth(new Date()) });
+    const { useCase } = build({ repo, storage });
 
     await useCase.execute();
 
@@ -484,7 +471,6 @@ describe('CleanupLocalStorageUseCase', () => {
   it('does not sweep an old-mtime orphan created after the last Drive sync', async () => {
     const repo = new InMemoryMediaRepository();
     repo.seedEvents([uploadedEvent(1)]);
-    const lastSuccessAt = new Date(Date.now() - 60_000);
     const storage = fakeStorage([85, 60], [
       {
         path: '/var/lib/motion/2026/01/01/restored.mp4',
@@ -492,7 +478,7 @@ describe('CleanupLocalStorageUseCase', () => {
         ctimeMs: Date.now(),
       },
     ]);
-    const { useCase } = build({ repo, storage, health: fakeHealth(lastSuccessAt) });
+    const { useCase } = build({ repo, storage });
 
     await useCase.execute();
 
@@ -505,7 +491,7 @@ describe('CleanupLocalStorageUseCase', () => {
     const repo = new InMemoryMediaRepository();
     repo.seedEvents([uploadedEvent(1)]);
     const storage = fakeStorage([85, 60], ['/var/lib/motion/2026/01/01/999.mp4']);
-    const { useCase } = build({ repo, storage, health: fakeHealth(null) });
+    const { useCase } = build({ repo, storage });
 
     await useCase.execute();
 

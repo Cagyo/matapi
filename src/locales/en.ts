@@ -367,7 +367,7 @@ export const commands: CommandDescriptor[] = [
   {
     command: 'system_update',
     description: 'Update OS dependencies',
-    usage: '/system_update — update OS dependencies (apt, rclone; Node major upgrades are manual)',
+    usage: '/system_update — update allowlisted OS packages (Node upgrades are manual)',
     scope: 'admin',
   },
   {
@@ -1378,27 +1378,6 @@ const enCatalog = {
     authorizationPending: 'Google authorization is still in progress. Complete it in the browser, then try again.',
     authorizationFailed: 'Google authorization did not complete. Your previous connection was kept.',
     accountUnavailable: 'the selected Google account',
-  },
-
-  gdriveAuth: {
-    prompt: (sshHost: string) =>
-      '☁️ *Google Drive Auth Setup*\n\n' +
-      'Paste your rclone `[gdrive]` config section below, or upload an `rclone.conf` file.\n\n' +
-      'To configure Drive directly on the Pi instead, run this from your laptop:\n' +
-      `\`ssh pi@${sshHost} sudo -H -u homeworker env RCLONE_CONFIG=/home/homeworker/.config/rclone/rclone.conf rclone config\`\n\n` +
-      'Create or update a remote named `gdrive` with type `drive`. On a headless Pi, answer `n` to browser auth; if rclone prints `rclone authorize "drive"`, run that on a computer with a browser and paste the token back into the SSH session.\n\n' +
-      'When direct setup is done, send /cancel here, then run /gdrive status.',
-    success: (used: string, total: string) =>
-      `✅ Google Drive connected!\n📦 ${used} / ${total}`,
-    failed: (reason: string) =>
-      `❌ Auth update failed: ${reason}\nPrevious config has been restored.`,
-    notInstalled:
-      '❌ rclone is not installed. Re-run install with the camera feature.',
-    alreadyInProgress: '⏳ Auth update already in progress. Send /cancel to abort.',
-    cancelled: '☁️ Google Drive auth setup cancelled.',
-    invalidSnippet:
-      "❌ That doesn't look like an rclone config section. Expected a `[gdrive]` header.",
-    button: '☁️ Set GDrive Auth',
   },
 
   settings: {

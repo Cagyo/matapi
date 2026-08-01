@@ -21,7 +21,7 @@ Home Worker — home automation and security monitoring system on Raspberry Pi w
 
 | Layer | Technology | Notes |
 |-------|-----------|-------|
-| Runtime | Node.js 20 | LTS, pinned to major version |
+| Runtime | Node.js 22 | LTS, pinned to major version |
 | Framework | NestJS | |
 | Database | SQLite via better-sqlite3 | WAL mode, synchronous=NORMAL, busy_timeout=5000 |
 | ORM | Drizzle ORM | Lightweight, TypeScript-first |
@@ -30,7 +30,7 @@ Home Worker — home automation and security monitoring system on Raspberry Pi w
 | GPIO | pigpio (socket mode) | Non-root via pigpiod |
 | UART | serialport npm | CO2 sensor |
 | Camera | Motion daemon | systemd, worker controls via sudo |
-| Cloud sync | rclone | Google Drive, service account auth |
+| Cloud archive | Direct Google Drive API | Device authorization, resumable streaming upload |
 
 ## Project Structure
 
@@ -100,24 +100,20 @@ MOTION_HOOK_PORT=4000            # loopback HTTP port for Motion daemon hooks
 MOTION_HEALTH_INTERVAL_MS=60000  # motion-daemon watchdog poll interval
 
 # Google Drive
-GDRIVE_REMOTE_NAME=gdrive
-GDRIVE_REMOTE_PATH=home-security/motion
-GDRIVE_CLEANUP_MIN_AGE_DAYS=30
+HOME_WORKER_ARCHIVE_KEY_PATH=/etc/home-worker/archive.key
+HOME_WORKER_INSTALLATION_ID_PATH=/etc/home-worker/installation-id
+ARCHIVE_SCHEDULER_INTERVAL_MS=120000  # bounded 30000..3600000
+ARCHIVE_UPLOAD_LEASE_MS=300000       # bounded 60000..86400000
+ARCHIVE_NEWER_VIDEO_BATCH=3          # bounded 1..100
 
 # Cleanup thresholds
 DISK_WARN_PERCENT=70
 DISK_CRITICAL_PERCENT=80
 DISK_EMERGENCY_PERCENT=95
-GDRIVE_CLEANUP_PERCENT=80
 
 # Backup
 BACKUP_CRON=0 3 * * *
 BACKUP_LOCAL_PATH=/opt/home-worker/data/backup.db
-BACKUP_TO_GDRIVE=true
-
-# rclone
-RCLONE_BW_LIMIT=1M
-RCLONE_TRANSFERS=2
 
 # PM2
 PM2_MAX_MEMORY_RESTART=512M

@@ -287,7 +287,7 @@ restart in this table. Do not hand-edit its migration: edit
 
 - WAL mode reduces write amplification
 - `synchronous=NORMAL` — acceptable tradeoff
-- `busy_timeout=5000` — prevents SQLITE_BUSY during rclone I/O
+- `busy_timeout=5000` — bounds transient writer contention during background I/O
 - CO2 readings: buffer in memory, flush every 60s
 - Digital events: write immediately (low frequency ~20/day)
 - Mount `/tmp` and `/var/log` as tmpfs
@@ -297,6 +297,8 @@ restart in this table. Do not hand-edit its migration: edit
 - Daily via SQLite Online Backup API (allows concurrent reads/writes)
 - Scheduled at 3 AM (`BACKUP_CRON`)
 - Local: `BACKUP_LOCAL_PATH` (survives DB corruption)
-- Remote: rclone to `gdrive:home-security/backups/worker-YYYY-MM-DD.db`
-- Keep last 7 backups on Drive
+- Remote: registered as an immutable `database_backup` archive artifact, then
+  streamed through the direct Google Drive resumable-upload pipeline
+- Keep seven days of verified backups; every remote expiry revalidates one exact
+  active-generation object ID immediately before deletion
 - On corruption: recover from local backup → notify admin

@@ -22,6 +22,8 @@ import { SubmitDriveClientUseCase } from '../../src/archive/application/use-case
 import { ConfirmDriveAccountUseCase } from '../../src/archive/application/use-cases/confirm-drive-account.use-case';
 import { CancelDriveConnectionUseCase } from '../../src/archive/application/use-cases/cancel-drive-connection.use-case';
 import { DisconnectDriveUseCase } from '../../src/archive/application/use-cases/disconnect-drive.use-case';
+import { ARCHIVE_CLOCK } from '../../src/archive/application/ports/archive-clock.port';
+import { ApplyDriveRetentionUseCase } from '../../src/archive/application/use-cases/apply-drive-retention.use-case';
 
 describe('ArchiveModule composition', () => {
   it('is imported by the application, Camera, and Telegram composition roots', () => {
@@ -71,5 +73,22 @@ describe('ArchiveModule composition', () => {
       (provider) => provider.provide === ReconcileDriveUseCase,
     );
     expect(reconcile).toMatchObject({ inject: expect.arrayContaining([ARCHIVE_ADMIN_ALERT]) });
+  });
+
+  it('wires the healthy archive clock and exact-ID retention into scheduled maintenance', () => {
+    const providers = Reflect.getMetadata('providers', ArchiveModule) as {
+      provide?: unknown;
+      inject?: unknown[];
+    }[];
+
+    expect(providers.some((provider) => provider.provide === ARCHIVE_CLOCK)).toBe(true);
+    expect(providers.some((provider) => provider.provide === ApplyDriveRetentionUseCase)).toBe(true);
+    const maintenance = providers.find((provider) =>
+      typeof provider.provide === 'symbol' &&
+      provider.inject?.includes(ReconcileDriveUseCase) &&
+      provider.inject?.includes(ApplyDriveRetentionUseCase) &&
+      provider.inject?.includes(ARCHIVE_ADMIN_ALERT),
+    );
+    expect(maintenance).toBeDefined();
   });
 });

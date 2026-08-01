@@ -223,17 +223,12 @@ leak a small entry forever.
 **Proposed fix:** drop the entry when a sensor is removed (hook into
 `remove-sensor.use-case`), or lazily evict on `reload()`.
 
-### M6 — Re-entrancy guards never reset on a hung task
+### M6 — Resolved: archive transfers are independently cancellable
 
-[drive-sync.scheduler.ts](../src/camera/application/drive-sync.scheduler.ts#L53-L70)
-adds to a `running` Set in `try/finally`. The `finally` only fires when the task
-settles; the underlying `rclone` has a **30-minute** timeout
-([rclone-drive-sync.adapter.ts](../src/camera/infrastructure/rclone-drive-sync.adapter.ts#L17)),
-so a half-open network can block that loop for up to 30 min. Same shape for the
-UART read loop.
-
-**Proposed fix:** lower the rclone timeout to ~10–15 min and/or wrap each
-scheduled task in a `Promise.race` watchdog that always clears the guard.
+The Archive scheduler admits only one bounded resumable transfer and keeps
+Motion reconciliation, backup creation, local cleanup, and later non-overlapping
+ticks independent. Shutdown aborts the active request and waits only for the
+configured bounded handoff window. The UART read-loop concern remains separate.
 
 ### M7 — Catch-blocks discard stack/cause
 

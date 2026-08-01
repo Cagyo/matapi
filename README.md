@@ -44,7 +44,8 @@ Mirrors [docs/00-overview.md](docs/00-overview.md):
 - `src/sensors` — driver interface, registry, drivers (digital, uart, mqtt, camera, mock).
 - `src/events` — write-side queue, drain processor, aggregation.
 - `src/telegram` — grammY bot, commands, role guard, conversations.
-- `src/camera` — Motion daemon control, rclone upload, cleanup.
+- `src/camera` — Motion daemon control, completed-video registration, local cleanup.
+- `src/archive` — direct Google Drive authorization, resumable uploads, verification, and retention.
 - `src/network` — heartbeat + connectivity watchdog.
 - `src/config` — YAML defaults loader.
 - `scripts` — install / update / system-update / setup wizard.

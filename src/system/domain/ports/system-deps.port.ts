@@ -4,7 +4,7 @@ export const SYSTEM_DEPS = Symbol('SYSTEM_DEPS');
  * Per-dependency comparison result (spec 18).
  *
  * `kind` drives the rendered diff line:
- *  - `upgrade`       — an apt/rclone upgrade is available (`current` → `available`).
+ *  - `upgrade`       — an allowlisted apt upgrade is available (`current` → `available`).
  *  - `none`          — installed and up to date.
  *  - `not-installed` — package is absent on this host.
  *  - `node-minor`    — node minor/patch bump within the desired major (manual update
@@ -39,9 +39,9 @@ export interface SystemDepsCheck {
 /**
  * OS-level dependency management for `/system_update` (spec 18 / spec 24).
  *
- * The adapter inspects apt packages, rclone and node, and delegates the
- * actual upgrade to `scripts/system-update.sh` (which owns the snapshot,
- * apt upgrade, rclone selfupdate, and health check, while printing manual
+ * The adapter inspects apt packages and Node, and delegates the actual upgrade
+ * to `scripts/system-update.sh` (which owns the snapshot, apt upgrade, and
+ * health check, while printing manual
  * node update instructions for same-major bumps and handling the
  * curl-based failure notification).
  */

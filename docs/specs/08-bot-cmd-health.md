@@ -26,7 +26,7 @@ Gather system metrics and report:
 | DB size | `fs.statSync(DATABASE_PATH).size` |
 | Bot polling | Time since last received update |
 | Sensors online | Count from sensor registry |
-| Motion storage | `du` on `MOTION_LOCAL_DIR` + rclone `about` for Drive |
+| Motion storage | bounded local usage plus the Archive status projection for Drive |
 
 ## Output Format
 
@@ -47,7 +47,7 @@ Gather system metrics and report:
 - Motion feature disabled → omit Motion line
 - Google Drive not configured → omit Drive part of Motion line
 - CPU temp file not found (some Pi models) → show "N/A"
-- rclone `about` fails → show "Drive: unavailable"
+- Archive quota probe fails → show "Drive: unavailable"
 
 ## Error Cases
 - Any metric fails to collect → show that line as "N/A", don't fail entire command

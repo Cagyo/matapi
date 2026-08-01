@@ -109,18 +109,11 @@ SNAPSHOT="/opt/home-worker/data/system-snapshot.txt"
 snapshot_current() {
   dpkg -l | grep -E "motion|ffmpeg|mosquitto" > "$SNAPSHOT"
   node -v >> "$SNAPSHOT"
-  rclone version >> "$SNAPSHOT" 2>/dev/null || echo "rclone: not installed" >> "$SNAPSHOT"
 }
 
 update_apt() {
   sudo apt-get update
   sudo apt-get install -y --only-upgrade motion ffmpeg mosquitto
-}
-
-update_rclone() {
-  if command -v rclone &>/dev/null; then
-    sudo rclone selfupdate
-  fi
 }
 
 update_node_minor() {
@@ -147,7 +140,6 @@ health_check() {
 main() {
   snapshot_current
   update_apt
-  update_rclone
   update_node_minor
 
   if ! health_check; then
@@ -187,9 +179,9 @@ If the check fails, rollback is automatic.
 
 ## Node.js Major Version Policy
 
-- `system-deps.yml` specifies major version only (e.g., `node: "20"`)
-- Minor/patch updates within the major are safe and automatic
-- Major upgrades (20→22) require:
+- `system-deps.yml` specifies Node 22 as the supported major
+- Bot-triggered updates never change Node; minor, patch, and major updates are manual
+- Any Node upgrade requires:
   1. Manual edit of `system-deps.yml`
   2. Awareness that all native modules (`better-sqlite3`, `pigpio`) recompile
   3. `install_production_deps` after Node upgrade rebuilds native addons sequentially with `jobs=1`

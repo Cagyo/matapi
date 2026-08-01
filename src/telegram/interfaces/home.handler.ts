@@ -58,8 +58,7 @@ export class HomeHandler implements TelegramHandler {
     private readonly help?: HelpHandler,
     private readonly config?: ConfigHandler,
     private readonly drive?: GdriveHandler,
-    // Kept as a positional compatibility slot while the removed legacy
-    // `/gdrive_auth` handler is replaced by GdriveHandler.handleConnect.
+    // Kept as a positional compatibility slot for direct Drive connection.
     @Optional() @Inject(GdriveHandler)
     private readonly driveConnection?: GdriveHandler,
     private readonly health?: HealthHandler,

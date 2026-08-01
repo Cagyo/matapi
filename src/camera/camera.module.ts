@@ -23,12 +23,10 @@ import { AdminAlertService } from './application/admin-alert.service';
 import { BrowseMotionEventsUseCase } from './application/browse-motion-events.use-case';
 import { CameraStatusUseCase } from './application/camera-status.use-case';
 import { CleanupCoordinatorService } from './application/cleanup-coordinator.service';
-import { CleanupDriveUseCase } from './application/cleanup-drive.use-case';
 import { CleanupLocalStorageUseCase } from './application/cleanup-local-storage.use-case';
 import { DisableMotionUseCase } from './application/disable-motion.use-case';
 import { FeatureCameraRuntimeLifecycleService } from './application/feature-camera-runtime-lifecycle.service';
 import { EnableMotionUseCase } from './application/enable-motion.use-case';
-import { GdriveStatusUseCase } from './application/gdrive-status.use-case';
 import { GetMotionPhotoUseCase } from './application/get-motion-photo.use-case';
 import { GetMotionVideoUseCase } from './application/get-motion-video.use-case';
 import { GetSnapshotUseCase } from './application/get-snapshot.use-case';
@@ -50,8 +48,6 @@ import { RecordSnapshotUseCase } from './application/record-snapshot.use-case';
 import { RegisterCompletedMotionVideosUseCase } from './application/register-completed-motion-videos.use-case';
 import { StopLiveStreamUseCase } from './application/stop-live-stream.use-case';
 import { TriggerCleanUseCase } from './application/trigger-clean.use-case';
-import { UploadMotionUseCase } from './application/upload-motion.use-case';
-import { UpdateGdriveAuthUseCase } from './application/update-gdrive-auth.use-case';
 import {
   CAMERA_MODE,
   LIVE_STREAM_OPTIONS,
@@ -59,10 +55,6 @@ import {
   type LiveStreamOptions,
 } from './camera.tokens';
 import { ADMIN_ALERT } from './domain/ports/admin-alert.port';
-import { DRIVE_AUTH } from './domain/ports/drive-auth.port';
-import { DRIVE_STATUS } from './domain/ports/drive-status.port';
-import { DRIVE_SYNC } from './domain/ports/drive-sync.port';
-import { GDRIVE_SYNC_HEALTH } from './domain/ports/gdrive-sync-health.port';
 import {
   LIVE_STREAM_CAPABILITY,
   type LiveStreamCapabilityPort,
@@ -136,20 +128,12 @@ import { FsLiveStreamLeaseAdapter } from './infrastructure/fs-live-stream-lease.
 import { FsLocalStorageAdapter } from './infrastructure/fs-local-storage.adapter';
 import { FsMediaFileAdapter } from './infrastructure/fs-media-file.adapter';
 import { FsCompletedMotionVideoAdapter } from './infrastructure/fs-completed-motion-video.adapter';
-import { InMemoryGdriveSyncHealth } from './infrastructure/in-memory-gdrive-sync-health';
 import { InMemoryLiveStreamGatewayAdapter } from './infrastructure/in-memory-live-stream-gateway.adapter';
 import { InMemoryLiveStreamLeaseAdapter } from './infrastructure/in-memory-live-stream-lease.adapter';
 import { InMemoryMediaRepository } from './infrastructure/in-memory-media.repository';
 import { InMemoryMonotonicClockAdapter } from './infrastructure/in-memory-monotonic-clock.adapter';
-import { MetaGdriveSyncHealth } from './infrastructure/meta-gdrive-sync-health';
 import { MotionDaemonAdapter } from './infrastructure/motion-daemon.adapter';
 import { QuickTunnelLiveStreamAdapter } from './infrastructure/quick-tunnel-live-stream.adapter';
-import { RcloneDriveAuthAdapter } from './infrastructure/rclone-drive-auth.adapter';
-import { RcloneDriveStatusAdapter } from './infrastructure/rclone-drive-status.adapter';
-import { RcloneDriveSyncAdapter } from './infrastructure/rclone-drive-sync.adapter';
-import { StubDriveAuthAdapter } from './infrastructure/stub-drive-auth.adapter';
-import { StubDriveStatusAdapter } from './infrastructure/stub-drive-status.adapter';
-import { StubDriveSyncAdapter } from './infrastructure/stub-drive-sync.adapter';
 import { StubLocalStorageAdapter } from './infrastructure/stub-local-storage.adapter';
 import { StubMediaFileAdapter } from './infrastructure/stub-media-file.adapter';
 import { StubMotionAlertAdapter } from './infrastructure/stub-motion-alert.adapter';
@@ -162,8 +146,8 @@ import { MotionHooksController } from './interfaces/motion-hooks.controller';
 export type CameraMode = 'real' | 'stub';
 
 /**
- * Resolve adapter selection (specs 14, 15). `real` shells out to
- * systemctl/ffmpeg/rclone/du; `stub` keeps everything in-process for dev
+ * Resolve adapter selection (specs 14, 20). `real` shells out to
+ * systemctl/ffmpeg/du; `stub` keeps everything in-process for dev
  * and CI. Defaults to `real` on Linux, `stub` elsewhere or when forced.
  */
 function resolveCameraMode(): CameraMode {
@@ -198,12 +182,11 @@ function isInstallationId(value: string | undefined): value is string {
 }
 
 /**
- * Camera composition root (specs 14, 15, 20, 21).
+ * Camera composition root (specs 14, 20, 21).
  *
- * Real adapters drive the Motion daemon, ffmpeg snapshots, rclone Drive
- * status and `du` storage accounting. Stub adapters provide the same ports
- * in memory so the `/camera` and `/gdrive` commands run on a dev box
- * without those binaries installed.
+ * Real adapters drive the Motion daemon, ffmpeg snapshots, and `du` storage
+ * accounting. The Archive context owns Google Drive; Camera publishes only
+ * completed-video registration and verification hooks across that boundary.
  */
 @Module({
   imports: [DatabaseModule, ArchiveModule, EventModule, FeatureModule, SystemModule],
@@ -274,18 +257,6 @@ function isInstallationId(value: string | undefined): value is string {
       useClass: mode === 'stub' ? StubMediaFileAdapter : FsMediaFileAdapter,
     },
     {
-      provide: DRIVE_STATUS,
-      useClass: mode === 'stub' ? StubDriveStatusAdapter : RcloneDriveStatusAdapter,
-    },
-    {
-      provide: DRIVE_AUTH,
-      useClass: mode === 'stub' ? StubDriveAuthAdapter : RcloneDriveAuthAdapter,
-    },
-    {
-      provide: DRIVE_SYNC,
-      useClass: mode === 'stub' ? StubDriveSyncAdapter : RcloneDriveSyncAdapter,
-    },
-    {
       provide: LOCAL_STORAGE,
       useClass: mode === 'stub' ? StubLocalStorageAdapter : FsLocalStorageAdapter,
     },
@@ -299,10 +270,6 @@ function isInstallationId(value: string | undefined): value is string {
     },
     AdminAlertService,
     { provide: ADMIN_ALERT, useExisting: AdminAlertService },
-    {
-      provide: GDRIVE_SYNC_HEALTH,
-      useClass: mode === 'stub' ? InMemoryGdriveSyncHealth : MetaGdriveSyncHealth,
-    },
     {
       provide: LIVE_STREAM_CAPABILITY,
       ...(mode === 'stub'
@@ -488,7 +455,6 @@ function isInstallationId(value: string | undefined): value is string {
     EnableMotionUseCase,
     DisableMotionUseCase,
     CameraStatusUseCase,
-    GdriveStatusUseCase,
     ListCamerasUseCase,
     RecordMotionStartUseCase,
     {
@@ -503,12 +469,9 @@ function isInstallationId(value: string | undefined): value is string {
     },
     RecordSnapshotUseCase,
     MotionWatcherService,
-    UploadMotionUseCase,
     CleanupLocalStorageUseCase,
-    CleanupDriveUseCase,
     CleanupCoordinatorService,
     TriggerCleanUseCase,
-    UpdateGdriveAuthUseCase,
   ],
   exports: [
     MEDIA_REPOSITORY,
@@ -524,14 +487,11 @@ function isInstallationId(value: string | undefined): value is string {
     EnableMotionUseCase,
     DisableMotionUseCase,
     CameraStatusUseCase,
-    GdriveStatusUseCase,
     ListCamerasUseCase,
     AdminAlertService,
     MotionWatcherService,
-    GDRIVE_SYNC_HEALTH,
     CleanupCoordinatorService,
     TriggerCleanUseCase,
-    UpdateGdriveAuthUseCase,
     OpenLiveStreamUseCase,
     StopLiveStreamUseCase,
     LiveStreamSessionService,

@@ -2,7 +2,7 @@ export const LOCAL_STORAGE = Symbol('LOCAL_STORAGE');
 
 export interface LocalFileInfo {
   path: string;
-  /** File mtime in ms since epoch; rclone --min-age uses this. */
+  /** File mtime in ms since epoch for bounded local-retention decisions. */
   mtimeMs: number;
   /** File ctime in ms since epoch; guards against newly restored old-mtime files. */
   ctimeMs: number;

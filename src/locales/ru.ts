@@ -372,7 +372,7 @@ export const commands: CommandDescriptor[] = [
   {
     command: 'system_update',
     description: 'Обновить зависимости ОС',
-    usage: '/system_update — обновить зависимости ОС (apt, rclone; мажорные обновления Node выполняются вручную)',
+    usage: '/system_update — обновить разрешённые пакеты ОС (обновления Node выполняются вручную)',
     scope: 'admin',
   },
   {
@@ -1337,27 +1337,6 @@ const ruCatalog = {
     authorizationPending: 'Авторизация Google ещё выполняется. Завершите её в браузере и попробуйте снова.',
     authorizationFailed: 'Авторизация Google не завершена. Предыдущее подключение сохранено.',
     accountUnavailable: 'выбранного аккаунта Google',
-  },
-
-  gdriveAuth: {
-    prompt: (sshHost: string) =>
-      '☁️ *Настройка аутентификации Google Drive*\n\n' +
-      'Вставьте ниже раздел конфигурации rclone `[gdrive]` или загрузите файл `rclone.conf`.\n\n' +
-      'Чтобы настроить Drive напрямую на Pi, выполните на своём ноутбуке:\n' +
-      `\`ssh pi@${sshHost} sudo -H -u homeworker env RCLONE_CONFIG=/home/homeworker/.config/rclone/rclone.conf rclone config\`\n\n` +
-      'Создайте или обновите удалённое хранилище `gdrive` с типом `drive`. На Pi без графического интерфейса ответьте `n` на вопрос об аутентификации в браузере; если rclone выведет `rclone authorize "drive"`, выполните эту команду на компьютере с браузером и вставьте токен в сеанс SSH.\n\n' +
-      'После прямой настройки отправьте здесь /cancel, затем выполните /gdrive status.',
-    success: (used: string, total: string) =>
-      `✅ Google Drive подключён!\n📦 ${used} / ${total}`,
-    failed: (reason: string) =>
-      `❌ Не удалось обновить аутентификацию: ${reason}\nПредыдущая конфигурация восстановлена.`,
-    notInstalled:
-      '❌ rclone не установлен. Повторите установку с функцией камеры.',
-    alreadyInProgress: '⏳ Обновление аутентификации уже выполняется. Отправьте /cancel для отмены.',
-    cancelled: '☁️ Настройка аутентификации Google Drive отменена.',
-    invalidSnippet:
-      '❌ Это не похоже на раздел конфигурации rclone. Ожидается заголовок `[gdrive]`.',
-    button: '☁️ Настроить аутентификацию GDrive',
   },
 
   settings: {

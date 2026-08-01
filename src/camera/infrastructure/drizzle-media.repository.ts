@@ -267,7 +267,7 @@ export class DrizzleMediaRepository implements MediaRepositoryPort, MediaWriterP
     void id;
     void remotePath;
     // Archive attempt verification owns remote state; this compatibility seam
-    // is removed with the legacy rclone scheduler migration.
+    // is retained for rollback readability while the archive manifest is authoritative.
   }
 
   async attachArchiveArtifact(eventIds: number[], archiveArtifactId: string): Promise<void> {

@@ -1,7 +1,7 @@
 # System packages installed at install time keyed by feature.
 # Read by scripts/install.sh.
 
-# Desired Node.js major version. `/system_update` applies apt/rclone updates
+# Desired Node.js major version. `/system_update` applies allowlisted apt updates
 # automatically and reports Node major mismatches with manual upgrade
 # instructions (spec 18 / spec 24).
 node: "22"
@@ -21,8 +21,6 @@ motion:
   apt:
     - motion
     - ffmpeg
-  scripts:
-    - "curl https://rclone.org/install.sh | sudo bash"
 
 # Explicit opt-in for the restricted RTSP converter and Quick Tunnel view.
 rtsp:

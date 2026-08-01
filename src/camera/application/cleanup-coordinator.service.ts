@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { CleanupDriveUseCase } from './cleanup-drive.use-case';
+import { ApplyDriveRetentionUseCase } from '../../archive/application/use-cases/apply-drive-retention.use-case';
 import { CleanupLocalStorageUseCase } from './cleanup-local-storage.use-case';
 
 export type CleanupTarget = 'local' | 'drive' | 'both';
@@ -14,7 +14,7 @@ export interface CleanupResult {
  *
  * Enforces an atomic execution lock so that background interval cleanups and
  * manual admin triggers (`/clean` or dashboard buttons) never run concurrently,
- * preventing SQLite busy timeouts and rclone file collisions.
+ * preserving the short local/remote mutation admission contract.
  */
 @Injectable()
 export class CleanupCoordinatorService {
@@ -23,7 +23,7 @@ export class CleanupCoordinatorService {
 
   constructor(
     private readonly cleanupLocal: CleanupLocalStorageUseCase,
-    private readonly cleanupDrive: CleanupDriveUseCase,
+    private readonly retention: ApplyDriveRetentionUseCase,
   ) {}
 
   /** Whether any storage cleanup is currently executing. */
@@ -62,10 +62,10 @@ export class CleanupCoordinatorService {
         }
       }
       if (target === 'drive' || target === 'both') {
-        const res = await this.cleanupDrive.execute(customThreshold);
-        if (res?.thresholdUsed && thresholdUsed === 0) {
-          thresholdUsed = res.thresholdUsed;
-        }
+        await this.retention.execute(
+          { requiredBytes: 0 },
+          new AbortController().signal,
+        );
       }
       return { executed: true, thresholdUsed };
     } catch (err) {
