@@ -16,12 +16,15 @@ import {
 } from './archive-scheduler.service';
 import { ArchiveRemoteMutationLockService } from './archive-remote-mutation-lock.service';
 
+const SHUTDOWN_WAIT_MS = 1_000;
+
 /** Deterministic archive boot recovery and bounded pre-Nest shutdown. */
 @Injectable()
 export class ArchiveRuntimeLifecycleService
 implements OnApplicationBootstrap, OnModuleDestroy {
   private controller = new AbortController();
   private startPromise: Promise<void> | null = null;
+  private shutdownPromise: Promise<void> | null = null;
   private closing = false;
 
   constructor(
@@ -58,13 +61,8 @@ implements OnApplicationBootstrap, OnModuleDestroy {
   }
 
   async shutdown(): Promise<void> {
-    if (this.closing) return;
-    this.closing = true;
-    this.polling.cancelAll();
-    if (!this.controller.signal.aborted) {
-      this.controller.abort(new DOMException('Archive runtime is shutting down', 'AbortError'));
-    }
-    await this.scheduler.shutdown();
+    this.shutdownPromise ??= this.finishShutdown();
+    await this.shutdownPromise;
   }
 
   async onModuleDestroy(): Promise<void> {
@@ -72,27 +70,87 @@ implements OnApplicationBootstrap, OnModuleDestroy {
   }
 
   private async recoverBoot(): Promise<void> {
-    const nowMs = this.clock.now().getTime();
-    await this.credentials.expireStaged(Number.MAX_SAFE_INTEGER);
+    try {
+      const signal = this.controller.signal;
+      throwIfAborted(signal);
+      const nowMs = this.clock.now().getTime();
+      await this.credentials.expireStaged(Number.MAX_SAFE_INTEGER);
+      throwIfAborted(signal);
 
-    const interrupted = [...await this.credentials.listInterruptedMaintenance()]
-      .sort((left, right) => maintenanceOrder(left.status) - maintenanceOrder(right.status));
-    for (const connection of interrupted) {
-      await this.repository.releaseGenerationLeases(connection.id, nowMs);
-      await this.repository.clearGenerationSessions(connection.id, nowMs);
-      await this.retire.execute(connection, this.controller.signal);
+      const interrupted = [...await this.credentials.listInterruptedMaintenance()]
+        .sort(compareMaintenance);
+      throwIfAborted(signal);
+      for (const connection of interrupted) {
+        await this.repository.releaseGenerationLeases(connection.id, nowMs);
+        throwIfAborted(signal);
+        await this.repository.clearGenerationSessions(connection.id, nowMs);
+        throwIfAborted(signal);
+        await this.retire.execute(connection, signal);
+        throwIfAborted(signal);
+      }
+
+      await this.repository.recoverExpiredLeases(nowMs);
+      throwIfAborted(signal);
+      await this.hooks.reconcileMotion(signal);
+      throwIfAborted(signal);
+      await this.hooks.runRemoteMaintenance(this.remoteMutationLock, signal);
+      throwIfAborted(signal);
+      const referencedPaths = new Set(await this.repository.listUnverifiedArtifactPaths());
+      throwIfAborted(signal);
+      await this.snapshots.removeStaleTemporarySnapshots({ nowMs, referencedPaths });
+      throwIfAborted(signal);
+      await this.backups.execute({ nowMs });
+      throwIfAborted(signal);
+      this.scheduler.startTimers();
+    } catch (error) {
+      if (this.controller.signal.aborted) return;
+      throw error;
     }
+  }
 
-    await this.repository.recoverExpiredLeases(nowMs);
-    await this.hooks.reconcileMotion(this.controller.signal);
-    await this.hooks.runRemoteMaintenance(this.remoteMutationLock, this.controller.signal);
-    const referencedPaths = new Set(await this.repository.listUnverifiedArtifactPaths());
-    await this.snapshots.removeStaleTemporarySnapshots({ nowMs, referencedPaths });
-    await this.backups.execute({ nowMs });
-    if (!this.controller.signal.aborted) this.scheduler.startTimers();
+  private async finishShutdown(): Promise<void> {
+    this.closing = true;
+    this.polling.cancelAll();
+    if (!this.controller.signal.aborted) {
+      this.controller.abort(new DOMException('Archive runtime is shutting down', 'AbortError'));
+    }
+    const boot = this.startPromise;
+    if (boot !== null) await settleBounded(boot, SHUTDOWN_WAIT_MS);
+    await this.scheduler.shutdown();
   }
 }
 
 function maintenanceOrder(status: string): number {
   return status === 'retiring' ? 0 : status === 'disconnecting' ? 1 : 2;
+}
+
+function compareMaintenance(
+  left: { status: string; createdAtMs: number; id: string },
+  right: { status: string; createdAtMs: number; id: string },
+): number {
+  return maintenanceOrder(left.status) - maintenanceOrder(right.status)
+    || left.createdAtMs - right.createdAtMs
+    || left.id.localeCompare(right.id);
+}
+
+function throwIfAborted(signal: AbortSignal): void {
+  if (signal.aborted) {
+    throw signal.reason instanceof Error
+      ? signal.reason
+      : new DOMException('Aborted', 'AbortError');
+  }
+}
+
+async function settleBounded(operation: Promise<unknown>, waitMs: number): Promise<void> {
+  await Promise.race([
+    operation.then(() => undefined, () => undefined),
+    boundedDelay(waitMs),
+  ]);
+}
+
+function boundedDelay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
 }

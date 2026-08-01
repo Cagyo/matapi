@@ -74,9 +74,15 @@ export class CleanupLocalStorageUseCase {
     @Inject(GDRIVE_SYNC_HEALTH) private readonly health: GdriveSyncHealthPort,
   ) {}
 
-  async execute(customThreshold?: number): Promise<{ thresholdUsed: number }> {
+  async execute(
+    customThreshold?: number,
+    signal?: AbortSignal,
+  ): Promise<{ thresholdUsed: number }> {
+    throwIfAborted(signal);
     const usage = await this.storage.usagePercent();
-    const critical = await this.resolveThreshold(customThreshold);
+    throwIfAborted(signal);
+    const critical = await this.resolveThreshold(customThreshold, signal);
+    throwIfAborted(signal);
     if (usage < critical) {
       const warn = this.percentEnv('DISK_WARN_PERCENT', DEFAULT_WARN_PERCENT);
       if (usage >= warn) {
@@ -85,15 +91,22 @@ export class CleanupLocalStorageUseCase {
           WARN_ALERT_KEY,
           WARN_ALERT_COOLDOWN_MS,
           'disk-warning',
+          signal,
         );
       }
       return { thresholdUsed: critical };
     }
 
     this.logger.warn(`Disk at ${usage}% (critical ${critical}%) — cleaning uploaded media`);
-    await this.deleteUploadedUntilBelow(Math.max(critical - TARGET_HYSTERESIS, 10));
+    await this.deleteUploadedUntilBelow(
+      Math.max(critical - TARGET_HYSTERESIS, 10),
+      signal,
+    );
+    throwIfAborted(signal);
     await this.storage.pruneEmptyDirs();
-    await this.sweepOrphans();
+    throwIfAborted(signal);
+    await this.sweepOrphans(signal);
+    throwIfAborted(signal);
 
     const emergency = this.percentEnv(
       'DISK_EMERGENCY_PERCENT',
@@ -101,26 +114,35 @@ export class CleanupLocalStorageUseCase {
     );
     // Re-measure: the deletions above may already have de-escalated the disk.
     const usageAfter = await this.storage.usagePercent();
+    throwIfAborted(signal);
     if (usageAfter < emergency) return { thresholdUsed: critical };
 
-    await this.runEmergency();
+    await this.runEmergency(signal);
     return { thresholdUsed: critical };
   }
 
   /** Oldest-first deletion with per-event re-measurement, stopping at target. */
-  private async deleteUploadedUntilBelow(targetPercent: number): Promise<void> {
+  private async deleteUploadedUntilBelow(
+    targetPercent: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
     const candidates = await this.media.findUploadedNotDeleted();
+    throwIfAborted(signal);
     let markedDeleted = 0;
     for (const event of candidates) {
+      throwIfAborted(signal);
       const videoDeleted = event.videoPath
         ? await this.storage.deleteFile(event.videoPath)
         : true;
+      throwIfAborted(signal);
       const snapshotDeleted = event.snapshotPath
         ? await this.storage.deleteFile(event.snapshotPath)
         : true;
+      throwIfAborted(signal);
 
       if (videoDeleted && snapshotDeleted) {
         await this.writer.markLocalDeleted(event.id);
+        throwIfAborted(signal);
         markedDeleted += 1;
       } else {
         this.logger.warn(
@@ -128,7 +150,9 @@ export class CleanupLocalStorageUseCase {
         );
       }
 
-      if ((await this.storage.usagePercent()) < targetPercent) {
+      const usage = await this.storage.usagePercent();
+      throwIfAborted(signal);
+      if (usage < targetPercent) {
         break;
       }
     }
@@ -152,7 +176,8 @@ export class CleanupLocalStorageUseCase {
    * bulk copy reads the very tree walked here, so anything swept provably
    * exists on Drive — only local availability is at risk, never the archive.
    */
-  private async sweepOrphans(): Promise<void> {
+  private async sweepOrphans(signal?: AbortSignal): Promise<void> {
+    throwIfAborted(signal);
     const { lastSuccessAt } = this.health.snapshot();
     if (!lastSuccessAt || Date.now() - lastSuccessAt.getTime() > DAY_MS) {
       this.logger.debug('Skipping orphan sweep — no recent Drive sync success');
@@ -162,48 +187,62 @@ export class CleanupLocalStorageUseCase {
       const cutoff = new Date(Date.now() - ORPHAN_MIN_AGE_DAYS * DAY_MS);
       const copySafeBeforeMs = lastSuccessAt.getTime() - RCLONE_COPY_MIN_AGE_MS;
       const referenced = new Set((await this.media.listAllMediaPaths()).map((p) => resolve(p)));
+      throwIfAborted(signal);
       const oldFiles = await this.storage.listFilesOlderThan(cutoff);
+      throwIfAborted(signal);
       let swept = 0;
       for (const file of oldFiles) {
+        throwIfAborted(signal);
         const path = resolve(file.path);
         if (referenced.has(path)) continue;
         if (file.mtimeMs > copySafeBeforeMs || file.ctimeMs > copySafeBeforeMs) continue;
         if (await this.storage.deleteFile(path)) swept += 1;
+        throwIfAborted(signal);
       }
       if (swept > 0) {
         this.logger.log(
           `Swept ${swept} orphaned media file(s) older than ${ORPHAN_MIN_AGE_DAYS}d`,
         );
         await this.storage.pruneEmptyDirs();
+        throwIfAborted(signal);
       }
     } catch (err) {
+      if (signal?.aborted) throw abortReason(signal);
       this.logger.warn(`Skipping orphan sweep after error: ${(err as Error).message}`);
     }
   }
 
-  private async runEmergency(): Promise<void> {
+  private async runEmergency(signal?: AbortSignal): Promise<void> {
+    throwIfAborted(signal);
     this.logger.error('Disk at emergency level — pruning logs/events and stopping motion');
     const cutoff = new Date(Date.now() - DAY_MS);
     await this.retention.pruneEventsOlderThan(cutoff);
+    throwIfAborted(signal);
     await this.retention.pruneSensorLogsOlderThan(cutoff);
+    throwIfAborted(signal);
     // Record the stop as intentional so the watcher doesn't immediately
     // restart Motion and refill the disk. /camera enable re-arms it.
     try {
       await this.meta.set(MOTION_DESIRED_STATE_KEY, 'off');
+      throwIfAborted(signal);
     } catch (err) {
+      if (signal?.aborted) throw abortReason(signal);
       this.logger.warn(
         `Failed to record desired motion state during emergency: ${(err as Error).message}`,
       );
     }
     try {
       await this.motion.stop();
+      throwIfAborted(signal);
     } catch (err) {
+      if (signal?.aborted) throw abortReason(signal);
       this.logger.warn(`Failed to stop motion during emergency: ${(err as Error).message}`);
     }
     await this.sendCooldownAlert(
       EMERGENCY_ALERT_KEY,
       EMERGENCY_ALERT_COOLDOWN_MS,
       'emergency-disk-cleanup',
+      signal,
     );
   }
 
@@ -215,38 +254,52 @@ export class CleanupLocalStorageUseCase {
     key: string,
     cooldownMs: number,
     kind: 'disk-warning' | 'emergency-disk-cleanup',
+    signal?: AbortSignal,
   ): Promise<void> {
-    if (!(await this.shouldSendAlert(key, cooldownMs))) return;
+    throwIfAborted(signal);
+    if (!(await this.shouldSendAlert(key, cooldownMs, signal))) return;
+    throwIfAborted(signal);
     try {
       await this.adminAlert.alert(kind);
+      throwIfAborted(signal);
     } catch (err) {
+      if (signal?.aborted) throw abortReason(signal);
       this.logger.warn(`Failed to send ${kind} alert: ${(err as Error).message}`);
       return;
     }
     try {
       await this.meta.set(key, String(Date.now()));
+      throwIfAborted(signal);
     } catch (err) {
+      if (signal?.aborted) throw abortReason(signal);
       this.logger.warn(`Failed to record ${kind} alert cooldown: ${(err as Error).message}`);
     }
   }
 
   /** True when the cooldown window has elapsed or can't be checked safely. */
-  private async shouldSendAlert(key: string, cooldownMs: number): Promise<boolean> {
+  private async shouldSendAlert(
+    key: string,
+    cooldownMs: number,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
     try {
       const raw = await this.meta.get(key);
+      throwIfAborted(signal);
       const last = raw === null ? NaN : Number(raw);
       return !(Number.isFinite(last) && Date.now() - last < cooldownMs);
     } catch (err) {
+      if (signal?.aborted) throw abortReason(signal);
       this.logger.warn(`Failed to read ${key} cooldown: ${(err as Error).message}`);
       return true;
     }
   }
 
-  private async resolveThreshold(custom?: number): Promise<number> {
+  private async resolveThreshold(custom?: number, signal?: AbortSignal): Promise<number> {
     if (custom !== undefined && Number.isFinite(custom) && custom >= 10 && custom <= 99) {
       return Math.trunc(custom);
     }
     const rawMeta = await this.meta.get('auto_clean_threshold');
+    throwIfAborted(signal);
     if (rawMeta !== null) {
       const val = Number(rawMeta);
       if (Number.isFinite(val) && val >= 10 && val <= 99) {
@@ -264,4 +317,14 @@ export class CleanupLocalStorageUseCase {
     const raw = Number(process.env[key]);
     return Number.isFinite(raw) && raw > 0 ? raw : fallback;
   }
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw abortReason(signal);
+}
+
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new DOMException('Aborted', 'AbortError');
 }

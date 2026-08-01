@@ -100,3 +100,48 @@ its own verification port.
 Existing unrelated worktree changes were preserved. The Task 9 unverified-path
 repository additions already present in the shared worktree are consumed by
 boot stale-temporary cleanup and backup pinning.
+
+## Review repair — shutdown fencing and deterministic recovery
+
+- Replaced the scheduler's boolean tick guard with a tracked tick promise.
+  Shutdown now aborts and bounded-settles both maintenance and transfer work.
+- Added cancellation checkpoints around transfer selection. A durable attempt
+  claimed concurrently with shutdown is returned to `retryable` immediately
+  with its resumable session intact instead of remaining leased until expiry.
+- Timer-dispatched ticks now catch and safely log claim/repository failures,
+  preventing unhandled promise rejections.
+- Boot recovery now checks cancellation between every durable transition,
+  bounded-settles the active boot promise before scheduler teardown, and sorts
+  equal-status maintenance by creation time and connection ID.
+- Camera scheduler bindings now propagate the archive cancellation signal.
+  Motion reconciliation and local cleanup stop at checkpoints between file,
+  database, retention, Motion-daemon, and alert operations.
+
+The repair was driven by six failing regression assertions covering same-status
+ordering, boot fencing, active tick settling, post-abort claim release, timer
+dispatch failure handling, and camera maintenance cancellation.
+
+```text
+yarn test test/archive/application/archive-scheduler.service.test.ts \
+  test/archive/application/archive-runtime-lifecycle.service.test.ts \
+  test/camera/application/register-completed-motion-videos.use-case.test.ts \
+  test/camera/application/cleanup-local-storage.use-case.test.ts
+4 files passed; 42 tests passed
+
+yarn test test/archive \
+  test/system/application/prepare-application-shutdown.test.ts \
+  test/camera/camera-composition.test.ts \
+  test/camera/application/register-completed-motion-videos.use-case.test.ts \
+  test/camera/application/cleanup-local-storage.use-case.test.ts \
+  test/telegram/telegram.module.composition.test.ts
+25 files passed; 195 tests passed
+
+yarn build
+exit 0
+
+yarn eslint <repair source and test paths>
+exit 0
+
+git diff --check
+exit 0 (the repository's existing fsmonitor IPC warning was printed)
+```

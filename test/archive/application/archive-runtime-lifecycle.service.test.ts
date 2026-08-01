@@ -10,12 +10,16 @@ import type { CreateDatabaseBackupUseCase } from '../../../src/archive/applicati
 import { DriveConnection } from '../../../src/archive/domain/drive-connection.entity';
 import type { ClockPort } from '../../../src/events/domain/ports/clock.port';
 
-function connection(status: 'retiring' | 'disconnecting'): DriveConnection {
+function connection(
+  status: 'retiring' | 'disconnecting',
+  id = status,
+  createdAtMs = 1,
+): DriveConnection {
   return DriveConnection.restore({
-    id: status, installationId: 'installation-1', status, revision: 1,
+    id, installationId: 'installation-1', status, revision: 1,
     permissionId: 'permission-1', email: null, displayName: null,
     folders: { rootId: 'root', motionId: 'motion', backupsId: 'backups' },
-    createdAtMs: 1, updatedAtMs: 2, activatedAtMs: 1, retiredAtMs: null,
+    createdAtMs, updatedAtMs: 2, activatedAtMs: 1, retiredAtMs: null,
   });
 }
 
@@ -24,7 +28,11 @@ describe('ArchiveRuntimeLifecycleService', () => {
     const order: string[] = [];
     const credentials = {
       expireStaged: vi.fn(async () => { order.push('expire-staged'); return []; }),
-      listInterruptedMaintenance: vi.fn(async () => [connection('disconnecting'), connection('retiring')]),
+      listInterruptedMaintenance: vi.fn(async () => [
+        connection('disconnecting'),
+        connection('retiring', 'retiring-b', 2),
+        connection('retiring', 'retiring-a', 1),
+      ]),
     } as unknown as DriveCredentialRepositoryPort;
     const repository = {
       releaseGenerationLeases: vi.fn(async () => undefined),
@@ -33,7 +41,9 @@ describe('ArchiveRuntimeLifecycleService', () => {
       listUnverifiedArtifactPaths: vi.fn(async () => []),
     } as unknown as ArchiveArtifactRepositoryPort;
     const retire = {
-      execute: vi.fn(async (candidate: DriveConnection) => { order.push(candidate.status === 'retiring' ? 'retire' : 'disconnect'); }),
+      execute: vi.fn(async (candidate: DriveConnection) => {
+        order.push(candidate.status === 'retiring' ? `retire:${candidate.id}` : 'disconnect');
+      }),
     } as unknown as RetireDriveConnectionUseCase;
     const scheduler = {
       startTimers: vi.fn(() => { order.push('schedule'); }), shutdown: vi.fn(async () => undefined),
@@ -52,7 +62,10 @@ describe('ArchiveRuntimeLifecycleService', () => {
 
     await lifecycle.start();
 
-    expect(order).toEqual(['expire-staged', 'retire', 'disconnect', 'recover-leases', 'schedule']);
+    expect(order).toEqual([
+      'expire-staged', 'retire:retiring-a', 'retire:retiring-b',
+      'disconnect', 'recover-leases', 'schedule',
+    ]);
   });
 
   it('runs boot reconciliation and safe backup maintenance before the catch-up backup and timers', async () => {
@@ -120,5 +133,50 @@ describe('ArchiveRuntimeLifecycleService', () => {
 
     expect(order).toEqual(['cancel-polling', 'scheduler-shutdown']);
     expect(lifecycle.signal.aborted).toBe(true);
+  });
+
+  it('awaits cancelled boot maintenance and fences later recovery work', async () => {
+    let maintenanceStarted!: () => void;
+    const started = new Promise<void>((resolve) => { maintenanceStarted = resolve; });
+    let maintenanceSettled = false;
+    const hooks = new ArchiveSchedulerHooksService();
+    hooks.registerCamera({
+      reconcileMotion: async (signal) => {
+        maintenanceStarted();
+        await new Promise<void>((resolve) => {
+          signal.addEventListener('abort', () => {
+            maintenanceSettled = true;
+            resolve();
+          }, { once: true });
+        });
+      },
+      cleanupLocal: async () => undefined,
+    });
+    const backups = { execute: vi.fn() };
+    const scheduler = { startTimers: vi.fn(), shutdown: vi.fn(async () => undefined) };
+    const lifecycle = new ArchiveRuntimeLifecycleService(
+      { expireStaged: vi.fn(async () => []), listInterruptedMaintenance: vi.fn(async () => []) },
+      {
+        recoverExpiredLeases: vi.fn(async () => 0),
+        listUnverifiedArtifactPaths: vi.fn(async () => []),
+      } as unknown as ArchiveArtifactRepositoryPort,
+      { execute: vi.fn() },
+      { cancelAll: vi.fn() },
+      { removeStaleTemporarySnapshots: vi.fn() },
+      backups,
+      scheduler,
+      hooks,
+      { now: () => new Date(1_000) },
+    );
+
+    const boot = lifecycle.start();
+    await started;
+    await lifecycle.shutdown();
+    await boot;
+
+    expect(maintenanceSettled).toBe(true);
+    expect(backups.execute).not.toHaveBeenCalled();
+    expect(scheduler.startTimers).not.toHaveBeenCalled();
+    expect(scheduler.shutdown).toHaveBeenCalledOnce();
   });
 });

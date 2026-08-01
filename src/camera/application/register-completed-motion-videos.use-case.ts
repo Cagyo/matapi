@@ -35,27 +35,37 @@ export class RegisterCompletedMotionVideosUseCase {
 
   async executeForEvent(eventId: number): Promise<void> {
     const event = await this.media.findEventById(eventId);
-    if (!event || !event.videoPath || !event.endedAt || event.archiveArtifactId) return;
+    if (!event?.videoPath || !event.endedAt || event.archiveArtifactId) return;
     await this.registerPath(event.videoPath, [event.id]);
   }
 
-  async reconcile(): Promise<void> {
+  async reconcile(signal?: AbortSignal): Promise<void> {
+    throwIfAborted(signal);
     const processedPaths = new Set<string>();
     const grouped = new Map<string, {
       descriptor: CompletedMotionVideoDescriptor;
       eventIds: Set<number>;
     }>();
     const pending = await this.media.findUnarchivedCompletedVideos(RECONCILIATION_LIMIT);
+    throwIfAborted(signal);
     for (const event of pending) {
+      throwIfAborted(signal);
       if (!event.videoPath || processedPaths.has(event.videoPath)) continue;
       processedPaths.add(event.videoPath);
       const descriptor = await this.completedVideos.resolve(event.videoPath);
+      throwIfAborted(signal);
       if (!descriptor) {
         await this.requireWriter().deferArchiveRegistration([event.id]);
+        throwIfAborted(signal);
         continue;
       }
       const matching = await this.media.findCompletedEventsByVideoPath(descriptor.trustedPath);
-      if (await this.hasReferencedEvent(descriptor.trustedPath)) continue;
+      throwIfAborted(signal);
+      if (await this.hasReferencedEvent(descriptor.trustedPath)) {
+        throwIfAborted(signal);
+        continue;
+      }
+      throwIfAborted(signal);
       this.groupDescriptor(
         grouped,
         descriptor,
@@ -63,11 +73,19 @@ export class RegisterCompletedMotionVideosUseCase {
       );
     }
 
-    for (const descriptor of await this.completedVideos.scan(RECONCILIATION_LIMIT)) {
+    const scanned = await this.completedVideos.scan(RECONCILIATION_LIMIT);
+    throwIfAborted(signal);
+    for (const descriptor of scanned) {
+      throwIfAborted(signal);
       if (processedPaths.has(descriptor.trustedPath)) continue;
       processedPaths.add(descriptor.trustedPath);
       const matching = await this.media.findCompletedEventsByVideoPath(descriptor.trustedPath);
-      if (await this.hasReferencedEvent(descriptor.trustedPath)) continue;
+      throwIfAborted(signal);
+      if (await this.hasReferencedEvent(descriptor.trustedPath)) {
+        throwIfAborted(signal);
+        continue;
+      }
+      throwIfAborted(signal);
       const eventIds = matching.map((event) => event.id);
       if (eventIds.length === 0) {
         const created = await this.requireWriter().createCompletedEvent(
@@ -76,13 +94,16 @@ export class RegisterCompletedMotionVideosUseCase {
           new Date(descriptor.sourceTimeMs),
           descriptor.trustedPath,
         );
+        throwIfAborted(signal);
         eventIds.push(created.id);
       }
       this.groupDescriptor(grouped, descriptor, eventIds);
     }
 
     for (const { descriptor, eventIds } of grouped.values()) {
+      throwIfAborted(signal);
       await this.registerDescriptor(descriptor, [...eventIds]);
+      throwIfAborted(signal);
     }
   }
 
@@ -133,5 +154,13 @@ export class RegisterCompletedMotionVideosUseCase {
     'createCompletedEvent' | 'attachArchiveArtifact' | 'deferArchiveRegistration'> {
     if (!this.writer) throw new Error('Motion archive writer is not configured');
     return this.writer;
+  }
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error
+      ? signal.reason
+      : new DOMException('Aborted', 'AbortError');
   }
 }

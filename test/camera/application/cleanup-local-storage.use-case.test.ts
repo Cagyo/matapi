@@ -227,6 +227,24 @@ describe('CleanupLocalStorageUseCase', () => {
     ]);
   });
 
+  it('stops local cleanup at an abort checkpoint', async () => {
+    const controller = new AbortController();
+    const repo = new InMemoryMediaRepository();
+    repo.seedEvents([uploadedEvent(1), uploadedEvent(2)]);
+    const storage = fakeStorage(85);
+    storage.deleteFile.mockImplementation(async () => {
+      controller.abort(new DOMException('shutdown', 'AbortError'));
+      return true;
+    });
+    const { useCase } = build({ repo, storage });
+
+    await expect(useCase.execute(undefined, controller.signal)).rejects.toMatchObject({
+      name: 'AbortError',
+    });
+
+    expect(storage.deleteFile).toHaveBeenCalledOnce();
+  });
+
   it('prunes logs, records desired=off, stops motion and alerts at emergency', async () => {
     const repo = new InMemoryMediaRepository();
     repo.seedEvents([uploadedEvent(1)]);

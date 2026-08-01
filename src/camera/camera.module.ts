@@ -250,8 +250,8 @@ function isInstallationId(value: string | undefined): value is string {
         cleanup: CleanupLocalStorageUseCase,
       ) => {
         hooks.registerCamera({
-          reconcileMotion: async () => registration.reconcile(),
-          cleanupLocal: async () => { await cleanup.execute(); },
+          reconcileMotion: async (signal) => registration.reconcile(signal),
+          cleanupLocal: async (signal) => { await cleanup.execute(undefined, signal); },
         });
         return hooks;
       },

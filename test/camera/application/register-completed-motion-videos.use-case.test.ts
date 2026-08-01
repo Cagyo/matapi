@@ -63,7 +63,7 @@ describe('RegisterCompletedMotionVideosUseCase', () => {
       scan: vi.fn().mockResolvedValue([descriptor]),
     };
     const repository = media([event(1), event(2)]);
-    const archive = { register: vi.fn().mockResolvedValue({ id: 'artifact-1' } as ArchiveArtifact) };
+    const archive = { register: vi.fn().mockResolvedValue({ id: 'artifact-1' }) };
     const useCase = new RegisterCompletedMotionVideosUseCase(repository, completed, archive, 'install-1', repository);
 
     await useCase.reconcile();
@@ -80,7 +80,7 @@ describe('RegisterCompletedMotionVideosUseCase', () => {
       scan: vi.fn().mockResolvedValue([]),
     };
     const repository = media([event(1), event(2, secondPath)]);
-    const archive = { register: vi.fn().mockResolvedValue({ id: 'artifact-1' } as ArchiveArtifact) };
+    const archive = { register: vi.fn().mockResolvedValue({ id: 'artifact-1' }) };
     const useCase = new RegisterCompletedMotionVideosUseCase(repository, completed, archive, 'install-1', repository);
 
     await useCase.reconcile();
@@ -115,6 +115,28 @@ describe('RegisterCompletedMotionVideosUseCase', () => {
     await useCase.reconcile();
 
     expect(repository.createCompletedEvent).not.toHaveBeenCalled();
+    expect(archive.register).not.toHaveBeenCalled();
+  });
+
+  it('stops reconciliation at an abort checkpoint', async () => {
+    const controller = new AbortController();
+    const secondPath = '/motion/2026/07/29/120001-67890.mp4';
+    const completed: CompletedMotionVideoPort = {
+      resolve: vi.fn(async () => {
+        controller.abort(new DOMException('shutdown', 'AbortError'));
+        return descriptor;
+      }),
+      scan: vi.fn().mockResolvedValue([]),
+    };
+    const repository = media([event(1), event(2, secondPath)]);
+    const archive = { register: vi.fn() };
+    const useCase = new RegisterCompletedMotionVideosUseCase(
+      repository, completed, archive, 'install-1', repository,
+    );
+
+    await expect(useCase.reconcile(controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
+
+    expect(completed.resolve).toHaveBeenCalledOnce();
     expect(archive.register).not.toHaveBeenCalled();
   });
 });

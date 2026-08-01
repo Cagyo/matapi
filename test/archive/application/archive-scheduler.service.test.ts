@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
   ArchiveArtifactRepositoryPort,
   ClaimedAttempt,
@@ -40,6 +40,7 @@ function setup(options: { upload?: () => Promise<unknown>; backup?: () => Promis
       lastReconcileSuccessMs: null, lastCleanupSuccessMs: null,
     })),
     compareAndSetSchedulerState: vi.fn(async () => true),
+    markRetryable: vi.fn(async () => undefined),
   } as unknown as ArchiveArtifactRepositoryPort;
   const backups = {
     execute: vi.fn(options.backup ?? (async () => ({ created: false, reason: 'not_due' }))),
@@ -63,6 +64,11 @@ function setup(options: { upload?: () => Promise<unknown>; backup?: () => Promis
 }
 
 describe('ArchiveSchedulerService', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
   it('does not let a stalled video transfer block backup creation or unrelated cleanup', async () => {
     const stalled = new Promise<never>(() => undefined);
     const fixture = setup({ upload: () => stalled });
@@ -150,5 +156,75 @@ describe('ArchiveSchedulerService', () => {
 
     expect(activeSignal?.aborted).toBe(true);
     expect(repository.markAbandoned).not.toHaveBeenCalled();
+  });
+
+  it('awaits an in-progress maintenance tick after aborting its signal', async () => {
+    const fixture = setup();
+    let started!: () => void;
+    const maintenanceStarted = new Promise<void>((resolve) => { started = resolve; });
+    let settled = false;
+    fixture.hooks.registerCamera({
+      reconcileMotion: async (signal) => {
+        started();
+        await new Promise<void>((resolve) => {
+          signal.addEventListener('abort', () => {
+            settled = true;
+            resolve();
+          }, { once: true });
+        });
+      },
+      cleanupLocal: async () => undefined,
+    });
+
+    const tick = fixture.scheduler.tick();
+    await maintenanceStarted;
+    await fixture.scheduler.shutdown();
+
+    expect(settled).toBe(true);
+    await expect(tick).resolves.toBeUndefined();
+  });
+
+  it('releases a claim acquired after shutdown cancellation as retryable', async () => {
+    const fixture = setup();
+    let resolveClaim!: (claimed: ClaimedAttempt) => void;
+    const delayedClaim = new Promise<ClaimedAttempt>((resolve) => { resolveClaim = resolve; });
+    vi.mocked(fixture.repository.claimNextAttempt).mockImplementation(async (input) => {
+      if (input.kind === 'database_backup') return delayedClaim;
+      return null;
+    });
+
+    const tick = fixture.scheduler.tick();
+    await vi.waitFor(() => {
+      expect(fixture.repository.claimNextAttempt).toHaveBeenCalledOnce();
+    });
+    const shutdown = fixture.scheduler.shutdown();
+    resolveClaim(claimedAttempt());
+    await shutdown;
+    await tick;
+
+    expect(fixture.uploads.executeClaimed).not.toHaveBeenCalled();
+    expect(fixture.repository.markRetryable).toHaveBeenCalledWith(
+      'video-attempt',
+      expect.objectContaining({ owner: 'scheduler', revision: 1 }),
+      'cancelled',
+      10_000,
+      10_000,
+    );
+  });
+
+  it('catches and logs timer-dispatched tick failures', async () => {
+    vi.useFakeTimers();
+    const fixture = setup();
+    vi.mocked(fixture.repository.claimNextAttempt).mockRejectedValue(new Error('claim failed'));
+    const logger = (fixture.scheduler as unknown as {
+      logger: { error: (message: string) => void };
+    }).logger;
+    const log = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+
+    fixture.scheduler.startTimers();
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(log).toHaveBeenCalledWith('Archive scheduler tick failed: claim failed');
+    await fixture.scheduler.shutdown();
   });
 });

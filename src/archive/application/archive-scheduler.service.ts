@@ -78,14 +78,15 @@ export class ArchiveSchedulerService {
   private readonly owner: () => string;
   private timer: ReturnType<typeof setInterval> | null = null;
   private controller = new AbortController();
-  private tickRunning = false;
   private acceptingWork = true;
+  private activeTick: Promise<void> | null = null;
   private activeUpload: Promise<void> | null = null;
   private consecutiveFreshVideos = 0;
 
   constructor(
     private readonly repository: Pick<ArchiveArtifactRepositoryPort,
-      'claimNextAttempt' | 'listUnattemptedArtifacts' | 'readSchedulerState' | 'compareAndSetSchedulerState'>,
+      'claimNextAttempt' | 'listUnattemptedArtifacts' | 'readSchedulerState' |
+      'compareAndSetSchedulerState' | 'markRetryable'>,
     private readonly backups: Pick<CreateDatabaseBackupUseCase, 'execute'>,
     private readonly uploads: Pick<UploadDriveObjectAttemptUseCase, 'execute' | 'executeClaimed'>,
     private readonly hooks: ArchiveSchedulerHooksService,
@@ -104,7 +105,11 @@ export class ArchiveSchedulerService {
     if (this.timer !== null) return;
     if (this.controller.signal.aborted) this.controller = new AbortController();
     this.acceptingWork = true;
-    this.timer = setInterval(() => { void this.tick(); }, this.intervalMs);
+    this.timer = setInterval(() => {
+      void this.tick().catch((error: unknown) => {
+        this.logger.error(`Archive scheduler tick failed: ${message(error)}`);
+      });
+    }, this.intervalMs);
     this.timer.unref?.();
   }
 
@@ -115,30 +120,39 @@ export class ArchiveSchedulerService {
   }
 
   async tick(): Promise<void> {
-    if (!this.acceptingWork || this.tickRunning) return;
-    this.tickRunning = true;
+    if (!this.acceptingWork || this.activeTick !== null) return;
+    const running = this.runTick();
+    this.activeTick = running;
+    try {
+      await running;
+    } finally {
+      if (this.activeTick === running) this.activeTick = null;
+    }
+  }
+
+  private async runTick(): Promise<void> {
     const nowMs = this.clock.now().getTime();
     const signal = this.controller.signal;
-    try {
-      await Promise.all([
-        this.runJob('database backup', async () => {
-          await this.backups.execute({ nowMs, scheduled: true });
-        }),
-        this.runJob('Motion reconciliation', async () => {
-          await this.hooks.reconcileMotion(signal);
+    await Promise.all([
+      this.runJob('database backup', async () => {
+        await this.backups.execute({ nowMs, scheduled: true });
+      }),
+      this.runJob('Motion reconciliation', async () => {
+        await this.hooks.reconcileMotion(signal);
+        if (!signal.aborted) {
           await this.recordSchedulerSuccess({ lastReconcileSuccessMs: nowMs });
-        }),
-        this.runJob('local cleanup', async () => {
-          await this.hooks.cleanupLocal(signal);
+        }
+      }),
+      this.runJob('local cleanup', async () => {
+        await this.hooks.cleanupLocal(signal);
+        if (!signal.aborted) {
           await this.recordSchedulerSuccess({ lastCleanupSuccessMs: nowMs });
-        }),
-        this.runJob('remote maintenance', () =>
-          this.hooks.runRemoteMaintenance(this.remoteMutationLock, signal)),
-      ]);
-      if (!signal.aborted) await this.dispatchOneTransfer(nowMs, signal);
-    } finally {
-      this.tickRunning = false;
-    }
+        }
+      }),
+      this.runJob('remote maintenance', () =>
+        this.hooks.runRemoteMaintenance(this.remoteMutationLock, signal)),
+    ]);
+    if (!signal.aborted) await this.dispatchOneTransfer(nowMs, signal);
   }
 
   async shutdown(): Promise<void> {
@@ -146,9 +160,14 @@ export class ArchiveSchedulerService {
     if (!this.controller.signal.aborted) {
       this.controller.abort(new DOMException('Archive runtime is shutting down', 'AbortError'));
     }
-    const active = this.activeUpload;
-    if (active === null) return;
-    await Promise.race([active, boundedDelay(this.shutdownWaitMs)]);
+    const active = [this.activeTick, this.activeUpload].filter(
+      (operation): operation is Promise<void> => operation !== null,
+    );
+    if (active.length === 0) return;
+    await Promise.race([
+      Promise.allSettled(active).then(() => undefined),
+      boundedDelay(this.shutdownWaitMs),
+    ]);
   }
 
   private async dispatchOneTransfer(nowMs: number, signal: AbortSignal): Promise<void> {
@@ -167,12 +186,14 @@ export class ArchiveSchedulerService {
       kind: 'database_backup',
     });
     if (backupClaim !== null) {
-      this.dispatchClaimed(backupClaim, signal);
+      await this.dispatchClaimed(backupClaim, signal, nowMs);
       return;
     }
+    if (signal.aborted) return;
     const [newBackup] = await this.repository.listUnattemptedArtifacts({
       kind: 'database_backup', limit: 1,
     });
+    if (signal.aborted) return;
     if (newBackup !== undefined) {
       this.consecutiveFreshVideos = 0;
       this.trackTransfer(this.uploads.execute(newBackup.id, signal), signal);
@@ -186,13 +207,15 @@ export class ArchiveSchedulerService {
         forceVideoRetryBeforeMs,
       });
       if (retry !== null) {
-        this.dispatchClaimed(retry, signal);
+        await this.dispatchClaimed(retry, signal, nowMs);
         return;
       }
+      if (signal.aborted) return;
     }
     const [newVideo] = await this.repository.listUnattemptedArtifacts({
       kind: 'motion_video', limit: 1,
     });
+    if (signal.aborted) return;
     if (newVideo !== undefined) {
       this.consecutiveFreshVideos += 1;
       this.trackTransfer(this.uploads.execute(newVideo.id, signal), signal);
@@ -202,11 +225,28 @@ export class ArchiveSchedulerService {
       ...baseClaim,
       kind: 'motion_video',
     });
-    if (claimed !== null) this.dispatchClaimed(claimed, signal);
+    if (claimed !== null) await this.dispatchClaimed(claimed, signal, nowMs);
   }
 
-  private dispatchClaimed(claimed: ClaimedAttempt, signal: AbortSignal): void {
-    if (signal.aborted) return;
+  private async dispatchClaimed(
+    claimed: ClaimedAttempt,
+    signal: AbortSignal,
+    nowMs: number,
+  ): Promise<void> {
+    if (signal.aborted) {
+      try {
+        await this.repository.markRetryable(
+          claimed.attempt.id,
+          claimed.lease,
+          'cancelled',
+          nowMs,
+          nowMs,
+        );
+      } catch (error) {
+        this.logger.warn(`Failed to release cancelled archive claim: ${message(error)}`);
+      }
+      return;
+    }
     this.noteAdmission(claimed);
     this.trackTransfer(this.uploads.executeClaimed(claimed, signal), signal);
   }
