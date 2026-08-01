@@ -130,6 +130,37 @@ export class DriveObjectAttempt implements DriveObjectAttemptSnapshot {
     });
   }
 
+  acceptPresentationRename(
+    name: string,
+    version: string,
+    nowMs = this.updatedAtMs,
+  ): DriveObjectAttempt {
+    requireText(name, "Drive object name");
+    requireText(version, "Drive object version");
+    if (this.state === "detached") throw new DriveObjectDetachedError();
+    if (this.state !== "verified" || this.verifiedMetadata === null) {
+      throw new DriveObjectConflictError(
+        "Only a verified Drive attempt can accept a rename",
+      );
+    }
+    if (
+      this.verifiedMetadata.name === name &&
+      this.verifiedMetadata.version === version
+    ) {
+      return this;
+    }
+    return new DriveObjectAttempt({
+      ...this,
+      verifiedMetadata: Object.freeze({
+        ...this.verifiedMetadata,
+        name,
+        version,
+      }),
+      updatedAtMs: nowMs,
+      revision: this.revision + 1,
+    });
+  }
+
   markMissing(
     reason = "remote_missing",
     nowMs = this.updatedAtMs,

@@ -216,6 +216,106 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
     this.transitionWithoutLease(attemptId, expectedRevision, nowMs, (attempt) => attempt.detach(reason, nowMs));
   }
 
+  async acceptReconciledRename(
+    attemptId: string,
+    expectedRevision: number,
+    name: string,
+    version: string,
+    nowMs: number,
+  ): Promise<void> {
+    const availability = or(isNull(driveObjectAttempts.leaseExpiresAt), lte(driveObjectAttempts.leaseExpiresAt, nowMs));
+    const row = this.db.select().from(driveObjectAttempts).where(and(
+      eq(driveObjectAttempts.id, attemptId),
+      eq(driveObjectAttempts.revision, expectedRevision),
+      availability,
+    )).get();
+    if (!row) throw new DriveObjectConflictError('Drive attempt changed before rename acceptance');
+    const next = toAttempt(row).acceptPresentationRename(name, version, nowMs);
+    const result = this.db.update(driveObjectAttempts).set({
+      verifiedName: name,
+      verifiedVersion: version,
+      revision: next.revision,
+      updatedAt: nowMs,
+    }).where(and(
+      eq(driveObjectAttempts.id, attemptId),
+      eq(driveObjectAttempts.revision, expectedRevision),
+      availability,
+    )).run();
+    if (result.changes !== 1) {
+      throw new DriveObjectConflictError('Drive attempt changed before rename acceptance');
+    }
+  }
+
+  async adoptVerifiedObject(
+    artifactId: string,
+    generationId: string,
+    remote: VerifiedArchiveObject,
+    nowMs: number,
+  ): Promise<ArchiveObjectAttempt> {
+    try {
+      return this.immediate((tx) => {
+        const persistedArtifact = tx.select().from(archiveArtifacts).where(and(
+          eq(archiveArtifacts.id, artifactId),
+          eq(archiveArtifacts.state, 'pending'),
+          isNull(archiveArtifacts.currentVerifiedAttemptId),
+        )).get();
+        if (!persistedArtifact) {
+          throw new DriveObjectConflictError('Archive artifact changed before restoration');
+        }
+        let row = tx.select().from(driveObjectAttempts)
+          .where(eq(driveObjectAttempts.remoteFileId, remote.objectId)).get();
+        if (row) {
+          if (row.artifactId !== artifactId
+            || row.generationId !== generationId
+            || row.parentId !== remote.containerId
+            || !['pending', 'retryable', 'uploading'].includes(row.state)
+            || (row.leaseExpiresAt ?? -1) > nowMs) {
+            throw new DriveObjectConflictError('Restored Drive object conflicts with immutable history');
+          }
+        } else {
+          const reserved = DriveObjectAttempt.reserve({
+            id: randomUUID(), artifactId, generationId,
+            remoteFileId: remote.objectId, parentId: remote.containerId, nowMs,
+          });
+          tx.insert(driveObjectAttempts).values(attemptRow(reserved)).run();
+          row = tx.select().from(driveObjectAttempts)
+            .where(eq(driveObjectAttempts.id, reserved.id)).get();
+          if (!row) throw new DriveObjectConflictError('Restored Drive attempt was not persisted');
+        }
+        const attempt = toAttempt(row).verify(toDriveObject(remote), nowMs);
+        const artifact = toArtifact(persistedArtifact).markVerified(attempt.id, nowMs);
+        const attemptResult = tx.update(driveObjectAttempts).set(verifiedAttemptUpdate(attempt))
+          .where(and(eq(driveObjectAttempts.id, row.id), eq(driveObjectAttempts.revision, row.revision))).run();
+        if (attemptResult.changes !== 1) {
+          throw new DriveObjectConflictError('Restored Drive attempt changed before verification');
+        }
+        const artifactResult = tx.update(archiveArtifacts).set({
+          state: artifact.state,
+          currentVerifiedAttemptId: artifact.currentVerifiedAttemptId,
+          updatedAt: artifact.updatedAtMs,
+          revision: artifact.revision,
+        }).where(and(
+          eq(archiveArtifacts.id, artifact.id),
+          eq(archiveArtifacts.revision, persistedArtifact.revision),
+        )).run();
+        if (artifactResult.changes !== 1) {
+          throw new DriveObjectConflictError('Archive artifact changed before restoration');
+        }
+        return project(attempt, {
+          nextAttemptMs: row.nextAttemptAt,
+          retryCount: row.retryCount,
+          errorCode: row.errorCode,
+          session: null,
+        });
+      });
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        throw new DriveObjectConflictError('Restored Drive object conflicts with immutable history');
+      }
+      throw error;
+    }
+  }
+
   async listAttempts(artifactId: string): Promise<readonly ArchiveObjectAttempt[]> {
     return this.db.select().from(driveObjectAttempts).where(eq(driveObjectAttempts.artifactId, artifactId))
       .orderBy(asc(driveObjectAttempts.createdAt), asc(driveObjectAttempts.id)).all().map(projectRow);
@@ -245,6 +345,15 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
     if (selection.generationId) conditions.push(eq(driveObjectAttempts.generationId, selection.generationId));
     return this.db.select().from(driveObjectAttempts).where(and(...conditions))
       .orderBy(asc(driveObjectAttempts.verifiedAt), asc(driveObjectAttempts.id)).limit(selection.limit).all().map(projectRow);
+  }
+
+  async listRestorationCandidates(limit: number): Promise<readonly ArchiveArtifact[]> {
+    validateLimit(limit);
+    return this.db.select().from(archiveArtifacts).where(and(
+      eq(archiveArtifacts.state, 'pending'),
+      isNull(archiveArtifacts.currentVerifiedAttemptId),
+    )).orderBy(asc(archiveArtifacts.createdAt), asc(archiveArtifacts.id))
+      .limit(limit).all().map(toArtifact);
   }
 
   async listRetentionCandidates(selection: RetentionSelection): Promise<readonly ArchiveObjectAttempt[]> {

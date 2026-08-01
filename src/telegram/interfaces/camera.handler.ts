@@ -411,7 +411,7 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
       return;
     }
     const keyboard = new InlineKeyboard();
-    if ((!!event.videoPath && !event.localDeleted) || !!event.gdriveFileId)
+    if ((!!event.videoPath && !event.localDeleted) || !!event.archiveWebViewLink)
       keyboard.text(en.camera.browse.buttons.video, callback(receipt.id, `bv:${event.id}`));
     if (!!event.snapshotPath && !event.localDeleted)
       keyboard.text(en.camera.browse.buttons.photo, callback(receipt.id, `bp:${event.id}`));
@@ -531,9 +531,10 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
     if (!(await this.workflows.markRunning(ctx, receipt))) return;
     const delivery = await this.video.execute(id);
     if (delivery.kind === 'drive') {
+      if (!(await this.requireAdmin(ctx, receipt))) return;
       await this.complete(ctx, receipt, () =>
         ctx.reply(
-          en.camera.driveLinkFallback(id, delivery.event.gdriveFileId),
+          en.camera.driveLinkFallback(id, delivery.webViewLink),
           keyboard ? { reply_markup: this.withHome(receipt, keyboard) } : {},
         ),
       );
@@ -876,7 +877,7 @@ function durationLabel(event: MotionEvent): string {
 function mediaLabel(event: MotionEvent): string {
   return en.camera.browse.media({
     hasLocalVideo: !!event.videoPath && !event.localDeleted,
-    hasDriveVideo: !!event.gdriveFileId,
+    hasDriveVideo: !!event.archiveWebViewLink,
     hasPhoto: !!event.snapshotPath && !event.localDeleted,
   });
 }

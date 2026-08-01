@@ -5,6 +5,7 @@ import {
 } from '../../../src/camera/application/browse-motion-events.use-case';
 import { MotionEvent } from '../../../src/camera/domain/motion-event.entity';
 import { InMemoryMediaRepository } from '../../../src/camera/infrastructure/in-memory-media.repository';
+import type { ArchiveVerificationPort } from '../../../src/archive/application/ports/archive-verification.port';
 
 function event(id: number, startedAt: string): MotionEvent {
   return {
@@ -14,16 +15,24 @@ function event(id: number, startedAt: string): MotionEvent {
     endedAt: new Date(new Date(startedAt).getTime() + 30_000),
     videoPath: `/motion/${id}.mp4`,
     snapshotPath: `/motion/${id}.jpg`,
+    archiveArtifactId: null,
     uploadedToGdrive: false,
     gdriveFileId: null,
     localDeleted: false,
   };
 }
 
-function useCase(events: MotionEvent[]): BrowseMotionEventsUseCase {
+function useCase(events: MotionEvent[], archive?: ArchiveVerificationPort): BrowseMotionEventsUseCase {
   const repo = new InMemoryMediaRepository();
   repo.seedEvents(events);
-  return new BrowseMotionEventsUseCase(repo);
+  return new BrowseMotionEventsUseCase(repo, archive ?? {
+    inspect: async (artifactId) => ({
+      artifactId,
+      cleanupSafe: false,
+      webViewLink: null,
+      reason: 'no-current-attempt',
+    }),
+  });
 }
 
 describe('BrowseMotionEventsUseCase', () => {
@@ -60,5 +69,25 @@ describe('BrowseMotionEventsUseCase', () => {
 
     expect(result.events.map((e) => e.id)).toEqual([3, 2]);
     expect(result.hasMore).toBe(false);
+  });
+
+  it('projects only the current verified private Drive link into browse results', async () => {
+    const archive: ArchiveVerificationPort = {
+      inspect: async (artifactId) => ({
+        artifactId,
+        cleanupSafe: false,
+        webViewLink: 'https://drive.example/current-private-link',
+        reason: 'local-changed',
+      }),
+    };
+    const archived = event(1, '2026-04-08T18:00:00');
+    archived.archiveArtifactId = 'artifact-1';
+    archived.gdriveFileId = 'legacy-stale-path';
+
+    const result = await useCase([archived], archive).latest();
+
+    expect(result.events[0]).toMatchObject({
+      archiveWebViewLink: 'https://drive.example/current-private-link',
+    });
   });
 });

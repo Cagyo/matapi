@@ -8,6 +8,8 @@ export interface MotionEvent {
   snapshotPath: string | null;
   /** Durable archive manifest entry for this completed video, when registered. */
   archiveArtifactId: string | null;
+  /** Fresh private link projection; never persisted as a remote path or ID. */
+  archiveWebViewLink: string | null;
   uploadedToGdrive: boolean;
   gdriveFileId: string | null;
   localDeleted: boolean;

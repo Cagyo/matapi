@@ -8,13 +8,17 @@ import {
   MediaRepositoryPort,
 } from '../domain/ports/media-repository.port';
 import { FEATURE_AVAILABILITY, type FeatureAvailabilityPort } from '../../features/domain/ports/feature-availability.port';
+import {
+  ARCHIVE_VERIFICATION,
+  type ArchiveVerificationPort,
+} from '../../archive/application/ports/archive-verification.port';
 
 /** Telegram's hard limit for bot-sent files. */
 export const TELEGRAM_MAX_FILE_BYTES = 50 * 1024 * 1024;
 
 export type VideoDelivery =
   | { kind: 'local'; event: MotionEvent; path: string }
-  | { kind: 'drive'; event: MotionEvent };
+  | { kind: 'drive'; event: MotionEvent; webViewLink: string };
 
 /**
  * `/camera video <id>` — spec 14.
@@ -29,6 +33,7 @@ export class GetMotionVideoUseCase {
   constructor(
     @Inject(MEDIA_REPOSITORY) private readonly media: MediaRepositoryPort,
     @Inject(MEDIA_FILE) private readonly files: MediaFilePort,
+    @Inject(ARCHIVE_VERIFICATION) private readonly archive: ArchiveVerificationPort,
     @Inject(FEATURE_AVAILABILITY) private readonly availability?: FeatureAvailabilityPort,
   ) {}
 
@@ -44,13 +49,20 @@ export class GetMotionVideoUseCase {
     if (localAvailable) {
       const size = await this.files.sizeBytes(path);
       const tooLarge = size !== null && size > TELEGRAM_MAX_FILE_BYTES;
-      if (tooLarge && event.gdriveFileId) {
-        return { kind: 'drive', event };
+      if (tooLarge) {
+        const webViewLink = await this.currentWebViewLink(event);
+        if (webViewLink !== null) return { kind: 'drive', event, webViewLink };
       }
       return { kind: 'local', event, path };
     }
 
-    if (event.gdriveFileId) return { kind: 'drive', event };
+    const webViewLink = await this.currentWebViewLink(event);
+    if (webViewLink !== null) return { kind: 'drive', event, webViewLink };
     throw new MediaFileUnavailableError(eventId);
+  }
+
+  private async currentWebViewLink(event: MotionEvent): Promise<string | null> {
+    if (event.archiveArtifactId === null) return null;
+    return (await this.archive.inspect(event.archiveArtifactId)).webViewLink;
   }
 }

@@ -238,7 +238,16 @@ export class DrizzleMediaRepository implements MediaRepositoryPort, MediaWriterP
   }
 
   async findUploadedNotDeleted(): Promise<MotionEvent[]> {
-    return [];
+    return this.db
+      .select()
+      .from(motionEvents)
+      .where(and(
+        isNotNull(motionEvents.archiveArtifactId),
+        eq(motionEvents.localDeleted, false),
+      ))
+      .orderBy(asc(motionEvents.startedAt))
+      .all()
+      .map((row) => this.toEvent(row));
   }
 
   async listAllMediaPaths(): Promise<string[]> {
@@ -306,6 +315,7 @@ export class DrizzleMediaRepository implements MediaRepositoryPort, MediaWriterP
       videoPath: row.videoPath,
       snapshotPath: row.snapshotPath,
       archiveArtifactId: row.archiveArtifactId,
+      archiveWebViewLink: null,
       uploadedToGdrive: false,
       gdriveFileId: null,
       localDeleted: row.localDeleted ?? false,

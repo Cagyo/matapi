@@ -32,6 +32,7 @@ import {
   type ArchiveArtifactRepositoryPort,
 } from './application/ports/archive-artifact-repository.port';
 import { ARCHIVE_REGISTRATION } from './application/ports/archive-registration.port';
+import { ARCHIVE_VERIFICATION } from './application/ports/archive-verification.port';
 import { ARCHIVE_SECRET_CIPHER } from './application/ports/archive-secret-cipher.port';
 import { DRIVE_ACCOUNT, type DriveAccountPort } from './application/ports/drive-account.port';
 import { DRIVE_ARCHIVE, type DriveArchivePort } from './application/ports/drive-archive.port';
@@ -50,8 +51,10 @@ import { ConfirmDriveAccountUseCase } from './application/use-cases/confirm-driv
 import { CreateDatabaseBackupUseCase } from './application/use-cases/create-database-backup.use-case';
 import { DisconnectDriveUseCase } from './application/use-cases/disconnect-drive.use-case';
 import { RegisterArchiveArtifactUseCase } from './application/use-cases/register-archive-artifact.use-case';
+import { ReconcileDriveUseCase } from './application/use-cases/reconcile-drive.use-case';
 import { RetireDriveConnectionUseCase } from './application/use-cases/retire-drive-connection.use-case';
 import { SubmitDriveClientUseCase } from './application/use-cases/submit-drive-client.use-case';
+import { VerifyArchiveArtifactUseCase } from './application/use-cases/verify-archive-artifact.use-case';
 import {
   ARCHIVE_UPLOAD_SOURCE,
   UploadDriveObjectAttemptUseCase,
@@ -68,6 +71,7 @@ import { InMemoryArchiveArtifactRepository } from './infrastructure/persistence/
 import { InMemoryDriveCredentialRepository } from './infrastructure/persistence/in-memory-drive-credential.repository';
 
 const ARCHIVE_BOOT_RECOVERY_REGISTRATION = Symbol('ARCHIVE_BOOT_RECOVERY_REGISTRATION');
+const ARCHIVE_REMOTE_MAINTENANCE_REGISTRATION = Symbol('ARCHIVE_REMOTE_MAINTENANCE_REGISTRATION');
 const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
 
 /** Archive composition root. Cross-context consumers receive only ports and application services. */
@@ -108,6 +112,37 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
     { provide: DRIVE_ARCHIVE, useExisting: GoogleDriveArchiveAdapter },
     FsArchiveUploadSourceAdapter,
     { provide: ARCHIVE_UPLOAD_SOURCE, useExisting: FsArchiveUploadSourceAdapter },
+    {
+      provide: VerifyArchiveArtifactUseCase,
+      useFactory: (
+        repository: ArchiveArtifactRepositoryPort,
+        credentials: DriveCredentialRepositoryPort,
+        drive: DriveArchivePort,
+        source: ArchiveUploadSourcePort,
+      ) => new VerifyArchiveArtifactUseCase(repository, credentials, drive, source),
+      inject: [
+        ARCHIVE_ARTIFACT_REPOSITORY,
+        DRIVE_CREDENTIAL_REPOSITORY,
+        DRIVE_ARCHIVE,
+        ARCHIVE_UPLOAD_SOURCE,
+      ],
+    },
+    { provide: ARCHIVE_VERIFICATION, useExisting: VerifyArchiveArtifactUseCase },
+    {
+      provide: ReconcileDriveUseCase,
+      useFactory: (
+        repository: ArchiveArtifactRepositoryPort,
+        credentials: DriveCredentialRepositoryPort,
+        drive: DriveArchivePort,
+        source: ArchiveUploadSourcePort,
+      ) => new ReconcileDriveUseCase(repository, credentials, drive, source),
+      inject: [
+        ARCHIVE_ARTIFACT_REPOSITORY,
+        DRIVE_CREDENTIAL_REPOSITORY,
+        DRIVE_ARCHIVE,
+        ARCHIVE_UPLOAD_SOURCE,
+      ],
+    },
     {
       provide: ArchiveTransferSemaphoreService,
       useFactory: () => new ArchiveTransferSemaphoreService(),
@@ -284,6 +319,19 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
       ],
     },
     {
+      provide: ARCHIVE_REMOTE_MAINTENANCE_REGISTRATION,
+      useFactory: (
+        hooks: ArchiveSchedulerHooksService,
+        reconcile: ReconcileDriveUseCase,
+      ) => {
+        hooks.registerRemoteMaintenance(async (lock, signal) => {
+          await reconcile.execute({ limit: 20 }, signal, lock);
+        });
+        return reconcile;
+      },
+      inject: [ArchiveSchedulerHooksService, ReconcileDriveUseCase],
+    },
+    {
       provide: ARCHIVE_BOOT_RECOVERY_REGISTRATION,
       useFactory: (
         lifecycle: ArchiveRuntimeLifecycleService,
@@ -299,6 +347,7 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
     DRIVE_CREDENTIAL_REPOSITORY,
     ARCHIVE_ARTIFACT_REPOSITORY,
     ARCHIVE_REGISTRATION,
+    ARCHIVE_VERIFICATION,
     DRIVE_DEVICE_AUTHORIZATION,
     DRIVE_ACCOUNT,
     BeginDriveConnectionUseCase,

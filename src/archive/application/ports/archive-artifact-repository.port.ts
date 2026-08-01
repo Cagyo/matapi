@@ -152,12 +152,17 @@ export interface ArchiveArtifactRepositoryPort {
   markVerified(attemptId: string, lease: AttemptLease, remote: VerifiedArchiveObject, nowMs: number): Promise<void>;
   markMissing(attemptId: string, expectedRevision: number, reason: string, nowMs: number): Promise<void>;
   markDetached(attemptId: string, expectedRevision: number, reason: string, nowMs: number): Promise<void>;
+  acceptReconciledRename(attemptId: string, expectedRevision: number, name: string, version: string, nowMs: number): Promise<void>;
+  /** Restores one exact managed object without overwriting a terminal historical attempt. */
+  adoptVerifiedObject(artifactId: string, generationId: string, remote: VerifiedArchiveObject, nowMs: number): Promise<ArchiveObjectAttempt>;
   listAttempts(artifactId: string): Promise<readonly ArchiveObjectAttempt[]>;
   /** Registered artifacts for which no immutable remote attempt exists yet. */
   listUnattemptedArtifacts(selection: UnattemptedArtifactSelection): Promise<readonly ArchiveArtifact[]>;
   /** Paths whose immutable local bytes must not be pruned before verification. */
   listUnverifiedArtifactPaths(): Promise<readonly string[]>;
   listReconciliationBatch(selection: ReconciliationSelection): Promise<readonly ArchiveObjectAttempt[]>;
+  /** Artifacts whose current verification pointer can be recovered from Drive metadata. */
+  listRestorationCandidates(limit: number): Promise<readonly ArchiveArtifact[]>;
   listRetentionCandidates(selection: RetentionSelection): Promise<readonly ArchiveObjectAttempt[]>;
   readSchedulerState(): Promise<ArchiveSchedulerState>;
   compareAndSetSchedulerState(expectedRevision: number, update: ArchiveSchedulerUpdate): Promise<boolean>;

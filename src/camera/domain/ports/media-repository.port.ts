@@ -56,9 +56,9 @@ export interface MediaRepositoryPort {
    */
   findPendingUploads(): Promise<MotionEvent[]>;
   /**
-   * Events safe to delete locally — already on Drive and not yet deleted
-   * (`uploadedToGdrive = true`, `localDeleted = false`), oldest first. Drives
-   * the local cleanup loop (spec 21).
+   * Events eligible for an ArchiveVerificationPort cleanup check: attached to
+   * an immutable artifact and not locally deleted, oldest first. This query
+   * alone never establishes deletion safety.
    */
   findUploadedNotDeleted(): Promise<MotionEvent[]>;
   /**

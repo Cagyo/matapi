@@ -108,6 +108,7 @@ and directs the user to localized `/menu` usage only.
 | Port | Adapters | Status | Source |
 |---|---|---|---|
 | `ArchiveRegistrationPort` (`ARCHIVE_REGISTRATION`) | `RegisterArchiveArtifactUseCase` over `ArchiveArtifactRepositoryPort` | ✅ provider-neutral cross-context artifact registration; callers supply only a validated immutable descriptor and never receive persistence access. | [archive-registration.port.ts](../src/archive/application/ports/archive-registration.port.ts) |
+| `ArchiveVerificationPort` (`ARCHIVE_VERIFICATION`) | `VerifyArchiveArtifactUseCase` over exact-ID Google metadata, the immutable manifest, and a bounded local source reader | ✅ current-generation cleanup and private-link gate; every check fails closed on remote drift and local cleanup additionally requires the trusted source's full SHA-256 to remain unchanged. | [archive-verification.port.ts](../src/archive/application/ports/archive-verification.port.ts) |
 | `DriveArchivePort` (`DRIVE_ARCHIVE`) | `GoogleDriveArchiveAdapter` over the Google SDK metadata API and direct bounded resumable HTTPS gateway | ✅ exact-ID immutable object operations; application code sees only provider-neutral byte iterables and verified metadata, while generated reservations, encrypted sessions, authoritative offsets, and private-object verification remain durable. | [drive-archive.port.ts](../src/archive/application/ports/drive-archive.port.ts) |
 
 ### Camera context

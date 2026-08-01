@@ -181,6 +181,68 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
     this.transitionWithoutLease(attemptId, expectedRevision, nowMs, (attempt) => attempt.detach(reason, nowMs));
   }
 
+  async acceptReconciledRename(
+    attemptId: string,
+    expectedRevision: number,
+    name: string,
+    version: string,
+    nowMs: number,
+  ): Promise<void> {
+    const entry = this.attempts.get(attemptId);
+    if (entry?.attempt.revision !== expectedRevision
+      || (entry.lease?.expiresAtMs ?? -1) > nowMs) {
+      throw new DriveObjectConflictError('Drive attempt changed before rename acceptance');
+    }
+    entry.attempt = entry.attempt.acceptPresentationRename(name, version, nowMs);
+  }
+
+  async adoptVerifiedObject(
+    artifactId: string,
+    generationId: string,
+    remote: VerifiedArchiveObject,
+    nowMs: number,
+  ): Promise<ArchiveObjectAttempt> {
+    const artifact = this.artifacts.get(artifactId);
+    if (artifact?.currentVerifiedAttemptId !== null) {
+      throw new DriveObjectConflictError('Archive artifact changed before restoration');
+    }
+    let entry = [...this.attempts.values()].find(
+      ({ attempt }) => attempt.remoteFileId === remote.objectId,
+    );
+    if (entry !== undefined) {
+      if (entry.attempt.artifactId !== artifactId
+        || entry.attempt.generationId !== generationId
+        || entry.attempt.parentId !== remote.containerId
+        || !['pending', 'retryable', 'uploading'].includes(entry.attempt.state)
+        || (entry.lease?.expiresAtMs ?? -1) > nowMs) {
+        throw new DriveObjectConflictError('Restored Drive object conflicts with immutable history');
+      }
+    } else {
+      const attempt = DriveObjectAttempt.reserve({
+        id: randomUUID(),
+        artifactId,
+        generationId,
+        remoteFileId: remote.objectId,
+        parentId: remote.containerId,
+        nowMs,
+      });
+      entry = {
+        attempt,
+        lease: null,
+        session: null,
+        nextAttemptMs: nowMs,
+        retryCount: 0,
+        errorCode: null,
+      };
+      this.attempts.set(attempt.id, entry);
+    }
+    entry.attempt = entry.attempt.verify(toDriveObject(remote), nowMs);
+    entry.lease = null;
+    entry.session = null;
+    this.artifacts.set(artifact.id, artifact.markVerified(entry.attempt.id, nowMs));
+    return project(entry);
+  }
+
   async listAttempts(artifactId: string): Promise<readonly ArchiveObjectAttempt[]> {
     return [...this.attempts.values()].filter(({ attempt }) => attempt.artifactId === artifactId)
       .sort((left, right) => left.attempt.createdAtMs - right.attempt.createdAtMs || left.attempt.id.localeCompare(right.attempt.id))
@@ -206,6 +268,13 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
       .filter(({ attempt }) => attempt.state === 'verified' && (!selection.generationId || attempt.generationId === selection.generationId))
       .sort((left, right) => left.attempt.verifiedAtMs! - right.attempt.verifiedAtMs! || left.attempt.id.localeCompare(right.attempt.id))
       .slice(0, selection.limit).map(project);
+  }
+
+  async listRestorationCandidates(limit: number): Promise<readonly ArchiveArtifact[]> {
+    return [...this.artifacts.values()]
+      .filter((artifact) => artifact.state === 'pending' && artifact.currentVerifiedAttemptId === null)
+      .sort((left, right) => left.createdAtMs - right.createdAtMs || left.id.localeCompare(right.id))
+      .slice(0, limit);
   }
 
   async listRetentionCandidates(selection: RetentionSelection): Promise<readonly ArchiveObjectAttempt[]> {

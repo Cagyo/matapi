@@ -5,6 +5,7 @@ import { AppModule } from '../../src/app.module';
 import { CameraModule } from '../../src/camera/camera.module';
 import { TelegramModule } from '../../src/telegram/telegram.module';
 import { ARCHIVE_REGISTRATION } from '../../src/archive/application/ports/archive-registration.port';
+import { ARCHIVE_VERIFICATION } from '../../src/archive/application/ports/archive-verification.port';
 import { ArchiveRuntimeLifecycleService } from '../../src/archive/application/archive-runtime-lifecycle.service';
 import { ArchiveSchedulerHooksService } from '../../src/archive/application/archive-scheduler.service';
 import {
@@ -27,6 +28,7 @@ describe('ArchiveModule composition', () => {
     const exports = Reflect.getMetadata('exports', ArchiveModule) as unknown[];
     expect(exports).toEqual(expect.arrayContaining([
       ARCHIVE_REGISTRATION,
+      ARCHIVE_VERIFICATION,
       BeginDriveConnectionUseCase,
       SubmitDriveClientUseCase,
       ConfirmDriveAccountUseCase,

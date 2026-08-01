@@ -1,5 +1,8 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { resolve } from 'node:path';
+import {
+  ARCHIVE_VERIFICATION,
+  type ArchiveVerificationPort,
+} from '../../archive/application/ports/archive-verification.port';
 import {
   SYSTEM_META_REPOSITORY,
   SystemMetaRepositoryPort,
@@ -8,7 +11,7 @@ import { MOTION_DESIRED_STATE_KEY } from '../domain/motion-desired-state';
 import { ADMIN_ALERT, AdminAlertPort } from '../domain/ports/admin-alert.port';
 import {
   GDRIVE_SYNC_HEALTH,
-  GdriveSyncHealthPort,
+  type GdriveSyncHealthPort,
 } from '../domain/ports/gdrive-sync-health.port';
 import {
   LOCAL_STORAGE,
@@ -34,10 +37,6 @@ const DEFAULT_CRITICAL_PERCENT = 80;
 const DEFAULT_EMERGENCY_PERCENT = 95;
 /** Stop deleting once usage drops this many points below the threshold. */
 const TARGET_HYSTERESIS = 5;
-/** Unreferenced local files older than this are sweepable orphans. */
-const ORPHAN_MIN_AGE_DAYS = 7;
-/** Must match the rclone `copyMotionFiles --min-age 1m` contract. */
-const RCLONE_COPY_MIN_AGE_MS = 60_000;
 const WARN_ALERT_KEY = 'last_alert_disk_warning';
 const WARN_ALERT_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const EMERGENCY_ALERT_KEY = 'last_alert_emergency_cleanup';
@@ -48,16 +47,14 @@ const EMERGENCY_ALERT_COOLDOWN_MS = 6 * 60 * 60 * 1000;
  * admins (at most once per 24h). At `DISK_CRITICAL_PERCENT` (or configured
  * `auto_clean_threshold`) it deletes the local copies of events already on
  * Drive — oldest first, re-measuring the disk after each event group and
- * stopping once below threshold−hysteresis — then sweeps orphaned segment
- * files the DB never tracked. At `DISK_EMERGENCY_PERCENT` (re-measured after
+ * stopping once below threshold−hysteresis. At `DISK_EMERGENCY_PERCENT` (re-measured after
  * the deletions, so a successful cleanup de-escalates) it additionally prunes
  * day-old sent events and sensor logs, records `motion_desired_state=off`,
  * stops the Motion daemon, and alerts admins (at most once per 6h).
  *
- * **Invariant:** only files provably on Drive are ever deleted — uploaded
- * events, or unreferenced files whose mtime and ctime prove they existed and
- * were old enough at the last successful bulk copy. Footage that never reached
- * Drive is preserved even when the disk fills.
+ * **Invariant:** only a current active-generation exact-ID verification plus
+ * an unchanged trusted local source can authorize deletion. Bulk-copy times,
+ * legacy upload flags, and unreferenced-file age never authorize deletion.
  */
 @Injectable()
 export class CleanupLocalStorageUseCase {
@@ -71,7 +68,8 @@ export class CleanupLocalStorageUseCase {
     @Inject(MOTION_CONTROL) private readonly motion: MotionControlPort,
     @Inject(ADMIN_ALERT) private readonly adminAlert: AdminAlertPort,
     @Inject(SYSTEM_META_REPOSITORY) private readonly meta: SystemMetaRepositoryPort,
-    @Inject(GDRIVE_SYNC_HEALTH) private readonly health: GdriveSyncHealthPort,
+    @Inject(GDRIVE_SYNC_HEALTH) _legacyHealth: GdriveSyncHealthPort,
+    @Inject(ARCHIVE_VERIFICATION) private readonly archive: ArchiveVerificationPort,
   ) {}
 
   async execute(
@@ -105,8 +103,6 @@ export class CleanupLocalStorageUseCase {
     throwIfAborted(signal);
     await this.storage.pruneEmptyDirs();
     throwIfAborted(signal);
-    await this.sweepOrphans(signal);
-    throwIfAborted(signal);
 
     const emergency = this.percentEnv(
       'DISK_EMERGENCY_PERCENT',
@@ -129,8 +125,18 @@ export class CleanupLocalStorageUseCase {
     const candidates = await this.media.findUploadedNotDeleted();
     throwIfAborted(signal);
     let markedDeleted = 0;
+    const verified = new Map<string, boolean>();
     for (const event of candidates) {
       throwIfAborted(signal);
+      const artifactId = event.archiveArtifactId;
+      if (artifactId === null) continue;
+      let cleanupSafe = verified.get(artifactId);
+      if (cleanupSafe === undefined) {
+        cleanupSafe = (await this.archive.inspect(artifactId)).cleanupSafe;
+        verified.set(artifactId, cleanupSafe);
+      }
+      throwIfAborted(signal);
+      if (!cleanupSafe) continue;
       const videoDeleted = event.videoPath
         ? await this.storage.deleteFile(event.videoPath)
         : true;
@@ -158,57 +164,6 @@ export class CleanupLocalStorageUseCase {
     }
     if (markedDeleted > 0) {
       this.logger.log(`Deleted local copies of ${markedDeleted} uploaded event(s)`);
-    }
-  }
-
-  /**
-   * Deletes files under the Motion dir that no event references (30s segments
-   * beyond the one the event-end hook recorded, leftovers from missed hooks).
-   * Gated on a bulk-copy success in the last 24h. A candidate must have mtime
-   * and ctime at least `--min-age` older than that success: mtime proves rclone
-   * would include it, and ctime proves it wasn't restored/copied in after the
-   * successful sync with an old timestamp.
-   *
-   * Path identity: DB paths (Motion's `%f`) and this walk both derive from the
-   * same `MOTION_LOCAL_DIR`/`target_dir` config (spec 20); the lexical
-   * `resolve()` comparison assumes no symlink aliasing between them. Even if
-   * that assumption breaks, the mtime/ctime gate bounds the damage: rclone's
-   * bulk copy reads the very tree walked here, so anything swept provably
-   * exists on Drive — only local availability is at risk, never the archive.
-   */
-  private async sweepOrphans(signal?: AbortSignal): Promise<void> {
-    throwIfAborted(signal);
-    const { lastSuccessAt } = this.health.snapshot();
-    if (!lastSuccessAt || Date.now() - lastSuccessAt.getTime() > DAY_MS) {
-      this.logger.debug('Skipping orphan sweep — no recent Drive sync success');
-      return;
-    }
-    try {
-      const cutoff = new Date(Date.now() - ORPHAN_MIN_AGE_DAYS * DAY_MS);
-      const copySafeBeforeMs = lastSuccessAt.getTime() - RCLONE_COPY_MIN_AGE_MS;
-      const referenced = new Set((await this.media.listAllMediaPaths()).map((p) => resolve(p)));
-      throwIfAborted(signal);
-      const oldFiles = await this.storage.listFilesOlderThan(cutoff);
-      throwIfAborted(signal);
-      let swept = 0;
-      for (const file of oldFiles) {
-        throwIfAborted(signal);
-        const path = resolve(file.path);
-        if (referenced.has(path)) continue;
-        if (file.mtimeMs > copySafeBeforeMs || file.ctimeMs > copySafeBeforeMs) continue;
-        if (await this.storage.deleteFile(path)) swept += 1;
-        throwIfAborted(signal);
-      }
-      if (swept > 0) {
-        this.logger.log(
-          `Swept ${swept} orphaned media file(s) older than ${ORPHAN_MIN_AGE_DAYS}d`,
-        );
-        await this.storage.pruneEmptyDirs();
-        throwIfAborted(signal);
-      }
-    } catch (err) {
-      if (signal?.aborted) throw abortReason(signal);
-      this.logger.warn(`Skipping orphan sweep after error: ${(err as Error).message}`);
     }
   }
 

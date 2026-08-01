@@ -9,6 +9,7 @@ import { RetentionPrunePort } from '../../../src/camera/domain/ports/retention-p
 import { SystemMetaRepositoryPort } from '../../../src/system/domain/ports/system-meta-repository.port';
 import { MotionEvent } from '../../../src/camera/domain/motion-event.entity';
 import { InMemoryMediaRepository } from '../../../src/camera/infrastructure/in-memory-media.repository';
+import type { ArchiveVerificationPort } from '../../../src/archive/application/ports/archive-verification.port';
 
 function uploadedEvent(id: number): MotionEvent {
   return {
@@ -18,6 +19,7 @@ function uploadedEvent(id: number): MotionEvent {
     endedAt: new Date(),
     videoPath: `/var/lib/motion/${id}.mp4`,
     snapshotPath: `/var/lib/motion/${id}.jpg`,
+    archiveArtifactId: `artifact-${id}`,
     uploadedToGdrive: true,
     gdriveFileId: `home-security/motion/${id}.mp4`,
     localDeleted: false,
@@ -25,7 +27,12 @@ function uploadedEvent(id: number): MotionEvent {
 }
 
 function notUploadedEvent(id: number): MotionEvent {
-  return { ...uploadedEvent(id), uploadedToGdrive: false, gdriveFileId: null };
+  return {
+    ...uploadedEvent(id),
+    archiveArtifactId: null,
+    uploadedToGdrive: false,
+    gdriveFileId: null,
+  };
 }
 
 /**
@@ -109,6 +116,7 @@ interface Overrides {
   alert?: ReturnType<typeof fakeAlert>;
   meta?: SystemMetaRepositoryPort;
   health?: GdriveSyncHealthPort;
+  archive?: ArchiveVerificationPort;
 }
 
 function build(overrides: Overrides = {}) {
@@ -118,7 +126,14 @@ function build(overrides: Overrides = {}) {
   const motion = overrides.motion ?? fakeMotion();
   const alert = overrides.alert ?? fakeAlert();
   const meta = overrides.meta ?? memMeta().meta;
-  const health = overrides.health ?? fakeHealth();
+  const archive = overrides.archive ?? {
+    inspect: vi.fn(async (artifactId: string) => ({
+      artifactId,
+      cleanupSafe: true,
+      webViewLink: `https://drive.example/${artifactId}`,
+      reason: 'verified' as const,
+    })),
+  };
   const useCase = new CleanupLocalStorageUseCase(
     storage,
     repo,
@@ -127,9 +142,10 @@ function build(overrides: Overrides = {}) {
     motion,
     alert,
     meta,
-    health,
+    overrides.health ?? fakeHealth(),
+    archive,
   );
-  return { useCase, storage, repo, retention, motion, alert, meta };
+  return { useCase, storage, repo, retention, motion, alert, meta, archive };
 }
 
 afterEach(() => {
@@ -168,6 +184,29 @@ describe('CleanupLocalStorageUseCase', () => {
     expect(storage.pruneEmptyDirs).toHaveBeenCalled();
     expect(motion.stop).not.toHaveBeenCalled();
     expect(alert.alert).not.toHaveBeenCalled();
+  });
+
+  it('never deletes local media from a legacy rclone success heuristic', async () => {
+    const repo = new InMemoryMediaRepository();
+    repo.seedEvents([uploadedEvent(1)]);
+    const archive: ArchiveVerificationPort = {
+      inspect: vi.fn(async (artifactId) => ({
+        artifactId,
+        cleanupSafe: false,
+        webViewLink: null,
+        reason: 'detached',
+      })),
+    };
+    const { useCase, storage } = build({
+      repo,
+      archive,
+      storage: fakeStorage([85, 60]),
+      health: fakeHealth(new Date()),
+    });
+
+    await useCase.execute();
+
+    expect(storage.deleteFile).not.toHaveBeenCalled();
   });
 
   it('does not mark local-deleted when any referenced file deletion fails', async () => {
@@ -407,7 +446,7 @@ describe('CleanupLocalStorageUseCase', () => {
     expect(alert.calls).toEqual(['emergency-disk-cleanup']);
   });
 
-  it('sweeps old unreferenced files when Drive sync succeeded recently', async () => {
+  it('never sweeps unreferenced files from a legacy bulk-copy timestamp', async () => {
     const repo = new InMemoryMediaRepository();
     repo.seedEvents([uploadedEvent(1), notUploadedEvent(2)]);
     const storage = fakeStorage(
@@ -418,7 +457,7 @@ describe('CleanupLocalStorageUseCase', () => {
 
     await useCase.execute();
 
-    expect(storage.deleteFile).toHaveBeenCalledWith('/var/lib/motion/2026/01/01/999.mp4');
+    expect(storage.deleteFile).not.toHaveBeenCalledWith('/var/lib/motion/2026/01/01/999.mp4');
     // 2.mp4 belongs to a (not yet uploaded) event — referenced, never swept.
     expect(storage.deleteFile).not.toHaveBeenCalledWith('/var/lib/motion/2.mp4');
   });

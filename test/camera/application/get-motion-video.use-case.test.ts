@@ -8,6 +8,7 @@ import { MediaFileUnavailableError } from '../../../src/camera/domain/errors/med
 import { MotionEvent } from '../../../src/camera/domain/motion-event.entity';
 import { MediaFilePort } from '../../../src/camera/domain/ports/media-file.port';
 import { InMemoryMediaRepository } from '../../../src/camera/infrastructure/in-memory-media.repository';
+import type { ArchiveVerificationPort } from '../../../src/archive/application/ports/archive-verification.port';
 
 function event(overrides: Partial<MotionEvent> = {}): MotionEvent {
   return {
@@ -17,6 +18,7 @@ function event(overrides: Partial<MotionEvent> = {}): MotionEvent {
     endedAt: new Date('2026-04-08T12:51:36Z'),
     videoPath: '/var/lib/motion/1.mp4',
     snapshotPath: '/var/lib/motion/1.jpg',
+    archiveArtifactId: null,
     uploadedToGdrive: false,
     gdriveFileId: null,
     localDeleted: false,
@@ -33,10 +35,22 @@ function files(opts: { exists?: boolean; size?: number | null }): MediaFilePort 
   };
 }
 
-function makeUseCase(events: MotionEvent[], file: MediaFilePort): GetMotionVideoUseCase {
+function makeUseCase(
+  events: MotionEvent[],
+  file: MediaFilePort,
+  result: Awaited<ReturnType<ArchiveVerificationPort['inspect']>> | null = null,
+): GetMotionVideoUseCase {
   const repo = new InMemoryMediaRepository();
   repo.seedEvents(events);
-  return new GetMotionVideoUseCase(repo, file);
+  const archive: ArchiveVerificationPort = {
+    inspect: async (artifactId) => result ?? {
+      artifactId,
+      cleanupSafe: true,
+      webViewLink: 'https://drive.example/current-private-link',
+      reason: 'verified',
+    },
+  };
+  return new GetMotionVideoUseCase(repo, file, archive);
 }
 
 describe('GetMotionVideoUseCase', () => {
@@ -51,11 +65,14 @@ describe('GetMotionVideoUseCase', () => {
 
   it('falls back to Drive when the local file is too large and uploaded', async () => {
     const useCase = makeUseCase(
-      [event({ gdriveFileId: 'abc123' })],
+      [event({ archiveArtifactId: 'artifact-1', gdriveFileId: 'stale-path' })],
       files({ exists: true, size: TELEGRAM_MAX_FILE_BYTES + 1 }),
     );
     const delivery = await useCase.execute(1);
-    expect(delivery.kind).toBe('drive');
+    expect(delivery).toMatchObject({
+      kind: 'drive',
+      webViewLink: 'https://drive.example/current-private-link',
+    });
   });
 
   it('keeps local delivery for an oversized file with no Drive copy', async () => {
@@ -69,11 +86,29 @@ describe('GetMotionVideoUseCase', () => {
 
   it('delivers Drive when no local copy survives but it was uploaded', async () => {
     const useCase = makeUseCase(
-      [event({ localDeleted: true, gdriveFileId: 'abc123' })],
+      [event({ localDeleted: true, archiveArtifactId: 'artifact-1', gdriveFileId: 'stale-path' })],
       files({ exists: false }),
     );
     const delivery = await useCase.execute(1);
-    expect(delivery.kind).toBe('drive');
+    expect(delivery).toMatchObject({
+      kind: 'drive',
+      webViewLink: 'https://drive.example/current-private-link',
+    });
+  });
+
+  it('never falls back to a stale Drive path when current verification is unsafe', async () => {
+    const useCase = makeUseCase(
+      [event({ localDeleted: true, archiveArtifactId: 'artifact-1', gdriveFileId: 'stale-path' })],
+      files({ exists: false }),
+      {
+        artifactId: 'artifact-1',
+        cleanupSafe: false,
+        webViewLink: null,
+        reason: 'detached',
+      },
+    );
+
+    await expect(useCase.execute(1)).rejects.toBeInstanceOf(MediaFileUnavailableError);
   });
 
   it('throws MediaFileUnavailableError when no copy exists anywhere', async () => {

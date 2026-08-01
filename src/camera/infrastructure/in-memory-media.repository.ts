@@ -34,6 +34,7 @@ export class InMemoryMediaRepository implements MediaRepositoryPort, MediaWriter
       videoPath: null,
       snapshotPath: null,
       archiveArtifactId: null,
+      archiveWebViewLink: null,
       uploadedToGdrive: false,
       gdriveFileId: null,
       localDeleted: false,
@@ -63,7 +64,7 @@ export class InMemoryMediaRepository implements MediaRepositoryPort, MediaWriter
     const event: MotionEvent = {
       id: this.nextId++, cameraId, startedAt, endedAt, videoPath,
       snapshotPath: null, archiveArtifactId: null, uploadedToGdrive: false,
-      gdriveFileId: null, localDeleted: false,
+      archiveWebViewLink: null, gdriveFileId: null, localDeleted: false,
     };
     this.events.push(event);
     return event;
@@ -189,7 +190,7 @@ export class InMemoryMediaRepository implements MediaRepositoryPort, MediaWriter
 
   async findUploadedNotDeleted(): Promise<MotionEvent[]> {
     return this.events
-      .filter((e) => e.uploadedToGdrive && !e.localDeleted)
+      .filter((e) => e.archiveArtifactId !== null && !e.localDeleted)
       .sort((a, b) => (a.startedAt?.getTime() ?? 0) - (b.startedAt?.getTime() ?? 0));
   }
 
