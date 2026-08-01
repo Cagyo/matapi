@@ -19,7 +19,6 @@ import {
 } from '../features/domain/ports/feature-availability.port';
 import { SystemModule } from '../system/system.module';
 import { AdminAlertService } from './application/admin-alert.service';
-import { BackupUploadUseCase } from './application/backup-upload.use-case';
 import { BrowseMotionEventsUseCase } from './application/browse-motion-events.use-case';
 import { CameraStatusUseCase } from './application/camera-status.use-case';
 import { CleanupCoordinatorService } from './application/cleanup-coordinator.service';
@@ -61,7 +60,6 @@ import {
   type LiveStreamOptions,
 } from './camera.tokens';
 import { ADMIN_ALERT } from './domain/ports/admin-alert.port';
-import { DB_BACKUP } from './domain/ports/db-backup.port';
 import { DRIVE_AUTH } from './domain/ports/drive-auth.port';
 import { DRIVE_STATUS } from './domain/ports/drive-status.port';
 import { DRIVE_SYNC } from './domain/ports/drive-sync.port';
@@ -150,8 +148,6 @@ import { QuickTunnelLiveStreamAdapter } from './infrastructure/quick-tunnel-live
 import { RcloneDriveAuthAdapter } from './infrastructure/rclone-drive-auth.adapter';
 import { RcloneDriveStatusAdapter } from './infrastructure/rclone-drive-status.adapter';
 import { RcloneDriveSyncAdapter } from './infrastructure/rclone-drive-sync.adapter';
-import { SqliteDbBackupAdapter } from './infrastructure/sqlite-db-backup.adapter';
-import { StubDbBackupAdapter } from './infrastructure/stub-db-backup.adapter';
 import { StubDriveAuthAdapter } from './infrastructure/stub-drive-auth.adapter';
 import { StubDriveStatusAdapter } from './infrastructure/stub-drive-status.adapter';
 import { StubDriveSyncAdapter } from './infrastructure/stub-drive-sync.adapter';
@@ -279,10 +275,6 @@ function isInstallationId(value: string | undefined): value is string {
     {
       provide: RETENTION_PRUNE,
       useClass: mode === 'stub' ? StubRetentionPruneAdapter : DrizzleRetentionPruneAdapter,
-    },
-    {
-      provide: DB_BACKUP,
-      useClass: mode === 'stub' ? StubDbBackupAdapter : SqliteDbBackupAdapter,
     },
     {
       provide: MOTION_ALERT,
@@ -499,7 +491,6 @@ function isInstallationId(value: string | undefined): value is string {
     CleanupDriveUseCase,
     CleanupCoordinatorService,
     TriggerCleanUseCase,
-    BackupUploadUseCase,
     DriveSyncScheduler,
     UpdateGdriveAuthUseCase,
   ],

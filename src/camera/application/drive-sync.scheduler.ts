@@ -1,14 +1,12 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { Cron, Interval } from '@nestjs/schedule';
+import { Interval } from '@nestjs/schedule';
 import { CAMERA_MODE, CameraMode } from '../camera.tokens';
-import { BackupUploadUseCase } from './backup-upload.use-case';
 import { CleanupCoordinatorService } from './cleanup-coordinator.service';
 import { UploadMotionUseCase } from './upload-motion.use-case';
 
 const UPLOAD_INTERVAL_MS = 2 * 60 * 1000;
 const LOCAL_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 const DRIVE_CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000;
-const DEFAULT_BACKUP_CRON = '0 3 * * *';
 
 /**
  * Drive sync scheduler (spec 21). Drives the four maintenance loops on timers
@@ -25,7 +23,6 @@ export class DriveSyncScheduler {
     @Inject(CAMERA_MODE) private readonly mode: CameraMode,
     private readonly uploadMotion: UploadMotionUseCase,
     private readonly coordinator: CleanupCoordinatorService,
-    private readonly backupUpload: BackupUploadUseCase,
   ) {}
 
   @Interval('drive-upload', UPLOAD_INTERVAL_MS)
@@ -45,11 +42,6 @@ export class DriveSyncScheduler {
     void this.run('drive-cleanup', async () => {
       await this.coordinator.runCleanup('drive');
     });
-  }
-
-  @Cron(process.env.BACKUP_CRON || DEFAULT_BACKUP_CRON, { name: 'db-backup' })
-  backupTick(): void {
-    void this.run('backup', () => this.backupUpload.execute());
   }
 
   private async run(name: string, task: () => Promise<void>): Promise<void> {
