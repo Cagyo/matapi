@@ -1,6 +1,6 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { mkdir, open, readdir, rename, rm, stat } from 'node:fs/promises';
+import { link, mkdir, open, readdir, rm, stat } from 'node:fs/promises';
 import { basename, dirname, resolve, sep } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import Database from 'better-sqlite3';
@@ -9,16 +9,19 @@ import type { DatabaseBackupDescriptor, DatabaseBackupSnapshotPort } from '../ap
 const STALE_TEMPORARY_MS = 60 * 60 * 1000;
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const COMPLETED_NAME = /^worker-(.+)\.db$/u;
-const TEMPORARY_NAME = /^worker-.+\.db(?:\.\d+)?\.tmp$/u;
+const TEMPORARY_NAME = /^worker-.+\.db(?:-[0-9a-f-]+)?\.tmp$/u;
 
 export interface BackupSnapshotFileSystem {
   ensureDirectory(path: string): Promise<void>;
   exists(path: string): Promise<boolean>;
+  /** Creates this exact staging path with O_EXCL; EEXIST must be retried. */
+  reserveTemporary(path: string): Promise<void>;
   stat(path: string): Promise<{ size: number; mtimeNs: bigint; mtimeMs: number }>;
   readDirectory(root: string): Promise<readonly { name: string; isFile: boolean; mtimeMs: number }[]>;
   sha256(path: string): Promise<string>;
   fsyncFile(path: string): Promise<void>;
-  rename(from: string, to: string): Promise<void>;
+  /** Atomically publishes only when `to` does not already exist. */
+  publishNoReplace(from: string, to: string): Promise<boolean>;
   fsyncDirectory(path: string): Promise<void>;
   remove(path: string): Promise<void>;
 }
@@ -29,11 +32,13 @@ export interface BetterSqlite3BackupSnapshotOptions {
   openSnapshot?: (path: string) => Pick<Database.Database, 'pragma' | 'close'>;
   staleTemporaryMs?: number;
   retentionMs?: number;
+  temporaryId?: () => string;
 }
 
 /**
  * Uses SQLite's online backup API then publishes one immutable file with the
- * POSIX durability sequence: validate, fsync file, atomic rename, fsync dir.
+ * POSIX durability sequence: validate, fsync file, atomic no-replace publish,
+ * then fsync the directory.
  */
 export class BetterSqlite3BackupSnapshotAdapter implements DatabaseBackupSnapshotPort {
   private readonly root: string;
@@ -41,6 +46,7 @@ export class BetterSqlite3BackupSnapshotAdapter implements DatabaseBackupSnapsho
   private readonly openSnapshot: (path: string) => Pick<Database.Database, 'pragma' | 'close'>;
   private readonly staleTemporaryMs: number;
   private readonly retentionMs: number;
+  private readonly temporaryId: () => string;
   private readonly inFlight = new Map<number, Promise<DatabaseBackupDescriptor>>();
 
   constructor(
@@ -52,6 +58,7 @@ export class BetterSqlite3BackupSnapshotAdapter implements DatabaseBackupSnapsho
     this.openSnapshot = options.openSnapshot ?? ((path) => new Database(path, { readonly: true, fileMustExist: true }));
     this.staleTemporaryMs = options.staleTemporaryMs ?? STALE_TEMPORARY_MS;
     this.retentionMs = options.retentionMs ?? RETENTION_MS;
+    this.temporaryId = options.temporaryId ?? randomUUID;
   }
 
   createOrLocateCompletedSnapshot(atMs: number): Promise<DatabaseBackupDescriptor> {
@@ -108,13 +115,15 @@ export class BetterSqlite3BackupSnapshotAdapter implements DatabaseBackupSnapsho
       await this.sqlite.backup(temporaryPath);
       this.assertQuickCheck(temporaryPath);
       await this.files.fsyncFile(temporaryPath);
-      // A second worker may have published this exact timestamp while this
-      // process was creating its private staging file. Keep that immutable one.
-      if (await this.files.exists(finalPath)) {
+      // A hard link is an atomic, no-replace publication on the same filesystem.
+      // Unlike rename(2), it cannot clobber a final another process published
+      // after our early existence check.
+      if (!(await this.files.publishNoReplace(temporaryPath, finalPath))) {
         await this.files.remove(temporaryPath);
         return this.describe(finalPath, atMs);
       }
-      await this.files.rename(temporaryPath, finalPath);
+      await this.files.fsyncDirectory(this.root);
+      await this.files.remove(temporaryPath);
       await this.files.fsyncDirectory(this.root);
       return this.describe(finalPath, atMs);
     } catch (error) {
@@ -136,12 +145,16 @@ export class BetterSqlite3BackupSnapshotAdapter implements DatabaseBackupSnapsho
   }
 
   private async nextTemporaryPath(finalPath: string): Promise<string> {
-    const first = `${finalPath}.tmp`;
-    if (!(await this.files.exists(first))) return first;
-    for (let suffix = 1; ; suffix += 1) {
-      const candidate = `${finalPath}.${suffix}.tmp`;
-      if (!(await this.files.exists(candidate))) return candidate;
+    for (let attempt = 0; attempt < 16; attempt += 1) {
+      const candidate = `${finalPath}-${this.temporaryId()}.tmp`;
+      try {
+        await this.files.reserveTemporary(candidate);
+        return candidate;
+      } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      }
     }
+    throw new Error('Unable to reserve a unique database backup temporary file');
   }
 
   private async describe(path: string, sourceTimeMs: number): Promise<DatabaseBackupDescriptor> {
@@ -173,6 +186,7 @@ export class BetterSqlite3BackupSnapshotAdapter implements DatabaseBackupSnapsho
 class NodeBackupSnapshotFileSystem implements BackupSnapshotFileSystem {
   async ensureDirectory(path: string): Promise<void> { await mkdir(path, { recursive: true }); }
   async exists(path: string): Promise<boolean> { return stat(path).then(() => true).catch(() => false); }
+  async reserveTemporary(path: string): Promise<void> { const handle = await open(path, 'wx'); await handle.close(); }
   async stat(path: string): Promise<{ size: number; mtimeNs: bigint; mtimeMs: number }> {
     const value = await stat(path, { bigint: true });
     return { size: Number(value.size), mtimeNs: value.mtimeNs, mtimeMs: Number(value.mtimeMs) };
@@ -195,7 +209,15 @@ class NodeBackupSnapshotFileSystem implements BackupSnapshotFileSystem {
     return hash.digest('hex');
   }
   async fsyncFile(path: string): Promise<void> { const handle = await open(path, 'r'); try { await handle.sync(); } finally { await handle.close(); } }
-  async rename(from: string, to: string): Promise<void> { await rename(from, to); }
+  async publishNoReplace(from: string, to: string): Promise<boolean> {
+    try {
+      await link(from, to);
+      return true;
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false;
+      throw error;
+    }
+  }
   async fsyncDirectory(path: string): Promise<void> { const handle = await open(path, 'r'); try { await handle.sync(); } finally { await handle.close(); } }
   async remove(path: string): Promise<void> { await rm(path, { force: true }); }
 }
