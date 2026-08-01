@@ -62,7 +62,7 @@ export class AesGcmArchiveSecretAdapter implements ArchiveSecretCipherPort {
 function associatedData(context: ArchiveSecretContext): Buffer {
   if (!context.installationId
     || !context.rowId
-    || (context.kind !== 'oauth-client' && context.kind !== 'oauth-token')
+    || (context.kind !== 'oauth-client' && context.kind !== 'oauth-token' && context.kind !== 'upload-session')
     || !Number.isSafeInteger(context.schemaVersion)
     || context.schemaVersion < 1) {
     throw new DriveCredentialCorruptError();

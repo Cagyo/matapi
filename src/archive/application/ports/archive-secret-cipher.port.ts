@@ -1,6 +1,6 @@
 export const ARCHIVE_SECRET_CIPHER = Symbol('ARCHIVE_SECRET_CIPHER');
 
-export type ArchiveSecretKind = 'oauth-client' | 'oauth-token';
+export type ArchiveSecretKind = 'oauth-client' | 'oauth-token' | 'upload-session';
 
 export interface ArchiveSecretContext {
   installationId: string;

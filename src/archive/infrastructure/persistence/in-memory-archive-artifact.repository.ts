@@ -54,6 +54,22 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
     return project(entry);
   }
 
+  async loadAttempt(attemptId: string): Promise<ArchiveObjectAttempt | null> {
+    const entry = this.attempts.get(attemptId);
+    return entry ? project(entry) : null;
+  }
+
+  async claimAttempt(attemptId: string, input: ClaimAttempt): Promise<ClaimedAttempt> {
+    validateClaim(input);
+    this.recoverExpired(input.nowMs);
+    const entry = this.attempts.get(attemptId);
+    if (!entry || (entry.attempt.state !== 'pending' && entry.attempt.state !== 'retryable')
+      || entry.nextAttemptMs > input.nowMs || (entry.lease !== null && entry.lease.expiresAtMs > input.nowMs)) {
+      throw new DriveAttemptLeaseLostError();
+    }
+    return this.claim(attemptId, entry, input, true);
+  }
+
   async claimNextAttempt(input: ClaimAttempt): Promise<ClaimedAttempt | null> {
     validateClaim(input);
     this.recoverExpired(input.nowMs);
@@ -108,6 +124,14 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
     entry.errorCode = errorCode;
     entry.nextAttemptMs = nextAttemptMs;
     entry.retryCount += 1;
+  }
+
+  async markConflict(attemptId: string, lease: AttemptLease, errorCode: string, nowMs: number): Promise<void> {
+    const entry = this.requireLease(attemptId, lease, nowMs);
+    entry.attempt = entry.attempt.markConflict(nowMs);
+    entry.lease = null;
+    entry.session = null;
+    entry.errorCode = errorCode;
   }
 
   async markVerified(attemptId: string, lease: AttemptLease, remote: VerifiedArchiveObject, nowMs: number): Promise<void> {

@@ -61,6 +61,26 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
     return project(attempt, { nextAttemptMs: nowMs, retryCount: 0, errorCode: null, session: null });
   }
 
+  async loadAttempt(attemptId: string): Promise<ArchiveObjectAttempt | null> {
+    const row = this.db.select().from(driveObjectAttempts).where(eq(driveObjectAttempts.id, attemptId)).get();
+    return row ? projectRow(row) : null;
+  }
+
+  async claimAttempt(attemptId: string, input: ClaimAttempt): Promise<ClaimedAttempt> {
+    validateClaim(input);
+    return this.immediate((tx) => {
+      this.recoverExpiredInTransaction(tx, input.nowMs);
+      const row = tx.select().from(driveObjectAttempts).where(and(
+        eq(driveObjectAttempts.id, attemptId),
+        inArray(driveObjectAttempts.state, ['pending', 'retryable']),
+        lte(driveObjectAttempts.nextAttemptAt, input.nowMs),
+        or(isNull(driveObjectAttempts.leaseExpiresAt), lte(driveObjectAttempts.leaseExpiresAt, input.nowMs)),
+      )).get();
+      if (!row) throw new DriveAttemptLeaseLostError();
+      return this.claim(tx, row, input, true);
+    });
+  }
+
   async claimNextAttempt(input: ClaimAttempt): Promise<ClaimedAttempt | null> {
     validateClaim(input);
     return this.immediate((tx) => {
@@ -123,6 +143,21 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
     const next = toAttempt(row).markRetryable(nowMs);
     const result = this.db.update(driveObjectAttempts).set({ state: next.state, revision: next.revision, updatedAt: nowMs,
       nextAttemptAt: nextAttemptMs, retryCount: row.retryCount + 1, errorCode, leaseOwner: null, leaseExpiresAt: null }).where(this.fenced(attemptId, lease, nowMs)).run();
+    if (result.changes !== 1) throw new DriveAttemptLeaseLostError();
+  }
+
+  async markConflict(attemptId: string, lease: AttemptLease, errorCode: string, nowMs: number): Promise<void> {
+    const row = this.requireFencedAttempt(attemptId, lease, nowMs);
+    const next = toAttempt(row).markConflict(nowMs);
+    const result = this.db.update(driveObjectAttempts).set({
+      state: next.state,
+      revision: next.revision,
+      updatedAt: nowMs,
+      errorCode,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      ...clearedSession(),
+    }).where(this.fenced(attemptId, lease, nowMs)).run();
     if (result.changes !== 1) throw new DriveAttemptLeaseLostError();
   }
 

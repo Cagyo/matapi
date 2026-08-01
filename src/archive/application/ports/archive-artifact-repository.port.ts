@@ -130,6 +130,8 @@ export interface ArchiveArtifactRepositoryPort {
   loadArtifact(id: string): Promise<ArchiveArtifact | null>;
   findByFingerprint(fingerprint: string): Promise<ArchiveArtifact | null>;
   createAttempt(artifactId: string, generationId: string, remoteObjectId: string, containerId: string, nowMs: number): Promise<ArchiveObjectAttempt>;
+  loadAttempt(attemptId: string): Promise<ArchiveObjectAttempt | null>;
+  claimAttempt(attemptId: string, input: ClaimAttempt): Promise<ClaimedAttempt>;
   claimNextAttempt(input: ClaimAttempt): Promise<ClaimedAttempt | null>;
   claimExpiredAttempt(attemptId: string, input: ClaimAttempt): Promise<ClaimedAttempt>;
   recoverExpiredLeases(nowMs: number): Promise<number>;
@@ -137,6 +139,7 @@ export interface ArchiveArtifactRepositoryPort {
   saveSession(attemptId: string, lease: AttemptLease, session: EncryptedUploadSession, nowMs: number): Promise<AttemptLease>;
   confirmOffset(attemptId: string, lease: AttemptLease, offset: number, nowMs: number): Promise<AttemptLease>;
   markRetryable(attemptId: string, lease: AttemptLease, errorCode: string, nextAttemptMs: number, nowMs: number): Promise<void>;
+  markConflict(attemptId: string, lease: AttemptLease, errorCode: string, nowMs: number): Promise<void>;
   markVerified(attemptId: string, lease: AttemptLease, remote: VerifiedArchiveObject, nowMs: number): Promise<void>;
   markMissing(attemptId: string, expectedRevision: number, reason: string, nowMs: number): Promise<void>;
   markDetached(attemptId: string, expectedRevision: number, reason: string, nowMs: number): Promise<void>;
