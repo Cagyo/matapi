@@ -2,6 +2,8 @@ import type {
   ActivateDriveConnection,
   DriveClientCredentials,
   DriveConnectionTerminalStatus,
+  CompareAndSetDriveQuotaReclamation,
+  DriveQuotaReclamationState,
   DriveCredentialRepositoryPort,
   MergeRefreshedTokens,
   ManagedFolderReservation,
@@ -23,6 +25,7 @@ interface Entry {
   chatId: number | null;
   expiresAtMs: number | null;
   reservations: Omit<ManagedFolderReservation, 'revision'>;
+  quotaReclamation: DriveQuotaReclamationState;
 }
 
 /** In-memory parity adapter for isolated use-case tests. */
@@ -32,7 +35,7 @@ export class InMemoryDriveCredentialRepository implements DriveCredentialReposit
   async stage(input: StageDriveConnection): Promise<DriveConnection> {
     if ([...this.entries.values()].some(({ connection }) => connection.status === 'staged')) throw conflict('A Drive setup is already staged');
     const connection = DriveConnection.stage({ id: input.id, installationId: input.installationId, nowMs: input.createdAtMs });
-    this.entries.set(input.id, { connection, clientIdHash: input.clientIdHash, client: { ...input.client }, tokens: emptyTokens(), receiptId: input.receiptId, adminUserId: input.adminUserId, chatId: input.chatId, expiresAtMs: input.expiresAtMs, reservations: emptyReservations() });
+    this.entries.set(input.id, { connection, clientIdHash: input.clientIdHash, client: { ...input.client }, tokens: emptyTokens(), receiptId: input.receiptId, adminUserId: input.adminUserId, chatId: input.chatId, expiresAtMs: input.expiresAtMs, reservations: emptyReservations(), quotaReclamation: emptyQuotaReclamation() });
     return connection;
   }
 
@@ -96,6 +99,20 @@ export class InMemoryDriveCredentialRepository implements DriveCredentialReposit
 
   async loadActive(): Promise<DriveConnection | null> {
     return [...this.entries.values()].find(({ connection }) => connection.status === 'active' || connection.status === 'reauth_required')?.connection ?? null;
+  }
+
+  async readQuotaReclamation(generationId: string): Promise<DriveQuotaReclamationState | null> {
+    const entry = this.entries.get(generationId);
+    return entry ? { ...entry.quotaReclamation } : null;
+  }
+
+  async compareAndSetQuotaReclamation(input: CompareAndSetDriveQuotaReclamation): Promise<boolean> {
+    const entry = this.entries.get(input.generationId);
+    if (entry?.connection.status !== 'active'
+      || !sameQuotaReclamation(entry.quotaReclamation, input.expected)
+      || !validQuotaReclamation(input.next)) return false;
+    entry.quotaReclamation = { ...input.next };
+    return true;
   }
 
   async loadCredentials(generationId: string): Promise<{ client: DriveClientCredentials; tokens: OAuthTokenSet; revision: number } | null> {
@@ -166,6 +183,23 @@ function emptyTokens(): OAuthTokenSet {
 
 function emptyReservations(): Omit<ManagedFolderReservation, 'revision'> {
   return { rootId: null, motionId: null, backupsId: null };
+}
+
+function emptyQuotaReclamation(): DriveQuotaReclamationState {
+  return { windowStartedMs: null, reclaimedBytes: 0 };
+}
+
+function sameQuotaReclamation(
+  left: DriveQuotaReclamationState,
+  right: DriveQuotaReclamationState,
+): boolean {
+  return left.windowStartedMs === right.windowStartedMs && left.reclaimedBytes === right.reclaimedBytes;
+}
+
+function validQuotaReclamation(state: DriveQuotaReclamationState): boolean {
+  return (state.windowStartedMs === null || (Number.isSafeInteger(state.windowStartedMs) && state.windowStartedMs >= 0))
+    && Number.isSafeInteger(state.reclaimedBytes) && state.reclaimedBytes >= 0
+    && (state.windowStartedMs !== null || state.reclaimedBytes === 0);
 }
 
 function reservationKey(role: ManagedFolderRole): keyof Omit<ManagedFolderReservation, 'revision'> {

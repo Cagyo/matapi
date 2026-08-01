@@ -105,6 +105,8 @@ export interface ReconciliationSelection {
 export interface RetentionSelection {
   kind: ArchiveArtifactKind;
   limit: number;
+  /** Restrict bounded cleanup selection to the currently manageable generation. */
+  generationId?: string;
   /** Inclusive provider-created-time bound used by age-based retention. */
   providerCreatedBeforeMs?: number;
 }
@@ -161,6 +163,8 @@ export interface ArchiveArtifactRepositoryPort {
     nowMs: number,
   ): Promise<ArchiveObjectAttempt>;
   markDetached(attemptId: string, expectedRevision: number, reason: string, nowMs: number): Promise<void>;
+  /** Records a completed exact-ID permanent deletion after provider success. */
+  markDeleted(attemptId: string, expectedRevision: number, nowMs: number): Promise<void>;
   /** Advances the durable fairness order after an exact reconciliation read. */
   markReconciled(attemptId: string, expectedRevision: number, nowMs: number): Promise<void>;
   acceptReconciledRename(attemptId: string, expectedRevision: number, name: string, version: string, nowMs: number): Promise<void>;

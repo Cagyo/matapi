@@ -132,6 +132,31 @@ describe('DrizzleDriveCredentialRepository', () => {
     const row = sqlite.prepare('SELECT root_folder_id, motion_folder_id, backups_folder_id FROM drive_connections WHERE id = ?').get('generation-1');
     expect(row).toEqual({ root_folder_id: 'root-reserved', motion_folder_id: 'motion-reserved', backups_folder_id: null });
   });
+
+  it('persists and compare-and-set fences the quota accounting window', async () => {
+    await repository.stage(staged('generation-1'));
+    await repository.storeExchangedTokens('generation-1', 0, tokens('old'));
+    const { active } = await repository.activate(activation('generation-1', 1, 'permission-1'));
+
+    expect(await repository.readQuotaReclamation(active.id)).toEqual({
+      windowStartedMs: null,
+      reclaimedBytes: 0,
+    });
+    await expect(repository.compareAndSetQuotaReclamation({
+      generationId: active.id,
+      expected: { windowStartedMs: null, reclaimedBytes: 0 },
+      next: { windowStartedMs: 1_000, reclaimedBytes: 42 },
+    })).resolves.toBe(true);
+    await expect(repository.compareAndSetQuotaReclamation({
+      generationId: active.id,
+      expected: { windowStartedMs: null, reclaimedBytes: 0 },
+      next: { windowStartedMs: 2_000, reclaimedBytes: 84 },
+    })).resolves.toBe(false);
+    expect(await repository.readQuotaReclamation(active.id)).toEqual({
+      windowStartedMs: 1_000,
+      reclaimedBytes: 42,
+    });
+  });
 });
 
 function client() {

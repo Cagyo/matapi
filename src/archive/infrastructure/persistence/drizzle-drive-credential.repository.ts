@@ -1,12 +1,14 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq, inArray, isNull, lte } from 'drizzle-orm';
+import { and, eq, inArray, isNull, lte, or } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../../database/database.module';
 import { driveConnections } from '../../../database/schema';
 import type {
   ActivateDriveConnection,
+  CompareAndSetDriveQuotaReclamation,
   DriveClientCredentials,
   DriveConnectionTerminalStatus,
   DriveCredentialRepositoryPort,
+  DriveQuotaReclamationState,
   MergeRefreshedTokens,
   ManagedFolderReservation,
   ManagedFolderRole,
@@ -236,6 +238,39 @@ export class DrizzleDriveCredentialRepository implements DriveCredentialReposito
   async loadActive(): Promise<DriveConnection | null> {
     const row = this.db.select().from(driveConnections).where(eq(driveConnections.currentSlot, 1)).get();
     return row ? toConnection(row) : null;
+  }
+
+  async readQuotaReclamation(generationId: string): Promise<DriveQuotaReclamationState | null> {
+    const row = this.db.select({
+      windowStartedMs: driveConnections.quotaReclamationStartedAt,
+      reclaimedBytes: driveConnections.quotaReclaimedAt,
+    }).from(driveConnections).where(eq(driveConnections.id, generationId)).get();
+    return row === undefined
+      ? null
+      : { windowStartedMs: row.windowStartedMs, reclaimedBytes: row.reclaimedBytes ?? 0 };
+  }
+
+  async compareAndSetQuotaReclamation(input: CompareAndSetDriveQuotaReclamation): Promise<boolean> {
+    if (!validQuotaReclamation(input.expected) || !validQuotaReclamation(input.next)) return false;
+    const expectedStarted = input.expected.windowStartedMs === null
+      ? isNull(driveConnections.quotaReclamationStartedAt)
+      : eq(driveConnections.quotaReclamationStartedAt, input.expected.windowStartedMs);
+    const expectedBytes = input.expected.reclaimedBytes === 0
+      ? or(isNull(driveConnections.quotaReclaimedAt), eq(driveConnections.quotaReclaimedAt, 0))
+      : eq(driveConnections.quotaReclaimedAt, input.expected.reclaimedBytes);
+    const result = this.db.update(driveConnections).set({
+      quotaReclamationStartedAt: input.next.windowStartedMs,
+      // This pre-existing integer column stores the durable reclaimed-byte total.
+      quotaReclaimedAt: input.next.reclaimedBytes,
+      quotaReclamationErrorCode: null,
+    }).where(and(
+      eq(driveConnections.id, input.generationId),
+      eq(driveConnections.currentSlot, 1),
+      eq(driveConnections.status, 'active'),
+      expectedStarted,
+      expectedBytes,
+    )).run();
+    return result.changes === 1;
   }
 
   async loadCredentials(generationId: string): Promise<{ client: DriveClientCredentials; tokens: OAuthTokenSet; revision: number } | null> {
@@ -528,6 +563,12 @@ function isStagedSlotUniqueViolation(error: unknown): boolean {
     && error.code === 'SQLITE_CONSTRAINT_UNIQUE'
     && typeof error.message === 'string'
     && error.message.includes('drive_connections.staged_slot');
+}
+
+function validQuotaReclamation(state: DriveQuotaReclamationState): boolean {
+  return (state.windowStartedMs === null || (Number.isSafeInteger(state.windowStartedMs) && state.windowStartedMs >= 0))
+    && Number.isSafeInteger(state.reclaimedBytes) && state.reclaimedBytes >= 0
+    && (state.windowStartedMs !== null || state.reclaimedBytes === 0);
 }
 
 function conflict(message: string): DriveObjectConflictError {

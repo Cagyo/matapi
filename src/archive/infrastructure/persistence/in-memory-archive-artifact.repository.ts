@@ -231,6 +231,10 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
     this.transitionWithoutLease(attemptId, expectedRevision, nowMs, (attempt) => attempt.detach(reason, nowMs));
   }
 
+  async markDeleted(attemptId: string, expectedRevision: number, nowMs: number): Promise<void> {
+    this.transitionWithoutLease(attemptId, expectedRevision, nowMs, (attempt) => attempt.markDeleted(nowMs));
+  }
+
   async markReconciled(
     attemptId: string,
     expectedRevision: number,
@@ -348,6 +352,7 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
   async listRetentionCandidates(selection: RetentionSelection): Promise<readonly ArchiveObjectAttempt[]> {
     return [...this.attempts.values()]
       .filter(({ attempt }) => attempt.state === 'verified' && this.artifacts.get(attempt.artifactId)?.kind === selection.kind
+        && (selection.generationId === undefined || attempt.generationId === selection.generationId)
         && (selection.providerCreatedBeforeMs === undefined || attempt.verifiedMetadata!.createdTimeMs <= selection.providerCreatedBeforeMs))
       .sort((left, right) => left.attempt.verifiedMetadata!.createdTimeMs - right.attempt.verifiedMetadata!.createdTimeMs || left.attempt.id.localeCompare(right.attempt.id))
       .slice(0, selection.limit).map(project);

@@ -320,6 +320,32 @@ describe('DrizzleArchiveArtifactRepository', () => {
     expect((await repository.listRetentionCandidates({ kind: 'motion_video', limit: 2 })).map((attempt) => attempt.remoteObjectId))
       .toEqual(['file-earlier-provider', 'file-later-provider']);
   });
+
+  it('atomically records exact deletion and clears the artifact verification pointer', async () => {
+    const artifact = await repository.register(artifactFixture());
+    const attempt = await repository.createAttempt(
+      artifact.id, 'generation-1', 'file-1', 'folder-1', 100,
+    );
+    const claim = await repository.claimAttempt(attempt.id, {
+      owner: 'worker-a', nowMs: 1_000, leaseMs: 5_000,
+    });
+    await repository.markVerified(
+      attempt.id, claim.lease, verifiedObject('file-1', 'folder-1'), 1_100,
+    );
+    const verified = await repository.loadAttempt(attempt.id);
+    if (!verified) throw new Error('expected verified attempt');
+
+    await repository.markDeleted(verified.id, verified.revision, 1_200);
+
+    expect(await repository.loadAttempt(attempt.id)).toMatchObject({
+      state: 'deleted',
+      deletedAtMs: 1_200,
+    });
+    expect(await repository.loadArtifact(artifact.id)).toMatchObject({
+      state: 'pending',
+      currentVerifiedAttemptId: null,
+    });
+  });
 });
 
 function artifactFixture() {

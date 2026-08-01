@@ -37,7 +37,11 @@ export class ArchiveRemoteMutationLockService {
     }
   }
 
-  /** Admits cleanup only when no upload/reconciliation is active. */
+  /**
+   * Admits cleanup preparation only when no upload/reconciliation is active.
+   * Retention performs local-master checks here, then nests `runExclusive`
+   * around only the final exact provider reread and mutation.
+   */
   async tryRunCleanup<T>(operation: () => Promise<T>): Promise<T | null> {
     if (this.cleanupActive || this.activeActivities > 0) return null;
     this.cleanupActive = true;

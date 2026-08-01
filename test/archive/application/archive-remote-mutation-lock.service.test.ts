@@ -44,4 +44,28 @@ describe('ArchiveRemoteMutationLockService activity gate', () => {
     await Promise.all([cleanup, upload]);
     expect(order).toEqual(['cleanup-start', 'cleanup-end', 'upload-start']);
   });
+
+  it('serializes admitted cleanup behind an existing exact remote mutation', async () => {
+    const gate = new ArchiveRemoteMutationLockService();
+    let releaseMutation!: () => void;
+    const order: string[] = [];
+    const mutation = gate.runExclusive(() => new Promise<void>((resolve) => {
+      order.push('mutation-start');
+      releaseMutation = () => {
+        order.push('mutation-end');
+        resolve();
+      };
+    }));
+    const cleanup = gate.tryRunCleanup(() => gate.runExclusive(async () => {
+      order.push('cleanup');
+      return 'cleaned';
+    }));
+    await Promise.resolve();
+
+    expect(order).toEqual(['mutation-start']);
+    releaseMutation();
+    await mutation;
+    await expect(cleanup).resolves.toBe('cleaned');
+    expect(order).toEqual(['mutation-start', 'mutation-end', 'cleanup']);
+  });
 });

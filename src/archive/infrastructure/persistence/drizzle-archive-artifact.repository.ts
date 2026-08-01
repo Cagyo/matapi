@@ -300,6 +300,10 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
     this.transitionWithoutLease(attemptId, expectedRevision, nowMs, (attempt) => attempt.detach(reason, nowMs));
   }
 
+  async markDeleted(attemptId: string, expectedRevision: number, nowMs: number): Promise<void> {
+    this.transitionWithoutLease(attemptId, expectedRevision, nowMs, (attempt) => attempt.markDeleted(nowMs));
+  }
+
   async markReconciled(
     attemptId: string,
     expectedRevision: number,
@@ -481,6 +485,7 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
   async listRetentionCandidates(selection: RetentionSelection): Promise<readonly ArchiveObjectAttempt[]> {
     validateLimit(selection.limit);
     const conditions = [eq(driveObjectAttempts.state, 'verified'), eq(archiveArtifacts.kind, selection.kind)];
+    if (selection.generationId !== undefined) conditions.push(eq(driveObjectAttempts.generationId, selection.generationId));
     if (selection.providerCreatedBeforeMs !== undefined) conditions.push(lte(driveObjectAttempts.verifiedCreatedTime, selection.providerCreatedBeforeMs));
     return this.db.select({ attempt: driveObjectAttempts }).from(driveObjectAttempts)
       .innerJoin(archiveArtifacts, eq(driveObjectAttempts.artifactId, archiveArtifacts.id)).where(and(...conditions))
@@ -588,7 +593,8 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
         if (updatedArtifact.changes !== 1) throw new DriveObjectConflictError('Archive artifact changed before transition');
       }
       const result = tx.update(driveObjectAttempts).set({ state: next.state, revision: next.revision, updatedAt: nowMs,
-        missingReason: next.missingReason, detachedReason: next.detachedReason, leaseOwner: null, leaseExpiresAt: null, ...clearedSession() })
+        missingReason: next.missingReason, detachedReason: next.detachedReason, deletedAt: next.deletedAtMs,
+        leaseOwner: null, leaseExpiresAt: null, ...clearedSession() })
         .where(and(eq(driveObjectAttempts.id, attemptId), eq(driveObjectAttempts.revision, expectedRevision), availability)).run();
       if (result.changes !== 1) throw new DriveObjectConflictError('Drive attempt changed before transition');
     });

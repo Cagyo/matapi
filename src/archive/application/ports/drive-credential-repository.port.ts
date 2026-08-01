@@ -45,6 +45,17 @@ export interface MergeRefreshedTokens {
   refreshedAtMs: number;
 }
 
+export interface DriveQuotaReclamationState {
+  windowStartedMs: number | null;
+  reclaimedBytes: number;
+}
+
+export interface CompareAndSetDriveQuotaReclamation {
+  generationId: string;
+  expected: DriveQuotaReclamationState;
+  next: DriveQuotaReclamationState;
+}
+
 export type ManagedFolderRole = 'root' | 'motion' | 'backups';
 
 /** Partial exact-ID reservations survive a provider timeout before activation. */
@@ -88,6 +99,8 @@ export interface DriveCredentialRepositoryPort {
   reserveManagedFolder(input: ReserveManagedFolder): Promise<ManagedFolderReservation | null>;
   activate(input: ActivateDriveConnection): Promise<{ active: DriveConnection; retiringId: string | null }>;
   loadActive(): Promise<DriveConnection | null>;
+  readQuotaReclamation(generationId: string): Promise<DriveQuotaReclamationState | null>;
+  compareAndSetQuotaReclamation(input: CompareAndSetDriveQuotaReclamation): Promise<boolean>;
   loadCredentials(generationId: string): Promise<{ client: DriveClientCredentials; tokens: OAuthTokenSet; revision: number } | null>;
   replaceCredentials(generationId: string, expectedRevision: number, client: DriveClientCredentials, tokens: OAuthTokenSet): Promise<DriveConnection>;
   mergeRefreshedTokens(input: MergeRefreshedTokens): Promise<boolean>;
