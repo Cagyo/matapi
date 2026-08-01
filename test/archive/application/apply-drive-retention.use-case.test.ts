@@ -112,6 +112,11 @@ describe('ApplyDriveRetentionUseCase', () => {
       ...fixture.repository.attempts.get('retired-oldest')!,
       generationId: 'retired-generation',
     });
+    fixture.addCandidate('retired-second', 'motion_video', NOW - 99 * DAY_MS);
+    fixture.repository.attempts.set('retired-second', {
+      ...fixture.repository.attempts.get('retired-second')!,
+      generationId: 'retired-generation',
+    });
     fixture.addCandidate('active-old', 'motion_video', NOW - 91 * DAY_MS);
 
     await fixture.useCase.execute({ requiredBytes: 5 }, signal);
@@ -400,10 +405,9 @@ class RetentionRepositoryFake {
     this.calls.push(`list:${selection.kind}`);
     return [...this.attempts.values()]
       .filter((attempt) => this.artifacts.get(attempt.artifactId)?.kind === selection.kind)
-      .filter((attempt) => {
-        const generationId = (selection as RetentionSelection & { generationId?: string }).generationId;
-        return generationId === undefined || attempt.generationId === generationId;
-      })
+      .filter((attempt) =>
+        selection.generationId === undefined || attempt.generationId === selection.generationId,
+      )
       .sort((left, right) =>
         (left.verifiedObject?.providerCreatedAtMs ?? 0) -
           (right.verifiedObject?.providerCreatedAtMs ?? 0),
