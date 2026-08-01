@@ -49,6 +49,10 @@ import {
   ARCHIVE_CLOCK,
   type ArchiveClockPort,
 } from './application/ports/archive-clock.port';
+import {
+  ARCHIVE_RETENTION,
+  type ArchiveRetentionPort,
+} from './application/ports/archive-retention.port';
 import { DRIVE_ACCOUNT, type DriveAccountPort } from './application/ports/drive-account.port';
 import { DRIVE_ARCHIVE, type DriveArchivePort } from './application/ports/drive-archive.port';
 import { DRIVE_AUTHORIZATION_OUTCOME } from './application/ports/drive-authorization-outcome.port';
@@ -352,6 +356,7 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         ArchiveRemoteMutationLockService,
       ],
     },
+    { provide: ARCHIVE_RETENTION, useExisting: ApplyDriveRetentionUseCase },
     {
       provide: ArchiveSchedulerService,
       useFactory: (
@@ -360,6 +365,7 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         uploads: UploadDriveObjectAttemptUseCase,
         hooks: ArchiveSchedulerHooksService,
         lock: ArchiveRemoteMutationLockService,
+        retention: ArchiveRetentionPort,
         clock: ClockPort,
       ) => new ArchiveSchedulerService(
         repository,
@@ -367,6 +373,7 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         uploads,
         hooks,
         lock,
+        retention,
         clock,
         archiveSchedulerOptionsFromConfig(loadDefaults().archive, process.env),
       ),
@@ -376,6 +383,7 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         UploadDriveObjectAttemptUseCase,
         ArchiveSchedulerHooksService,
         ArchiveRemoteMutationLockService,
+        ARCHIVE_RETENTION,
         CLOCK,
       ],
     },
@@ -414,7 +422,7 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
       useFactory: (
         hooks: ArchiveSchedulerHooksService,
         reconcile: ReconcileDriveUseCase,
-        retention: ApplyDriveRetentionUseCase,
+        retention: ArchiveRetentionPort,
         alerts: ArchiveAdminAlertPort,
       ) => {
         hooks.registerRemoteMaintenance(async (lock, signal) => {
@@ -435,7 +443,7 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
       inject: [
         ArchiveSchedulerHooksService,
         ReconcileDriveUseCase,
-        ApplyDriveRetentionUseCase,
+        ARCHIVE_RETENTION,
         ARCHIVE_ADMIN_ALERT,
       ],
     },
@@ -467,7 +475,7 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
     DriveAuthorizationOutcomeRegistrationService,
     ArchiveSchedulerHooksService,
     ArchiveRemoteMutationLockService,
-    ApplyDriveRetentionUseCase,
+    ARCHIVE_RETENTION,
     ArchiveRuntimeLifecycleService,
     ARCHIVE_ADMIN_ALERT,
     ArchiveAdminAlertService,

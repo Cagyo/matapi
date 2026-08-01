@@ -51,6 +51,8 @@ describe('GrammyBotGateway handler registration', () => {
       eventNotifier: { register: vi.fn() },
       recipientDirectory: { register: vi.fn() },
       adminAlertService: { register: vi.fn() },
+      archiveAdminAlerts: { register: vi.fn() },
+      telegramArchiveAdminAlert: {},
       eventProcessor: { drain: vi.fn() },
       telegramNotifier: { setBot: vi.fn() },
       directMessenger: { setBot: vi.fn() },
@@ -124,6 +126,8 @@ describe('GrammyBotGateway handler registration', () => {
       eventNotifier: { register: vi.fn() },
       recipientDirectory: { register: vi.fn() },
       adminAlertService: { register: vi.fn() },
+      archiveAdminAlerts: { register: vi.fn() },
+      telegramArchiveAdminAlert: {},
       eventProcessor: { drain: vi.fn() },
       consoleNotifier: {},
       telegramRecipients: {},
@@ -151,6 +155,7 @@ describe('GrammyBotGateway handler registration', () => {
       eventNotifier: { clear: vi.fn() },
       recipientDirectory: { clear: vi.fn() },
       adminAlertService: { clear: vi.fn() },
+      archiveAdminAlerts: { clear: vi.fn() },
       liveStreamMessageCleanup: { clear },
     });
 

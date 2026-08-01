@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { CleanupCoordinatorService } from '../../../src/camera/application/cleanup-coordinator.service';
 import { CleanupLocalStorageUseCase } from '../../../src/camera/application/cleanup-local-storage.use-case';
-import { ApplyDriveRetentionUseCase } from '../../../src/archive/application/use-cases/apply-drive-retention.use-case';
+import type { ArchiveRetentionPort } from '../../../src/archive/application/ports/archive-retention.port';
+import {
+  ArchiveSchedulerHooksService,
+} from '../../../src/archive/application/archive-scheduler.service';
+import { CameraModule } from '../../../src/camera/camera.module';
 
 function fakeCleanups() {
   const local = {
@@ -13,7 +17,7 @@ function fakeCleanups() {
       deletedIds: [], reclaimedBytes: 0, remainingDeficitBytes: 0,
       accountingWindowActive: false,
     })),
-  } as unknown as ApplyDriveRetentionUseCase;
+  } as unknown as ArchiveRetentionPort;
 
   return { local, retention };
 }
@@ -84,5 +88,40 @@ describe('CleanupCoordinatorService', () => {
     resolveLocal();
     await firstRun;
     expect(coordinator.isCleaning()).toBe(false);
+  });
+
+  it('routes scheduled local cleanup through the coordinator so manual cleanup cannot overlap', async () => {
+    const { local, retention } = fakeCleanups();
+    let releaseLocal!: () => void;
+    const localBlocked = new Promise<void>((resolve) => { releaseLocal = resolve; });
+    local.execute = vi.fn(async () => {
+      await localBlocked;
+      return { thresholdUsed: 80 };
+    });
+    const coordinator = new CleanupCoordinatorService(local, retention);
+    const hooks = new ArchiveSchedulerHooksService();
+    const providers = Reflect.getMetadata('providers', CameraModule) as {
+      provide?: unknown;
+      useFactory?: (...dependencies: unknown[]) => unknown;
+    }[];
+    const hookRegistration = providers.find(
+      (provider) => provider.provide === 'ARCHIVE_CAMERA_SCHEDULER_HOOK_REGISTRATION',
+    );
+    expect(hookRegistration?.useFactory).toBeTypeOf('function');
+    hookRegistration!.useFactory!(
+      hooks,
+      { reconcile: vi.fn(async () => undefined) },
+      coordinator,
+    );
+
+    const scheduled = hooks.cleanupLocal(new AbortController().signal);
+    void scheduled.catch(() => undefined);
+    await vi.waitFor(() => expect(coordinator.getActiveTarget()).toBe('local'));
+    const manual = await coordinator.runCleanup('both', 85);
+
+    expect(manual).toEqual({ executed: false, thresholdUsed: 85 });
+    expect(retention.execute).not.toHaveBeenCalled();
+    releaseLocal();
+    await scheduled;
   });
 });

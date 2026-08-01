@@ -268,7 +268,6 @@ DISK_CRITICAL_PERCENT=80
 DISK_EMERGENCY_PERCENT=95
 
 # Backup
-BACKUP_CRON=0 3 * * *              # daily at 3 AM
 BACKUP_LOCAL_PATH=/opt/home-worker/data/backup.db
 
 # PM2
@@ -497,7 +496,8 @@ Queries against `sensors` table are always clean — no `WHERE deleted = false` 
 ### 7.6 Database Backup
 
 - Daily backup via SQLite Online Backup API (not `VACUUM INTO` — allows concurrent reads/writes during backup)
-- Scheduled at 3 AM (configurable via `BACKUP_CRON`) — low-activity window
+- Created by the bounded archive scheduler on the first tick of each local day,
+  with a boot catch-up after 24 hours without a successful backup
 - Local backup: `/opt/home-worker/data/backup.db` (survives DB corruption, same SD card)
 - Remote backup: immutable `database_backup` artifacts use the same direct API upload pipeline
 - Retention: keep seven days, revalidating one exact active-generation ID before deletion

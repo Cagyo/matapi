@@ -18,7 +18,13 @@ const textExtensions = new Set([
 
 function activeFiles(): string[] {
   const roots = ['config', 'docs', 'scripts', 'src', 'test'];
-  const files = ['package.json'];
+  const files = [
+    '.env.example',
+    'README.md',
+    'AGENTS.md',
+    'ecosystem.config.js',
+    'package.json',
+  ];
   for (const root of roots) visit(resolve(repositoryRoot, root), files);
   return files.sort();
 }
@@ -37,6 +43,15 @@ function visit(directory: string, files: string[]): void {
 }
 
 describe('legacy Google Drive integration removal', () => {
+  it('includes root configuration and operator documentation in the active-file fence', () => {
+    expect(activeFiles()).toEqual(expect.arrayContaining([
+      '.env.example',
+      'README.md',
+      'AGENTS.md',
+      'ecosystem.config.js',
+    ]));
+  });
+
   it('has no active runtime, installer, config, test, locale, or documentation path', () => {
     const remnants = activeFiles().flatMap((file) => {
       const lines = readFileSync(resolve(repositoryRoot, file), 'utf8').split('\n');

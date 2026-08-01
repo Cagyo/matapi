@@ -9,6 +9,8 @@ import type {
 import type { CreateDatabaseBackupUseCase } from './use-cases/create-database-backup.use-case';
 import type { UploadDriveObjectAttemptUseCase } from './use-cases/upload-drive-object-attempt.use-case';
 import { ArchiveRemoteMutationLockService } from './archive-remote-mutation-lock.service';
+import type { ArchiveRetentionPort } from './ports/archive-retention.port';
+import { DriveQuotaExceededError } from '../domain/errors/drive-quota-exceeded.error';
 
 const DEFAULT_INTERVAL_MS = 2 * 60 * 1_000;
 const DEFAULT_LEASE_MS = 5 * 60 * 1_000;
@@ -91,6 +93,7 @@ export class ArchiveSchedulerService {
     private readonly uploads: Pick<UploadDriveObjectAttemptUseCase, 'execute' | 'executeClaimed'>,
     private readonly hooks: ArchiveSchedulerHooksService,
     private readonly remoteMutationLock: ArchiveRemoteMutationLockService,
+    private readonly retention: ArchiveRetentionPort,
     private readonly clock: ClockPort,
     options: ArchiveSchedulerOptions = {},
   ) {
@@ -196,7 +199,7 @@ export class ArchiveSchedulerService {
     if (signal.aborted) return;
     if (newBackup !== undefined) {
       this.consecutiveFreshVideos = 0;
-      this.trackTransfer(this.uploads.execute(newBackup.id, signal), signal);
+      this.trackTransfer(this.uploads.execute(newBackup.id, signal), signal, newBackup.size);
       return;
     }
     if (forceVideoRetryBeforeMs !== undefined) {
@@ -218,7 +221,7 @@ export class ArchiveSchedulerService {
     if (signal.aborted) return;
     if (newVideo !== undefined) {
       this.consecutiveFreshVideos += 1;
-      this.trackTransfer(this.uploads.execute(newVideo.id, signal), signal);
+      this.trackTransfer(this.uploads.execute(newVideo.id, signal), signal, newVideo.size);
       return;
     }
     const claimed = await this.repository.claimNextAttempt({
@@ -248,14 +251,33 @@ export class ArchiveSchedulerService {
       return;
     }
     this.noteAdmission(claimed);
-    this.trackTransfer(this.uploads.executeClaimed(claimed, signal), signal);
+    this.trackTransfer(
+      this.uploads.executeClaimed(claimed, signal),
+      signal,
+      claimed.artifact.size,
+    );
   }
 
-  private trackTransfer(transferOperation: Promise<unknown>, signal: AbortSignal): void {
+  private trackTransfer(
+    transferOperation: Promise<unknown>,
+    signal: AbortSignal,
+    pendingArtifactBytes: number,
+  ): void {
     const transfer = transferOperation
       .then(async () => { await this.recordSchedulerSuccess({ lastUploadSuccessMs: this.clock.now().getTime() }); })
-      .catch((error: unknown) => {
-        if (!signal.aborted) this.logger.warn(`Archive upload failed: ${message(error)}`);
+      .catch(async (error: unknown) => {
+        if (signal.aborted) return;
+        if (error instanceof DriveQuotaExceededError) {
+          const requiredBytes = boundedPendingBytes(pendingArtifactBytes);
+          if (requiredBytes > 0) {
+            try {
+              await this.retention.execute({ requiredBytes }, signal);
+            } catch (retentionError) {
+              this.logger.warn(`Archive quota reclamation failed: ${message(retentionError)}`);
+            }
+          }
+        }
+        this.logger.warn(`Archive upload failed: ${message(error)}`);
       });
     const tracked = transfer.finally(() => {
       if (this.activeUpload === tracked) this.activeUpload = null;
@@ -285,6 +307,10 @@ export class ArchiveSchedulerService {
       if (!this.controller.signal.aborted) this.logger.warn(`${name} failed: ${message(error)}`);
     }
   }
+}
+
+function boundedPendingBytes(value: number): number {
+  return Number.isSafeInteger(value) && value > 0 ? value : 0;
 }
 
 function positive(value: number, label: string): number {

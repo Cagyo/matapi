@@ -185,8 +185,8 @@ function isInstallationId(value: string | undefined): value is string {
  * Camera composition root (specs 14, 20, 21).
  *
  * Real adapters drive the Motion daemon, ffmpeg snapshots, and `du` storage
- * accounting. The Archive context owns Google Drive; Camera publishes only
- * completed-video registration and verification hooks across that boundary.
+ * accounting. The Archive context owns Google Drive; Camera crosses that
+ * boundary only through registration, verification, and retention ports.
  */
 @Module({
   imports: [DatabaseModule, ArchiveModule, EventModule, FeatureModule, SystemModule],
@@ -230,18 +230,20 @@ function isInstallationId(value: string | undefined): value is string {
       useFactory: (
         hooks: ArchiveSchedulerHooksService,
         registration: RegisterCompletedMotionVideosUseCase,
-        cleanup: CleanupLocalStorageUseCase,
+        cleanup: CleanupCoordinatorService,
       ) => {
         hooks.registerCamera({
           reconcileMotion: async (signal) => registration.reconcile(signal),
-          cleanupLocal: async (signal) => { await cleanup.execute(undefined, signal); },
+          cleanupLocal: async (signal) => {
+            await cleanup.runCleanup('local', undefined, signal);
+          },
         });
         return hooks;
       },
       inject: [
         ArchiveSchedulerHooksService,
         RegisterCompletedMotionVideosUseCase,
-        CleanupLocalStorageUseCase,
+        CleanupCoordinatorService,
       ],
     },
     {

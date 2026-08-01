@@ -11,11 +11,13 @@ import { ArchiveRemoteMutationLockService } from '../../../src/archive/applicati
 import type { CreateDatabaseBackupUseCase } from '../../../src/archive/application/use-cases/create-database-backup.use-case';
 import type { UploadDriveObjectAttemptUseCase } from '../../../src/archive/application/use-cases/upload-drive-object-attempt.use-case';
 import type { ClockPort } from '../../../src/events/domain/ports/clock.port';
+import { DriveQuotaExceededError } from '../../../src/archive/domain/errors/drive-quota-exceeded.error';
+import type { ArchiveRetentionPort } from '../../../src/archive/application/ports/archive-retention.port';
 
 function claimedAttempt(overrides: Partial<ClaimedAttempt['attempt']> = {}): ClaimedAttempt {
   return {
     artifact: {
-      id: 'video-artifact', kind: 'motion_video', installationId: 'installation-1',
+      id: 'video-artifact', kind: 'motion_video', installationId: 'installation-1', size: 4_096,
     } as ClaimedAttempt['artifact'],
     attempt: {
       id: 'video-attempt', artifactId: 'video-artifact', generationId: 'generation-1',
@@ -49,6 +51,12 @@ function setup(options: { upload?: () => Promise<unknown>; backup?: () => Promis
     execute: vi.fn(async () => ({ kind: 'verified' })),
     executeClaimed: vi.fn(options.upload ?? (async () => ({ kind: 'verified' }))),
   } as unknown as UploadDriveObjectAttemptUseCase;
+  const retention = {
+    execute: vi.fn(async () => ({
+      deletedIds: [], reclaimedBytes: 0, remainingDeficitBytes: 0,
+      accountingWindowActive: false,
+    })),
+  } as ArchiveRetentionPort;
   const hooks = new ArchiveSchedulerHooksService();
   const clock: ClockPort = { now: () => new Date(10_000) };
   const scheduler = new ArchiveSchedulerService(
@@ -57,10 +65,11 @@ function setup(options: { upload?: () => Promise<unknown>; backup?: () => Promis
     uploads,
     hooks,
     new ArchiveRemoteMutationLockService(),
+    retention,
     clock,
     { intervalMs: 60_000, shutdownWaitMs: 10, newerVideoBatch: 2 },
   );
-  return { repository, backups, uploads, hooks, scheduler };
+  return { repository, backups, uploads, retention, hooks, scheduler };
 }
 
 describe('ArchiveSchedulerService', () => {
@@ -83,6 +92,42 @@ describe('ArchiveSchedulerService', () => {
     expect(registration).toHaveBeenCalledTimes(2);
     expect(localCleanup).toHaveBeenCalledTimes(2);
     expect(fixture.uploads.executeClaimed).toHaveBeenCalledTimes(1);
+  });
+
+  it('reclaims the pending artifact size after quota failure before a later upload retry', async () => {
+    const order: string[] = [];
+    const upload = vi.fn()
+      .mockImplementationOnce(async () => {
+        order.push('upload:quota');
+        throw new DriveQuotaExceededError();
+      })
+      .mockImplementationOnce(async () => {
+        order.push('upload:verified');
+        return { kind: 'verified' };
+      });
+    const fixture = setup({ upload });
+    const retention = fixture.retention;
+    vi.mocked(retention.execute).mockImplementation(
+      async (input: { requiredBytes: number }) => {
+        order.push(`reclaim:${input.requiredBytes}`);
+        return {
+          deletedIds: ['old-backup'],
+          reclaimedBytes: input.requiredBytes,
+          remainingDeficitBytes: 0,
+          accountingWindowActive: true,
+        };
+      },
+    );
+
+    await fixture.scheduler.tick();
+    await vi.waitFor(() => expect(retention.execute).toHaveBeenCalledWith(
+      { requiredBytes: 4_096 },
+      expect.any(AbortSignal),
+    ));
+    await fixture.scheduler.tick();
+    await vi.waitFor(() => expect(upload).toHaveBeenCalledTimes(2));
+
+    expect(order).toEqual(['upload:quota', 'reclaim:4096', 'upload:verified']);
   });
 
   it('does not overlap scheduler ticks', async () => {

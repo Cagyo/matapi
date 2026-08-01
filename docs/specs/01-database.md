@@ -295,7 +295,8 @@ restart in this table. Do not hand-edit its migration: edit
 ## Database Backup
 
 - Daily via SQLite Online Backup API (allows concurrent reads/writes)
-- Scheduled at 3 AM (`BACKUP_CRON`)
+- Created by the bounded archive scheduler on the first tick of each local day,
+  with a boot catch-up after 24 hours without a successful backup
 - Local: `BACKUP_LOCAL_PATH` (survives DB corruption)
 - Remote: registered as an immutable `database_backup` archive artifact, then
   streamed through the direct Google Drive resumable-upload pipeline

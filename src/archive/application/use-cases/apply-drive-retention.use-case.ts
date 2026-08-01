@@ -36,6 +36,11 @@ import {
   ARCHIVE_UPLOAD_SOURCE,
   type ArchiveUploadSourcePort,
 } from './upload-drive-object-attempt.use-case';
+import type {
+  ArchiveRetentionInput,
+  ArchiveRetentionPort,
+  ArchiveRetentionResult,
+} from '../ports/archive-retention.port';
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
 const BACKUP_RETENTION_MS = 7 * DAY_MS;
@@ -55,13 +60,6 @@ export interface ApplyDriveRetentionOptions {
   clockSkewMs?: number;
 }
 
-export interface ApplyDriveRetentionResult {
-  deletedIds: readonly string[];
-  reclaimedBytes: number;
-  remainingDeficitBytes: number;
-  accountingWindowActive: boolean;
-}
-
 interface Candidate {
   attempt: ArchiveObjectAttempt;
   artifact: ArchiveArtifact;
@@ -69,7 +67,7 @@ interface Candidate {
 
 /** Applies only bounded exact-ID retention after clock, quota, and ownership checks. */
 @Injectable()
-export class ApplyDriveRetentionUseCase {
+export class ApplyDriveRetentionUseCase implements ArchiveRetentionPort {
   private readonly candidateLimit: number;
   private readonly clockSkewMs: number;
 
@@ -94,9 +92,9 @@ export class ApplyDriveRetentionUseCase {
   }
 
   async execute(
-    input: { requiredBytes: number },
+    input: ArchiveRetentionInput,
     signal: AbortSignal,
-  ): Promise<ApplyDriveRetentionResult> {
+  ): Promise<ArchiveRetentionResult> {
     const requiredBytes = nonNegative(input.requiredBytes, 'required bytes');
     throwIfAborted(signal);
     const clock = await this.clock.read();
@@ -357,7 +355,7 @@ function result(
   reclaimedBytes: number,
   remainingDeficitBytes: number,
   accountingWindowActive: boolean,
-): ApplyDriveRetentionResult {
+): ArchiveRetentionResult {
   return { deletedIds, reclaimedBytes, remainingDeficitBytes, accountingWindowActive };
 }
 

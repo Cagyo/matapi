@@ -1,5 +1,8 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { ApplyDriveRetentionUseCase } from '../../archive/application/use-cases/apply-drive-retention.use-case';
+import { Inject, Injectable, Logger } from '@nestjs/common';
+import {
+  ARCHIVE_RETENTION,
+  type ArchiveRetentionPort,
+} from '../../archive/application/ports/archive-retention.port';
 import { CleanupLocalStorageUseCase } from './cleanup-local-storage.use-case';
 
 export type CleanupTarget = 'local' | 'drive' | 'both';
@@ -23,7 +26,7 @@ export class CleanupCoordinatorService {
 
   constructor(
     private readonly cleanupLocal: CleanupLocalStorageUseCase,
-    private readonly retention: ApplyDriveRetentionUseCase,
+    @Inject(ARCHIVE_RETENTION) private readonly retention: ArchiveRetentionPort,
   ) {}
 
   /** Whether any storage cleanup is currently executing. */
@@ -43,6 +46,7 @@ export class CleanupCoordinatorService {
   async runCleanup(
     target: CleanupTarget,
     customThreshold?: number,
+    signal?: AbortSignal,
   ): Promise<CleanupResult> {
     if (this.activeTarget !== null) {
       this.logger.warn(
@@ -56,7 +60,9 @@ export class CleanupCoordinatorService {
 
     try {
       if (target === 'local' || target === 'both') {
-        const res = await this.cleanupLocal.execute(customThreshold);
+        const res = signal === undefined
+          ? await this.cleanupLocal.execute(customThreshold)
+          : await this.cleanupLocal.execute(customThreshold, signal);
         if (res?.thresholdUsed && thresholdUsed === 0) {
           thresholdUsed = res.thresholdUsed;
         }
@@ -64,7 +70,7 @@ export class CleanupCoordinatorService {
       if (target === 'drive' || target === 'both') {
         await this.retention.execute(
           { requiredBytes: 0 },
-          new AbortController().signal,
+          signal ?? new AbortController().signal,
         );
       }
       return { executed: true, thresholdUsed };

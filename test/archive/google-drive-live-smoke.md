@@ -66,6 +66,15 @@ URLs, or resumable-session URIs.
 4. Stall a video transfer. During the stall, create a snapshot, register another
    completed candidate, run status, create/locate a backup, and run unrelated
    local cleanup. Record that these operations finish independently.
+5. Disable or interrupt the Motion completion hook while a stable video closes,
+   then restore the hook and restart the worker. Prove filesystem reconciliation
+   registers the missed video exactly once, creates at most one immutable Drive
+   attempt, and does not inspect or mutate either unrelated sentinel item.
+6. Kill the worker after an upload attempt lease is acquired, wait beyond the
+   recorded lease expiry, and restart. Prove boot recovery reclaims the expired
+   lease and resumes or retries the same immutable attempt/remote ID without a
+   duplicate object. Inventory both unrelated sentinel items before and after
+   and record that neither was read for mutation, moved, deleted, or trashed.
 
 ## Remote mutation and generation safety
 
