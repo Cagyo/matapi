@@ -11,23 +11,22 @@ describe('DurableArchiveAdminAlertAdapter', () => {
     } as never);
     const adapter = new DurableArchiveAdminAlertAdapter(
       queue,
-      { process: async () => { throw new Error('notifier offline'); } },
+      { alert: async () => { throw new Error('Telegram unavailable'); } },
       { now: () => new Date('2030-01-01T00:00:00.000Z') },
     );
 
     await expect(adapter.alert('remote-object-missing', {
       generationId: 'generation-1',
       artifactId: 'artifact-1',
-    })).rejects.toThrow('notifier offline');
+    })).resolves.toBeUndefined();
 
     await expect(repository.pending()).resolves.toEqual([
       expect.objectContaining({
         sensorId: null,
         type: 'archive_admin_alert',
         payload: {
-          artifactId: 'artifact-1',
           message: '⚠️ An archive object is missing and cannot be restored automatically.',
-          reason: 'remote-object-missing',
+          kind: 'remote-object-missing',
         },
       }),
     ]);

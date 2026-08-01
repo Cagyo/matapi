@@ -241,7 +241,23 @@ export class DrizzleDriveCredentialRepository implements DriveCredentialReposito
   }
 
   async listStatusConnections(): Promise<readonly DriveStatusConnection[]> {
-    return this.db.select().from(driveConnections).all().map(toStatusConnection);
+    return this.db.select({
+      id: driveConnections.id,
+      installationId: driveConnections.installationId,
+      status: driveConnections.status,
+      revision: driveConnections.revision,
+      permissionId: driveConnections.permissionId,
+      email: driveConnections.email,
+      displayName: driveConnections.displayName,
+      rootFolderId: driveConnections.rootFolderId,
+      motionFolderId: driveConnections.motionFolderId,
+      backupsFolderId: driveConnections.backupsFolderId,
+      createdAt: driveConnections.createdAt,
+      updatedAt: driveConnections.updatedAt,
+      activatedAt: driveConnections.activatedAt,
+      retiredAt: driveConnections.retiredAt,
+      errorCode: driveConnections.errorCode,
+    }).from(driveConnections).all().map(toStatusConnection);
   }
 
   async readAlertCooldowns(generationId: string): Promise<Readonly<Record<string, number>> | null> {
@@ -475,8 +491,12 @@ function toConnection(row: ConnectionRow): DriveConnection {
   });
 }
 
-function toStatusConnection(row: ConnectionRow): DriveStatusConnection {
-  return { ...toConnection(row), errorCode: row.errorCode };
+function toStatusConnection(row: Pick<ConnectionRow,
+  'id' | 'installationId' | 'status' | 'revision' | 'permissionId' | 'email' |
+  'displayName' | 'rootFolderId' | 'motionFolderId' | 'backupsFolderId' |
+  'createdAt' | 'updatedAt' | 'activatedAt' | 'retiredAt' | 'errorCode'
+>): DriveStatusConnection {
+  return { ...toConnection(row as ConnectionRow), errorCode: row.errorCode };
 }
 
 function emptyTokens(): OAuthTokenSet {

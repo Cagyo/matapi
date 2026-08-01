@@ -11,6 +11,7 @@ import {
   type DatabaseBackupSnapshotPort,
 } from '../database/application/ports/database-backup-snapshot.port';
 import { EventModule } from '../events/event.module';
+import { EventQueueService } from '../events/application/event-queue.service';
 import { CLOCK, type ClockPort } from '../events/domain/ports/clock.port';
 import { SystemModule } from '../system/system.module';
 import { BootRecoveryService } from '../system/application/boot-recovery.service';
@@ -73,6 +74,7 @@ import { AesGcmArchiveSecretAdapter } from './infrastructure/persistence/aes-gcm
 import { DrizzleArchiveArtifactRepository } from './infrastructure/persistence/drizzle-archive-artifact.repository';
 import { DrizzleDriveCredentialRepository } from './infrastructure/persistence/drizzle-drive-credential.repository';
 import { FsArchiveUploadSourceAdapter } from './infrastructure/persistence/fs-archive-upload-source.adapter';
+import { DurableArchiveAdminAlertAdapter } from './infrastructure/events/durable-archive-admin-alert.adapter';
 import { InMemoryArchiveArtifactRepository } from './infrastructure/persistence/in-memory-archive-artifact.repository';
 import { InMemoryDriveCredentialRepository } from './infrastructure/persistence/in-memory-drive-credential.repository';
 
@@ -119,7 +121,16 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
     FsArchiveUploadSourceAdapter,
     { provide: ARCHIVE_UPLOAD_SOURCE, useExisting: FsArchiveUploadSourceAdapter },
     ArchiveAdminAlertService,
-    { provide: ARCHIVE_ADMIN_ALERT, useExisting: ArchiveAdminAlertService },
+    {
+      provide: DurableArchiveAdminAlertAdapter,
+      useFactory: (
+        queue: EventQueueService,
+        alerts: ArchiveAdminAlertService,
+        clock: ClockPort,
+      ) => new DurableArchiveAdminAlertAdapter(queue, alerts, clock),
+      inject: [EventQueueService, ArchiveAdminAlertService, CLOCK],
+    },
+    { provide: ARCHIVE_ADMIN_ALERT, useExisting: DurableArchiveAdminAlertAdapter },
     {
       provide: ReportDriveStatusUseCase,
       useFactory: (
@@ -171,8 +182,6 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
     ArchiveRemoteMutationLockService,
     ArchiveSchedulerHooksService,
     DriveAuthorizationOutcomeRegistrationService,
-    ArchiveAdminAlertService,
-    ReportDriveStatusUseCase,
     {
       provide: DRIVE_AUTHORIZATION_OUTCOME,
       useExisting: DriveAuthorizationOutcomeRegistrationService,
@@ -385,6 +394,9 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
     ArchiveSchedulerHooksService,
     ArchiveRemoteMutationLockService,
     ArchiveRuntimeLifecycleService,
+    ARCHIVE_ADMIN_ALERT,
+    ArchiveAdminAlertService,
+    ReportDriveStatusUseCase,
   ],
 })
 export class ArchiveModule {}

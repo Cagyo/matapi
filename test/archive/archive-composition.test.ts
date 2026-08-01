@@ -10,6 +10,9 @@ import { ARCHIVE_ADMIN_ALERT } from '../../src/archive/application/ports/archive
 import { ArchiveRemoteMutationLockService } from '../../src/archive/application/archive-remote-mutation-lock.service';
 import { ReconcileDriveUseCase } from '../../src/archive/application/use-cases/reconcile-drive.use-case';
 import { ArchiveRuntimeLifecycleService } from '../../src/archive/application/archive-runtime-lifecycle.service';
+import { ArchiveAdminAlertService } from '../../src/archive/application/archive-admin-alert.service';
+import { ReportDriveStatusUseCase } from '../../src/archive/application/use-cases/report-drive-status.use-case';
+import { CLOCK } from '../../src/events/domain/ports/clock.port';
 import { ArchiveSchedulerHooksService } from '../../src/archive/application/archive-scheduler.service';
 import {
   DriveAuthorizationOutcomeRegistrationService,
@@ -41,8 +44,19 @@ describe('ArchiveModule composition', () => {
       ArchiveSchedulerHooksService,
       ArchiveRemoteMutationLockService,
       DriveAuthorizationOutcomeRegistrationService,
+      ArchiveAdminAlertService,
+      ReportDriveStatusUseCase,
     ]));
     expect(exports.some((value) => typeof value === 'function' && /Adapter|Repository/u.test(value.name))).toBe(false);
+  });
+
+  it('injects a real clock token into cooldown persistence', () => {
+    const parameters = Reflect.getMetadata('self:paramtypes', ArchiveAdminAlertService) as
+      | readonly { index: number; param: unknown }[]
+      | undefined;
+    expect(parameters).toEqual(expect.arrayContaining([
+      expect.objectContaining({ index: 1, param: CLOCK }),
+    ]));
   });
 
   it('binds a mandatory durable admin-alert adapter into reconciliation', () => {

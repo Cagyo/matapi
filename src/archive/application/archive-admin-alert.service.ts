@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import type { ClockPort } from '../../events/domain/ports/clock.port';
+import { CLOCK, type ClockPort } from '../../events/domain/ports/clock.port';
 import {
   DRIVE_CREDENTIAL_REPOSITORY,
   type DriveCredentialRepositoryPort,
@@ -29,7 +29,7 @@ export class ArchiveAdminAlertService implements ArchiveAdminAlertPort {
       DriveCredentialRepositoryPort,
       'loadActive' | 'readAlertCooldowns' | 'compareAndSetAlertCooldowns'
     >,
-    private readonly clock: Pick<ClockPort, 'now'>,
+    @Inject(CLOCK) private readonly clock: Pick<ClockPort, 'now'>,
   ) {}
 
   register(delivery: ArchiveAdminAlertDeliveryPort): void {
