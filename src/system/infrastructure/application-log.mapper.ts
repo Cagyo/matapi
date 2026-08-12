@@ -15,7 +15,7 @@ const ANSI_CSI_PATTERN = /\u001B\[[0-?]*[ -/]*[@-~]/gu;
 const ANSI_OSC_PATTERN = /\u001B\][^\u0007\u001B]*(?:\u0007|\u001B\\)/gu;
 const AUTHORIZATION_PATTERN = /(Authorization\s*:\s*(?:Bearer|Basic)\s+)\S+/giu;
 const URL_PATTERN = /\b[a-z][a-z\d+.-]*:\/\/[^\s'"<>]+/giu;
-const SENSITIVE_QUERY_KEY_PATTERN = /(?:^|_)(?:TOKEN|SECRET|PASSWORD|CREDENTIALS?|PRIVATE_KEY|AUTHORIZATION)(?:_|$)|^ACCESS_TOKEN$/iu;
+const SENSITIVE_QUERY_KEY_PATTERN = /(?:^|_)(?:TOKEN|SECRET|PASSWORD|CREDENTIALS?|PRIVATE_KEY|AUTHORIZATION|API_KEY|KEY)(?:_|$)|^ACCESS_TOKEN$/iu;
 const TELEGRAM_BOT_TOKEN_PATTERN = /\b\d{6,}:[A-Za-z\d_-]{20,}\b/gu;
 const ENCODED_REDACTION_MARKER = '%5BREDACTED%5D';
 

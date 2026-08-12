@@ -24,7 +24,11 @@ export class BoundedLogTailGateway {
   constructor(
     private readonly chunkBytes = 64 * 1024,
     private readonly openFile: OpenFile = open,
-  ) {}
+  ) {
+    if (!Number.isSafeInteger(chunkBytes) || chunkBytes <= 0) {
+      throw new RangeError('chunkBytes must be a positive safe integer');
+    }
+  }
 
   async read(input: BoundedLogTailRequest): Promise<BoundedLogTailResult> {
     const handle = await this.openSafe(input.path);

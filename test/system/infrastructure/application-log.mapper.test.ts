@@ -43,6 +43,15 @@ describe('sanitizeAndBoundApplicationLogLines', () => {
     expect(result.lines[0]).not.toMatch(/bearer-value-123|dXNlcjpwYXNzd29yZA|user:pass|secret-value/);
   });
 
+  it.each([
+    ['api_key', 'https://example.test/path?api_key=api-key-secret&ok=1'],
+    ['key', 'https://example.test/path?key=plain-key-secret&ok=1'],
+  ])('redacts an empty-environment URL %s credential', (_key, line) => {
+    const result = sanitizeAndBoundApplicationLogLines([Buffer.from(line)], {}, 1024);
+    expect(result.lines[0]).toContain(REDACTED_APPLICATION_LOG_VALUE);
+    expect(result.lines[0]).not.toMatch(/api-key-secret|plain-key-secret/);
+  });
+
   it('fails closed for a configured secret shorter than eight UTF-8 bytes', () => {
     expect(() => sanitizeAndBoundApplicationLogLines(
       [Buffer.from('claim=short')],

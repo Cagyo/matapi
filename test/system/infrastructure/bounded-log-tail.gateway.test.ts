@@ -21,6 +21,19 @@ describe('BoundedLogTailGateway', () => {
     return path;
   }
 
+  it.each([
+    0,
+    -1,
+    1.5,
+    Number.MAX_SAFE_INTEGER + 1,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+  ])('rejects invalid chunk size %s synchronously', (chunkBytes) => {
+    expect(() => new BoundedLogTailGateway(chunkBytes)).toThrow(
+      new RangeError('chunkBytes must be a positive safe integer'),
+    );
+  });
+
   it('returns the newest complete LF-delimited lines in chronological order', async () => {
     const path = await fixture('worker-out.log', 'one\r\ntwo\nthree');
     const result = await new BoundedLogTailGateway().read({ path, maxLines: 2, maxBytes: 1024 });

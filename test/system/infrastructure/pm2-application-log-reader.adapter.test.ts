@@ -13,7 +13,18 @@ function processEntry(name = 'worker', out = outputPath, error = errorPath) {
   return { name, pm2_env: { pm_out_log_path: out, pm_err_log_path: error } };
 }
 
-function setup(stdout = pm2List([processEntry()])) {
+const defaultEnvironment = {
+  HOME: '/home/pi',
+  PM2_HOME: '/home/pi/.pm2',
+  PM2_APP_NAME: 'worker',
+  TELEGRAM_BOT_TOKEN: '123456789:abcdefghijklmnopqrstuvwxyzABCDE_123456789',
+  UNRELATED_SECRET: 'not-forwarded-to-child',
+};
+
+function setup(
+  stdout = pm2List([processEntry()]),
+  environment: Readonly<Record<string, string | undefined>> = defaultEnvironment,
+) {
   const executePm2 = vi.fn().mockResolvedValue({ stdout, stderr: '' });
   const tail = {
     read: vi.fn().mockResolvedValue({
@@ -24,13 +35,7 @@ function setup(stdout = pm2List([processEntry()])) {
   const adapter = new Pm2ApplicationLogReaderAdapter({
     executePm2,
     tail: tail as never,
-    environment: {
-      HOME: '/home/pi',
-      PM2_HOME: '/home/pi/.pm2',
-      PM2_APP_NAME: 'worker',
-      TELEGRAM_BOT_TOKEN: '123456789:abcdefghijklmnopqrstuvwxyzABCDE_123456789',
-      UNRELATED_SECRET: 'not-forwarded-to-child',
-    },
+    environment,
   });
   return { adapter, executePm2, tail };
 }
@@ -66,6 +71,37 @@ describe('Pm2ApplicationLogReaderAdapter', () => {
     });
   });
 
+  it('defaults a missing PM2_APP_NAME to worker', async () => {
+    const { adapter, tail } = setup(pm2List([processEntry()]), {
+      HOME: '/home/pi',
+      PM2_HOME: '/home/pi/.pm2',
+    });
+
+    await adapter.read('output', { maxLines: 200, maxBytes: 1024 });
+
+    expect(tail.read).toHaveBeenCalledWith({
+      path: outputPath,
+      maxLines: 200,
+      maxBytes: 1024,
+    });
+  });
+
+  it('trims the configured PM2_APP_NAME before exact matching', async () => {
+    const configuredOutput = '/var/log/home-worker/configured-out.log';
+    const { adapter, tail } = setup(
+      pm2List([processEntry('configured-worker', configuredOutput)]),
+      { PM2_APP_NAME: '  configured-worker  ' },
+    );
+
+    await adapter.read('output', { maxLines: 200, maxBytes: 1024 });
+
+    expect(tail.read).toHaveBeenCalledWith({
+      path: configuredOutput,
+      maxLines: 200,
+      maxBytes: 1024,
+    });
+  });
+
   it.each([
     ['malformed JSON', '{', 'pm2-metadata-invalid'],
     ['non-array JSON', '{}', 'pm2-metadata-invalid'],
@@ -74,6 +110,15 @@ describe('Pm2ApplicationLogReaderAdapter', () => {
     ['missing pm2_env', pm2List([{ name: 'worker' }]), 'stream-path-invalid'],
     ['relative path', pm2List([processEntry('worker', 'relative.log')]), 'stream-path-invalid'],
     ['combined paths', pm2List([processEntry('worker', outputPath, outputPath)]), 'stream-path-collision'],
+    [
+      'distinct absolute paths that normalize to one path',
+      pm2List([processEntry(
+        'worker',
+        '/var/log/home-worker/archive/../worker.log',
+        '/var/log/home-worker/worker.log',
+      )]),
+      'stream-path-collision',
+    ],
   ] as const)('fails closed for %s', async (_label, stdout, reason) => {
     const { adapter, tail } = setup(stdout);
     await expect(adapter.read('output', { maxLines: 200, maxBytes: 1024 }))
