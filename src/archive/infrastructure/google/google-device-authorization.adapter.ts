@@ -35,6 +35,11 @@ interface DiscoveryDocument {
   revocationEndpoint: string;
 }
 
+interface OAuthResponse {
+  response: Response;
+  body: Record<string, unknown>;
+}
+
 export interface DeviceAuthorizationClock {
   now(): number;
   sleep(ms: number, signal: AbortSignal): Promise<void>;
@@ -67,12 +72,11 @@ export class GoogleDeviceAuthorizationAdapter
   ): Promise<DeviceAuthorizationChallenge> {
     throwIfAborted(signal);
     const discovery = await this.discover(signal);
-    const response = await this.postForm(
+    const { response, body } = await this.postForm(
       discovery.deviceAuthorizationEndpoint,
       { client_id: client.clientId, scope: DRIVE_FILE_SCOPE },
       signal,
     );
-    const body = await readObject(response, signal);
     throwIfAborted(signal);
     if (!response.ok) throw this.mapFailure('device-code', response.status, body);
 
@@ -113,7 +117,7 @@ export class GoogleDeviceAuthorizationAdapter
       while (true) {
         throwIfAborted(signal);
         throwIfLive(challenge, this.clock.now());
-        const response = await this.postForm(
+        const { response, body } = await this.postForm(
           discovery.tokenEndpoint,
           {
             client_id: client.clientId,
@@ -123,7 +127,6 @@ export class GoogleDeviceAuthorizationAdapter
           },
           operationSignal,
         );
-        const body = await readObject(response, operationSignal);
         throwIfAborted(signal);
         throwIfLive(challenge, this.clock.now());
         if (response.ok) return parseTokens(body, this.clock.now());
@@ -152,26 +155,27 @@ export class GoogleDeviceAuthorizationAdapter
   async revoke(token: string, signal: AbortSignal): Promise<void> {
     throwIfAborted(signal);
     const discovery = await this.discover(signal);
-    const response = await this.postForm(
+    const { response, body } = await this.postForm(
       discovery.revocationEndpoint,
       { token },
       signal,
     );
     if (response.ok) return;
-    const body = await readObject(response, signal);
     throw this.mapFailure('revoke', response.status, body);
   }
 
   private async discover(signal: AbortSignal): Promise<DiscoveryDocument> {
     throwIfAborted(signal);
-    const response = await this.requestWithTimeout(signal, (requestSignal) => this.request(DISCOVERY_URL, {
+    const body = await this.requestWithTimeout(signal, async (requestSignal) => {
+      const response = await this.request(DISCOVERY_URL, {
         method: 'GET',
         redirect: 'manual',
         signal: requestSignal,
-      }));
-    rejectRedirect(response);
-    if (!response.ok) throw new DriveTemporaryUnavailableError();
-    const body = await readObject(response, signal);
+      });
+      rejectRedirect(response);
+      if (!response.ok) throw new DriveTemporaryUnavailableError();
+      return readObject(response, requestSignal);
+    });
     const document = {
       deviceAuthorizationEndpoint: boundedString(body.device_authorization_endpoint, MAX_VERIFICATION_URL_BYTES),
       tokenEndpoint: boundedString(body.token_endpoint, MAX_VERIFICATION_URL_BYTES),
@@ -191,23 +195,25 @@ export class GoogleDeviceAuthorizationAdapter
     url: string,
     values: Record<string, string>,
     signal: AbortSignal,
-  ): Promise<Response> {
+  ): Promise<OAuthResponse> {
     throwIfAborted(signal);
-    const response = await this.requestWithTimeout(signal, (requestSignal) => this.request(url, {
+    return this.requestWithTimeout(signal, async (requestSignal) => {
+      const response = await this.request(url, {
         method: 'POST',
         redirect: 'manual',
         signal: requestSignal,
         headers: { 'content-type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams(values).toString(),
-      }));
-    rejectRedirect(response);
-    return response;
+      });
+      rejectRedirect(response);
+      return { response, body: await readObject(response, requestSignal) };
+    });
   }
 
-  private async requestWithTimeout(
+  private async requestWithTimeout<T>(
     callerSignal: AbortSignal,
-    execute: (signal: AbortSignal) => Promise<Response>,
-  ): Promise<Response> {
+    execute: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
     throwIfAborted(callerSignal);
     const timeout = AbortSignal.timeout(this.requestTimeoutMs);
     try {
@@ -215,6 +221,9 @@ export class GoogleDeviceAuthorizationAdapter
     } catch (error) {
       if (callerSignal.aborted) throw abortError(callerSignal, error);
       if (timeout.aborted) throw new DriveTemporaryUnavailableError();
+      if (error instanceof DriveProviderResponseError
+        || error instanceof DriveConfigurationError
+        || error instanceof DriveTemporaryUnavailableError) throw error;
       throw mapTransportFailure(error, callerSignal);
     }
   }

@@ -171,6 +171,24 @@ describe('GoogleDeviceAuthorizationAdapter', () => {
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
   });
 
+  it('maps a locally timed-out stalled OAuth response body to temporary unavailable', async () => {
+    let stalledController: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const stalledBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        stalledController = controller;
+      },
+    });
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(discovery())))
+      .mockImplementationOnce((_url: string | URL, init: RequestInit) => {
+        init.signal?.addEventListener('abort', () => stalledController?.error(init.signal?.reason), { once: true });
+        return new Response(stalledBody);
+      });
+    const adapter = new GoogleDeviceAuthorizationAdapter({ fetch, clock: new Clock(), requestTimeoutMs: 1 });
+
+    await expect(adapter.requestCode(client(), signal)).rejects.toBeInstanceOf(DriveTemporaryUnavailableError);
+  });
+
   it('rejects every manual redirect before following it', async () => {
     const transport = new Transport();
     transport.enqueue(302, {});
