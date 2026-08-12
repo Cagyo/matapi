@@ -56,6 +56,18 @@ export class BoundedLogTailGateway {
     handle: FileHandle,
     input: BoundedLogTailRequest,
   ): Promise<BoundedLogTailResult> {
+    try {
+      return await this.readSnapshot(handle, input);
+    } catch (error) {
+      if (error instanceof ApplicationLogUnavailableError) throw error;
+      throw new ApplicationLogUnavailableError('file-unavailable');
+    }
+  }
+
+  private async readSnapshot(
+    handle: FileHandle,
+    input: BoundedLogTailRequest,
+  ): Promise<BoundedLogTailResult> {
     const capturedSize = (await handle.stat()).size;
     if (capturedSize === 0 || input.maxLines === 0) {
       return { lines: [], truncatedByByteLimit: false };
@@ -78,19 +90,19 @@ export class BoundedLogTailGateway {
         (line) => capturedSize - (position + line.start) <= input.maxBytes,
       );
 
-      if (fittingLines.length >= input.maxLines) {
-        return {
-          lines: fittingLines.slice(-input.maxLines).map((line) => line.bytes),
-          truncatedByByteLimit: false,
-        };
-      }
-
       if (position === 0) {
         if (fittingLines.length === 0) {
           throw new ApplicationLogUnavailableError('snapshot-too-large');
         }
         return {
-          lines: fittingLines.map((line) => line.bytes),
+          lines: fittingLines.slice(-input.maxLines).map((line) => line.bytes),
+          truncatedByByteLimit: completeLines.length > fittingLines.length,
+        };
+      }
+
+      if (fittingLines.length >= input.maxLines) {
+        return {
+          lines: fittingLines.slice(-input.maxLines).map((line) => line.bytes),
           truncatedByByteLimit: false,
         };
       }

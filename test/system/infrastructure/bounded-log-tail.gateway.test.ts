@@ -45,6 +45,13 @@ describe('BoundedLogTailGateway', () => {
     expect(result.truncatedByByteLimit).toBe(true);
   });
 
+  it('marks byte truncation when the whole file is read in one chunk', async () => {
+    const path = await fixture('same-chunk.log', '1234567890\nz');
+    const result = await new BoundedLogTailGateway().read({ path, maxLines: 200, maxBytes: 10 });
+    expect(result.lines.map((line) => line.toString())).toEqual(['z']);
+    expect(result.truncatedByByteLimit).toBe(true);
+  });
+
   it('rejects a symlink and a newest raw line larger than the bound', async () => {
     const target = await fixture('target.log', 'secret');
     const link = `${target}.link`;
@@ -84,6 +91,36 @@ describe('BoundedLogTailGateway', () => {
 
     await expect(gateway.read({ path: '/fixed/log', maxLines: 200, maxBytes: 1024 }))
       .rejects.toMatchObject({ reason: 'snapshot-changed' });
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('maps descriptor stat failures after opening to file-unavailable', async () => {
+    const close = vi.fn().mockResolvedValue(undefined);
+    const handle = {
+      stat: vi.fn()
+        .mockResolvedValueOnce({ size: 4, isFile: () => true })
+        .mockRejectedValueOnce(new Error('descriptor stat failed')),
+      read: vi.fn(),
+      close,
+    };
+    const gateway = new BoundedLogTailGateway(4, vi.fn().mockResolvedValue(handle));
+
+    await expect(gateway.read({ path: '/fixed/log', maxLines: 200, maxBytes: 1024 }))
+      .rejects.toMatchObject({ reason: 'file-unavailable' });
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('maps descriptor read failures after opening to file-unavailable', async () => {
+    const close = vi.fn().mockResolvedValue(undefined);
+    const handle = {
+      stat: vi.fn().mockResolvedValue({ size: 4, isFile: () => true }),
+      read: vi.fn().mockRejectedValue(new Error('descriptor read failed')),
+      close,
+    };
+    const gateway = new BoundedLogTailGateway(4, vi.fn().mockResolvedValue(handle));
+
+    await expect(gateway.read({ path: '/fixed/log', maxLines: 200, maxBytes: 1024 }))
+      .rejects.toMatchObject({ reason: 'file-unavailable' });
     expect(close).toHaveBeenCalledOnce();
   });
 });
