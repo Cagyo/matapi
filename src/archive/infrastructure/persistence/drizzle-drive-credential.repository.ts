@@ -26,6 +26,7 @@ import {
 import { DriveConnection, type DriveConnectionStatus } from '../../domain/drive-connection.entity';
 import { DriveCredentialCorruptError } from '../../domain/errors/drive-credential-corrupt.error';
 import { DriveObjectConflictError } from '../../domain/errors/drive-object-conflict.error';
+import { DriveSetupBusyError } from '../../domain/errors/drive-setup-busy.error';
 
 type ConnectionRow = typeof driveConnections.$inferSelect;
 type ConnectionWriter = Pick<AppDatabase, 'delete' | 'insert' | 'select' | 'update'>;
@@ -76,7 +77,7 @@ export class DrizzleDriveCredentialRepository implements DriveCredentialReposito
         quotaReclamationErrorCode: null,
       }).run();
     } catch (error) {
-      if (isStagedSlotUniqueViolation(error)) throw conflict('A Drive setup is already staged');
+      if (isStagedSlotUniqueViolation(error)) throw new DriveSetupBusyError();
       throw error;
     }
     return connection;

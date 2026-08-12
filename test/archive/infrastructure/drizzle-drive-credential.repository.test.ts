@@ -8,7 +8,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import * as schema from '../../../src/database/schema';
 import { AesGcmArchiveSecretAdapter } from '../../../src/archive/infrastructure/persistence/aes-gcm-archive-secret.adapter';
 import { DrizzleDriveCredentialRepository } from '../../../src/archive/infrastructure/persistence/drizzle-drive-credential.repository';
-import { DriveObjectConflictError } from '../../../src/archive/domain/errors/drive-object-conflict.error';
+import { InMemoryDriveCredentialRepository } from '../../../src/archive/infrastructure/persistence/in-memory-drive-credential.repository';
+import { DriveSetupBusyError } from '../../../src/archive/domain/errors/drive-setup-busy.error';
 
 describe('DrizzleDriveCredentialRepository', () => {
   let sqlite: Database.Database;
@@ -33,8 +34,19 @@ describe('DrizzleDriveCredentialRepository', () => {
   it('rejects a second staged slot without changing the existing staged generation', async () => {
     await repository.stage(staged('generation-1'));
 
-    await expect(repository.stage(staged('generation-2'))).rejects.toBeInstanceOf(DriveObjectConflictError);
+    await expect(repository.stage(staged('generation-2'))).rejects.toBeInstanceOf(DriveSetupBusyError);
     expect((await repository.loadStaged('receipt-1'))?.id).toBe('generation-1');
+  });
+
+  it('keeps the first staged generation in memory when another administrator retries', async () => {
+    const memory = new InMemoryDriveCredentialRepository();
+    await memory.stage(staged('generation-1'));
+
+    await expect(memory.stage(staged('generation-2', { receiptId: 'receipt-2' })))
+      .rejects.toBeInstanceOf(DriveSetupBusyError);
+
+    expect((await memory.loadStaged('receipt-1'))?.id).toBe('generation-1');
+    expect(await memory.loadStaged('receipt-2')).toBeNull();
   });
 
   it('stores an allowlisted neutral error code rather than a provider response', async () => {

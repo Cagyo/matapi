@@ -15,6 +15,7 @@ import type {
 } from '../../application/ports/drive-credential-repository.port';
 import { DriveConnection } from '../../domain/drive-connection.entity';
 import { DriveObjectConflictError } from '../../domain/errors/drive-object-conflict.error';
+import { DriveSetupBusyError } from '../../domain/errors/drive-setup-busy.error';
 
 interface Entry {
   connection: DriveConnection;
@@ -35,7 +36,7 @@ export class InMemoryDriveCredentialRepository implements DriveCredentialReposit
   private readonly entries = new Map<string, Entry>();
 
   async stage(input: StageDriveConnection): Promise<DriveConnection> {
-    if ([...this.entries.values()].some(({ connection }) => connection.status === 'staged')) throw conflict('A Drive setup is already staged');
+    if ([...this.entries.values()].some(({ connection }) => connection.status === 'staged')) throw new DriveSetupBusyError();
     const connection = DriveConnection.stage({ id: input.id, installationId: input.installationId, nowMs: input.createdAtMs });
     this.entries.set(input.id, { connection, clientIdHash: input.clientIdHash, client: { ...input.client }, tokens: emptyTokens(), receiptId: input.receiptId, adminUserId: input.adminUserId, chatId: input.chatId, expiresAtMs: input.expiresAtMs, reservations: emptyReservations(), quotaReclamation: emptyQuotaReclamation(), alertCooldowns: {} });
     return connection;

@@ -2,6 +2,7 @@ import type { ClockPort } from '../../../events/domain/ports/clock.port';
 import type { DriveAccountPort } from '../ports/drive-account.port';
 import type { DriveCredentialRepositoryPort } from '../ports/drive-credential-repository.port';
 import { DriveConfigurationError } from '../../domain/errors/drive-configuration.error';
+import { DriveSetupExpiredError } from '../../domain/errors/drive-setup-expired.error';
 
 /** Binds the approved account to the exact staged receipt and activates it atomically. */
 export class ConfirmDriveAccountUseCase {
@@ -11,16 +12,26 @@ export class ConfirmDriveAccountUseCase {
     private readonly clock: ClockPort,
   ) {}
 
-  async execute(input: { generationId: string; receiptId: string; adminUserId: number; chatId: number; signal: AbortSignal }): Promise<'activated' | 'pending' | 'stale'> {
+  async execute(input: {
+    generationId: string;
+    receiptId: string;
+    adminUserId: number;
+    chatId: number;
+    effectiveDeadlineMs: number;
+    signal: AbortSignal;
+  }): Promise<'activated' | 'pending' | 'stale'> {
     const staged = await this.loadBound(input);
     if (!staged) return 'stale';
-    const material = await this.credentials.loadCredentials(staged.id);
-    // Confirmation may happen before the background poll exchanges tokens.
-    // Keep the exact staged generation intact until credentials exist.
-    if (!material?.tokens.accessToken && !material?.tokens.refreshToken) return 'pending';
     try {
+      this.assertLive(input.effectiveDeadlineMs);
+      const material = await this.credentials.loadCredentials(staged.id);
+      // Confirmation may happen before the background poll exchanges tokens.
+      // Keep the exact staged generation intact until credentials exist.
+      if (!material?.tokens.accessToken && !material?.tokens.refreshToken) return 'pending';
       const account = await this.accounts.resolveAccount(staged, input.signal);
       const folders = await this.accounts.resolveManagedFolders(staged, input.signal);
+      this.assertLive(input.effectiveDeadlineMs);
+      this.assertLive(input.effectiveDeadlineMs);
       await this.credentials.activate({ stagedId: staged.id, expectedRevision: staged.revision, ...account, folders, activatedAtMs: this.clock.now().getTime() });
       return 'activated';
     } catch (error) {
@@ -41,5 +52,10 @@ export class ConfirmDriveAccountUseCase {
       throw new DriveConfigurationError('Drive confirmation binding is invalid');
     }
     return staged;
+  }
+
+  private assertLive(effectiveDeadlineMs: number): void {
+    if (!Number.isSafeInteger(effectiveDeadlineMs)
+      || effectiveDeadlineMs <= this.clock.now().getTime()) throw new DriveSetupExpiredError();
   }
 }

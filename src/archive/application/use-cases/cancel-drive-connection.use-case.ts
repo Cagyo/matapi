@@ -9,9 +9,9 @@ export class CancelDriveConnectionUseCase {
   ) {}
 
   async execute(input: { generationId: string; receiptId: string; adminUserId: number; chatId: number }): Promise<'cancelled' | 'stale'> {
+    this.polling.cancel(input.generationId);
     const staged = await this.credentials.loadStaged(input.receiptId, input);
     if (!staged) return 'stale';
-    this.polling.cancel(staged.id);
     return await this.credentials.discardStaged(staged.id, input.receiptId) ? 'cancelled' : 'stale';
   }
 }

@@ -37,6 +37,7 @@ export interface StartDriveAuthorizationPolling {
   adminUserId: number;
   chatId: number;
   client: DriveClientCredentials;
+  signal: AbortSignal;
   challenge: DeviceAuthorizationChallenge;
 }
 
@@ -62,10 +63,11 @@ export class DriveAuthorizationPollingService implements OnModuleInit {
 
   start(input: StartDriveAuthorizationPolling): void {
     this.cancel(input.generationId);
-    const controller = new AbortController();
-    this.requests.set(input.generationId, controller);
-    void this.poll(input, controller).finally(() => {
-      if (this.requests.get(input.generationId) === controller) {
+    const local = new AbortController();
+    this.requests.set(input.generationId, local);
+    const signal = AbortSignal.any([input.signal, local.signal]);
+    void this.poll(input, signal).finally(() => {
+      if (this.requests.get(input.generationId) === local) {
         this.requests.delete(input.generationId);
       }
     });
@@ -81,10 +83,10 @@ export class DriveAuthorizationPollingService implements OnModuleInit {
     for (const generationId of this.requests.keys()) this.cancel(generationId);
   }
 
-  private async poll(input: StartDriveAuthorizationPolling, controller: AbortController): Promise<void> {
+  private async poll(input: StartDriveAuthorizationPolling, signal: AbortSignal): Promise<void> {
     try {
-      const tokens = await this.authorization.poll(input.client, input.challenge, controller.signal);
-      if (controller.signal.aborted) return;
+      const tokens = await this.authorization.poll(input.client, input.challenge, signal);
+      if (signal.aborted) return;
       const stored = await this.credentials.storeExchangedTokens(input.generationId, input.expectedRevision, tokens);
       if (!stored) return;
       const staged = await this.credentials.loadStaged(input.receiptId, {
@@ -93,7 +95,7 @@ export class DriveAuthorizationPollingService implements OnModuleInit {
         chatId: input.chatId,
       });
       if (!staged) return;
-      const account = await this.accounts.resolveAccount(staged, controller.signal);
+      const account = await this.accounts.resolveAccount(staged, signal);
       await this.outcomes.publish({
         kind: 'authorized',
         generationId: input.generationId,
@@ -103,7 +105,7 @@ export class DriveAuthorizationPollingService implements OnModuleInit {
         account,
       });
     } catch (error) {
-      if (controller.signal.aborted) return;
+      if (signal.aborted) return;
       await this.credentials.discardStaged(input.generationId, input.receiptId);
       await this.outcomes.publish({ ...binding(input, 'failed'), reason: reasonFor(error) });
     }
