@@ -155,3 +155,74 @@ above supplies the complete non-truncated output for the repair scope.
   Vitest's final aggregate line was unavailable even though the command
   completed successfully. The fresh focused run has complete output.
 - Existing unrelated working-tree changes remain intentionally untouched.
+
+## Fix round 1 — pre-lifecycle E2E feature fixture
+
+### Finding and root cause
+
+The original repair created the application context before installing its
+readiness spy, then directly updated feature rows after bootstrap. Nest’s
+`createApplicationContext()` has already initialized lifecycle hooks when it
+resolves, so this did not control boot-time readiness and could hide a failed
+verification state.
+
+The replacement fixture uses Nest’s supported testing composition API. Before
+the container is compiled or initialized, it overrides the feature query,
+feature repository, and readiness port with a shared enabled `digital`/
+`motion` fixture and a ready readiness-port implementation. This gives the
+normal feature seeder, availability service, and sensor/camera use cases the
+required state without mutating production feature rows after bootstrap.
+
+Added development dependency: `@nestjs/testing` pinned to `10.4.15`, matching
+the project’s NestJS version.
+
+### RED
+
+Command:
+
+```bash
+yarn vitest run test/e2e/application-smoke.test.ts
+```
+
+Output before the fixture change:
+
+```text
+Test Files  1 failed (1)
+     Tests  2 failed | 5 passed (7)
+FeatureUnavailableError: Feature is unavailable for this operation
+```
+
+The failures were the sensor and camera pipelines at
+`FeatureAvailabilityService.requireReady()`.
+
+### GREEN
+
+Covering command:
+
+```bash
+yarn vitest run test/e2e/application-smoke.test.ts test/features/application/feature-readiness-boot.service.test.ts
+```
+
+Output:
+
+```text
+Test Files  2 passed (2)
+     Tests  10 passed (10)
+Duration  4.35s
+```
+
+### Files added or changed in this round
+
+- `package.json`
+- `yarn.lock`
+- `test/e2e/application-smoke.test.ts`
+- this report
+
+### Round self-review
+
+- Provider overrides are declared before `.compile()` and `module.init()`.
+- The test no longer calls `setVerified()` or `setEnabled()` after application
+  initialization.
+- Production feature-readiness and boot-service code remain unchanged.
+- The pre-existing sensor and camera E2E behaviors stay intact; the direct
+  feature-readiness boot composition test is also green.

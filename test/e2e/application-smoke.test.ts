@@ -1,5 +1,5 @@
 import { INestApplicationContext } from '@nestjs/common';
-import { NestFactory } from '@nestjs/core';
+import { Test } from '@nestjs/testing';
 import { mkdirSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -11,9 +11,10 @@ import { DB } from '../../src/database/database.tokens';
 import { EventNotifierService } from '../../src/events/application/event-notifier.service';
 import { EventProcessorService } from '../../src/events/application/event-processor.service';
 import { FEATURE_READINESS } from '../../src/features/domain/ports/feature-readiness.port';
+import { FEATURE_QUERY } from '../../src/features/domain/ports/feature-query.port';
 import { FEATURE_REPOSITORY } from '../../src/features/domain/ports/feature-repository.port';
-import type { FeatureRepositoryPort } from '../../src/features/domain/ports/feature-repository.port';
-import { FeatureReadinessRouter } from '../../src/features/infrastructure/readiness/feature-readiness.router';
+import { InMemoryFeatureQuery } from '../../src/features/infrastructure/in-memory-feature.query';
+import { InMemoryFeatureRepository } from '../../src/features/infrastructure/in-memory-feature.repository';
 import { AddSensorUseCase } from '../../src/sensors/application/add-sensor.use-case';
 import { SensorRegistryService } from '../../src/sensors/application/sensor-registry.service';
 import { SimulateSensorUseCase } from '../../src/sensors/application/simulate-sensor.use-case';
@@ -30,6 +31,15 @@ const dbPath = resolve(tmpRoot, 'smoke.db');
 
 describe('Application E2E Smoke Integration Tests (Dev/Test Mode)', () => {
   let app: INestApplicationContext;
+  const enabledFeatures = [
+    { name: 'digital' as const, installed: true, enabled: true, config: null, attentionReason: null },
+    { name: 'motion' as const, installed: true, enabled: true, config: null, attentionReason: null },
+  ];
+  const featureRepository = new InMemoryFeatureRepository(enabledFeatures);
+  const featureQuery = new InMemoryFeatureQuery(enabledFeatures);
+  const readiness = {
+    verify: async () => ({ ready: true as const, restartScope: 'worker' as const }),
+  };
 
   beforeAll(async () => {
     // Ensure clean tmp directory for E2E SQLite DB
@@ -44,25 +54,23 @@ describe('Application E2E Smoke Integration Tests (Dev/Test Mode)', () => {
     process.env.DATABASE_PATH = dbPath;
     process.env.PIGPIOD_ENABLED = 'false';
 
-    app = await NestFactory.createApplicationContext(AppModule, {
-      logger: ['error', 'warn'],
-    });
-    const features = app.get<FeatureRepositoryPort>(FEATURE_REPOSITORY);
-    for (const name of ['digital', 'motion'] as const) {
-      await features.setVerified({ name, installed: true, attentionReason: null });
-      await features.setEnabled(name, true);
-    }
-    vi.spyOn(app.get<FeatureReadinessRouter>(FEATURE_READINESS), 'verify').mockResolvedValue({
-      ready: true,
-      restartScope: 'worker',
-    });
-    await app.init();
+    const module = await Test.createTestingModule({ imports: [AppModule] })
+      .overrideProvider(FEATURE_QUERY)
+      .useValue(featureQuery)
+      .overrideProvider(FEATURE_REPOSITORY)
+      .useValue(featureRepository)
+      .overrideProvider(FEATURE_READINESS)
+      .useValue(readiness)
+      .compile();
+    await module.init();
+    app = module;
   });
 
   afterAll(async () => {
     if (app) {
       await app.close();
     }
+    vi.restoreAllMocks();
     rmSync(tmpRoot, { recursive: true, force: true });
   });
 
