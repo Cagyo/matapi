@@ -129,6 +129,7 @@ import { HomeLauncher } from './interfaces/home-launcher';
 import { LegacyMenuHandler } from './interfaces/legacy-menu.handler';
 import { SettingsHandler } from './interfaces/settings.handler';
 import { CleanHandler } from './interfaces/clean.handler';
+import { ApplicationLogDocumentPresenter } from './interfaces/application-log-document.presenter';
 import { BotCommandsMenuService } from './application/bot-commands-menu.service';
 import { DriveSetupStateRegistry } from './interfaces/drive-setup-state.registry';
 import { WorkflowDraftRegistry } from './interfaces/workflow-draft.registry';
@@ -289,6 +290,7 @@ const mode = resolveBotMode();
     { provide: CONFIG_CODEC, useClass: YamlConfigCodec },
     { provide: CSV_TEMP_DIRECTORY, useValue: join(tmpdir(), 'home-worker-csv') },
     LocaleMiddleware,
+    ApplicationLogDocumentPresenter,
     { provide: CSV_TEMP_FILE, useClass: NodeCsvTempFileAdapter },
     RoleMiddleware,
     ClaimAdminHandler,

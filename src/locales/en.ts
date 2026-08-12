@@ -614,6 +614,8 @@ const enCatalog = {
     history: {
       title: '🗂 History',
       logs: '📜 Logs',
+      applicationLogs: '🧾 Application logs',
+      errors: '❌ Errors',
       exportCsv: '⬇ Export CSV',
     },
     more: {
@@ -777,6 +779,15 @@ const enCatalog = {
     collectFailed: '❌ Failed to collect system health',
   },
   logs: {
+    application: {
+      outputCaption: '📄 Application logs — up to the latest 200 lines.',
+      errorCaption: '📄 Application errors — up to the latest 200 lines.',
+      outputEmpty: 'No application output is available.',
+      errorEmpty: 'No application errors are available.',
+      truncated: '⚠️ Older lines were omitted by the 2 MiB safety limit.',
+      unavailable: '❌ Application logs are unavailable right now.',
+      invalidArguments: '❌ Use /logs app or /logs error without extra arguments.',
+    },
     header(name: string, count: number): string {
       return `📋 Logs for ${name} (last ${count}):`;
     },

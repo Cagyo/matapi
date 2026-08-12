@@ -619,6 +619,8 @@ const ruCatalog = {
     history: {
       title: '🗂 История',
       logs: '📜 Журналы',
+      applicationLogs: '🧾 Журнал приложения',
+      errors: '❌ Ошибки',
       exportCsv: '⬇ Экспорт CSV',
     },
     more: {
@@ -782,6 +784,15 @@ const ruCatalog = {
     collectFailed: '❌ Не удалось собрать сведения о состоянии системы',
   },
   logs: {
+    application: {
+      outputCaption: '📄 Журнал приложения — до 200 последних строк.',
+      errorCaption: '📄 Ошибки приложения — до 200 последних строк.',
+      outputEmpty: 'Вывод приложения отсутствует.',
+      errorEmpty: 'Ошибки приложения отсутствуют.',
+      truncated: '⚠️ Старые строки пропущены из-за ограничения безопасности в 2 МиБ.',
+      unavailable: '❌ Журналы приложения сейчас недоступны.',
+      invalidArguments: '❌ Используйте /logs app или /logs error без дополнительных аргументов.',
+    },
     header(name: string, count: number): string {
       return `📋 Журнал ${name} (последние ${count}):`;
     },

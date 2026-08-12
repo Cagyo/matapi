@@ -619,6 +619,8 @@ const ukCatalog = {
     history: {
       title: '🗂 Історія',
       logs: '📜 Журнали',
+      applicationLogs: '🧾 Журнал застосунку',
+      errors: '❌ Помилки',
       exportCsv: '⬇ Експорт CSV',
     },
     more: {
@@ -782,6 +784,15 @@ const ukCatalog = {
     collectFailed: '❌ Не вдалося зібрати дані про стан системи',
   },
   logs: {
+    application: {
+      outputCaption: '📄 Журнал застосунку — до 200 останніх рядків.',
+      errorCaption: '📄 Помилки застосунку — до 200 останніх рядків.',
+      outputEmpty: 'Вивід застосунку відсутній.',
+      errorEmpty: 'Помилки застосунку відсутні.',
+      truncated: '⚠️ Старі рядки пропущено через обмеження безпеки у 2 МіБ.',
+      unavailable: '❌ Журнали застосунку зараз недоступні.',
+      invalidArguments: '❌ Використовуйте /logs app або /logs error без додаткових аргументів.',
+    },
     header(name: string, count: number): string {
       return `📋 Журнал ${name} (останні ${count}):`;
     },
