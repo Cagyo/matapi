@@ -3,7 +3,14 @@ import { DriveAuthorizationPollingService } from '../../../src/archive/applicati
 import { DisconnectDriveUseCase } from '../../../src/archive/application/use-cases/disconnect-drive.use-case';
 import { ConfirmDriveAccountUseCase } from '../../../src/archive/application/use-cases/confirm-drive-account.use-case';
 import { CancelDriveConnectionUseCase } from '../../../src/archive/application/use-cases/cancel-drive-connection.use-case';
+import { DriveAuthorizationDeniedError } from '../../../src/archive/domain/errors/drive-authorization-denied.error';
+import { DriveOAuthClientRejectedError } from '../../../src/archive/domain/errors/drive-oauth-client-rejected.error';
+import { DrivePolicyBlockedError } from '../../../src/archive/domain/errors/drive-policy-blocked.error';
+import { DriveProviderResponseError } from '../../../src/archive/domain/errors/drive-provider-response.error';
+import { DriveRateLimitedError } from '../../../src/archive/domain/errors/drive-rate-limited.error';
+import { DriveReauthorizationRequiredError } from '../../../src/archive/domain/errors/drive-reauthorization-required.error';
 import { DriveSetupExpiredError } from '../../../src/archive/domain/errors/drive-setup-expired.error';
+import { DriveTemporaryUnavailableError } from '../../../src/archive/domain/errors/drive-temporary-unavailable.error';
 import { InMemoryDriveCredentialRepository } from '../../../src/archive/infrastructure/persistence/in-memory-drive-credential.repository';
 
 describe('Drive connection workflow', () => {
@@ -121,6 +128,46 @@ describe('Drive connection workflow', () => {
 });
 
 describe('background authorization and disconnect', () => {
+  it.each([
+    [new DriveAuthorizationDeniedError(), 'denied'],
+    [new DriveReauthorizationRequiredError(), 'expired'],
+    [new DrivePolicyBlockedError(), 'policy'],
+    [new DriveRateLimitedError(), 'rate-limited'],
+    [new DriveOAuthClientRejectedError(), 'client-rejected'],
+    [new DriveProviderResponseError(), 'provider-response'],
+    [new DriveTemporaryUnavailableError(), 'unavailable'],
+  ] as const)('publishes the closed background reason for %s', async (error, reason) => {
+    const credentials = {
+      storeExchangedTokens: vi.fn(),
+      discardStaged: vi.fn().mockResolvedValue(undefined),
+      expireStaged: vi.fn(),
+      loadStaged: vi.fn(),
+    };
+    const outcomes = { publish: vi.fn().mockResolvedValue(undefined) };
+    const polling = new DriveAuthorizationPollingService(
+      { poll: vi.fn().mockRejectedValue(error) } as never,
+      credentials,
+      { resolveAccount: vi.fn() },
+      outcomes,
+    );
+
+    polling.start({
+      generationId: 'generation-00001', expectedRevision: 0,
+      receiptId: 'abcdefghijklmnop', adminUserId: 7, chatId: 9,
+      client: { clientId: '123.apps.googleusercontent.com', clientSecret: 'secret-123' },
+      signal: new AbortController().signal,
+      challenge: { deviceCode: 'device', userCode: 'user', verificationUri: 'https://example.test', verificationUriComplete: null, intervalMs: 1, expiresAtMs: 99 },
+    });
+
+    await vi.waitFor(() => expect(outcomes.publish).toHaveBeenCalledWith({
+      kind: 'failed', generationId: 'generation-00001', receiptId: 'abcdefghijklmnop',
+      adminUserId: 7, chatId: 9, reason,
+    }));
+    expect(credentials.discardStaged).toHaveBeenCalledWith('generation-00001', 'abcdefghijklmnop');
+    expect(credentials.discardStaged.mock.invocationCallOrder[0])
+      .toBeLessThan(outcomes.publish.mock.invocationCallOrder[0]);
+  });
+
   it('aborts polling before loading staged credentials for cancellation', async () => {
     const order: string[] = [];
     const polling = { cancel: vi.fn(() => order.push('cancel')) };
@@ -158,6 +205,7 @@ describe('background authorization and disconnect', () => {
     await vi.waitFor(() => expect(publish).toHaveBeenCalledOnce());
 
     expect(credentials.storeExchangedTokens.mock.invocationCallOrder[0]).toBeLessThan(publish.mock.invocationCallOrder[0]);
+    expect(credentials.discardStaged).not.toHaveBeenCalled();
     expect(publish).toHaveBeenCalledWith(expect.objectContaining({ kind: 'authorized', account: { permissionId: 'permission-1', email: null, displayName: 'Drive admin' } }));
   });
 

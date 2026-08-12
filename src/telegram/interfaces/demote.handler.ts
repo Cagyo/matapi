@@ -14,6 +14,7 @@ import { RoleMiddleware } from './role.middleware';
 import { BotCommandsMenuService } from '../application/bot-commands-menu.service';
 import { TelegramHandler } from './telegram-handler';
 import { TelegramContext } from './telegram-context';
+import { DriveSetupStateRegistry } from './drive-setup-state.registry';
 
 @Injectable()
 export class DemoteHandler implements TelegramHandler {
@@ -24,6 +25,7 @@ export class DemoteHandler implements TelegramHandler {
     private readonly guard: RoleMiddleware,
     @Inject(DIRECT_MESSENGER) private readonly dm: DirectMessengerPort,
     private readonly botCommandsMenu: BotCommandsMenuService,
+    private readonly setupStates: DriveSetupStateRegistry,
   ) {}
 
   register(composer: Composer<TelegramContext>): void {
@@ -37,6 +39,11 @@ export class DemoteHandler implements TelegramHandler {
       }
       try {
         const demoted = await this.demote.execute(target);
+        try {
+          await this.setupStates.cancelUser(demoted.telegramId);
+        } catch {
+          this.logger.warn('Drive setup cleanup after demotion failed');
+        }
         await ctx.reply(en.users.demoted(demoted.name));
         await this.botCommandsMenu.updateUserMenu(demoted.telegramId);
         const adminName = from.first_name || from.username || `user-${from.id}`;

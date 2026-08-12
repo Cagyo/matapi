@@ -2,6 +2,15 @@
  * The application-side event emitted by a background device-code poll. It
  * deliberately contains neither client credentials, tokens nor device codes.
  */
+export type DriveAuthorizationFailureReason =
+  | 'denied'
+  | 'expired'
+  | 'policy'
+  | 'rate-limited'
+  | 'client-rejected'
+  | 'provider-response'
+  | 'unavailable';
+
 export type DriveAuthorizationOutcome =
   | {
     kind: 'authorized';
@@ -17,7 +26,7 @@ export type DriveAuthorizationOutcome =
     receiptId: string;
     adminUserId: number;
     chatId: number;
-    reason: 'denied' | 'expired' | 'unavailable';
+    reason: DriveAuthorizationFailureReason;
   };
 
 export const DRIVE_AUTHORIZATION_OUTCOME = Symbol('DRIVE_AUTHORIZATION_OUTCOME');

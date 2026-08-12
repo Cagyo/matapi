@@ -1,10 +1,18 @@
 import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
-import type { DriveAuthorizationOutcomePort } from './ports/drive-authorization-outcome.port';
+import type {
+  DriveAuthorizationFailureReason,
+  DriveAuthorizationOutcomePort,
+} from './ports/drive-authorization-outcome.port';
 import type { DriveDeviceAuthorizationPort, DeviceAuthorizationChallenge } from './ports/drive-device-authorization.port';
 import type { DriveClientCredentials, DriveCredentialRepositoryPort } from './ports/drive-credential-repository.port';
 import type { DriveAccountPort } from './ports/drive-account.port';
 import { DriveAuthorizationDeniedError } from '../domain/errors/drive-authorization-denied.error';
+import { DriveOAuthClientRejectedError } from '../domain/errors/drive-oauth-client-rejected.error';
+import { DrivePolicyBlockedError } from '../domain/errors/drive-policy-blocked.error';
+import { DriveProviderResponseError } from '../domain/errors/drive-provider-response.error';
+import { DriveRateLimitedError } from '../domain/errors/drive-rate-limited.error';
 import { DriveReauthorizationRequiredError } from '../domain/errors/drive-reauthorization-required.error';
+import { DriveTemporaryUnavailableError } from '../domain/errors/drive-temporary-unavailable.error';
 
 /** Archive-owned runtime seam for Telegram authorization outcomes. */
 @Injectable()
@@ -122,8 +130,13 @@ function binding(input: StartDriveAuthorizationPolling, kind: 'failed') {
   } as const;
 }
 
-function reasonFor(error: unknown): 'denied' | 'expired' | 'unavailable' {
+function reasonFor(error: unknown): DriveAuthorizationFailureReason {
   if (error instanceof DriveAuthorizationDeniedError) return 'denied';
   if (error instanceof DriveReauthorizationRequiredError) return 'expired';
+  if (error instanceof DrivePolicyBlockedError) return 'policy';
+  if (error instanceof DriveRateLimitedError) return 'rate-limited';
+  if (error instanceof DriveOAuthClientRejectedError) return 'client-rejected';
+  if (error instanceof DriveProviderResponseError) return 'provider-response';
+  if (error instanceof DriveTemporaryUnavailableError) return 'unavailable';
   return 'unavailable';
 }
