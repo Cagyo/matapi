@@ -37,6 +37,8 @@ describe('Home callback codec', () => {
       { kind: 'history' },
       { kind: 'history-logs' },
       { kind: 'history-csv' },
+      { kind: 'history-application-logs' },
+      { kind: 'history-error-logs' },
       { kind: 'settings' },
       { kind: 'help' },
       { kind: 'admin-tools' },
@@ -80,6 +82,21 @@ describe('Home callback codec', () => {
       const data = encodeHomeCallback(token, Number.MAX_SAFE_INTEGER, action);
       expect(parseHomeCallback(data)).toEqual({ token, revision: Number.MAX_SAFE_INTEGER, action });
       expect(Buffer.byteLength(data, 'utf8')).toBeLessThanOrEqual(64);
+    }
+  });
+
+  it('round trips no-payload application log actions within Telegram limits', () => {
+    for (const action of [
+      { kind: 'history-application-logs' },
+      { kind: 'history-error-logs' },
+    ] as const) {
+      const encoded = encodeHomeCallback('abcdefghijklmnop', 1, action);
+      expect(Buffer.byteLength(encoded, 'utf8')).toBeLessThanOrEqual(64);
+      expect(parseHomeCallback(encoded)).toEqual({
+        token: 'abcdefghijklmnop',
+        revision: 1,
+        action,
+      });
     }
   });
 
@@ -131,6 +148,8 @@ describe('Home callback codec', () => {
     `h:${token}:1:uq:${token}:extra`,
     `h:${token}:1:q:21-07`,
     `h:${token}:1:q:22-07:extra`,
+    `h:${token}:1:ha:extra`,
+    `h:${token}:1:hr:extra`,
     `h:${token}:1::h`,
     `h:${token.slice(0, 15)}:1:h`,
     `h:${token}x:1:h`,

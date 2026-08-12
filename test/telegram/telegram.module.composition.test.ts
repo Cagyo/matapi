@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { rmSync, mkdtempSync } from 'node:fs';
+import { readFileSync, rmSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -71,8 +71,11 @@ async function resolveHomeSummaryFromApplication(mode: 'mock' | 'real') {
   const { NestFactory } = await import('@nestjs/core');
   const { AppModule } = await import('../../src/app.module');
   const { GetHomeSummaryUseCase } = await import('../../src/telegram/application/get-home-summary.use-case');
+  const { ReadApplicationLogsUseCase } = await import('../../src/system/application/read-application-logs.use-case');
   const { NotificationTargetDirectoryService } = await import('../../src/telegram/application/notification-target-directory.service');
   const { HomeHandler } = await import('../../src/telegram/interfaces/home.handler');
+  const { ApplicationLogDocumentPresenter } = await import('../../src/telegram/interfaces/application-log-document.presenter');
+  const { LogsHandler } = await import('../../src/telegram/interfaces/logs.handler');
   const { WorkflowEntryCoordinator } = await import('../../src/telegram/interfaces/workflow-entry.coordinator');
   const { WorkflowNavigationHandler } = await import('../../src/telegram/interfaces/workflow-navigation.handler');
   const { WorkflowNavigationPresenter } = await import('../../src/telegram/interfaces/workflow-navigation.presenter');
@@ -86,6 +89,9 @@ async function resolveHomeSummaryFromApplication(mode: 'mock' | 'real') {
       summary: app.get(GetHomeSummaryUseCase),
       targets: app.get(NotificationTargetDirectoryService),
       homeHandler: app.get(HomeHandler),
+      readApplicationLogs: app.get(ReadApplicationLogsUseCase),
+      applicationLogDocumentPresenter: app.get(ApplicationLogDocumentPresenter),
+      logsHandler: app.get(LogsHandler),
       workflowCoordinator: app.get(WorkflowEntryCoordinator),
       workflowNavigation: app.get(WorkflowNavigationHandler),
       workflowPresenter: app.get(WorkflowNavigationPresenter),
@@ -159,6 +165,9 @@ describe('TelegramModule bot-mode composition', () => {
       summary,
       targets,
       homeHandler,
+      readApplicationLogs,
+      applicationLogDocumentPresenter,
+      logsHandler,
       workflowCoordinator,
       workflowNavigation,
       workflowPresenter,
@@ -169,5 +178,20 @@ describe('TelegramModule bot-mode composition', () => {
       .toBe(workflowNavigation);
     expect(workflowNavigation).toBeTruthy();
     expect(workflowPresenter).toBeTruthy();
+    expect(homeHandler).toBeDefined();
+    expect(readApplicationLogs).toBeDefined();
+    expect(applicationLogDocumentPresenter).toBeDefined();
+    expect(logsHandler).toBeDefined();
+  });
+
+  it('imports the System context without reaching through its PM2 adapter or a cycle', () => {
+    const moduleSource = readFileSync(
+      join(process.cwd(), 'src/telegram/telegram.module.ts'),
+      'utf8',
+    );
+
+    expect(moduleSource).toContain("from '../system/system.module'");
+    expect(moduleSource).not.toContain('Pm2ApplicationLogReaderAdapter');
+    expect(moduleSource).not.toContain('forwardRef(');
   });
 });

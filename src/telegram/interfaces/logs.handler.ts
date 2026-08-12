@@ -8,8 +8,12 @@ import {
   SensorLogRepositoryPort,
 } from '../../sensors/domain/ports/sensor-log-repository.port';
 import { SENSOR_QUERY, SensorQueryPort } from '../../sensors/domain/ports/sensor-query.port';
+import { ReadApplicationLogsUseCase } from '../../system/application/read-application-logs.use-case';
+import type { ApplicationLogStream } from '../../system/domain/application-log';
+import { ApplicationLogUnavailableError } from '../../system/domain/errors/application-log-unavailable.error';
 import type { WorkflowReturnReceipt } from '../domain/workflow-return';
 import { workflowReturnCallback } from '../domain/workflow-return';
+import { ApplicationLogDocumentPresenter } from './application-log-document.presenter';
 import { RoleMiddleware } from './role.middleware';
 import { TelegramHandler } from './telegram-handler';
 import { TelegramContext } from './telegram-context';
@@ -35,6 +39,25 @@ interface LogPickerState {
   targets: ReadonlyMap<string, string>;
 }
 
+export type ClassifiedLogsCommand =
+  | { kind: 'application'; stream: 'output' | 'error' }
+  | { kind: 'application-invalid' }
+  | { kind: 'sensor'; raw: string };
+
+export function classifyLogsCommand(raw: string): ClassifiedLogsCommand {
+  const trimmed = raw.trim();
+  const tokens = trimmed.split(/\s+/u).filter(Boolean);
+  const first = tokens[0]?.toLocaleLowerCase('en-US');
+  if (first === 'app' || first === 'error') {
+    if (tokens.length !== 1) return { kind: 'application-invalid' };
+    return { kind: 'application', stream: first === 'app' ? 'output' : 'error' };
+  }
+  if (first === 'sensor' && tokens.length > 1) {
+    return { kind: 'sensor', raw: tokens.slice(1).join(' ') };
+  }
+  return { kind: 'sensor', raw: trimmed };
+}
+
 /**
  * `/logs <sensor> [count]` or `/logs <sensor> --since <duration>` — spec 09.
  *
@@ -53,6 +76,8 @@ export class LogsHandler implements TelegramHandler {
     private readonly logs: SensorLogRepositoryPort,
     private readonly guard: RoleMiddleware,
     private readonly workflows: WorkflowEntryCoordinator,
+    private readonly readApplicationLogs: ReadApplicationLogsUseCase,
+    private readonly applicationDocuments: ApplicationLogDocumentPresenter,
     @Optional() private readonly navigation?: WorkflowNavigationHandler,
   ) {}
 
@@ -92,9 +117,27 @@ export class LogsHandler implements TelegramHandler {
 
   register(composer: Composer<TelegramContext>): void {
     composer.command('logs', this.guard.registered, async (ctx) => {
-      const raw = (ctx.match ?? '').toString().trim();
-      if (!raw) {
+      const raw = (ctx.match ?? '').toString();
+      if (!raw.trim()) {
         await this.handleEmpty(ctx);
+        return;
+      }
+
+      const command = classifyLogsCommand(raw);
+      if (command.kind === 'application') {
+        await this.handleApplication(ctx, command.stream);
+        return;
+      }
+      if (command.kind === 'application-invalid') {
+        await this.guard.adminOnly(ctx, async () => {
+          const receipt = await this.workflows.begin(ctx, 'logs', {
+            source: 'natural-parent',
+          });
+          if (!receipt) return;
+          const catalog = ctx.localeState?.catalog ?? en;
+          await this.complete(ctx, receipt, () =>
+            ctx.reply(catalog.logs.application.invalidArguments));
+        });
         return;
       }
 
@@ -102,7 +145,7 @@ export class LogsHandler implements TelegramHandler {
         source: 'natural-parent',
       });
       if (!receipt) return;
-      const parsed = parseArgs(raw);
+      const parsed = parseArgs(command.raw);
       if (parsed.invalid === 'count') {
         await this.complete(ctx, receipt, () => ctx.reply(en.logs.invalidCount));
         return;
@@ -143,6 +186,37 @@ export class LogsHandler implements TelegramHandler {
       } catch (error) {
         this.logger.error(`/logs callback failed: ${(error as Error).message}`, (error as Error).stack);
         await this.complete(ctx, state.receipt, () => ctx.reply(en.logs.readFailed));
+      }
+    });
+  }
+
+  async handleApplication(
+    ctx: TelegramContext,
+    stream: ApplicationLogStream,
+    launch?: WorkflowLaunch,
+  ): Promise<void> {
+    await this.guard.adminOnly(ctx, async () => {
+      const receipt = launch?.receipt ?? await this.workflows.begin(ctx, 'logs', {
+        source: 'natural-parent',
+      });
+      if (!receipt) return;
+      try {
+        const snapshot = await this.readApplicationLogs.execute(stream);
+        const document = this.applicationDocuments.render(
+          ctx.localeState?.catalog ?? en,
+          snapshot,
+        );
+        await this.complete(ctx, receipt, () => ctx.replyWithDocument(
+          new InputFile(document.content, document.filename),
+          { caption: document.caption },
+        ));
+      } catch (error) {
+        if (!(error instanceof ApplicationLogUnavailableError)) {
+          this.logger.error('/logs application-log retrieval failed');
+        }
+        const catalog = ctx.localeState?.catalog ?? en;
+        await this.complete(ctx, receipt, () =>
+          ctx.reply(catalog.logs.application.unavailable));
       }
     });
   }

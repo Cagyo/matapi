@@ -44,6 +44,20 @@ describe('catalogFor', () => {
     }
   });
 
+  it('provides application log copy and history actions for every locale', () => {
+    for (const catalog of [catalogs.en, catalogs.ru, catalogs.uk]) {
+      expect(catalog.logs.application.outputCaption).toBeTruthy();
+      expect(catalog.logs.application.errorCaption).toBeTruthy();
+      expect(catalog.logs.application.outputEmpty).toBeTruthy();
+      expect(catalog.logs.application.errorEmpty).toBeTruthy();
+      expect(catalog.logs.application.truncated).toBeTruthy();
+      expect(catalog.logs.application.unavailable).toBeTruthy();
+      expect(catalog.logs.application.invalidArguments).toBeTruthy();
+      expect(catalog.home.history.applicationLogs).toBeTruthy();
+      expect(catalog.home.history.errors).toBeTruthy();
+    }
+  });
+
   it('provides contextual sensor cancellation and language-return copy in every locale', () => {
     for (const catalog of [catalogs.en, catalogs.ru, catalogs.uk]) {
       expect(catalog.config.cancelSensorSetup).toBeTruthy();

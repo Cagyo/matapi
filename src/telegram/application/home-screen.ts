@@ -18,7 +18,7 @@ export type HomeScreen =
   | { kind: 'notification-target'; target: NotificationTarget; page: number }
   | { kind: 'pause-duration' }
   | { kind: 'pause-confirmation'; hours: 1 | 4 | 8; receiptId: string }
-  | { kind: 'history' }
+  | { kind: 'history'; isAdmin: boolean }
   | { kind: 'more'; isAdmin: boolean }
   | { kind: 'admin-tools' }
   | { kind: 'admin-sensor-setup' }

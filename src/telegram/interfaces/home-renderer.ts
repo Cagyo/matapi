@@ -37,7 +37,7 @@ export function renderHomeMessage(
     case 'pause-confirmation':
       return renderPauseConfirmation(catalog, identity, screen);
     case 'history':
-      return renderHistory(catalog, identity);
+      return renderHistory(catalog, identity, screen);
     case 'more':
       return renderMore(catalog, identity, screen);
     case 'admin-tools':
@@ -278,14 +278,22 @@ function renderPauseConfirmation(
   };
 }
 
-function renderHistory(catalog: LocaleCatalog, identity: PendingHomeIdentity): HomeRenderedMessage {
-  return {
-    text: catalog.home.history.title,
-    rows: [
-      [button(catalog.home.history.logs, identity, { kind: 'history-logs' }), button(catalog.home.history.exportCsv, identity, { kind: 'history-csv' })],
-      ...navigationRows(catalog, identity, 'more'),
-    ],
-  };
+function renderHistory(
+  catalog: LocaleCatalog,
+  identity: PendingHomeIdentity,
+  screen: Extract<HomeScreen, { kind: 'history' }>,
+): HomeRenderedMessage {
+  const rows: HomeButton[][] = [
+    [button(catalog.home.history.logs, identity, { kind: 'history-logs' }), button(catalog.home.history.exportCsv, identity, { kind: 'history-csv' })],
+  ];
+  if (screen.isAdmin) {
+    rows.push([
+      button(catalog.home.history.applicationLogs, identity, { kind: 'history-application-logs' }),
+      button(catalog.home.history.errors, identity, { kind: 'history-error-logs' }),
+    ]);
+  }
+  rows.push(...navigationRows(catalog, identity, 'more'));
+  return { text: catalog.home.history.title, rows };
 }
 
 function renderMore(

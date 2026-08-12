@@ -27,6 +27,8 @@ export type HomeAction =
   | { kind: 'history' }
   | { kind: 'history-logs' }
   | { kind: 'history-csv' }
+  | { kind: 'history-application-logs' }
+  | { kind: 'history-error-logs' }
   | { kind: 'settings' }
   | { kind: 'help' }
   | { kind: 'admin-tools' }
@@ -136,6 +138,10 @@ function actionParts(action: HomeAction): string[] {
       return ['hl'];
     case 'history-csv':
       return ['hv'];
+    case 'history-application-logs':
+      return ['ha'];
+    case 'history-error-logs':
+      return ['hr'];
     case 'settings':
       return ['st'];
     case 'help':
@@ -272,6 +278,8 @@ export function parseHomeCallback(data: string): ParsedHomeCallback | null {
       case 'hi': return parts.length === 4 ? { token, revision, action: { kind: 'history' } } : null;
       case 'hl': return parts.length === 4 ? { token, revision, action: { kind: 'history-logs' } } : null;
       case 'hv': return parts.length === 4 ? { token, revision, action: { kind: 'history-csv' } } : null;
+      case 'ha': return parts.length === 4 ? { token, revision, action: { kind: 'history-application-logs' } } : null;
+      case 'hr': return parts.length === 4 ? { token, revision, action: { kind: 'history-error-logs' } } : null;
       case 'st': return parts.length === 4 ? { token, revision, action: { kind: 'settings' } } : null;
       case 'he': return parts.length === 4 ? { token, revision, action: { kind: 'help' } } : null;
       case 'at': return parts.length === 4 ? { token, revision, action: { kind: 'admin-tools' } } : null;

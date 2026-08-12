@@ -293,13 +293,19 @@ describe('renderHomeMessage', () => {
   });
 
   it('renders canonical History, More, and admin destination layouts', () => {
-    const history = renderHomeMessage(catalogs.en, identity, { kind: 'history' });
+    const memberHistory = renderHomeMessage(catalogs.en, identity, { kind: 'history', isAdmin: false });
+    const adminHistory = renderHomeMessage(catalogs.en, identity, { kind: 'history', isAdmin: true });
     const memberMore = renderHomeMessage(catalogs.en, identity, { kind: 'more', isAdmin: false });
     const adminMore = renderHomeMessage(catalogs.en, identity, { kind: 'more', isAdmin: true });
     const adminTools = renderHomeMessage(catalogs.en, identity, { kind: 'admin-tools' });
 
-    expect(rowActions(history)).toEqual([
+    expect(rowActions(memberHistory)).toEqual([
       [{ kind: 'history-logs' }, { kind: 'history-csv' }],
+      [{ kind: 'back' }, { kind: 'home' }],
+    ]);
+    expect(rowActions(adminHistory)).toEqual([
+      [{ kind: 'history-logs' }, { kind: 'history-csv' }],
+      [{ kind: 'history-application-logs' }, { kind: 'history-error-logs' }],
       [{ kind: 'back' }, { kind: 'home' }],
     ]);
     expect(rowActions(memberMore)).toEqual([
@@ -359,7 +365,7 @@ describe('renderHomeMessage', () => {
 
   it('uses dedicated parent labels and never renders Close Home', () => {
     const screens: HomeScreen[] = [
-      { kind: 'history' },
+      { kind: 'history', isAdmin: false },
       { kind: 'admin-tools' },
       { kind: 'admin-sensor-setup' },
       { kind: 'admin-storage' },

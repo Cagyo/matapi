@@ -101,6 +101,26 @@ describe('GetHomeScreenUseCase', () => {
     })).resolves.toMatchObject({ kind: 'sensors', checking: true, isAdmin: false });
   });
 
+  it.each([
+    ['admin', true],
+    ['user', false],
+  ] as const)('projects current %s capability onto History', async (role, isAdmin) => {
+    const useCase = new GetHomeScreenUseCase(
+      { execute: vi.fn() },
+      { listDashboardPage: vi.fn() },
+      { execute: vi.fn() },
+      { listEnabled: vi.fn() },
+    );
+    const screen = await useCase.execute({
+      userId: 7,
+      chatId: 70,
+      role,
+      view: { kind: 'history' },
+    });
+    expect(screen).toEqual({ kind: 'history', isAdmin });
+    expect(homeViewForScreen(screen)).toEqual({ kind: 'history' });
+  });
+
   it('clamps notification-target pages, persists only the rendered typed target refs, and avoids summary reads', async () => {
     const getSummary = { execute: vi.fn() };
     const sensors = { listDashboardPage: vi.fn() };
