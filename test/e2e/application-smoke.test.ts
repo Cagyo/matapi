@@ -10,6 +10,10 @@ import { InMemoryMediaRepository } from '../../src/camera/infrastructure/in-memo
 import { DB } from '../../src/database/database.tokens';
 import { EventNotifierService } from '../../src/events/application/event-notifier.service';
 import { EventProcessorService } from '../../src/events/application/event-processor.service';
+import { FEATURE_READINESS } from '../../src/features/domain/ports/feature-readiness.port';
+import { FEATURE_REPOSITORY } from '../../src/features/domain/ports/feature-repository.port';
+import type { FeatureRepositoryPort } from '../../src/features/domain/ports/feature-repository.port';
+import { FeatureReadinessRouter } from '../../src/features/infrastructure/readiness/feature-readiness.router';
 import { AddSensorUseCase } from '../../src/sensors/application/add-sensor.use-case';
 import { SensorRegistryService } from '../../src/sensors/application/sensor-registry.service';
 import { SimulateSensorUseCase } from '../../src/sensors/application/simulate-sensor.use-case';
@@ -42,6 +46,15 @@ describe('Application E2E Smoke Integration Tests (Dev/Test Mode)', () => {
 
     app = await NestFactory.createApplicationContext(AppModule, {
       logger: ['error', 'warn'],
+    });
+    const features = app.get<FeatureRepositoryPort>(FEATURE_REPOSITORY);
+    for (const name of ['digital', 'motion'] as const) {
+      await features.setVerified({ name, installed: true, attentionReason: null });
+      await features.setEnabled(name, true);
+    }
+    vi.spyOn(app.get<FeatureReadinessRouter>(FEATURE_READINESS), 'verify').mockResolvedValue({
+      ready: true,
+      restartScope: 'worker',
     });
     await app.init();
   });
@@ -116,7 +129,8 @@ describe('Application E2E Smoke Integration Tests (Dev/Test Mode)', () => {
     // 3. Simulate state transition (0 -> 1)
     simulate.execute(created.id, 1);
 
-    // Wait for async persistState / event pipeline to drain completely
+    // Wait for the async driver -> registry handoff to reach the event processor.
+    await vi.waitFor(() => expect(notifySpy).toHaveBeenCalled(), { timeout: 2000 });
     await eventProcessor.waitForIdle(2000);
 
     // 4. Verify DB recorded state update
@@ -127,7 +141,6 @@ describe('Application E2E Smoke Integration Tests (Dev/Test Mode)', () => {
       expect(lookup.sensor.lastValue).toBe('1');
     }
 
-    expect(notifySpy).toHaveBeenCalled();
     notifySpy.mockRestore();
   });
 
