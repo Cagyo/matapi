@@ -2,7 +2,10 @@
 
 ## Status
 
-Approved on 2026-08-13.
+Approved on 2026-08-13 and amended after the implementation pressure test on
+the same date. The restart handoff, network-drift enforcement, reinstall path,
+concurrency fences, prompt durability, and typed probe failures below are
+normative parts of the approved design.
 
 This design fixes the RTSP feature-install failure, makes RTSP camera setup
 discoverable from the Camera dashboard, and hardens the complete Telegram
@@ -71,14 +74,31 @@ best effort rather than an explicit privacy contract.
    saved source.
 7. A newly created `type: rtsp` camera is removed with its source. Removing a
    source attached to a Motion camera leaves the Motion camera intact.
+8. Installed network policy is bound to eligible physical interfaces as well as
+   CIDRs. Runtime grants revalidate the current route and nftables rules bind the
+   destination to the installed output interface.
+9. RTSP installation is a durable two-stage transition: privileged completion,
+   then supervisor restart, then application readiness. The feature is not
+   marked installed or enabled before the post-restart check passes.
+10. An installed RTSP feature has an explicit Reinstall on current network
+    action. Policy drift never relies on the ordinary first-install transition.
+11. Camera display-name uniqueness uses a persisted canonical key, and every
+    source replacement or removal uses revision-based compare-and-swap.
+12. Credential prompt metadata and expired-prompt tombstones are durable and
+    non-secret. A received credential reply is deletion-attempted before the
+    network probe begins.
+13. Probe failures cross the Camera boundary as a closed typed error set. Raw
+    FFmpeg or resolver diagnostics never cross that boundary.
 
 ## Architecture
 
 The change stays inside the existing Features, Camera, and Telegram bounded
 contexts.
 
-- The root-owned fixed feature routine discovers routes and installs the
-  privileged runtime policy.
+- A root-owned fixed network-policy inspector discovers eligible routes, emits
+  only canonical non-secret policy projections, and verifies the installed
+  projection against current link state. The privileged feature routine stages
+  and installs the corresponding private runtime policy.
 - Features owns RTSP installation outcomes and readiness. Its adapters inspect
   fixed artifacts; no Telegram handler shells out or reads privileged files.
 - Camera owns camera registration, source probing, encrypted persistence,
@@ -103,15 +123,31 @@ An eligible network must satisfy all of these rules:
 
 - The route is in the main table, is unicast, has `scope link`, has a concrete
   destination prefix, and has no gateway.
-- Its device is active and is not `lo`.
+- Its device is administratively up, has carrier, is not `lo`, and is a
+  device-backed physical Ethernet or Wi-Fi link. Bridge, bond, veth, tun/tap,
+  WireGuard, Docker/container, and other virtual or tunnel link kinds are
+  rejected even when they expose a private `scope link` route.
 - IPv4 is within `10.0.0.0/8`, `172.16.0.0/12`, or `192.168.0.0/16`; IPv6 is
   within unique-local `fc00::/7`.
 - The network is not loopback, link-local, multicast, unspecified, or a default
   route.
 
-The installer parses every prefix with strict network semantics, canonicalizes
-it, removes duplicates, and sorts the result deterministically. Multiple active
+The inspector parses every prefix with strict network semantics, canonicalizes
+it, pairs it with the validated interface name, removes duplicate
+`(interface, prefix)` pairs, and sorts first by address family and network and
+then by interface. Interface names must be canonical kernel names of at most 15
+bytes and must match their JSON link record exactly. Multiple active
 Ethernet/Wi-Fi LANs are allowed. At least one eligible network is required.
+
+The same root-owned inspector executable is used in two fixed modes:
+
+- `discover` emits the canonical eligible-network projection for installation;
+- `verify-installed` reads the fixed public summary artifact, rediscovers the
+  current projection, and emits only `ready`, a closed reason code, the digest,
+  and the redacted interface/subnet summary.
+
+It accepts no paths, commands, CIDRs, or interface names from Telegram or the
+worker. Raw `ip` JSON remains in the root journal on failure.
 
 No active eligible network fails before installing FFmpeg, nftables, polkit, or
 cloudflared with the sanitized feature failure
@@ -119,19 +155,26 @@ cloudflared with the sanitized feature failure
 
 ### Durable artifacts
 
-From one canonical subnet list, the installer prepares:
+From one canonical network projection, the installer prepares:
 
 - `RTSP_ALLOWED_CIDRS=<canonical comma-separated list>` in the private worker
   environment;
 - `/etc/home-worker/live-stream-policy.json`, retaining mode `0600` and root
-  ownership;
-- a root-owned, world-readable non-secret digest artifact containing the digest
-  of the canonical subnet list; and
+  ownership, with version, worker/stream UIDs, interface-bound networks, and the
+  UDP media range;
+- `/etc/home-worker/live-stream-policy.summary.json`, a root-owned mode `0644`,
+  single-link, non-secret artifact containing the same version, UIDs,
+  interface-bound networks, UDP range, and policy digest; and
 - `RTSP_POLICY_DIGEST=<digest>` in the private worker environment.
 
-The digest lets application readiness detect environment/policy drift without
-granting the worker read access to the privileged policy. The root helper also
-verifies that the policy content was generated from that exact canonical list.
+The digest is SHA-256 over the canonical JSON encoding of every
+security-relevant policy field: version, worker UID, stream UID,
+`(interface, CIDR)` pairs, and UDP range. Application readiness opens the public
+summary with no-follow/single-link/owner/mode/size checks, confirms that its
+CIDRs and UDP range equal the worker-visible environment, compares the digest to
+`RTSP_POLICY_DIGEST`, and invokes `verify-installed` to compare the installed
+projection with current routes. The root network helper independently verifies
+that the private policy and public summary describe the same canonical object.
 
 The environment update uses the existing no-follow, single-link, owner, and
 mode checks. It replaces any previous `RTSP_ALLOWED_CIDRS` and policy digest
@@ -139,45 +182,95 @@ with the freshly detected local networks, preserves the credential key when it
 is valid and non-empty, generates the key only when absent, and preserves all
 unrelated settings.
 
-Every output is written to a private file, flushed, validated, and atomically
-renamed. The two-file operation cannot be globally atomic; its commit order is
-policy, digest, then environment. A crash may temporarily create disagreement,
-but readiness fails closed and an idempotent installer retry reconciles all
-artifacts.
+The inspector output, private policy, public summary, and environment update are
+all staged and validated before any RTSP-specific package mutation. After
+dependencies install, each durable output is written to a same-directory
+private file, flushed, validated, and atomically renamed. The three-file commit
+cannot be globally atomic; its order is private policy, public summary, then
+environment. A crash may temporarily create disagreement, but readiness and the
+runtime helper fail closed and an idempotent reinstall reconciles all artifacts.
 
 ### Installation and restart outcome
 
 The privileged helper distinguishes these sanitized RTSP failures from an
-ordinary package failure:
+ordinary package failure through reserved routine exit statuses:
 
-- `local-network-unavailable`
-- `network-policy-generation-failed`
-- `dependency-install-failed`
-- `privileged-verification-failed`
+- `20` → `local-network-unavailable`
+- `21` → `network-policy-generation-failed`
+- `22` → `dependency-install-failed`
+- `23` → `privileged-verification-failed`
 
-The result schema, domain failure union, persistence, and locale catalogs are
-extended together. Raw route output and package diagnostics remain in the root
-journal and are never delivered through Telegram.
+The RTSP routine maps discovery-with-no-result to `local-network-unavailable`
+and malformed/staging output to `network-policy-generation-failed`; both occur
+before package or durable-artifact mutation and are reconciliation-safe.
+Package commands map to `dependency-install-failed`. A zero routine status
+followed by a failed root verification maps to
+`privileged-verification-failed`; failures after the first durable rename are
+also treated as privileged-verification failures. All other nonzero routine
+statuses map to dependency failure. The result schema, domain failure union,
+safe-failure classification, persistence, and locale catalogs are extended
+together. Raw route output and package diagnostics remain in the root journal
+and are never delivered through Telegram.
 
-RTSP installation retains supervisor restart scope because the worker must
-receive `homeworker-stream` group membership and reload the installed policy.
-Only after recovery and application readiness succeed does the feature become
-installed and enabled.
+RTSP installation retains supervisor restart scope because both PM2 and the
+worker must receive `homeworker-stream` group membership and reload the
+installed policy. A successful privileged result moves the durable job from
+`running` to `awaiting-restart` while retaining the global active slot and root
+result. The worker records its current process identity before dispatching the
+fixed supervisor-restart unit. The identity is
+`<linux-boot-id>:<proc-self-start-ticks>`, read through a Features-owned port
+from the two fixed procfs files. Recovery behaves as follows:
+
+1. In the same process identity, it waits for the dispatched restart and does
+   not run application readiness or dispatch repeatedly.
+2. In a new process identity, it runs application readiness. Readiness success
+   terminalizes the job, marks the feature installed and enabled, removes the
+   root result, opens the RTSP start gate, and delivers the final outcome.
+3. If readiness still reports missing process group membership, recovery records
+   the new identity and dispatches the supervisor restart once more. Any other
+   readiness failure terminalizes with the typed failure and preserves the
+   previous installed/enabled state.
+4. A restart-dispatch failure leaves the job recoverable with
+   `restart-required`; an administrator retry dispatches the same fixed unit.
+
+Only the post-restart terminal transaction marks the feature installed and
+enabled.
+
+### Reinstall on the current network
+
+Feature Management exposes `Reinstall on current network` for RTSP when it is
+already installed. The action is also offered from stale-policy guidance. It
+creates an install job with an exact expected previous installed/enabled state,
+uses the same global active slot and two-stage restart protocol, and never
+deletes camera sources. Before publishing the privileged request, the existing
+RTSP runtime lifecycle closes the start gate and stops RTSP sessions. A
+pre-mutation discovery or staging failure preserves the previous policy and
+feature state and reopens the gate only if the old policy still passes current
+readiness. A failure after durable mutation marks the feature
+`partial-state-uncertain` and keeps RTSP start-gated until a later reinstall or
+verification succeeds.
 
 ### Readiness
 
 RTSP readiness continues to verify FFmpeg, cloudflared, root-owned runtime
 artifacts, runtime directory ownership/modes, the active network helper, and
-worker group membership. It additionally:
+the current worker process's group membership. It additionally:
 
 1. Parses and canonicalizes the worker-visible `RTSP_ALLOWED_CIDRS`.
-2. Computes its digest and compares it to both `RTSP_POLICY_DIGEST` and the
-   fixed non-secret digest artifact.
-3. Rejects an empty, malformed, broad, public, or inconsistent policy.
+2. Safely reads and validates the fixed public policy summary.
+3. Computes the complete policy digest and compares it to
+   `RTSP_POLICY_DIGEST` and the summary digest.
+4. Invokes the fixed inspector in `verify-installed` mode and rejects a changed
+   CIDR, interface, link kind, carrier state, route scope, gateway, UID, or UDP
+   range.
+5. Rejects an empty, malformed, broad, public, or inconsistent policy.
 
-Readiness does not automatically replace policy after a network change. The old
-policy keeps failing closed. The source UI reports that the RTSP feature must
-be reinstalled on the Pi's new local network.
+At grant time the network helper also resolves each destination's current route
+and requires the installed interface with no gateway. Generated nftables rules
+include the installed output-interface name. Readiness does not automatically
+replace policy after a network change. A changed route or interface therefore
+fails closed even when the destination remains inside an old allowed CIDR. The
+source UI reports `policy-stale` and links to Reinstall on current network.
 
 ## Camera Application Model
 
@@ -199,42 +292,68 @@ publishes the narrow atomic registration/removal operations needed here. The
 Drizzle adapter may implement both read and write ports, but consumers depend
 on the appropriate port.
 
+`cameras` gains a required canonical `nameKey` with a unique index. The key is
+`name.trim().normalize('NFC').toLowerCase().normalize('NFC')`; the original
+trimmed display name remains unchanged for presentation.
+`camera_live_sources` gains a non-negative `revision`, `verifiedAt`, and
+`policyDigest`. Every overview returns the revision and dynamically compares the
+saved policy digest and current hostname resolution with the installed policy;
+the persisted `ready` bit alone never renders Configured and verified.
+
+The Camera application depends on a published admin-authorization port. Every
+mutating use case receives `actorUserId`, checks current admin status before the
+probe and again immediately before its final synchronous SQLite transaction,
+then checks the RTSP gate epoch and installed policy digest without another
+asynchronous boundary. The deployment remains `instances=1`; database CAS is
+still authoritative for concurrent Telegram updates.
+
 ### Create flow
 
 For a new RTSP camera:
 
-1. Recheck RTSP availability and the process-local start gate.
+1. Recheck current admin authorization, RTSP availability, the installed policy
+   digest, and the process-local start-gate epoch.
 2. Validate and normalize a unique display name.
 3. Generate a stable opaque camera ID and construct a candidate `type: rtsp`,
    enabled camera without persisting it.
 4. Parse the URL, resolve its host, enforce the installed CIDRs, and run the
    bounded restricted probe.
 5. Encrypt the validated credential payload.
-6. Recheck RTSP availability and the start gate.
-7. In one SQLite transaction, insert the camera, source metadata, and credential.
+6. Recheck current admin authorization, RTSP availability, the unchanged policy
+   digest, and the unchanged start-gate epoch.
+7. Without another asynchronous boundary, use one immediate SQLite transaction
+   to insert the camera, source metadata at revision `0`, and credential.
 
 If probing, encryption, availability, uniqueness, or persistence fails, no row
-is created. Database uniqueness remains the final authority for concurrent
-same-name attempts.
+is created. The unique `nameKey` index remains the final authority for
+concurrent case- or Unicode-equivalent name attempts. Camera-ID collision and
+name-key violations map to typed domain errors at the Drizzle boundary.
 
 Attaching a source to an existing camera uses a camera picker and the camera's
-existing ID. It probes and saves only the source/credential transaction.
+existing ID. It probes and inserts only the source/credential transaction after
+rechecking that the camera is still enabled and has no source.
 
 ### Test and replacement
 
 Test connection loads the source through the credential port, probes the exact
-saved settings, and returns a sanitized outcome. It does not update source
-metadata, credentials, readiness, or timestamps.
+saved settings, and returns a sanitized typed outcome. It does not update source
+metadata, credentials, readiness, revision, `verifiedAt`, or timestamps.
 
-Change address keeps the current source active while validating and probing the
-candidate. After a successful probe it stops an active stream for that source,
-encrypts the new credential, and atomically replaces metadata and credential.
-A failed replacement leaves the old source untouched and usable.
+Change address captures the current source revision and keeps the current source
+active while validating, probing, and encrypting the candidate. After a
+successful probe it stops only active or pending work whose camera ID matches
+that source, then atomically replaces metadata and credential only when the
+revision still matches. The transaction increments the revision and records the
+current policy digest and verification time. A probe, encryption, stop, CAS, or
+persistence failure leaves the old source and credential persisted and usable;
+an already-stopped live session is not automatically recreated.
 
 ### Removal
 
 Removal always requires a confirmation containing the camera display name and
-stops active work first.
+captures the current revision. After the final admin/feature/gate checks, it
+stops only active or pending work for that camera and removes data only when the
+revision still matches.
 
 - For a camera whose type is `rtsp`, one transaction removes live-source rows,
   credential rows, and the camera row.
@@ -242,6 +361,9 @@ stops active work first.
   credential rows.
 
 No plaintext credential is loaded for removal.
+
+Concurrent replacement, attachment, and removal conflicts throw a typed stale
+source error and return the administrator to a freshly loaded source detail.
 
 ## Telegram Experience
 
@@ -303,18 +425,29 @@ Before URL input, the bot states:
 - the prompt expires in ten minutes.
 
 The URL prompt is another ForceReply bound to its exact message ID and receipt.
-On valid input, the bot immediately sends `Testing connection…`, marks the
-workflow running, and invokes the create/attach use case.
+Prompt state is stored through a Telegram-owned port in SQLite and contains only
+user, private chat, receipt, exact prompt message ID, non-secret camera
+selection/name, phase, and expiry. It never contains a URL or credential.
 
-The input message is deleted in `finally` for success, validation failure,
-probe failure, role change, and feature change. If deletion fails, the bot
-identifies the exact reply by message context without repeating its text and
-asks the administrator to delete it manually.
+On a matching reply, the handler durably changes the prompt to `running`, copies
+the text only into the current call stack, and immediately attempts to delete
+the exact Telegram message. It then sends `Testing connection…` and invokes the
+create/attach use case. A deletion failure is remembered as a non-secret boolean
+so the terminal message can identify the exact reply by context and ask the
+administrator to remove it manually.
 
-The handler retains bounded non-secret expired-prompt tombstones long enough to
-recognize a late reply to a known credential prompt. Such a reply is not
-processed; deletion is attempted and the bot offers `Start again`. Arbitrary
-RTSP-looking messages that are not replies to a known prompt are not claimed.
+The immediate deletion attempt runs for success, validation failure, role
+change, and feature change because it occurs before those effects. A narrow
+`finally` retries deletion if the first attempt failed. The URL remains only in
+the bounded stack/Camera call and is never copied into prompt state, receipt
+payload, logs, callbacks, or error objects.
+
+The prompt store retains non-secret expired/consumed credential-prompt
+tombstones for 24 hours, capped at 100 records per administrator. On process
+startup it retries deletion for interrupted `running` prompts before expiring
+them. A late reply to a retained prompt is not processed; deletion is attempted
+and the bot offers `Start again`. Arbitrary RTSP-looking messages that are not
+replies to a known prompt are not claimed.
 
 ### Error recovery
 
@@ -330,6 +463,13 @@ Typed errors map at the Telegram boundary to these safe categories:
 - probe timed out;
 - RTSP feature changed or became unavailable; and
 - policy is stale after a Pi network change.
+
+The probe port exposes one typed error per category. DNS lookup and installed
+policy checks map directly. The FFmpeg adapter runs with a fixed `LANG=C`,
+captures at most 64 KiB of stderr, classifies only an allowlisted set of stable
+patterns for authentication, TLS, unsupported video, and timeout, then discards
+the diagnostic buffer. Unrecognized process failures map to the existing
+generic probe failure. No diagnostic text is attached as an error cause.
 
 An error retains only non-secret context such as the proposed display name or
 selected camera. It offers the applicable Retry, Change address, Back, or
@@ -362,8 +502,12 @@ only while an exact text prompt is active.
   and prompt message.
 - Feature availability and admin role are rechecked before probing and before
   persistence.
+- Mutations carry the installed policy digest, start-gate epoch, and source
+  revision through the probe and fail on any mismatch before the SQLite effect.
 - Active streams stop before replacement or removal.
 - A network change never automatically widens access.
+- Runtime egress is bound to both approved destinations and approved physical
+  output interfaces.
 
 ## Verification
 
@@ -371,14 +515,18 @@ only while an exact text prompt is active.
 
 Tests cover one Wi-Fi/Ethernet subnet, multiple direct private subnets,
 deterministic canonical ordering, and rejection of public, loopback, link-local,
-multicast, unspecified, default, inactive-interface, and gateway-routed entries.
+multicast, unspecified, default, inactive-interface, carrier-down,
+gateway-routed, bridge, bond, veth, tun/tap, WireGuard, and container entries.
 No eligible network must fail before any RTSP-specific package installation.
 
 Environment tests prove owner/mode/no-follow enforcement, key preservation,
 replacement of stale CIDRs, unrelated-setting preservation, digest parity,
-interrupted replacement, and idempotent recovery. Privileged and application
-readiness tests cover every artifact, service, group, directory, and policy
-mismatch.
+interrupted three-file replacement, and idempotent recovery. Privileged and
+application readiness tests cover every artifact, service, group, directory,
+interface, current-route, policy-field, and digest mismatch. Install recovery
+tests prove the `running → awaiting-restart → succeeded` path, same-process
+waiting, one dispatch per process identity, post-restart group verification,
+dispatch retry, and reinstall preservation/failure behavior.
 
 ### Application and persistence
 
@@ -387,22 +535,27 @@ Use-case and SQLite integration tests prove:
 - successful probe creates camera, source, and encrypted credential atomically;
 - probe failure creates no rows;
 - duplicate camera names fail safely, including concurrent attempts;
+- case- and Unicode-equivalent names collide through `nameKey`;
 - attaching to an existing camera does not replace the camera row;
 - Test connection performs no writes;
 - failed replacement preserves the old source and credential;
 - successful replacement stops active work before its atomic commit;
+- concurrent replace/replace, replace/remove, and attach/attach attempts produce
+  one commit and one typed stale-source result;
 - RTSP-camera removal deletes camera/source/credential together;
 - Motion-camera detachment preserves the camera; and
-- feature/role changes prevent the next effect.
+- feature, policy, gate-epoch, and role changes prevent the next effect.
 
 ### Telegram and locales
 
 Handler tests cover the full admin/readiness visibility matrix, direct-command
 fallback, empty/populated/paginated overviews, exact ForceReply and receipt
 binding, prompt expiry/tombstones, deletion on every terminal path, deletion
-failure copy, progress acknowledgement, categorized errors, retry/back/home,
-removal confirmation, stale callbacks, localized typed cancellation, private
-chat enforcement, and the 64-byte callback limit.
+failure copy, immediate deletion before probing, restart recovery of interrupted
+prompts, bounded 24-hour tombstone retention, progress acknowledgement,
+categorized errors, retry/back/home, removal confirmation, stale callbacks,
+localized typed cancellation, private-chat enforcement, and the 64-byte
+callback limit.
 
 Catalog parity tests require all source keys in English, Russian, and Ukrainian
 and reject English fallback for this workflow.
@@ -420,7 +573,9 @@ On a Pi connected to its normal LAN:
 6. Exercise bad credentials, timeout, edit, non-mutating test, and both removal
    semantics.
 7. Change or simulate policy drift and confirm fail-closed guidance.
-8. Scan application logs, root journal excerpts exposed to the app, Telegram
+8. Reinstall RTSP on the changed network and confirm sources are preserved but
+   dynamically reclassified against the new policy.
+9. Scan application logs, root journal excerpts exposed to the app, Telegram
    messages, database rows, exports, and callbacks for credential leakage.
 
 ## Acceptance Criteria
@@ -428,14 +583,22 @@ On a Pi connected to its normal LAN:
 - A clean RTSP installation succeeds on a Pi with an active directly connected
   private LAN and no preconfigured `RTSP_ALLOWED_CIDRS`.
 - Installation fails early and clearly when no eligible LAN exists.
-- Installed policy permits only detected direct private subnets.
+- Installed policy permits only detected direct private subnets through their
+  installed physical output interfaces.
+- Privileged success remains non-terminal until a supervisor restart gives the
+  worker its runtime group and application readiness passes.
+- An installed RTSP feature can be reinstalled on the current network without
+  deleting camera sources.
 - An administrator can create an RTSP camera and set its address entirely
   through Camera Dashboard after RTSP becomes ready.
 - Failed creation leaves no camera/source/credential rows; failed replacement
   preserves the working source.
+- Concurrent source mutations are revision-safe and equivalent display names
+  cannot bypass database uniqueness.
 - Source management is status-first, localized, receipt/prompt-bound, and
   recoverable without re-entering non-secret context.
 - Test connection does not mutate persisted configuration.
 - Credentials never appear in logs, callbacks, exports, or bot output, and the
-  bot explicitly treats Telegram deletion as best effort.
+  bot attempts Telegram deletion before probing, recovers non-secret prompt
+  cleanup after restart, and explicitly treats deletion as best effort.
 - Normal users never see or invoke RTSP source-management effects.
