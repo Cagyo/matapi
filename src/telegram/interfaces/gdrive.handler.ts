@@ -2,12 +2,24 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Composer, InlineKeyboard } from 'grammy';
 import { randomBytes } from 'node:crypto';
 import { BeginDriveConnectionUseCase, type PendingDriveConnection } from '../../archive/application/use-cases/begin-drive-connection.use-case';
-import { SubmitDriveClientUseCase } from '../../archive/application/use-cases/submit-drive-client.use-case';
+import {
+  SubmitDriveClientUseCase,
+  type DriveClientSubmissionResult,
+} from '../../archive/application/use-cases/submit-drive-client.use-case';
 import { ConfirmDriveAccountUseCase } from '../../archive/application/use-cases/confirm-drive-account.use-case';
 import { CancelDriveConnectionUseCase } from '../../archive/application/use-cases/cancel-drive-connection.use-case';
 import { DisconnectDriveUseCase } from '../../archive/application/use-cases/disconnect-drive.use-case';
+import { DriveClientDocumentError } from '../../archive/domain/errors/drive-client-document.error';
+import { DriveOAuthClientRejectedError } from '../../archive/domain/errors/drive-oauth-client-rejected.error';
+import { DrivePolicyBlockedError } from '../../archive/domain/errors/drive-policy-blocked.error';
+import { DriveProviderResponseError } from '../../archive/domain/errors/drive-provider-response.error';
+import { DriveRateLimitedError } from '../../archive/domain/errors/drive-rate-limited.error';
+import { DriveSetupBusyError } from '../../archive/domain/errors/drive-setup-busy.error';
+import { DriveSetupExpiredError } from '../../archive/domain/errors/drive-setup-expired.error';
+import { DriveTemporaryUnavailableError } from '../../archive/domain/errors/drive-temporary-unavailable.error';
 import {
   TELEGRAM_DRIVE_CLIENT_DOCUMENT_READER,
+  type TelegramDriveClientDocument,
   type TelegramDriveClientDocumentAdapter,
 } from '../infrastructure/telegram-drive-client-document.adapter';
 import { ReportDriveStatusUseCase } from '../../archive/application/use-cases/report-drive-status.use-case';
@@ -20,6 +32,15 @@ import {
   type WorkflowLaunch,
 } from './workflow-entry.coordinator';
 import { WorkflowNavigationHandler } from './workflow-navigation.handler';
+import { workflowReturnCallback } from '../domain/workflow-return';
+import {
+  DriveSetupStateRegistry,
+  type DriveSetupGenerationIdentity,
+  type DriveSetupIdentity,
+  type DriveSetupState,
+} from './drive-setup-state.registry';
+
+const GOOGLE_CLOUD_CONSOLE_URL = 'https://console.cloud.google.com/apis/credentials';
 
 /**
  * `/gdrive status` — private-admin only. Reports the sanitized archive state.
@@ -27,7 +48,6 @@ import { WorkflowNavigationHandler } from './workflow-navigation.handler';
 @Injectable()
 export class GdriveHandler implements TelegramHandler {
   private readonly logger = new Logger(GdriveHandler.name);
-  private readonly pending = new Map<string, PendingDriveConnection>();
   private readonly disconnects = new Map<string, { receiptId: string; generationId: string; userId: number; chatId: number }>();
 
   constructor(
@@ -42,6 +62,7 @@ export class GdriveHandler implements TelegramHandler {
     private readonly confirmAccount: ConfirmDriveAccountUseCase,
     private readonly cancelConnection: CancelDriveConnectionUseCase,
     private readonly disconnect: DisconnectDriveUseCase,
+    private readonly setupStates: DriveSetupStateRegistry,
   ) {}
 
   register(composer: Composer<TelegramContext>): void {
@@ -75,49 +96,144 @@ export class GdriveHandler implements TelegramHandler {
       if (ctx.chat?.type === 'private') await ctx.reply(catalog.common.adminRequired);
       return;
     }
-    await this.cancelPendingConnections();
-    let pending: PendingDriveConnection;
-    try {
-      pending = this.beginConnection.execute({ adminUserId: current.userId, chatId: current.chatId, receiptId: launch?.receipt.id });
-    } catch {
-      await ctx.reply(catalog.gdriveConnection.connectionFailed);
-      return;
-    }
-    this.pending.set(bindingKey(current.userId, current.chatId), pending);
-    await ctx.reply(catalog.gdriveConnection.uploadPrompt, {
-      reply_markup: new InlineKeyboard().text(catalog.gdriveConnection.cancel, callback('c', pending.receiptId, pending.generationId)),
+    const receipt = launch?.receipt ?? await this.workflows.begin(ctx, 'drive-setup', {
+      source: 'natural-parent',
     });
+    if (!receipt) return;
+    const identity = {
+      userId: current.userId,
+      chatId: current.chatId,
+      receiptId: receipt.id,
+    };
+    this.setupStates.prepare({
+      ...identity,
+      preparationExpiresAtMs: receipt.expiresAt.getTime(),
+    });
+    try {
+      await ctx.reply(catalog.gdriveConnection.guide, {
+        link_preview_options: { is_disabled: true },
+        reply_markup: new InlineKeyboard()
+          .url(catalog.gdriveConnection.openConsole, GOOGLE_CLOUD_CONSOLE_URL)
+          .text(catalog.gdriveConnection.cancel, workflowReturnCallback(receipt.id, 'origin')),
+      });
+    } catch (error) {
+      this.setupStates.removePreparation(identity);
+      throw error;
+    }
   }
 
   /** Security gate intentionally precedes the first document read. */
   async handleDocument(ctx: TelegramContext): Promise<void> {
-    const current = this.currentAdmin(ctx);
-    if (!current) {
-      await this.cancelDocumentAfterRoleLoss(ctx);
+    const raw = rawPrivateIdentity(ctx);
+    const associated = raw ? this.setupStates.association(raw) : null;
+    if (!associated) return;
+    const catalog = ctx.localeState?.catalog ?? en;
+    let generation: DriveSetupGenerationIdentity | null = null;
+    try {
+      if (!ctx.message?.document) return;
+      const admin = this.currentAdmin(ctx);
+      if (!admin || !await this.workflows.loadCurrent(ctx, associated.receiptId, 'drive-setup')) {
+        await this.setupStates.cancelExact(associated);
+        return;
+      }
+      if (ctx.message.forward_origin) {
+        await ctx.reply(catalog.gdriveConnection.documentInvalid);
+        return;
+      }
+      const pending = this.beginConnection.execute({
+        adminUserId: admin.userId,
+        chatId: admin.chatId,
+        receiptId: associated.receiptId,
+      });
+      generation = {
+        userId: admin.userId,
+        chatId: admin.chatId,
+        receiptId: associated.receiptId,
+        generationId: pending.generationId,
+      };
+      const authorizing = this.setupStates.claimAuthorizing(associated, pending);
+      if (!authorizing) return;
+      const operationSignal = AbortSignal.any([
+        authorizing.controller.signal,
+        AbortSignal.timeout(30_000),
+      ]);
+      const document = await this.documents.read(documentInput(ctx), operationSignal);
+      const result = await this.submitClient.execute({
+        pending,
+        document,
+        signal: operationSignal,
+        authorizationSignal: authorizing.controller.signal,
+        acceptChallenge: (binding) => this.setupStates.recordChallenge({ ...associated, ...binding }),
+      });
+      await this.replyWithAuthorization(ctx, result, pending);
+    } catch (error) {
+      await this.handleSetupError(ctx, associated, generation, error);
+    } finally {
+      await this.deleteAssociatedDocument(ctx, catalog.gdriveConnection.manualDelete);
+    }
+  }
+
+  private async replyWithAuthorization(
+    ctx: TelegramContext,
+    result: DriveClientSubmissionResult,
+    pending: PendingDriveConnection,
+  ): Promise<void> {
+    const catalog = ctx.localeState?.catalog ?? en;
+    await ctx.reply(catalog.gdriveConnection.authorize(result.verificationUri, result.userCode), {
+      reply_markup: new InlineKeyboard()
+        .text(catalog.gdriveConnection.confirm, callback('a', pending.receiptId, pending.generationId))
+        .text(catalog.gdriveConnection.cancel, callback('c', pending.receiptId, pending.generationId)),
+    });
+  }
+
+  private async handleSetupError(
+    ctx: TelegramContext,
+    preparation: DriveSetupIdentity,
+    generation: DriveSetupGenerationIdentity | null,
+    error: unknown,
+  ): Promise<void> {
+    const catalog = ctx.localeState?.catalog ?? en;
+    if (isAbortError(error) && !this.setupStates.association(preparation)) return;
+    if (error instanceof DriveSetupExpiredError) {
+      await this.setupStates.cancelExact(preparation).catch(() => undefined);
+      await this.completeSetup(ctx, preparation.receiptId, catalog.gdriveConnection.setupExpired);
       return;
     }
-    if (!ctx.message?.document || ctx.message.forward_origin) return;
-    const catalog = ctx.localeState?.catalog ?? en;
-    const pending = this.pending.get(bindingKey(current.userId, current.chatId));
-    if (!pending) return;
-    let read = false;
+    if (generation) this.setupStates.returnToPreparing(generation);
+    const reply = error instanceof DriveClientDocumentError
+      ? error.reason === 'unsupported-client-type'
+        ? catalog.gdriveConnection.unsupportedClientType
+        : catalog.gdriveConnection.documentInvalid
+      : error instanceof DriveOAuthClientRejectedError ? catalog.gdriveConnection.clientRejected
+        : error instanceof DriveSetupBusyError ? catalog.gdriveConnection.setupBusy
+          : error instanceof DrivePolicyBlockedError ? catalog.gdriveConnection.policyBlocked
+            : error instanceof DriveRateLimitedError ? catalog.gdriveConnection.rateLimited
+              : error instanceof DriveProviderResponseError ? catalog.gdriveConnection.providerResponse
+                : catalog.gdriveConnection.temporaryUnavailable;
+    if (!(error instanceof DriveClientDocumentError
+      || error instanceof DriveOAuthClientRejectedError
+      || error instanceof DriveSetupBusyError
+      || error instanceof DrivePolicyBlockedError
+      || error instanceof DriveRateLimitedError
+      || error instanceof DriveProviderResponseError
+      || error instanceof DriveTemporaryUnavailableError)) {
+      this.logger.error('Unexpected Drive setup failure');
+    }
+    await ctx.reply(reply);
+  }
+
+  private async deleteAssociatedDocument(ctx: TelegramContext, warning: string): Promise<void> {
+    const messageId = ctx.message?.message_id;
+    const chatId = ctx.chat?.id;
+    if (!messageId || !chatId) return;
     try {
-      const document = await this.documents.read({
-        fileId: ctx.message.document.file_id,
-        fileSize: ctx.message.document.file_size,
-      }, AbortSignal.timeout(30_000));
-      read = true;
-      const result = await this.submitClient.execute({ pending, document, signal: AbortSignal.timeout(30_000) });
-      await ctx.reply(catalog.gdriveConnection.authorize(result.verificationUri, result.userCode), {
-        reply_markup: new InlineKeyboard()
-          .text(catalog.gdriveConnection.confirm, callback('a', pending.receiptId, pending.generationId))
-          .text(catalog.gdriveConnection.cancel, callback('c', pending.receiptId, pending.generationId)),
-      });
-    } catch (error) {
-      this.logger.warn(`Drive client document rejected: ${error instanceof Error ? error.name : 'unknown'}`);
-      await ctx.reply(catalog.gdriveConnection.invalidClient);
-    } finally {
-      if (read) await this.deleteClientMessage(ctx, catalog.gdriveConnection.manualDelete);
+      await ctx.api.deleteMessage(chatId, messageId);
+    } catch {
+      try {
+        await ctx.reply(warning);
+      } catch {
+        this.logger.warn('Drive credential message deletion warning delivery failed');
+      }
     }
   }
 
@@ -140,10 +256,7 @@ export class GdriveHandler implements TelegramHandler {
     const current = this.currentAdmin(ctx);
     const parsed = parseCallback(ctx.callbackQuery?.data ?? '');
     if (!parsed) return;
-    if (!current) {
-      await this.cancelAfterRoleLoss(ctx, parsed);
-      return;
-    }
+    if (!current) return;
     const catalog = ctx.localeState?.catalog ?? en;
     if (parsed.action === 'd' || parsed.action === 'x') {
       const requested = this.disconnects.get(parsed.receiptId);
@@ -154,77 +267,94 @@ export class GdriveHandler implements TelegramHandler {
       await ctx.reply(result === 'disconnected' ? catalog.gdriveConnection.disconnected : catalog.gdriveConnection.notConnected);
       return;
     }
-    const pending = this.pending.get(bindingKey(current.userId, current.chatId));
-    if (pending?.receiptId !== parsed.receiptId || pending.generationId !== parsed.generationId) return;
+    const state = this.setupStates.authorizing({
+      userId: current.userId,
+      chatId: current.chatId,
+      receiptId: parsed.receiptId,
+      generationId: parsed.generationId,
+    });
+    if (!state) return;
     if (parsed.action === 'c') {
-      this.pending.delete(bindingKey(current.userId, current.chatId));
-      const result = await this.cancelConnection.execute({ generationId: pending.generationId, receiptId: pending.receiptId, adminUserId: current.userId, chatId: current.chatId });
-      if (result === 'cancelled') await ctx.reply(catalog.gdriveConnection.cancelled);
+      if (!await this.workflows.loadCurrent(ctx, state.receiptId, 'drive-setup')) return;
+      const result = await this.setupStates.cancelExact(state);
+      if (result === 'cancelled') {
+        await this.completeSetup(ctx, state.receiptId, catalog.gdriveConnection.cancelled);
+      }
       return;
     }
     if (parsed.action !== 'a') return;
+    if (!state.effectiveDeadlineMs
+      || !await this.workflows.loadCurrent(ctx, state.receiptId, 'drive-setup')) return;
+    const signal = AbortSignal.any([state.controller.signal, AbortSignal.timeout(30_000)]);
     try {
-      const result = await this.confirmAccount.execute({ generationId: pending.generationId, receiptId: pending.receiptId, adminUserId: current.userId, chatId: current.chatId, signal: AbortSignal.timeout(30_000) });
-      if (result === 'activated') {
-        this.pending.delete(bindingKey(current.userId, current.chatId));
-        await ctx.reply(catalog.gdriveConnection.connected);
-      } else if (result === 'pending') {
+      const result = await this.confirmAccount.execute({
+        generationId: state.pending.generationId,
+        receiptId: state.receiptId,
+        adminUserId: state.userId,
+        chatId: state.chatId,
+        effectiveDeadlineMs: state.effectiveDeadlineMs,
+        signal,
+      });
+      if (result === 'pending') {
         await ctx.reply(catalog.gdriveConnection.authorizationPending);
+        return;
       }
-    } catch {
-      this.pending.delete(bindingKey(current.userId, current.chatId));
-      await ctx.reply(catalog.gdriveConnection.connectionFailed);
+      if (result !== 'activated' || !this.setupStates.takeActivated({
+        userId: state.userId,
+        chatId: state.chatId,
+        receiptId: state.receiptId,
+        generationId: state.pending.generationId,
+      })) return;
+      const receipt = await this.workflows.loadCurrent(ctx, state.receiptId, 'drive-setup');
+      if (!receipt) return;
+      await this.navigation?.complete(ctx, { receipt }, {
+        effectStage: 'pending',
+        deliver: async () => { await ctx.reply(catalog.gdriveConnection.connected); },
+        failureNotice: catalog.home.recovery.unavailable,
+      });
+    } catch (error) {
+      await this.handleConfirmationError(ctx, state, error);
     }
+  }
+
+  private async handleConfirmationError(
+    ctx: TelegramContext,
+    state: Extract<DriveSetupState, { kind: 'authorizing' }>,
+    error: unknown,
+  ): Promise<void> {
+    const identity = {
+      userId: state.userId,
+      chatId: state.chatId,
+      receiptId: state.receiptId,
+      generationId: state.pending.generationId,
+    };
+    if (!this.setupStates.takeTerminal(identity)) return;
+    const catalog = ctx.localeState?.catalog ?? en;
+    const message = error instanceof DriveSetupExpiredError ? catalog.gdriveConnection.setupExpired
+      : error instanceof DrivePolicyBlockedError ? catalog.gdriveConnection.policyBlocked
+        : error instanceof DriveRateLimitedError ? catalog.gdriveConnection.rateLimited
+          : error instanceof DriveProviderResponseError ? catalog.gdriveConnection.providerResponse
+            : catalog.gdriveConnection.temporaryUnavailable;
+    await this.completeSetup(ctx, state.receiptId, message);
+  }
+
+  private async completeSetup(ctx: TelegramContext, receiptId: string, message: string): Promise<void> {
+    const receipt = await this.workflows.loadCurrent(ctx, receiptId, 'drive-setup');
+    if (!receipt) return;
+    if (!this.navigation) {
+      await ctx.reply(message);
+      return;
+    }
+    await this.navigation.complete(ctx, { receipt }, {
+      effectStage: 'pending',
+      deliver: async () => { await ctx.reply(message); },
+      failureNotice: (ctx.localeState?.catalog ?? en).home.recovery.unavailable,
+    });
   }
 
   private currentAdmin(ctx: TelegramContext): { userId: number; chatId: number } | null {
     if (ctx.chat?.type !== 'private' || ctx.localeState?.user.role !== 'admin' || !ctx.from) return null;
     return { userId: ctx.from.id, chatId: ctx.chat.id };
-  }
-
-  private async cancelAfterRoleLoss(ctx: TelegramContext, parsed: { receiptId: string; generationId: string }): Promise<void> {
-    if (ctx.chat?.type !== 'private' || !ctx.from) return;
-    const pending = this.pending.get(bindingKey(ctx.from.id, ctx.chat.id));
-    if (pending?.receiptId !== parsed.receiptId || pending.generationId !== parsed.generationId) return;
-    this.pending.delete(bindingKey(ctx.from.id, ctx.chat.id));
-    await this.cancelConnection.execute({
-      generationId: pending.generationId,
-      receiptId: pending.receiptId,
-      adminUserId: ctx.from.id,
-      chatId: ctx.chat.id,
-    });
-  }
-
-  private async cancelDocumentAfterRoleLoss(ctx: TelegramContext): Promise<void> {
-    if (ctx.chat?.type !== 'private' || !ctx.from) return;
-    const pending = this.pending.get(bindingKey(ctx.from.id, ctx.chat.id));
-    if (!pending) return;
-    this.pending.delete(bindingKey(ctx.from.id, ctx.chat.id));
-    await this.cancelConnection.execute({
-      generationId: pending.generationId,
-      receiptId: pending.receiptId,
-      adminUserId: ctx.from.id,
-      chatId: ctx.chat.id,
-    });
-  }
-
-  private async cancelPendingConnections(): Promise<void> {
-    const pending = [...this.pending.values()];
-    this.pending.clear();
-    await Promise.all(pending.map((connection) => this.cancelConnection.execute({
-      generationId: connection.generationId,
-      receiptId: connection.receiptId,
-      adminUserId: connection.adminUserId,
-      chatId: connection.chatId,
-    }).catch(() => 'stale')));
-  }
-
-  private async deleteClientMessage(ctx: TelegramContext, warning: string): Promise<void> {
-    const messageId = ctx.message?.message_id;
-    const chatId = ctx.chat?.id;
-    if (!messageId || !chatId) return;
-    try { await ctx.api.deleteMessage(chatId, messageId); }
-    catch { await ctx.reply(warning); }
   }
 
   async handleStatus(
@@ -290,10 +420,22 @@ function parseCallback(data: string): { receiptId: string; generationId: string;
   return match ? { receiptId: match[1], generationId: match[2], action: match[3] as DriveCallbackAction } : null;
 }
 
-function bindingKey(userId: number, chatId: number): string {
-  return `${userId}:${chatId}`;
-}
-
 function randomReceipt(): string {
   return randomBytes(12).toString('base64url');
+}
+
+function rawPrivateIdentity(ctx: TelegramContext): { userId: number; chatId: number } | null {
+  return ctx.chat?.type === 'private' && ctx.from
+    ? { userId: ctx.from.id, chatId: ctx.chat.id }
+    : null;
+}
+
+function documentInput(ctx: TelegramContext): TelegramDriveClientDocument {
+  const document = ctx.message?.document;
+  if (!document) throw new DriveClientDocumentError('invalid-credentials');
+  return { fileId: document.file_id, fileSize: document.file_size };
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
 }
