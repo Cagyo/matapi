@@ -26,8 +26,7 @@ export class DrizzleUserSensorMuteRepository
     if (row !== undefined || typeof target === 'string' || target.kind !== 'sensor') return row !== undefined;
     const legacy = this.select(userId, target.id);
     if (!legacy) return false;
-    await this.mute(userId, target);
-    await this.unmute(userId, target.id);
+    this.migrateLegacySensorMute(userId, target.id);
     return true;
   }
 
@@ -83,6 +82,27 @@ export class DrizzleUserSensorMuteRepository
   private select(userId: number, sensorId: string): boolean {
     return this.db.select({ sensorId: userSensorMutes.sensorId }).from(userSensorMutes)
       .where(and(eq(userSensorMutes.userId, userId), eq(userSensorMutes.sensorId, sensorId))).get() !== undefined;
+  }
+
+  private migrateLegacySensorMute(userId: number, sensorId: string): void {
+    try {
+      this.db.transaction((tx) => {
+        tx.insert(userSensorMutes)
+          .values({ userId, sensorId: targetKey({ kind: 'sensor', id: sensorId }) })
+          .onConflictDoNothing()
+          .run();
+        tx.delete(userSensorMutes)
+          .where(
+            and(
+              eq(userSensorMutes.userId, userId),
+              eq(userSensorMutes.sensorId, sensorId),
+            ),
+          )
+          .run();
+      });
+    } catch {
+      // The legacy row remains the authoritative mute if conversion cannot commit.
+    }
   }
 }
 

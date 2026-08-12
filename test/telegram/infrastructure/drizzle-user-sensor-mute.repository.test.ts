@@ -45,4 +45,43 @@ describe('DrizzleUserSensorMuteRepository', () => {
     await expect(repository.countForUser(1)).resolves.toBe(1);
     await expect(repository.listForUser(1)).resolves.toEqual([{ kind: 'sensor', id: 'door' }]);
   });
+
+  it('migrates a legacy mute without exposing a transient mixed representation', async () => {
+    const users = new DrizzleUserRepository(context.appDb);
+    await users.createUser({
+      telegramId: 1, name: 'One', role: 'user', locale: 'en', createdAt: new Date(),
+    });
+    await repository.mute(1, 'door');
+
+    const migration = repository.isMuted(1, { kind: 'sensor', id: 'door' });
+
+    expect(mutedSensorIds()).toEqual(['sensor:door']);
+    await expect(migration).resolves.toBe(true);
+  });
+
+  it('rolls back a failed legacy-mute migration and preserves the legacy acknowledgement', async () => {
+    const users = new DrizzleUserRepository(context.appDb);
+    await users.createUser({
+      telegramId: 1, name: 'One', role: 'user', locale: 'en', createdAt: new Date(),
+    });
+    await repository.mute(1, 'door');
+    context.sqlite.exec(`
+      CREATE TRIGGER reject_legacy_mute_delete
+      BEFORE DELETE ON user_sensor_mutes
+      WHEN OLD.sensor_id = 'door'
+      BEGIN
+        SELECT RAISE(ABORT, 'legacy mute deletion rejected');
+      END;
+    `);
+
+    await expect(repository.isMuted(1, { kind: 'sensor', id: 'door' })).resolves.toBe(true);
+    expect(mutedSensorIds()).toEqual(['door']);
+  });
+
+  function mutedSensorIds(): string[] {
+    return context.sqlite
+      .prepare('SELECT sensor_id FROM user_sensor_mutes WHERE user_id = ? ORDER BY sensor_id')
+      .all(1)
+      .map((row) => row.sensor_id as string);
+  }
 });
