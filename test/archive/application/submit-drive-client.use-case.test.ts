@@ -4,7 +4,9 @@ import type { PendingDriveConnection } from '../../../src/archive/application/us
 import { SubmitDriveClientUseCase } from '../../../src/archive/application/use-cases/submit-drive-client.use-case';
 import type { DeviceAuthorizationChallenge } from '../../../src/archive/application/ports/drive-device-authorization.port';
 import { DriveSetupExpiredError } from '../../../src/archive/domain/errors/drive-setup-expired.error';
+import { DriveSetupBusyError } from '../../../src/archive/domain/errors/drive-setup-busy.error';
 import { DriveTemporaryUnavailableError } from '../../../src/archive/domain/errors/drive-temporary-unavailable.error';
+import { InMemoryDriveCredentialRepository } from '../../../src/archive/infrastructure/persistence/in-memory-drive-credential.repository';
 
 const nowMs = 10_000;
 
@@ -81,6 +83,48 @@ describe('SubmitDriveClientUseCase', () => {
       fixture.pending.generationId, fixture.pending.receiptId,
     );
   });
+
+  it('retains the old active generation when a replacement provider request fails', async () => {
+    const credentials = new InMemoryDriveCredentialRepository();
+    await activateOldGeneration(credentials);
+    const pending = pendingFixture({ generationId: 'new-generation', receiptId: 'new-receipt' });
+    const useCase = new SubmitDriveClientUseCase(
+      credentials,
+      { requestCode: vi.fn().mockRejectedValue(new DriveTemporaryUnavailableError()) } as never,
+      { start: vi.fn() } as never,
+      fixedClock(nowMs),
+    );
+
+    await expect(useCase.execute({
+      pending, document: validClientJson(), signal: new AbortController().signal,
+      authorizationSignal: new AbortController().signal, acceptChallenge: () => true,
+    })).rejects.toBeInstanceOf(DriveTemporaryUnavailableError);
+
+    expect((await credentials.loadActive())?.id).toBe('old-generation');
+    expect(await credentials.loadStaged('new-receipt')).toBeNull();
+  });
+
+  it('never discards another administrator’s staged owner when submission is busy', async () => {
+    const repository = new InMemoryDriveCredentialRepository();
+    await repository.stage(stageInput('first-generation', 'first-receipt'));
+    const discardStaged = vi.fn(repository.discardStaged.bind(repository));
+    const useCase = new SubmitDriveClientUseCase(
+      { stage: repository.stage.bind(repository), discardStaged } as never,
+      { requestCode: vi.fn() } as never,
+      { start: vi.fn() } as never,
+      fixedClock(nowMs),
+    );
+    const pending = pendingFixture({ generationId: 'second-generation', receiptId: 'second-receipt' });
+
+    await expect(useCase.execute({
+      pending, document: validClientJson(), signal: new AbortController().signal,
+      authorizationSignal: new AbortController().signal, acceptChallenge: () => true,
+    })).rejects.toBeInstanceOf(DriveSetupBusyError);
+
+    expect(discardStaged).not.toHaveBeenCalledWith('first-generation', 'first-receipt');
+    expect((await repository.loadStaged('first-receipt'))?.id).toBe('first-generation');
+    expect(await repository.loadStaged('second-receipt')).toBeNull();
+  });
 });
 
 function createFixture() {
@@ -125,4 +169,22 @@ function validClientJson(): string {
   return JSON.stringify({ installed: {
     client_id: '123-device.apps.googleusercontent.com', client_secret: 'secret_12345678',
   } });
+}
+
+async function activateOldGeneration(credentials: InMemoryDriveCredentialRepository): Promise<void> {
+  await credentials.stage(stageInput('old-generation', 'old-receipt'));
+  await credentials.storeExchangedTokens('old-generation', 0, {
+    accessToken: null, refreshToken: 'old-refresh', expiryDateMs: null, tokenType: null, scope: null,
+  });
+  await credentials.activate({
+    stagedId: 'old-generation', expectedRevision: 1, permissionId: 'old-permission', email: null, displayName: null,
+    folders: { rootId: 'old-root', motionId: 'old-motion', backupsId: 'old-backups' }, activatedAtMs: nowMs,
+  });
+}
+
+function stageInput(id: string, receiptId: string) {
+  return {
+    id, receiptId, installationId: 'installation-1', client: { clientId: '123-device.apps.googleusercontent.com', clientSecret: 'secret_12345678' },
+    clientIdHash: id, adminUserId: 7, chatId: 7, createdAtMs: nowMs, expiresAtMs: nowMs + 600_000,
+  };
 }

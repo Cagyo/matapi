@@ -31,8 +31,9 @@ export class ConfirmDriveAccountUseCase {
       const account = await this.accounts.resolveAccount(staged, input.signal);
       const folders = await this.accounts.resolveManagedFolders(staged, input.signal);
       this.assertLive(input.effectiveDeadlineMs);
-      this.assertLive(input.effectiveDeadlineMs);
-      await this.credentials.activate({ stagedId: staged.id, expectedRevision: staged.revision, ...account, folders, activatedAtMs: this.clock.now().getTime() });
+      const activatedAtMs = this.clock.now().getTime();
+      this.assertLive(input.effectiveDeadlineMs, activatedAtMs);
+      await this.credentials.activate({ stagedId: staged.id, expectedRevision: staged.revision, ...account, folders, activatedAtMs });
       return 'activated';
     } catch (error) {
       await this.credentials.discardStaged(staged.id, input.receiptId);
@@ -54,8 +55,8 @@ export class ConfirmDriveAccountUseCase {
     return staged;
   }
 
-  private assertLive(effectiveDeadlineMs: number): void {
+  private assertLive(effectiveDeadlineMs: number, nowMs = this.clock.now().getTime()): void {
     if (!Number.isSafeInteger(effectiveDeadlineMs)
-      || effectiveDeadlineMs <= this.clock.now().getTime()) throw new DriveSetupExpiredError();
+      || effectiveDeadlineMs <= nowMs) throw new DriveSetupExpiredError();
   }
 }

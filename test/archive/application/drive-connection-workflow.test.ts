@@ -76,6 +76,48 @@ describe('Drive connection workflow', () => {
     expect((await credentials.loadActive())?.id).toBe('old-generation');
     expect(await credentials.loadStaged('receipt-1')).toBeNull();
   });
+
+  it('rejects confirmation when the final activation timestamp reaches the deadline', async () => {
+    const credentials = new InMemoryDriveCredentialRepository();
+    await credentials.stage({
+      id: 'generation-00001', installationId: 'installation-1', client: { clientId: 'new.apps.googleusercontent.com', clientSecret: 'new-secret' },
+      clientIdHash: 'new', adminUserId: 7, chatId: 9, receiptId: 'receipt-1', createdAtMs: 4, expiresAtMs: 99,
+    });
+    await credentials.storeExchangedTokens('generation-00001', 0, { accessToken: null, refreshToken: 'new-refresh', expiryDateMs: null, tokenType: null, scope: null });
+    const readings = [9, 9, 10];
+    const workflow = new ConfirmDriveAccountUseCase(credentials, {
+      resolveAccount: vi.fn().mockResolvedValue({ permissionId: 'new-permission', email: null, displayName: null }),
+      resolveManagedFolders: vi.fn().mockResolvedValue({ rootId: 'new-root', motionId: 'new-motion', backupsId: 'new-backups' }),
+    } as never, { now: () => new Date(readings.shift() ?? 10) });
+
+    await expect(workflow.execute({
+      generationId: 'generation-00001', receiptId: 'receipt-1', adminUserId: 7, chatId: 9,
+      effectiveDeadlineMs: 10, signal: new AbortController().signal,
+    })).rejects.toBeInstanceOf(DriveSetupExpiredError);
+
+    expect(await credentials.loadStaged('receipt-1')).toBeNull();
+  });
+
+  it('rejects confirmation when account resolution crosses the effective deadline', async () => {
+    const credentials = new InMemoryDriveCredentialRepository();
+    await credentials.stage({
+      id: 'generation-00001', installationId: 'installation-1', client: { clientId: 'new.apps.googleusercontent.com', clientSecret: 'new-secret' },
+      clientIdHash: 'new', adminUserId: 7, chatId: 9, receiptId: 'receipt-1', createdAtMs: 4, expiresAtMs: 99,
+    });
+    await credentials.storeExchangedTokens('generation-00001', 0, { accessToken: null, refreshToken: 'new-refresh', expiryDateMs: null, tokenType: null, scope: null });
+    let nowMs = 9;
+    const workflow = new ConfirmDriveAccountUseCase(credentials, {
+      resolveAccount: vi.fn().mockImplementation(async () => { nowMs = 10; return { permissionId: 'new-permission', email: null, displayName: null }; }),
+      resolveManagedFolders: vi.fn().mockResolvedValue({ rootId: 'new-root', motionId: 'new-motion', backupsId: 'new-backups' }),
+    } as never, { now: () => new Date(nowMs) });
+
+    await expect(workflow.execute({
+      generationId: 'generation-00001', receiptId: 'receipt-1', adminUserId: 7, chatId: 9,
+      effectiveDeadlineMs: 10, signal: new AbortController().signal,
+    })).rejects.toBeInstanceOf(DriveSetupExpiredError);
+
+    expect(await credentials.loadStaged('receipt-1')).toBeNull();
+  });
 });
 
 describe('background authorization and disconnect', () => {
@@ -117,6 +159,29 @@ describe('background authorization and disconnect', () => {
 
     expect(credentials.storeExchangedTokens.mock.invocationCallOrder[0]).toBeLessThan(publish.mock.invocationCallOrder[0]);
     expect(publish).toHaveBeenCalledWith(expect.objectContaining({ kind: 'authorized', account: { permissionId: 'permission-1', email: null, displayName: 'Drive admin' } }));
+  });
+
+  it('aborts the provider poll when the registry-owned signal is cancelled', async () => {
+    const registry = new AbortController();
+    const poll = vi.fn(async (_client: unknown, _challenge: unknown, signal: AbortSignal) => {
+      await new Promise<never>((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+    });
+    const credentials = { storeExchangedTokens: vi.fn(), discardStaged: vi.fn(), expireStaged: vi.fn(), loadStaged: vi.fn() };
+    const publish = vi.fn();
+    const polling = new DriveAuthorizationPollingService(
+      { poll } as never, credentials, { resolveAccount: vi.fn() }, { publish },
+    );
+
+    polling.start({ generationId: 'generation-00001', expectedRevision: 0, receiptId: 'abcdefghijklmnop', adminUserId: 7, chatId: 9,
+      client: { clientId: '123.apps.googleusercontent.com', clientSecret: 'secret-123' }, signal: registry.signal,
+      challenge: { deviceCode: 'device', userCode: 'user', verificationUri: 'https://example.test', verificationUriComplete: null, intervalMs: 1, expiresAtMs: 99 },
+    });
+    await vi.waitFor(() => expect(poll).toHaveBeenCalledOnce());
+    registry.abort(new DOMException('Cancelled', 'AbortError'));
+    await vi.waitFor(() => expect(poll.mock.calls[0]?.[2]?.aborted).toBe(true));
+
+    expect(credentials.discardStaged).not.toHaveBeenCalled();
+    expect(publish).not.toHaveBeenCalled();
   });
 
   it('releases generation leases and resumable sessions before revoking credentials', async () => {
