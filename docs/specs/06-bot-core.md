@@ -75,7 +75,8 @@ the authority across a restart.
 Normal callback data is UTF-8 bounded to Telegram's 64-byte limit and has the
 format `h:<16-character-base64url-token>:<base36-revision>:<action>[:<page>]`.
 The action codes are `h` (Home), `s` (Sensors page), `c` (camera), `n`
-(notifications), `m` (More), and `k` (Check now); `ho` is the
+(notifications), `m` (More), `k` (Check now), `ha` (application output), and
+`hr` (application errors); `ho` is the
 stateless Open-new-Home recovery action. The handler acknowledges first, parses
 the bounded value, loads current locale/role, validates user/chat/message/token/
 revision, then renders or executes. A stale, closed, or unavailable authority
@@ -88,6 +89,27 @@ five Sensor Setup destinations (add, edit, remove, import, export), Storage
 (Drive status/connect and receipt-backed cleanup), and System (health,
 packages, restart, and automatic-cleanup thresholds). Canonical Storage status
 never emits `clean:trigger`; Home is the only Slice 3 cleanup launcher.
+
+History keeps the ordinary sensor Logs and CSV actions in its first row. For a
+currently authorized administrator it adds a second row with Application logs
+and Errors before the Back/Home row; ordinary users retain the original layout
+unchanged. The role capability is projected into the rendered History screen
+from the role loaded for the current update and is not persisted in `HomeView`.
+The `ha` and `hr` callbacks are exact four-part, typed, no-payload actions: they
+never carry a filesystem path, PM2 process name, role, stream string, or line
+count. Navigation checks that their persisted parent is History before checking
+the current admin role, so a wrong-parent callback is superseded and a button
+pressed after demotion receives localized recovery without starting a workflow.
+
+An authorized Application logs or Errors launch captures the exact History
+origin and current Home session token in the durable `logs` workflow receipt.
+`LogsHandler` re-authorizes the administrator at the interface boundary, maps
+the typed action to the output or error stream, and delivers the bounded log as
+a document before opening a fresh, currently authorized History screen. If the
+document send fails, it is not retried; the restored History carries localized
+unavailable notice. If fresh History restoration itself fails, the receipt
+remains resumable and the exact receipt-bound retry-return control is presented.
+Sensor history continues through the existing sensor picker (`handleEmpty`).
 
 External workflows use one durable `workflow-return` receipt per user/private
 chat. `WorkflowNavigationHandler` registers before broad workflow handlers and

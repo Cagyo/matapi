@@ -104,6 +104,26 @@ describe('HomeNavigationUseCase', () => {
     })).resolves.toEqual({ kind: 'recovery', reason: 'superseded' });
   });
 
+  it.each([
+    ['history-application-logs', 'history-application-logs'],
+    ['history-error-logs', 'history-error-logs'],
+  ] as const)('routes admin %s only from History', async (kind, destination) => {
+    const useCase = new HomeNavigationUseCase(
+      {} as never,
+      { now: () => now },
+      { generate: () => '1234567890abcdef' },
+    );
+    await expect(useCase.execute({
+      active, role: 'admin', view: { kind: 'history' }, action: { kind },
+    })).resolves.toEqual({ kind: 'external', destination });
+    await expect(useCase.execute({
+      active, role: 'user', view: { kind: 'history' }, action: { kind },
+    })).resolves.toEqual({ kind: 'recovery', reason: 'admin-required' });
+    await expect(useCase.execute({
+      active, role: 'admin', view: { kind: 'more' }, action: { kind },
+    })).resolves.toEqual({ kind: 'recovery', reason: 'superseded' });
+  });
+
   it('starts Features only from Admin tools for an administrator', async () => {
     const useCase = new HomeNavigationUseCase({} as never, { now: () => now }, { generate: () => '1234567890abcdef' });
     await expect(useCase.execute({ active, role: 'admin', view: { kind: 'admin-tools' }, action: { kind: 'features' } }))

@@ -65,7 +65,8 @@ export class GetHomeScreenUseCase {
       if (!target) throw new NotificationTargetUnavailableError(`${input.view.target.kind}:${input.view.target.id}`);
       return { kind: 'notification-target', target, page: input.view.page };
     }
-    if (input.view.kind === 'pause-duration' || input.view.kind === 'history' || input.view.kind === 'admin-tools' || input.view.kind === 'admin-sensor-setup' || input.view.kind === 'admin-storage') return { kind: input.view.kind };
+    if (input.view.kind === 'history') return { kind: 'history', isAdmin: input.role === 'admin' };
+    if (input.view.kind === 'pause-duration' || input.view.kind === 'admin-tools' || input.view.kind === 'admin-sensor-setup' || input.view.kind === 'admin-storage') return { kind: input.view.kind };
     if (input.view.kind === 'pause-confirmation') return { kind: input.view.kind, hours: input.view.hours, receiptId: input.view.receiptId };
     if (input.view.kind === 'more') return { kind: 'more', isAdmin: input.role === 'admin' };
     if (input.view.kind === 'admin-system') return { kind: 'admin-system' };

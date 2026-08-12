@@ -10,6 +10,8 @@ type HomeExternalDestination =
   | 'camera'
   | 'history-logs'
   | 'history-csv'
+  | 'history-application-logs'
+  | 'history-error-logs'
   | 'settings'
   | 'help'
   | 'config-add'
@@ -143,12 +145,18 @@ export class HomeNavigationUseCase {
     if ((action.kind === 'notification-target-mute' || action.kind === 'notification-target-unmute') && view.kind === 'notification-target') return { kind: 'effect' };
     if (action.kind === 'history-logs' && view.kind === 'history') return { kind: 'external', destination: 'history-logs' };
     if (action.kind === 'history-csv' && view.kind === 'history') return { kind: 'external', destination: 'history-csv' };
+    if (action.kind === 'history-application-logs' || action.kind === 'history-error-logs') {
+      if (view.kind !== 'history') return { kind: 'recovery', reason: 'superseded' };
+      return input.role === 'admin'
+        ? { kind: 'external', destination: action.kind }
+        : { kind: 'recovery', reason: 'admin-required' };
+    }
     if (action.kind === 'settings' && view.kind === 'more') return { kind: 'external', destination: 'settings' };
     if (action.kind === 'help' && view.kind === 'more') return { kind: 'external', destination: 'help' };
     if (action.kind === 'invite' && view.kind === 'admin-tools' && input.role === 'admin') return { kind: 'external', destination: 'invite' };
     if (action.kind === 'features' && view.kind === 'admin-tools' && input.role === 'admin') return { kind: 'external', destination: 'features' };
 
-    const adminExternal: Record<string, Exclude<HomeExternalDestination, 'camera' | 'history-logs' | 'history-csv' | 'settings' | 'help' | 'invite'>> = {
+    const adminExternal: Record<string, Exclude<HomeExternalDestination, 'camera' | 'history-logs' | 'history-csv' | 'history-application-logs' | 'history-error-logs' | 'settings' | 'help' | 'invite'>> = {
       'config-add': 'config-add', 'config-modify': 'config-modify', 'config-remove': 'config-remove', 'config-import': 'config-import', 'config-export': 'config-export',
       'drive-status': 'drive-status', 'drive-connect': 'drive-connect', 'system-health': 'system-health', 'system-packages': 'system-packages',
     };

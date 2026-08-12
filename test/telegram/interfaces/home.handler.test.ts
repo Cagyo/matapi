@@ -103,7 +103,10 @@ function setup(overrides: {
   thresholds?: { execute: ReturnType<typeof vi.fn> };
   actions?: { finishExternal: ReturnType<typeof vi.fn> };
   workflows?: WorkflowEntryCoordinator;
-  logs?: { handleEmpty: ReturnType<typeof vi.fn> };
+  logs?: {
+    handleEmpty: ReturnType<typeof vi.fn>;
+    handleApplication: ReturnType<typeof vi.fn>;
+  };
   csv?: { handleEmpty: ReturnType<typeof vi.fn> };
   settings?: { handleCommand: ReturnType<typeof vi.fn> };
   config?: { handleSubcommand: ReturnType<typeof vi.fn> };
@@ -435,7 +438,10 @@ describe('HomeHandler', () => {
     ['history-logs', 'logs', 'logs'],
     ['history-csv', 'csv', 'csv'],
   ] as const)('starts Home-launched %s with its exact captured History origin', async (actionKind, workflow, target) => {
-    const logs = { handleEmpty: vi.fn().mockResolvedValue(undefined) };
+    const logs = {
+      handleEmpty: vi.fn().mockResolvedValue(undefined),
+      handleApplication: vi.fn().mockResolvedValue(undefined),
+    };
     const csv = { handleEmpty: vi.fn().mockResolvedValue(undefined) };
     const { callbacks, navigation, workflowEntry } = setup({ logs, csv });
     const ctx = context(encodeHomeCallback(identity.token, 1, { kind: actionKind }));
@@ -458,6 +464,65 @@ describe('HomeHandler', () => {
     expect(handler).toHaveBeenCalledWith(ctx, {
       receipt: expect.objectContaining({ payload: expect.objectContaining({ workflow }) }),
     });
+  });
+
+  it.each([
+    ['history-application-logs', 'output'],
+    ['history-error-logs', 'error'],
+  ] as const)('launches %s with the exact captured History receipt', async (actionKind, stream) => {
+    const logs = {
+      handleEmpty: vi.fn().mockResolvedValue(undefined),
+      handleApplication: vi.fn().mockResolvedValue(undefined),
+    };
+    const { callbacks, validate, navigation, workflowEntry } = setup({ logs });
+    const ctx = context(encodeHomeCallback(identity.token, 1, { kind: actionKind }));
+    ctx.localeState = localeState('admin');
+    (validate.execute as ReturnType<typeof vi.fn>).mockResolvedValue({
+      kind: 'accepted', active: identity, view: { kind: 'history' },
+    });
+    (navigation.route as ReturnType<typeof vi.fn>).mockReturnValue({
+      kind: 'external', destination: actionKind,
+    });
+    const logsReceipt = {
+      ...workflowReceipt,
+      payload: {
+        ...workflowReceipt.payload,
+        workflow: 'logs' as const,
+        origin: { kind: 'history' as const },
+      },
+    };
+    (workflowEntry.begin as ReturnType<typeof vi.fn>).mockResolvedValue(logsReceipt);
+
+    await callbacks[0].fn(ctx);
+
+    expect(workflowEntry.begin).toHaveBeenCalledWith(ctx, 'logs', {
+      source: 'captured', view: { kind: 'history' }, sessionToken: identity.token,
+    });
+    expect(logs.handleApplication).toHaveBeenCalledWith(ctx, stream, { receipt: logsReceipt });
+    expect(logs.handleEmpty).not.toHaveBeenCalled();
+  });
+
+  it('does not launch a stale admin History action after demotion', async () => {
+    const logs = {
+      handleEmpty: vi.fn().mockResolvedValue(undefined),
+      handleApplication: vi.fn().mockResolvedValue(undefined),
+    };
+    const { callbacks, validate, navigation, workflowEntry } = setup({ logs });
+    const ctx = context(encodeHomeCallback(identity.token, 1, {
+      kind: 'history-error-logs',
+    }));
+    ctx.localeState = localeState('user');
+    (validate.execute as ReturnType<typeof vi.fn>).mockResolvedValue({
+      kind: 'accepted', active: identity, view: { kind: 'history' },
+    });
+    (navigation.route as ReturnType<typeof vi.fn>).mockReturnValue({
+      kind: 'recovery', reason: 'admin-required',
+    });
+
+    await callbacks[0].fn(ctx);
+
+    expect(workflowEntry.begin).not.toHaveBeenCalled();
+    expect(logs.handleApplication).not.toHaveBeenCalled();
   });
 
   it('starts a Home-launched sensor editor once with its captured Sensor setup origin', async () => {
