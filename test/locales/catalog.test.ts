@@ -54,6 +54,24 @@ describe('catalogFor', () => {
     }
   });
 
+  it('provides the complete Drive connection copy in every locale', () => {
+    for (const catalog of [catalogs.en, catalogs.ru, catalogs.uk]) {
+      expect(catalog.gdriveConnection).toEqual(expect.objectContaining({
+        guide: expect.any(String),
+        openConsole: expect.any(String),
+        documentInvalid: expect.any(String),
+        unsupportedClientType: expect.any(String),
+        clientRejected: expect.any(String),
+        setupBusy: expect.any(String),
+        setupExpired: expect.any(String),
+        policyBlocked: expect.any(String),
+        rateLimited: expect.any(String),
+        temporaryUnavailable: expect.any(String),
+        providerResponse: expect.any(String),
+      }));
+    }
+  });
+
   it('provides the complete Home rendering catalog with equal shapes in every locale', () => {
     const [english, russian, ukrainian] = [catalogs.en, catalogs.ru, catalogs.uk];
 

@@ -1361,12 +1361,40 @@ const enCatalog = {
   },
 
   gdriveConnection: {
+    guide: `☁️ Connect Google Drive
+
+Home Worker needs an OAuth client created in a Google Cloud project you control. Do not upload a Web or Desktop client.
+
+1. Open Google Cloud Console and sign in with the account that will own this project.
+2. Create a project dedicated to this Home Worker installation, or select an existing dedicated project.
+3. Open APIs & Services → Library, find Google Drive API, and press Enable.
+4. Open Google Auth Platform → Branding. If setup has not started, press Get started. Enter an app name such as “Home Worker,” select a support email, add a contact email, accept the Google API Services User Data Policy, and finish setup. Under Audience, choose External for a personal account or access outside one Google Workspace organization. Choose Internal only when the project belongs to your Workspace organization and the Drive account is a member of that same organization.
+5. Open Google Auth Platform → Data Access → Add or remove scopes. Add https://www.googleapis.com/auth/drive.file, then save.
+6. If you chose External, open Google Auth Platform → Audience and publish the app so its status is In production. Do not leave an External app in Testing: Google expires Testing authorizations and refresh tokens after seven days. Internal apps do not use this External publishing step.
+7. Open Google Auth Platform → Clients → Create client.
+8. Set Application type to exactly “TVs and Limited Input devices.” Enter a name such as “Home Worker device” and create it.
+9. Download the client JSON. Do not use a Web application or Desktop app JSON.
+10. Return to this private chat and send the downloaded JSON using Telegram's document/file attachment. Do not paste its contents, edit it, or forward it from another chat.
+
+Keep the downloaded file private. After reading the Telegram document, the bot will try to delete that message. If Google shows an unverified-app warning, continue only when this is your own project and you recognize the requested drive.file permission. For an Internal app, use only an account in the same Workspace organization as the project.
+
+If setup is interrupted or the bot restarts, press Connect Drive again.`,
+    openConsole: 'Open Google Cloud Console',
     uploadPrompt: '☁️ Send the Google OAuth installed-client JSON file as a document. It will be deleted after it is read.',
     authorize: (url: string, code: string) => `Open ${url} and enter this code: ${code}. Then tap Confirm.`,
     confirm: '✅ Confirm account',
     cancel: 'Cancel',
     cancelled: 'Google Drive connection cancelled.',
     invalidClient: '❌ The uploaded file is not a valid Google installed-client JSON document.',
+    documentInvalid: '❌ Download a fresh client JSON and send it as a Telegram document.',
+    unsupportedClientType: '❌ Create a client of type TVs and Limited Input devices. Web and Desktop clients do not work.',
+    clientRejected: '❌ Google rejected this OAuth client. Check that its type is TVs and Limited Input devices and that it still exists and is enabled.',
+    setupBusy: '⏳ Another administrator is connecting Drive. Retry this same document later; you do not need to restart setup.',
+    setupExpired: '⌛ Drive setup expired. Press Connect Drive and start again.',
+    policyBlocked: '❌ Google policy blocked access. Check External/Internal audience selection, Internal organization membership, and Workspace administrator policy.',
+    rateLimited: '⏳ Google rate-limited setup. Wait before starting Drive setup again.',
+    temporaryUnavailable: '❌ Google Drive or the network is temporarily unavailable. Retry later; your previous Drive connection is unchanged.',
+    providerResponse: '❌ Google returned an unexpected response. Update or restart Home Worker and retry; the JSON file is not necessarily invalid.',
     manualDelete: '⚠️ Could not delete the credential document. Please delete it manually.',
     connected: '✅ Google Drive connected.',
     connectionFailed: '❌ Google Drive connection could not be completed. Your previous connection was kept.',

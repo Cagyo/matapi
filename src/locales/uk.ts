@@ -1316,12 +1316,40 @@ const ukCatalog = {
   },
 
   gdriveConnection: {
+    guide: `☁️ Підключення Google Drive
+
+Home Worker потрібен OAuth-клієнт у контрольованому вами проєкті Google Cloud. Не надсилайте клієнт Web або Desktop.
+
+1. Відкрийте Google Cloud Console й увійдіть в обліковий запис власника проєкту.
+2. Створіть окремий проєкт для цієї інсталяції Home Worker або виберіть наявний окремий проєкт.
+3. Відкрийте APIs & Services → Library, знайдіть Google Drive API й натисніть Enable.
+4. Відкрийте Google Auth Platform → Branding. Якщо налаштування ще не почато, натисніть Get started. Укажіть назву, наприклад “Home Worker”, адресу підтримки й контактну адресу, прийміть Google API Services User Data Policy та завершіть налаштування. У Audience виберіть External для особистого облікового запису або доступу поза однією організацією Google Workspace. Вибирайте Internal лише коли проєкт належить вашій організації Workspace, а обліковий запис Drive входить до тієї самої організації.
+5. Відкрийте Google Auth Platform → Data Access → Add or remove scopes. Додайте https://www.googleapis.com/auth/drive.file і збережіть.
+6. Для External відкрийте Google Auth Platform → Audience та опублікуйте застосунок зі статусом In production. Не залишайте External у Testing: Google припиняє такі авторизації й refresh-токени через сім днів. Для Internal цей крок публікації не потрібен.
+7. Відкрийте Google Auth Platform → Clients → Create client.
+8. Встановіть Application type точно “TVs and Limited Input devices”, укажіть назву, наприклад “Home Worker device”, і створіть клієнт.
+9. Завантажте JSON клієнта. Не використовуйте JSON застосунку Web або Desktop.
+10. Поверніться до цього приватного чату й надішліть завантажений JSON як документ/файл Telegram. Не вставляйте його вміст, не редагуйте файл і не пересилайте його з іншого чату.
+
+Зберігайте файл приватним. Після читання бот спробує видалити повідомлення. Якщо Google покаже попередження про неперевірений застосунок, продовжуйте лише для власного проєкту, коли впізнаєте дозвіл drive.file. Для Internal використовуйте обліковий запис тієї самої організації Workspace.
+
+Якщо налаштування перервано або бот перезапущено, знову натисніть «Підключити Drive».`,
+    openConsole: 'Відкрити Google Cloud Console',
     uploadPrompt: '☁️ Надішліть JSON-файл Google OAuth для встановленого клієнта як документ. Після зчитування його буде видалено.',
     authorize: (url: string, code: string) => `Відкрийте ${url} і введіть код: ${code}. Потім натисніть «Підтвердити».`,
     confirm: '✅ Підтвердити обліковий запис',
     cancel: 'Скасувати',
     cancelled: 'Підключення Google Drive скасовано.',
     invalidClient: '❌ Завантажений файл не є коректним JSON для встановленого клієнта Google.',
+    documentInvalid: '❌ Завантажте свіжий JSON клієнта й надішліть його як документ Telegram.',
+    unsupportedClientType: '❌ Створіть клієнт типу TVs and Limited Input devices. Клієнти Web і Desktop не працюють.',
+    clientRejected: '❌ Google відхилив OAuth-клієнт. Перевірте тип TVs and Limited Input devices, а також що клієнт існує й увімкнений.',
+    setupBusy: '⏳ Інший адміністратор підключає Drive. Повторно надішліть цей документ пізніше; починати налаштування заново не потрібно.',
+    setupExpired: '⌛ Час налаштування Drive минув. Натисніть «Підключити Drive» і почніть знову.',
+    policyBlocked: '❌ Політика Google заблокувала доступ. Перевірте External/Internal, належність облікового запису до організації для Internal і політику адміністратора Workspace.',
+    rateLimited: '⏳ Google обмежив частоту налаштувань. Зачекайте перед новою спробою.',
+    temporaryUnavailable: '❌ Google Drive або мережа тимчасово недоступні. Спробуйте пізніше; попереднє підключення не змінено.',
+    providerResponse: '❌ Google повернув неочікувану відповідь. Оновіть або перезапустіть Home Worker і спробуйте знову; JSON не обов’язково помилковий.',
     manualDelete: '⚠️ Не вдалося видалити документ із даними. Видаліть його вручну.',
     connected: '✅ Google Drive підключено.',
     connectionFailed: '❌ Не вдалося завершити підключення Google Drive. Попереднє підключення збережено.',

@@ -1320,12 +1320,40 @@ const ruCatalog = {
   },
 
   gdriveConnection: {
+    guide: `☁️ Подключение Google Drive
+
+Home Worker нужен OAuth-клиент в контролируемом вами проекте Google Cloud. Не отправляйте клиент Web или Desktop.
+
+1. Откройте Google Cloud Console и войдите в аккаунт владельца проекта.
+2. Создайте отдельный проект для этой установки Home Worker или выберите существующий отдельный проект.
+3. Откройте APIs & Services → Library, найдите Google Drive API и нажмите Enable.
+4. Откройте Google Auth Platform → Branding. Если настройка ещё не начата, нажмите Get started. Укажите имя, например “Home Worker”, адрес поддержки и контактный адрес, примите Google API Services User Data Policy и завершите настройку. В Audience выберите External для личного аккаунта или доступа вне одной организации Google Workspace. Выбирайте Internal только если проект принадлежит вашей организации Workspace, а аккаунт Drive состоит в той же организации.
+5. Откройте Google Auth Platform → Data Access → Add or remove scopes. Добавьте https://www.googleapis.com/auth/drive.file и сохраните.
+6. Для External откройте Google Auth Platform → Audience и опубликуйте приложение со статусом In production. Не оставляйте External в Testing: Google прекращает такие авторизации и refresh-токены через семь дней. Для Internal этот шаг публикации не нужен.
+7. Откройте Google Auth Platform → Clients → Create client.
+8. Установите Application type точно “TVs and Limited Input devices”, задайте имя, например “Home Worker device”, и создайте клиент.
+9. Скачайте JSON клиента. Не используйте JSON приложения Web или Desktop.
+10. Вернитесь в этот личный чат и отправьте скачанный JSON как документ/файл Telegram. Не вставляйте его содержимое, не редактируйте файл и не пересылайте его из другого чата.
+
+Храните файл в тайне. После чтения бот попытается удалить сообщение. Если Google покажет предупреждение о непроверенном приложении, продолжайте только для собственного проекта, когда вы узнаёте разрешение drive.file. Для Internal используйте аккаунт из той же организации Workspace.
+
+Если настройка прервана или бот перезапущен, снова нажмите «Подключить Drive».`,
+    openConsole: 'Открыть Google Cloud Console',
     uploadPrompt: '☁️ Отправьте JSON-файл OAuth установленного клиента Google как документ. После чтения он будет удалён.',
     authorize: (url: string, code: string) => `Откройте ${url} и введите код: ${code}. Затем нажмите «Подтвердить».`,
     confirm: '✅ Подтвердить аккаунт',
     cancel: 'Отмена',
     cancelled: 'Подключение Google Drive отменено.',
     invalidClient: '❌ Загруженный файл не является корректным JSON установленного клиента Google.',
+    documentInvalid: '❌ Скачайте свежий JSON клиента и отправьте его как документ Telegram.',
+    unsupportedClientType: '❌ Создайте клиент типа TVs and Limited Input devices. Клиенты Web и Desktop не работают.',
+    clientRejected: '❌ Google отклонил OAuth-клиент. Проверьте тип TVs and Limited Input devices, а также что клиент существует и включён.',
+    setupBusy: '⏳ Другой администратор подключает Drive. Повторно отправьте этот документ позже; начинать настройку заново не нужно.',
+    setupExpired: '⌛ Время настройки Drive истекло. Нажмите «Подключить Drive» и начните заново.',
+    policyBlocked: '❌ Политика Google заблокировала доступ. Проверьте External/Internal, членство аккаунта в организации для Internal и политику администратора Workspace.',
+    rateLimited: '⏳ Google ограничил частоту настройки. Подождите перед новой попыткой.',
+    temporaryUnavailable: '❌ Google Drive или сеть временно недоступны. Повторите позже; предыдущее подключение не изменено.',
+    providerResponse: '❌ Google вернул неожиданный ответ. Обновите или перезапустите Home Worker и повторите; JSON не обязательно ошибочен.',
     manualDelete: '⚠️ Не удалось удалить документ с данными. Удалите его вручную.',
     connected: '✅ Google Drive подключён.',
     connectionFailed: '❌ Не удалось завершить подключение Google Drive. Предыдущее подключение сохранено.',
