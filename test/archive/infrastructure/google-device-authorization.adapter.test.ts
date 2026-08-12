@@ -110,7 +110,9 @@ describe('GoogleDeviceAuthorizationAdapter', () => {
       intervalMs: 5_000, expiresAtMs: clock.nowMs + 600_000,
     });
 
-    expect(new URLSearchParams(String(transport.requests[1].init.body)).get('scope'))
+    const body = transport.requests[1].init.body;
+    if (typeof body !== 'string') throw new Error('expected URL-encoded request body');
+    expect(new URLSearchParams(body).get('scope'))
       .toBe('https://www.googleapis.com/auth/drive.file');
   });
 
@@ -167,7 +169,7 @@ describe('GoogleDeviceAuthorizationAdapter', () => {
 
   it('maps transport timeout to temporary unavailable but preserves caller abort', async () => {
     const never = vi.fn((_url: string | URL, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
-      init.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      init.signal?.addEventListener('abort', () => reject(abortError(init.signal)), { once: true });
     }));
     const adapter = new GoogleDeviceAuthorizationAdapter({ fetch: never, clock: new Clock(), requestTimeoutMs: 1 });
     await expect(adapter.requestCode(client(), signal)).rejects.toBeInstanceOf(DriveTemporaryUnavailableError);
@@ -298,4 +300,10 @@ function discovery(): Record<string, string> {
 
 function tokens(): Record<string, unknown> {
   return { access_token: 'access-token', refresh_token: 'refresh-token', expires_in: 3600, token_type: 'Bearer', scope: 'https://www.googleapis.com/auth/drive.file' };
+}
+
+function abortError(signal: AbortSignal | null): Error {
+  return signal?.reason instanceof Error
+    ? signal.reason
+    : new DOMException('Cancelled', 'AbortError');
 }

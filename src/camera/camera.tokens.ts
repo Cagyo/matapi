@@ -52,7 +52,7 @@ function runtimeDirectory(raw: string | undefined): string {
     raw.length === 0 ||
     raw.length > 1_024 ||
     raw !== raw.trim() ||
-    /[\0-\x1f\x7f]/.test(raw) ||
+    containsControlCharacter(raw) ||
     !isAbsolute(raw) ||
     raw.split('/').includes('..')
   ) {
@@ -64,6 +64,13 @@ function runtimeDirectory(raw: string | undefined): string {
     return DEFAULTS.runtimeDirectory;
   }
   return normalized;
+}
+
+function containsControlCharacter(value: string): boolean {
+  return [...value].some((character) => {
+    const code = character.charCodeAt(0);
+    return code < 0x20 || code === 0x7f;
+  });
 }
 
 function boundedInteger(

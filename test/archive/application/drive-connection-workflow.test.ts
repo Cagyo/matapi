@@ -128,6 +128,12 @@ describe('Drive connection workflow', () => {
   });
 });
 
+function abortError(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new DOMException('Cancelled', 'AbortError');
+}
+
 describe('background authorization and disconnect', () => {
   it.each([
     [new DriveAuthorizationDeniedError(), 'denied'],
@@ -252,7 +258,7 @@ describe('background authorization and disconnect', () => {
   it('aborts the provider poll when the registry-owned signal is cancelled', async () => {
     const registry = new AbortController();
     const poll = vi.fn(async (_client: unknown, _challenge: unknown, signal: AbortSignal) => {
-      await new Promise<never>((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+      await new Promise<never>((_resolve, reject) => signal.addEventListener('abort', () => reject(abortError(signal)), { once: true }));
     });
     const credentials = { storeExchangedTokens: vi.fn(), discardStaged: vi.fn(), expireStaged: vi.fn(), loadStaged: vi.fn() };
     const publish = vi.fn();
@@ -275,7 +281,7 @@ describe('background authorization and disconnect', () => {
   it('aborts the provider poll when its local request is cancelled', async () => {
     const registry = new AbortController();
     const poll = vi.fn(async (_client: unknown, _challenge: unknown, signal: AbortSignal) => {
-      await new Promise<never>((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+      await new Promise<never>((_resolve, reject) => signal.addEventListener('abort', () => reject(abortError(signal)), { once: true }));
     });
     const credentials = { storeExchangedTokens: vi.fn(), discardStaged: vi.fn(), expireStaged: vi.fn(), loadStaged: vi.fn() };
     const publish = vi.fn();

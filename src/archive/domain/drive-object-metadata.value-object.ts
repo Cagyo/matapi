@@ -95,7 +95,7 @@ export function canonicalSharingState(
   requireText(sharing.ownerPermissionId, "Drive owner permission ID");
   if (
     typeof sharing.shared !== "boolean" ||
-    !Array.isArray(sharing.permissionIds)
+    !isStringArray(sharing.permissionIds)
   ) {
     throw new DriveObjectConflictError("Drive sharing metadata is malformed");
   }
@@ -167,4 +167,8 @@ function requireNonNegativeInteger(value: unknown, label: string): void {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function isStringArray(value: unknown): value is readonly string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
 }

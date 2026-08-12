@@ -14,7 +14,7 @@ describe('SensorModule', () => {
       && 'provide' in candidate && candidate.provide === FeatureSensorRuntimeLifecycleService);
     expect(provider).toBeDefined();
 
-    const lifecycleRegistry = { register: vi.fn() };
+    const lifecycleRegistry = { register: vi.fn<(name: string) => void>() };
     provider?.useFactory(lifecycleRegistry, {
       stopFeature: vi.fn(),
       resumeFeature: vi.fn(),

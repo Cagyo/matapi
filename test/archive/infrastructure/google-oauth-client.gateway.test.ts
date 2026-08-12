@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
-import { GoogleOAuthClientGateway, type OAuth2ClientFactory } from '../../../src/archive/infrastructure/google/google-oauth-client.gateway';
+import { GoogleOAuthClientGateway } from '../../../src/archive/infrastructure/google/google-oauth-client.gateway';
 import type { DriveCredentialRepositoryPort, OAuthTokenSet } from '../../../src/archive/application/ports/drive-credential-repository.port';
 import { DriveReauthorizationRequiredError } from '../../../src/archive/domain/errors/drive-reauthorization-required.error';
 
 class Client {
   private listener: ((tokens: Record<string, unknown>) => void) | undefined;
   credentials: Record<string, unknown> = {};
-  fail: unknown = null;
+  fail: Error | null = null;
 
   setCredentials(credentials: Record<string, unknown>): void { this.credentials = credentials; }
   on(_event: 'tokens', listener: (tokens: Record<string, unknown>) => void): this { this.listener = listener; return this; }
@@ -46,7 +46,7 @@ describe('GoogleOAuthClientGateway', () => {
 
     client.emit({ access_token: 'late-access' });
     await active.waitForTokenPersistence();
-    client.fail = { response: { status: 400, data: { error: 'invalid_grant', error_description: 'private content' } } };
+    client.fail = googleError({ status: 400, data: { error: 'invalid_grant', error_description: 'private content' } });
 
     await expect(active.getAccessToken()).rejects.toThrow(DriveReauthorizationRequiredError);
     expect(alert).toHaveBeenCalledTimes(1);
@@ -63,7 +63,7 @@ describe('GoogleOAuthClientGateway', () => {
     const gateway = new GoogleOAuthClientGateway(repository, alert, { create: () => client } as OAuth2ClientFactory, { now: () => 1_700_000_000_000 });
     const active = gateway.create({ generationId: 'generation-1', revision: 4, client: { clientId: 'id', clientSecret: 'secret' }, tokens: tokens('old-access') });
     client.emit({ access_token: 'new-access' });
-    client.fail = { response: { status: 400, data: { error: 'invalid_grant' } } };
+    client.fail = googleError({ status: 400, data: { error: 'invalid_grant' } });
 
     const first = active.getAccessToken();
     const second = active.getAccessToken();
@@ -83,7 +83,7 @@ describe('GoogleOAuthClientGateway', () => {
     repository.requireReauthorization.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
     const gateway = new GoogleOAuthClientGateway(repository, alert, { create: () => client } as OAuth2ClientFactory, { now: () => 1_700_000_000_000 });
     const active = gateway.create({ generationId: 'generation-1', revision: 4, client: { clientId: 'id', clientSecret: 'secret' }, tokens: tokens('old-access') });
-    client.fail = { response: { status: 400, data: { error: 'invalid_grant' } } };
+    client.fail = googleError({ status: 400, data: { error: 'invalid_grant' } });
 
     await expect(active.getAccessToken()).rejects.toThrow(DriveReauthorizationRequiredError);
     await expect(active.getAccessToken()).rejects.toThrow(DriveReauthorizationRequiredError);
@@ -95,4 +95,8 @@ describe('GoogleOAuthClientGateway', () => {
 
 function repositoryStub(): Record<keyof Pick<DriveCredentialRepositoryPort, 'mergeRefreshedTokens' | 'requireReauthorization'>, ReturnType<typeof vi.fn>> {
   return { mergeRefreshedTokens: vi.fn(), requireReauthorization: vi.fn() };
+}
+
+function googleError(response: { status: number; data: Record<string, unknown> }): Error {
+  return Object.assign(new Error('OAuth refresh failed'), { response });
 }

@@ -265,7 +265,7 @@ describe('QuickTunnelLiveStreamAdapter', () => {
       startupTimeoutMs: 500,
       stopGraceMs: 0,
     });
-    queueMicrotask(() => child.stdout.write('https://clear-moon.trycloudflare.com\n'));
+    queueMicrotask(() => { child.stdout.write('https://clear-moon.trycloudflare.com\n'); });
     const starting = adapter.start(startInput('http://127.0.0.1:9'));
     await vi.waitFor(() => expect(publicProbe).toHaveBeenCalledOnce());
     child.stderr.write('https://clear-moon.trycloudflare.com\n');
@@ -376,7 +376,7 @@ async function createFixture(
     spawnCloudflared: (args, options) => {
       spawnArgs = args;
       spawnOptions = options;
-      queueMicrotask(() => child.stderr.write('https://clear-moon.trycloudflare.com\n'));
+      queueMicrotask(() => { child.stderr.write('https://clear-moon.trycloudflare.com\n'); });
       return child;
     },
     publicProbe: async () => undefined,

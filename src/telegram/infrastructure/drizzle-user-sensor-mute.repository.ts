@@ -26,8 +26,8 @@ export class DrizzleUserSensorMuteRepository
     if (row !== undefined || typeof target === 'string' || target.kind !== 'sensor') return row !== undefined;
     const legacy = this.select(userId, target.id);
     if (!legacy) return false;
-    this.mute(userId, target);
-    this.unmute(userId, target.id);
+    await this.mute(userId, target);
+    await this.unmute(userId, target.id);
     return true;
   }
 
@@ -65,11 +65,11 @@ export class DrizzleUserSensorMuteRepository
       await this.mute(userId, { kind: 'sensor', id: value });
       await this.unmute(userId, value);
     }
-    return (await this.db
+    return this.db
       .select({ sensorId: userSensorMutes.sensorId })
       .from(userSensorMutes)
       .where(eq(userSensorMutes.userId, userId))
-      .all())
+      .all()
       .map((row) => row.sensorId)
       .filter((id): id is string => id !== null)
       .map(parseTarget)

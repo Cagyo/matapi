@@ -322,8 +322,7 @@ export class SensorRegistryService
     const existing = this.activeHealthChecks.get(sensorId);
     if (existing) return existing;
 
-    let check!: Promise<boolean>;
-    check = Promise.resolve()
+    const check = Promise.resolve()
       .then(() => driver.healthCheck())
       .finally(() => {
         if (this.activeHealthChecks.get(sensorId) === check) {

@@ -42,7 +42,10 @@ describe('pairing forms', () => {
       { name: 'neobox', defaultEnabled: true },
       { name: 'digital', defaultEnabled: true },
     ]);
-    const values = [...html.matchAll(/name="features" value="([^"]+)"/g)].map((match) => match[1]);
+    const values: string[] = [];
+    for (const match of html.matchAll(/name="features" value="([^"]+)"/g)) {
+      if (match[1] !== undefined) values.push(match[1]);
+    }
     expect(values).toEqual(['digital', 'uart', 'zigbee', 'motion', 'rtsp']);
     expect(html).not.toContain('value="4g"');
     expect(html).not.toContain('value="neobox"');

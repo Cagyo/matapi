@@ -199,7 +199,7 @@ export class MotionWatcherService
     if (!this.isCurrent(generation)) throw new WatcherStoppedError();
   }
 
-  private sleep(ms: number, generation: number): Promise<void> {
+  private sleep(ms: number, _generation: number): Promise<void> {
     return new Promise((resolve) => {
       this.resolveBackoff = resolve;
       this.backoffTimer = setTimeout(() => {

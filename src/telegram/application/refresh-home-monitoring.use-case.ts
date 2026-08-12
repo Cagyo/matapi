@@ -35,8 +35,7 @@ export class RefreshHomeMonitoringUseCase {
   execute(): Promise<RefreshHomeMonitoringResult> {
     if (this.inFlight) return this.inFlight;
 
-    let refresh!: Promise<RefreshHomeMonitoringResult>;
-    refresh = this.refresh().finally(() => {
+    const refresh = this.refresh().finally(() => {
       if (this.inFlight === refresh) this.inFlight = null;
     });
     this.inFlight = refresh;

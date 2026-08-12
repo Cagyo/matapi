@@ -58,7 +58,11 @@ export class DrizzleSensorLogExportReader implements SensorLogExportReaderPort {
   constructor(@Inject(SQLITE) private readonly sqlite: Database.Database) {
     this.preflight = sqlite.prepare(PREFLIGHT_SQL);
     this.rows = sqlite.prepare(ROWS_SQL);
-    this.withinSnapshot = sqlite.transaction((sensorId, options, consume) => {
+    this.withinSnapshot = sqlite.transaction((
+      sensorId: string,
+      options: { limit: number; maxMessageBytes: number },
+      consume: (rows: Iterable<SensorLogExportRow>) => void,
+    ) => {
       // SQLite aggregates always return one row, but the driver correctly
       // represents a general `Statement#get` result as optional.
       const preflight = this.preflight.get(sensorId, options.limit) ?? {

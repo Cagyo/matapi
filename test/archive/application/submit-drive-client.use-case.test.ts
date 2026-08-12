@@ -90,8 +90,8 @@ describe('SubmitDriveClientUseCase', () => {
     const pending = pendingFixture({ generationId: 'new-generation', receiptId: 'new-receipt' });
     const useCase = new SubmitDriveClientUseCase(
       credentials,
-      { requestCode: vi.fn().mockRejectedValue(new DriveTemporaryUnavailableError()) } as never,
-      { start: vi.fn() } as never,
+      { requestCode: vi.fn().mockRejectedValue(new DriveTemporaryUnavailableError()) },
+      { start: vi.fn() },
       fixedClock(nowMs),
     );
 
@@ -109,9 +109,9 @@ describe('SubmitDriveClientUseCase', () => {
     await repository.stage(stageInput('first-generation', 'first-receipt'));
     const discardStaged = vi.fn(repository.discardStaged.bind(repository));
     const useCase = new SubmitDriveClientUseCase(
-      { stage: repository.stage.bind(repository), discardStaged } as never,
-      { requestCode: vi.fn() } as never,
-      { start: vi.fn() } as never,
+      { stage: repository.stage.bind(repository), discardStaged },
+      { requestCode: vi.fn() },
+      { start: vi.fn() },
       fixedClock(nowMs),
     );
     const pending = pendingFixture({ generationId: 'second-generation', receiptId: 'second-receipt' });
@@ -138,7 +138,7 @@ function createFixture() {
   const authorization = { requestCode: vi.fn().mockResolvedValue(challenge) };
   const polling = { start: vi.fn() };
   const useCase = new SubmitDriveClientUseCase(
-    credentials as never, authorization as never, polling as never, fixedClock(nowMs),
+    credentials, authorization, polling, fixedClock(nowMs),
   );
   return {
     pending, acceptChallenge, credentials, authorization, polling, useCase,

@@ -125,7 +125,7 @@ function parseRemoteTotal(value: string | null): number | null {
   if (value === null) return null;
   const match = /^bytes ([0-9]+)-[0-9]+\/([0-9]+)$/.exec(value);
   const total = match ? Number(match[2]) : Number.NaN;
-  if (!match || match[1] !== '0' || !Number.isSafeInteger(total) || total < 0) {
+  if (match?.[1] !== '0' || !Number.isSafeInteger(total) || total < 0) {
     throw new DriveClientDocumentError('download-failed');
   }
   return total;
@@ -143,7 +143,7 @@ function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw signal.reason ?? new DOMException('Aborted', 'AbortError');
 }
 
-function normalizeDownloadError(error: unknown, signal: AbortSignal): DriveClientDocumentError | unknown {
+function normalizeDownloadError(error: unknown, signal: AbortSignal): unknown {
   if (signal.aborted) throw signal.reason ?? error;
   if (error instanceof DriveClientDocumentError) return error;
   return new DriveClientDocumentError('download-failed');
