@@ -5,6 +5,8 @@
 Repaired only the two stale test fixtures responsible for the five documented
 baseline failures. No Google Drive implementation work was started.
 
+Primary repair commit: `35c7ec114c0f8e70cb755de34cabd9374d24f3bf`
+
 ## Initial worktree check
 
 `git status --short` showed an already-dirty worktree across Drive, feature,
