@@ -13,6 +13,7 @@ import { ArchiveRuntimeLifecycleService } from '../../src/archive/application/ar
 import { ArchiveAdminAlertService } from '../../src/archive/application/archive-admin-alert.service';
 import { ReportDriveStatusUseCase } from '../../src/archive/application/use-cases/report-drive-status.use-case';
 import { CLOCK } from '../../src/events/domain/ports/clock.port';
+import { DRIVE_DEVICE_AUTHORIZATION } from '../../src/archive/application/ports/drive-device-authorization.port';
 import { ArchiveSchedulerHooksService } from '../../src/archive/application/archive-scheduler.service';
 import {
   DriveAuthorizationOutcomeRegistrationService,
@@ -84,6 +85,41 @@ describe('ArchiveModule composition', () => {
     expect(parameters).toEqual(expect.arrayContaining([
       expect.objectContaining({ index: 1, param: CLOCK }),
     ]));
+  });
+
+  it('injects the shared CLOCK into every Drive setup time consumer', () => {
+    const providers = Reflect.getMetadata('providers', ArchiveModule) as ProviderRecord[];
+
+    expect(providerFor(providers, DRIVE_DEVICE_AUTHORIZATION).inject).toContain(CLOCK);
+    expect(providerFor(providers, BeginDriveConnectionUseCase).inject).toContain(CLOCK);
+    expect(providerFor(providers, SubmitDriveClientUseCase).inject).toContain(CLOCK);
+    expect(providerFor(providers, ConfirmDriveAccountUseCase).inject).toContain(CLOCK);
+  });
+
+  it('clears the adapter sleep timer and preserves the caller abort reason', async () => {
+    vi.useFakeTimers();
+    try {
+      const providers = Reflect.getMetadata('providers', ArchiveModule) as ProviderRecord[];
+      const provider = providerFor(providers, DRIVE_DEVICE_AUTHORIZATION);
+      const fixedNow = new Date('2026-08-12T10:00:00.000Z');
+      const adapter = provider.useFactory?.({ now: () => fixedNow }) as {
+        clock: {
+          now(): number;
+          sleep(ms: number, signal: AbortSignal): Promise<void>;
+        };
+      };
+      const controller = new AbortController();
+      const reason = new DOMException('Exact setup cancelled', 'AbortError');
+
+      expect(adapter.clock.now()).toBe(fixedNow.getTime());
+      const sleeping = adapter.clock.sleep(60_000, controller.signal);
+      controller.abort(reason);
+
+      await expect(sleeping).rejects.toBe(reason);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('binds a mandatory durable admin-alert adapter into reconciliation', () => {
@@ -161,6 +197,18 @@ describe('ArchiveModule composition', () => {
     });
   });
 });
+
+interface ProviderRecord {
+  provide?: unknown;
+  inject?: unknown[];
+  useFactory?: (...dependencies: unknown[]) => unknown;
+}
+
+function providerFor(providers: ProviderRecord[], token: unknown): ProviderRecord {
+  const provider = providers.find((candidate) => candidate.provide === token);
+  if (!provider) throw new Error(`Provider not found: ${String(token)}`);
+  return provider;
+}
 
 function remoteMaintenanceProvider(): {
   useFactory: (...dependencies: unknown[]) => unknown;

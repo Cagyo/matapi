@@ -15,10 +15,34 @@ generation only after its permission identity and private folder tree are
 verified. Client secrets, device codes, tokens, and resumable-session URLs are
 never logged or shown by status commands.
 
+Google's device response uses `verification_url`; the validated URL reaches the
+authorization message byte-for-byte unchanged, and `user_code` retains its exact
+case. Device-code failures use `error_code` with `error` as a compatibility
+fallback, while token and revoke failures use `error`. Recognized discriminators
+map to typed pending, denied, policy, client-rejected, reauthorization, and
+rate-limit errors; HTTP 429 maps to rate limiting, and unknown provider content
+maps to a sanitized temporary/provider-response failure. In particular,
+device-code `rate_limit_exceeded` and token/device `invalid_client` retain their
+dedicated localized outcomes.
+
+OAuth response JSON is read through a bounded streaming parser: bodies are at
+most 64 KiB, device codes 4 KiB, user codes 64 printable ASCII bytes, and display
+or discovered endpoint URLs 2 KiB. Display URLs must be absolute HTTP(S) URLs
+without embedded credentials. Discovery endpoints must equal the fixed Google
+device-code, token, and revoke endpoints; uploaded documents cannot redirect
+them.
+
 OAuth credentials are encrypted with AES-256-GCM. The encryption key is the
 immutable root-provisioned `/etc/home-worker/archive.key`; reinstall and OTA
 must validate it and never replace it. A missing or corrupt key makes Drive
 `reauth_required` without stopping Motion, Telegram, or local backups.
+
+The credential repository permits one staged generation for the whole
+installation. Staging contention returns a retryable busy result without
+discarding the existing owner. The previously active generation remains active
+until account and managed-folder confirmation succeeds and activation commits
+atomically; cancellation, timeout, provider rejection, or failed confirmation
+discards only the exact staged receipt/generation.
 
 ## Folder and object model
 

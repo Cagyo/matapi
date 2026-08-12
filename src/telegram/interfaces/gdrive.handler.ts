@@ -62,7 +62,7 @@ export class GdriveHandler implements TelegramHandler {
     private readonly confirmAccount: ConfirmDriveAccountUseCase,
     private readonly cancelConnection: CancelDriveConnectionUseCase,
     private readonly disconnect: DisconnectDriveUseCase,
-    private readonly setupStates: DriveSetupStateRegistry,
+    @Inject(DriveSetupStateRegistry) private readonly setupStates: DriveSetupStateRegistry,
   ) {}
 
   register(composer: Composer<TelegramContext>): void {

@@ -130,6 +130,7 @@ import { LegacyMenuHandler } from './interfaces/legacy-menu.handler';
 import { SettingsHandler } from './interfaces/settings.handler';
 import { CleanHandler } from './interfaces/clean.handler';
 import { BotCommandsMenuService } from './application/bot-commands-menu.service';
+import { DriveSetupStateRegistry } from './interfaces/drive-setup-state.registry';
 import { WorkflowDraftRegistry } from './interfaces/workflow-draft.registry';
 import { WorkflowOperationQueue } from './interfaces/workflow-operation.queue';
 import { WorkflowEntryCoordinator } from './interfaces/workflow-entry.coordinator';
@@ -317,6 +318,7 @@ const mode = resolveBotMode();
     CsvHandler,
     HomeHandler,
     WorkflowDraftRegistry,
+    DriveSetupStateRegistry,
     WorkflowOperationQueue,
     WorkflowEntryCoordinator,
     WorkflowNavigationPresenter,

@@ -47,6 +47,13 @@ const challenge = () => ({
 const signal = new AbortController().signal;
 
 describe('GoogleDeviceAuthorizationAdapter', () => {
+  it('requires a caller-owned clock', () => {
+    const fetch = vi.fn<typeof globalThis.fetch>();
+
+    expect(() => new GoogleDeviceAuthorizationAdapter({ fetch } as never))
+      .toThrow(DriveConfigurationError);
+  });
+
   it('adds five seconds after Google returns slow_down', async () => {
     const transport = new Transport();
     const clock = new Clock();

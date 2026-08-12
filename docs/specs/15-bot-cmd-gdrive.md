@@ -18,13 +18,41 @@ Administrator, private chat only.
 
 ## Connect
 
-The handler begins a receipt-bound `drive-setup` workflow and requests a Google
-OAuth installed-client JSON document. Forwarded, oversized, malformed, or
-non-private documents are rejected before parsing. The document is deleted
-after reading; if Telegram deletion fails, the administrator receives a manual
-deletion warning. Device authorization presents only Google's verification URL
-and user code. Confirmation rechecks the live account identity before activating
-the staged generation, so a failed replacement preserves the prior connection.
+The Storage & backup entry and `/gdrive connect` render the same localized
+command/menu guide, including the Google Cloud Console link and a receipt-origin
+Cancel control. Starting the guide creates one secret-free preparation owned by
+the administrator, private chat, and workflow receipt. The durable workflow
+receipt lasts 24 hours; no client secret, device code, token, or credential JSON
+is retained in preparation state.
+
+Sending a document is the continue action. The handler creates a fresh ten-minute
+pending generation only when it receives the associated document, so time spent
+following the guide does not consume the authorization window. Forwarded,
+oversized, malformed, Web, Desktop, and non-private documents are rejected before
+credential use. Every document associated with a preparation is deletion-attempted
+on success, validation failure, provider failure, expiry, and staged-slot
+contention. A failed Telegram deletion produces a localized manual-deletion
+warning; failure to deliver that warning does not replace the setup outcome.
+
+Device authorization displays only Google's unchanged verification URL and
+case-sensitive user code. Polling and confirmation share the effective deadline,
+which is the earlier of the pending generation expiry and Google's challenge
+expiry. Confirmation rechecks the live account identity before atomic activation,
+so a failed replacement preserves the active connection. A second administrator
+who encounters the single staged slot receives retryable busy guidance and can
+retry the same document without cancelling the staged owner or restarting the
+24-hour preparation.
+
+Callback payloads are exact, opaque bindings: `wr:<receipt>:o` returns or cancels
+to the receipt origin; `wr:<receipt>:h` opens Home;
+`gdc:<receipt>:<generation>:a` confirms authorization;
+`gdc:<receipt>:<generation>:c` cancels that setup;
+`gdc:<receipt>:<generation>:d` confirms disconnect; and
+`gdc:<receipt>:<generation>:x` cancels disconnect. They contain no credentials.
+Localized typed replies keep malformed document, unsupported client, rejected
+client, policy, rate-limit, busy, expiry, temporary transport, malformed provider
+success, and authorization-pending outcomes distinct; provider-controlled text is
+never copied into a reply.
 
 ## Status
 

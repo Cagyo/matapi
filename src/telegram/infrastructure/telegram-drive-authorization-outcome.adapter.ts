@@ -17,7 +17,7 @@ export class TelegramDriveAuthorizationOutcomeAdapter implements DriveAuthorizat
   constructor(
     @Inject(USER_REPOSITORY) private readonly users: UserRepositoryPort,
     @Inject(DIRECT_MESSENGER) private readonly messenger: DirectMessengerPort,
-    private readonly setupStates: DriveSetupStateRegistry,
+    @Inject(DriveSetupStateRegistry) private readonly setupStates: DriveSetupStateRegistry,
     private readonly workflows: WorkflowEntryCoordinator,
     private readonly restoreWorkflow: RestoreWorkflowOriginUseCase,
   ) {}

@@ -5,6 +5,35 @@ Google account containing clearly named unrelated files in My Drive and Trash.
 Never run it against a personal or production account. The repository test run
 does not prove this procedure passed.
 
+## Google Drive connection setup evidence
+
+- Operator:
+- Date/time and timezone:
+- Raspberry Pi model / architecture / Raspberry Pi OS:
+- Home Worker commit:
+- Disposable Google project:
+- OAuth client type: TVs and Limited Input devices
+- Audience/status tested: External In production / Internal / not applicable
+- Menu and `/gdrive connect` guide parity: pass / fail
+- Two-administrator staged-slot isolation: pass / fail
+- Credential-message deletion or manual warning: pass / fail
+- Restart refresh-token persistence: pass / fail
+- Sanitized-log review (no credentials, codes, tokens, chat IDs, provider bodies, or private URLs): pass / fail
+
+### Procedure
+
+1. Start setup from Storage & backup and follow the guide from a fresh dedicated project.
+2. Repeat through `/gdrive connect`; record whether the instructions and controls are identical.
+3. Upload a TVs and Limited Input devices JSON; record Google's URL/code step.
+4. Upload Desktop and Web JSON documents; record the specific rejected/unsupported guidance.
+5. If Workspace is available, test Internal with an in-organization account and an outside account; otherwise record not applicable.
+6. Verify the guide's seven-day Testing warning; use External In production for persistence testing.
+7. Complete authorization, confirm the intended account, and verify managed folder creation.
+8. Verify every submitted credential message is deleted or produces the manual-deletion warning.
+9. With a second administrator, verify retryable busy guidance does not disturb the first authorization.
+10. Inspect sanitized logs for the forbidden values listed above.
+11. Restart the worker and verify refresh continues with the encrypted stored credential.
+
 ## Release record
 
 Complete one row for every Raspberry Pi OS/architecture combination that the

@@ -47,7 +47,7 @@ export interface DeviceAuthorizationClock {
 
 export interface GoogleDeviceAuthorizationAdapterOptions {
   fetch?: typeof globalThis.fetch;
-  clock?: DeviceAuthorizationClock;
+  clock: DeviceAuthorizationClock;
   requestTimeoutMs?: number;
 }
 
@@ -60,9 +60,10 @@ export class GoogleDeviceAuthorizationAdapter
   private readonly requestTimeoutMs: number;
   private readonly logger = new Logger(GoogleDeviceAuthorizationAdapter.name);
 
-  constructor(options: GoogleDeviceAuthorizationAdapterOptions = {}) {
+  constructor(options: GoogleDeviceAuthorizationAdapterOptions) {
+    if (!options.clock) throw new DriveConfigurationError('Device authorization clock is required');
     this.request = options.fetch ?? globalThis.fetch;
-    this.clock = options.clock ?? systemClock();
+    this.clock = options.clock;
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   }
 
@@ -435,21 +436,4 @@ async function readChunk(
   } finally {
     if (onAbort) signal.removeEventListener('abort', onAbort);
   }
-}
-
-function systemClock(): DeviceAuthorizationClock {
-  return {
-    now: () => Date.now(),
-    sleep: (ms, signal) => new Promise((resolve, reject) => {
-      if (signal.aborted) {
-        reject(signal.reason instanceof Error ? signal.reason : new DOMException('Aborted', 'AbortError'));
-        return;
-      }
-      const timeout = setTimeout(resolve, ms);
-      signal.addEventListener('abort', () => {
-        clearTimeout(timeout);
-        reject(signal.reason instanceof Error ? signal.reason : new DOMException('Aborted', 'AbortError'));
-      }, { once: true });
-    }),
-  };
 }

@@ -125,7 +125,16 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
     },
     RegisterArchiveArtifactUseCase,
     { provide: ARCHIVE_REGISTRATION, useExisting: RegisterArchiveArtifactUseCase },
-    { provide: DRIVE_DEVICE_AUTHORIZATION, useFactory: () => new GoogleDeviceAuthorizationAdapter() },
+    {
+      provide: DRIVE_DEVICE_AUTHORIZATION,
+      useFactory: (clock: ClockPort) => new GoogleDeviceAuthorizationAdapter({
+        clock: {
+          now: () => clock.now().getTime(),
+          sleep: abortableSleep,
+        },
+      }),
+      inject: [CLOCK],
+    },
     GoogleDriveConnectionAccountAdapter,
     { provide: DRIVE_ACCOUNT, useExisting: GoogleDriveConnectionAccountAdapter },
     {
@@ -237,8 +246,14 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         credentials: DriveCredentialRepositoryPort,
         authorization: DriveDeviceAuthorizationPort,
         polling: DriveAuthorizationPollingService,
-      ) => new SubmitDriveClientUseCase(credentials, authorization, polling),
-      inject: [DRIVE_CREDENTIAL_REPOSITORY, DRIVE_DEVICE_AUTHORIZATION, DriveAuthorizationPollingService],
+        clock: ClockPort,
+      ) => new SubmitDriveClientUseCase(credentials, authorization, polling, clock),
+      inject: [
+        DRIVE_CREDENTIAL_REPOSITORY,
+        DRIVE_DEVICE_AUTHORIZATION,
+        DriveAuthorizationPollingService,
+        CLOCK,
+      ],
     },
     {
       provide: ConfirmDriveAccountUseCase,
@@ -483,6 +498,30 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
   ],
 })
 export class ArchiveModule {}
+
+function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(abortReason(signal));
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortReason(signal));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new DOMException('Aborted', 'AbortError');
+}
 
 function archiveInstallationId(): string {
   if (process.env.NODE_ENV === 'test') return '00000000-0000-4000-8000-000000000000';

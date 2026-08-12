@@ -25,7 +25,7 @@ export class DemoteHandler implements TelegramHandler {
     private readonly guard: RoleMiddleware,
     @Inject(DIRECT_MESSENGER) private readonly dm: DirectMessengerPort,
     private readonly botCommandsMenu: BotCommandsMenuService,
-    private readonly setupStates: DriveSetupStateRegistry,
+    @Inject(DriveSetupStateRegistry) private readonly setupStates: DriveSetupStateRegistry,
   ) {}
 
   register(composer: Composer<TelegramContext>): void {

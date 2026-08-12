@@ -40,8 +40,9 @@ export class DriveSetupStateRegistry implements OnModuleInit, WorkflowDraftCance
 
   constructor(
     @Inject(CLOCK) private readonly clock: ClockPort,
+    @Inject(CancelDriveConnectionUseCase)
     private readonly cancelConnection: CancelDriveConnectionUseCase,
-    private readonly drafts: WorkflowDraftRegistry,
+    @Inject(WorkflowDraftRegistry) private readonly drafts: WorkflowDraftRegistry,
   ) {}
 
   onModuleInit(): void {
