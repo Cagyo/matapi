@@ -189,6 +189,15 @@ describe('GoogleDeviceAuthorizationAdapter', () => {
     await expect(adapter.requestCode(client(), signal)).rejects.toBeInstanceOf(DriveTemporaryUnavailableError);
   });
 
+  it('accepts a successful revoke with no response body', async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(discovery())))
+      .mockResolvedValueOnce(new Response(null, { status: 200 }));
+    const adapter = new GoogleDeviceAuthorizationAdapter({ fetch, clock: new Clock() });
+
+    await expect(adapter.revoke('token', signal)).resolves.toBeUndefined();
+  });
+
   it('rejects every manual redirect before following it', async () => {
     const transport = new Transport();
     transport.enqueue(302, {});

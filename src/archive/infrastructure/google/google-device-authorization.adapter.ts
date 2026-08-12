@@ -159,6 +159,7 @@ export class GoogleDeviceAuthorizationAdapter
       discovery.revocationEndpoint,
       { token },
       signal,
+      false,
     );
     if (response.ok) return;
     throw this.mapFailure('revoke', response.status, body);
@@ -195,6 +196,7 @@ export class GoogleDeviceAuthorizationAdapter
     url: string,
     values: Record<string, string>,
     signal: AbortSignal,
+    readSuccessBody = true,
   ): Promise<OAuthResponse> {
     throwIfAborted(signal);
     return this.requestWithTimeout(signal, async (requestSignal) => {
@@ -206,7 +208,10 @@ export class GoogleDeviceAuthorizationAdapter
         body: new URLSearchParams(values).toString(),
       });
       rejectRedirect(response);
-      return { response, body: await readObject(response, requestSignal) };
+      return {
+        response,
+        body: response.ok && !readSuccessBody ? {} : await readObject(response, requestSignal),
+      };
     });
   }
 
