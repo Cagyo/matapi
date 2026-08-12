@@ -198,6 +198,24 @@ describe('GoogleDeviceAuthorizationAdapter', () => {
     await expect(adapter.revoke('token', signal)).resolves.toBeUndefined();
   });
 
+  it('maps a stalled successful revoke response body to temporary unavailable', async () => {
+    let stalledController: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const stalledBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        stalledController = controller;
+      },
+    });
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(discovery())))
+      .mockImplementationOnce((_url: string | URL, init: RequestInit) => {
+        init.signal?.addEventListener('abort', () => stalledController?.error(init.signal?.reason), { once: true });
+        return new Response(stalledBody, { status: 200 });
+      });
+    const adapter = new GoogleDeviceAuthorizationAdapter({ fetch, clock: new Clock(), requestTimeoutMs: 1 });
+
+    await expect(adapter.revoke('token', signal)).rejects.toBeInstanceOf(DriveTemporaryUnavailableError);
+  });
+
   it('rejects every manual redirect before following it', async () => {
     const transport = new Transport();
     transport.enqueue(302, {});

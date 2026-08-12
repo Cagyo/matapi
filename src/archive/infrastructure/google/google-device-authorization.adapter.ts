@@ -208,9 +208,13 @@ export class GoogleDeviceAuthorizationAdapter
         body: new URLSearchParams(values).toString(),
       });
       rejectRedirect(response);
+      if (response.ok && !readSuccessBody) {
+        await drainBody(response, requestSignal);
+        return { response, body: {} };
+      }
       return {
         response,
-        body: response.ok && !readSuccessBody ? {} : await readObject(response, requestSignal),
+        body: await readObject(response, requestSignal),
       };
     });
   }
@@ -273,6 +277,22 @@ async function readObject(response: Response, signal: AbortSignal): Promise<Reco
   }
   if (!isRecord(value)) throw new DriveProviderResponseError();
   return value;
+}
+
+async function drainBody(response: Response, signal: AbortSignal): Promise<void> {
+  if (!response.body) return;
+  const reader = response.body.getReader();
+  let size = 0;
+  try {
+    while (true) {
+      const next = await readChunk(reader, signal);
+      if (next.done) return;
+      size += next.value.byteLength;
+      if (size > MAX_OAUTH_BODY_BYTES) throw new DriveProviderResponseError();
+    }
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 function parseTokens(body: Record<string, unknown>, nowMs: number): OAuthTokenSet {
