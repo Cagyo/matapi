@@ -5,7 +5,7 @@ import type {
 } from './ports/drive-authorization-outcome.port';
 import type { DriveDeviceAuthorizationPort, DeviceAuthorizationChallenge } from './ports/drive-device-authorization.port';
 import type { DriveClientCredentials, DriveCredentialRepositoryPort } from './ports/drive-credential-repository.port';
-import type { DriveAccountPort } from './ports/drive-account.port';
+import type { DriveAccountIdentity, DriveAccountPort } from './ports/drive-account.port';
 import { DriveAuthorizationDeniedError } from '../domain/errors/drive-authorization-denied.error';
 import { DriveOAuthClientRejectedError } from '../domain/errors/drive-oauth-client-rejected.error';
 import { DrivePolicyBlockedError } from '../domain/errors/drive-policy-blocked.error';
@@ -55,6 +55,7 @@ export interface StartDriveAuthorizationPolling {
  */
 @Injectable()
 export class DriveAuthorizationPollingService implements OnModuleInit {
+  private readonly logger = new Logger(DriveAuthorizationPollingService.name);
   private readonly requests = new Map<string, AbortController>();
 
   constructor(
@@ -74,11 +75,13 @@ export class DriveAuthorizationPollingService implements OnModuleInit {
     const local = new AbortController();
     this.requests.set(input.generationId, local);
     const signal = AbortSignal.any([input.signal, local.signal]);
-    void this.poll(input, signal).finally(() => {
-      if (this.requests.get(input.generationId) === local) {
-        this.requests.delete(input.generationId);
-      }
-    });
+    void this.poll(input, signal)
+      .catch(() => this.logger.warn('Drive authorization background task failed'))
+      .finally(() => {
+        if (this.requests.get(input.generationId) === local) {
+          this.requests.delete(input.generationId);
+        }
+      });
   }
 
   cancel(generationId: string): void {
@@ -92,6 +95,7 @@ export class DriveAuthorizationPollingService implements OnModuleInit {
   }
 
   private async poll(input: StartDriveAuthorizationPolling, signal: AbortSignal): Promise<void> {
+    let account: DriveAccountIdentity;
     try {
       const tokens = await this.authorization.poll(input.client, input.challenge, signal);
       if (signal.aborted) return;
@@ -103,20 +107,21 @@ export class DriveAuthorizationPollingService implements OnModuleInit {
         chatId: input.chatId,
       });
       if (!staged) return;
-      const account = await this.accounts.resolveAccount(staged, signal);
-      await this.outcomes.publish({
-        kind: 'authorized',
-        generationId: input.generationId,
-        receiptId: input.receiptId,
-        adminUserId: input.adminUserId,
-        chatId: input.chatId,
-        account,
-      });
+      account = await this.accounts.resolveAccount(staged, signal);
     } catch (error) {
       if (signal.aborted) return;
       await this.credentials.discardStaged(input.generationId, input.receiptId);
       await this.outcomes.publish({ ...binding(input, 'failed'), reason: reasonFor(error) });
+      return;
     }
+    await this.outcomes.publish({
+      kind: 'authorized',
+      generationId: input.generationId,
+      receiptId: input.receiptId,
+      adminUserId: input.adminUserId,
+      chatId: input.chatId,
+      account,
+    });
   }
 }
 

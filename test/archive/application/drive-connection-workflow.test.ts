@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { describe, expect, it, vi } from 'vitest';
 import { DriveAuthorizationPollingService } from '../../../src/archive/application/drive-authorization-polling.service';
 import { DisconnectDriveUseCase } from '../../../src/archive/application/use-cases/disconnect-drive.use-case';
@@ -207,6 +208,45 @@ describe('background authorization and disconnect', () => {
     expect(credentials.storeExchangedTokens.mock.invocationCallOrder[0]).toBeLessThan(publish.mock.invocationCallOrder[0]);
     expect(credentials.discardStaged).not.toHaveBeenCalled();
     expect(publish).toHaveBeenCalledWith(expect.objectContaining({ kind: 'authorized', account: { permissionId: 'permission-1', email: null, displayName: 'Drive admin' } }));
+  });
+
+  it('retains exchanged staging when authorized outcome delivery rejects', async () => {
+    const credentials = {
+      storeExchangedTokens: vi.fn().mockResolvedValue(true),
+      discardStaged: vi.fn(),
+      expireStaged: vi.fn(),
+      loadStaged: vi.fn().mockResolvedValue({ id: 'generation-00001' }),
+    };
+    const publish = vi.fn().mockRejectedValue(new Error('provider body: client_secret=must-not-log'));
+    const unhandled = vi.fn();
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    process.on('unhandledRejection', unhandled);
+    const polling = new DriveAuthorizationPollingService(
+      { poll: vi.fn().mockResolvedValue({ accessToken: 'access', refreshToken: 'refresh', expiryDateMs: null, tokenType: null, scope: null }) } as never,
+      credentials,
+      { resolveAccount: vi.fn().mockResolvedValue({ permissionId: 'permission-1', email: null, displayName: 'Drive admin' }) },
+      { publish },
+    );
+
+    try {
+      polling.start({ generationId: 'generation-00001', expectedRevision: 0, receiptId: 'abcdefghijklmnop', adminUserId: 7, chatId: 9,
+        client: { clientId: '123.apps.googleusercontent.com', clientSecret: 'secret-123' },
+        signal: new AbortController().signal,
+        challenge: { deviceCode: 'device', userCode: 'user', verificationUri: 'https://example.test', verificationUriComplete: null, intervalMs: 1, expiresAtMs: 99 },
+      });
+      await vi.waitFor(() => expect(publish).toHaveBeenCalled());
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(credentials.discardStaged).not.toHaveBeenCalled();
+      expect(publish).toHaveBeenCalledOnce();
+      expect(publish).toHaveBeenCalledWith(expect.objectContaining({ kind: 'authorized' }));
+      expect(unhandled).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledWith('Drive authorization background task failed');
+      expect(warn.mock.calls.flat().join(' ')).not.toContain('must-not-log');
+    } finally {
+      process.off('unhandledRejection', unhandled);
+      warn.mockRestore();
+    }
   });
 
   it('aborts the provider poll when the registry-owned signal is cancelled', async () => {
