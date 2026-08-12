@@ -145,6 +145,7 @@ and directs the user to localized `/menu` usage only.
 | Port | Adapters | Status | Source |
 |---|---|---|---|
 | `SystemHealthPort` (`SYSTEM_HEALTH`) | `OsSystemHealthAdapter` (`df -kP`, `/sys/class/thermal`, `process.memoryUsage`, `os.totalmem`, `process.uptime`, `fs.stat` on `DATABASE_PATH`) | ✅ canonical — drives `/health`. Disk / CPU temp / db size degrade to `null` on dev hosts without throwing. | [system-health.port.ts](../src/system/domain/ports/system-health.port.ts) |
+| `ApplicationLogReaderPort` (`APPLICATION_LOG_READER`) | `Pm2ApplicationLogReaderAdapter`; `InMemoryApplicationLogReaderAdapter` (tests/dev) | ✅ bounded, sanitized, read-only PM2 output/error snapshots for the admin Telegram boundary | [application-log-reader.port.ts](../src/system/domain/ports/application-log-reader.port.ts) |
 
 ### Network context
 

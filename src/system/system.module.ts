@@ -2,6 +2,8 @@ import { Module } from '@nestjs/common';
 import { EventModule } from '../events/event.module';
 import { BootRecoveryService } from './application/boot-recovery.service';
 import { GracefulShutdownService } from './application/graceful-shutdown.service';
+import { ReadApplicationLogsUseCase } from './application/read-application-logs.use-case';
+import { APPLICATION_LOG_READER } from './domain/ports/application-log-reader.port';
 import { CLOCK_SYNC_PROBE } from './domain/ports/clock-sync.port';
 import { OTA } from './domain/ports/ota.port';
 import { PROCESS_RESTARTER } from './domain/ports/process-restarter.port';
@@ -10,6 +12,7 @@ import { SYSTEM_META_REPOSITORY } from './domain/ports/system-meta-repository.po
 import { SYSTEM_HEALTH } from './domain/ports/system-health.port';
 import { DrizzleSystemMetaRepository } from './infrastructure/drizzle-system-meta.repository';
 import { OsSystemHealthAdapter } from './infrastructure/os-system-health.adapter';
+import { Pm2ApplicationLogReaderAdapter } from './infrastructure/pm2-application-log-reader.adapter';
 import { Pm2ProcessRestarter } from './infrastructure/pm2-process-restarter.adapter';
 import { ShellOtaAdapter } from './infrastructure/shell-ota.adapter';
 import { ShellSystemDepsAdapter } from './infrastructure/shell-system-deps.adapter';
@@ -34,6 +37,11 @@ const mode = resolveSystemMode();
   providers: [
     BootRecoveryService,
     GracefulShutdownService,
+    ReadApplicationLogsUseCase,
+    {
+      provide: APPLICATION_LOG_READER,
+      useFactory: () => new Pm2ApplicationLogReaderAdapter(),
+    },
     { provide: SYSTEM_HEALTH, useClass: OsSystemHealthAdapter },
     { provide: SYSTEM_META_REPOSITORY, useClass: DrizzleSystemMetaRepository },
     {
@@ -59,6 +67,7 @@ const mode = resolveSystemMode();
     CLOCK_SYNC_PROBE,
     BootRecoveryService,
     GracefulShutdownService,
+    ReadApplicationLogsUseCase,
   ],
 })
 export class SystemModule {}
