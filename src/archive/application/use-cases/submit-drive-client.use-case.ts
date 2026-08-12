@@ -2,11 +2,8 @@ import type { DriveAuthorizationPollingService } from '../drive-authorization-po
 import type { DriveDeviceAuthorizationPort } from '../ports/drive-device-authorization.port';
 import type { DriveClientCredentials, DriveCredentialRepositoryPort } from '../ports/drive-credential-repository.port';
 import { DriveConfigurationError } from '../../domain/errors/drive-configuration.error';
+import { DriveClientDocumentError } from '../../domain/errors/drive-client-document.error';
 import { hashDriveClientId, type PendingDriveConnection } from './begin-drive-connection.use-case';
-
-const ALLOWED_INSTALLED_KEYS = new Set([
-  'client_id', 'project_id', 'auth_uri', 'token_uri', 'auth_provider_x509_cert_url', 'client_secret', 'redirect_uris', 'javascript_origins',
-]);
 
 export interface DriveClientSubmissionResult {
   verificationUri: string;
@@ -56,34 +53,26 @@ export class SubmitDriveClientUseCase {
 }
 
 export function parseInstalledClient(document: string): DriveClientCredentials {
+  const withoutBom = document.startsWith('\uFEFF') ? document.slice(1) : document;
+  if (withoutBom.startsWith('\uFEFF')) throw new DriveClientDocumentError('invalid-utf8');
   let value: unknown;
-  try { value = JSON.parse(document); } catch { throw new DriveConfigurationError('Drive client document is not JSON'); }
-  if (!isRecord(value) || Object.keys(value).length !== 1 || !isRecord(value.installed)) {
-    throw new DriveConfigurationError('Drive client document must contain only installed credentials');
+  try { value = JSON.parse(withoutBom); } catch { throw new DriveClientDocumentError('malformed-json'); }
+  if (!isRecord(value)) throw new DriveClientDocumentError('invalid-credentials');
+  if ('web' in value) throw new DriveClientDocumentError('unsupported-client-type');
+  if (Object.keys(value).length !== 1 || !isRecord(value.installed)) {
+    throw new DriveClientDocumentError('invalid-credentials');
   }
   const installed = value.installed;
-  if (Object.keys(installed).some((key) => !ALLOWED_INSTALLED_KEYS.has(key))) {
-    throw new DriveConfigurationError('Drive client document contains unsupported fields');
-  }
   if (!isClientId(installed.client_id) || !isClientSecret(installed.client_secret)) {
-    throw new DriveConfigurationError('Drive client document is invalid');
+    throw new DriveClientDocumentError('invalid-credentials');
   }
-  if (!validOptionalInstalledFields(installed)) throw new DriveConfigurationError('Drive client document is invalid');
   return { clientId: installed.client_id, clientSecret: installed.client_secret };
 }
 
-function validOptionalInstalledFields(value: Record<string, unknown>): boolean {
-  for (const key of ['project_id', 'auth_uri', 'token_uri', 'auth_provider_x509_cert_url']) {
-    if (key in value && typeof value[key] !== 'string') return false;
-  }
-  for (const key of ['redirect_uris', 'javascript_origins']) {
-    if (key in value && (!Array.isArray(value[key]) || !value[key].every((item) => typeof item === 'string'))) return false;
-  }
-  return true;
-}
-
 function isClientId(value: unknown): value is string {
-  return typeof value === 'string' && /^[0-9]+(?:-[A-Za-z0-9]+)*\.apps\.googleusercontent\.com$/.test(value);
+  return typeof value === 'string'
+    && Buffer.byteLength(value, 'utf8') <= 512
+    && /^[0-9]+(?:-[A-Za-z0-9]+)*\.apps\.googleusercontent\.com$/.test(value);
 }
 
 function isClientSecret(value: unknown): value is string {
