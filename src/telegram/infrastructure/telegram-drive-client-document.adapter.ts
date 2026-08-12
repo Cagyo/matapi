@@ -145,13 +145,8 @@ function throwIfAborted(signal: AbortSignal): void {
 
 function normalizeDownloadError(error: unknown, signal: AbortSignal): DriveClientDocumentError | unknown {
   if (signal.aborted) throw signal.reason ?? error;
-  if (isAbortError(error)) throw error;
   if (error instanceof DriveClientDocumentError) return error;
   return new DriveClientDocumentError('download-failed');
-}
-
-function isAbortError(error: unknown): boolean {
-  return error instanceof DOMException && error.name === 'AbortError';
 }
 
 function isFilePayload(value: unknown): value is { result: { file_path: string } } {

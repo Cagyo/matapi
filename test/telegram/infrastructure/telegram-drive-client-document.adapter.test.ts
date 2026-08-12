@@ -84,6 +84,14 @@ describe('TelegramDriveClientDocumentAdapter', () => {
 
     await expect(adapter.read({ fileId: 'f' }, signal)).rejects.toEqual(new DriveClientDocumentError('download-failed'));
   });
+
+  it('sanitizes an AbortError that did not come from the caller signal', async () => {
+    const adapter = new TelegramDriveClientDocumentAdapter({
+      download: vi.fn().mockRejectedValue(new DOMException('provider cancellation detail', 'AbortError')),
+    });
+
+    await expect(adapter.read({ fileId: 'f' }, signal)).rejects.toEqual(new DriveClientDocumentError('download-failed'));
+  });
 });
 
 describe('TelegramHttpDriveClientDocumentGateway', () => {
