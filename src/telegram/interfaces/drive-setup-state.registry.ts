@@ -53,7 +53,13 @@ export class DriveSetupStateRegistry implements OnModuleInit, WorkflowDraftCance
     if (current?.kind === 'authorizing' || (current && current.receiptId !== input.receiptId)) {
       throw new RangeError('Drive setup replacement was not cancelled first');
     }
-    this.states.set(key(input), { kind: 'preparing', ...input });
+    this.states.set(key(input), {
+      kind: 'preparing',
+      userId: input.userId,
+      chatId: input.chatId,
+      receiptId: input.receiptId,
+      preparationExpiresAtMs: input.preparationExpiresAtMs,
+    });
   }
 
   removePreparation(identity: DriveSetupIdentity): boolean {
@@ -76,11 +82,17 @@ export class DriveSetupStateRegistry implements OnModuleInit, WorkflowDraftCance
   ): AuthorizingDriveSetupState | null {
     const state = this.exact(identity);
     if (state?.kind !== 'preparing') return null;
+    if (pending.receiptId !== identity.receiptId
+      || pending.adminUserId !== identity.userId
+      || pending.chatId !== identity.chatId) return null;
     if (state.preparationExpiresAtMs <= this.clock.now().getTime()) throw new DriveSetupExpiredError();
     const next: AuthorizingDriveSetupState = {
-      ...state,
       kind: 'authorizing',
-      pending,
+      userId: state.userId,
+      chatId: state.chatId,
+      receiptId: state.receiptId,
+      preparationExpiresAtMs: state.preparationExpiresAtMs,
+      pending: pendingMetadata(pending),
       effectiveDeadlineMs: null,
       controller: new AbortController(),
     };
@@ -165,4 +177,16 @@ export class DriveSetupStateRegistry implements OnModuleInit, WorkflowDraftCance
 
 function key(input: { userId: number; chatId: number }): string {
   return `${input.userId}:${input.chatId}`;
+}
+
+function pendingMetadata(input: PendingDriveConnection): PendingDriveConnection {
+  return {
+    generationId: input.generationId,
+    receiptId: input.receiptId,
+    adminUserId: input.adminUserId,
+    chatId: input.chatId,
+    installationId: input.installationId,
+    createdAtMs: input.createdAtMs,
+    expiresAtMs: input.expiresAtMs,
+  };
 }

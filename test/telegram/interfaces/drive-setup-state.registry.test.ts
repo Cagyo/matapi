@@ -20,6 +20,56 @@ describe('DriveSetupStateRegistry', () => {
     expect(registry.association({ userId: 2, chatId: 2 })?.kind).toBe('preparing');
   });
 
+  it('projects preparation inputs to the declared secret-free state fields', () => {
+    const registry = setupRegistry(1_000);
+    const input = {
+      ...identity(1),
+      preparationExpiresAtMs: 20_000,
+      document: 'client-document-secret',
+      clientSecret: 'client-secret',
+    };
+
+    registry.prepare(input);
+
+    const state = registry.association({ userId: 1, chatId: 1 });
+    expect(state).not.toHaveProperty('document');
+    expect(state).not.toHaveProperty('clientSecret');
+  });
+
+  it('projects pending metadata to the declared secret-free authorization fields', () => {
+    const registry = setupRegistry(1_000);
+    registry.prepare({ ...identity(1), preparationExpiresAtMs: 20_000 });
+    const pendingWithSecrets = {
+      ...pending('generation-one'),
+      providerUrl: 'https://provider.example/device',
+      deviceCode: 'device-code-secret',
+      accessToken: 'access-token-secret',
+    };
+
+    registry.claimAuthorizing(identity(1), pendingWithSecrets);
+
+    const state = registry.association({ userId: 1, chatId: 1 });
+    expect(state?.kind).toBe('authorizing');
+    expect(state?.kind === 'authorizing' ? state.pending : null).not.toHaveProperty('providerUrl');
+    expect(state?.kind === 'authorizing' ? state.pending : null).not.toHaveProperty('deviceCode');
+    expect(state?.kind === 'authorizing' ? state.pending : null).not.toHaveProperty('accessToken');
+  });
+
+  it.each([
+    ['receipt', { receiptId: 'bbbbbbbbbbbbbbbb' }],
+    ['admin user', { adminUserId: 2 }],
+    ['chat', { chatId: 2 }],
+  ] as const)('rejects a pending connection with mismatched %s binding', (_, mismatch) => {
+    const registry = setupRegistry(1_000);
+    registry.prepare({ ...identity(1), preparationExpiresAtMs: 20_000 });
+
+    expect(registry.claimAuthorizing(identity(1), { ...pending('generation-one'), ...mismatch })).toBeNull();
+    expect(registry.association({ userId: 1, chatId: 1 })).toMatchObject({
+      kind: 'preparing',
+      receiptId: 'aaaaaaaaaaaaaaaa',
+    });
+  });
+
   it('rejects replacement before cancellation and only removes an exact preparation', () => {
     const registry = setupRegistry(1_000);
     registry.prepare({ ...identity(1), preparationExpiresAtMs: 20_000 });
