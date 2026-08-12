@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import type {
   DeviceAuthorizationChallenge,
   DriveDeviceAuthorizationPort,
@@ -9,7 +10,9 @@ import type {
 import { DriveAuthorizationDeniedError } from '../../domain/errors/drive-authorization-denied.error';
 import { DriveAuthorizationPendingError } from '../../domain/errors/drive-authorization-pending.error';
 import { DriveConfigurationError } from '../../domain/errors/drive-configuration.error';
+import { DriveOAuthClientRejectedError } from '../../domain/errors/drive-oauth-client-rejected.error';
 import { DrivePolicyBlockedError } from '../../domain/errors/drive-policy-blocked.error';
+import { DriveProviderResponseError } from '../../domain/errors/drive-provider-response.error';
 import { DriveRateLimitedError } from '../../domain/errors/drive-rate-limited.error';
 import { DriveReauthorizationRequiredError } from '../../domain/errors/drive-reauthorization-required.error';
 import { DriveTemporaryUnavailableError } from '../../domain/errors/drive-temporary-unavailable.error';
@@ -20,6 +23,11 @@ const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const REVOKE_URL = 'https://oauth2.googleapis.com/revoke';
 const DRIVE_FILE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 const DEFAULT_INTERVAL_MS = 5_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const MAX_OAUTH_BODY_BYTES = 64 * 1024;
+const MAX_DEVICE_CODE_BYTES = 4_096;
+const MAX_USER_CODE_BYTES = 64;
+const MAX_VERIFICATION_URL_BYTES = 2_048;
 
 interface DiscoveryDocument {
   deviceAuthorizationEndpoint: string;
@@ -35,6 +43,7 @@ export interface DeviceAuthorizationClock {
 export interface GoogleDeviceAuthorizationAdapterOptions {
   fetch?: typeof globalThis.fetch;
   clock?: DeviceAuthorizationClock;
+  requestTimeoutMs?: number;
 }
 
 /** Google limited-input-device protocol with fixed discovered endpoint allowlists. */
@@ -43,10 +52,13 @@ export class GoogleDeviceAuthorizationAdapter
 {
   private readonly request: typeof globalThis.fetch;
   private readonly clock: DeviceAuthorizationClock;
+  private readonly requestTimeoutMs: number;
+  private readonly logger = new Logger(GoogleDeviceAuthorizationAdapter.name);
 
   constructor(options: GoogleDeviceAuthorizationAdapterOptions = {}) {
     this.request = options.fetch ?? globalThis.fetch;
     this.clock = options.clock ?? systemClock();
+    this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   }
 
   async requestCode(
@@ -62,27 +74,28 @@ export class GoogleDeviceAuthorizationAdapter
     );
     const body = await readObject(response, signal);
     throwIfAborted(signal);
-    if (!response.ok) throw mapOAuthFailure(response.status, body.error);
+    if (!response.ok) throw this.mapFailure('device-code', response.status, body);
 
-    const deviceCode = readNonEmptyString(body.device_code);
-    const userCode = readNonEmptyString(body.user_code);
-    const verificationUri = readNonEmptyString(body.verification_uri);
-    const expiresIn = readPositiveInteger(body.expires_in);
-    if (!deviceCode || !userCode || !verificationUri || !expiresIn) {
-      throw new DriveConfigurationError('Google device authorization response is invalid');
+    const deviceCode = boundedString(body.device_code, MAX_DEVICE_CODE_BYTES);
+    const userCode = printableAscii(body.user_code, MAX_USER_CODE_BYTES) ? body.user_code : null;
+    const verificationUri = readDisplayUrl(body.verification_url);
+    const expiresMs = safePositiveMilliseconds(body.expires_in);
+    const intervalMs = body.interval === undefined ? DEFAULT_INTERVAL_MS : safePositiveMilliseconds(body.interval);
+    const verificationUriComplete = body.verification_url_complete === undefined
+      ? null : readDisplayUrl(body.verification_url_complete);
+    if (!deviceCode || !userCode || !verificationUri || expiresMs === null
+      || intervalMs === null || (body.verification_url_complete !== undefined && verificationUriComplete === null)) {
+      throw new DriveProviderResponseError();
     }
-    const intervalSeconds = readPositiveInteger(body.interval) ?? 5;
-    const verificationUriComplete = readOptionalString(body.verification_uri_complete);
-    if (verificationUriComplete === undefined) {
-      throw new DriveConfigurationError('Google device authorization response is invalid');
-    }
+    const nowMs = this.clock.now();
+    if (!Number.isSafeInteger(nowMs + expiresMs)) throw new DriveProviderResponseError();
     return {
       deviceCode,
       userCode,
       verificationUri,
       verificationUriComplete,
-      intervalMs: intervalSeconds * 1_000,
-      expiresAtMs: this.clock.now() + expiresIn * 1_000,
+      intervalMs,
+      expiresAtMs: nowMs + expiresMs,
     };
   }
 
@@ -115,7 +128,7 @@ export class GoogleDeviceAuthorizationAdapter
         throwIfLive(challenge, this.clock.now());
         if (response.ok) return parseTokens(body, this.clock.now());
 
-        switch (body.error) {
+        switch (failureDiscriminator('token', body)) {
           case 'authorization_pending':
             await this.clock.sleep(remainingSleep(intervalMs, challenge, this.clock.now()), operationSignal);
             continue;
@@ -124,7 +137,7 @@ export class GoogleDeviceAuthorizationAdapter
             await this.clock.sleep(remainingSleep(intervalMs, challenge, this.clock.now()), operationSignal);
             continue;
           default:
-            throw mapOAuthFailure(response.status, body.error);
+            throw this.mapFailure('token', response.status, body);
         }
       }
     } catch (error) {
@@ -146,35 +159,30 @@ export class GoogleDeviceAuthorizationAdapter
     );
     if (response.ok) return;
     const body = await readObject(response, signal);
-    throw mapOAuthFailure(response.status, body.error);
+    throw this.mapFailure('revoke', response.status, body);
   }
 
   private async discover(signal: AbortSignal): Promise<DiscoveryDocument> {
     throwIfAborted(signal);
-    let response: Response;
-    try {
-      response = await this.request(DISCOVERY_URL, {
+    const response = await this.requestWithTimeout(signal, (requestSignal) => this.request(DISCOVERY_URL, {
         method: 'GET',
         redirect: 'manual',
-        signal,
-      });
-    } catch (error) {
-      throw mapTransportFailure(error, signal);
-    }
+        signal: requestSignal,
+      }));
     rejectRedirect(response);
     if (!response.ok) throw new DriveTemporaryUnavailableError();
     const body = await readObject(response, signal);
     const document = {
-      deviceAuthorizationEndpoint: readNonEmptyString(body.device_authorization_endpoint),
-      tokenEndpoint: readNonEmptyString(body.token_endpoint),
-      revocationEndpoint: readNonEmptyString(body.revocation_endpoint),
+      deviceAuthorizationEndpoint: boundedString(body.device_authorization_endpoint, MAX_VERIFICATION_URL_BYTES),
+      tokenEndpoint: boundedString(body.token_endpoint, MAX_VERIFICATION_URL_BYTES),
+      revocationEndpoint: boundedString(body.revocation_endpoint, MAX_VERIFICATION_URL_BYTES),
     };
     if (
       document.deviceAuthorizationEndpoint !== DEVICE_CODE_URL ||
       document.tokenEndpoint !== TOKEN_URL ||
       document.revocationEndpoint !== REVOKE_URL
     ) {
-      throw new DriveConfigurationError('Google OAuth discovery endpoints are not allowlisted');
+      throw new DriveProviderResponseError();
     }
     return document as DiscoveryDocument;
   }
@@ -185,39 +193,72 @@ export class GoogleDeviceAuthorizationAdapter
     signal: AbortSignal,
   ): Promise<Response> {
     throwIfAborted(signal);
-    let response: Response;
-    try {
-      response = await this.request(url, {
+    const response = await this.requestWithTimeout(signal, (requestSignal) => this.request(url, {
         method: 'POST',
         redirect: 'manual',
-        signal,
+        signal: requestSignal,
         headers: { 'content-type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams(values).toString(),
-      });
-    } catch (error) {
-      throw mapTransportFailure(error, signal);
-    }
+      }));
     rejectRedirect(response);
     return response;
+  }
+
+  private async requestWithTimeout(
+    callerSignal: AbortSignal,
+    execute: (signal: AbortSignal) => Promise<Response>,
+  ): Promise<Response> {
+    throwIfAborted(callerSignal);
+    const timeout = AbortSignal.timeout(this.requestTimeoutMs);
+    try {
+      return await execute(AbortSignal.any([callerSignal, timeout]));
+    } catch (error) {
+      if (callerSignal.aborted) throw abortError(callerSignal, error);
+      if (timeout.aborted) throw new DriveTemporaryUnavailableError();
+      throw mapTransportFailure(error, callerSignal);
+    }
+  }
+
+  private mapFailure(
+    endpoint: 'device-code' | 'token' | 'revoke',
+    status: number,
+    body: Record<string, unknown>,
+  ): Error {
+    const discriminator = failureDiscriminator(endpoint, body);
+    if (status >= 400 && status < 500 && !isRecognizedOAuthFailure(discriminator)) {
+      this.logger.warn({ status, code: 'unrecognized_oauth_error' });
+    }
+    return mapOAuthFailure(status, discriminator);
   }
 }
 
 async function readObject(response: Response, signal: AbortSignal): Promise<Record<string, unknown>> {
-  throwIfAborted(signal);
-  let onAbort: (() => void) | undefined;
+  if (!response.body) throw new DriveProviderResponseError();
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
   try {
-    const aborted = new Promise<never>((_resolve, reject) => {
-      onAbort = () => reject(abortError(signal));
-      signal.addEventListener('abort', onAbort, { once: true });
-    });
-    const value: unknown = await Promise.race([response.json(), aborted]);
-    return isRecord(value) ? value : {};
-  } catch (error) {
-    if (signal.aborted || isAbortError(error)) throw abortError(signal, error);
-    return {};
+    while (true) {
+      const next = await readChunk(reader, signal);
+      if (next.done) break;
+      size += next.value.byteLength;
+      if (size > MAX_OAUTH_BODY_BYTES) throw new DriveProviderResponseError();
+      chunks.push(next.value);
+    }
   } finally {
-    if (onAbort) signal.removeEventListener('abort', onAbort);
+    reader.releaseLock();
   }
+  throwIfAborted(signal);
+  let value: unknown;
+  try {
+    const bytes = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)), size);
+    value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  } catch (error) {
+    if (error instanceof DriveProviderResponseError) throw error;
+    throw new DriveProviderResponseError();
+  }
+  if (!isRecord(value)) throw new DriveProviderResponseError();
+  return value;
 }
 
 function parseTokens(body: Record<string, unknown>, nowMs: number): OAuthTokenSet {
@@ -225,31 +266,36 @@ function parseTokens(body: Record<string, unknown>, nowMs: number): OAuthTokenSe
   const refreshToken = readOptionalString(body.refresh_token);
   const tokenType = readOptionalString(body.token_type);
   const scope = readOptionalString(body.scope);
-  const expiresIn = readPositiveInteger(body.expires_in);
-  if (accessToken === undefined || refreshToken === undefined || tokenType === undefined || scope === undefined || !accessToken || !expiresIn) {
-    throw new DriveConfigurationError('Google token response is invalid');
+  const expiresMs = safePositiveMilliseconds(body.expires_in);
+  if (accessToken === undefined || refreshToken === undefined || tokenType === undefined || scope === undefined || !accessToken || expiresMs === null
+    || !Number.isSafeInteger(nowMs + expiresMs)) {
+    throw new DriveProviderResponseError();
   }
   return {
     accessToken,
     refreshToken,
-    expiryDateMs: nowMs + expiresIn * 1_000,
+    expiryDateMs: nowMs + expiresMs,
     tokenType,
     scope,
   };
 }
 
-function mapOAuthFailure(status: number, error: unknown): Error {
-  switch (error) {
+function failureDiscriminator(endpoint: 'device-code' | 'token' | 'revoke', body: Record<string, unknown>): unknown {
+  return endpoint === 'device-code' ? body.error_code ?? body.error : body.error;
+}
+
+function mapOAuthFailure(status: number, discriminator: unknown): Error {
+  switch (discriminator) {
     case 'authorization_pending': return new DriveAuthorizationPendingError();
     case 'access_denied': return new DriveAuthorizationDeniedError();
     case 'admin_policy_enforced':
     case 'org_internal': return new DrivePolicyBlockedError();
-    case 'invalid_client': return new DriveConfigurationError('Google OAuth client is invalid');
+    case 'invalid_client': return new DriveOAuthClientRejectedError();
     case 'invalid_grant':
     case 'expired_token': return new DriveReauthorizationRequiredError();
+    case 'rate_limit_exceeded': return new DriveRateLimitedError();
     default:
       if (status === 429) return new DriveRateLimitedError();
-      if (status >= 500) return new DriveTemporaryUnavailableError();
       return new DriveTemporaryUnavailableError();
   }
 }
@@ -265,16 +311,34 @@ function rejectRedirect(response: Response): void {
   }
 }
 
-function readNonEmptyString(value: unknown): string | null {
-  return typeof value === 'string' && value.length > 0 ? value : null;
+function boundedString(value: unknown, maxBytes: number): string | null {
+  return typeof value === 'string' && value.length > 0
+    && Buffer.byteLength(value, 'utf8') <= maxBytes ? value : null;
+}
+
+function printableAscii(value: unknown, maxBytes: number): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= maxBytes
+    && /^[\x20-\x7e]+$/.test(value);
+}
+
+function readDisplayUrl(value: unknown): string | null {
+  if (!printableAscii(value, MAX_VERIFICATION_URL_BYTES)) return null;
+  try {
+    const url = new URL(value);
+    return (url.protocol === 'https:' || url.protocol === 'http:') && !url.username && !url.password
+      ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function safePositiveMilliseconds(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+    && value <= Math.floor(Number.MAX_SAFE_INTEGER / 1_000) ? value * 1_000 : null;
 }
 
 function readOptionalString(value: unknown): string | null | undefined {
   return value === undefined || value === null ? null : typeof value === 'string' ? value : undefined;
-}
-
-function readPositiveInteger(value: unknown): number | null {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -305,6 +369,38 @@ function abortError(signal: AbortSignal, fallback?: unknown): Error {
 
 function isAbortError(value: unknown): value is Error {
   return value instanceof Error && value.name === 'AbortError';
+}
+
+function isRecognizedOAuthFailure(value: unknown): boolean {
+  return value === 'authorization_pending'
+    || value === 'slow_down'
+    || value === 'access_denied'
+    || value === 'admin_policy_enforced'
+    || value === 'org_internal'
+    || value === 'invalid_client'
+    || value === 'invalid_grant'
+    || value === 'expired_token'
+    || value === 'rate_limit_exceeded';
+}
+
+async function readChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal: AbortSignal,
+) {
+  throwIfAborted(signal);
+  let onAbort: (() => void) | undefined;
+  try {
+    const aborted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => {
+        void reader.cancel().catch(() => undefined);
+        reject(abortError(signal));
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    return await Promise.race([reader.read(), aborted]);
+  } finally {
+    if (onAbort) signal.removeEventListener('abort', onAbort);
+  }
 }
 
 function systemClock(): DeviceAuthorizationClock {

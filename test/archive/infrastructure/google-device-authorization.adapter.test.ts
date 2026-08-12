@@ -2,9 +2,12 @@ import { describe, expect, it, vi } from 'vitest';
 import { GoogleDeviceAuthorizationAdapter } from '../../../src/archive/infrastructure/google/google-device-authorization.adapter';
 import { DriveAuthorizationDeniedError } from '../../../src/archive/domain/errors/drive-authorization-denied.error';
 import { DriveConfigurationError } from '../../../src/archive/domain/errors/drive-configuration.error';
+import { DriveOAuthClientRejectedError } from '../../../src/archive/domain/errors/drive-oauth-client-rejected.error';
 import { DrivePolicyBlockedError } from '../../../src/archive/domain/errors/drive-policy-blocked.error';
+import { DriveProviderResponseError } from '../../../src/archive/domain/errors/drive-provider-response.error';
 import { DriveRateLimitedError } from '../../../src/archive/domain/errors/drive-rate-limited.error';
 import { DriveReauthorizationRequiredError } from '../../../src/archive/domain/errors/drive-reauthorization-required.error';
+import { DriveTemporaryUnavailableError } from '../../../src/archive/domain/errors/drive-temporary-unavailable.error';
 
 interface RequestRecord { url: string; init: RequestInit }
 
@@ -69,7 +72,7 @@ describe('GoogleDeviceAuthorizationAdapter', () => {
     const adapter = new GoogleDeviceAuthorizationAdapter({ fetch: transport.fetch.bind(transport), clock });
 
     await expect(adapter.requestCode({ ...client(), deviceAuthorizationEndpoint: 'https://evil.example/device' } as never, signal))
-      .rejects.toThrow(DriveConfigurationError);
+      .rejects.toThrow(DriveProviderResponseError);
 
     expect(transport.requests.some((request) => request.url.includes('evil.example'))).toBe(false);
   });
@@ -84,25 +87,45 @@ describe('GoogleDeviceAuthorizationAdapter', () => {
     await expect(adapter.poll(client(), challenge(), signal)).rejects.toThrow(DriveAuthorizationDeniedError);
   });
 
-  it('returns an approved challenge and requests exactly drive.file', async () => {
+  it('parses verification_url and preserves the case-sensitive user code', async () => {
     const transport = new Transport();
     const clock = new Clock();
     transport.enqueue(200, discovery());
     transport.enqueue(200, {
-      device_code: 'device-code', user_code: 'ABCD-EFGH', verification_uri: 'https://www.google.com/device',
-      expires_in: 600, interval: 5,
+      device_code: 'device-code', user_code: 'aB9-Zx2',
+      verification_url: 'https://www.google.com/device', expires_in: 600,
     });
     const adapter = new GoogleDeviceAuthorizationAdapter({ fetch: transport.fetch.bind(transport), clock });
 
-    await expect(adapter.requestCode(client(), signal)).resolves.toMatchObject({ deviceCode: 'device-code', intervalMs: 5_000 });
+    await expect(adapter.requestCode(client(), signal)).resolves.toEqual({
+      deviceCode: 'device-code', userCode: 'aB9-Zx2',
+      verificationUri: 'https://www.google.com/device', verificationUriComplete: null,
+      intervalMs: 5_000, expiresAtMs: clock.nowMs + 600_000,
+    });
 
     expect(new URLSearchParams(String(transport.requests[1].init.body)).get('scope'))
       .toBe('https://www.googleapis.com/auth/drive.file');
   });
 
   it.each([
-    [429, { error: 'rate_limited' }, DriveRateLimitedError],
-    [400, { error: 'invalid_client' }, DriveConfigurationError],
+    [{ device_code: '', user_code: 'ABC', verification_url: 'https://google.com/device', expires_in: 10 }],
+    [{ device_code: 'd', user_code: '\nBAD', verification_url: 'https://google.com/device', expires_in: 10 }],
+    [{ device_code: 'd', user_code: 'ABC', verification_url: '/relative', expires_in: 10 }],
+    [{ device_code: 'd', user_code: 'ABC', verification_url: 'https://user:pass@google.com/device', expires_in: 10 }],
+    [{ device_code: 'd', user_code: 'ABC', verification_url: 'ftp://google.com/device', expires_in: 10 }],
+    [{ device_code: 'd', user_code: 'ABC', verification_url: 'https://google.com/device', expires_in: Number.MAX_SAFE_INTEGER }],
+  ])('rejects malformed successful device-code fields', async (body) => {
+    const transport = new Transport();
+    transport.enqueue(200, discovery());
+    transport.enqueue(200, body);
+
+    await expect(new GoogleDeviceAuthorizationAdapter({ fetch: transport.fetch.bind(transport), clock: new Clock() })
+      .requestCode(client(), signal)).rejects.toBeInstanceOf(DriveProviderResponseError);
+  });
+
+  it.each([
+    [429, { error: 'rate_limit_exceeded' }, DriveRateLimitedError],
+    [400, { error: 'invalid_client' }, DriveOAuthClientRejectedError],
     [400, { error: 'admin_policy_enforced' }, DrivePolicyBlockedError],
   ])('maps provider rejection %s to its typed domain error', async (status, body, error) => {
     const transport = new Transport();
@@ -111,6 +134,41 @@ describe('GoogleDeviceAuthorizationAdapter', () => {
     const adapter = new GoogleDeviceAuthorizationAdapter({ fetch: transport.fetch.bind(transport), clock: new Clock() });
 
     await expect(adapter.requestCode(client(), signal)).rejects.toThrow(error);
+  });
+
+  it('maps device-code error_code rate_limit_exceeded and token invalid_client', async () => {
+    const device = new Transport();
+    device.enqueue(200, discovery());
+    device.enqueue(403, { error_code: 'rate_limit_exceeded' });
+    await expect(new GoogleDeviceAuthorizationAdapter({ fetch: device.fetch.bind(device), clock: new Clock() })
+      .requestCode(client(), signal)).rejects.toBeInstanceOf(DriveRateLimitedError);
+
+    const token = new Transport();
+    token.enqueue(200, discovery());
+    token.enqueue(401, { error: 'invalid_client' });
+    await expect(new GoogleDeviceAuthorizationAdapter({ fetch: token.fetch.bind(token), clock: new Clock() })
+      .poll(client(), challenge(), signal)).rejects.toBeInstanceOf(DriveOAuthClientRejectedError);
+  });
+
+  it('rejects an OAuth JSON body larger than 64 KiB', async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(discovery())))
+      .mockResolvedValueOnce(new Response(`{"device_code":"${'x'.repeat(64 * 1024)}"}`));
+    await expect(new GoogleDeviceAuthorizationAdapter({ fetch, clock: new Clock() })
+      .requestCode(client(), signal)).rejects.toBeInstanceOf(DriveProviderResponseError);
+  });
+
+  it('maps transport timeout to temporary unavailable but preserves caller abort', async () => {
+    const never = vi.fn((_url: string | URL, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+    }));
+    const adapter = new GoogleDeviceAuthorizationAdapter({ fetch: never, clock: new Clock(), requestTimeoutMs: 1 });
+    await expect(adapter.requestCode(client(), signal)).rejects.toBeInstanceOf(DriveTemporaryUnavailableError);
+
+    const controller = new AbortController();
+    const pending = adapter.requestCode(client(), controller.signal);
+    controller.abort(new DOMException('cancelled', 'AbortError'));
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
   });
 
   it('rejects every manual redirect before following it', async () => {
@@ -150,8 +208,8 @@ describe('GoogleDeviceAuthorizationAdapter', () => {
 
   it('cancels an in-flight response-body read as AbortError', async () => {
     const controller = new AbortController();
-    const responseBody = new Promise<unknown>(() => undefined);
-    const fetch = vi.fn().mockResolvedValue({ ok: true, status: 200, json: () => responseBody } as Response);
+    const responseBody = new ReadableStream<Uint8Array>({ start: () => undefined });
+    const fetch = vi.fn().mockResolvedValue({ ok: true, status: 200, body: responseBody });
     const adapter = new GoogleDeviceAuthorizationAdapter({ fetch, clock: new Clock() });
     const pending = adapter.requestCode(client(), controller.signal);
     await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
