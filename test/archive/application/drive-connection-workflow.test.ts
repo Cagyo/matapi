@@ -184,6 +184,30 @@ describe('background authorization and disconnect', () => {
     expect(publish).not.toHaveBeenCalled();
   });
 
+  it('aborts the provider poll when its local request is cancelled', async () => {
+    const registry = new AbortController();
+    const poll = vi.fn(async (_client: unknown, _challenge: unknown, signal: AbortSignal) => {
+      await new Promise<never>((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+    });
+    const credentials = { storeExchangedTokens: vi.fn(), discardStaged: vi.fn(), expireStaged: vi.fn(), loadStaged: vi.fn() };
+    const publish = vi.fn();
+    const polling = new DriveAuthorizationPollingService(
+      { poll } as never, credentials, { resolveAccount: vi.fn() }, { publish },
+    );
+
+    polling.start({ generationId: 'generation-00001', expectedRevision: 0, receiptId: 'abcdefghijklmnop', adminUserId: 7, chatId: 9,
+      client: { clientId: '123.apps.googleusercontent.com', clientSecret: 'secret-123' }, signal: registry.signal,
+      challenge: { deviceCode: 'device', userCode: 'user', verificationUri: 'https://example.test', verificationUriComplete: null, intervalMs: 1, expiresAtMs: 99 },
+    });
+    await vi.waitFor(() => expect(poll).toHaveBeenCalledOnce());
+    polling.cancel('generation-00001');
+    await vi.waitFor(() => expect(poll.mock.calls[0]?.[2]?.aborted).toBe(true));
+
+    expect(registry.signal.aborted).toBe(false);
+    expect(credentials.discardStaged).not.toHaveBeenCalled();
+    expect(publish).not.toHaveBeenCalled();
+  });
+
   it('releases generation leases and resumable sessions before revoking credentials', async () => {
     const order: string[] = [];
     const credentials = {
