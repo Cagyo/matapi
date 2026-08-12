@@ -11,7 +11,7 @@
 Extend the existing Telegram `/logs` command with two reserved, admin-only views:
 
 - `/logs app` returns the worker's last 200 normal-output lines.
-- `/logs error` returns the worker's last 200 error-output lines, including the multiline stack traces retained after the physical-line and byte-safety bounds are applied.
+- `/logs error` returns up to the worker's last 200 error-output physical lines, including every multiline stack frame retained after the byte-safety bound is applied.
 
 The streams remain separate. Each successful or empty read is delivered as a `.txt` document rather than an inline Telegram message. The History menu shows separate **Application logs** and **Errors** buttons to administrators; ordinary users continue to see only sensor logs and CSV export.
 
@@ -25,7 +25,7 @@ The feature reads PM2's existing output and error files on demand. It does not i
 - Keep the fixed response size suitable for a Raspberry Pi 3+ runtime.
 - Reuse `/logs` and the canonical receipt-bound History return flow.
 - Prevent non-admin users from reading operational logs or seeing their menu actions.
-- Prevent log retrieval from exposing configured secrets, PM2 metadata, or raw filesystem paths.
+- Keep PM2 metadata and raw filesystem paths out of replies and new application logs, and apply documented defense-in-depth redaction to known configured secret values and recognizable credential forms.
 - Keep all new user-facing copy complete in English, Russian, and Ukrainian.
 
 ## Non-goals
@@ -42,16 +42,18 @@ The feature reads PM2's existing output and error files on demand. It does not i
 
 ### Command grammar
 
-The existing command gains two exact reserved forms:
+The existing command gains two exact reserved forms plus an explicit sensor-name escape form:
 
 ```text
 /logs app
 /logs error
+/logs sensor <sensor_name> [count]
+/logs sensor <sensor_name> --since <duration>
 ```
 
 Matching is case-insensitive after trimming whitespace. Extra arguments are invalid; `/logs app 50` does not create a configurable-count variant.
 
-All other input continues through the existing sensor-log parser. The words `app` and `error` are reserved when they are the complete command argument. A sensor with either name remains accessible through the no-argument `/logs` picker.
+All other input continues through the existing sensor-log parser. The words `app` and `error` are reserved when they are the complete first argument, including invalid forms such as `/logs app 50`. A current enabled sensor with either name remains accessible through the no-argument `/logs` picker. Any current, disabled, or archived sensor whose name collides with a reserved word remains directly accessible through the explicit `/logs sensor <sensor_name> ...` escape form. `/logs sensor` with no following sensor name retains the existing interpretation of a sensor literally named `sensor`.
 
 ### Authorization
 
@@ -76,11 +78,9 @@ An empty output file contains one localized explanatory line, so the command sti
 
 ### Error-stack behavior
 
-`/logs error` selects the last 200 physical lines, not the last 200 error events. The separate 2 MiB safety ceiling may reduce that physical-line window in a pathological file; all stack frames inside the resulting bounded window are retained.
+`/logs error` selects the last 200 physical lines, not the last 200 error events. The separate 2 MiB safety ceiling may reduce that physical-line window in a pathological file; every complete line inside the resulting bounded window is retained.
 
-When the window begins after the start of the file, it may begin in the middle of an older stack. After ANSI removal, the reader looks for the first recognizable error-entry header in the retained window. If one exists after the first retained line, the preceding partial fragment is omitted. If no header can be recognized safely, the reader keeps the complete 200-line window instead of guessing and discarding valid data.
-
-This rule does not fetch lines preceding the 200-line window to reconstruct an older error. It preserves complete subsequent stacks and follows the explicitly selected physical-line limit.
+The reader performs no error-header recognition and never discards a line based on guessed logger structure. The oldest retained line may therefore begin in the middle of an older stack. This is preferable to falsely recognizing a nested error or application message as a new entry and deleting valid frames. The reader does not fetch earlier lines to reconstruct that older stack.
 
 ## Menu and navigation
 
@@ -130,7 +130,7 @@ interface ApplicationLogSnapshot {
 }
 ```
 
-`ReadApplicationLogsUseCase` accepts only the stream. It owns the fixed `200`-line policy and calls `ApplicationLogReaderPort`. Callers cannot supply a process name, path, or line limit.
+`ReadApplicationLogsUseCase` accepts only the stream. It owns the fixed `200`-line and 2 MiB snapshot policies and calls `ApplicationLogReaderPort` with those constants. Callers cannot supply a process name, path, or limit.
 
 The system composition root binds the port to the PM2 adapter and exports the use case. Telegram imports the system application boundary, never the concrete adapter.
 
@@ -138,12 +138,14 @@ The system composition root binds the port to the PM2 adapter and exports the us
 
 `Pm2ApplicationLogReaderAdapter` performs these steps:
 
-1. Execute PM2 directly without a shell to obtain the process list.
-2. Select the exact worker name, honoring an already configured `PM2_APP_NAME` and otherwise using the repository's existing `worker` default. This feature adds no environment variable.
-3. Parse only the selected process's output and error log path fields.
-4. Resolve the selected path and verify it is absolute and refers to a readable regular file.
-5. Open the file read-only and scan backward in bounded chunks until 200 physical lines are available or the file begins.
-6. Return the retained lines in chronological order after sanitization.
+1. Execute `pm2 jlist` directly with `execFile`, `shell: false`, the repository's sanitized system `PATH`, a five-second timeout, and a 2 MiB stdout/stderr buffer limit.
+2. Parse the bounded stdout as untrusted JSON. Never interpolate, log, attach, or copy stdout or stderr into an error.
+3. Select the exact worker name, honoring an already configured non-empty `PM2_APP_NAME` and otherwise using the repository's existing `worker` default. This feature adds no environment variable.
+4. Require exactly one matching PM2 entry. Zero matches produce process-not-found; multiple matches produce process-ambiguous. The adapter never chooses the first ambiguous entry.
+5. Read only that entry's `pm2_env.pm_out_log_path` and `pm2_env.pm_err_log_path`. Both must be non-empty absolute strings and must resolve to different paths; combined output/error logging is unavailable because it cannot satisfy stream separation.
+6. Validate the raw selected path as absolute before normalization. Open it once with read-only and no-follow flags, then `fstat` the opened descriptor and require a regular file. Pre-open `stat` results are never used as the security decision.
+7. Capture the descriptor size, scan backward with positioned fixed-size reads until 200 physical lines are available, the captured beginning is reached, or the 2 MiB raw-scan ceiling is reached. Ignore bytes appended after the captured size. Rename-based PM2 rotation remains safe because the descriptor anchors the opened inode. Truncation or a short positioned read inside the captured range produces the typed snapshot-changed failure.
+8. Return the retained lines in chronological order after sanitization and final UTF-8 byte bounding.
 
 PM2 process metadata can contain environment values. The adapter must never log, return, attach, or include raw PM2 stdout/stderr in a thrown error. It extracts only the application name and the two log-path fields, then discards the metadata buffer.
 
@@ -154,10 +156,14 @@ The adapter never uses user-provided values in a command, path, or process selec
 - File access is read-only.
 - Backward reads use fixed-size chunks rather than loading the full PM2 log.
 - The result retains at most 200 physical lines.
-- A separate 2 MiB snapshot ceiling protects the Pi from a pathological single line or stack.
-- If the 200-line window exceeds 2 MiB, the reader keeps the newest complete lines that fit and marks the document as byte-truncated.
+- The PM2 metadata subprocess has a five-second timeout and a 2 MiB output limit independent of the log snapshot limit.
+- The backward raw-byte scan retains at most 2 MiB plus one fixed read chunk. If that boundary falls inside the oldest candidate line, the partial oldest line is discarded and the snapshot is marked byte-truncated.
+- A separate 2 MiB sanitized UTF-8 snapshot ceiling protects the Pi from a pathological single line, stack, or redaction expansion.
+- A physical line is delimited by LF; an optional preceding CR is removed. In a non-empty file, the final bytes at EOF form a complete physical line even when the file has no trailing LF. An empty file has zero lines, and a trailing LF does not manufacture an extra empty line.
+- If the sanitized 200-line window exceeds 2 MiB, the reader keeps the newest complete sanitized lines that fit and marks the document as byte-truncated.
 - The document starts with a localized truncation notice when that exceptional ceiling is reached.
-- If a single newest physical line exceeds the ceiling and no complete line can be returned, the reader raises the safe typed snapshot-too-large failure instead of returning a misleading fragment.
+- If the newest raw or sanitized physical line alone exceeds its ceiling, the reader raises the safe typed snapshot-too-large failure instead of returning a fragment.
+- UTF-8 decoding preserves code points split across read chunks. Invalid UTF-8 input is replaced with the standard replacement character before byte bounding; raw undecodable bytes never cross the adapter boundary.
 
 The normal path creates one bounded in-memory buffer suitable for grammY's `InputFile`. No persistent temporary file is required.
 
@@ -174,7 +180,7 @@ For an application-log request it:
 5. delivers one `.txt` document;
 6. completes through the existing workflow navigation coordinator.
 
-Raw log content is never copied into Nest logs when retrieval or Telegram delivery fails.
+Raw log content is never copied into Nest logs when retrieval or Telegram delivery fails. A failed document delivery is followed by the existing localized History recovery flow. The durable workflow receipt may then complete because `completed` records successful terminal navigation recovery; it must not be presented or logged as successful attachment delivery.
 
 ### Home application and renderer
 
@@ -225,32 +231,33 @@ registered user sends /logs app
 
 Operational logs are privileged but are not assumed safe merely because the requester is an admin.
 
-Before content crosses the infrastructure boundary, the adapter:
+Before content crosses the infrastructure boundary, the adapter applies defense-in-depth sanitization:
 
 - strips ANSI control sequences;
-- replaces non-empty configured values whose environment key denotes a token, secret, password, credential, or private key;
-- redacts Telegram bot-token shapes, bearer-token forms, and URL user-info credentials;
+- replaces configured values whose environment key denotes a token, secret, password, credential, private key, or authorization value;
+- refuses the snapshot with a typed sanitization-unsafe failure when such a configured value is shorter than eight UTF-8 bytes, because literal replacement would corrupt ordinary output and returning it would risk disclosure;
+- redacts Telegram bot-token shapes, Bearer and Basic authorization forms, URL user-info credentials, and sensitive URL query values named `token`, `access_token`, `api_key`, `password`, `secret`, or `key`;
 - uses one stable `[REDACTED]` marker;
 - preserves error type, message structure, source file, line number, column number, and stack-frame ordering when those fields are not themselves secret.
 
-Very short or generic environment values are not used as literal replacement needles because they could corrupt ordinary words. Pattern redaction still applies. The implementation must test the project-sensitive values that are most likely to appear: Telegram credentials, admin-claim credentials, RTSP credentials, authorization headers, and credential-bearing URLs.
+The implementation must test the project-sensitive environment values and credential forms most likely to appear: Telegram credentials, admin-claim credentials, RTSP encryption keys, authorization headers, and credential-bearing URLs. RTSP source passwords and other credentials stored encrypted in SQLite are not loaded merely to construct a redaction dictionary; source adapters remain responsible for never logging them. Consequently this sanitizer is a bounded defense-in-depth control, not a general data-loss-prevention guarantee for arbitrary secret text.
 
 The raw PM2 metadata buffer and unsanitized log bytes are never passed to the handler, locale renderer, Nest logger, or domain error messages.
 
 ## Error handling
 
-Expected infrastructure failures are mapped to typed system errors with safe metadata only:
+Expected infrastructure failures are mapped to one typed `ApplicationLogUnavailableError` carrying only a safe reason discriminator:
 
-- worker process not found;
-- PM2 metadata unavailable or malformed;
-- log path unavailable or invalid;
-- log file missing or unreadable;
-- log snapshot too large to produce safely;
-- unexpected read change while tailing.
+- `pm2-unavailable` or `pm2-metadata-invalid`;
+- `process-not-found` or `process-ambiguous`;
+- `stream-path-invalid` or `stream-path-collision`;
+- `file-unavailable`;
+- `snapshot-too-large` or `snapshot-changed`;
+- `sanitization-unsafe`.
 
 The Telegram boundary maps all expected failures to localized operational-log failure copy. Unexpected exceptions are logged with their safe stack when available, but the raw PM2 output, selected filesystem path, and raw log content are excluded. The bot reply never includes `error.message` directly.
 
-A Telegram document-delivery failure follows the existing workflow-navigation failure path. It does not mark a failed delivery as a successful workflow completion, echo the document into application logs, or retry automatically in a loop.
+A Telegram document-delivery failure follows the existing workflow-navigation failure path, restores History with localized unavailable copy, and may terminally complete the navigation receipt. It does not claim that the attachment was delivered, echo the document into application logs, or retry automatically in a loop.
 
 If the worker is running outside PM2, such as a local development session, the command returns the same localized unavailable response. Mock and test composition may bind an in-memory application-log reader.
 
@@ -271,16 +278,19 @@ Cover `ReadApplicationLogsUseCase` with an in-memory reader:
 Use a fake process executor plus temporary regular files:
 
 - selects `worker` and the correct distinct PM2 path for each stream;
+- fails closed on multiple exact-name matches and identical output/error paths;
+- bounds `pm2 jlist` with the sanitized path, five-second timeout, and 2 MiB buffer without leaking stdout or stderr;
 - returns the last 200 physical lines in chronological order;
-- handles fewer than 200 lines and a final line without a newline;
+- handles fewer than 200 lines, CRLF, a trailing newline, Unicode split across chunks, invalid UTF-8, and a final line without a newline;
 - does not load or return older file content;
-- drops only a recognizable oldest partial error fragment;
-- preserves subsequent multiline stacks;
-- keeps all lines when no safe error boundary is recognizable;
+- preserves every retained multiline stack line without error-header heuristics;
 - strips ANSI sequences;
 - redacts configured secret values and credential patterns;
+- rejects configured secret values that are too short for safe literal replacement;
 - applies the 2 MiB ceiling on complete-line boundaries and reports truncation;
-- rejects missing processes, malformed metadata, relative paths, directories, missing files, and read failures;
+- never retains more than the raw ceiling plus one fixed read chunk while searching for line boundaries;
+- rejects missing or ambiguous processes, malformed metadata, relative paths, symlinks, directories, missing files, changed snapshots, and read failures;
+- ignores post-open appends and remains bound to the opened inode across rename-based rotation;
 - exposes no raw PM2 metadata, environment value, raw path, or raw log content in mapped errors.
 
 ### Telegram handler tests
@@ -294,6 +304,7 @@ Extend `logs.handler.test.ts` to prove:
 - successful, empty, and byte-truncated results always use `replyWithDocument`;
 - output and error filenames/captions are distinct and localized;
 - extra arguments are rejected without falling into sensor lookup;
+- `/logs sensor app` and `/logs sensor error` reach current, disabled, or archived sensor history through the existing sensor parser;
 - every expected application-log error maps to localized safe copy;
 - document-delivery failure follows the existing receipt recovery behavior.
 
@@ -318,16 +329,18 @@ Update the canonical product docs alongside code:
 
 - `docs/specs/09-bot-cmd-logs.md`: add the two admin-only application-log forms, fixed line count, document delivery, reserved-token rule, and failure behavior.
 - `docs/specs/06-bot-core.md`: add the role-aware History destinations and natural-parent behavior.
+- `docs/ports-and-adapters.md`: register `ApplicationLogReaderPort`, its PM2 adapter, and its in-memory test adapter in the system-context catalogue.
 
 ## Acceptance criteria
 
 1. `/logs app` sends an admin a `.txt` document containing at most the latest 200 sanitized normal-output lines and no PM2 error-output lines.
-2. `/logs error` sends an admin a `.txt` document containing at most the latest 200 sanitized error-output lines, preserving all stack frames retained after the documented 2 MiB safety bound.
+2. `/logs error` sends an admin a `.txt` document containing at most the latest 200 sanitized error-output lines, preserving every complete physical line retained after the documented 2 MiB safety bound without guessing error headers.
 3. Both commands use fixed limits, distinct filenames/captions, and the configured local timezone.
 4. Empty output still produces a `.txt` document with localized explanatory content.
 5. A non-admin cannot see the two History buttons and cannot cause PM2 metadata or log files to be read through a typed command or stale callback.
 6. Existing sensor-log commands, picker behavior, CSV export, and ordinary-user History layout remain unchanged.
-7. PM2 metadata, raw paths, unsanitized log bytes, Telegram tokens, claim credentials, RTSP credentials, authorization values, and credential-bearing URLs do not appear in Telegram documents or new application error logs.
-8. Reads are bounded to 200 lines and 2 MiB without loading a complete PM2 log file.
+7. PM2 metadata, raw paths, unsanitized log bytes, known configured environment secrets of at least eight bytes, and recognized Telegram-token, authorization-header, URL-user-info, and sensitive-query credential forms do not appear in Telegram documents or new application error logs; unsafe shorter configured secrets make retrieval unavailable.
+8. PM2 metadata lookup is bounded to five seconds and 2 MiB, while log reads are separately bounded to 200 lines, a 2 MiB raw scan plus one chunk, and a 2 MiB sanitized snapshot without loading a complete PM2 log file.
 9. PM2/filesystem failures are localized and do not crash the bot handler.
 10. The feature introduces no automatic forwarding, new environment flag, database migration, root requirement, or PM2 log-configuration change.
+11. Zero or multiple exact PM2 process matches, combined output/error paths, symlinks, non-regular files, and snapshot changes fail closed with localized unavailable copy.
