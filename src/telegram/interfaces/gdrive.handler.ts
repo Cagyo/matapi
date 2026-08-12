@@ -129,6 +129,8 @@ export class GdriveHandler implements TelegramHandler {
     if (!associated) return;
     const catalog = ctx.localeState?.catalog ?? en;
     let generation: DriveSetupGenerationIdentity | null = null;
+    let claimed = false;
+    let submitted = false;
     try {
       if (!ctx.message?.document) return;
       const admin = this.currentAdmin(ctx);
@@ -153,6 +155,7 @@ export class GdriveHandler implements TelegramHandler {
       };
       const authorizing = this.setupStates.claimAuthorizing(associated, pending);
       if (!authorizing) return;
+      claimed = true;
       const operationSignal = AbortSignal.any([
         authorizing.controller.signal,
         AbortSignal.timeout(30_000),
@@ -165,9 +168,10 @@ export class GdriveHandler implements TelegramHandler {
         authorizationSignal: authorizing.controller.signal,
         acceptChallenge: (binding) => this.setupStates.recordChallenge({ ...associated, ...binding }),
       });
+      submitted = true;
       await this.replyWithAuthorization(ctx, result, pending);
     } catch (error) {
-      await this.handleSetupError(ctx, associated, generation, error);
+      await this.handleSetupError(ctx, associated, generation, claimed, submitted, error);
     } finally {
       await this.deleteAssociatedDocument(ctx, catalog.gdriveConnection.manualDelete);
     }
@@ -190,16 +194,30 @@ export class GdriveHandler implements TelegramHandler {
     ctx: TelegramContext,
     preparation: DriveSetupIdentity,
     generation: DriveSetupGenerationIdentity | null,
+    claimed: boolean,
+    submitted: boolean,
     error: unknown,
   ): Promise<void> {
     const catalog = ctx.localeState?.catalog ?? en;
-    if (isAbortError(error) && !this.setupStates.association(preparation)) return;
     if (error instanceof DriveSetupExpiredError) {
-      await this.setupStates.cancelExact(preparation).catch(() => undefined);
+      if (!await this.terminalizeExpiredSetup(preparation, generation, claimed)) return;
       await this.completeSetup(ctx, preparation.receiptId, catalog.gdriveConnection.setupExpired);
       return;
     }
-    if (generation) this.setupStates.returnToPreparing(generation);
+    if (generation) {
+      if (submitted) {
+        await this.cancelConnection.execute({
+          generationId: generation.generationId,
+          receiptId: generation.receiptId,
+          adminUserId: generation.userId,
+          chatId: generation.chatId,
+        });
+      }
+      if (!this.setupStates.returnToPreparing(generation)) return;
+    } else {
+      const current = this.setupStates.association(preparation);
+      if (current?.receiptId !== preparation.receiptId) return;
+    }
     const reply = error instanceof DriveClientDocumentError
       ? error.reason === 'unsupported-client-type'
         ? catalog.gdriveConnection.unsupportedClientType
@@ -220,6 +238,15 @@ export class GdriveHandler implements TelegramHandler {
       this.logger.error('Unexpected Drive setup failure');
     }
     await ctx.reply(reply);
+  }
+
+  private async terminalizeExpiredSetup(
+    preparation: DriveSetupIdentity,
+    generation: DriveSetupGenerationIdentity | null,
+    claimed: boolean,
+  ): Promise<boolean> {
+    if (claimed && generation) return this.setupStates.takeTerminal(generation) !== null;
+    return await this.setupStates.cancelExact(preparation) === 'cancelled';
   }
 
   private async deleteAssociatedDocument(ctx: TelegramContext, warning: string): Promise<void> {
@@ -296,6 +323,13 @@ export class GdriveHandler implements TelegramHandler {
         signal,
       });
       if (result === 'pending') {
+        if (!await this.workflows.loadCurrent(ctx, state.receiptId, 'drive-setup')) return;
+        if (!this.setupStates.authorizing({
+          userId: state.userId,
+          chatId: state.chatId,
+          receiptId: state.receiptId,
+          generationId: state.pending.generationId,
+        })) return;
         await ctx.reply(catalog.gdriveConnection.authorizationPending);
         return;
       }
@@ -434,8 +468,4 @@ function documentInput(ctx: TelegramContext): TelegramDriveClientDocument {
   const document = ctx.message?.document;
   if (!document) throw new DriveClientDocumentError('invalid-credentials');
   return { fileId: document.file_id, fileSize: document.file_size };
-}
-
-function isAbortError(error: unknown): boolean {
-  return error instanceof Error && error.name === 'AbortError';
 }

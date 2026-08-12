@@ -9,6 +9,7 @@ import { DriveSetupBusyError } from '../../../src/archive/domain/errors/drive-se
 import { DriveSetupExpiredError } from '../../../src/archive/domain/errors/drive-setup-expired.error';
 import { DriveTemporaryUnavailableError } from '../../../src/archive/domain/errors/drive-temporary-unavailable.error';
 import { catalogFor } from '../../../src/locales';
+import { DriveSetupStateRegistry } from '../../../src/telegram/interfaces/drive-setup-state.registry';
 import { GdriveHandler } from '../../../src/telegram/interfaces/gdrive.handler';
 
 describe('GdriveHandler status', () => {
@@ -199,11 +200,13 @@ describe('GdriveHandler Drive client documents', () => {
   it('treats initial setup expiry as terminal and restores only the exact current receipt', async () => {
     const fixture = preparedDocumentFixture();
     fixture.submit.execute.mockRejectedValue(new DriveSetupExpiredError());
+    fixture.states.takeTerminal.mockReturnValue(authorizingState(fixture));
 
     await fixture.handler.handleDocument(fixture.ctx as never);
 
     expect(fixture.states.returnToPreparing).not.toHaveBeenCalled();
-    expect(fixture.states.cancelExact).toHaveBeenCalledWith(expect.objectContaining({ receiptId: fixture.receipt.id }));
+    expect(fixture.states.takeTerminal).toHaveBeenCalledWith(generationIdentity(fixture));
+    expect(fixture.states.cancelExact).not.toHaveBeenCalled();
     expect(fixture.navigation.complete).toHaveBeenCalledWith(
       fixture.ctx,
       { receipt: fixture.receipt },
@@ -265,12 +268,107 @@ describe('GdriveHandler Drive client documents', () => {
     const fixture = preparedDocumentFixture();
     fixture.documents.read.mockRejectedValue(new DOMException('cancelled', 'AbortError'));
     fixture.states.association.mockReturnValueOnce(preparingState(fixture)).mockReturnValueOnce(null);
+    fixture.states.returnToPreparing.mockReturnValue(false);
 
     await fixture.handler.handleDocument(fixture.ctx as never);
 
     expect(fixture.ctx.reply).not.toHaveBeenCalled();
-    expect(fixture.states.returnToPreparing).not.toHaveBeenCalled();
+    expect(fixture.states.returnToPreparing).toHaveBeenCalledWith(generationIdentity(fixture));
     expect(fixture.ctx.api.deleteMessage).toHaveBeenCalledWith(7, 99);
+  });
+
+  it('does not reply from an old generation after a real replacement state is installed', async () => {
+    const fixture = realPreparedDocumentFixture();
+    const read = deferred<string>();
+    fixture.documents.read.mockReturnValue(read.promise);
+
+    const handling = fixture.handler.handleDocument(fixture.ctx as never);
+    await vi.waitFor(() => expect(fixture.documents.read).toHaveBeenCalledOnce());
+    await fixture.registry.cancelExact(preparingState(fixture));
+    fixture.registry.prepare({
+      userId: 7, chatId: 7, receiptId: 'ponmlkjihgfedcba', preparationExpiresAtMs: 86_401_000,
+    });
+    read.reject(new DriveTemporaryUnavailableError());
+    await handling;
+
+    expect(fixture.ctx.reply).not.toHaveBeenCalled();
+    expect(fixture.registry.association({ userId: 7, chatId: 7 })).toMatchObject({
+      kind: 'preparing', receiptId: 'ponmlkjihgfedcba',
+    });
+  });
+
+  it('does not terminalize a same-receipt retry after an old generation expires', async () => {
+    const fixture = realPreparedDocumentFixture();
+    const read = deferred<string>();
+    fixture.documents.read.mockReturnValue(read.promise);
+
+    const handling = fixture.handler.handleDocument(fixture.ctx as never);
+    await vi.waitFor(() => expect(fixture.documents.read).toHaveBeenCalledOnce());
+    await fixture.registry.cancelExact(generationIdentity(fixture));
+    fixture.registry.prepare({
+      userId: 7, chatId: 7, receiptId: fixture.receipt.id, preparationExpiresAtMs: 86_401_000,
+    });
+    read.reject(new DriveSetupExpiredError());
+    await handling;
+
+    expect(fixture.ctx.reply).not.toHaveBeenCalled();
+    expect(fixture.registry.association({ userId: 7, chatId: 7 })).toMatchObject({
+      kind: 'preparing', receiptId: fixture.receipt.id,
+    });
+  });
+
+  it('does not reply from a pre-generation failure after its real receipt is replaced', async () => {
+    const fixture = realPreparedDocumentFixture();
+    const current = deferred<ReturnType<typeof driveSetupReceipt>>();
+    fixture.workflows.loadCurrent.mockReturnValueOnce(current.promise);
+    fixture.begin.execute.mockImplementation(() => { throw new DriveSetupBusyError(); });
+
+    const handling = fixture.handler.handleDocument(fixture.ctx as never);
+    await fixture.registry.cancelExact(preparingState(fixture));
+    fixture.registry.prepare({
+      userId: 7, chatId: 7, receiptId: 'ponmlkjihgfedcba', preparationExpiresAtMs: 86_401_000,
+    });
+    current.resolve(fixture.receipt);
+    await handling;
+
+    expect(fixture.ctx.reply).not.toHaveBeenCalled();
+    expect(fixture.registry.association({ userId: 7, chatId: 7 })?.receiptId).toBe('ponmlkjihgfedcba');
+  });
+
+  it('discards the exact staged generation before retrying and leaves another administrator untouched', async () => {
+    const order: string[] = [];
+    const cancel = {
+      execute: vi.fn(async () => { order.push('discard'); return 'cancelled' as const; }),
+    };
+    const fixture = realPreparedDocumentFixture(cancel);
+    fixture.registry.prepare({
+      userId: 8, chatId: 8, receiptId: 'bbbbbbbbbbbbbbbb', preparationExpiresAtMs: 86_401_000,
+    });
+    const returnToPreparing = vi.spyOn(fixture.registry, 'returnToPreparing');
+    returnToPreparing.mockImplementation((identity) => {
+      order.push('retry');
+      returnToPreparing.mockRestore();
+      return fixture.registry.returnToPreparing(identity);
+    });
+    fixture.ctx.reply
+      .mockRejectedValueOnce(new Error('authorization delivery failed'))
+      .mockResolvedValueOnce({ message_id: 2 });
+
+    await fixture.handler.handleDocument(fixture.ctx as never);
+
+    expect(cancel.execute).toHaveBeenCalledWith({
+      generationId: fixture.pending.generationId,
+      receiptId: fixture.receipt.id,
+      adminUserId: 7,
+      chatId: 7,
+    });
+    expect(order).toEqual(['discard', 'retry']);
+    expect(fixture.registry.association({ userId: 7, chatId: 7 })).toMatchObject({
+      kind: 'preparing', receiptId: fixture.receipt.id,
+    });
+    expect(fixture.registry.association({ userId: 8, chatId: 8 })).toMatchObject({
+      kind: 'preparing', receiptId: 'bbbbbbbbbbbbbbbb',
+    });
   });
 
   it('warns after deletion failure and swallows warning-delivery failure without provider text', async () => {
@@ -319,6 +417,41 @@ describe('GdriveHandler Drive authorization callbacks', () => {
     });
     expect(fixture.ctx.reply).toHaveBeenCalledWith(fixture.catalog.gdriveConnection.authorizationPending);
     expect(fixture.states.takeActivated).not.toHaveBeenCalled();
+  });
+
+  it('does not send pending after concurrent cancellation installs a replacement state', async () => {
+    const pending = deferred<'pending'>();
+    const fixture = realAuthorizationFixture();
+    fixture.confirm.execute.mockReturnValue(pending.promise);
+
+    const handling = fixture.invoke('a');
+    await vi.waitFor(() => expect(fixture.confirm.execute).toHaveBeenCalledOnce());
+    await fixture.registry.cancelExact(generationIdentity(fixture));
+    fixture.registry.prepare({
+      userId: 7, chatId: 7, receiptId: 'ponmlkjihgfedcba', preparationExpiresAtMs: 86_401_000,
+    });
+    pending.resolve('pending');
+    await handling;
+
+    expect(fixture.ctx.reply).not.toHaveBeenCalled();
+    expect(fixture.registry.association({ userId: 7, chatId: 7 })?.receiptId).toBe('ponmlkjihgfedcba');
+  });
+
+  it('does not send pending when the exact workflow receipt stops being current during confirmation', async () => {
+    const pending = deferred<'pending'>();
+    const fixture = realAuthorizationFixture();
+    fixture.confirm.execute.mockReturnValue(pending.promise);
+    fixture.workflows.loadCurrent
+      .mockResolvedValueOnce(fixture.receipt)
+      .mockResolvedValueOnce(null);
+
+    const handling = fixture.invoke('a');
+    await vi.waitFor(() => expect(fixture.confirm.execute).toHaveBeenCalledOnce());
+    pending.resolve('pending');
+    await handling;
+
+    expect(fixture.ctx.reply).not.toHaveBeenCalled();
+    expect(fixture.registry.authorizing(generationIdentity(fixture))).not.toBeNull();
   });
 
   it('removes the activated exact generation before terminal delivery and restoration', async () => {
@@ -405,7 +538,11 @@ function driveSetupReceipt(workflow: 'drive-setup' | 'drive-status' = 'drive-set
   };
 }
 
-function setupDriveHandler(options: { statusReceipt?: boolean } = {}) {
+function setupDriveHandler(options: {
+  statusReceipt?: boolean;
+  setupStates?: DriveSetupStateRegistry;
+  cancel?: { execute: ReturnType<typeof vi.fn> };
+} = {}) {
   const events: string[] = [];
   const receipt = driveSetupReceipt(options.statusReceipt ? 'drive-status' : 'drive-setup');
   const status = { execute: vi.fn() };
@@ -421,7 +558,8 @@ function setupDriveHandler(options: { statusReceipt?: boolean } = {}) {
   };
   const states = {
     prepare: vi.fn(), removePreparation: vi.fn(), association: vi.fn(),
-    authorizing: vi.fn(), claimAuthorizing: vi.fn(), recordChallenge: vi.fn(), returnToPreparing: vi.fn(),
+    authorizing: vi.fn(), claimAuthorizing: vi.fn(), recordChallenge: vi.fn(),
+    returnToPreparing: vi.fn().mockReturnValue(true),
     observeAuthorized: vi.fn(), takeTerminal: vi.fn(), takeActivated: vi.fn(),
     cancelExact: vi.fn().mockResolvedValue('cancelled'), cancelUser: vi.fn(),
   };
@@ -434,6 +572,7 @@ function setupDriveHandler(options: { statusReceipt?: boolean } = {}) {
   const begin = { execute: vi.fn() };
   const submit = { execute: vi.fn() };
   const confirm = { execute: vi.fn() };
+  const cancel = options.cancel ?? { execute: vi.fn().mockResolvedValue('cancelled') };
   const handler = new GdriveHandler(
     status as never,
     {} as never,
@@ -443,11 +582,13 @@ function setupDriveHandler(options: { statusReceipt?: boolean } = {}) {
     begin as never,
     submit as never,
     confirm as never,
-    { execute: vi.fn() } as never,
+    cancel as never,
     { activeGeneration: vi.fn() } as never,
-    states as never,
+    (options.setupStates ?? states) as never,
   );
-  return { handler, ctx, status, workflows, navigation, states, receipt, documents, begin, submit, confirm, events };
+  return {
+    handler, ctx, status, workflows, navigation, states, receipt, documents, begin, submit, confirm, cancel, events,
+  };
 }
 
 function preparedDocumentFixture() {
@@ -476,12 +617,66 @@ function preparedDocumentFixture() {
   return { ...fixture, pending, controller, catalog: catalogFor('en') };
 }
 
+function realPreparedDocumentFixture(
+  cancel = { execute: vi.fn().mockResolvedValue('cancelled') },
+) {
+  const registry = new DriveSetupStateRegistry(
+    { now: () => new Date(1_000) },
+    cancel as never,
+    { register: vi.fn() } as never,
+  );
+  const fixture = setupDriveHandler({ setupStates: registry, cancel });
+  const pending: PendingFixture = {
+    generationId: 'generation-00001', receiptId: fixture.receipt.id,
+    adminUserId: 7, chatId: 7, installationId: 'installation-1',
+    createdAtMs: 1_000, expiresAtMs: 601_000,
+  };
+  registry.prepare(preparingState({ ...fixture, pending }));
+  Object.assign(fixture.ctx, {
+    message: { message_id: 99, document: { file_id: 'file-1', file_size: 200 } },
+    api: { deleteMessage: vi.fn().mockResolvedValue(true) },
+  });
+  fixture.begin.execute.mockReturnValue(pending);
+  fixture.documents.read.mockResolvedValue(JSON.stringify({ installed: {
+    client_id: '123-device.apps.googleusercontent.com', client_secret: 'secret_12345678',
+  } }));
+  fixture.submit.execute.mockResolvedValue({
+    verificationUri: 'https://www.google.com/device', userCode: 'Ab9-Xy2',
+    effectiveDeadlineMs: 121_000,
+  });
+  return { ...fixture, registry, pending, catalog: catalogFor('en') };
+}
+
 function authorizationFixture() {
   const fixture = preparedDocumentFixture();
   const state = authorizingState(fixture);
   state.effectiveDeadlineMs = 121_000;
   fixture.states.authorizing.mockReturnValue(state);
   fixture.states.takeActivated.mockReturnValue(state);
+  const callbacks: { fn: (ctx: object) => Promise<void> }[] = [];
+  fixture.handler.register({
+    command: vi.fn(), on: vi.fn(),
+    callbackQuery: vi.fn((_pattern, fn) => { callbacks.push({ fn }); }),
+  } as never);
+  fixture.ctx.reply.mockClear();
+  fixture.events.length = 0;
+  return {
+    ...fixture,
+    state,
+    invoke: async (action: 'a' | 'c') => {
+      Object.assign(fixture.ctx, {
+        callbackQuery: { data: `gdc:${fixture.receipt.id}:${fixture.pending.generationId}:${action}` },
+        answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+      });
+      await callbacks[0].fn(fixture.ctx);
+    },
+  };
+}
+
+function realAuthorizationFixture() {
+  const fixture = realPreparedDocumentFixture();
+  const state = fixture.registry.claimAuthorizing(preparingState(fixture), fixture.pending)!;
+  fixture.registry.recordChallenge({ ...generationIdentity(fixture), effectiveDeadlineMs: 121_000 });
   const callbacks: { fn: (ctx: object) => Promise<void> }[] = [];
   fixture.handler.register({
     command: vi.fn(), on: vi.fn(),
@@ -534,4 +729,14 @@ interface PendingFixture {
   installationId: string;
   createdAtMs: number;
   expiresAtMs: number;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((onResolve, onReject) => {
+    resolve = onResolve;
+    reject = onReject;
+  });
+  return { promise, resolve, reject };
 }
