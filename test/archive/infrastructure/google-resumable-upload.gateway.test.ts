@@ -8,7 +8,16 @@ import {
 } from '../../../src/archive/infrastructure/google/google-resumable-upload.gateway';
 
 const signal = new AbortController().signal;
-const validLocation = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&upload_id=opaque-id';
+const validLocation = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&upload_id=opaque-id&ignoreDefaultVisibility=true';
+const beginInput = {
+  authorization: 'Bearer token',
+  fileId: 'reserved-1',
+  parentId: 'folder-1',
+  name: 'clip.mp4',
+  mimeType: 'video/mp4',
+  size: 42,
+  appProperties: { a1v: '1' },
+} as const;
 
 describe('GoogleResumableUploadGateway', () => {
   it.each([
@@ -32,20 +41,64 @@ describe('GoogleResumableUploadGateway', () => {
   });
 
   it.each([
-    'http://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&upload_id=x',
-    'https://user:pass@www.googleapis.com/upload/drive/v3/files?uploadType=resumable&upload_id=x',
-    'https://evil.example/upload/drive/v3/files?uploadType=resumable&upload_id=x',
-    'https://www.googleapis.com/upload/drive/v3/files/extra?uploadType=resumable&upload_id=x',
-    'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&upload_id=x&access_token=secret',
-    'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&upload_id=x&upload_id=y',
-    'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&upload_id=x#fragment',
-  ])('rejects a non-allowlisted resumable Location without returning it: %s', async (location) => {
-    const gateway = new GoogleResumableUploadGateway(new FakeTransport({ status: 200, headers: { location } }));
+    [
+      'with a Google-controlled auxiliary parameter',
+      validLocation,
+    ],
+    [
+      'without the optional uploadType parameter',
+      'https://www.googleapis.com/upload/drive/v3/files?upload_id=opaque-id&ignoreDefaultVisibility=true',
+    ],
+  ] as const)('accepts and preserves a valid session URI %s', async (_case, location) => {
+    const transport = new FakeTransport({ status: 200, headers: { location } });
+    const gateway = new GoogleResumableUploadGateway(transport, { now: () => 100 });
 
-    await expect(gateway.begin({
-      authorization: 'Bearer token', fileId: 'reserved-1', parentId: 'folder-1', name: 'clip.mp4',
-      mimeType: 'video/mp4', size: 42, appProperties: { a1v: '1' },
-    }, signal)).rejects.toThrow('allowlisted');
+    await expect(gateway.begin(beginInput, signal)).resolves.toEqual({
+      uri: location,
+      createdAtMs: 100,
+      expiresAtMs: 518_400_100,
+    });
+  });
+
+  it('uses the exact validated persisted URI for a status PUT', async () => {
+    const location = 'https://www.googleapis.com:443/upload/drive/v3/files?upload_id=opaque-id&ignoreDefaultVisibility=true';
+    const transport = new FakeTransport({ status: 308, headers: {} });
+    const gateway = new GoogleResumableUploadGateway(transport);
+
+    await expect(gateway.querySession({
+      authorization: 'Bearer token',
+      uri: location,
+      totalSize: 42,
+    }, signal)).resolves.toEqual({ kind: 'resume', confirmedOffset: 0 });
+    expect(transport.requests[0].url).toBe(location);
+  });
+
+  it.each([
+    ['a missing Location header', undefined],
+    ['a relative URL', '/upload/drive/v3/files?upload_id=x'],
+    ['HTTP', 'http://www.googleapis.com/upload/drive/v3/files?upload_id=x'],
+    ['embedded credentials', 'https://user:pass@www.googleapis.com/upload/drive/v3/files?upload_id=x'],
+    ['a foreign host', 'https://evil.example/upload/drive/v3/files?upload_id=x'],
+    ['a suffix-confusable host', 'https://www.googleapis.com.evil.example/upload/drive/v3/files?upload_id=x'],
+    ['a non-default port', 'https://www.googleapis.com:444/upload/drive/v3/files?upload_id=x'],
+    ['a different path', 'https://www.googleapis.com/upload/drive/v3/files/extra?upload_id=x'],
+    ['a fragment', 'https://www.googleapis.com/upload/drive/v3/files?upload_id=x#fragment'],
+    ['a missing upload_id', 'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable'],
+    ['an empty upload_id', 'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&upload_id='],
+    ['duplicate upload_id values', 'https://www.googleapis.com/upload/drive/v3/files?upload_id=x&upload_id=y'],
+    ['an empty uploadType', 'https://www.googleapis.com/upload/drive/v3/files?upload_id=x&uploadType='],
+    ['an invalid uploadType', 'https://www.googleapis.com/upload/drive/v3/files?upload_id=x&uploadType=multipart'],
+    ['duplicate resumable uploadType values', 'https://www.googleapis.com/upload/drive/v3/files?upload_id=x&uploadType=resumable&uploadType=resumable'],
+    ['mixed duplicate uploadType values', 'https://www.googleapis.com/upload/drive/v3/files?upload_id=x&uploadType=resumable&uploadType=multipart'],
+  ] as const)('rejects %s with the sanitized configuration error', async (_case, location) => {
+    const transport = new FakeTransport({ status: 200, headers: { location } });
+    const gateway = new GoogleResumableUploadGateway(transport);
+
+    await expect(gateway.begin(beginInput, signal)).rejects.toMatchObject({
+      name: 'DriveConfigurationError',
+      code: 'DRIVE_CONFIGURATION',
+      message: 'Google resumable Location is not allowlisted',
+    });
   });
 
   it('returns an allowlisted initiation URI and applies bounded transport deadlines', async () => {
@@ -54,10 +107,7 @@ describe('GoogleResumableUploadGateway', () => {
       now: () => 100, connectTimeoutMs: 1_000, responseTimeoutMs: 2_000, idleTimeoutMs: 3_000, totalTimeoutMs: 4_000,
     });
 
-    await expect(gateway.begin({
-      authorization: 'Bearer token', fileId: 'reserved-1', parentId: 'folder-1', name: 'clip.mp4',
-      mimeType: 'video/mp4', size: 42, appProperties: { a1v: '1' },
-    }, signal)).resolves.toEqual({ uri: validLocation, createdAtMs: 100, expiresAtMs: 518_400_100 });
+    await expect(gateway.begin(beginInput, signal)).resolves.toEqual({ uri: validLocation, createdAtMs: 100, expiresAtMs: 518_400_100 });
     expect(transport.requests[0].deadlines).toEqual({ connectMs: 1_000, responseMs: 2_000, idleMs: 3_000, totalMs: 4_000 });
   });
 

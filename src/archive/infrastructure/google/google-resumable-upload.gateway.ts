@@ -219,17 +219,17 @@ function validateSessionUri(value: string | undefined): string {
   if (!value) throw new DriveConfigurationError('Google resumable Location is not allowlisted');
   let url: URL;
   try { url = new URL(value); } catch { throw new DriveConfigurationError('Google resumable Location is not allowlisted'); }
-  const keys = [...url.searchParams.keys()];
   const uploadTypes = url.searchParams.getAll('uploadType');
   const uploadIds = url.searchParams.getAll('upload_id');
+  const invalidUploadType = uploadTypes.length > 1
+    || (uploadTypes.length === 1 && uploadTypes[0] !== 'resumable');
   if (url.protocol !== 'https:' || url.hostname !== 'www.googleapis.com' || url.port !== ''
     || url.username !== '' || url.password !== '' || url.pathname !== SESSION_PATH || url.hash !== ''
-    || keys.length !== 2 || new Set(keys).size !== 2
-    || uploadTypes.length !== 1 || uploadTypes[0] !== 'resumable'
+    || invalidUploadType
     || uploadIds.length !== 1 || uploadIds[0].length === 0) {
     throw new DriveConfigurationError('Google resumable Location is not allowlisted');
   }
-  return url.toString();
+  return value;
 }
 
 function parseConfirmedOffset(headers: Readonly<Record<string, string | undefined>>, totalSize: number): number {
