@@ -252,8 +252,15 @@ export class ReconcileDriveUseCase {
   ): Promise<string | null> {
     if (artifact.kind === 'database_backup') return parentFor(artifact, active);
     if (artifact.admission.state === 'terminal') return null;
+    let path: MotionArchivePath;
+    try {
+      path = MotionArchivePath.parse(artifact.relativePath);
+    } catch (_error) {
+      await this.terminalizeMalformedMotionArtifact(artifact);
+      return null;
+    }
     if (!await hasUnchangedTrustedSource(artifact, this.source, signal)) return null;
-    return this.resolveMotionContainer(artifact, active, signal);
+    return this.resolveParsedMotionContainer(active, path, signal);
   }
 
   private async resolveMotionContainer(
@@ -261,18 +268,39 @@ export class ReconcileDriveUseCase {
     active: DriveConnection,
     signal: AbortSignal,
   ): Promise<string | null> {
-    if (this.containerResolver === undefined) return parentFor(artifact, active);
     let path: MotionArchivePath;
     try {
       path = MotionArchivePath.parse(artifact.relativePath);
     } catch (_error) {
+      await this.terminalizeMalformedMotionArtifact(artifact);
       return null;
     }
+    if (this.containerResolver === undefined) return parentFor(artifact, active);
+    return this.resolveParsedMotionContainer(active, path, signal);
+  }
+
+  private async resolveParsedMotionContainer(
+    active: DriveConnection,
+    path: MotionArchivePath,
+    signal: AbortSignal,
+  ): Promise<string | null> {
+    const resolver = this.containerResolver;
+    if (resolver === undefined) return null;
     try {
-      return await this.containerResolver.execute(active, path, signal);
+      return await resolver.execute(active, path, signal);
     } catch (error) {
       if (error instanceof DriveFolderBranchBlockedError) return null;
       throw error;
+    }
+  }
+
+  private async terminalizeMalformedMotionArtifact(artifact: ArchiveArtifact): Promise<void> {
+    try {
+      await this.repository.markAdmissionTerminal(
+        artifact.id, artifact.admission.revision, 'invalid_motion_path', this.now(),
+      );
+    } catch (error) {
+      if (!(error instanceof DriveObjectConflictError)) throw error;
     }
   }
 

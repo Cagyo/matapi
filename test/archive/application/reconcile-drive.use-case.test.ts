@@ -361,6 +361,38 @@ describe('ReconcileDriveUseCase', () => {
     });
   });
 
+  it('terminalizes an invalid oldest candidate so the next limited run restores a healthy artifact', async () => {
+    const fixtureValue = await fixture();
+    vi.spyOn(Date, 'now').mockReturnValueOnce(1).mockReturnValueOnce(2);
+    const invalid = await fixtureValue.repository.register({
+      installationId: fixtureValue.active.installationId,
+      kind: 'motion_video',
+      sourceIdentity: 'motion:legacy-invalid',
+      trustedPath: '/motion/legacy-invalid.mp4',
+      relativePath: 'legacy-invalid.mp4',
+      size: 5,
+      mtimeNs: '500000000',
+      sourceTimeMs: 500,
+      sha256: DIGEST,
+      sourceFingerprint: 'e'.repeat(64),
+    });
+    const healthy = await registerPending(
+      fixtureValue.repository, fixtureValue.active, '2026/08/14/120003-healthy.mp4', 'f',
+    );
+    fixtureValue.resolver.execute.mockResolvedValue('day-14');
+    fixtureValue.drive.listed = [[managedRemote(healthy, 'restored-healthy', 'day-14')]];
+
+    await fixtureValue.reconcile.execute({ limit: 1 }, signal);
+    expect(await fixtureValue.repository.loadArtifact(invalid.id)).toMatchObject({
+      admission: { state: 'terminal', errorCode: 'invalid_motion_path' },
+    });
+
+    await fixtureValue.reconcile.execute({ limit: 1 }, signal);
+    expect((await fixtureValue.repository.listAttempts(healthy.id)).at(-1)).toMatchObject({
+      remoteObjectId: 'restored-healthy', state: 'verified',
+    });
+  });
+
   it('does not adopt a remote-only flat video when its source no longer survives', async () => {
     const fixtureValue = await fixture(false);
     const [attempt] = await fixtureValue.repository.listAttempts(fixtureValue.artifact.id);

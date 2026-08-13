@@ -457,7 +457,9 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
 
   async listRestorationCandidates(limit: number): Promise<readonly ArchiveArtifact[]> {
     return [...this.artifacts.values()]
-      .filter((artifact) => artifact.state === 'pending' && artifact.currentVerifiedAttemptId === null)
+      .filter((artifact) => artifact.state === 'pending'
+        && artifact.currentVerifiedAttemptId === null
+        && artifact.admission.state !== 'terminal')
       .sort((left, right) => left.createdAtMs - right.createdAtMs || left.id.localeCompare(right.id))
       .slice(0, limit);
   }

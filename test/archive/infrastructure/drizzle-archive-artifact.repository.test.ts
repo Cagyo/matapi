@@ -207,6 +207,23 @@ describe('DrizzleArchiveArtifactRepository', () => {
     });
   });
 
+  it('filters terminal restoration candidates before applying the limit', async () => {
+    vi.spyOn(Date, 'now')
+      .mockReturnValueOnce(1)
+      .mockReturnValueOnce(2);
+    const terminal = await repository.register({
+      ...artifactFixture(), sourceIdentity: 'terminal-restoration',
+      relativePath: '2026/08/13/120000-terminal.mp4', sourceFingerprint: 'c'.repeat(64),
+    });
+    const healthy = await repository.register({
+      ...artifactFixture(), sourceIdentity: 'healthy-restoration',
+      relativePath: '2026/08/14/120000-healthy.mp4', sourceFingerprint: 'd'.repeat(64),
+    });
+    await repository.markAdmissionTerminal(terminal.id, terminal.admission.revision, 'invalid_motion_path', 3);
+
+    expect(await repository.listRestorationCandidates(1)).toMatchObject([{ id: healthy.id }]);
+  });
+
   it('keeps historical attempt IDs after replacement', async () => {
     const artifact = await repository.register(artifactFixture());
     const first = await repository.createAttempt(artifact.id, 'generation-1', 'file-1', 'folder-1', 100);

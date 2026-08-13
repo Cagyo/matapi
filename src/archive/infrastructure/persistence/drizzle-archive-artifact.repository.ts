@@ -647,6 +647,7 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
     return this.db.select().from(archiveArtifacts).where(and(
       eq(archiveArtifacts.state, 'pending'),
       isNull(archiveArtifacts.currentVerifiedAttemptId),
+      inArray(archiveArtifacts.admissionState, ['ready', 'retryable']),
     )).orderBy(asc(archiveArtifacts.createdAt), asc(archiveArtifacts.id))
       .limit(limit).all().map(toArtifact);
   }
