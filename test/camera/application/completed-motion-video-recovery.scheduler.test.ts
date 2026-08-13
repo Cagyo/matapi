@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CompletedMotionVideoRecoveryScheduler } from '../../../src/camera/application/completed-motion-video-recovery.scheduler';
+import { RegisterCompletedMotionVideosUseCase } from '../../../src/camera/application/register-completed-motion-videos.use-case';
 
 function deferred() {
   let resolve!: () => void;
@@ -14,6 +15,18 @@ function deferred() {
 describe('CompletedMotionVideoRecoveryScheduler', () => {
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('binds the registration constructor dependency to its use-case token', () => {
+    const dependencies = Reflect.getMetadata('self:paramtypes', CompletedMotionVideoRecoveryScheduler) as {
+      index: number;
+      param: unknown;
+    }[];
+
+    expect(dependencies).toContainEqual({
+      index: 1,
+      param: RegisterCompletedMotionVideosUseCase,
+    });
   });
 
   it('starts reconciliation at application bootstrap in real mode', async () => {

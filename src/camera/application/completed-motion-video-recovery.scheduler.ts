@@ -13,6 +13,7 @@ export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBoots
 
   constructor(
     @Inject(CAMERA_MODE) private readonly mode: CameraMode,
+    @Inject(RegisterCompletedMotionVideosUseCase)
     private readonly registration: Pick<RegisterCompletedMotionVideosUseCase, 'reconcile'>,
   ) {}
 
