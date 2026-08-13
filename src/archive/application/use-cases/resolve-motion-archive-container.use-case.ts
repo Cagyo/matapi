@@ -4,6 +4,7 @@ import { encodeMotionFolderAppProperties } from '../../domain/app-properties';
 import type { DriveConnection } from '../../domain/drive-connection.entity';
 import type { DriveFolderReservation } from '../../domain/drive-folder-reservation.entity';
 import { DriveFolderBranchBlockedError } from '../../domain/errors/drive-folder-branch-blocked.error';
+import { DriveObjectConflictError } from '../../domain/errors/drive-object-conflict.error';
 import type { MotionArchivePath } from '../../domain/motion-archive-path.value-object';
 import type { ArchiveRemoteMutationLockService } from '../archive-remote-mutation-lock.service';
 import {
@@ -20,6 +21,7 @@ import {
 
 const FOLDER_MIME_TYPE = 'application/vnd.google-apps.folder';
 const BLOCKED_CODE = 'DRIVE_FOLDER_BRANCH_BLOCKED';
+const MAX_BLOCK_CAS_RELOADS = 3;
 
 type DateFolderLevel = Readonly<{
   level: 'year' | 'month' | 'day';
@@ -107,11 +109,13 @@ export class ResolveMotionArchiveContainerUseCase {
     parentId: string,
     current: DriveFolderReservation,
     signal: AbortSignal,
+    blockCasReloads = MAX_BLOCK_CAS_RELOADS,
   ): Promise<string> {
     if (current.state === 'detached' || current.state === 'conflict') throw blocked();
     if (!matchesReservation(current, level, parentId)) {
-      await this.blockReservation(current, 'conflict');
-      throw blocked();
+      return this.blockAndResolve(
+        connection, level, parentId, current, 'conflict', signal, blockCasReloads,
+      );
     }
     throwIfAborted(signal);
     const exact = await this.drive.loadExact(connection, current.folderId, signal);
@@ -119,8 +123,9 @@ export class ResolveMotionArchiveContainerUseCase {
       return this.replaceMissing(connection, level, parentId, current, signal);
     }
     if (!isExactFolder(exact, connection, level, parentId, current.folderId)) {
-      await this.blockReservation(current, 'detached');
-      throw blocked();
+      return this.blockAndResolve(
+        connection, level, parentId, current, 'detached', signal, blockCasReloads,
+      );
     }
     return this.verifyReservation(connection, level, parentId, current, signal);
   }
@@ -166,8 +171,9 @@ export class ResolveMotionArchiveContainerUseCase {
       return this.replaceMissing(connection, level, parentId, result.reservation, signal);
     }
     if (!isExactFolder(exact, connection, level, parentId, candidate.id)) {
-      await this.blockReservation(result.reservation, 'detached');
-      throw blocked();
+      return this.blockAndResolve(
+        connection, level, parentId, result.reservation, 'detached', signal,
+      );
     }
     return this.verifyReservation(connection, level, parentId, result.reservation, signal);
   }
@@ -219,8 +225,9 @@ export class ResolveMotionArchiveContainerUseCase {
       exact = recovered;
     }
     if (!isExactFolder(exact, connection, level, parentId, reservation.folderId)) {
-      await this.blockReservation(reservation, 'conflict');
-      throw blocked();
+      return this.blockAndResolve(
+        connection, level, parentId, reservation, 'conflict', signal,
+      );
     }
     return this.verifyReservation(connection, level, parentId, reservation, signal);
   }
@@ -267,23 +274,79 @@ export class ResolveMotionArchiveContainerUseCase {
       nowMs: this.now(),
     });
     if (result.kind === 'lost') {
-      if (result.current !== null) await this.blockReservation(result.current, 'conflict');
-      throw blocked();
+      return this.resolveWinner(connection, level, parentId, result.current, signal);
     }
-    await this.blockReservation(result.reservation, 'conflict');
-    throw blocked();
+    return this.blockConflictMarker(
+      connection, level, parentId, result.reservation, signal, MAX_BLOCK_CAS_RELOADS,
+    );
   }
 
-  private async blockReservation(
+  private async blockAndResolve(
+    connection: DriveConnection,
+    level: DateFolderLevel,
+    parentId: string,
     reservation: DriveFolderReservation,
     state: 'detached' | 'conflict',
-  ): Promise<void> {
-    await this.reservations.markBlocked(
+    signal: AbortSignal,
+    remainingReloads = MAX_BLOCK_CAS_RELOADS,
+  ): Promise<string> {
+    const marked = await this.reservations.markBlocked(
       reservation.id,
       reservation.revision,
       state,
       BLOCKED_CODE,
       this.now(),
+    );
+    if (marked !== null) throw blocked();
+    if (remainingReloads < 1) throw convergenceFailure();
+    const winner = await this.reservations.loadCurrent(
+      connection.id,
+      level.normalizedPath,
+    );
+    if (winner === null) throw convergenceFailure();
+    return this.resolveCurrent(
+      connection,
+      level,
+      parentId,
+      winner,
+      signal,
+      remainingReloads - 1,
+    );
+  }
+
+  private async blockConflictMarker(
+    connection: DriveConnection,
+    level: DateFolderLevel,
+    parentId: string,
+    marker: DriveFolderReservation,
+    signal: AbortSignal,
+    remainingReloads: number,
+  ): Promise<string> {
+    const marked = await this.reservations.markBlocked(
+      marker.id,
+      marker.revision,
+      'conflict',
+      BLOCKED_CODE,
+      this.now(),
+    );
+    if (marked !== null) throw blocked();
+    if (remainingReloads < 1) throw convergenceFailure();
+    const winner = await this.reservations.loadCurrent(
+      connection.id,
+      level.normalizedPath,
+    );
+    if (winner === null) throw convergenceFailure();
+    if (winner.id !== marker.id) {
+      return this.resolveWinner(connection, level, parentId, winner, signal);
+    }
+    if (winner.state === 'detached' || winner.state === 'conflict') throw blocked();
+    return this.blockConflictMarker(
+      connection,
+      level,
+      parentId,
+      winner,
+      signal,
+      remainingReloads - 1,
     );
   }
 
@@ -438,4 +501,8 @@ function throwIfAborted(signal: AbortSignal): void {
 
 function blocked(): DriveFolderBranchBlockedError {
   return new DriveFolderBranchBlockedError();
+}
+
+function convergenceFailure(): DriveObjectConflictError {
+  return new DriveObjectConflictError('Drive folder reservation CAS did not converge');
 }

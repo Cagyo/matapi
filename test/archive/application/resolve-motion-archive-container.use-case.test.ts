@@ -200,6 +200,84 @@ describe('ResolveMotionArchiveContainerUseCase', () => {
     expect(await base.loadCurrent('generation-1', '2026')).toMatchObject({ folderId: 'winning-year-id', state: 'verified' });
   });
 
+  it('reloads a revision-changed head and durably detaches it after the first block CAS loses', async () => {
+    const base = new InMemoryDriveFolderReservationRepository();
+    const drive = new FakeDriveFolderPort();
+    const stored = await base.compareAndSetCurrent({
+      expected: null,
+      replacement: {
+        id: 'year-reservation', installationId: 'installation-1', generationId: 'generation-1',
+        normalizedPath: '2026', level: 'year', segmentName: '2026',
+        folderId: 'existing-year', parentFolderId: 'motion-1',
+      },
+      nowMs: 1,
+    });
+    if (stored.kind !== 'stored') throw new Error('expected seeded reservation');
+    drive.exact.set('existing-year', {
+      ...folderFor('existing-year', '2026', 'motion-1', 'motion-year', '2026'),
+      name: 'renamed-by-user',
+    });
+    const repository = new FlakyMarkBlockedRepository(base);
+    const context = createContext([], drive, repository);
+
+    await expect(context.useCase.execute(connection(), path, signal)).rejects.toBeInstanceOf(
+      DriveFolderBranchBlockedError,
+    );
+
+    expect(repository.blockAttempts).toBe(2);
+    expect(drive.calls).toEqual(['load:existing-year', 'load:existing-year']);
+    expect(await base.loadCurrent('generation-1', '2026')).toMatchObject({
+      state: 'detached', errorCode: 'DRIVE_FOLDER_BRANCH_BLOCKED', revision: 2,
+    });
+  });
+
+  it('bounds repeated nullable block CAS outcomes instead of spinning', async () => {
+    const base = new InMemoryDriveFolderReservationRepository();
+    const drive = new FakeDriveFolderPort();
+    await seedLevel(base, drive, {
+      normalizedPath: '2026', level: 'year', role: 'motion-year', segmentName: '2026',
+      folderId: 'existing-year', parentFolderId: 'motion-1',
+    });
+    drive.exact.set('existing-year', {
+      ...drive.exact.get('existing-year')!,
+      name: 'renamed-by-user',
+    });
+    const repository = new FlakyMarkBlockedRepository(base, Number.MAX_SAFE_INTEGER);
+    const context = createContext([], drive, repository);
+
+    await expect(context.useCase.execute(connection(), path, signal)).rejects.toMatchObject({
+      code: 'DRIVE_OBJECT_CONFLICT',
+      message: 'Drive folder reservation CAS did not converge',
+    });
+
+    expect(repository.blockAttempts).toBe(4);
+    expect(await base.loadCurrent('generation-1', '2026')).toMatchObject({ state: 'verified' });
+  });
+
+  it('exact-validates and uses a winner when conflict-marker reservation loses its CAS', async () => {
+    const base = new InMemoryDriveFolderReservationRepository();
+    const drive = new FakeDriveFolderPort(['losing-conflict-marker', 'month-folder-id', 'day-folder-id']);
+    const winner = folderFor('winning-year-id', '2026', 'motion-1', 'motion-year', '2026');
+    const duplicate = folderFor('duplicate-year-id', '2026', 'motion-1', 'motion-year', '2026');
+    drive.exact.set(winner.id, winner);
+    drive.pages.push(
+      { folders: [winner, duplicate], nextPageToken: null, incompleteSearch: false },
+      emptyPage(),
+      emptyPage(),
+    );
+    const repository = new LoseFirstCurrentSlotRepository(base, winner.id);
+    const context = createContext([], drive, repository);
+
+    await expect(context.useCase.execute(connection(), path, signal)).resolves.toBe('day-folder-id');
+
+    expect(await base.loadCurrent('generation-1', '2026')).toMatchObject({
+      folderId: 'winning-year-id', state: 'verified', errorCode: null,
+    });
+    expect(base.history().some((row) => row.state === 'conflict')).toBe(false);
+    expect(drive.calls).toContain('load:winning-year-id');
+    expect(drive.calls).not.toContain('create:losing-conflict-marker');
+  });
+
   it.each(['detached', 'conflict'] as const)('rejects an already-%s head before any provider operation', async (state) => {
     const context = createContext();
     await seedLevel(context.repository, context.drive, {
@@ -364,6 +442,52 @@ class LoseFirstCurrentSlotRepository implements DriveFolderReservationRepository
   }
 
   markBlocked(id: string, expectedRevision: number, state: 'detached' | 'conflict', errorCode: string, nowMs: number) {
+    return this.delegate.markBlocked(id, expectedRevision, state, errorCode, nowMs);
+  }
+
+  replaceMissing(input: { expected: { id: string; revision: number; folderId: string }; replacement: ReserveDriveFolder; nowMs: number }) {
+    return this.delegate.replaceMissing(input);
+  }
+
+  countUnhealthy(generationId: string) {
+    return this.delegate.countUnhealthy(generationId);
+  }
+}
+
+class FlakyMarkBlockedRepository implements DriveFolderReservationRepositoryPort {
+  blockAttempts = 0;
+
+  constructor(
+    private readonly delegate: InMemoryDriveFolderReservationRepository,
+    private remainingLosses = 1,
+  ) {}
+
+  loadCurrent(generationId: string, normalizedPath: string) {
+    return this.delegate.loadCurrent(generationId, normalizedPath);
+  }
+
+  compareAndSetCurrent(input: { expected: { id: string; revision: number } | null; replacement: ReserveDriveFolder; nowMs: number }) {
+    return this.delegate.compareAndSetCurrent(input);
+  }
+
+  markVerified(id: string, expectedRevision: number, nowMs: number) {
+    return this.delegate.markVerified(id, expectedRevision, nowMs);
+  }
+
+  async markBlocked(
+    id: string,
+    expectedRevision: number,
+    state: 'detached' | 'conflict',
+    errorCode: string,
+    nowMs: number,
+  ) {
+    this.blockAttempts += 1;
+    if (this.remainingLosses > 0) {
+      this.remainingLosses -= 1;
+      const advanced = await this.delegate.markVerified(id, expectedRevision, nowMs);
+      if (advanced === null) throw new Error('expected synthetic revision winner');
+      return null;
+    }
     return this.delegate.markBlocked(id, expectedRevision, state, errorCode, nowMs);
   }
 
