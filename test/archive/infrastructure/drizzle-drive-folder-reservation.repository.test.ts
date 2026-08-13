@@ -7,11 +7,12 @@ import { DrizzleDriveFolderReservationRepository } from '../../../src/archive/in
 
 describe('DrizzleDriveFolderReservationRepository', () => {
   let sqlite: Database.Database;
+  let db: ReturnType<typeof drizzle>;
   let repository: DrizzleDriveFolderReservationRepository;
 
   beforeEach(() => {
     sqlite = new Database(':memory:');
-    const db = drizzle(sqlite, { schema });
+    db = drizzle(sqlite, { schema });
     migrate(db, { migrationsFolder: './migrations' });
     repository = new DrizzleDriveFolderReservationRepository(db);
   });
@@ -111,6 +112,32 @@ describe('DrizzleDriveFolderReservationRepository', () => {
       expect.objectContaining({ id: detached.id, state: 'detached', currentSlot: 1 }),
       expect.objectContaining({ id: conflict.id, state: 'conflict', currentSlot: 1 }),
     ]));
+  });
+
+  it('wraps verified and blocked transitions in immediate transactions', async () => {
+    const immediateBehaviors: unknown[] = [];
+    const instrumentedDb = new Proxy(db, {
+      get(target, property) {
+        if (property === 'transaction') {
+          const transaction = target.transaction.bind(target);
+          return (...args: Parameters<typeof transaction>) => {
+            immediateBehaviors.push((args[1] as { behavior?: unknown } | undefined)?.behavior);
+            return transaction(...args);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const instrumentedRepository = new DrizzleDriveFolderReservationRepository(instrumentedDb);
+    const verified = await stored(reservation('verified', '2026', 'f-verified'), 10);
+    const blocked = await stored(reservation('blocked', '2027', 'f-blocked'), 10);
+
+    expect(await instrumentedRepository.markVerified(verified.id, verified.revision, 20))
+      .toMatchObject({ state: 'verified', revision: 1 });
+    expect(await instrumentedRepository.markBlocked(blocked.id, blocked.revision, 'detached', 'metadata_changed', 20))
+      .toMatchObject({ state: 'detached', revision: 1, currentSlot: 1 });
+    expect(immediateBehaviors).toEqual(['immediate', 'immediate']);
   });
 
   async function stored(input: ReturnType<typeof reservation>, nowMs: number) {

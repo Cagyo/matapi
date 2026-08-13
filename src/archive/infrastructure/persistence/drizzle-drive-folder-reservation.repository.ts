@@ -59,18 +59,20 @@ export class DrizzleDriveFolderReservationRepository implements DriveFolderReser
   }
 
   async markVerified(id: string, expectedRevision: number, nowMs: number): Promise<DriveFolderReservation | null> {
-    const row = this.db.select().from(driveMotionFolderReservations)
-      .where(and(eq(driveMotionFolderReservations.id, id), eq(driveMotionFolderReservations.revision, expectedRevision))).get();
-    if (!row) return null;
-    const verified = toReservation(row).verify(nowMs);
-    const result = this.db.update(driveMotionFolderReservations).set({
-      state: verified.state,
-      revision: verified.revision,
-      errorCode: verified.errorCode,
-      updatedAt: verified.updatedAtMs,
-      verifiedAt: verified.verifiedAtMs,
-    }).where(and(eq(driveMotionFolderReservations.id, id), eq(driveMotionFolderReservations.revision, expectedRevision))).run();
-    return result.changes === 1 ? verified : null;
+    return this.immediate((tx) => {
+      const row = tx.select().from(driveMotionFolderReservations)
+        .where(and(eq(driveMotionFolderReservations.id, id), eq(driveMotionFolderReservations.revision, expectedRevision))).get();
+      if (!row) return null;
+      const verified = toReservation(row).verify(nowMs);
+      const result = tx.update(driveMotionFolderReservations).set({
+        state: verified.state,
+        revision: verified.revision,
+        errorCode: verified.errorCode,
+        updatedAt: verified.updatedAtMs,
+        verifiedAt: verified.verifiedAtMs,
+      }).where(and(eq(driveMotionFolderReservations.id, id), eq(driveMotionFolderReservations.revision, expectedRevision))).run();
+      return result.changes === 1 ? verified : null;
+    });
   }
 
   async markBlocked(
@@ -80,18 +82,20 @@ export class DrizzleDriveFolderReservationRepository implements DriveFolderReser
     errorCode: string,
     nowMs: number,
   ): Promise<DriveFolderReservation | null> {
-    const row = this.db.select().from(driveMotionFolderReservations)
-      .where(and(eq(driveMotionFolderReservations.id, id), eq(driveMotionFolderReservations.revision, expectedRevision))).get();
-    if (!row) return null;
-    const blocked = toReservation(row).block(state, errorCode, nowMs);
-    const result = this.db.update(driveMotionFolderReservations).set({
-      state: blocked.state,
-      revision: blocked.revision,
-      errorCode: blocked.errorCode,
-      updatedAt: blocked.updatedAtMs,
-      verifiedAt: blocked.verifiedAtMs,
-    }).where(and(eq(driveMotionFolderReservations.id, id), eq(driveMotionFolderReservations.revision, expectedRevision))).run();
-    return result.changes === 1 ? blocked : null;
+    return this.immediate((tx) => {
+      const row = tx.select().from(driveMotionFolderReservations)
+        .where(and(eq(driveMotionFolderReservations.id, id), eq(driveMotionFolderReservations.revision, expectedRevision))).get();
+      if (!row) return null;
+      const blocked = toReservation(row).block(state, errorCode, nowMs);
+      const result = tx.update(driveMotionFolderReservations).set({
+        state: blocked.state,
+        revision: blocked.revision,
+        errorCode: blocked.errorCode,
+        updatedAt: blocked.updatedAtMs,
+        verifiedAt: blocked.verifiedAtMs,
+      }).where(and(eq(driveMotionFolderReservations.id, id), eq(driveMotionFolderReservations.revision, expectedRevision))).run();
+      return result.changes === 1 ? blocked : null;
+    });
   }
 
   async replaceMissing(input: {
