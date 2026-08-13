@@ -172,6 +172,34 @@ describe('UploadDriveObjectAttemptUseCase', () => {
     })).toMatchObject([{ id: healthy.id }]);
   });
 
+  it.each([
+    ['short read', 'short', 'local_source_changed'],
+    ['long read', 'long', 'local_source_changed'],
+    ['digest mutation', 'corrupt', 'local_source_changed'],
+    ['final stat mutation', 'final-stat', 'local_source_changed'],
+    ['disappearance while streaming', 'missing', 'local_source_missing'],
+  ] as const)(
+    'terminalizes a Motion attempt after %s instead of returning it to the retry queue',
+    async (_label, failure, errorCode) => {
+      const fixture = await setup();
+      fixture.source.readFailure = failure;
+      fixture.drive.acceptInvalidBodyLength = failure === 'short' || failure === 'long';
+
+      await expect(fixture.useCase.execute(fixture.artifactId, signal)).rejects.toThrow();
+
+      const [attempt] = await fixture.repository.listAttempts(fixture.artifactId);
+      expect(await fixture.repository.loadArtifact(fixture.artifactId)).toMatchObject({
+        admission: { state: 'terminal', errorCode },
+      });
+      expect(attempt).toMatchObject({
+        state: 'abandoned', session: null, errorCode,
+      });
+      expect(await fixture.repository.claimNextAttempt({
+        owner: 'retry-worker', nowMs: fixture.clock.value + 10_000, leaseMs: 1_000,
+      })).toBeNull();
+    },
+  );
+
   it('keeps database backups directly under the managed Backups folder', async () => {
     const fixture = await setup({ kind: 'database_backup', relativePath: 'backups/home-worker.sqlite3' });
 
@@ -455,6 +483,7 @@ class FakeSource implements ArchiveUploadSourcePort {
   mutateAfterRead = false;
   statOverride: { size: number; mtimeNs: string } | null = null;
   statError: Error | null = null;
+  readFailure: 'short' | 'long' | 'corrupt' | 'final-stat' | 'missing' | null = null;
   onYield?: (start: number) => void;
   private reads = 0;
 
@@ -463,7 +492,10 @@ class FakeSource implements ArchiveUploadSourcePort {
   async stat(): Promise<{ size: number; mtimeNs: string }> {
     if (this.statError !== null) throw this.statError;
     if (this.statOverride !== null) return this.statOverride;
-    return { size: this.content.length, mtimeNs: this.mutateAfterRead && this.reads > 0 ? '124' : '123' };
+    return {
+      size: this.content.length,
+      mtimeNs: (this.mutateAfterRead || this.readFailure === 'final-stat') && this.reads > 0 ? '124' : '123',
+    };
   }
 
   open(_path: string, start: number, endExclusive: number): AsyncIterable<Uint8Array> {
@@ -473,11 +505,24 @@ class FakeSource implements ArchiveUploadSourcePort {
     this.reads += 1;
     const content = this.content;
     const onYield = this.onYield;
+    const readFailure = this.readFailure;
     return (async function* () {
-      for (let offset = start; offset < endExclusive; offset += 64 * 1024) {
-        onYield?.(start);
-        yield content.subarray(offset, Math.min(offset + 64 * 1024, endExclusive));
+      if (readFailure === 'missing') {
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
       }
+      const limit = readFailure === 'short' ? Math.max(start, endExclusive - 1) : endExclusive;
+      for (let offset = start; offset < limit; offset += 64 * 1024) {
+        onYield?.(start);
+        const part = content.subarray(offset, Math.min(offset + 64 * 1024, limit));
+        if (readFailure === 'corrupt' && offset === start && part.length > 0) {
+          const corrupted = Buffer.from(part);
+          corrupted[0] ^= 0xff;
+          yield corrupted;
+        } else {
+          yield part;
+        }
+      }
+      if (readFailure === 'long') yield new Uint8Array([1]);
     })();
   }
 }
@@ -503,6 +548,7 @@ class FakeDrive implements DriveArchivePort {
   fallbackMimeType = 'video/mp4';
   artifactKind: 'motion_video' | 'database_backup' = 'motion_video';
   generateError: Error | null = null;
+  acceptInvalidBodyLength = false;
   onGenerate?: () => void;
   onBegin?: () => Promise<void>;
   onChunk?: () => Promise<void>;
@@ -542,7 +588,9 @@ class FakeDrive implements DriveArchivePort {
     if (this.failChunkOnce) { this.failChunkOnce = false; throw new Error('network'); }
     let read = 0;
     for await (const part of input.body) read += part.byteLength;
-    expect(read).toBe(input.endInclusive - input.start + 1);
+    if (!this.acceptInvalidBodyLength) {
+      expect(read).toBe(input.endInclusive - input.start + 1);
+    }
     if (input.endInclusive + 1 === input.totalSize) {
       const begin = this.beginInputs.find((value) => value.fileId === input.fileId);
       this.objects.set(input.fileId, verified(

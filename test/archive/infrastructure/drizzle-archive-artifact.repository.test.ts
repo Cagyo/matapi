@@ -280,6 +280,53 @@ describe('DrizzleArchiveArtifactRepository', () => {
     });
   });
 
+  it('rejects a stale container-replacement revision without changing the attempt', async () => {
+    const artifact = await repository.register(artifactFixture());
+    const first = await repository.createAttempt(
+      artifact.id, 'generation-1', 'file-1', 'old-day-folder', 100,
+    );
+
+    await expect(repository.replaceAttemptForContainer({
+      attemptId: first.id,
+      fence: { kind: 'revision', revision: first.revision + 1 },
+      expectedContainerId: 'old-day-folder',
+      terminalState: 'missing',
+      errorCode: 'container_missing',
+      replacementRemoteObjectId: 'stale-file',
+      replacementContainerId: 'new-day-folder',
+      nowMs: 200,
+    })).rejects.toThrow('changed');
+    expect(await repository.loadAttempt(first.id)).toMatchObject({
+      state: 'pending', containerId: 'old-day-folder',
+    });
+    expect(await repository.listAttempts(artifact.id)).toHaveLength(1);
+  });
+
+  it('accepts the exact revision fence while preserving the old immutable container', async () => {
+    const artifact = await repository.register(artifactFixture());
+    const first = await repository.createAttempt(
+      artifact.id, 'generation-1', 'file-1', 'old-day-folder', 100,
+    );
+
+    const replacement = await repository.replaceAttemptForContainer({
+      attemptId: first.id,
+      fence: { kind: 'revision', revision: first.revision },
+      expectedContainerId: 'old-day-folder',
+      terminalState: 'missing',
+      errorCode: 'container_missing',
+      replacementRemoteObjectId: 'file-2',
+      replacementContainerId: 'new-day-folder',
+      nowMs: 201,
+    });
+
+    expect(replacement).toMatchObject({
+      remoteObjectId: 'file-2', containerId: 'new-day-folder', state: 'pending',
+    });
+    expect(await repository.loadAttempt(first.id)).toMatchObject({
+      state: 'missing', containerId: 'old-day-folder',
+    });
+  });
+
   it('rolls back container terminalization and session clearing when replacement insertion fails', async () => {
     const artifact = await repository.register(artifactFixture());
     const first = await repository.createAttempt(
@@ -338,6 +385,40 @@ describe('DrizzleArchiveArtifactRepository', () => {
     });
     expect(await repository.loadAttempt(first.id)).toMatchObject({
       state: 'abandoned', session: null, errorCode: 'local_source_missing',
+    });
+  });
+
+  it('rolls back exact-attempt terminalization when the artifact admission CAS is stale', async () => {
+    const artifact = await repository.register(artifactFixture());
+    const first = await repository.createAttempt(
+      artifact.id, 'generation-1', 'file-1', 'day-folder', 100,
+    );
+    const claim = await repository.claimAttempt(first.id, {
+      owner: 'worker-a', nowMs: 1_000, leaseMs: 5_000,
+    });
+    const lease = await repository.saveSession(
+      first.id, claim.lease, sessionFixture(1_100), 1_100,
+    );
+    await repository.markAdmissionRetryable(
+      artifact.id, artifact.admission.revision, 'provider_cooldown', 9_000, 1_150,
+    );
+
+    await expect(repository.terminalizeArtifactAttempt({
+      artifactId: artifact.id,
+      expectedAdmissionRevision: artifact.admission.revision,
+      attemptId: first.id,
+      lease,
+      errorCode: 'local_source_changed',
+      nowMs: 1_200,
+    })).rejects.toThrow('changed');
+
+    expect(await repository.loadArtifact(artifact.id)).toMatchObject({
+      admission: {
+        state: 'retryable', errorCode: 'provider_cooldown', nextAttemptMs: 9_000,
+      },
+    });
+    expect(await repository.loadAttempt(first.id)).toMatchObject({
+      state: 'uploading', session: sessionFixture(1_100), errorCode: null,
     });
   });
 

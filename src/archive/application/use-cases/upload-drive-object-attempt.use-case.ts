@@ -186,23 +186,7 @@ export class UploadDriveObjectAttemptUseCase {
     let terminalized = false;
     let release: (() => void) | null = null;
     try {
-      try {
-        await this.requireUnchangedSource(claimed.artifact, signal);
-      } catch (error) {
-        const localCode = localIdentityErrorCode(error);
-        if (claimed.artifact.kind === 'motion_video' && localCode !== null) {
-          await this.repository.terminalizeArtifactAttempt({
-            artifactId: claimed.artifact.id,
-            expectedAdmissionRevision: claimed.artifact.admission.revision,
-            attemptId: claimed.attempt.id,
-            lease,
-            errorCode: localCode,
-            nowMs: this.now(),
-          });
-          terminalized = true;
-        }
-        throw error;
-      }
+      await this.requireUnchangedSource(claimed.artifact, signal);
       const resolvedContainerId = knownContainerId
         ?? await this.resolveContainer(claimed.artifact, connection, signal);
       release = await this.semaphore.acquire(claimed.artifact.kind, signal);
@@ -218,7 +202,22 @@ export class UploadDriveObjectAttemptUseCase {
       terminalized = true;
       return result;
     } catch (error) {
-      if (!terminalized) await this.releaseAsRetryable(claimed.attempt.id, lease, error);
+      if (!terminalized) {
+        const localCode = localIdentityErrorCode(error);
+        if (claimed.artifact.kind === 'motion_video' && localCode !== null) {
+          await this.repository.terminalizeArtifactAttempt({
+            artifactId: claimed.artifact.id,
+            expectedAdmissionRevision: claimed.artifact.admission.revision,
+            attemptId: claimed.attempt.id,
+            lease,
+            errorCode: localCode,
+            nowMs: this.now(),
+          });
+          terminalized = true;
+        } else {
+          await this.releaseAsRetryable(claimed.attempt.id, lease, error);
+        }
+      }
       throw error;
     } finally {
       release?.();
@@ -763,7 +762,7 @@ function errorCode(error: unknown): string {
 function localIdentityErrorCode(
   error: unknown,
 ): 'local_source_changed' | 'local_source_missing' | null {
-  if (error instanceof LocalSourceMissingError) return 'local_source_missing';
+  if (error instanceof LocalSourceMissingError || isMissingSource(error)) return 'local_source_missing';
   if (error instanceof DriveLocalSourceChangedError) return 'local_source_changed';
   return null;
 }
