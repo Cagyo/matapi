@@ -46,7 +46,12 @@ describe('InMemoryDriveFolderReservationRepository', () => {
     });
     expect(replaced.kind).toBe('stored');
     expect(await repository.loadCurrent('generation-1', '2026/08')).toBeNull();
-    expect(repository.history().filter((row) => row.state === 'superseded')).toHaveLength(2);
+    const history = repository.history();
+    expect(history.find((row) => row.id === 'year-1')).toMatchObject({ state: 'missing', currentSlot: null });
+    expect(history.filter((row) => row.state === 'superseded')).toEqual([
+      expect.objectContaining({ id: 'month-1', currentSlot: null }),
+      expect.objectContaining({ id: 'day-1', currentSlot: null }),
+    ]);
   });
 
   it('does not mutate a head or history when replacement expectations are stale', async () => {
@@ -64,6 +69,34 @@ describe('InMemoryDriveFolderReservationRepository', () => {
     expect(lost).toMatchObject({ kind: 'lost', current: stored.reservation });
     expect(repository.history()).toEqual(before);
     expect(await repository.loadCurrent('generation-1', '2026')).toEqual(stored.reservation);
+  });
+
+  it('rejects reuse of a historical folder ID without mutating current state', async () => {
+    const repository = new InMemoryDriveFolderReservationRepository();
+    const stored = await repository.compareAndSetCurrent({
+      expected: null,
+      replacement: reservation('year-1', '2026', 'folder-1'), nowMs: 10,
+    });
+    if (stored.kind !== 'stored') throw new Error('expected stored reservation');
+    const replacementSeed = await repository.replaceMissing({
+      expected: { id: stored.reservation.id, revision: stored.reservation.revision, folderId: stored.reservation.folderId },
+      replacement: reservation('year-2', '2026', 'folder-2'), nowMs: 15,
+    });
+    if (replacementSeed.kind !== 'stored') throw new Error('expected replacement seed');
+    const before = repository.history();
+    const normal = await repository.compareAndSetCurrent({
+      expected: null,
+      replacement: { ...reservation('year-2', '2027', 'folder-1'), segmentName: '2027' }, nowMs: 20,
+    });
+    const replacement = await repository.replaceMissing({
+      expected: { id: replacementSeed.reservation.id, revision: replacementSeed.reservation.revision, folderId: replacementSeed.reservation.folderId },
+      replacement: reservation('year-3', '2026', 'folder-1'), nowMs: 20,
+    });
+    expect(normal).toMatchObject({ kind: 'lost', current: null });
+    expect(replacement).toMatchObject({ kind: 'lost', current: replacementSeed.reservation });
+    expect(repository.history()).toEqual(before);
+    expect(await repository.loadCurrent('generation-1', '2026')).toEqual(replacementSeed.reservation);
+    expect(await repository.loadCurrent('generation-1', '2027')).toBeNull();
   });
 
   it('returns immutable snapshots and counts blocking current heads as unhealthy', async () => {

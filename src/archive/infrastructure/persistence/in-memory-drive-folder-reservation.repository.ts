@@ -22,7 +22,7 @@ export class InMemoryDriveFolderReservationRepository implements DriveFolderRese
     nowMs: number;
   }): Promise<{ kind: 'stored'; reservation: DriveFolderReservation } | { kind: 'lost'; current: DriveFolderReservation | null }> {
     const current = this.currentFor(input.replacement.generationId, input.replacement.normalizedPath);
-    if (!matches(current, input.expected) || this.reservations.has(input.replacement.id)) {
+    if (!matches(current, input.expected) || this.reservations.has(input.replacement.id) || this.hasFolderId(input.replacement.folderId)) {
       return { kind: 'lost', current: this.cloneNullable(current) };
     }
     const reservation = DriveFolderReservation.reserve({ ...input.replacement, nowMs: input.nowMs });
@@ -53,7 +53,9 @@ export class InMemoryDriveFolderReservationRepository implements DriveFolderRese
     nowMs: number;
   }): Promise<{ kind: 'stored'; reservation: DriveFolderReservation } | { kind: 'lost'; current: DriveFolderReservation | null }> {
     const current = this.currentFor(input.replacement.generationId, input.replacement.normalizedPath);
-    if (!current || current.id !== input.expected.id || current.revision !== input.expected.revision || current.folderId !== input.expected.folderId || this.reservations.has(input.replacement.id)) {
+    if (!current || current.id !== input.expected.id || current.revision !== input.expected.revision
+      || current.folderId !== input.expected.folderId || this.reservations.has(input.replacement.id)
+      || this.hasFolderId(input.replacement.folderId)) {
       return { kind: 'lost', current: this.cloneNullable(current) };
     }
 
@@ -90,6 +92,10 @@ export class InMemoryDriveFolderReservationRepository implements DriveFolderRese
     return id === undefined ? null : this.reservations.get(id) ?? null;
   }
 
+  private hasFolderId(folderId: string): boolean {
+    return [...this.reservations.values()].some((reservation) => reservation.folderId === folderId);
+  }
+
   private clone(reservation: DriveFolderReservation): DriveFolderReservation {
     return DriveFolderReservation.restore({ ...reservation });
   }
@@ -111,6 +117,7 @@ function restoreWithState(reservation: DriveFolderReservation, state: 'missing' 
   const snapshot: DriveFolderReservationSnapshot = {
     ...reservation,
     state,
+    currentSlot: null,
     revision: reservation.revision + 1,
     updatedAtMs: nowMs,
   };
