@@ -251,6 +251,7 @@ export class ReconcileDriveUseCase {
     signal: AbortSignal,
   ): Promise<string | null> {
     if (artifact.kind === 'database_backup') return parentFor(artifact, active);
+    if (artifact.admission.state === 'terminal') return null;
     if (!await hasUnchangedTrustedSource(artifact, this.source, signal)) return null;
     return this.resolveMotionContainer(artifact, active, signal);
   }
@@ -261,8 +262,14 @@ export class ReconcileDriveUseCase {
     signal: AbortSignal,
   ): Promise<string | null> {
     if (this.containerResolver === undefined) return parentFor(artifact, active);
+    let path: MotionArchivePath;
     try {
-      return await this.containerResolver.execute(active, MotionArchivePath.parse(artifact.relativePath), signal);
+      path = MotionArchivePath.parse(artifact.relativePath);
+    } catch (_error) {
+      return null;
+    }
+    try {
+      return await this.containerResolver.execute(active, path, signal);
     } catch (error) {
       if (error instanceof DriveFolderBranchBlockedError) return null;
       throw error;

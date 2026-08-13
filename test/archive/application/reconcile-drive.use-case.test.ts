@@ -278,6 +278,26 @@ describe('ReconcileDriveUseCase', () => {
     },
   );
 
+  it('keeps an unchanged nested object authorized by its immutable attempt container', async () => {
+    const fixtureValue = await fixture();
+    const [flat] = await fixtureValue.repository.listAttempts(fixtureValue.artifact.id);
+    await fixtureValue.repository.markMissing(flat.id, flat.revision, 'old', NOW);
+    const nested = await fixtureValue.repository.createAttempt(
+      fixtureValue.artifact.id, fixtureValue.active.id, 'nested-file', 'day-13', NOW,
+    );
+    const claimed = await fixtureValue.repository.claimAttempt(nested.id, {
+      owner: 'nested-upload', nowMs: NOW, leaseMs: 1_000,
+    });
+    const nestedRemote = remote({ id: 'nested-file', parentId: 'day-13', canDelete: true });
+    await fixtureValue.repository.markVerified(nested.id, claimed.lease, archiveObject(nestedRemote), NOW);
+    fixtureValue.drive.object = nestedRemote;
+
+    await fixtureValue.reconcile.execute({ limit: 20 }, signal);
+
+    expect((await fixtureValue.repository.listAttempts(fixtureValue.artifact.id)).find(({ id }) => id === nested.id))
+      .toMatchObject({ state: 'verified', containerId: 'day-13', verifiedObject: { canDelete: true } });
+  });
+
   it('groups restoration listings by resolved day folder', async () => {
     const fixtureValue = await fixture();
     await registerPending(fixtureValue.repository, fixtureValue.active, '2026/08/13/120001-a.mp4', 'c');
@@ -310,6 +330,37 @@ describe('ReconcileDriveUseCase', () => {
     expect((await fixtureValue.repository.listAttempts(healthy.id)).at(-1)?.state).toBe('verified');
   });
 
+  it('skips terminal invalid motion artifacts and restores a later healthy day group', async () => {
+    const fixtureValue = await fixture();
+    const invalid = await fixtureValue.repository.register({
+      installationId: fixtureValue.active.installationId,
+      kind: 'motion_video',
+      sourceIdentity: 'motion:invalid',
+      trustedPath: '/motion/invalid.mp4',
+      relativePath: 'not-a-motion-path.mp4',
+      size: 5,
+      mtimeNs: '500000000',
+      sourceTimeMs: 500,
+      sha256: DIGEST,
+      sourceFingerprint: 'f'.repeat(64),
+    });
+    const terminal = await fixtureValue.repository.markAdmissionTerminal(
+      invalid.id, invalid.admission.revision, 'invalid_motion_path', NOW,
+    );
+    const healthy = await registerPending(
+      fixtureValue.repository, fixtureValue.active, '2026/08/14/120003-healthy.mp4', 'c',
+    );
+    vi.spyOn(fixtureValue.repository, 'listRestorationCandidates').mockResolvedValue([terminal, healthy]);
+    fixtureValue.resolver.execute.mockResolvedValue('day-14');
+    fixtureValue.drive.listed = [[managedRemote(healthy, 'restored-healthy', 'day-14')]];
+
+    await fixtureValue.reconcile.execute({ limit: 20 }, signal);
+
+    expect((await fixtureValue.repository.listAttempts(healthy.id)).at(-1)).toMatchObject({
+      remoteObjectId: 'restored-healthy', state: 'verified',
+    });
+  });
+
   it('does not adopt a remote-only flat video when its source no longer survives', async () => {
     const fixtureValue = await fixture(false);
     const [attempt] = await fixtureValue.repository.listAttempts(fixtureValue.artifact.id);
@@ -338,6 +389,20 @@ describe('ReconcileDriveUseCase', () => {
     await fixtureValue.reconcile.execute({ limit: 20 }, signal);
     expect((await fixtureValue.repository.listAttempts(fixtureValue.artifact.id)).map(({ remoteObjectId }) => remoteObjectId))
       .toEqual(['file-1']);
+  });
+
+  it('does not adopt when a leaf listing exceeds the configured page bound', async () => {
+    const fixtureValue = await fixture();
+    const [attempt] = await fixtureValue.repository.listAttempts(fixtureValue.artifact.id);
+    await fixtureValue.repository.markMissing(attempt.id, attempt.revision, 'missing', NOW);
+    fixtureValue.drive.object = null;
+    fixtureValue.drive.listed = Array.from({ length: 5 }, () => [remote({ id: 'candidate' })]);
+
+    await fixtureValue.reconcile.execute({ limit: 20 }, signal);
+
+    expect((await fixtureValue.repository.listAttempts(fixtureValue.artifact.id)).map(({ remoteObjectId }) => remoteObjectId))
+      .toEqual(['file-1']);
+    expect(fixtureValue.drive.listManagedObjects).toHaveBeenCalledTimes(4);
   });
 
   it('preserves history and alerts when a missing object has no trusted local source', async () => {
