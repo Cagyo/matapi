@@ -231,7 +231,7 @@ describe('ResolveMotionArchiveContainerUseCase', () => {
     });
   });
 
-  it('bounds repeated nullable block CAS outcomes instead of spinning', async () => {
+  it('bounds repeated nullable block CAS outcomes with a sanitized branch-blocked error', async () => {
     const base = new InMemoryDriveFolderReservationRepository();
     const drive = new FakeDriveFolderPort();
     await seedLevel(base, drive, {
@@ -246,8 +246,9 @@ describe('ResolveMotionArchiveContainerUseCase', () => {
     const context = createContext([], drive, repository);
 
     await expect(context.useCase.execute(connection(), path, signal)).rejects.toMatchObject({
-      code: 'DRIVE_OBJECT_CONFLICT',
-      message: 'Drive folder reservation CAS did not converge',
+      name: 'DriveFolderBranchBlockedError',
+      code: 'DRIVE_FOLDER_BRANCH_BLOCKED',
+      message: 'Drive motion folder branch is blocked',
     });
 
     expect(repository.blockAttempts).toBe(4);

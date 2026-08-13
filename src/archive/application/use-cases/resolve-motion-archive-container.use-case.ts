@@ -4,7 +4,6 @@ import { encodeMotionFolderAppProperties } from '../../domain/app-properties';
 import type { DriveConnection } from '../../domain/drive-connection.entity';
 import type { DriveFolderReservation } from '../../domain/drive-folder-reservation.entity';
 import { DriveFolderBranchBlockedError } from '../../domain/errors/drive-folder-branch-blocked.error';
-import { DriveObjectConflictError } from '../../domain/errors/drive-object-conflict.error';
 import type { MotionArchivePath } from '../../domain/motion-archive-path.value-object';
 import type { ArchiveRemoteMutationLockService } from '../archive-remote-mutation-lock.service';
 import {
@@ -298,12 +297,12 @@ export class ResolveMotionArchiveContainerUseCase {
       this.now(),
     );
     if (marked !== null) throw blocked();
-    if (remainingReloads < 1) throw convergenceFailure();
+    if (remainingReloads < 1) throw blocked();
     const winner = await this.reservations.loadCurrent(
       connection.id,
       level.normalizedPath,
     );
-    if (winner === null) throw convergenceFailure();
+    if (winner === null) throw blocked();
     return this.resolveCurrent(
       connection,
       level,
@@ -330,12 +329,12 @@ export class ResolveMotionArchiveContainerUseCase {
       this.now(),
     );
     if (marked !== null) throw blocked();
-    if (remainingReloads < 1) throw convergenceFailure();
+    if (remainingReloads < 1) throw blocked();
     const winner = await this.reservations.loadCurrent(
       connection.id,
       level.normalizedPath,
     );
-    if (winner === null) throw convergenceFailure();
+    if (winner === null) throw blocked();
     if (winner.id !== marker.id) {
       return this.resolveWinner(connection, level, parentId, winner, signal);
     }
@@ -501,8 +500,4 @@ function throwIfAborted(signal: AbortSignal): void {
 
 function blocked(): DriveFolderBranchBlockedError {
   return new DriveFolderBranchBlockedError();
-}
-
-function convergenceFailure(): DriveObjectConflictError {
-  return new DriveObjectConflictError('Drive folder reservation CAS did not converge');
 }
