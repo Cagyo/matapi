@@ -9,7 +9,7 @@ const RECOVERY_INTERVAL_MS = 2 * 60 * 1000;
 @Injectable()
 export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBootstrap {
   private readonly logger = new Logger(CompletedMotionVideoRecoveryScheduler.name);
-  private running = false;
+  private inFlight: Promise<void> | null = null;
 
   constructor(
     @Inject(CAMERA_MODE) private readonly mode: CameraMode,
@@ -17,23 +17,30 @@ export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBoots
   ) {}
 
   onApplicationBootstrap(): void {
-    void this.run();
+    this.dispatchBestEffort();
   }
 
   @Interval('completed-motion-video-recovery', RECOVERY_INTERVAL_MS)
   reconcileTick(): void {
-    void this.run();
+    this.dispatchBestEffort();
   }
 
-  private async run(): Promise<void> {
-    if (this.mode !== 'real' || this.running) return;
-    this.running = true;
-    try {
-      await this.registration.reconcile();
-    } catch (error) {
-      this.logger.error(`Completed Motion recovery failed: ${(error as Error).message}`);
-    } finally {
-      this.running = false;
-    }
+  reconcile(signal?: AbortSignal): Promise<void> {
+    if (this.mode !== 'real') return Promise.resolve();
+    if (this.inFlight !== null) return this.inFlight;
+
+    const shared = Promise.resolve()
+      .then(() => this.registration.reconcile(signal))
+      .finally(() => {
+        if (this.inFlight === shared) this.inFlight = null;
+      });
+    this.inFlight = shared;
+    return shared;
+  }
+
+  private dispatchBestEffort(): void {
+    void this.reconcile().catch(() => {
+      this.logger.error('Completed Motion recovery failed');
+    });
   }
 }
