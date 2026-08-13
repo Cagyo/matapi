@@ -423,6 +423,28 @@ describe('ReconcileDriveUseCase', () => {
       .toEqual(['file-1']);
   });
 
+  it('restores a valid flat motion object when no date-container resolver is composed', async () => {
+    const fixtureValue = await fixture();
+    const [attempt] = await fixtureValue.repository.listAttempts(fixtureValue.artifact.id);
+    await fixtureValue.repository.markMissing(attempt.id, attempt.revision, 'missing', NOW);
+    fixtureValue.drive.object = null;
+    fixtureValue.drive.listed = [[remote({ id: 'flat-restored' })]];
+    const withoutResolver = new ReconcileDriveUseCase(
+      fixtureValue.repository,
+      { loadActive: async () => fixtureValue.active },
+      fixtureValue.drive,
+      source(),
+      { alert: async () => undefined },
+      { now: () => NOW, pageSize: 2, maxPages: 4 },
+    );
+
+    await withoutResolver.execute({ limit: 20 }, signal);
+
+    expect((await fixtureValue.repository.listAttempts(fixtureValue.artifact.id)).at(-1)).toMatchObject({
+      remoteObjectId: 'flat-restored', state: 'verified', containerId: 'motion-1',
+    });
+  });
+
   it('does not adopt when a leaf listing exceeds the configured page bound', async () => {
     const fixtureValue = await fixture();
     const [attempt] = await fixtureValue.repository.listAttempts(fixtureValue.artifact.id);

@@ -260,6 +260,7 @@ export class ReconcileDriveUseCase {
       return null;
     }
     if (!await hasUnchangedTrustedSource(artifact, this.source, signal)) return null;
+    if (this.containerResolver === undefined) return parentFor(artifact, active);
     return this.resolveParsedMotionContainer(active, path, signal);
   }
 
