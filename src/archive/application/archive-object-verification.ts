@@ -31,8 +31,8 @@ export function isAdoptableRemoteObject(
   artifact: ArchiveArtifact,
   connection: DriveConnection,
   remote: VerifiedDriveObject,
+  expectedParent: string,
 ): boolean {
-  const expectedParent = parentFor(artifact, connection);
   return remote.parentId === expectedParent
     && remote.mimeType === mimeTypeFor(artifact)
     && remote.size === artifact.size
@@ -111,7 +111,6 @@ function matchesRequiredIdentity(
   return remote.id === attempt.remoteObjectId
     && attempt.generationId === connection.id
     && artifact.installationId === connection.installationId
-    && attempt.containerId === parentFor(artifact, connection)
     && remote.parentId === attempt.containerId
     && remote.mimeType === mimeTypeFor(artifact)
     && remote.size === artifact.size

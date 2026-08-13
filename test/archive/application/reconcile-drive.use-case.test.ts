@@ -5,6 +5,7 @@ import { ReconcileDriveUseCase } from '../../../src/archive/application/use-case
 import { encodeArchiveAppProperties } from '../../../src/archive/domain/app-properties';
 import { DriveConnection } from '../../../src/archive/domain/drive-connection.entity';
 import type { VerifiedDriveObject } from '../../../src/archive/domain/drive-object-metadata.value-object';
+import { DriveFolderBranchBlockedError } from '../../../src/archive/domain/errors/drive-folder-branch-blocked.error';
 import { DriveObjectConflictError } from '../../../src/archive/domain/errors/drive-object-conflict.error';
 import { InMemoryArchiveArtifactRepository } from '../../../src/archive/infrastructure/persistence/in-memory-archive-artifact.repository';
 
@@ -68,6 +69,7 @@ class FakeDrive implements DriveArchivePort {
   object: VerifiedDriveObject | null = remote();
   readonly objects = new Map<string, VerifiedDriveObject>();
   listed: VerifiedDriveObject[][] = [];
+  incompleteSearch = false;
   readonly generatedIds: string[] = [];
   readonly loadObject = vi.fn(async (_connection, fileId: string) =>
     this.objects.get(fileId) ?? (this.object?.id === fileId ? this.object : null),
@@ -77,14 +79,14 @@ class FakeDrive implements DriveArchivePort {
     this.generatedIds.push(id);
     return id;
   }
-  async listManagedObjects(input: { parentId: string; pageToken: string | null }) {
+  readonly listManagedObjects = vi.fn(async (input: { parentId: string; pageToken: string | null }) => {
     const page = input.pageToken === null ? 0 : Number(input.pageToken);
     return {
       objects: (this.listed[page] ?? []).filter((object) => object.parentId === input.parentId),
       nextPageToken: page + 1 < this.listed.length ? String(page + 1) : null,
-      incompleteSearch: false,
+      incompleteSearch: this.incompleteSearch,
     };
-  }
+  });
   async beginResumableUpload(): Promise<never> { throw new Error('not used'); }
   async querySession(): Promise<never> { throw new Error('not used'); }
   async uploadChunk(): Promise<never> { throw new Error('not used'); }
@@ -112,7 +114,7 @@ async function fixture(localAvailable = true) {
     kind: 'motion_video',
     sourceIdentity: 'motion:clip',
     trustedPath: '/motion/clip.mp4',
-    relativePath: 'clip.mp4',
+    relativePath: '2026/08/13/120000-clip.mp4',
     size: 5,
     mtimeNs: '500000000',
     sourceTimeMs: 500,
@@ -133,16 +135,18 @@ async function fixture(localAvailable = true) {
   });
   await repository.markVerified(attempt.id, claimed.lease, archiveObject(remote()), 1_200);
   const drive = new FakeDrive();
+  const resolver = { execute: vi.fn().mockResolvedValue(active.folders!.motionId) };
   const alerts: { kind: string; generationId: string; artifactId?: string }[] = [];
-  const reconcile = new ReconcileDriveUseCase(
+  const reconcile = Reflect.construct(ReconcileDriveUseCase, [
     repository,
     { loadActive: async () => active },
     drive,
     source(localAvailable),
     { alert: async (kind, context) => void alerts.push({ kind, ...context }) },
+    resolver,
     { now: () => NOW, pageSize: 2, maxPages: 4 },
-  );
-  return { repository, artifact, drive, reconcile, alerts, active };
+  ]) as ReconcileDriveUseCase;
+  return { repository, artifact, drive, reconcile, alerts, active, resolver };
 }
 
 describe('ReconcileDriveUseCase', () => {
@@ -192,6 +196,150 @@ describe('ReconcileDriveUseCase', () => {
     expect(fixtureValue.alerts).toEqual([]);
   });
 
+  it('keeps an existing verified flat object valid against its stored attempt parent', async () => {
+    const fixtureValue = await fixture();
+    fixtureValue.drive.object = remote({ parentId: fixtureValue.active.folders!.motionId });
+
+    await fixtureValue.reconcile.execute({ limit: 20 }, signal);
+
+    expect((await fixtureValue.repository.listAttempts(fixtureValue.artifact.id))[0].state).toBe('verified');
+    expect(fixtureValue.resolver.execute).not.toHaveBeenCalled();
+  });
+
+  it('recreates a removed flat object under the resolved day only when the source survives', async () => {
+    const fixtureValue = await fixture(true);
+    fixtureValue.drive.object = null;
+    fixtureValue.resolver.execute.mockResolvedValue('day-folder-1');
+
+    await fixtureValue.reconcile.execute({ limit: 20 }, signal);
+
+    expect((await fixtureValue.repository.listAttempts(fixtureValue.artifact.id)).map((attempt) => [
+      attempt.containerId, attempt.state,
+    ])).toEqual([
+      [fixtureValue.active.folders!.motionId, 'missing'],
+      ['day-folder-1', 'pending'],
+    ]);
+  });
+
+  it('replaces missing nested objects under their resolved day folder', async () => {
+    const fixtureValue = await fixture(true);
+    const [flat] = await fixtureValue.repository.listAttempts(fixtureValue.artifact.id);
+    await fixtureValue.repository.markMissing(flat.id, flat.revision, 'old', NOW);
+    const nested = await fixtureValue.repository.createAttempt(
+      fixtureValue.artifact.id, fixtureValue.active.id, 'nested-file', 'day-13', NOW,
+    );
+    const claimed = await fixtureValue.repository.claimAttempt(nested.id, {
+      owner: 'nested-upload', nowMs: NOW, leaseMs: 1_000,
+    });
+    await fixtureValue.repository.markVerified(
+      nested.id, claimed.lease, archiveObject(remote({ id: 'nested-file', parentId: 'day-13' })), NOW,
+    );
+    fixtureValue.drive.object = null;
+    fixtureValue.resolver.execute.mockResolvedValue('day-replacement');
+
+    await fixtureValue.reconcile.execute({ limit: 20 }, signal);
+
+    expect((await fixtureValue.repository.listAttempts(fixtureValue.artifact.id)).map((attempt) => [
+      attempt.containerId, attempt.state,
+    ])).toEqual(expect.arrayContaining([
+      ['motion-1', 'missing'],
+      ['day-13', 'missing'],
+      ['day-replacement', 'pending'],
+    ]));
+  });
+
+  it.each([null, remote({ id: 'nested-file', parentId: 'day-13', trashed: true })])(
+    'replaces a missing or trashed nested object under a newly resolved day',
+    async (nestedRemote) => {
+      const fixtureValue = await fixture(true);
+      const [flat] = await fixtureValue.repository.listAttempts(fixtureValue.artifact.id);
+      await fixtureValue.repository.markMissing(flat.id, flat.revision, 'old', NOW);
+      const nested = await fixtureValue.repository.createAttempt(
+        fixtureValue.artifact.id, fixtureValue.active.id, 'nested-file', 'day-13', NOW,
+      );
+      const claimed = await fixtureValue.repository.claimAttempt(nested.id, {
+        owner: 'nested-upload', nowMs: NOW, leaseMs: 1_000,
+      });
+      await fixtureValue.repository.markVerified(
+        nested.id, claimed.lease, archiveObject(remote({ id: 'nested-file', parentId: 'day-13' })), NOW,
+      );
+      fixtureValue.drive.object = nestedRemote;
+      fixtureValue.resolver.execute.mockResolvedValue('day-replacement');
+
+      await fixtureValue.reconcile.execute({ limit: 20 }, signal);
+
+      const attempts = await fixtureValue.repository.listAttempts(fixtureValue.artifact.id);
+      expect(attempts.find(({ containerId }) => containerId === 'day-13')).toMatchObject({
+        containerId: 'day-13', state: 'missing',
+      });
+      expect(attempts.find(({ containerId }) => containerId === 'day-replacement')).toMatchObject({
+        containerId: 'day-replacement', state: 'pending',
+      });
+    },
+  );
+
+  it('groups restoration listings by resolved day folder', async () => {
+    const fixtureValue = await fixture();
+    await registerPending(fixtureValue.repository, fixtureValue.active, '2026/08/13/120001-a.mp4', 'c');
+    await registerPending(fixtureValue.repository, fixtureValue.active, '2026/08/13/120002-b.mp4', 'd');
+    await registerPending(fixtureValue.repository, fixtureValue.active, '2026/08/14/120003-c.mp4', 'e');
+    fixtureValue.resolver.execute.mockImplementation(async (_connection, path) =>
+      path.dayPath === '2026/08/13' ? 'day-13' : 'day-14');
+
+    await fixtureValue.reconcile.execute({ limit: 20 }, signal);
+
+    expect(fixtureValue.drive.listManagedObjects).toHaveBeenCalledTimes(2);
+    expect(fixtureValue.drive.listManagedObjects.mock.calls.map(([input]) => input.parentId).sort())
+      .toEqual(['day-13', 'day-14']);
+  });
+
+  it('skips a blocked motion branch while restoring healthy folders', async () => {
+    const fixtureValue = await fixture();
+    const healthy = await registerPending(
+      fixtureValue.repository, fixtureValue.active, '2026/08/14/120003-c.mp4', 'c',
+    );
+    await registerPending(fixtureValue.repository, fixtureValue.active, '2026/08/13/120002-b.mp4', 'd');
+    fixtureValue.resolver.execute.mockImplementation(async (_connection, path) => {
+      if (path.dayPath === '2026/08/13') throw new DriveFolderBranchBlockedError();
+      return 'day-14';
+    });
+    fixtureValue.drive.listed = [[managedRemote(healthy, 'restored-healthy', 'day-14')]];
+
+    await fixtureValue.reconcile.execute({ limit: 20 }, signal);
+
+    expect((await fixtureValue.repository.listAttempts(healthy.id)).at(-1)?.state).toBe('verified');
+  });
+
+  it('does not adopt a remote-only flat video when its source no longer survives', async () => {
+    const fixtureValue = await fixture(false);
+    const [attempt] = await fixtureValue.repository.listAttempts(fixtureValue.artifact.id);
+    await fixtureValue.repository.markMissing(attempt.id, attempt.revision, 'missing', NOW);
+    fixtureValue.drive.object = null;
+    fixtureValue.drive.listed = [[remote({ id: 'remote-only' })]];
+
+    await fixtureValue.reconcile.execute({ limit: 20 }, signal);
+
+    expect((await fixtureValue.repository.listAttempts(fixtureValue.artifact.id)).map(({ remoteObjectId }) => remoteObjectId))
+      .toEqual(['file-1']);
+  });
+
+  it('does not adopt duplicate leaf candidates or incomplete restoration searches', async () => {
+    const fixtureValue = await fixture();
+    const [attempt] = await fixtureValue.repository.listAttempts(fixtureValue.artifact.id);
+    await fixtureValue.repository.markMissing(attempt.id, attempt.revision, 'missing', NOW);
+    fixtureValue.drive.object = null;
+    fixtureValue.drive.listed = [[remote({ id: 'candidate-a' }), remote({ id: 'candidate-b' })]];
+
+    await fixtureValue.reconcile.execute({ limit: 20 }, signal);
+    expect((await fixtureValue.repository.listAttempts(fixtureValue.artifact.id)).map(({ remoteObjectId }) => remoteObjectId))
+      .toEqual(['file-1']);
+
+    fixtureValue.drive.incompleteSearch = true;
+    await fixtureValue.reconcile.execute({ limit: 20 }, signal);
+    expect((await fixtureValue.repository.listAttempts(fixtureValue.artifact.id)).map(({ remoteObjectId }) => remoteObjectId))
+      .toEqual(['file-1']);
+  });
+
   it('preserves history and alerts when a missing object has no trusted local source', async () => {
     const fixtureValue = await fixture(false);
     fixtureValue.drive.object = null;
@@ -226,8 +374,8 @@ describe('ReconcileDriveUseCase', () => {
     const conflicting = await registerPending(
       fixtureValue.repository,
       fixtureValue.active,
-      'conflicting',
-      'c'.repeat(64),
+      '2026/08/13/conflicting.mp4',
+      'c',
     );
     await fixtureValue.repository.createAttempt(
       conflicting.id,
@@ -321,8 +469,8 @@ describe('ReconcileDriveUseCase', () => {
     const second = await registerPending(
       fixtureValue.repository,
       fixtureValue.active,
-      'second',
-      'd'.repeat(64),
+      '2026/08/13/120001-second.mp4',
+      'd',
     );
     fixtureValue.drive.object = null;
     fixtureValue.drive.listed = [[
@@ -347,14 +495,14 @@ describe('ReconcileDriveUseCase', () => {
     const first = await registerPending(
       fixtureValue.repository,
       fixtureValue.active,
-      'first-restore',
-      'd'.repeat(64),
+      '2026/08/13/120001-first-restore.mp4',
+      'd',
     );
     const second = await registerPending(
       fixtureValue.repository,
       fixtureValue.active,
-      'second-restore',
-      'e'.repeat(64),
+      '2026/08/13/120002-second-restore.mp4',
+      'e',
     );
     const [conflictedArtifact, recoveredArtifact] = [first, second].sort(
       (left, right) => left.createdAtMs - right.createdAtMs || left.id.localeCompare(right.id),
@@ -392,8 +540,8 @@ describe('ReconcileDriveUseCase', () => {
       const artifact = await registerPending(
         repository,
         active,
-        `fair-${index}`,
-        String(index).repeat(64),
+        `2026/08/13/12000${index}-fair.mp4`,
+        String(index),
       );
       const value = managedRemote(artifact, `fair-file-${index}`);
       drive.objects.set(value.id, value);
@@ -437,30 +585,33 @@ describe('ReconcileDriveUseCase', () => {
 async function registerPending(
   repository: InMemoryArchiveArtifactRepository,
   active: ReturnType<typeof connection>,
-  suffix: string,
-  fingerprint: string,
+  relativePath: string,
+  fingerprintCharacter: string,
 ) {
+  const suffix = relativePath.replaceAll('/', '-').replace('.mp4', '');
   return repository.register({
     installationId: active.installationId,
     kind: 'motion_video',
     sourceIdentity: `motion:${suffix}`,
     trustedPath: `/motion/${suffix}.mp4`,
-    relativePath: `${suffix}.mp4`,
+    relativePath,
     size: 5,
     mtimeNs: '500000000',
     sourceTimeMs: 500,
     sha256: DIGEST,
-    sourceFingerprint: fingerprint,
+    sourceFingerprint: fingerprintCharacter.repeat(64),
   });
 }
 
 function managedRemote(
   artifact: Awaited<ReturnType<typeof registerPending>>,
   id: string,
+  parentId = 'motion-1',
 ): VerifiedDriveObject {
   return remote({
     id,
     name: artifact.relativePath,
+    parentId,
     appProperties: encodeArchiveAppProperties({
       installationId: artifact.installationId,
       generationId: 'generation-1',
