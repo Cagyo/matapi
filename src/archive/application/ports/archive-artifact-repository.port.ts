@@ -97,6 +97,26 @@ export interface ClaimedAttempt {
   lease: AttemptLease;
 }
 
+export interface ReplaceAttemptForContainer {
+  attemptId: string;
+  fence: { kind: 'revision'; revision: number } | { kind: 'lease'; lease: AttemptLease };
+  expectedContainerId: string;
+  terminalState: 'missing' | 'detached' | 'abandoned';
+  errorCode: string;
+  replacementRemoteObjectId: string;
+  replacementContainerId: string;
+  nowMs: number;
+}
+
+export interface TerminalizeArtifactAttempt {
+  artifactId: string;
+  expectedAdmissionRevision: number;
+  attemptId: string;
+  lease: AttemptLease;
+  errorCode: 'local_source_changed' | 'local_source_missing' | 'invalid_motion_path';
+  nowMs: number;
+}
+
 export interface ReconciliationSelection {
   limit: number;
   generationId?: string;
@@ -167,6 +187,8 @@ export interface ArchiveArtifactRepositoryPort {
   saveSession(attemptId: string, lease: AttemptLease, session: EncryptedUploadSession, nowMs: number): Promise<AttemptLease>;
   confirmOffset(attemptId: string, lease: AttemptLease, offset: number, nowMs: number): Promise<AttemptLease>;
   markRetryable(attemptId: string, lease: AttemptLease, errorCode: string, nextAttemptMs: number, nowMs: number): Promise<void>;
+  replaceAttemptForContainer(input: ReplaceAttemptForContainer): Promise<ArchiveObjectAttempt>;
+  terminalizeArtifactAttempt(input: TerminalizeArtifactAttempt): Promise<void>;
   replaceConflictingAttempt(attemptId: string, lease: AttemptLease, replacementRemoteObjectId: string, errorCode: string, nowMs: number): Promise<ArchiveObjectAttempt>;
   markVerified(attemptId: string, lease: AttemptLease, remote: VerifiedArchiveObject, nowMs: number): Promise<void>;
   markMissing(attemptId: string, expectedRevision: number, reason: string, nowMs: number): Promise<void>;

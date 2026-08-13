@@ -247,6 +247,100 @@ describe('DrizzleArchiveArtifactRepository', () => {
       .resolves.toMatchObject({ lease: { owner: 'worker-b' } });
   });
 
+  it('atomically replaces an immutable attempt container and clears the old session', async () => {
+    const artifact = await repository.register(artifactFixture());
+    const first = await repository.createAttempt(
+      artifact.id, 'generation-1', 'file-1', 'old-day-folder', 100,
+    );
+    const claim = await repository.claimAttempt(first.id, {
+      owner: 'worker-a', nowMs: 1_000, leaseMs: 5_000,
+    });
+    const lease = await repository.saveSession(
+      first.id, claim.lease, sessionFixture(1_100), 1_100,
+    );
+
+    const replacement = await repository.replaceAttemptForContainer({
+      attemptId: first.id,
+      fence: { kind: 'lease', lease },
+      expectedContainerId: 'old-day-folder',
+      terminalState: 'missing',
+      errorCode: 'container_replaced',
+      replacementRemoteObjectId: 'file-2',
+      replacementContainerId: 'new-day-folder',
+      nowMs: 1_200,
+    });
+
+    expect(replacement).toMatchObject({
+      remoteObjectId: 'file-2', containerId: 'new-day-folder', state: 'pending',
+      nextAttemptMs: 1_200,
+    });
+    expect(await repository.loadAttempt(first.id)).toMatchObject({
+      containerId: 'old-day-folder', state: 'missing', session: null,
+      errorCode: 'container_replaced',
+    });
+  });
+
+  it('rolls back container terminalization and session clearing when replacement insertion fails', async () => {
+    const artifact = await repository.register(artifactFixture());
+    const first = await repository.createAttempt(
+      artifact.id, 'generation-1', 'file-1', 'old-day-folder', 100,
+    );
+    await repository.createAttempt(
+      artifact.id, 'generation-1', 'file-2', 'new-day-folder', 101,
+    );
+    const claim = await repository.claimAttempt(first.id, {
+      owner: 'worker-a', nowMs: 1_000, leaseMs: 5_000,
+    });
+    const lease = await repository.saveSession(
+      first.id, claim.lease, sessionFixture(1_100), 1_100,
+    );
+
+    await expect(repository.replaceAttemptForContainer({
+      attemptId: first.id,
+      fence: { kind: 'lease', lease },
+      expectedContainerId: 'old-day-folder',
+      terminalState: 'missing',
+      errorCode: 'container_replaced',
+      replacementRemoteObjectId: 'file-2',
+      replacementContainerId: 'new-day-folder',
+      nowMs: 1_200,
+    })).rejects.toThrow('Reserved remote object ID already exists');
+
+    expect(await repository.loadAttempt(first.id)).toMatchObject({
+      containerId: 'old-day-folder', state: 'uploading', session: sessionFixture(1_100),
+      errorCode: null,
+    });
+  });
+
+  it('atomically terminalizes one local-source attempt and its artifact admission', async () => {
+    const artifact = await repository.register(artifactFixture());
+    const first = await repository.createAttempt(
+      artifact.id, 'generation-1', 'file-1', 'day-folder', 100,
+    );
+    const claim = await repository.claimAttempt(first.id, {
+      owner: 'worker-a', nowMs: 1_000, leaseMs: 5_000,
+    });
+    const lease = await repository.saveSession(
+      first.id, claim.lease, sessionFixture(1_100), 1_100,
+    );
+
+    await repository.terminalizeArtifactAttempt({
+      artifactId: artifact.id,
+      expectedAdmissionRevision: artifact.admission.revision,
+      attemptId: first.id,
+      lease,
+      errorCode: 'local_source_missing',
+      nowMs: 1_200,
+    });
+
+    expect(await repository.loadArtifact(artifact.id)).toMatchObject({
+      admission: { state: 'terminal', errorCode: 'local_source_missing' },
+    });
+    expect(await repository.loadAttempt(first.id)).toMatchObject({
+      state: 'abandoned', session: null, errorCode: 'local_source_missing',
+    });
+  });
+
   it('rolls back a missing transition when its reserved replacement cannot be inserted', async () => {
     const artifact = await repository.register(artifactFixture());
     const first = await repository.createAttempt(

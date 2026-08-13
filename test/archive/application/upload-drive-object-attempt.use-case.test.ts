@@ -18,6 +18,173 @@ const digest = createHash('sha256').update(bytes).digest('hex');
 const signal = new AbortController().signal;
 
 describe('UploadDriveObjectAttemptUseCase', () => {
+  it.each([
+    ['avi', 'video/x-msvideo'],
+    ['mkv', 'video/x-matroska'],
+    ['mp4', 'video/mp4'],
+  ])('uploads %s under the verified day folder with %s', async (extension, mimeType) => {
+    const fixture = await setup({ relativePath: `2026/08/13/120000-event.${extension}` });
+
+    await fixture.useCase.execute(fixture.artifactId, signal);
+
+    expect(fixture.resolver.execute).toHaveBeenCalled();
+    expect(fixture.drive.beginInputs.at(-1)).toMatchObject({
+      parentId: 'day-folder-1',
+      mimeType,
+    });
+  });
+
+  it('revalidates the full folder chain before resuming a nested attempt', async () => {
+    const fixture = await setup({
+      createAttempt: true,
+      relativePath: '2026/08/13/120000-event.mp4',
+      attemptContainerId: 'day-folder-1',
+    });
+    await fixture.seedSession(0);
+
+    await fixture.useCase.execute(fixture.attemptId(), signal);
+
+    expect(fixture.journal.indexOf('resolve-folder'))
+      .toBeLessThan(fixture.journal.indexOf('query-session'));
+  });
+
+  it('reconciles the old exact ID and atomically reserves a replacement when the leaf changed', async () => {
+    const fixture = await setup({
+      createAttempt: true,
+      relativePath: '2026/08/13/120000-event.mp4',
+      attemptContainerId: 'old-day-folder',
+    });
+    await fixture.seedSession(0);
+    fixture.drive.generatedIds.push('reserved-2');
+    fixture.resolver.execute.mockResolvedValue('new-day-folder');
+    fixture.drive.queryResult = { kind: 'expired' };
+
+    await expect(fixture.useCase.execute(fixture.attemptId(), signal)).resolves.toMatchObject({
+      kind: 'replaced',
+      replacementFileId: 'reserved-2',
+    });
+
+    const attempts = await fixture.repository.listAttempts(fixture.artifactId);
+    expect(attempts.map((attempt) => [attempt.containerId, attempt.state])).toEqual([
+      ['old-day-folder', 'missing'],
+      ['new-day-folder', 'pending'],
+    ]);
+  });
+
+  it('keeps a surviving old exact object bound to its historical attempt when the leaf changed', async () => {
+    const fixture = await setup({
+      createAttempt: true,
+      relativePath: '2026/08/13/120000-event.mp4',
+      attemptContainerId: 'old-day-folder',
+    });
+    await fixture.seedSession(0);
+    fixture.resolver.execute.mockResolvedValue('new-day-folder');
+    fixture.drive.queryResult = { kind: 'expired' };
+    fixture.drive.objects.set('reserved-1', verified(
+      'reserved-1', bytes, {}, '120000-event.mp4', 'old-day-folder', 'video/mp4',
+    ));
+
+    await expect(fixture.useCase.execute(fixture.attemptId(), signal)).resolves.toMatchObject({
+      kind: 'verified', fileId: 'reserved-1',
+    });
+
+    expect(await fixture.repository.listAttempts(fixture.artifactId)).toMatchObject([
+      { containerId: 'old-day-folder', state: 'verified' },
+    ]);
+  });
+
+  it('uses the renewed lease when a non-exact old object needs a new-container replacement', async () => {
+    const fixture = await setup({
+      createAttempt: true,
+      leaseMs: 500,
+      relativePath: '2026/08/13/120000-event.mp4',
+      attemptContainerId: 'old-day-folder',
+    });
+    fixture.drive.generatedIds.push('reserved-2');
+    fixture.resolver.execute.mockResolvedValue('new-day-folder');
+    fixture.drive.objects.set('reserved-1', verified(
+      'reserved-1', bytes, { sha256: '0'.repeat(64) },
+      '120000-event.mp4', 'old-day-folder', 'video/mp4',
+    ));
+    fixture.source.onYield = () => { fixture.clock.value += 200; };
+
+    await expect(fixture.useCase.execute(fixture.attemptId(), signal)).resolves.toMatchObject({
+      kind: 'replaced', replacementFileId: 'reserved-2',
+    });
+
+    expect(await fixture.repository.listAttempts(fixture.artifactId)).toMatchObject([
+      { containerId: 'old-day-folder', state: 'detached' },
+      { containerId: 'new-day-folder', state: 'pending' },
+    ]);
+  });
+
+  it('terminalizes an invalid motion path before generating a Drive file ID', async () => {
+    const fixture = await setup({ relativePath: 'clip.mp4' });
+
+    await expect(fixture.useCase.execute(fixture.artifactId, signal)).rejects.toThrow(/path/iu);
+
+    expect(fixture.drive.generateCalls).toBe(0);
+    expect(await fixture.repository.loadArtifact(fixture.artifactId)).toMatchObject({
+      admission: { state: 'terminal', errorCode: 'invalid_motion_path' },
+    });
+  });
+
+  it('makes a temporary pre-attempt file-ID failure retryable without creating an attempt', async () => {
+    const fixture = await setup();
+    fixture.drive.generateError = new Error('temporary provider failure');
+
+    await expect(fixture.useCase.execute(fixture.artifactId, signal))
+      .rejects.toThrow('temporary provider failure');
+
+    expect(await fixture.repository.loadArtifact(fixture.artifactId)).toMatchObject({
+      admission: {
+        state: 'retryable', errorCode: 'temporary_failure', nextAttemptMs: now + 1_000,
+      },
+    });
+    expect(await fixture.repository.listAttempts(fixture.artifactId)).toEqual([]);
+  });
+
+  it.each([
+    ['changed', 'local_source_changed'],
+    ['missing', 'local_source_missing'],
+  ] as const)('terminalizes only the %s local source and abandons its exact attempt', async (failure, errorCode) => {
+    const fixture = await setup({ createAttempt: true });
+    await fixture.seedSession(0);
+    if (failure === 'changed') fixture.source.statOverride = { size: bytes.length + 1, mtimeNs: '123' };
+    else fixture.source.statError = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    const healthy = await fixture.repository.register({
+      installationId: 'installation-1', kind: 'motion_video', sourceIdentity: 'motion:healthy',
+      trustedPath: '/motion/healthy.mp4', relativePath: '2026/08/14/120000-healthy.mp4',
+      size: bytes.length, mtimeNs: '123', sourceTimeMs: now - 900,
+      sha256: digest, sourceFingerprint: 'e'.repeat(64),
+    });
+
+    await expect(fixture.useCase.execute(fixture.attemptId(), signal)).rejects.toThrow();
+
+    expect(await fixture.repository.loadAttempt(fixture.attemptId())).toMatchObject({
+      state: 'abandoned', session: null, errorCode,
+    });
+    expect(await fixture.repository.loadArtifact(fixture.artifactId)).toMatchObject({
+      admission: { state: 'terminal', errorCode },
+    });
+    expect(await fixture.repository.listUnattemptedArtifacts({
+      kind: 'motion_video', generationId: 'generation-1', nowMs: now, limit: 10,
+    })).toMatchObject([{ id: healthy.id }]);
+  });
+
+  it('keeps database backups directly under the managed Backups folder', async () => {
+    const fixture = await setup({ kind: 'database_backup', relativePath: 'backups/home-worker.sqlite3' });
+
+    await fixture.useCase.execute(fixture.artifactId, signal);
+
+    expect(fixture.resolver.execute).not.toHaveBeenCalled();
+    expect(fixture.drive.beginInputs.at(-1)).toMatchObject({
+      parentId: 'backup-folder',
+      name: 'home-worker.sqlite3',
+      mimeType: 'application/vnd.sqlite3',
+    });
+  });
+
   it('persists a generated ID and encrypted session before sending bounded chunks', async () => {
     const fixture = await setup();
     const events: string[] = [];
@@ -199,33 +366,60 @@ describe('UploadDriveObjectAttemptUseCase', () => {
   });
 });
 
-async function setup(options: { createAttempt?: boolean; leaseMs?: number } = {}) {
+async function setup(options: {
+  createAttempt?: boolean;
+  leaseMs?: number;
+  relativePath?: string;
+  attemptContainerId?: string;
+  kind?: 'motion_video' | 'database_backup';
+} = {}) {
   const repository = new InMemoryArchiveArtifactRepository();
+  const relativePath = options.relativePath ?? '2026/08/13/120000-clip.mp4';
+  const kind = options.kind ?? 'motion_video';
   const artifact = await repository.register({
-    installationId: 'installation-1', kind: 'motion_video', sourceIdentity: 'motion:clip', trustedPath: '/motion/clip.mp4',
-    relativePath: 'clip.mp4', size: bytes.length, mtimeNs: '123', sourceTimeMs: now - 1_000,
+    installationId: 'installation-1', kind, sourceIdentity: `${kind}:clip`, trustedPath: '/motion/clip.mp4',
+    relativePath, size: bytes.length, mtimeNs: '123', sourceTimeMs: now - 1_000,
     sha256: digest, sourceFingerprint: 'f'.repeat(64),
   });
   const existingAttempt = options.createAttempt
-    ? await repository.createAttempt(artifact.id, 'generation-1', 'reserved-1', 'motion-folder', now - 20)
+    ? await repository.createAttempt(
+      artifact.id, 'generation-1', 'reserved-1', options.attemptContainerId ?? 'day-folder-1', now - 20,
+    )
     : null;
   const connection = DriveConnection.stage({ id: 'generation-1', installationId: 'installation-1', nowMs: 1 }).activate({
     permissionId: 'owner-1', email: null, displayName: null,
     folders: { rootId: 'root-folder', motionId: 'motion-folder', backupsId: 'backup-folder' }, nowMs: 2,
   });
   const source = new FakeSource(bytes);
-  const drive = new FakeDrive(bytes);
+  const journal: string[] = [];
+  const drive = new FakeDrive(bytes, journal);
+  drive.fallbackName = relativePath.split('/').at(-1) ?? '';
+  drive.fallbackParentId = existingAttempt?.containerId
+    ?? (kind === 'database_backup' ? 'backup-folder' : 'day-folder-1');
+  drive.fallbackMimeType = kind === 'database_backup'
+    ? 'application/vnd.sqlite3'
+    : relativePath.endsWith('.avi') ? 'video/x-msvideo'
+      : relativePath.endsWith('.mkv') ? 'video/x-matroska' : 'video/mp4';
+  drive.artifactKind = kind;
+  if (existingAttempt !== null) drive.generatedIds.shift();
   drive.lastAttemptId = existingAttempt?.id ?? null;
+  const resolver = {
+    execute: vi.fn(async () => {
+      journal.push('resolve-folder');
+      return 'day-folder-1';
+    }),
+  };
   const cipher = new FakeCipher();
   const semaphore = new ArchiveTransferSemaphoreService();
   const clock = { value: now, now() { return this.value; } };
   const credentials = { loadActive: vi.fn(async () => connection) };
   const create = () => new UploadDriveObjectAttemptUseCase(
     repository, credentials, drive, cipher, source, semaphore,
+    resolver,
     { now: () => clock.value, owner: () => 'worker-1', leaseMs: options.leaseMs ?? 1_000, retryDelayMs: 1_000 },
   );
   const fixture = {
-    repository, artifactId: artifact.id, source, drive, cipher, semaphore, clock,
+    repository, artifactId: artifact.id, source, drive, cipher, semaphore, clock, resolver, journal,
     useCase: create(), newUseCase: create,
     attemptId: () => drive.lastAttemptId ?? '',
     seedSession: async (confirmedOffset: number) => {
@@ -259,12 +453,16 @@ class FakeSource implements ArchiveUploadSourcePort {
   readonly openEnds: number[] = [];
   maxRequestedBytes = 0;
   mutateAfterRead = false;
+  statOverride: { size: number; mtimeNs: string } | null = null;
+  statError: Error | null = null;
   onYield?: (start: number) => void;
   private reads = 0;
 
   constructor(private readonly content: Buffer) {}
 
   async stat(): Promise<{ size: number; mtimeNs: string }> {
+    if (this.statError !== null) throw this.statError;
+    if (this.statOverride !== null) return this.statOverride;
     return { size: this.content.length, mtimeNs: this.mutateAfterRead && this.reads > 0 ? '124' : '123' };
   }
 
@@ -290,6 +488,8 @@ class FakeDrive implements DriveArchivePort {
   readonly objects = new Map<string, VerifiedDriveObject>();
   readonly loadIds: string[] = [];
   readonly beginFileIds: string[] = [];
+  readonly beginInputs: Parameters<DriveArchivePort['beginResumableUpload']>[0][] = [];
+  generateCalls = 0;
   beginCalls = 0;
   uploadCalls = 0;
   lastAttemptId: string | null = null;
@@ -298,14 +498,21 @@ class FakeDrive implements DriveArchivePort {
   conflictOnBegin = false;
   failChunkOnce = false;
   remoteOverride: Partial<VerifiedDriveObject> = {};
+  fallbackName = '120000-clip.mp4';
+  fallbackParentId = 'day-folder-1';
+  fallbackMimeType = 'video/mp4';
+  artifactKind: 'motion_video' | 'database_backup' = 'motion_video';
+  generateError: Error | null = null;
   onGenerate?: () => void;
   onBegin?: () => Promise<void>;
   onChunk?: () => Promise<void>;
 
-  constructor(private readonly content: Buffer) {}
+  constructor(private readonly content: Buffer, private readonly journal: string[]) {}
 
   async generateFileId(): Promise<string> {
+    this.generateCalls += 1;
     this.onGenerate?.();
+    if (this.generateError !== null) throw this.generateError;
     const id = this.generatedIds.shift();
     if (!id) throw new Error('no generated ID');
     return id;
@@ -314,16 +521,20 @@ class FakeDrive implements DriveArchivePort {
   async beginResumableUpload(input: Parameters<DriveArchivePort['beginResumableUpload']>[0]) {
     this.beginCalls += 1;
     this.beginFileIds.push(input.fileId);
+    this.beginInputs.push(input);
     await this.onBegin?.();
     if (this.conflictOnBegin) throw Object.assign(new Error('reserved ID conflict'), { name: 'DriveObjectConflictError' });
     if (this.failAfterRemoteCreate) {
-      this.objects.set(input.fileId, verified(input.fileId, this.content, this.remoteOverride));
+      this.objects.set(input.fileId, verified(
+        input.fileId, this.content, this.remoteOverride, input.name, input.parentId, input.mimeType,
+        this.artifactKind,
+      ));
       throw new Error('timeout');
     }
     return this.session;
   }
 
-  async querySession() { return this.queryResult; }
+  async querySession() { this.journal.push('query-session'); return this.queryResult; }
 
   async uploadChunk(input: UploadChunk) {
     this.uploadCalls += 1;
@@ -333,7 +544,16 @@ class FakeDrive implements DriveArchivePort {
     for await (const part of input.body) read += part.byteLength;
     expect(read).toBe(input.endInclusive - input.start + 1);
     if (input.endInclusive + 1 === input.totalSize) {
-      this.objects.set(input.fileId, verified(input.fileId, this.content, this.remoteOverride));
+      const begin = this.beginInputs.find((value) => value.fileId === input.fileId);
+      this.objects.set(input.fileId, verified(
+        input.fileId,
+        this.content,
+        this.remoteOverride,
+        begin?.name ?? this.fallbackName,
+        begin?.parentId ?? this.fallbackParentId,
+        begin?.mimeType ?? this.fallbackMimeType,
+        this.artifactKind,
+      ));
       return { kind: 'complete' as const };
     }
     return { kind: 'resume' as const, confirmedOffset: input.endInclusive + 1 };
@@ -348,12 +568,20 @@ class FakeDrive implements DriveArchivePort {
   async deleteExact() { return undefined; }
 }
 
-function verified(id: string, content: Buffer, override: Partial<VerifiedDriveObject>): VerifiedDriveObject {
+function verified(
+  id: string,
+  content: Buffer,
+  override: Partial<VerifiedDriveObject>,
+  name = '120000-clip.mp4',
+  parentId = 'day-folder-1',
+  mimeType = 'video/mp4',
+  kind: 'motion_video' | 'database_backup' = 'motion_video',
+): VerifiedDriveObject {
   return {
-    id, name: 'clip.mp4', parentId: 'motion-folder', mimeType: 'video/mp4', size: content.length,
+    id, name, parentId, mimeType, size: content.length,
     sha256: createHash('sha256').update(content).digest('hex'), md5: null, createdTimeMs: now,
     headRevisionId: 'revision-1', version: '1', ownedByMe: true, canDelete: true, trashed: false,
-    appProperties: { a1v: '1', a1i: 'installation-1', a1g: 'generation-1', a1k: 'motion_video', a1f: 'f'.repeat(64), a1s: digest, a1t: String(now - 1_000) },
+    appProperties: { a1v: '1', a1i: 'installation-1', a1g: 'generation-1', a1k: kind, a1f: 'f'.repeat(64), a1s: digest, a1t: String(now - 1_000) },
     sharing: { ownerPermissionId: 'owner-1', shared: false, permissionIds: ['owner-1'] }, webViewLink: null,
     ...override,
   };

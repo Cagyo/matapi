@@ -5,7 +5,8 @@ import { AppDatabase, DB } from '../../../database/database.module';
 import { archiveArtifacts, archiveSchedulerState, driveMotionFolderReservations, driveObjectAttempts } from '../../../database/schema';
 import type {
   ArchiveArtifactRepositoryPort, ArchiveObjectAttempt, ArchiveQueueStatus, ArchiveSchedulerState, ArchiveSchedulerUpdate, ArchiveStatusCounts, AttemptLease, ClaimAttempt,
-  ClaimedAttempt, EncryptedUploadSession, ReconciliationSelection, RetentionSelection, UnattemptedArtifactSelection, VerifiedArchiveObject,
+  ClaimedAttempt, EncryptedUploadSession, ReconciliationSelection, ReplaceAttemptForContainer, RetentionSelection, TerminalizeArtifactAttempt,
+  UnattemptedArtifactSelection, VerifiedArchiveObject,
 } from '../../application/ports/archive-artifact-repository.port';
 import { ArchiveArtifact, type ArchiveArtifactKind, type RegisterArchiveArtifact } from '../../domain/archive-artifact.entity';
 import { DriveObjectAttempt, type DriveAttemptState } from '../../domain/drive-object-attempt.entity';
@@ -184,6 +185,131 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
     const result = this.db.update(driveObjectAttempts).set({ state: next.state, revision: next.revision, updatedAt: nowMs,
       nextAttemptAt: nextAttemptMs, retryCount: row.retryCount + 1, errorCode, leaseOwner: null, leaseExpiresAt: null }).where(this.fenced(attemptId, lease, nowMs)).run();
     if (result.changes !== 1) throw new DriveAttemptLeaseLostError();
+  }
+
+  async replaceAttemptForContainer(input: ReplaceAttemptForContainer): Promise<ArchiveObjectAttempt> {
+    try {
+      return this.immediate((tx) => {
+        const fence = input.fence.kind === 'lease'
+          ? this.fenced(input.attemptId, input.fence.lease, input.nowMs)
+          : and(
+            eq(driveObjectAttempts.id, input.attemptId),
+            eq(driveObjectAttempts.revision, input.fence.revision),
+            or(
+              isNull(driveObjectAttempts.leaseExpiresAt),
+              lte(driveObjectAttempts.leaseExpiresAt, input.nowMs),
+            ),
+          );
+        const row = tx.select().from(driveObjectAttempts).where(and(
+          fence,
+          eq(driveObjectAttempts.parentId, input.expectedContainerId),
+        )).get();
+        if (!row) {
+          if (input.fence.kind === 'lease') throw new DriveAttemptLeaseLostError();
+          throw new DriveObjectConflictError('Drive attempt changed before container replacement');
+        }
+        const terminal = terminalizeAttempt(
+          toAttempt(row), input.terminalState, input.errorCode, input.nowMs,
+        );
+        const replacement = DriveObjectAttempt.reserve({
+          id: randomUUID(),
+          artifactId: row.artifactId,
+          generationId: row.generationId,
+          remoteFileId: input.replacementRemoteObjectId,
+          parentId: input.replacementContainerId,
+          nowMs: input.nowMs,
+        });
+        tx.insert(driveObjectAttempts).values(attemptRow(replacement)).run();
+        const attemptResult = tx.update(driveObjectAttempts).set({
+          state: terminal.state,
+          revision: terminal.revision,
+          updatedAt: terminal.updatedAtMs,
+          missingReason: terminal.missingReason,
+          detachedReason: terminal.detachedReason,
+          errorCode: input.errorCode,
+          leaseOwner: null,
+          leaseExpiresAt: null,
+          ...clearedSession(),
+        }).where(and(fence, eq(driveObjectAttempts.parentId, input.expectedContainerId))).run();
+        if (attemptResult.changes !== 1) {
+          if (input.fence.kind === 'lease') throw new DriveAttemptLeaseLostError();
+          throw new DriveObjectConflictError('Drive attempt changed before container replacement');
+        }
+        const artifactRow = tx.select().from(archiveArtifacts)
+          .where(eq(archiveArtifacts.id, row.artifactId)).get();
+        if (!artifactRow) throw new DriveObjectConflictError('Archive artifact does not exist');
+        if (artifactRow.currentVerifiedAttemptId === row.id) {
+          const artifact = toArtifact(artifactRow)
+            .markCurrentVerificationUnavailable(row.id, input.nowMs);
+          const artifactResult = tx.update(archiveArtifacts).set({
+            state: artifact.state,
+            currentVerifiedAttemptId: artifact.currentVerifiedAttemptId,
+            updatedAt: artifact.updatedAtMs,
+            revision: artifact.revision,
+          }).where(and(
+            eq(archiveArtifacts.id, artifact.id),
+            eq(archiveArtifacts.revision, artifactRow.revision),
+          )).run();
+          if (artifactResult.changes !== 1) {
+            throw new DriveObjectConflictError('Archive artifact changed before container replacement');
+          }
+        }
+        return project(replacement, {
+          nextAttemptMs: input.nowMs,
+          retryCount: 0,
+          errorCode: null,
+          session: null,
+        });
+      });
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        throw new DriveObjectConflictError('Reserved remote object ID already exists');
+      }
+      throw error;
+    }
+  }
+
+  async terminalizeArtifactAttempt(input: TerminalizeArtifactAttempt): Promise<void> {
+    this.immediate((tx) => {
+      const row = tx.select().from(driveObjectAttempts).where(and(
+        this.fenced(input.attemptId, input.lease, input.nowMs),
+        eq(driveObjectAttempts.artifactId, input.artifactId),
+      )).get();
+      if (!row) throw new DriveAttemptLeaseLostError();
+      const artifactRow = tx.select().from(archiveArtifacts).where(and(
+        eq(archiveArtifacts.id, input.artifactId),
+        eq(archiveArtifacts.admissionRevision, input.expectedAdmissionRevision),
+      )).get();
+      if (!artifactRow) {
+        throw new DriveObjectConflictError('Archive admission changed before terminalization');
+      }
+      const terminalArtifact = toArtifact(artifactRow)
+        .markAdmissionTerminal(input.errorCode, input.nowMs);
+      const terminalAttempt = toAttempt(row).abandon(input.nowMs);
+      const artifactResult = tx.update(archiveArtifacts).set({
+        admissionState: terminalArtifact.admission.state,
+        admissionNextAt: terminalArtifact.admission.nextAttemptMs,
+        admissionErrorCode: terminalArtifact.admission.errorCode,
+        admissionRevision: terminalArtifact.admission.revision,
+        updatedAt: terminalArtifact.updatedAtMs,
+      }).where(and(
+        eq(archiveArtifacts.id, input.artifactId),
+        eq(archiveArtifacts.admissionRevision, input.expectedAdmissionRevision),
+      )).run();
+      if (artifactResult.changes !== 1) {
+        throw new DriveObjectConflictError('Archive admission changed before terminalization');
+      }
+      const attemptResult = tx.update(driveObjectAttempts).set({
+        state: terminalAttempt.state,
+        revision: terminalAttempt.revision,
+        updatedAt: terminalAttempt.updatedAtMs,
+        errorCode: input.errorCode,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        ...clearedSession(),
+      }).where(this.fenced(input.attemptId, input.lease, input.nowMs)).run();
+      if (attemptResult.changes !== 1) throw new DriveAttemptLeaseLostError();
+    });
   }
 
   async replaceConflictingAttempt(
@@ -975,4 +1101,15 @@ function parseSharing(value: string | null): CanonicalSharingState {
 
 function isUniqueViolation(error: unknown): boolean {
   return !!error && typeof error === 'object' && (error as { code?: unknown }).code === 'SQLITE_CONSTRAINT_UNIQUE';
+}
+
+function terminalizeAttempt(
+  attempt: DriveObjectAttempt,
+  state: ReplaceAttemptForContainer['terminalState'],
+  reason: string,
+  nowMs: number,
+): DriveObjectAttempt {
+  if (state === 'missing') return attempt.markMissing(reason, nowMs);
+  if (state === 'detached') return attempt.detach(reason, nowMs);
+  return attempt.abandon(nowMs);
 }

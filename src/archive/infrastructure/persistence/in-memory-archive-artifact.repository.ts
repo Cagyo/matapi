@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type {
   ArchiveArtifactRepositoryPort, ArchiveObjectAttempt, ArchiveQueueStatus, ArchiveSchedulerState, ArchiveSchedulerUpdate, ArchiveStatusCounts, AttemptLease, ClaimAttempt,
-  ClaimedAttempt, EncryptedUploadSession, ReconciliationSelection, RetentionSelection, UnattemptedArtifactSelection, VerifiedArchiveObject,
+  ClaimedAttempt, EncryptedUploadSession, ReconciliationSelection, ReplaceAttemptForContainer, RetentionSelection, TerminalizeArtifactAttempt,
+  UnattemptedArtifactSelection, VerifiedArchiveObject,
 } from '../../application/ports/archive-artifact-repository.port';
 import { ArchiveArtifact, type RegisterArchiveArtifact } from '../../domain/archive-artifact.entity';
 import { DriveObjectAttempt } from '../../domain/drive-object-attempt.entity';
@@ -169,6 +170,69 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
     entry.errorCode = errorCode;
     entry.nextAttemptMs = nextAttemptMs;
     entry.retryCount += 1;
+  }
+
+  async replaceAttemptForContainer(input: ReplaceAttemptForContainer): Promise<ArchiveObjectAttempt> {
+    const entry = input.fence.kind === 'lease'
+      ? this.requireLease(input.attemptId, input.fence.lease, input.nowMs)
+      : this.requireRevisionFence(input.attemptId, input.fence.revision, input.nowMs);
+    if (entry.attempt.parentId !== input.expectedContainerId) {
+      throw new DriveObjectConflictError('Drive attempt container changed before replacement');
+    }
+    if ([...this.attempts.values()].some(
+      ({ attempt }) => attempt.remoteFileId === input.replacementRemoteObjectId,
+    )) {
+      throw new DriveObjectConflictError('Reserved remote object ID already exists');
+    }
+    const artifact = this.artifacts.get(entry.attempt.artifactId);
+    if (!artifact) throw new DriveObjectConflictError('Archive artifact does not exist');
+    const terminal = terminalizeAttempt(entry.attempt, input.terminalState, input.errorCode, input.nowMs);
+    const replacement = DriveObjectAttempt.reserve({
+      id: randomUUID(),
+      artifactId: entry.attempt.artifactId,
+      generationId: entry.attempt.generationId,
+      remoteFileId: input.replacementRemoteObjectId,
+      parentId: input.replacementContainerId,
+      nowMs: input.nowMs,
+    });
+    const replacementEntry: Entry = {
+      attempt: replacement,
+      lease: null,
+      session: null,
+      nextAttemptMs: input.nowMs,
+      retryCount: 0,
+      errorCode: null,
+    };
+    entry.attempt = terminal;
+    entry.lease = null;
+    entry.session = null;
+    entry.errorCode = input.errorCode;
+    if (artifact.currentVerifiedAttemptId === entry.attempt.id) {
+      this.artifacts.set(
+        artifact.id,
+        artifact.markCurrentVerificationUnavailable(entry.attempt.id, input.nowMs),
+      );
+    }
+    this.attempts.set(replacement.id, replacementEntry);
+    return project(replacementEntry);
+  }
+
+  async terminalizeArtifactAttempt(input: TerminalizeArtifactAttempt): Promise<void> {
+    const entry = this.requireLease(input.attemptId, input.lease, input.nowMs);
+    if (entry.attempt.artifactId !== input.artifactId) {
+      throw new DriveObjectConflictError('Drive attempt does not belong to the archive artifact');
+    }
+    const artifact = this.artifacts.get(input.artifactId);
+    if (!artifact || artifact.admission.revision !== input.expectedAdmissionRevision) {
+      throw new DriveObjectConflictError('Archive admission changed before terminalization');
+    }
+    const terminalArtifact = artifact.markAdmissionTerminal(input.errorCode, input.nowMs);
+    const terminalAttempt = entry.attempt.abandon(input.nowMs);
+    this.artifacts.set(artifact.id, terminalArtifact);
+    entry.attempt = terminalAttempt;
+    entry.lease = null;
+    entry.session = null;
+    entry.errorCode = input.errorCode;
   }
 
   async replaceConflictingAttempt(
@@ -570,6 +634,14 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
     return entry;
   }
 
+  private requireRevisionFence(attemptId: string, revision: number, nowMs: number): Entry {
+    const entry = this.attempts.get(attemptId);
+    if (!entry || entry.attempt.revision !== revision || (entry.lease?.expiresAtMs ?? -1) > nowMs) {
+      throw new DriveObjectConflictError('Drive attempt changed before replacement');
+    }
+    return entry;
+  }
+
   private transitionAdmission(
     artifactId: string,
     expectedRevision: number,
@@ -663,4 +735,15 @@ function validateLimit(limit: number): void {
 function dayPathPrefixes(dayPath: string): readonly string[] {
   const segments = dayPath.split('/');
   return [segments[0], segments.slice(0, 2).join('/'), dayPath];
+}
+
+function terminalizeAttempt(
+  attempt: DriveObjectAttempt,
+  state: ReplaceAttemptForContainer['terminalState'],
+  reason: string,
+  nowMs: number,
+): DriveObjectAttempt {
+  if (state === 'missing') return attempt.markMissing(reason, nowMs);
+  if (state === 'detached') return attempt.detach(reason, nowMs);
+  return attempt.abandon(nowMs);
 }

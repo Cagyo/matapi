@@ -27,10 +27,13 @@ import type { DriveConnection } from '../../domain/drive-connection.entity';
 import type { VerifiedDriveObject } from '../../domain/drive-object-metadata.value-object';
 import { DriveAttemptLeaseLostError } from '../../domain/errors/drive-attempt-lease-lost.error';
 import { DriveConfigurationError } from '../../domain/errors/drive-configuration.error';
+import { DriveFolderBranchBlockedError } from '../../domain/errors/drive-folder-branch-blocked.error';
 import { DriveLocalSourceChangedError } from '../../domain/errors/drive-local-source-changed.error';
 import { DriveObjectConflictError } from '../../domain/errors/drive-object-conflict.error';
+import { MotionArchivePath } from '../../domain/motion-archive-path.value-object';
 import { ArchiveTransferSemaphoreService } from '../archive-transfer-semaphore.service';
 import type { ArchiveRemoteMutationLockService } from '../archive-remote-mutation-lock.service';
+import type { ResolveMotionArchiveContainerUseCase } from './resolve-motion-archive-container.use-case';
 
 const CHUNK_SIZE = 256 * 1024;
 const DEFAULT_LEASE_MS = 5 * 60 * 1_000;
@@ -69,6 +72,7 @@ export class UploadDriveObjectAttemptUseCase {
   private readonly leaseMs: number;
   private readonly retryDelayMs: number;
   private readonly activityGate?: Pick<ArchiveRemoteMutationLockService, 'runActivity'>;
+  private readonly containerResolver?: Pick<ResolveMotionArchiveContainerUseCase, 'execute'>;
 
   constructor(
     @Inject(ARCHIVE_ARTIFACT_REPOSITORY)
@@ -82,13 +86,18 @@ export class UploadDriveObjectAttemptUseCase {
     @Inject(ARCHIVE_UPLOAD_SOURCE)
     private readonly source: ArchiveUploadSourcePort,
     private readonly semaphore: ArchiveTransferSemaphoreService,
+    resolverOrOptions: Pick<ResolveMotionArchiveContainerUseCase, 'execute'> | UploadDriveObjectAttemptOptions = {},
     options: UploadDriveObjectAttemptOptions = {},
   ) {
-    this.now = options.now ?? Date.now;
-    this.owner = options.owner ?? randomUUID;
-    this.leaseMs = options.leaseMs ?? DEFAULT_LEASE_MS;
-    this.retryDelayMs = options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
-    this.activityGate = options.activityGate;
+    const hasResolver = isContainerResolver(resolverOrOptions);
+    const resolver = hasResolver ? resolverOrOptions : undefined;
+    const configured: UploadDriveObjectAttemptOptions = hasResolver ? options : resolverOrOptions;
+    this.containerResolver = resolver;
+    this.now = configured.now ?? Date.now;
+    this.owner = configured.owner ?? randomUUID;
+    this.leaseMs = configured.leaseMs ?? DEFAULT_LEASE_MS;
+    this.retryDelayMs = configured.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
+    this.activityGate = configured.activityGate;
   }
 
   async execute(id: string, signal: AbortSignal): Promise<UploadDriveObjectAttemptResult> {
@@ -107,13 +116,34 @@ export class UploadDriveObjectAttemptUseCase {
       artifact = await this.repository.loadArtifact(id);
       if (artifact === null) throw new DriveObjectConflictError('Archive upload target does not exist');
       this.requireConnection(artifact, connection);
-      const fileId = await this.drive.generateFileId(connection, signal);
-      const parentId = parentFor(artifact, connection);
-      attempt = await this.repository.createAttempt(artifact.id, connection.id, fileId, parentId, this.now());
+      const prepared = await this.prepareUnattemptedArtifact(artifact, connection, signal);
+      artifact = prepared.artifact;
+      try {
+        const fileId = await this.drive.generateFileId(connection, signal);
+        attempt = await this.repository.createAttempt(
+          artifact.id, connection.id, fileId, prepared.containerId, this.now(),
+        );
+      } catch (error) {
+        if (artifact.kind === 'motion_video') {
+          await this.repository.markAdmissionRetryable(
+            artifact.id,
+            artifact.admission.revision,
+            errorCode(error),
+            this.now() + this.retryDelayMs,
+            this.now(),
+          );
+        }
+        throw error;
+      }
+      const claimed = await this.repository.claimAttempt(attempt.id, {
+        owner: this.owner(), nowMs: this.now(), leaseMs: this.leaseMs,
+      });
+      return this.runClaimed(claimed, connection, signal, prepared.containerId);
     } else {
       artifact = await this.repository.loadArtifact(attempt.artifactId);
       if (artifact === null) throw new DriveObjectConflictError('Archive artifact does not exist');
       this.requireConnection(artifact, connection, attempt);
+      artifact = await this.prepareExistingAdmission(artifact, attempt, signal);
     }
 
     const claimed = await this.repository.claimAttempt(attempt.id, {
@@ -140,21 +170,50 @@ export class UploadDriveObjectAttemptUseCase {
     throwIfAborted(signal);
     const connection = await this.requireActiveConnection();
     this.requireConnection(claimed.artifact, connection, claimed.attempt);
-    return this.runClaimed(claimed, connection, signal);
+    const artifact = await this.prepareExistingAdmission(
+      claimed.artifact, claimed.attempt, signal, claimed.lease,
+    );
+    return this.runClaimed({ ...claimed, artifact }, connection, signal);
   }
 
   private async runClaimed(
     claimed: ClaimedAttempt,
     connection: DriveConnection,
     signal: AbortSignal,
+    knownContainerId?: string,
   ): Promise<UploadDriveObjectAttemptResult> {
     let lease = claimed.lease;
     let terminalized = false;
     let release: (() => void) | null = null;
     try {
-      await this.requireUnchangedSource(claimed.artifact, signal);
+      try {
+        await this.requireUnchangedSource(claimed.artifact, signal);
+      } catch (error) {
+        const localCode = localIdentityErrorCode(error);
+        if (claimed.artifact.kind === 'motion_video' && localCode !== null) {
+          await this.repository.terminalizeArtifactAttempt({
+            artifactId: claimed.artifact.id,
+            expectedAdmissionRevision: claimed.artifact.admission.revision,
+            attemptId: claimed.attempt.id,
+            lease,
+            errorCode: localCode,
+            nowMs: this.now(),
+          });
+          terminalized = true;
+        }
+        throw error;
+      }
+      const resolvedContainerId = knownContainerId
+        ?? await this.resolveContainer(claimed.artifact, connection, signal);
       release = await this.semaphore.acquire(claimed.artifact.kind, signal);
       lease = await this.renew(claimed.attempt.id, lease);
+      if (resolvedContainerId !== claimed.attempt.containerId) {
+        const result = await this.replaceChangedContainer(
+          claimed, connection, resolvedContainerId, lease, signal, (next) => { lease = next; },
+        );
+        terminalized = true;
+        return result;
+      }
       const result = await this.transfer(claimed, connection, lease, signal, (next) => { lease = next; });
       terminalized = true;
       return result;
@@ -174,6 +233,7 @@ export class UploadDriveObjectAttemptUseCase {
     updateLease: (lease: AttemptLease) => void,
   ): Promise<UploadDriveObjectAttemptResult> {
     const { artifact, attempt } = claimed;
+    const target = uploadTarget(artifact, connection);
     const expectedProperties = encodeArchiveAppProperties({
       installationId: artifact.installationId,
       generationId: attempt.generationId,
@@ -218,8 +278,8 @@ export class UploadDriveObjectAttemptUseCase {
           connection,
           fileId: attempt.remoteObjectId,
           parentId: attempt.containerId,
-          name: fileName(artifact.relativePath),
-          mimeType: mimeTypeFor(artifact),
+          name: target.fileName,
+          mimeType: target.contentType,
           size: artifact.size,
           appProperties: expectedProperties,
         }, signal);
@@ -319,6 +379,7 @@ export class UploadDriveObjectAttemptUseCase {
     transferredDigest?: string,
     replaceMismatch = false,
   ): Promise<UploadDriveObjectAttemptResult> {
+    const target = uploadTarget(artifact, connection);
     let digest = transferredDigest;
     if (digest === undefined) {
       const hashed = await this.digestWholeSource(attempt.id, artifact, lease, signal, updateLease);
@@ -328,9 +389,9 @@ export class UploadDriveObjectAttemptUseCase {
     await this.requireUnchangedSource(artifact, signal);
     if (digest !== artifact.sha256
       || remote.id !== attempt.remoteObjectId
-      || remote.name !== fileName(artifact.relativePath)
+      || remote.name !== target.fileName
       || remote.parentId !== attempt.containerId
-      || remote.mimeType !== mimeTypeFor(artifact)
+      || remote.mimeType !== target.contentType
       || remote.size !== artifact.size
       || remote.sha256 !== artifact.sha256
       || !remote.headRevisionId
@@ -401,8 +462,170 @@ export class UploadDriveObjectAttemptUseCase {
     return { kind: 'replaced', attemptId: attempt.id, replacementAttemptId: replacement.id, replacementFileId };
   }
 
+  private async replaceChangedContainer(
+    claimed: ClaimedAttempt,
+    connection: DriveConnection,
+    replacementContainerId: string,
+    lease: AttemptLease,
+    signal: AbortSignal,
+    updateLease: (lease: AttemptLease) => void,
+  ): Promise<UploadDriveObjectAttemptResult> {
+    const { artifact, attempt } = claimed;
+    let activeLease = lease;
+    const trackLease = (next: AttemptLease) => {
+      activeLease = next;
+      updateLease(next);
+    };
+    if (attempt.session !== null) {
+      const session = await this.decryptSession(artifact, attempt);
+      await this.drive.querySession({ connection, uri: session.uri, totalSize: artifact.size }, signal);
+    }
+    const remote = await this.drive.loadObject(connection, attempt.remoteObjectId, signal);
+    if (remote !== null && !remote.trashed) {
+      try {
+        return await this.verifyLoaded(
+          attempt,
+          artifact,
+          connection,
+          encodeArchiveAppProperties({
+            installationId: artifact.installationId,
+            generationId: attempt.generationId,
+            kind: artifact.kind,
+            sourceFingerprint: artifact.sourceFingerprint,
+            sha256: artifact.sha256,
+            sourceTimeMs: artifact.sourceTimeMs,
+            schemaVersion: 1,
+          }),
+          remote,
+          activeLease,
+          signal,
+          trackLease,
+        );
+      } catch (error) {
+        if (!(error instanceof DriveObjectConflictError)) throw error;
+      }
+    }
+    const replacementFileId = await this.drive.generateFileId(connection, signal);
+    const replacement = await this.repository.replaceAttemptForContainer({
+      attemptId: attempt.id,
+      fence: { kind: 'lease', lease: activeLease },
+      expectedContainerId: attempt.containerId,
+      terminalState: remote === null || remote.trashed ? 'missing' : 'detached',
+      errorCode: remote === null || remote.trashed ? 'container_missing' : 'container_detached',
+      replacementRemoteObjectId: replacementFileId,
+      replacementContainerId,
+      nowMs: this.now(),
+    });
+    return {
+      kind: 'replaced',
+      attemptId: attempt.id,
+      replacementAttemptId: replacement.id,
+      replacementFileId,
+    };
+  }
+
+  private async prepareUnattemptedArtifact(
+    artifact: ArchiveArtifact,
+    connection: DriveConnection,
+    signal: AbortSignal,
+  ): Promise<{ artifact: ArchiveArtifact; containerId: string }> {
+    let target: ReturnType<typeof uploadTarget>;
+    try {
+      target = uploadTarget(artifact, connection);
+    } catch (error) {
+      if (artifact.kind === 'motion_video') {
+        await this.repository.markAdmissionTerminal(
+          artifact.id, artifact.admission.revision, 'invalid_motion_path', this.now(),
+        );
+      }
+      throw error;
+    }
+    if (target.directContainerId !== null) {
+      return { artifact, containerId: target.directContainerId };
+    }
+    artifact = await this.recordAdmissionPath(artifact, target.dayPath!);
+    try {
+      await this.requireUnchangedSource(artifact, signal);
+    } catch (error) {
+      const localCode = localIdentityErrorCode(error);
+      if (localCode !== null) {
+        await this.repository.markAdmissionTerminal(
+          artifact.id, artifact.admission.revision, localCode, this.now(),
+        );
+      }
+      throw error;
+    }
+    try {
+      return { artifact, containerId: await this.resolveContainer(artifact, connection, signal) };
+    } catch (error) {
+      if (!(error instanceof DriveFolderBranchBlockedError)) {
+        await this.repository.markAdmissionRetryable(
+          artifact.id,
+          artifact.admission.revision,
+          errorCode(error),
+          this.now() + this.retryDelayMs,
+          this.now(),
+        );
+      }
+      throw error;
+    }
+  }
+
+  private async prepareExistingAdmission(
+    artifact: ArchiveArtifact,
+    attempt: ArchiveObjectAttempt,
+    signal: AbortSignal,
+    claimedLease?: AttemptLease,
+  ): Promise<ArchiveArtifact> {
+    if (artifact.kind !== 'motion_video') return artifact;
+    let path: MotionArchivePath;
+    try {
+      path = MotionArchivePath.parse(artifact.relativePath);
+    } catch (error) {
+      const lease = claimedLease ?? (await this.repository.claimAttempt(attempt.id, {
+        owner: this.owner(), nowMs: this.now(), leaseMs: this.leaseMs,
+      })).lease;
+      await this.repository.terminalizeArtifactAttempt({
+        artifactId: artifact.id,
+        expectedAdmissionRevision: artifact.admission.revision,
+        attemptId: attempt.id,
+        lease,
+        errorCode: 'invalid_motion_path',
+        nowMs: this.now(),
+      });
+      throwIfAborted(signal);
+      throw error;
+    }
+    return this.recordAdmissionPath(artifact, path.dayPath);
+  }
+
+  private async recordAdmissionPath(artifact: ArchiveArtifact, dayPath: string): Promise<ArchiveArtifact> {
+    if (artifact.admission.motionDayPath === dayPath && artifact.admission.state === 'ready') return artifact;
+    return this.repository.recordMotionAdmissionPath(
+      artifact.id, artifact.admission.revision, dayPath, this.now(),
+    );
+  }
+
+  private async resolveContainer(
+    artifact: ArchiveArtifact,
+    connection: DriveConnection,
+    signal: AbortSignal,
+  ): Promise<string> {
+    if (artifact.kind === 'database_backup') return parentFor(artifact, connection);
+    if (this.containerResolver === undefined) {
+      throw new DriveConfigurationError('Motion archive container resolver is unavailable');
+    }
+    return this.containerResolver.execute(connection, MotionArchivePath.parse(artifact.relativePath), signal);
+  }
+
   private async requireUnchangedSource(artifact: ArchiveArtifact, signal: AbortSignal): Promise<void> {
-    const source = await this.source.stat(artifact.trustedPath, signal);
+    let source: ArchiveUploadSourceStat;
+    try {
+      source = await this.source.stat(artifact.trustedPath, signal);
+    } catch (error) {
+      if (isMissingSource(error)) throw new LocalSourceMissingError();
+      throw error;
+    }
     if (source.size !== artifact.size || source.mtimeNs !== artifact.mtimeNs) throw new DriveLocalSourceChangedError();
   }
 
@@ -451,7 +674,8 @@ export class UploadDriveObjectAttemptUseCase {
 
   private requireConnection(artifact: ArchiveArtifact, connection: DriveConnection, attempt?: ArchiveObjectAttempt): void {
     if (artifact.installationId !== connection.installationId
-      || (attempt !== undefined && (attempt.generationId !== connection.id || attempt.containerId !== parentFor(artifact, connection)))) {
+      || (attempt !== undefined && (attempt.generationId !== connection.id
+        || (artifact.kind === 'database_backup' && attempt.containerId !== parentFor(artifact, connection))))) {
       throw new DriveObjectConflictError('Archive attempt does not belong to the active Drive generation');
     }
   }
@@ -478,14 +702,29 @@ function parentFor(artifact: ArchiveArtifact, connection: DriveConnection): stri
   return artifact.kind === 'database_backup' ? folders.backupsId : folders.motionId;
 }
 
-function fileName(relativePath: string): string {
-  const name = relativePath.split('/').filter(Boolean).at(-1);
-  if (!name) throw new DriveConfigurationError('Archive object name is invalid');
-  return name;
-}
-
-function mimeTypeFor(artifact: ArchiveArtifact): string {
-  return artifact.kind === 'motion_video' ? 'video/mp4' : 'application/vnd.sqlite3';
+function uploadTarget(artifact: ArchiveArtifact, connection: DriveConnection): {
+  fileName: string;
+  contentType: string;
+  dayPath: string | null;
+  directContainerId: string | null;
+} {
+  if (artifact.kind === 'database_backup') {
+    const fileName = artifact.relativePath.split('/').at(-1);
+    if (!fileName) throw new DriveConfigurationError('Archive object name is invalid');
+    return {
+      fileName,
+      contentType: 'application/vnd.sqlite3',
+      dayPath: null,
+      directContainerId: connection.folders!.backupsId,
+    };
+  }
+  const path = MotionArchivePath.parse(artifact.relativePath);
+  return {
+    fileName: path.fileName,
+    contentType: path.contentType,
+    dayPath: path.dayPath,
+    directContainerId: null,
+  };
 }
 
 function toArchiveObject(remote: VerifiedDriveObject): VerifiedArchiveObject {
@@ -514,10 +753,37 @@ function isConflict(error: unknown): boolean {
 }
 
 function errorCode(error: unknown): string {
+  if (error instanceof LocalSourceMissingError) return 'local_source_missing';
   if (error instanceof DriveLocalSourceChangedError) return 'local_source_changed';
   if (error instanceof DriveObjectConflictError) return 'remote_conflict';
   if (error instanceof Error && error.name === 'AbortError') return 'cancelled';
   return 'temporary_failure';
+}
+
+function localIdentityErrorCode(
+  error: unknown,
+): 'local_source_changed' | 'local_source_missing' | null {
+  if (error instanceof LocalSourceMissingError) return 'local_source_missing';
+  if (error instanceof DriveLocalSourceChangedError) return 'local_source_changed';
+  return null;
+}
+
+function isMissingSource(error: unknown): boolean {
+  return !!error && typeof error === 'object'
+    && (error as { code?: unknown }).code === 'ENOENT';
+}
+
+function isContainerResolver(
+  value: Pick<ResolveMotionArchiveContainerUseCase, 'execute'> | UploadDriveObjectAttemptOptions,
+): value is Pick<ResolveMotionArchiveContainerUseCase, 'execute'> {
+  return 'execute' in value && typeof value.execute === 'function';
+}
+
+class LocalSourceMissingError extends Error {
+  constructor() {
+    super('Local archive source is missing');
+    this.name = 'LocalSourceMissingError';
+  }
 }
 
 function throwIfAborted(signal: AbortSignal): void {
