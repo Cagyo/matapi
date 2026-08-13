@@ -50,6 +50,27 @@ describe('DrizzleArchiveArtifactRepository', () => {
     )).rejects.toThrow('changed');
   });
 
+  it('atomically clears every encrypted session column behind the active lease fence', async () => {
+    const artifact = await repository.register(artifactFixture());
+    const attempt = await repository.createAttempt(artifact.id, 'generation-1', 'file-clear', 'folder-1', 10);
+    const claimed = await repository.claimAttempt(attempt.id, { owner: 'worker', nowMs: 20, leaseMs: 100 });
+    const saved = await repository.saveSession(attempt.id, claimed.lease, {
+      ciphertext: 'ciphertext', nonce: 'nonce', authTag: 'tag', keyVersion: 1,
+      formatVersion: 1, createdAtMs: 20, expiresAtMs: 100, confirmedOffset: 17,
+    }, 21);
+
+    await expect(repository.clearSession(attempt.id, { ...saved, revision: saved.revision - 1 }, 22))
+      .rejects.toThrow(DriveAttemptLeaseLostError);
+    expect((await repository.loadAttempt(attempt.id))?.session).not.toBeNull();
+
+    await repository.clearSession(attempt.id, saved, 22);
+    const row = sqlite.prepare(`select
+      session_ciphertext, session_nonce, session_auth_tag, session_key_version,
+      session_format_version, session_created_at, session_expires_at, confirmed_offset
+      from drive_object_attempts where id = ?`).get(attempt.id) as Record<string, unknown>;
+    expect(Object.values(row)).toEqual(Array(8).fill(null));
+  });
+
   it('runs admission read-transition-write inside one real immediate transaction', async () => {
     let updateObservedInTransaction: boolean | null = null;
     sqlite.function('observe_admission_transaction', () => {

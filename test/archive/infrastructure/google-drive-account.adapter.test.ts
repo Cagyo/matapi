@@ -181,6 +181,21 @@ describe("GoogleDriveAccountAdapter", () => {
 
 describe("GoogleDriveGateway", () => {
   it.each([
+    [403, "rateLimitExceeded", "DriveRateLimitedError"],
+    [429, "backendError", "DriveRateLimitedError"],
+    [403, "dailyLimitExceeded", "DriveProviderCapacityBlockedError"],
+    [403, "activeItemCreationLimitExceeded", "DriveProviderCapacityBlockedError"],
+    [403, "domainPolicy", "DrivePolicyBlockedError"],
+    [401, "authError", "DriveReauthorizationRequiredError"],
+  ] as const)("classifies %s/%s before broad status fallback", async (status, reason, name) => {
+    const gateway = new GoogleDriveGateway({
+      about: { get: async () => { throw providerFailure(status, reason, "refresh_token=secret"); } },
+    } as unknown as ConstructorParameters<typeof GoogleDriveGateway>[0]);
+
+    await expect(gateway.loadAbout(signal)).rejects.toMatchObject({ name });
+  });
+
+  it.each([
     ["about", (gateway: GoogleDriveGateway) => gateway.loadAbout(signal)],
     ["list", (gateway: GoogleDriveGateway) => gateway.listFolders({ installationId: "installation-1", generationId: "generation-1", role: "root", parentId: "root", pageToken: null, signal })],
     ["generate", (gateway: GoogleDriveGateway) => gateway.generateFolderId(signal)],

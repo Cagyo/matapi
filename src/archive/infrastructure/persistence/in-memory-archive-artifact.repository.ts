@@ -163,6 +163,14 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
     return entry.lease;
   }
 
+  async clearSession(attemptId: string, lease: AttemptLease, nowMs: number): Promise<AttemptLease> {
+    const entry = this.requireLease(attemptId, lease, nowMs);
+    entry.attempt = revise(entry.attempt, nowMs);
+    entry.session = null;
+    entry.lease = { ...lease, revision: entry.attempt.revision };
+    return entry.lease;
+  }
+
   async markRetryable(attemptId: string, lease: AttemptLease, errorCode: string, nextAttemptMs: number, nowMs: number): Promise<void> {
     const entry = this.requireLease(attemptId, lease, nowMs);
     entry.attempt = entry.attempt.markRetryable(nowMs);

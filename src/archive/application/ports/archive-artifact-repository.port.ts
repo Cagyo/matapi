@@ -186,6 +186,7 @@ export interface ArchiveArtifactRepositoryPort {
   renewLease(attemptId: string, lease: AttemptLease, nowMs: number, leaseMs: number): Promise<AttemptLease>;
   saveSession(attemptId: string, lease: AttemptLease, session: EncryptedUploadSession, nowMs: number): Promise<AttemptLease>;
   confirmOffset(attemptId: string, lease: AttemptLease, offset: number, nowMs: number): Promise<AttemptLease>;
+  clearSession(attemptId: string, lease: AttemptLease, nowMs: number): Promise<AttemptLease>;
   markRetryable(attemptId: string, lease: AttemptLease, errorCode: string, nextAttemptMs: number, nowMs: number): Promise<void>;
   replaceAttemptForContainer(input: ReplaceAttemptForContainer): Promise<ArchiveObjectAttempt>;
   terminalizeArtifactAttempt(input: TerminalizeArtifactAttempt): Promise<void>;

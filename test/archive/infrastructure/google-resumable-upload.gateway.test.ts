@@ -21,6 +21,50 @@ const beginInput = {
 
 describe('GoogleResumableUploadGateway', () => {
   it.each([
+    [403, 'rateLimitExceeded', 'DriveRateLimitedError'],
+    [429, null, 'DriveRateLimitedError'],
+    [403, 'dailyLimitExceeded', 'DriveProviderCapacityBlockedError'],
+    [403, 'activeItemCreationLimitExceeded', 'DriveProviderCapacityBlockedError'],
+    [403, 'storageQuotaExceeded', 'DriveQuotaExceededError'],
+    [403, 'domainPolicy', 'DrivePolicyBlockedError'],
+    [401, 'authError', 'DriveReauthorizationRequiredError'],
+  ] as const)('maps %s/%s by reason before status fallback', async (status, reason, name) => {
+    const transport = new FakeTransport(providerErrorResponse(status, reason, { 'retry-after': '120' }));
+
+    await expect(new GoogleResumableUploadGateway(transport).querySession({
+      authorization: 'Bearer token', uri: validLocation, totalSize: 42,
+    }, signal)).rejects.toMatchObject({ name });
+  });
+
+  it('marks a session-phase rate limit and ordinary 4xx as unusable without exposing provider text', async () => {
+    const rateLimit = new GoogleResumableUploadGateway(new FakeTransport(providerErrorResponse(
+      429, null, { 'retry-after': 'Thu, 13 Aug 2026 00:02:00 GMT' }, 'access_token=secret',
+    )), { now: () => Date.parse('Thu, 13 Aug 2026 00:00:00 GMT') });
+    await expect(rateLimit.uploadChunk({
+      authorization: 'Bearer token', uri: validLocation, start: 0, endInclusive: 41,
+      totalSize: 42, body: Readable.from([Buffer.alloc(42)]),
+    }, signal)).rejects.toMatchObject({
+      name: 'DriveRateLimitedError',
+      message: 'Drive rate limit was reached',
+      detail: { retryAfterMs: 120_000, sessionUsable: false, operationPhase: 'session-chunk' },
+    });
+
+    await expect(new GoogleResumableUploadGateway(new FakeTransport(providerErrorResponse(400, null, {})))
+      .querySession({ authorization: 'Bearer token', uri: validLocation, totalSize: 42 }, signal))
+      .rejects.toMatchObject({ name: 'DriveTemporaryUnavailableError', sessionUsable: false });
+  });
+
+  it('honors an allowlisted authorization or policy reason before 404 session expiry', async () => {
+    const gateway = new GoogleResumableUploadGateway(new FakeTransport(
+      providerErrorResponse(404, 'domainPolicy', {}),
+    ));
+
+    await expect(gateway.querySession({
+      authorization: 'Bearer token', uri: validLocation, totalSize: 42,
+    }, signal)).rejects.toMatchObject({ name: 'DrivePolicyBlockedError' });
+  });
+
+  it.each([
     [200, 'complete'],
     [201, 'complete'],
     [308, 'resume'],
@@ -146,6 +190,21 @@ describe('GoogleResumableUploadGateway', () => {
     expect(transport.requests).toHaveLength(0);
   });
 });
+
+function providerErrorResponse(
+  status: number,
+  reason: string | null,
+  headers: Readonly<Record<string, string>>,
+  message = 'provider failure',
+): GoogleResumableTransportResponse {
+  return {
+    status,
+    headers,
+    body: Buffer.from(JSON.stringify({
+      error: { errors: reason === null ? [] : [{ reason }], code: status, message },
+    }), 'utf8'),
+  };
+}
 
 class FakeTransport implements GoogleResumableTransport {
   readonly requests: GoogleResumableTransportRequest[] = [];

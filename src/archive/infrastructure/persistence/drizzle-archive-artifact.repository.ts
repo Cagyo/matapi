@@ -179,6 +179,17 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
     return { ...lease, revision };
   }
 
+  async clearSession(attemptId: string, lease: AttemptLease, nowMs: number): Promise<AttemptLease> {
+    const revision = lease.revision + 1;
+    const result = this.db.update(driveObjectAttempts).set({
+      revision,
+      updatedAt: nowMs,
+      ...clearedSession(),
+    }).where(this.fenced(attemptId, lease, nowMs)).run();
+    if (result.changes !== 1) throw new DriveAttemptLeaseLostError();
+    return { ...lease, revision };
+  }
+
   async markRetryable(attemptId: string, lease: AttemptLease, errorCode: string, nextAttemptMs: number, nowMs: number): Promise<void> {
     const row = this.requireFencedAttempt(attemptId, lease, nowMs);
     const next = toAttempt(row).markRetryable(nowMs);

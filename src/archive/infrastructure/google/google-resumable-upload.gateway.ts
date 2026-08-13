@@ -3,11 +3,17 @@ import type { IncomingHttpHeaders } from 'node:http';
 import { once } from 'node:events';
 import { DriveConfigurationError } from '../../domain/errors/drive-configuration.error';
 import { DriveTemporaryUnavailableError } from '../../domain/errors/drive-temporary-unavailable.error';
+import { DrivePolicyBlockedError } from '../../domain/errors/drive-policy-blocked.error';
+import { DriveProviderCapacityBlockedError } from '../../domain/errors/drive-provider-capacity-blocked.error';
+import { DriveRateLimitedError } from '../../domain/errors/drive-rate-limited.error';
+import { DriveReauthorizationRequiredError } from '../../domain/errors/drive-reauthorization-required.error';
+import { DriveQuotaExceededError } from '../../domain/errors/drive-quota-exceeded.error';
 
 const INITIATION_URL = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&ignoreDefaultVisibility=true';
 const SESSION_PATH = '/upload/drive/v3/files';
 const CHUNK_ALIGNMENT = 256 * 1024;
 const LOCAL_SESSION_LIFETIME_MS = 6 * 24 * 60 * 60 * 1_000;
+const MAX_ERROR_BODY_BYTES = 64 * 1024;
 
 export interface GoogleResumableDeadlines {
   connectMs: number;
@@ -28,6 +34,7 @@ export interface GoogleResumableTransportRequest {
 export interface GoogleResumableTransportResponse {
   status: number;
   headers: Readonly<Record<string, string | undefined>>;
+  body?: Uint8Array;
 }
 
 export interface GoogleResumableTransport {
@@ -104,7 +111,8 @@ export class GoogleResumableUploadGateway {
       signal,
       deadlines: this.deadlines,
     });
-    if (response.status !== 200 && response.status !== 201) throw statusError(response.status);
+    throwPriorityError(response, 'session-create', this.now());
+    if (response.status !== 200 && response.status !== 201) throw statusError(response, 'session-create', this.now());
     const uri = validateSessionUri(header(response.headers, 'location'));
     const createdAtMs = this.now();
     return { uri, createdAtMs, expiresAtMs: createdAtMs + LOCAL_SESSION_LIFETIME_MS };
@@ -126,10 +134,11 @@ export class GoogleResumableUploadGateway {
       signal,
       deadlines: this.deadlines,
     });
+    throwPriorityError(response, 'session-query', this.now());
     if (response.status === 200 || response.status === 201) return { kind: 'complete' };
     if (response.status === 308) return { kind: 'resume', confirmedOffset: parseConfirmedOffset(response.headers, input.totalSize) };
     if (response.status === 404) return { kind: 'expired' };
-    throw statusError(response.status);
+    throw statusError(response, 'session-query', this.now());
   }
 
   async uploadChunk(input: AuthorizedChunk, signal: AbortSignal): Promise<
@@ -150,9 +159,10 @@ export class GoogleResumableUploadGateway {
       signal,
       deadlines: this.deadlines,
     });
+    throwPriorityError(response, 'session-chunk', this.now());
     if (response.status === 200 || response.status === 201) return { kind: 'complete' };
     if (response.status === 308) return { kind: 'resume', confirmedOffset: parseConfirmedOffset(response.headers, input.totalSize) };
-    throw statusError(response.status);
+    throw statusError(response, 'session-chunk', this.now());
   }
 }
 
@@ -177,13 +187,28 @@ export class NodeHttpsResumableTransport implements GoogleResumableTransport {
           clearTimeout(idleTimer);
           idleTimer = setTimeout(() => req.destroy(new Error('Google upload idle deadline exceeded')), input.deadlines.idleMs);
         };
-        response.on('data', resetIdle);
+        const chunks: Buffer[] = [];
+        let retainedBytes = 0;
+        response.on('data', (raw: Buffer | string) => {
+          resetIdle();
+          if (response.statusCode === 200 || response.statusCode === 201 || response.statusCode === 308) return;
+          if (retainedBytes >= MAX_ERROR_BODY_BYTES) return;
+          const part = typeof raw === 'string' ? Buffer.from(raw) : raw;
+          const retained = part.subarray(0, MAX_ERROR_BODY_BYTES - retainedBytes);
+          if (retained.byteLength > 0) {
+            chunks.push(retained);
+            retainedBytes += retained.byteLength;
+          }
+        });
         response.on('end', () => {
           clearTimeout(idleTimer);
           settled = true;
-          resolve({ status: response.statusCode ?? 0, headers: normalizeHeaders(response.headers) });
+          resolve({
+            status: response.statusCode ?? 0,
+            headers: normalizeHeaders(response.headers),
+            body: chunks.length === 0 ? undefined : Buffer.concat(chunks, retainedBytes),
+          });
         });
-        response.resume();
       });
       const connectTimer = setTimeout(() => req.destroy(new Error('Google upload connect deadline exceeded')), input.deadlines.connectMs);
       const responseTimer = setTimeout(() => req.destroy(new Error('Google upload response deadline exceeded')), input.deadlines.responseMs);
@@ -273,8 +298,93 @@ function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new DOMException('Aborted', 'AbortError');
 }
 
-function statusError(status: number): Error {
-  return new DriveTemporaryUnavailableError(`Google resumable upload failed (${status})`);
+type OperationPhase = 'session-create' | 'session-query' | 'session-chunk';
+
+function statusError(
+  response: GoogleResumableTransportResponse,
+  operationPhase: OperationPhase,
+  nowMs: number,
+): Error {
+  return priorityError(response, operationPhase, nowMs)
+    ?? sessionFallbackError(response.status, operationPhase);
+}
+
+function throwPriorityError(
+  response: GoogleResumableTransportResponse,
+  operationPhase: OperationPhase,
+  nowMs: number,
+): void {
+  const error = priorityError(response, operationPhase, nowMs);
+  if (error !== null) throw error;
+}
+
+function priorityError(
+  response: GoogleResumableTransportResponse,
+  operationPhase: OperationPhase,
+  nowMs: number,
+): Error | null {
+  const reason = providerReason(response.body);
+  const retryAfter = parseRetryAfter(header(response.headers, 'retry-after'), nowMs);
+  if (reason === 'authError' || reason === 'invalidCredentials' || response.status === 401) {
+    return new DriveReauthorizationRequiredError();
+  }
+  if (reason === 'dailyLimitExceeded') {
+    return new DriveProviderCapacityBlockedError('temporary', retryAfter);
+  }
+  if (reason === 'activeItemCreationLimitExceeded') {
+    return new DriveProviderCapacityBlockedError('user-action', retryAfter);
+  }
+  if (reason === 'storageQuotaExceeded') return new DriveQuotaExceededError();
+  if (reason === 'domainPolicy' || reason === 'accessNotConfigured' || reason === 'insufficientFilePermissions') {
+    return new DrivePolicyBlockedError();
+  }
+  if (reason === 'rateLimitExceeded' || reason === 'userRateLimitExceeded' || response.status === 429) {
+    return new DriveRateLimitedError({
+      retryAfterMs: retryAfter,
+      sessionUsable: operationPhase === 'session-create',
+      operationPhase,
+    });
+  }
+  return null;
+}
+
+function sessionFallbackError(status: number, operationPhase: OperationPhase): Error {
+  const error = new DriveTemporaryUnavailableError(`Google resumable upload failed (${status})`);
+  if (status >= 400 && status < 500) {
+    Object.assign(error, { sessionUsable: false, operationPhase });
+  }
+  return error;
+}
+
+function providerReason(body: Uint8Array | undefined): string | null {
+  if (body === undefined || body.byteLength === 0 || body.byteLength > MAX_ERROR_BODY_BYTES) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(body).toString('utf8'));
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null;
+  const error = (parsed as { error?: unknown }).error;
+  if (typeof error !== 'object' || error === null) return null;
+  const errors = (error as { errors?: unknown }).errors;
+  const candidate = Array.isArray(errors) && typeof errors[0] === 'object' && errors[0] !== null
+    ? (errors[0] as { reason?: unknown }).reason
+    : (error as { reason?: unknown }).reason;
+  return typeof candidate === 'string' && SAFE_PROVIDER_REASONS.has(candidate) ? candidate : null;
+}
+
+function parseRetryAfter(value: string | undefined, nowMs: number): number | null {
+  if (value === undefined) return null;
+  if (/^\d+$/u.test(value)) {
+    const seconds = Number(value);
+    if (!Number.isSafeInteger(seconds)) return null;
+    const milliseconds = seconds * 1_000;
+    return Number.isSafeInteger(milliseconds) ? milliseconds : null;
+  }
+  const deadline = Date.parse(value);
+  if (!Number.isFinite(deadline)) return null;
+  return Math.max(0, deadline - nowMs);
 }
 
 function mapTransportError(error: unknown, caller: AbortSignal, total: AbortSignal): Error {
@@ -283,3 +393,16 @@ function mapTransportError(error: unknown, caller: AbortSignal, total: AbortSign
   return new DriveTemporaryUnavailableError(error instanceof Error && error.message.includes('deadline')
     ? error.message : 'Google resumable upload transport failed');
 }
+
+const SAFE_PROVIDER_REASONS = new Set([
+  'accessNotConfigured',
+  'activeItemCreationLimitExceeded',
+  'authError',
+  'dailyLimitExceeded',
+  'domainPolicy',
+  'insufficientFilePermissions',
+  'invalidCredentials',
+  'rateLimitExceeded',
+  'storageQuotaExceeded',
+  'userRateLimitExceeded',
+]);

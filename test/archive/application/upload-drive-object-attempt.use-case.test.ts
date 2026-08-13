@@ -11,6 +11,10 @@ import { InMemoryArchiveArtifactRepository } from '../../../src/archive/infrastr
 import { DriveConnection } from '../../../src/archive/domain/drive-connection.entity';
 import type { VerifiedDriveObject } from '../../../src/archive/domain/drive-object-metadata.value-object';
 import { DriveAttemptLeaseLostError } from '../../../src/archive/domain/errors/drive-attempt-lease-lost.error';
+import { DriveRateLimitedError } from '../../../src/archive/domain/errors/drive-rate-limited.error';
+import { DriveTemporaryUnavailableError } from '../../../src/archive/domain/errors/drive-temporary-unavailable.error';
+import { ArchiveProviderGateService } from '../../../src/archive/application/archive-provider-gate.service';
+import { InMemoryArchiveProviderStateRepository } from '../../../src/archive/infrastructure/persistence/in-memory-archive-provider-state.repository';
 
 const now = 1_000_000;
 const bytes = Buffer.alloc(700_000, 7);
@@ -272,6 +276,35 @@ describe('UploadDriveObjectAttemptUseCase', () => {
     expect(await fixture.repository.listAttempts(fixture.artifactId)).toHaveLength(1);
   });
 
+  it('reopens bytes from the confirmed offset for each bounded inline retry', async () => {
+    const fixture = await setup({ providerGate: true });
+    fixture.drive.failChunkAfterConsumeOnce = true;
+
+    await fixture.useCase.execute(fixture.artifactId, signal);
+
+    expect(fixture.source.openStarts.filter((start) => start === 0)).toHaveLength(2);
+    expect(fixture.drive.queryCalls).toBe(1);
+    expect(fixture.providerSleeps).toEqual([1_500]);
+  });
+
+  it('clears an unusable session after a session-phase rate limit before rescheduling', async () => {
+    const fixture = await setup({ createAttempt: true });
+    await fixture.seedSession(0);
+    fixture.drive.queryError = new DriveRateLimitedError({
+      retryAfterMs: 60_000,
+      sessionUsable: false,
+      operationPhase: 'session-query',
+    });
+
+    await expect(fixture.useCase.execute(fixture.attemptId(), signal))
+      .rejects.toBeInstanceOf(DriveRateLimitedError);
+
+    expect(await fixture.repository.loadAttempt(fixture.attemptId())).toMatchObject({
+      state: 'retryable', session: null,
+    });
+    expect(fixture.drive.loadIds).toContain('reserved-1');
+  });
+
   it('verifies a timed-out creation by its reserved ID without duplicating', async () => {
     const fixture = await setup();
     fixture.drive.failAfterRemoteCreate = true;
@@ -400,6 +433,7 @@ async function setup(options: {
   relativePath?: string;
   attemptContainerId?: string;
   kind?: 'motion_video' | 'database_backup';
+  providerGate?: boolean;
 } = {}) {
   const repository = new InMemoryArchiveArtifactRepository();
   const relativePath = options.relativePath ?? '2026/08/13/120000-clip.mp4';
@@ -440,15 +474,27 @@ async function setup(options: {
   const cipher = new FakeCipher();
   const semaphore = new ArchiveTransferSemaphoreService();
   const clock = { value: now, now() { return this.value; } };
+  const providerSleeps: number[] = [];
+  const providerGate = options.providerGate
+    ? new ArchiveProviderGateService(
+      new InMemoryArchiveProviderStateRepository(),
+      { now: () => new Date(clock.value) },
+      { sleep: async (ms: number) => { providerSleeps.push(ms); clock.value += ms; } },
+      { random: () => 0.5 },
+    )
+    : undefined;
   const credentials = { loadActive: vi.fn(async () => connection) };
   const create = () => new UploadDriveObjectAttemptUseCase(
     repository, credentials, drive, cipher, source, semaphore,
     resolver,
-    { now: () => clock.value, owner: () => 'worker-1', leaseMs: options.leaseMs ?? 1_000, retryDelayMs: 1_000 },
+    {
+      now: () => clock.value, owner: () => 'worker-1', leaseMs: options.leaseMs ?? 1_000,
+      retryDelayMs: 1_000, providerGate,
+    },
   );
   const fixture = {
     repository, artifactId: artifact.id, source, drive, cipher, semaphore, clock, resolver, journal,
-    useCase: create(), newUseCase: create,
+    useCase: create(), newUseCase: create, providerSleeps,
     attemptId: () => drive.lastAttemptId ?? '',
     seedSession: async (confirmedOffset: number) => {
       const attempt = (await repository.listAttempts(artifact.id))[0];
@@ -537,11 +583,14 @@ class FakeDrive implements DriveArchivePort {
   generateCalls = 0;
   beginCalls = 0;
   uploadCalls = 0;
+  queryCalls = 0;
   lastAttemptId: string | null = null;
   queryResult: Awaited<ReturnType<DriveArchivePort['querySession']>> = { kind: 'resume', confirmedOffset: 0 };
   failAfterRemoteCreate = false;
   conflictOnBegin = false;
   failChunkOnce = false;
+  failChunkAfterConsumeOnce = false;
+  queryError: Error | null = null;
   remoteOverride: Partial<VerifiedDriveObject> = {};
   fallbackName = '120000-clip.mp4';
   fallbackParentId = 'day-folder-1';
@@ -580,7 +629,12 @@ class FakeDrive implements DriveArchivePort {
     return this.session;
   }
 
-  async querySession() { this.journal.push('query-session'); return this.queryResult; }
+  async querySession() {
+    this.queryCalls += 1;
+    this.journal.push('query-session');
+    if (this.queryError !== null) throw this.queryError;
+    return this.queryResult;
+  }
 
   async uploadChunk(input: UploadChunk) {
     this.uploadCalls += 1;
@@ -588,6 +642,10 @@ class FakeDrive implements DriveArchivePort {
     if (this.failChunkOnce) { this.failChunkOnce = false; throw new Error('network'); }
     let read = 0;
     for await (const part of input.body) read += part.byteLength;
+    if (this.failChunkAfterConsumeOnce) {
+      this.failChunkAfterConsumeOnce = false;
+      throw new DriveTemporaryUnavailableError('network after body');
+    }
     if (!this.acceptInvalidBodyLength) {
       expect(read).toBe(input.endInclusive - input.start + 1);
     }

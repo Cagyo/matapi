@@ -34,6 +34,9 @@ import { MotionArchivePath } from '../../domain/motion-archive-path.value-object
 import { ArchiveTransferSemaphoreService } from '../archive-transfer-semaphore.service';
 import type { ArchiveRemoteMutationLockService } from '../archive-remote-mutation-lock.service';
 import type { ResolveMotionArchiveContainerUseCase } from './resolve-motion-archive-container.use-case';
+import type { ArchiveProviderGateService } from '../archive-provider-gate.service';
+import { DriveTemporaryUnavailableError } from '../../domain/errors/drive-temporary-unavailable.error';
+import { DriveRateLimitedError } from '../../domain/errors/drive-rate-limited.error';
 
 const CHUNK_SIZE = 256 * 1024;
 const DEFAULT_LEASE_MS = 5 * 60 * 1_000;
@@ -62,6 +65,7 @@ export interface UploadDriveObjectAttemptOptions {
   leaseMs?: number;
   retryDelayMs?: number;
   activityGate?: Pick<ArchiveRemoteMutationLockService, 'runActivity'>;
+  providerGate?: Pick<ArchiveProviderGateService, 'run'>;
 }
 
 /** Streams or resumes one immutable exact-ID Drive object attempt. */
@@ -73,6 +77,7 @@ export class UploadDriveObjectAttemptUseCase {
   private readonly retryDelayMs: number;
   private readonly activityGate?: Pick<ArchiveRemoteMutationLockService, 'runActivity'>;
   private readonly containerResolver?: Pick<ResolveMotionArchiveContainerUseCase, 'execute'>;
+  private readonly providerGate?: Pick<ArchiveProviderGateService, 'run'>;
 
   constructor(
     @Inject(ARCHIVE_ARTIFACT_REPOSITORY)
@@ -98,6 +103,7 @@ export class UploadDriveObjectAttemptUseCase {
     this.leaseMs = configured.leaseMs ?? DEFAULT_LEASE_MS;
     this.retryDelayMs = configured.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
     this.activityGate = configured.activityGate;
+    this.providerGate = configured.providerGate;
   }
 
   async execute(id: string, signal: AbortSignal): Promise<UploadDriveObjectAttemptResult> {
@@ -249,7 +255,23 @@ export class UploadDriveObjectAttemptUseCase {
     if (attempt.session !== null) {
       session = await this.decryptSession(artifact, attempt);
       if (attempt.session.expiresAtMs > this.now()) {
-        const status = await this.drive.querySession({ connection, uri: session.uri, totalSize: artifact.size }, signal);
+        let status: Awaited<ReturnType<DriveArchivePort['querySession']>>;
+        try {
+          status = await this.runProviderUpload(connection.id, () => this.drive.querySession({
+            connection, uri: session!.uri, totalSize: artifact.size,
+          }, signal), signal, async (waitMs) => {
+            lease = await this.renewForProviderWait(attempt.id, lease, waitMs);
+            updateLease(lease);
+          });
+        } catch (error) {
+          if (isSessionUnusable(error)) {
+            const recovered = await this.reconcileUnusableSession(
+              attempt, artifact, connection, expectedProperties, lease, signal, updateLease,
+            );
+            if (recovered !== null) return recovered;
+          }
+          throw error;
+        }
         if (status.kind === 'complete') {
           return this.verify(attempt, artifact, connection, expectedProperties, lease, signal, updateLease);
         }
@@ -259,9 +281,13 @@ export class UploadDriveObjectAttemptUseCase {
           if (recovered !== null) {
             return this.verifyLoaded(attempt, artifact, connection, expectedProperties, recovered, lease, signal, updateLease, undefined, true);
           }
+          lease = await this.repository.clearSession(attempt.id, lease, this.now());
+          updateLease(lease);
           session = null;
         }
       } else {
+        lease = await this.repository.clearSession(attempt.id, lease, this.now());
+        updateLease(lease);
         session = null;
       }
     } else {
@@ -273,7 +299,7 @@ export class UploadDriveObjectAttemptUseCase {
 
     if (session === null) {
       try {
-        session = await this.drive.beginResumableUpload({
+        session = await this.runProviderUpload(connection.id, () => this.drive.beginResumableUpload({
           connection,
           fileId: attempt.remoteObjectId,
           parentId: attempt.containerId,
@@ -281,7 +307,10 @@ export class UploadDriveObjectAttemptUseCase {
           mimeType: target.contentType,
           size: artifact.size,
           appProperties: expectedProperties,
-        }, signal);
+        }, signal), signal, async (waitMs) => {
+          lease = await this.renewForProviderWait(attempt.id, lease, waitMs);
+          updateLease(lease);
+        });
       } catch (error) {
         const recovered = await this.drive.loadObject(connection, attempt.remoteObjectId, signal);
         if (recovered !== null) {
@@ -313,20 +342,61 @@ export class UploadDriveObjectAttemptUseCase {
     }
     while (offset < artifact.size) {
       throwIfAborted(signal);
-      lease = await this.renew(attempt.id, lease);
-      updateLease(lease);
-      const endExclusive = Math.min(offset + CHUNK_SIZE, artifact.size);
-      const counted = { bytes: 0 };
-      const result = await this.drive.uploadChunk({
-        connection,
-        fileId: attempt.remoteObjectId,
-        uri: session.uri,
-        start: offset,
-        endInclusive: endExclusive - 1,
-        totalSize: artifact.size,
-        body: hashBody(this.source.open(artifact.trustedPath, offset, endExclusive, signal), hasher, counted, signal),
-      }, signal);
-      if (counted.bytes !== endExclusive - offset) throw new DriveLocalSourceChangedError('Local archive source ended during upload');
+      let invocation = 0;
+      let endExclusive = offset;
+      let counted = { bytes: 0 };
+      let result: Awaited<ReturnType<DriveArchivePort['uploadChunk']>>;
+      try {
+        result = await this.runProviderUpload(connection.id, async () => {
+          if (invocation > 0) {
+            const status = await this.drive.querySession({
+              connection, uri: session.uri, totalSize: artifact.size,
+            }, signal);
+            if (status.kind === 'complete') return { kind: 'complete' } as const;
+            if (status.kind === 'expired') {
+              const expired = new DriveTemporaryUnavailableError('Google resumable upload session expired');
+              Object.assign(expired, { sessionUsable: false, operationPhase: 'session-query' });
+              throw expired;
+            }
+            offset = status.confirmedOffset;
+            hasher = createHash('sha256');
+            if (offset > 0) {
+              lease = await this.hashRange(attempt.id, artifact, 0, offset, hasher, lease, signal, updateLease);
+            }
+            lease = await this.repository.confirmOffset(attempt.id, lease, offset, this.now());
+            updateLease(lease);
+          }
+          invocation += 1;
+          lease = await this.renew(attempt.id, lease);
+          updateLease(lease);
+          endExclusive = Math.min(offset + CHUNK_SIZE, artifact.size);
+          counted = { bytes: 0 };
+          const uploaded = await this.drive.uploadChunk({
+            connection,
+            fileId: attempt.remoteObjectId,
+            uri: session.uri,
+            start: offset,
+            endInclusive: endExclusive - 1,
+            totalSize: artifact.size,
+            body: hashBody(this.source.open(artifact.trustedPath, offset, endExclusive, signal), hasher, counted, signal),
+          }, signal);
+          if (counted.bytes !== endExclusive - offset) {
+            throw new DriveLocalSourceChangedError('Local archive source ended during upload');
+          }
+          return uploaded;
+        }, signal, async (waitMs) => {
+          lease = await this.renewForProviderWait(attempt.id, lease, waitMs);
+          updateLease(lease);
+        });
+      } catch (error) {
+        if (isSessionUnusable(error)) {
+          const recovered = await this.reconcileUnusableSession(
+            attempt, artifact, connection, expectedProperties, lease, signal, updateLease,
+          );
+          if (recovered !== null) return recovered;
+        }
+        throw error;
+      }
       if (result.kind === 'complete') {
         offset = artifact.size;
         break;
@@ -349,6 +419,51 @@ export class UploadDriveObjectAttemptUseCase {
     const transferredDigest = hasher.digest('hex');
     if (transferredDigest !== artifact.sha256) throw new DriveLocalSourceChangedError('Transferred archive digest changed');
     return this.verify(attempt, artifact, connection, expectedProperties, lease, signal, updateLease, transferredDigest);
+  }
+
+  private async reconcileUnusableSession(
+    attempt: ArchiveObjectAttempt,
+    artifact: ArchiveArtifact,
+    connection: DriveConnection,
+    expectedProperties: Readonly<Record<string, string>>,
+    lease: AttemptLease,
+    signal: AbortSignal,
+    updateLease: (lease: AttemptLease) => void,
+  ): Promise<UploadDriveObjectAttemptResult | null> {
+    const recovered = await this.drive.loadObject(connection, attempt.remoteObjectId, signal);
+    if (recovered !== null) {
+      return this.verifyLoaded(
+        attempt, artifact, connection, expectedProperties, recovered, lease, signal, updateLease, undefined, true,
+      );
+    }
+    const cleared = await this.repository.clearSession(attempt.id, lease, this.now());
+    updateLease(cleared);
+    return null;
+  }
+
+  private async runProviderUpload<T>(
+    generationId: string,
+    operation: () => Promise<T>,
+    signal: AbortSignal,
+    beforeWait?: (waitMs: number) => Promise<void>,
+  ): Promise<T> {
+    if (this.providerGate === undefined) return operation();
+    return this.providerGate.run({
+      generationId, operationClass: 'upload', probe: true, operation, signal, beforeWait,
+    });
+  }
+
+  private async renewForProviderWait(
+    attemptId: string,
+    lease: AttemptLease,
+    waitMs: number,
+  ): Promise<AttemptLease> {
+    return this.repository.renewLease(
+      attemptId,
+      lease,
+      this.now(),
+      Math.max(this.leaseMs, waitMs + Math.max(1_000, this.leaseMs)),
+    );
   }
 
   private async verify(
@@ -749,6 +864,12 @@ function toArchiveObject(remote: VerifiedDriveObject): VerifiedArchiveObject {
 
 function isConflict(error: unknown): boolean {
   return error instanceof DriveObjectConflictError || (error instanceof Error && error.name === 'DriveObjectConflictError');
+}
+
+function isSessionUnusable(error: unknown): boolean {
+  if (error instanceof DriveRateLimitedError) return !error.detail.sessionUsable;
+  return error instanceof Error
+    && (error as Error & { sessionUsable?: unknown }).sessionUsable === false;
 }
 
 function errorCode(error: unknown): string {

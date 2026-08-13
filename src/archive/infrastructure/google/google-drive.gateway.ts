@@ -6,6 +6,7 @@ import { DriveQuotaExceededError } from "../../domain/errors/drive-quota-exceede
 import { DriveRateLimitedError } from "../../domain/errors/drive-rate-limited.error";
 import { DriveReauthorizationRequiredError } from "../../domain/errors/drive-reauthorization-required.error";
 import { DriveTemporaryUnavailableError } from "../../domain/errors/drive-temporary-unavailable.error";
+import { DriveProviderCapacityBlockedError } from "../../domain/errors/drive-provider-capacity-blocked.error";
 
 const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
 const FOLDER_FIELDS = "id,name,mimeType,parents,appProperties,driveId,ownedByMe,owners(permissionId),permissionIds,shared,trashed";
@@ -251,7 +252,11 @@ export function mapGoogleDriveFailure(value: unknown): Error {
   const reason = safeProviderReason(value);
   const message = safeFailureMessage(status, reason);
   if (status === 401 || reason === "authError" || reason === "invalidCredentials") return new DriveReauthorizationRequiredError(message);
-  if (status === 429 || reason === "rateLimitExceeded" || reason === "userRateLimitExceeded" || reason === "dailyLimitExceeded") return new DriveRateLimitedError(message);
+  if (reason === "dailyLimitExceeded") return new DriveProviderCapacityBlockedError("temporary", retryAfterMs(value));
+  if (reason === "activeItemCreationLimitExceeded") return new DriveProviderCapacityBlockedError("user-action", retryAfterMs(value));
+  if (status === 429 || reason === "rateLimitExceeded" || reason === "userRateLimitExceeded") {
+    return new DriveRateLimitedError({ retryAfterMs: retryAfterMs(value), sessionUsable: true, operationPhase: "metadata" });
+  }
   if (reason === "storageQuotaExceeded") return new DriveQuotaExceededError(message);
   if (reason === "domainPolicy" || reason === "accessNotConfigured" || reason === "insufficientFilePermissions" || status === 403) return new DrivePolicyBlockedError(message);
   if (status === 400 || reason === "invalidArgument" || reason === "badRequest") return new DriveConfigurationError(message);
@@ -298,6 +303,7 @@ function isDomainError(value: unknown): value is Error {
     || value instanceof DriveConfigurationError
     || value instanceof DrivePolicyBlockedError
     || value instanceof DriveQuotaExceededError
+    || value instanceof DriveProviderCapacityBlockedError
     || value instanceof DriveRateLimitedError
     || value instanceof DriveReauthorizationRequiredError
     || value instanceof DriveTemporaryUnavailableError;
@@ -305,6 +311,7 @@ function isDomainError(value: unknown): value is Error {
 
 const SAFE_REASONS = new Set([
   "accessNotConfigured",
+  "activeItemCreationLimitExceeded",
   "authError",
   "backendError",
   "badRequest",
@@ -317,3 +324,20 @@ const SAFE_REASONS = new Set([
   "storageQuotaExceeded",
   "userRateLimitExceeded",
 ]);
+
+function retryAfterMs(value: unknown): number | null {
+  if (typeof value !== "object" || value === null) return null;
+  const response = (value as { response?: unknown }).response;
+  if (typeof response !== "object" || response === null) return null;
+  const headers = (response as { headers?: unknown }).headers;
+  if (typeof headers !== "object" || headers === null) return null;
+  const entries = Object.entries(headers as Record<string, unknown>);
+  const candidate = entries.find(([key]) => key.toLowerCase() === "retry-after")?.[1];
+  if (typeof candidate !== "string") return null;
+  if (/^\d+$/u.test(candidate)) {
+    const seconds = Number(candidate);
+    return Number.isSafeInteger(seconds) ? seconds * 1_000 : null;
+  }
+  const parsed = Date.parse(candidate);
+  return Number.isFinite(parsed) ? Math.max(0, parsed - Date.now()) : null;
+}
