@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, count, eq, gt, gte, inArray, isNotNull, isNull, lte, max, ne, or, sql } from 'drizzle-orm';
+import { and, asc, count, eq, exists, gt, gte, inArray, isNotNull, isNull, lte, max, min, ne, notExists, or, sql } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../../database/database.module';
-import { archiveArtifacts, archiveSchedulerState, driveObjectAttempts } from '../../../database/schema';
+import { archiveArtifacts, archiveSchedulerState, driveMotionFolderReservations, driveObjectAttempts } from '../../../database/schema';
 import type {
-  ArchiveArtifactRepositoryPort, ArchiveObjectAttempt, ArchiveSchedulerState, ArchiveSchedulerUpdate, ArchiveStatusCounts, AttemptLease, ClaimAttempt,
+  ArchiveArtifactRepositoryPort, ArchiveObjectAttempt, ArchiveQueueStatus, ArchiveSchedulerState, ArchiveSchedulerUpdate, ArchiveStatusCounts, AttemptLease, ClaimAttempt,
   ClaimedAttempt, EncryptedUploadSession, ReconciliationSelection, RetentionSelection, UnattemptedArtifactSelection, VerifiedArchiveObject,
 } from '../../application/ports/archive-artifact-repository.port';
 import { ArchiveArtifact, type ArchiveArtifactKind, type RegisterArchiveArtifact } from '../../domain/archive-artifact.entity';
@@ -45,6 +45,40 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
   async findByFingerprint(fingerprint: string): Promise<ArchiveArtifact | null> {
     const row = this.db.select().from(archiveArtifacts).where(eq(archiveArtifacts.sourceFingerprint, fingerprint)).get();
     return row ? toArtifact(row) : null;
+  }
+
+  async recordMotionAdmissionPath(
+    artifactId: string,
+    expectedRevision: number,
+    dayPath: string,
+    nowMs: number,
+  ): Promise<ArchiveArtifact> {
+    return this.transitionAdmission(artifactId, expectedRevision, (artifact) => (
+      artifact.recordMotionAdmissionPath(dayPath, nowMs)
+    ));
+  }
+
+  async markAdmissionRetryable(
+    artifactId: string,
+    expectedRevision: number,
+    errorCode: string,
+    nextAttemptMs: number,
+    nowMs: number,
+  ): Promise<ArchiveArtifact> {
+    return this.transitionAdmission(artifactId, expectedRevision, (artifact) => (
+      artifact.markAdmissionRetryable(errorCode, nextAttemptMs, nowMs)
+    ));
+  }
+
+  async markAdmissionTerminal(
+    artifactId: string,
+    expectedRevision: number,
+    errorCode: string,
+    nowMs: number,
+  ): Promise<ArchiveArtifact> {
+    return this.transitionAdmission(artifactId, expectedRevision, (artifact) => (
+      artifact.markAdmissionTerminal(errorCode, nowMs)
+    ));
   }
 
   async createAttempt(artifactId: string, generationId: string, remoteObjectId: string, containerId: string, nowMs: number): Promise<ArchiveObjectAttempt> {
@@ -449,13 +483,22 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
 
   async listUnattemptedArtifacts(selection: UnattemptedArtifactSelection): Promise<readonly ArchiveArtifact[]> {
     validateLimit(selection.limit);
+    const conditions = [
+      eq(archiveArtifacts.kind, selection.kind),
+      eq(archiveArtifacts.state, 'pending'),
+      inArray(archiveArtifacts.admissionState, ['ready', 'retryable']),
+      lte(archiveArtifacts.admissionNextAt, selection.nowMs ?? Date.now()),
+      isNull(driveObjectAttempts.id),
+    ];
+    if (selection.generationId !== undefined) {
+      conditions.push(or(
+        isNull(archiveArtifacts.motionDayPath),
+        notExists(blockedHeadsQuery(this.db, selection.generationId)),
+      )!);
+    }
     return this.db.select({ artifact: archiveArtifacts }).from(archiveArtifacts)
       .leftJoin(driveObjectAttempts, eq(driveObjectAttempts.artifactId, archiveArtifacts.id))
-      .where(and(
-        eq(archiveArtifacts.kind, selection.kind),
-        eq(archiveArtifacts.state, 'pending'),
-        isNull(driveObjectAttempts.id),
-      ))
+      .where(and(...conditions))
       .orderBy(asc(archiveArtifacts.createdAt), asc(archiveArtifacts.id))
       .limit(selection.limit).all().map(({ artifact }) => toArtifact(artifact));
   }
@@ -507,6 +550,75 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
     for (const row of artifactRows) artifacts[row.state as keyof typeof artifacts] = row.count;
     for (const row of attemptRows) attempts[row.state as keyof typeof attempts] = row.count;
     return { artifacts, attempts };
+  }
+
+  async readNextDeadline(
+    generationId: string,
+    nowMs: number,
+    providerCooldownUntilMs: number | null,
+  ): Promise<number | null> {
+    const admissionDeadline = this.db.select({ value: min(archiveArtifacts.admissionNextAt) })
+      .from(archiveArtifacts)
+      .where(and(
+        eq(archiveArtifacts.kind, 'motion_video'),
+        eq(archiveArtifacts.state, 'pending'),
+        eq(archiveArtifacts.admissionState, 'retryable'),
+        gt(archiveArtifacts.admissionNextAt, nowMs),
+        notExists(this.db.select({ value: sql`1` }).from(driveObjectAttempts)
+          .where(eq(driveObjectAttempts.artifactId, archiveArtifacts.id))),
+      )).get()?.value ?? null;
+    const attemptDeadline = this.db.select({ value: min(driveObjectAttempts.nextAttemptAt) })
+      .from(driveObjectAttempts)
+      .where(and(
+        eq(driveObjectAttempts.generationId, generationId),
+        inArray(driveObjectAttempts.state, ['pending', 'retryable']),
+        gt(driveObjectAttempts.nextAttemptAt, nowMs),
+      )).get()?.value ?? null;
+    const deadlines = [
+      admissionDeadline,
+      attemptDeadline,
+      providerCooldownUntilMs !== null && providerCooldownUntilMs > nowMs
+        ? providerCooldownUntilMs
+        : null,
+    ].filter((deadline): deadline is number => deadline !== null);
+    return deadlines.length === 0 ? null : Math.min(...deadlines);
+  }
+
+  async readQueueStatus(generationId: string): Promise<ArchiveQueueStatus> {
+    const queueCondition = and(
+      eq(archiveArtifacts.kind, 'motion_video'),
+      eq(archiveArtifacts.state, 'pending'),
+      inArray(archiveArtifacts.admissionState, ['ready', 'retryable']),
+    );
+    const aggregate = this.db.select({
+      count: count(),
+      oldest: min(archiveArtifacts.createdAt),
+    }).from(archiveArtifacts).where(queueCondition).get();
+    const retryableIds = new Set(this.db.select({ id: archiveArtifacts.id })
+      .from(archiveArtifacts)
+      .where(and(queueCondition, eq(archiveArtifacts.admissionState, 'retryable')))
+      .all().map(({ id }) => id));
+    for (const row of this.db.select({ artifactId: driveObjectAttempts.artifactId })
+      .from(driveObjectAttempts)
+      .innerJoin(archiveArtifacts, eq(driveObjectAttempts.artifactId, archiveArtifacts.id))
+      .where(and(
+        queueCondition,
+        eq(driveObjectAttempts.generationId, generationId),
+        eq(driveObjectAttempts.state, 'retryable'),
+      )).all()) retryableIds.add(row.artifactId);
+    const blocked = this.db.select({ id: archiveArtifacts.id })
+      .from(archiveArtifacts)
+      .where(and(
+        queueCondition,
+        isNotNull(archiveArtifacts.motionDayPath),
+        exists(blockedHeadsQuery(this.db, generationId)),
+      )).limit(1).get();
+    return {
+      queuedVideos: aggregate?.count ?? 0,
+      retryableVideos: retryableIds.size,
+      oldestQueuedVideoAtMs: aggregate?.oldest ?? null,
+      branchBlocked: blocked !== undefined,
+    };
   }
 
   async readSchedulerState(): Promise<ArchiveSchedulerState> {
@@ -617,6 +729,34 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
     });
   }
 
+  private transitionAdmission(
+    artifactId: string,
+    expectedRevision: number,
+    transition: (artifact: ArchiveArtifact) => ArchiveArtifact,
+  ): ArchiveArtifact {
+    const row = this.db.select().from(archiveArtifacts).where(and(
+      eq(archiveArtifacts.id, artifactId),
+      eq(archiveArtifacts.admissionRevision, expectedRevision),
+    )).get();
+    if (!row) throw new DriveObjectConflictError('Archive admission changed before transition');
+    const next = transition(toArtifact(row));
+    const result = this.db.update(archiveArtifacts).set({
+      admissionState: next.admission.state,
+      motionDayPath: next.admission.motionDayPath,
+      admissionNextAt: next.admission.nextAttemptMs,
+      admissionErrorCode: next.admission.errorCode,
+      admissionRevision: next.admission.revision,
+      updatedAt: next.updatedAtMs,
+    }).where(and(
+      eq(archiveArtifacts.id, artifactId),
+      eq(archiveArtifacts.admissionRevision, expectedRevision),
+    )).run();
+    if (result.changes !== 1) {
+      throw new DriveObjectConflictError('Archive admission changed before transition');
+    }
+    return next;
+  }
+
   private fenced(attemptId: string, lease: AttemptLease, nowMs: number) {
     return and(eq(driveObjectAttempts.id, attemptId), eq(driveObjectAttempts.revision, lease.revision), eq(driveObjectAttempts.leaseOwner, lease.owner),
       eq(driveObjectAttempts.leaseExpiresAt, lease.expiresAtMs), gt(driveObjectAttempts.leaseExpiresAt, nowMs));
@@ -639,7 +779,10 @@ function artifactRow(artifact: ArchiveArtifact) {
   return { id: artifact.id, installationId: artifact.installationId, kind: artifact.kind, sourceIdentity: artifact.sourceIdentity,
     trustedPath: artifact.trustedPath, relativePath: artifact.relativePath, size: artifact.size, mtimeNs: artifact.mtimeNs,
     sourceTimeMs: artifact.sourceTimeMs, sha256: artifact.sha256, sourceFingerprint: artifact.sourceFingerprint, state: artifact.state,
-    currentVerifiedAttemptId: artifact.currentVerifiedAttemptId, createdAt: artifact.createdAtMs, updatedAt: artifact.updatedAtMs,
+    currentVerifiedAttemptId: artifact.currentVerifiedAttemptId,
+    admissionState: artifact.admission.state, motionDayPath: artifact.admission.motionDayPath,
+    admissionNextAt: artifact.admission.nextAttemptMs, admissionErrorCode: artifact.admission.errorCode,
+    admissionRevision: artifact.admission.revision, createdAt: artifact.createdAtMs, updatedAt: artifact.updatedAtMs,
     localDeletedAt: artifact.localDeletedAtMs, revision: artifact.revision };
 }
 
@@ -675,7 +818,28 @@ function toArtifact(row: ArtifactRow): ArchiveArtifact {
     sourceIdentity: row.sourceIdentity, trustedPath: row.trustedPath, relativePath: row.relativePath, size: row.size, mtimeNs: row.mtimeNs,
     sourceTimeMs: row.sourceTimeMs, sha256: row.sha256, sourceFingerprint: row.sourceFingerprint, state: row.state as ArchiveArtifact['state'],
     currentVerifiedAttemptId: row.currentVerifiedAttemptId, createdAtMs: row.createdAt, updatedAtMs: row.updatedAt,
-    localDeletedAtMs: row.localDeletedAt, revision: row.revision });
+    localDeletedAtMs: row.localDeletedAt, revision: row.revision,
+    admission: {
+      state: row.admissionState as ArchiveArtifact['admission']['state'],
+      motionDayPath: row.motionDayPath,
+      nextAttemptMs: row.admissionNextAt,
+      errorCode: row.admissionErrorCode,
+      revision: row.admissionRevision,
+    },
+  });
+}
+
+function blockedHeadsQuery(db: AppDatabase, generationId: string) {
+  return db.select({ value: sql`1` }).from(driveMotionFolderReservations).where(and(
+    eq(driveMotionFolderReservations.generationId, generationId),
+    eq(driveMotionFolderReservations.currentSlot, 1),
+    inArray(driveMotionFolderReservations.state, ['detached', 'conflict']),
+    sql`${driveMotionFolderReservations.normalizedPath} in (
+      substr(${archiveArtifacts.motionDayPath}, 1, 4),
+      substr(${archiveArtifacts.motionDayPath}, 1, 7),
+      ${archiveArtifacts.motionDayPath}
+    )`,
+  ));
 }
 
 function toAttempt(row: AttemptRow): DriveObjectAttempt {

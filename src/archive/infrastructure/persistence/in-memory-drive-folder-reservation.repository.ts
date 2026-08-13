@@ -83,6 +83,47 @@ export class InMemoryDriveFolderReservationRepository implements DriveFolderRese
       && ['missing', 'detached', 'conflict'].includes(this.reservations.get(id)?.state ?? '')).length;
   }
 
+  /** Test-only fixture helper that creates the complete prefix chain. */
+  async seedBlockedPath(
+    generationId: string,
+    dayPath: string,
+    state: 'detached' | 'conflict',
+    blockedLevel: 'year' | 'month' | 'day' = 'day',
+  ): Promise<void> {
+    const segments = dayPath.split('/');
+    const paths = [segments[0], segments.slice(0, 2).join('/'), dayPath];
+    let parentFolderId = 'motion-root';
+    for (const [index, normalizedPath] of paths.entries()) {
+      const suffix = this.reservations.size;
+      const stored = await this.compareAndSetCurrent({
+        expected: null,
+        replacement: {
+          id: `seed-reservation-${suffix}`,
+          installationId: 'installation-1',
+          generationId,
+          normalizedPath,
+          level: ['year', 'month', 'day'][index] as 'year' | 'month' | 'day',
+          segmentName: segments[index],
+          folderId: `seed-folder-${suffix}`,
+          parentFolderId,
+        },
+        nowMs: index + 1,
+      });
+      if (stored.kind !== 'stored') throw new Error('Seed folder reservation lost');
+      const verified = await this.markVerified(
+        stored.reservation.id, stored.reservation.revision, index + 10,
+      );
+      if (verified === null) throw new Error('Seed folder verification lost');
+      if (['year', 'month', 'day'][index] === blockedLevel) {
+        const blocked = await this.markBlocked(
+          verified.id, verified.revision, state, 'seeded_block', index + 20,
+        );
+        if (blocked === null) throw new Error('Seed folder block lost');
+      }
+      parentFolderId = stored.reservation.folderId;
+    }
+  }
+
   history(): readonly DriveFolderReservation[] {
     return Object.freeze([...this.reservations.values()].map((reservation) => this.clone(reservation)));
   }

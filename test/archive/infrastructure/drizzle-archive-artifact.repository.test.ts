@@ -1,24 +1,163 @@
 import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as schema from '../../../src/database/schema';
+import type { DriveFolderReservationRepositoryPort } from '../../../src/archive/application/ports/drive-folder-reservation-repository.port';
 import { DriveAttemptLeaseLostError } from '../../../src/archive/domain/errors/drive-attempt-lease-lost.error';
 import { DrizzleArchiveArtifactRepository } from '../../../src/archive/infrastructure/persistence/drizzle-archive-artifact.repository';
+import { DrizzleDriveFolderReservationRepository } from '../../../src/archive/infrastructure/persistence/drizzle-drive-folder-reservation.repository';
 import { InMemoryArchiveArtifactRepository } from '../../../src/archive/infrastructure/persistence/in-memory-archive-artifact.repository';
 
 describe('DrizzleArchiveArtifactRepository', () => {
   let sqlite: Database.Database;
   let repository: DrizzleArchiveArtifactRepository;
+  let folderReservations: DrizzleDriveFolderReservationRepository;
 
   beforeEach(() => {
     sqlite = new Database(':memory:');
     const db = drizzle(sqlite, { schema });
     migrate(db, { migrationsFolder: './migrations' });
     repository = new DrizzleArchiveArtifactRepository(db);
+    folderReservations = new DrizzleDriveFolderReservationRepository(db);
   });
 
-  afterEach(() => sqlite.close());
+  afterEach(() => {
+    vi.restoreAllMocks();
+    sqlite.close();
+  });
+
+  it('persists immutable admission transitions and fences stale revisions', async () => {
+    const artifact = await repository.register(artifactFixture());
+    const admitted = await repository.recordMotionAdmissionPath(
+      artifact.id, 0, '2026/08/13', 100,
+    );
+    const retryable = await repository.markAdmissionRetryable(
+      artifact.id, admitted.admission.revision, 'temporary', 500, 101,
+    );
+
+    expect(await repository.loadArtifact(artifact.id)).toMatchObject({
+      admission: {
+        state: 'retryable', motionDayPath: '2026/08/13', nextAttemptMs: 500,
+        errorCode: 'temporary', revision: 2,
+      },
+    });
+    await expect(repository.recordMotionAdmissionPath(
+      artifact.id, retryable.admission.revision, '2026/08/14', 102,
+    )).rejects.toThrow('immutable');
+    await expect(repository.markAdmissionTerminal(
+      artifact.id, 1, 'stale', 103,
+    )).rejects.toThrow('changed');
+  });
+
+  it('filters blocked branches before applying the bounded selection limit', async () => {
+    vi.spyOn(Date, 'now')
+      .mockReturnValueOnce(1)
+      .mockReturnValueOnce(2);
+    const blocked = await repository.register({
+      ...artifactFixture(),
+      sourceIdentity: 'blocked',
+      relativePath: '2026/08/13/blocked.mp4',
+      sourceFingerprint: 'c'.repeat(64),
+    });
+    await repository.recordMotionAdmissionPath(blocked.id, 0, '2026/08/13', 10);
+    const healthy = await repository.register({
+      ...artifactFixture(),
+      sourceIdentity: 'healthy',
+      relativePath: '2026/08/14/healthy.mp4',
+      sourceFingerprint: 'd'.repeat(64),
+    });
+    await repository.recordMotionAdmissionPath(healthy.id, 0, '2026/08/14', 11);
+    await seedBlockedPath(folderReservations, 'generation-1', '2026/08/13', 'detached');
+
+    expect(await repository.listUnattemptedArtifacts({
+      kind: 'motion_video', generationId: 'generation-1', nowMs: 100, limit: 1,
+    })).toMatchObject([{ id: healthy.id }]);
+  });
+
+  it('filters an artifact whose current year ancestor is blocked', async () => {
+    const blocked = await repository.register({
+      ...artifactFixture(), sourceIdentity: 'blocked-year',
+      relativePath: '2026/08/13/blocked.mp4', sourceFingerprint: 'c'.repeat(64),
+    });
+    await repository.recordMotionAdmissionPath(blocked.id, 0, '2026/08/13', 10);
+    const healthy = await repository.register({
+      ...artifactFixture(), sourceIdentity: 'healthy-year',
+      relativePath: '2027/08/13/healthy.mp4', sourceFingerprint: 'd'.repeat(64),
+    });
+    await repository.recordMotionAdmissionPath(healthy.id, 0, '2027/08/13', 11);
+    await seedBlockedPath(
+      folderReservations, 'generation-1', '2026/08/13', 'conflict', 'year',
+    );
+
+    expect(await repository.listUnattemptedArtifacts({
+      kind: 'motion_video', generationId: 'generation-1', nowMs: 100, limit: 5,
+    })).toMatchObject([{ id: healthy.id }]);
+  });
+
+  it('keeps null paths eligible and compares blocked prefixes without LIKE wildcards', async () => {
+    const wildcard = await repository.register({
+      ...artifactFixture(),
+      sourceIdentity: 'wildcard',
+      relativePath: '2026/%_/15/wildcard.mp4',
+      sourceFingerprint: 'e'.repeat(64),
+    });
+    await repository.recordMotionAdmissionPath(wildcard.id, 0, '2026/%_/15', 10);
+    const unparsed = await repository.register({
+      ...artifactFixture(),
+      sourceIdentity: 'unparsed',
+      relativePath: 'unparsed.mp4',
+      sourceFingerprint: 'f'.repeat(64),
+    });
+    await seedBlockedPath(folderReservations, 'generation-1', '2026/08/15', 'conflict');
+
+    expect((await repository.listUnattemptedArtifacts({
+      kind: 'motion_video', generationId: 'generation-1', nowMs: 100, limit: 5,
+    })).map((artifact) => artifact.id)).toEqual(expect.arrayContaining([wildcard.id, unparsed.id]));
+  });
+
+  it('persists terminal filtering, all queue deadlines, and aggregate queue status', async () => {
+    vi.spyOn(Date, 'now')
+      .mockReturnValueOnce(10)
+      .mockReturnValueOnce(20)
+      .mockReturnValueOnce(30);
+    const blocked = await repository.register({
+      ...artifactFixture(), sourceIdentity: 'blocked-status',
+      relativePath: '2026/08/16/blocked.mp4', sourceFingerprint: 'c'.repeat(64),
+    });
+    await repository.recordMotionAdmissionPath(blocked.id, 0, '2026/08/16', 40);
+    const retryable = await repository.register({
+      ...artifactFixture(), sourceIdentity: 'retryable-status',
+      sourceFingerprint: 'd'.repeat(64),
+    });
+    await repository.markAdmissionRetryable(retryable.id, 0, 'temporary', 500, 41);
+    const attempted = await repository.register({
+      ...artifactFixture(), sourceIdentity: 'attempted-status',
+      sourceFingerprint: 'e'.repeat(64),
+    });
+    const attempt = await repository.createAttempt(
+      attempted.id, 'generation-1', 'file-deadline', 'folder-1', 42,
+    );
+    const claim = await repository.claimAttempt(attempt.id, {
+      owner: 'worker', nowMs: 50, leaseMs: 10,
+    });
+    await repository.markRetryable(attempt.id, claim.lease, 'temporary', 350, 51);
+    await repository.markAdmissionTerminal(attempted.id, 0, 'invalid', 52);
+    await seedBlockedPath(folderReservations, 'generation-1', '2026/08/16', 'detached');
+
+    expect(await repository.readNextDeadline('generation-1', 100, 400)).toBe(350);
+    expect(await repository.readNextDeadline('other-generation', 100, null)).toBe(500);
+    expect(await repository.readNextDeadline('other-generation', 100, 400)).toBe(400);
+    expect(await repository.listUnattemptedArtifacts({
+      kind: 'motion_video', generationId: 'generation-1', nowMs: 100, limit: 10,
+    })).toEqual([]);
+    expect(await repository.readQueueStatus('generation-1')).toEqual({
+      queuedVideos: 2,
+      retryableVideos: 1,
+      oldestQueuedVideoAtMs: 10,
+      branchBlocked: true,
+    });
+  });
 
   it('keeps historical attempt IDs after replacement', async () => {
     const artifact = await repository.register(artifactFixture());
@@ -395,4 +534,46 @@ function sessionFixture(createdAtMs: number) {
     expiresAtMs: createdAtMs + 10_000,
     confirmedOffset: 0,
   };
+}
+
+async function seedBlockedPath(
+  repository: DriveFolderReservationRepositoryPort,
+  generationId: string,
+  dayPath: string,
+  state: 'detached' | 'conflict',
+  blockedLevel: 'year' | 'month' | 'day' = 'day',
+): Promise<void> {
+  const segments = dayPath.split('/');
+  const paths = [segments[0], segments.slice(0, 2).join('/'), dayPath];
+  let parentFolderId = 'motion-root';
+  for (const [index, normalizedPath] of paths.entries()) {
+    const id = `${generationId}-reservation-${index}`;
+    const folderId = `${generationId}-folder-${index}`;
+    const stored = await repository.compareAndSetCurrent({
+      expected: null,
+      replacement: {
+        id,
+        installationId: 'installation-1',
+        generationId,
+        normalizedPath,
+        level: ['year', 'month', 'day'][index] as 'year' | 'month' | 'day',
+        segmentName: segments[index],
+        folderId,
+        parentFolderId,
+      },
+      nowMs: index + 1,
+    });
+    if (stored.kind !== 'stored') throw new Error('expected seeded folder head');
+    const verified = await repository.markVerified(
+      stored.reservation.id, stored.reservation.revision, index + 10,
+    );
+    if (!verified) throw new Error('expected verified seeded folder head');
+    if (['year', 'month', 'day'][index] === blockedLevel) {
+      const blocked = await repository.markBlocked(
+        verified.id, verified.revision, state, 'seeded_block', index + 20,
+      );
+      if (!blocked) throw new Error('expected blocked seeded folder head');
+    }
+    parentFolderId = folderId;
+  }
 }

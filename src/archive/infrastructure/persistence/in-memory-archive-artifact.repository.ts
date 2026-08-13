@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type {
-  ArchiveArtifactRepositoryPort, ArchiveObjectAttempt, ArchiveSchedulerState, ArchiveSchedulerUpdate, ArchiveStatusCounts, AttemptLease, ClaimAttempt,
+  ArchiveArtifactRepositoryPort, ArchiveObjectAttempt, ArchiveQueueStatus, ArchiveSchedulerState, ArchiveSchedulerUpdate, ArchiveStatusCounts, AttemptLease, ClaimAttempt,
   ClaimedAttempt, EncryptedUploadSession, ReconciliationSelection, RetentionSelection, UnattemptedArtifactSelection, VerifiedArchiveObject,
 } from '../../application/ports/archive-artifact-repository.port';
 import { ArchiveArtifact, type RegisterArchiveArtifact } from '../../domain/archive-artifact.entity';
@@ -8,6 +8,7 @@ import { DriveObjectAttempt } from '../../domain/drive-object-attempt.entity';
 import type { VerifiedDriveObject } from '../../domain/drive-object-metadata.value-object';
 import { DriveAttemptLeaseLostError } from '../../domain/errors/drive-attempt-lease-lost.error';
 import { DriveObjectConflictError } from '../../domain/errors/drive-object-conflict.error';
+import { InMemoryDriveFolderReservationRepository } from './in-memory-drive-folder-reservation.repository';
 
 interface Entry {
   attempt: DriveObjectAttempt;
@@ -23,6 +24,10 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
   private readonly artifacts = new Map<string, ArchiveArtifact>();
   private readonly attempts = new Map<string, Entry>();
   private scheduler: ArchiveSchedulerState = emptySchedulerState();
+
+  constructor(
+    private readonly folderReservations = new InMemoryDriveFolderReservationRepository(),
+  ) {}
 
   async register(input: RegisterArchiveArtifact): Promise<ArchiveArtifact> {
     const existing = [...this.artifacts.values()].find((artifact) => artifact.sourceFingerprint === input.sourceFingerprint);
@@ -41,6 +46,40 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
 
   async findByFingerprint(fingerprint: string): Promise<ArchiveArtifact | null> {
     return [...this.artifacts.values()].find((artifact) => artifact.sourceFingerprint === fingerprint) ?? null;
+  }
+
+  async recordMotionAdmissionPath(
+    artifactId: string,
+    expectedRevision: number,
+    dayPath: string,
+    nowMs: number,
+  ): Promise<ArchiveArtifact> {
+    return this.transitionAdmission(artifactId, expectedRevision, (artifact) => (
+      artifact.recordMotionAdmissionPath(dayPath, nowMs)
+    ));
+  }
+
+  async markAdmissionRetryable(
+    artifactId: string,
+    expectedRevision: number,
+    errorCode: string,
+    nextAttemptMs: number,
+    nowMs: number,
+  ): Promise<ArchiveArtifact> {
+    return this.transitionAdmission(artifactId, expectedRevision, (artifact) => (
+      artifact.markAdmissionRetryable(errorCode, nextAttemptMs, nowMs)
+    ));
+  }
+
+  async markAdmissionTerminal(
+    artifactId: string,
+    expectedRevision: number,
+    errorCode: string,
+    nowMs: number,
+  ): Promise<ArchiveArtifact> {
+    return this.transitionAdmission(artifactId, expectedRevision, (artifact) => (
+      artifact.markAdmissionTerminal(errorCode, nowMs)
+    ));
   }
 
   async createAttempt(artifactId: string, generationId: string, remoteObjectId: string, containerId: string, nowMs: number): Promise<ArchiveObjectAttempt> {
@@ -322,9 +361,19 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
   }
 
   async listUnattemptedArtifacts(selection: UnattemptedArtifactSelection): Promise<readonly ArchiveArtifact[]> {
+    validateLimit(selection.limit);
+    const nowMs = selection.nowMs ?? Date.now();
     const attempted = new Set([...this.attempts.values()].map(({ attempt }) => attempt.artifactId));
-    return [...this.artifacts.values()]
-      .filter((artifact) => artifact.kind === selection.kind && artifact.state === 'pending' && !attempted.has(artifact.id))
+    const eligible: ArchiveArtifact[] = [];
+    for (const artifact of this.artifacts.values()) {
+      if (artifact.kind !== selection.kind || artifact.state !== 'pending' || attempted.has(artifact.id)
+        || artifact.admission.state === 'terminal'
+        || artifact.admission.nextAttemptMs > nowMs) continue;
+      if (selection.generationId !== undefined
+        && await this.isBlocked(artifact, selection.generationId)) continue;
+      eligible.push(artifact);
+    }
+    return eligible
       .sort((left, right) => left.createdAtMs - right.createdAtMs || left.id.localeCompare(right.id))
       .slice(0, selection.limit);
   }
@@ -369,6 +418,64 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
     for (const artifact of this.artifacts.values()) artifacts[artifact.state] += 1;
     for (const { attempt } of this.attempts.values()) attempts[attempt.state] += 1;
     return { artifacts, attempts };
+  }
+
+  async readNextDeadline(
+    generationId: string,
+    nowMs: number,
+    providerCooldownUntilMs: number | null,
+  ): Promise<number | null> {
+    const attempted = new Set([...this.attempts.values()].map(({ attempt }) => attempt.artifactId));
+    const deadlines: number[] = [];
+    if (providerCooldownUntilMs !== null && providerCooldownUntilMs > nowMs) {
+      deadlines.push(providerCooldownUntilMs);
+    }
+    for (const artifact of this.artifacts.values()) {
+      if (artifact.kind === 'motion_video' && artifact.state === 'pending'
+        && artifact.admission.state === 'retryable' && artifact.admission.nextAttemptMs > nowMs
+        && !attempted.has(artifact.id)) {
+        deadlines.push(artifact.admission.nextAttemptMs);
+      }
+    }
+    for (const { attempt } of this.attempts.values()) {
+      const entry = this.attempts.get(attempt.id)!;
+      if (attempt.generationId === generationId && ['pending', 'retryable'].includes(attempt.state)
+        && entry.nextAttemptMs > nowMs) deadlines.push(entry.nextAttemptMs);
+    }
+    return deadlines.length === 0 ? null : Math.min(...deadlines);
+  }
+
+  async readQueueStatus(generationId: string): Promise<ArchiveQueueStatus> {
+    const queued = [...this.artifacts.values()].filter((artifact) => (
+      artifact.kind === 'motion_video' && artifact.state === 'pending'
+      && artifact.admission.state !== 'terminal'
+    ));
+    const retryableArtifactIds = new Set(
+      queued.filter((artifact) => artifact.admission.state === 'retryable')
+        .map((artifact) => artifact.id),
+    );
+    const queuedArtifactIds = new Set(queued.map((artifact) => artifact.id));
+    for (const { attempt } of this.attempts.values()) {
+      if (attempt.generationId === generationId && attempt.state === 'retryable'
+        && queuedArtifactIds.has(attempt.artifactId)) {
+        retryableArtifactIds.add(attempt.artifactId);
+      }
+    }
+    let branchBlocked = false;
+    for (const artifact of queued) {
+      if (await this.isBlocked(artifact, generationId)) {
+        branchBlocked = true;
+        break;
+      }
+    }
+    return {
+      queuedVideos: queued.length,
+      retryableVideos: retryableArtifactIds.size,
+      oldestQueuedVideoAtMs: queued.length === 0
+        ? null
+        : Math.min(...queued.map((artifact) => artifact.createdAtMs)),
+      branchBlocked,
+    };
   }
 
   async readSchedulerState(): Promise<ArchiveSchedulerState> {
@@ -462,6 +569,29 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
     }
     return entry;
   }
+
+  private transitionAdmission(
+    artifactId: string,
+    expectedRevision: number,
+    transition: (artifact: ArchiveArtifact) => ArchiveArtifact,
+  ): ArchiveArtifact {
+    const artifact = this.artifacts.get(artifactId);
+    if (!artifact || artifact.admission.revision !== expectedRevision) {
+      throw new DriveObjectConflictError('Archive admission changed before transition');
+    }
+    const next = transition(artifact);
+    this.artifacts.set(artifactId, next);
+    return next;
+  }
+
+  private async isBlocked(artifact: ArchiveArtifact, generationId: string): Promise<boolean> {
+    if (artifact.admission.motionDayPath === null) return false;
+    for (const prefix of dayPathPrefixes(artifact.admission.motionDayPath)) {
+      const head = await this.folderReservations.loadCurrent(generationId, prefix);
+      if (head !== null && ['detached', 'conflict'].includes(head.state)) return true;
+    }
+    return false;
+  }
 }
 
 function sameRegistration(artifact: ArchiveArtifact, input: RegisterArchiveArtifact): boolean {
@@ -522,4 +652,15 @@ function validateSession(session: EncryptedUploadSession): void {
 
 function validateScheduler(state: ArchiveSchedulerState): void {
   if ((state.backupLeaseOwner === null) !== (state.backupLeaseExpiresAtMs === null)) throw new DriveObjectConflictError('Backup scheduler lease is malformed');
+}
+
+function validateLimit(limit: number): void {
+  if (!Number.isSafeInteger(limit) || limit <= 0) {
+    throw new DriveObjectConflictError('Archive selection limit is malformed');
+  }
+}
+
+function dayPathPrefixes(dayPath: string): readonly string[] {
+  const segments = dayPath.split('/');
+  return [segments[0], segments.slice(0, 2).join('/'), dayPath];
 }

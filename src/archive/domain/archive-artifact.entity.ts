@@ -7,6 +7,7 @@ export type ArchiveArtifactState =
   | "verified"
   | "local_missing"
   | "superseded";
+export type ArchiveArtifactAdmissionState = 'ready' | 'retryable' | 'terminal';
 
 export interface RegisterArchiveArtifact {
   installationId: string;
@@ -30,7 +31,7 @@ export interface ArchiveArtifactSnapshot extends RegisterArchiveArtifact {
   localDeletedAtMs: number | null;
   revision: number;
   admission: {
-    state: 'ready';
+    state: ArchiveArtifactAdmissionState;
     motionDayPath: string | null;
     nextAttemptMs: number;
     errorCode: string | null;
@@ -150,6 +151,67 @@ export class ArchiveArtifact implements ArchiveArtifactSnapshot {
     return this.transition("superseded", nowMs);
   }
 
+  recordMotionAdmissionPath(dayPath: string, nowMs: number): ArchiveArtifact {
+    if (this.kind !== 'motion_video') {
+      throw new DriveObjectConflictError('Only motion videos have an admission day path');
+    }
+    requireText(dayPath, 'Archive motion day path');
+    if (this.admission.motionDayPath !== null && this.admission.motionDayPath !== dayPath) {
+      throw new DriveObjectConflictError('Archive motion day path is immutable');
+    }
+    if (this.admission.state === 'terminal') {
+      throw new DriveObjectConflictError('Terminal archive admission is immutable');
+    }
+    return this.transitionAdmission({
+      state: 'ready',
+      motionDayPath: dayPath,
+      nextAttemptMs: 0,
+      errorCode: null,
+    }, nowMs);
+  }
+
+  markAdmissionRetryable(errorCode: string, nextAttemptMs: number, nowMs: number): ArchiveArtifact {
+    if (this.admission.state === 'terminal') {
+      throw new DriveObjectConflictError('Terminal archive admission is immutable');
+    }
+    requireText(errorCode, 'Archive admission error code');
+    requireNonNegativeInteger(nextAttemptMs, 'Archive admission next attempt');
+    return this.transitionAdmission({
+      state: 'retryable',
+      nextAttemptMs,
+      errorCode,
+    }, nowMs);
+  }
+
+  markAdmissionTerminal(errorCode: string, nowMs: number): ArchiveArtifact {
+    if (this.admission.state === 'terminal') {
+      throw new DriveObjectConflictError('Terminal archive admission is immutable');
+    }
+    requireText(errorCode, 'Archive admission error code');
+    return this.transitionAdmission({
+      state: 'terminal',
+      nextAttemptMs: 0,
+      errorCode,
+    }, nowMs);
+  }
+
+  private transitionAdmission(
+    update: Pick<ArchiveArtifactSnapshot['admission'], 'state' | 'nextAttemptMs' | 'errorCode'>
+      & Partial<Pick<ArchiveArtifactSnapshot['admission'], 'motionDayPath'>>,
+    nowMs: number,
+  ): ArchiveArtifact {
+    requireNonNegativeInteger(nowMs, 'Archive admission transition time');
+    return new ArchiveArtifact({
+      ...this,
+      updatedAtMs: nowMs,
+      admission: {
+        ...this.admission,
+        ...update,
+        revision: this.admission.revision + 1,
+      },
+    });
+  }
+
   private transition(
     state: ArchiveArtifactState,
     nowMs: number,
@@ -239,7 +301,7 @@ function validateArtifactSnapshot(snapshot: ArchiveArtifactSnapshot): void {
     );
   }
   requireNonNegativeInteger(snapshot.revision, "Archive revision");
-  if (snapshot.admission.state !== 'ready') {
+  if (!['ready', 'retryable', 'terminal'].includes(snapshot.admission.state)) {
     throw new DriveObjectConflictError('Archive admission state is malformed');
   }
   if (snapshot.admission.motionDayPath !== null) {
@@ -248,6 +310,13 @@ function validateArtifactSnapshot(snapshot: ArchiveArtifactSnapshot): void {
   requireNonNegativeInteger(snapshot.admission.nextAttemptMs, 'Archive admission next attempt');
   if (snapshot.admission.errorCode !== null) {
     requireText(snapshot.admission.errorCode, 'Archive admission error code');
+  }
+  if (snapshot.admission.state === 'ready'
+    && (snapshot.admission.nextAttemptMs !== 0 || snapshot.admission.errorCode !== null)) {
+    throw new DriveObjectConflictError('Ready archive admission is malformed');
+  }
+  if (snapshot.admission.state !== 'ready' && snapshot.admission.errorCode === null) {
+    throw new DriveObjectConflictError('Archive admission error code is missing');
   }
   requireNonNegativeInteger(snapshot.admission.revision, 'Archive admission revision');
 }

@@ -114,6 +114,15 @@ export interface RetentionSelection {
 export interface UnattemptedArtifactSelection {
   kind: ArchiveArtifactKind;
   limit: number;
+  generationId?: string;
+  nowMs?: number;
+}
+
+export interface ArchiveQueueStatus {
+  queuedVideos: number;
+  retryableVideos: number;
+  oldestQueuedVideoAtMs: number | null;
+  branchBlocked: boolean;
 }
 
 export interface ArchiveSchedulerState {
@@ -145,6 +154,9 @@ export interface ArchiveArtifactRepositoryPort {
   register(input: RegisterArchiveArtifact): Promise<ArchiveArtifact>;
   loadArtifact(id: string): Promise<ArchiveArtifact | null>;
   findByFingerprint(fingerprint: string): Promise<ArchiveArtifact | null>;
+  recordMotionAdmissionPath(artifactId: string, expectedRevision: number, dayPath: string, nowMs: number): Promise<ArchiveArtifact>;
+  markAdmissionRetryable(artifactId: string, expectedRevision: number, errorCode: string, nextAttemptMs: number, nowMs: number): Promise<ArchiveArtifact>;
+  markAdmissionTerminal(artifactId: string, expectedRevision: number, errorCode: string, nowMs: number): Promise<ArchiveArtifact>;
   createAttempt(artifactId: string, generationId: string, remoteObjectId: string, containerId: string, nowMs: number): Promise<ArchiveObjectAttempt>;
   loadAttempt(attemptId: string): Promise<ArchiveObjectAttempt | null>;
   claimAttempt(attemptId: string, input: ClaimAttempt): Promise<ClaimedAttempt>;
@@ -186,6 +198,8 @@ export interface ArchiveArtifactRepositoryPort {
   listRetentionCandidates(selection: RetentionSelection): Promise<readonly ArchiveObjectAttempt[]>;
   /** Aggregate-only status read; source paths, IDs, metadata, and errors stay private. */
   readStatusCounts(): Promise<ArchiveStatusCounts>;
+  readNextDeadline(generationId: string, nowMs: number, providerCooldownUntilMs: number | null): Promise<number | null>;
+  readQueueStatus(generationId: string): Promise<ArchiveQueueStatus>;
   readSchedulerState(): Promise<ArchiveSchedulerState>;
   compareAndSetSchedulerState(expectedRevision: number, update: ArchiveSchedulerUpdate): Promise<boolean>;
   releaseGenerationLeases(generationId: string, nowMs: number): Promise<void>;
