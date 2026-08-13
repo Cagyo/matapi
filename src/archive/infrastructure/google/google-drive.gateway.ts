@@ -11,6 +11,8 @@ const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
 const FOLDER_FIELDS = "id,name,mimeType,parents,appProperties,driveId,ownedByMe,owners(permissionId),permissionIds,shared,trashed";
 
 export type GoogleDriveFolderRole = "root" | "motion" | "backups";
+export type GoogleDriveDateFolderRole = "motion-year" | "motion-month" | "motion-day";
+export type GoogleDriveFolderQueryRole = GoogleDriveFolderRole | GoogleDriveDateFolderRole;
 
 export interface GoogleDriveAbout {
   user: {
@@ -46,19 +48,33 @@ export interface GoogleDriveFolderPage {
   incompleteSearch: boolean;
 }
 
-export interface GoogleDriveFolderList {
+export interface GoogleDriveManagedFolderList {
   installationId: string;
   generationId: string;
   role: GoogleDriveFolderRole;
   parentId: string;
   pageToken: string | null;
+  pageSize?: number;
   signal: AbortSignal;
 }
+
+export interface GoogleDriveDateFolderList {
+  installationId: string;
+  generationId: string;
+  role: GoogleDriveDateFolderRole;
+  normalizedPath: string;
+  parentId: string;
+  pageToken: string | null;
+  pageSize: number;
+  signal: AbortSignal;
+}
+
+export type GoogleDriveFolderList = GoogleDriveManagedFolderList | GoogleDriveDateFolderList;
 
 export interface GoogleDriveFolderCreate {
   id: string;
   name: string;
-  role: GoogleDriveFolderRole;
+  role: GoogleDriveFolderQueryRole;
   parentId: string;
   appProperties: Readonly<Record<string, string>>;
   signal: AbortSignal;
@@ -117,6 +133,7 @@ export class GoogleDriveGateway {
       const response = await this.drive.files.list({
         corpora: "user",
         spaces: "drive",
+        pageSize: input.pageSize,
         pageToken: input.pageToken ?? undefined,
         q: folderQuery(input),
         fields: `nextPageToken,incompleteSearch,files(${FOLDER_FIELDS})`,
@@ -166,12 +183,13 @@ export class GoogleDriveGateway {
 }
 
 function folderQuery(input: GoogleDriveFolderList): string {
-  const properties = {
+  const properties: Record<string, string> = {
     a1v: "1",
     a1i: input.installationId,
     a1g: input.generationId,
     a1k: input.role,
   };
+  if ("normalizedPath" in input) properties.a1p = input.normalizedPath;
   const matches = Object.entries(properties).map(
     ([key, value]) => `appProperties has { key='${escapeQuery(key)}' and value='${escapeQuery(value)}' }`,
   );

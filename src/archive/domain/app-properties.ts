@@ -14,6 +14,16 @@ export interface ArchiveAppPropertiesInput {
   schemaVersion: number;
 }
 
+export type MotionFolderRole = "motion-year" | "motion-month" | "motion-day";
+
+export interface MotionFolderAppPropertiesInput {
+  installationId: string;
+  generationId: string;
+  role: MotionFolderRole;
+  normalizedPath: string;
+  schemaVersion: number;
+}
+
 export type ArchiveAppPropertyKey =
   | "a1v"
   | "a1i"
@@ -25,6 +35,12 @@ export type ArchiveAppPropertyKey =
 
 export type ArchiveAppProperties = Readonly<
   Record<ArchiveAppPropertyKey, string>
+>;
+
+export type MotionFolderAppPropertyKey = "a1v" | "a1i" | "a1g" | "a1k" | "a1p";
+
+export type MotionFolderAppProperties = Readonly<
+  Record<MotionFolderAppPropertyKey, string>
 >;
 
 export function encodeArchiveAppProperties(
@@ -39,6 +55,19 @@ export function encodeArchiveAppProperties(
     [`${PREFIX}f`]: encodeBoundedValue(input.sourceFingerprint, `${PREFIX}f`),
     [`${PREFIX}s`]: encodeBoundedValue(input.sha256, `${PREFIX}s`),
     [`${PREFIX}t`]: encodeBoundedValue(sourceTimeMs, `${PREFIX}t`),
+  };
+  return Object.freeze(properties);
+}
+
+export function encodeMotionFolderAppProperties(
+  input: MotionFolderAppPropertiesInput,
+): MotionFolderAppProperties {
+  const properties: Record<MotionFolderAppPropertyKey, string> = {
+    [`${PREFIX}v`]: String(input.schemaVersion),
+    [`${PREFIX}i`]: encodeBoundedValue(input.installationId, `${PREFIX}i`),
+    [`${PREFIX}g`]: encodeBoundedValue(input.generationId, `${PREFIX}g`),
+    [`${PREFIX}k`]: encodeBoundedValue(input.role, `${PREFIX}k`),
+    [`${PREFIX}p`]: encodeBoundedValue(input.normalizedPath, `${PREFIX}p`),
   };
   return Object.freeze(properties);
 }

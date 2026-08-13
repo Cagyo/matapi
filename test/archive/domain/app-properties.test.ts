@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   encodeArchiveAppProperties,
+  encodeMotionFolderAppProperties,
   matchesArchiveAppProperties,
 } from "../../../src/archive/domain/app-properties";
 
@@ -37,5 +38,21 @@ describe("archive app properties", () => {
     const transplanted = { ...expected, a1g: "generation-2" };
 
     expect(matchesArchiveAppProperties(expected, transplanted)).toBe(false);
+  });
+
+  it("encodes compact private properties for a motion date folder", () => {
+    expect(encodeMotionFolderAppProperties({
+      installationId: "installation-1",
+      generationId: "generation-1",
+      role: "motion-day",
+      normalizedPath: "2026/08/13",
+      schemaVersion: 1,
+    })).toEqual({
+      a1v: "1",
+      a1i: "installation-1",
+      a1g: "generation-1",
+      a1k: "motion-day",
+      a1p: "2026/08/13",
+    });
   });
 });
