@@ -1,4 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { ArchiveSchedulerHooksService } from '../../src/archive/application/archive-scheduler.service';
+import { CleanupCoordinatorService } from '../../src/camera/application/cleanup-coordinator.service';
+import { CompletedMotionVideoRecoveryScheduler } from '../../src/camera/application/completed-motion-video-recovery.scheduler';
+import { CameraModule } from '../../src/camera/camera.module';
 import {
   liveStreamOptionsFromEnv,
   type LiveStreamOptions,
@@ -63,5 +67,49 @@ describe('CameraModule live-stream composition', () => {
     expect(liveStreamOptionsFromEnv({
       LIVE_STREAM_RUNTIME_DIR: runtimeDirectory,
     }).runtimeDirectory).toBe(runtimeDirectory);
+  });
+});
+
+describe('CameraModule archive recovery composition', () => {
+  it('provides the recovery coordinator and routes Archive hooks through it', async () => {
+    interface ProviderMetadata {
+      provide?: unknown;
+      inject?: readonly unknown[];
+      useFactory?: (...dependencies: unknown[]) => unknown;
+    }
+    const providers = Reflect.getMetadata('providers', CameraModule) as unknown[];
+    expect(providers).toContain(CompletedMotionVideoRecoveryScheduler);
+
+    const hookRegistration = providers.find(
+      (provider): provider is ProviderMetadata => typeof provider === 'object'
+        && provider !== null
+        && 'provide' in provider
+        && provider.provide === 'ARCHIVE_CAMERA_SCHEDULER_HOOK_REGISTRATION',
+    );
+    expect(hookRegistration).toMatchObject({
+      inject: [
+        ArchiveSchedulerHooksService,
+        CompletedMotionVideoRecoveryScheduler,
+        CleanupCoordinatorService,
+      ],
+    });
+    expect(hookRegistration?.useFactory).toBeTypeOf('function');
+
+    const hooks = new ArchiveSchedulerHooksService();
+    const reconcile = vi.fn(async (_signal?: AbortSignal) => undefined);
+    const runCleanup = vi.fn(async () => ({ executed: true, thresholdUsed: 80 }));
+    if (!hookRegistration?.useFactory) {
+      throw new Error('Camera archive hook registration factory is unavailable');
+    }
+    hookRegistration.useFactory(hooks, { reconcile }, { runCleanup });
+    const signal = new AbortController().signal;
+
+    await hooks.reconcileMotion(signal);
+    await hooks.cleanupLocal(signal);
+
+    expect(reconcile).toHaveBeenCalledOnce();
+    expect(reconcile).toHaveBeenCalledWith(signal);
+    expect(runCleanup).toHaveBeenCalledOnce();
+    expect(runCleanup).toHaveBeenCalledWith('local', undefined, signal);
   });
 });

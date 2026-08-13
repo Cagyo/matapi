@@ -45,6 +45,7 @@ import { RtspSourceStartGate } from './application/rtsp-source-start-gate.servic
 import { RecordMotionEndUseCase } from './application/record-motion-end.use-case';
 import { RecordMotionStartUseCase } from './application/record-motion-start.use-case';
 import { RecordSnapshotUseCase } from './application/record-snapshot.use-case';
+import { CompletedMotionVideoRecoveryScheduler } from './application/completed-motion-video-recovery.scheduler';
 import { RegisterCompletedMotionVideosUseCase } from './application/register-completed-motion-videos.use-case';
 import { StopLiveStreamUseCase } from './application/stop-live-stream.use-case';
 import { TriggerCleanUseCase } from './application/trigger-clean.use-case';
@@ -225,15 +226,16 @@ function isInstallationId(value: string | undefined): value is string {
       ),
       inject: [MEDIA_REPOSITORY, MEDIA_WRITER, COMPLETED_MOTION_VIDEO, ARCHIVE_REGISTRATION],
     },
+    CompletedMotionVideoRecoveryScheduler,
     {
       provide: 'ARCHIVE_CAMERA_SCHEDULER_HOOK_REGISTRATION',
       useFactory: (
         hooks: ArchiveSchedulerHooksService,
-        registration: RegisterCompletedMotionVideosUseCase,
+        recovery: CompletedMotionVideoRecoveryScheduler,
         cleanup: CleanupCoordinatorService,
       ) => {
         hooks.registerCamera({
-          reconcileMotion: async (signal) => registration.reconcile(signal),
+          reconcileMotion: async (signal) => recovery.reconcile(signal),
           cleanupLocal: async (signal) => {
             await cleanup.runCleanup('local', undefined, signal);
           },
@@ -242,7 +244,7 @@ function isInstallationId(value: string | undefined): value is string {
       },
       inject: [
         ArchiveSchedulerHooksService,
-        RegisterCompletedMotionVideosUseCase,
+        CompletedMotionVideoRecoveryScheduler,
         CleanupCoordinatorService,
       ],
     },
