@@ -50,6 +50,54 @@ describe('DrizzleArchiveArtifactRepository', () => {
     )).rejects.toThrow('changed');
   });
 
+  it('runs admission read-transition-write inside one real immediate transaction', async () => {
+    let updateObservedInTransaction: boolean | null = null;
+    sqlite.function('observe_admission_transaction', () => {
+      updateObservedInTransaction = sqlite.inTransaction;
+      return 1;
+    });
+    sqlite.exec(`
+      create temp trigger observe_archive_admission_transaction
+      before update of admission_revision on archive_artifacts
+      begin
+        select observe_admission_transaction();
+      end
+    `);
+    const artifact = await repository.register(artifactFixture());
+
+    const admitted = await repository.recordMotionAdmissionPath(
+      artifact.id, 0, '2026/08/13', 100,
+    );
+
+    expect(updateObservedInTransaction).toBe(true);
+    expect(await repository.loadArtifact(artifact.id)).toEqual(admitted);
+  });
+
+  it('rejects admission transitions for database backups without persisting changes', async () => {
+    const backup = await repository.register({
+      ...artifactFixture(),
+      kind: 'database_backup',
+      sourceIdentity: 'backup-admission',
+      sourceFingerprint: '0'.repeat(64),
+    });
+
+    await expect(repository.recordMotionAdmissionPath(
+      backup.id, 0, '2026/08/13', 10,
+    )).rejects.toThrow(/motion video/iu);
+    await expect(repository.markAdmissionRetryable(
+      backup.id, 0, 'temporary', 500, 11,
+    )).rejects.toThrow(/motion video/iu);
+    await expect(repository.markAdmissionTerminal(
+      backup.id, 0, 'invalid', 12,
+    )).rejects.toThrow(/motion video/iu);
+    expect(await repository.loadArtifact(backup.id)).toMatchObject({
+      admission: {
+        state: 'ready', motionDayPath: null, nextAttemptMs: 0,
+        errorCode: null, revision: 0,
+      },
+    });
+  });
+
   it('filters blocked branches before applying the bounded selection limit', async () => {
     vi.spyOn(Date, 'now')
       .mockReturnValueOnce(1)

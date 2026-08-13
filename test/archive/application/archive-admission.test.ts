@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { RegisterArchiveArtifact } from '../../../src/archive/domain/archive-artifact.entity';
+import { ArchiveArtifact, type RegisterArchiveArtifact } from '../../../src/archive/domain/archive-artifact.entity';
 import { InMemoryArchiveArtifactRepository } from '../../../src/archive/infrastructure/persistence/in-memory-archive-artifact.repository';
 import { InMemoryDriveFolderReservationRepository } from '../../../src/archive/infrastructure/persistence/in-memory-drive-folder-reservation.repository';
 
@@ -60,6 +60,44 @@ describe('archive artifact admission', () => {
     await expect(repository.markAdmissionRetryable(
       artifact.id, 3, 'temporary', 600, 54,
     )).rejects.toThrow(/terminal/iu);
+  });
+
+  it('rejects admission transitions for database backups without changing their state', async () => {
+    const backup = await repository.register({
+      ...artifactInput('backup-admission', '0'),
+      kind: 'database_backup',
+    });
+
+    await expect(repository.recordMotionAdmissionPath(
+      backup.id, 0, '2026/08/13', 10,
+    )).rejects.toThrow(/motion video/iu);
+    await expect(repository.markAdmissionRetryable(
+      backup.id, 0, 'temporary', 500, 11,
+    )).rejects.toThrow(/motion video/iu);
+    await expect(repository.markAdmissionTerminal(
+      backup.id, 0, 'invalid', 12,
+    )).rejects.toThrow(/motion video/iu);
+    expect(await repository.loadArtifact(backup.id)).toMatchObject({
+      admission: {
+        state: 'ready', motionDayPath: null, nextAttemptMs: 0,
+        errorCode: null, revision: 0,
+      },
+    });
+  });
+
+  it('rejects a restored terminal admission with a future deadline', async () => {
+    const artifact = await repository.register(artifactInput('terminal-restore', 'a'));
+
+    expect(() => ArchiveArtifact.restore({
+      ...artifact,
+      admission: {
+        state: 'terminal',
+        motionDayPath: null,
+        nextAttemptMs: 1,
+        errorCode: 'invalid_motion_path',
+        revision: 1,
+      },
+    })).toThrow(/terminal archive admission/iu);
   });
 
   it('skips a blocked oldest branch and selects a later healthy artifact', async () => {

@@ -171,6 +171,7 @@ export class ArchiveArtifact implements ArchiveArtifactSnapshot {
   }
 
   markAdmissionRetryable(errorCode: string, nextAttemptMs: number, nowMs: number): ArchiveArtifact {
+    this.requireMotionAdmission();
     if (this.admission.state === 'terminal') {
       throw new DriveObjectConflictError('Terminal archive admission is immutable');
     }
@@ -184,6 +185,7 @@ export class ArchiveArtifact implements ArchiveArtifactSnapshot {
   }
 
   markAdmissionTerminal(errorCode: string, nowMs: number): ArchiveArtifact {
+    this.requireMotionAdmission();
     if (this.admission.state === 'terminal') {
       throw new DriveObjectConflictError('Terminal archive admission is immutable');
     }
@@ -210,6 +212,12 @@ export class ArchiveArtifact implements ArchiveArtifactSnapshot {
         revision: this.admission.revision + 1,
       },
     });
+  }
+
+  private requireMotionAdmission(): void {
+    if (this.kind !== 'motion_video') {
+      throw new DriveObjectConflictError('Only motion videos have admission transitions');
+    }
   }
 
   private transition(
@@ -314,6 +322,9 @@ function validateArtifactSnapshot(snapshot: ArchiveArtifactSnapshot): void {
   if (snapshot.admission.state === 'ready'
     && (snapshot.admission.nextAttemptMs !== 0 || snapshot.admission.errorCode !== null)) {
     throw new DriveObjectConflictError('Ready archive admission is malformed');
+  }
+  if (snapshot.admission.state === 'terminal' && snapshot.admission.nextAttemptMs !== 0) {
+    throw new DriveObjectConflictError('Terminal archive admission is malformed');
   }
   if (snapshot.admission.state !== 'ready' && snapshot.admission.errorCode === null) {
     throw new DriveObjectConflictError('Archive admission error code is missing');

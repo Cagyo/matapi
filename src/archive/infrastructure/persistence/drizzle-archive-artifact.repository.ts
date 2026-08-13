@@ -734,27 +734,29 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
     expectedRevision: number,
     transition: (artifact: ArchiveArtifact) => ArchiveArtifact,
   ): ArchiveArtifact {
-    const row = this.db.select().from(archiveArtifacts).where(and(
-      eq(archiveArtifacts.id, artifactId),
-      eq(archiveArtifacts.admissionRevision, expectedRevision),
-    )).get();
-    if (!row) throw new DriveObjectConflictError('Archive admission changed before transition');
-    const next = transition(toArtifact(row));
-    const result = this.db.update(archiveArtifacts).set({
-      admissionState: next.admission.state,
-      motionDayPath: next.admission.motionDayPath,
-      admissionNextAt: next.admission.nextAttemptMs,
-      admissionErrorCode: next.admission.errorCode,
-      admissionRevision: next.admission.revision,
-      updatedAt: next.updatedAtMs,
-    }).where(and(
-      eq(archiveArtifacts.id, artifactId),
-      eq(archiveArtifacts.admissionRevision, expectedRevision),
-    )).run();
-    if (result.changes !== 1) {
-      throw new DriveObjectConflictError('Archive admission changed before transition');
-    }
-    return next;
+    return this.immediate((tx) => {
+      const row = tx.select().from(archiveArtifacts).where(and(
+        eq(archiveArtifacts.id, artifactId),
+        eq(archiveArtifacts.admissionRevision, expectedRevision),
+      )).get();
+      if (!row) throw new DriveObjectConflictError('Archive admission changed before transition');
+      const next = transition(toArtifact(row));
+      const result = tx.update(archiveArtifacts).set({
+        admissionState: next.admission.state,
+        motionDayPath: next.admission.motionDayPath,
+        admissionNextAt: next.admission.nextAttemptMs,
+        admissionErrorCode: next.admission.errorCode,
+        admissionRevision: next.admission.revision,
+        updatedAt: next.updatedAtMs,
+      }).where(and(
+        eq(archiveArtifacts.id, artifactId),
+        eq(archiveArtifacts.admissionRevision, expectedRevision),
+      )).run();
+      if (result.changes !== 1) {
+        throw new DriveObjectConflictError('Archive admission changed before transition');
+      }
+      return next;
+    });
   }
 
   private fenced(attemptId: string, lease: AttemptLease, nowMs: number) {
