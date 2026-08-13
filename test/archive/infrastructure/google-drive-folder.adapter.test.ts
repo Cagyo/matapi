@@ -119,6 +119,40 @@ describe("GoogleDriveFolderAdapter", () => {
     });
   });
 
+  it.each([
+    ["a mismatched ID", folder("unexpected-folder", "Existing", "year-1")],
+    ["a missing ID", { ...folder("existing-1", "Existing", "year-1"), id: undefined }],
+  ])("rejects %s returned from an exact folder load", async (_case, response) => {
+    resetSdk();
+    sdk.getResponse = response;
+
+    await expect(adapterFor().loadExact(connection(), "existing-1", signal)).rejects.toMatchObject({
+      name: "DriveFolderExactIdIntegrityError",
+      code: "DRIVE_FOLDER_EXACT_ID_INTEGRITY",
+      message: "Google Drive folder exact-ID integrity check failed",
+    });
+  });
+
+  it.each([
+    ["a mismatched ID", folder("unexpected-folder", "August", "year-1")],
+    ["a missing ID", { ...folder("reserved-1", "August", "year-1"), id: undefined }],
+  ])("rejects %s returned from a reserved folder create", async (_case, response) => {
+    resetSdk();
+    sdk.createResponse = response;
+
+    await expect(adapterFor().create({
+      connection: connection(),
+      id: "reserved-1",
+      parentId: "year-1",
+      name: "August",
+      appProperties: { a1v: "1", a1i: "installation-1", a1g: "generation-1", a1k: "motion-month", a1p: "2026/08" },
+    }, signal)).rejects.toMatchObject({
+      name: "DriveFolderExactIdIntegrityError",
+      code: "DRIVE_FOLDER_EXACT_ID_INTEGRITY",
+      message: "Google Drive folder exact-ID integrity check failed",
+    });
+  });
+
   it("maps a rejected page token without exposing the provider message", async () => {
     resetSdk();
     sdk.listResponse = providerFailure(400, "badRequest", "page token=secret-token is invalid");

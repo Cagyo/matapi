@@ -47,6 +47,16 @@ export class DriveFolderPageTokenRejectedError extends Error {
   }
 }
 
+/** Exact-ID operations must not accept a provider response for another folder. */
+export class DriveFolderExactIdIntegrityError extends Error {
+  readonly code = "DRIVE_FOLDER_EXACT_ID_INTEGRITY" as const;
+
+  constructor() {
+    super("Google Drive folder exact-ID integrity check failed");
+    this.name = "DriveFolderExactIdIntegrityError";
+  }
+}
+
 /** Provider-neutral exact-ID boundary for private motion date folders. */
 export interface DriveFolderPort {
   generateId(connection: DriveConnection, signal: AbortSignal): Promise<string>;

@@ -10,6 +10,7 @@ import {
   type DriveFolderMetadata,
   type DriveFolderPage,
   type DriveFolderPort,
+  DriveFolderExactIdIntegrityError,
   DriveFolderPageTokenRejectedError,
 } from "../../application/ports/drive-folder.port";
 import type { DriveConnection } from "../../domain/drive-connection.entity";
@@ -39,6 +40,7 @@ export class GoogleDriveFolderAdapter implements DriveFolderPort {
     signal: AbortSignal,
   ): Promise<DriveFolderMetadata | null> {
     const file = await this.callDrive(() => this.forConnection(connection).then((gateway) => gateway.loadFolder(folderId, signal)));
+    if (file !== null) assertExactFolderId(file, folderId);
     return file === null ? null : toFolderMetadata(file);
   }
 
@@ -80,6 +82,7 @@ export class GoogleDriveFolderAdapter implements DriveFolderPort {
       appProperties: input.appProperties,
       signal,
     })));
+    assertExactFolderId(file, input.id);
     return toFolderMetadata(file);
   }
 
@@ -104,6 +107,10 @@ export class GoogleDriveFolderAdapter implements DriveFolderPort {
       throw mapGoogleDriveFailure(error);
     }
   }
+}
+
+function assertExactFolderId(file: GoogleDriveFolder, expectedId: string): void {
+  if (file.id !== expectedId) throw new DriveFolderExactIdIntegrityError();
 }
 
 function toFolderMetadata(file: GoogleDriveFolder): DriveFolderMetadata {
