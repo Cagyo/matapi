@@ -294,6 +294,11 @@ export const archiveArtifacts = sqliteTable(
     sourceFingerprint: text('source_fingerprint').notNull(),
     state: text('state').notNull(),
     currentVerifiedAttemptId: text('current_verified_attempt_id').references((): AnySQLiteColumn => driveObjectAttempts.id),
+    admissionState: text('admission_state').notNull().default('ready'),
+    motionDayPath: text('motion_day_path'),
+    admissionNextAt: integer('admission_next_at').notNull().default(0),
+    admissionErrorCode: text('admission_error_code'),
+    admissionRevision: integer('admission_revision').notNull().default(0),
     createdAt: integer('created_at').notNull(),
     updatedAt: integer('updated_at').notNull(),
     localDeletedAt: integer('local_deleted_at'),
@@ -308,6 +313,55 @@ export const archiveArtifacts = sqliteTable(
     check('archive_artifacts_revision_check', sql`${table.revision} >= 0`),
     check('archive_artifacts_size_check', sql`${table.size} >= 0`),
     check('archive_artifacts_verified_check', sql`(${table.state} = 'verified' and ${table.currentVerifiedAttemptId} is not null) or (${table.state} != 'verified' and ${table.currentVerifiedAttemptId} is null)`),
+  ],
+);
+
+export const driveMotionFolderReservations = sqliteTable(
+  'drive_motion_folder_reservations',
+  {
+    id: text('id').primaryKey(),
+    installationId: text('installation_id').notNull(),
+    generationId: text('generation_id').notNull(),
+    normalizedPath: text('normalized_path').notNull(),
+    level: text('level').notNull(),
+    segmentName: text('segment_name').notNull(),
+    folderId: text('folder_id').notNull(),
+    parentFolderId: text('parent_folder_id').notNull(),
+    state: text('state').notNull(),
+    currentSlot: integer('current_slot'),
+    revision: integer('revision').notNull(),
+    errorCode: text('error_code'),
+    createdAt: integer('created_at').notNull(),
+    updatedAt: integer('updated_at').notNull(),
+    verifiedAt: integer('verified_at'),
+  },
+  (table) => [
+    uniqueIndex('uq_drive_motion_folder_current_path')
+      .on(table.generationId, table.normalizedPath)
+      .where(sql`${table.currentSlot} = 1`),
+    uniqueIndex('uq_drive_motion_folder_id').on(table.folderId),
+    check('drive_motion_folder_state_check', sql`${table.state} in ('reserved','verified','missing','detached','conflict','superseded')`),
+    check('drive_motion_folder_slot_check', sql`${table.currentSlot} is null or ${table.currentSlot} = 1`),
+  ],
+);
+
+export const archiveProviderState = sqliteTable(
+  'archive_provider_state',
+  {
+    id: integer('id').primaryKey(),
+    revision: integer('revision').notNull(),
+    generationId: text('generation_id'),
+    operationClass: text('operation_class'),
+    failureClass: text('failure_class'),
+    failureStreak: integer('failure_streak').notNull().default(0),
+    cooldownUntil: integer('cooldown_until'),
+    blockReason: text('block_reason'),
+    updatedAt: integer('updated_at').notNull(),
+  },
+  (table) => [
+    check('archive_provider_state_singleton_check', sql`${table.id} = 1`),
+    check('archive_provider_state_revision_check', sql`${table.revision} >= 0`),
+    check('archive_provider_state_failure_streak_check', sql`${table.failureStreak} >= 0`),
   ],
 );
 
@@ -382,6 +436,8 @@ export const archiveSchedulerState = sqliteTable(
     lastUploadSuccessMs: integer('last_upload_success_ms'),
     lastReconcileSuccessMs: integer('last_reconcile_success_ms'),
     lastCleanupSuccessMs: integer('last_cleanup_success_ms'),
+    lastMotionTraversalSuccessMs: integer('last_motion_traversal_success_ms'),
+    lastArtifactRegistrationSuccessMs: integer('last_artifact_registration_success_ms'),
   },
   (table) => [
     check('archive_scheduler_state_singleton_check', sql`${table.id} = 1`),

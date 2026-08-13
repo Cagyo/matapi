@@ -29,7 +29,18 @@ export interface ArchiveArtifactSnapshot extends RegisterArchiveArtifact {
   updatedAtMs: number;
   localDeletedAtMs: number | null;
   revision: number;
+  admission: {
+    state: 'ready';
+    motionDayPath: string | null;
+    nextAttemptMs: number;
+    errorCode: string | null;
+    revision: number;
+  };
 }
+
+type ArchiveArtifactRestoreSnapshot = Omit<ArchiveArtifactSnapshot, 'admission'> & {
+  admission?: ArchiveArtifactSnapshot['admission'];
+};
 
 export class ArchiveArtifact implements ArchiveArtifactSnapshot {
   readonly id!: string;
@@ -49,10 +60,12 @@ export class ArchiveArtifact implements ArchiveArtifactSnapshot {
   readonly updatedAtMs!: number;
   readonly localDeletedAtMs!: number | null;
   readonly revision!: number;
+  readonly admission!: ArchiveArtifactSnapshot['admission'];
 
-  private constructor(snapshot: ArchiveArtifactSnapshot) {
-    validateArtifactSnapshot(snapshot);
-    Object.assign(this, snapshot);
+  private constructor(snapshot: ArchiveArtifactRestoreSnapshot) {
+    const normalized = normalizeArtifactSnapshot(snapshot);
+    validateArtifactSnapshot(normalized);
+    Object.assign(this, normalized);
     Object.freeze(this);
   }
 
@@ -69,10 +82,17 @@ export class ArchiveArtifact implements ArchiveArtifactSnapshot {
       updatedAtMs: identity.nowMs,
       localDeletedAtMs: null,
       revision: 0,
+      admission: {
+        state: 'ready' as const,
+        motionDayPath: null,
+        nextAttemptMs: 0,
+        errorCode: null,
+        revision: 0,
+      },
     });
   }
 
-  static restore(snapshot: ArchiveArtifactSnapshot): ArchiveArtifact {
+  static restore(snapshot: ArchiveArtifactRestoreSnapshot): ArchiveArtifact {
     return new ArchiveArtifact(snapshot);
   }
 
@@ -219,6 +239,30 @@ function validateArtifactSnapshot(snapshot: ArchiveArtifactSnapshot): void {
     );
   }
   requireNonNegativeInteger(snapshot.revision, "Archive revision");
+  if (snapshot.admission.state !== 'ready') {
+    throw new DriveObjectConflictError('Archive admission state is malformed');
+  }
+  if (snapshot.admission.motionDayPath !== null) {
+    requireText(snapshot.admission.motionDayPath, 'Archive motion day path');
+  }
+  requireNonNegativeInteger(snapshot.admission.nextAttemptMs, 'Archive admission next attempt');
+  if (snapshot.admission.errorCode !== null) {
+    requireText(snapshot.admission.errorCode, 'Archive admission error code');
+  }
+  requireNonNegativeInteger(snapshot.admission.revision, 'Archive admission revision');
+}
+
+function normalizeArtifactSnapshot(snapshot: ArchiveArtifactRestoreSnapshot): ArchiveArtifactSnapshot {
+  return {
+    ...snapshot,
+    admission: snapshot.admission ?? {
+      state: 'ready',
+      motionDayPath: null,
+      nextAttemptMs: 0,
+      errorCode: null,
+      revision: 0,
+    },
+  };
 }
 
 function isArtifactState(value: unknown): value is ArchiveArtifactState {
