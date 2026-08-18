@@ -1,0 +1,1 @@
+gpiodetect (libgpiod) v2.1.3

@@ -1,0 +1,4 @@
+gpiochip0 - 54 lines:
+	line   0:	"ID_SDA"        	input
+	line  17:	"GPIO17"        	input consumer="home-worker-17"
+	line  18:	"GPIO18"        	input

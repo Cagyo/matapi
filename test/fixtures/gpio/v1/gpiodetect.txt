@@ -1,0 +1,2 @@
+gpiochip0 [pinctrl-bcm2835] (54 lines)
+gpiochip1 [raspberrypi-exp-gpio] (8 lines)
