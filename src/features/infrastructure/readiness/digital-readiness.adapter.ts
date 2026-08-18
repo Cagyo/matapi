@@ -81,7 +81,7 @@ export class DigitalReadinessAdapter implements FeatureReadinessPort {
  * divergence here would pass readiness on a chip the sensors then fail on.
  */
 function knownChipName(gpiodetectStdout: string): string | null {
-  const chips: Array<{ name: string; label: string }> = [];
+  const chips: { name: string; label: string }[] = [];
   for (const row of gpiodetectStdout.split('\n')) {
     const match = /^(\S+)\s+\[([^\]]+)\]/.exec(row.trim());
     if (match) chips.push({ name: match[1], label: match[2] });
