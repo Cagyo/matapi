@@ -8,15 +8,53 @@ import { UartReadinessAdapter } from '../../../src/features/infrastructure/readi
 import { ZigbeeReadinessAdapter } from '../../../src/features/infrastructure/readiness/zigbee-readiness.adapter';
 
 describe('feature readiness adapters', () => {
-  it('runs digital checks through fixed, bounded command and socket seams', async () => {
-    const execFile = vi.fn().mockResolvedValue({ stdout: '', stderr: '' });
-    const connect = vi.fn().mockResolvedValue(undefined);
-    const adapter = new DigitalReadinessAdapter({ execFile, connect, host: '127.0.0.1', port: 8888 });
-
+  it('digital readiness passes when gpiod tools, chip, group and permissions hold and pigpiod is absent', async () => {
+    const execFile = vi.fn(async (executable: string, args: readonly string[]) => {
+      if (executable === '/usr/bin/which') return { stdout: `/usr/bin/${args[0]}\n`, stderr: '' };
+      if (executable === '/usr/bin/gpiodetect') {
+        return { stdout: 'gpiochip0 [pinctrl-rp1] (54 lines)\n', stderr: '' };
+      }
+      if (executable === '/usr/bin/id') return { stdout: 'homeworker gpio video\n', stderr: '' };
+      if (executable === '/usr/bin/gpioinfo') return { stdout: 'gpiochip0 - 54 lines:\n', stderr: '' };
+      if (executable === '/bin/systemctl') throw new Error('inactive'); // pigpiod must NOT be active
+      throw new Error(`unexpected exec: ${executable}`);
+    });
+    const adapter = new DigitalReadinessAdapter({ execFile });
     await expect(adapter.verify('digital')).resolves.toEqual({ ready: true, restartScope: 'worker' });
-    expect(execFile).toHaveBeenNthCalledWith(1, '/usr/bin/which', ['pigpiod'], expect.objectContaining({ timeout: 5_000, maxBuffer: 4_096, env: { PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' } }));
-    expect(execFile).toHaveBeenNthCalledWith(2, '/bin/systemctl', ['is-active', 'pigpiod.service'], expect.anything());
-    expect(connect).toHaveBeenCalledWith('127.0.0.1', 8888);
+  });
+
+  it('digital readiness fails when the worker lacks the gpio group', async () => {
+    const execFile = vi.fn(async (executable: string, args: readonly string[]) => {
+      if (executable === '/usr/bin/which') return { stdout: `/usr/bin/${args[0]}\n`, stderr: '' };
+      if (executable === '/usr/bin/gpiodetect') {
+        return { stdout: 'gpiochip0 [pinctrl-bcm2711] (58 lines)\n', stderr: '' };
+      }
+      if (executable === '/usr/bin/id') return { stdout: 'homeworker video\n', stderr: '' };
+      return { stdout: '', stderr: '' };
+    });
+    const adapter = new DigitalReadinessAdapter({ execFile });
+    await expect(adapter.verify('digital')).resolves.toEqual({
+      ready: false,
+      failureCode: 'application-verification-failed',
+    });
+  });
+
+  it('digital readiness fails while pigpiod is still active — it fights gpiod invisibly', async () => {
+    const execFile = vi.fn(async (executable: string, args: readonly string[]) => {
+      if (executable === '/usr/bin/which') return { stdout: `/usr/bin/${args[0]}\n`, stderr: '' };
+      if (executable === '/usr/bin/gpiodetect') {
+        return { stdout: 'gpiochip0 [pinctrl-bcm2835] (54 lines)\n', stderr: '' };
+      }
+      if (executable === '/usr/bin/id') return { stdout: 'homeworker gpio\n', stderr: '' };
+      if (executable === '/usr/bin/gpioinfo') return { stdout: 'gpiochip0 - 54 lines:\n', stderr: '' };
+      if (executable === '/bin/systemctl') return { stdout: 'active\n', stderr: '' };
+      throw new Error(`unexpected exec: ${executable}`);
+    });
+    const adapter = new DigitalReadinessAdapter({ execFile });
+    await expect(adapter.verify('digital')).resolves.toEqual({
+      ready: false,
+      failureCode: 'application-verification-failed',
+    });
   });
 
   it('maps a failed fixed command to the allowlisted application failure', async () => {
