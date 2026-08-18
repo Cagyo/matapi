@@ -1,7 +1,7 @@
 # Digital Readiness Probe — Fix the Pi 5 False Negative
 
 **Date:** 2026-08-18
-**Status:** Approved design, not yet implemented
+**Status:** Implemented 2026-08-18; on-device verification pending
 **Affects:** `src/features/infrastructure/readiness/digital-readiness.adapter.ts`, `src/features/infrastructure/readiness/readiness-seams.ts`, `test/features/infrastructure/feature-readiness.adapters.test.ts`
 
 ## Dependencies
