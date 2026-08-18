@@ -30,7 +30,8 @@ import { DrizzleSensorLogRepository } from './infrastructure/drizzle-sensor-log.
 import { DrizzleSensorLogExportReader } from './infrastructure/drizzle-sensor-log-export.reader';
 import { DrizzleSensorQuery } from './infrastructure/drizzle-sensor.query';
 import { DrizzleSensorRepository } from './infrastructure/drizzle-sensor.repository';
-import { PigpioGateway } from './infrastructure/pigpio.gateway';
+import { GPIO_BACKEND, type GpioBackendPort } from './infrastructure/gpio-backend.port';
+import { LibgpiodCliBackend } from './infrastructure/libgpiod-cli.backend';
 import { MqttConnectionPool } from './infrastructure/mqtt-connection.pool';
 import { SensorResourcesLifecycleAdapter } from './infrastructure/sensor-resources-lifecycle.adapter';
 import { SensorDriverFactoryProvider } from './infrastructure/sensor-driver.factory';
@@ -69,7 +70,8 @@ const devControllers =
     ListSensorHistoryTargetsUseCase,
     SimulateSensorUseCase,
     ReadSensorLogHistoryUseCase,
-    PigpioGateway,
+    LibgpiodCliBackend,
+    { provide: GPIO_BACKEND, useExisting: LibgpiodCliBackend },
     MqttConnectionPool,
     SensorResourcesLifecycleAdapter,
     { provide: CLOCK, useClass: SystemClockAdapter },
@@ -81,12 +83,12 @@ const devControllers =
     {
       provide: SENSOR_DRIVER_FACTORY,
       useFactory: (
-        pigpio: PigpioGateway,
+        gpioBackend: GpioBackendPort,
         sensorLogs: SensorLogRepositoryPort,
         mqttPool: MqttConnectionPool,
       ): SensorDriverFactory =>
-        SensorDriverFactoryProvider.build({ pigpio, sensorLogs, mqttPool }),
-      inject: [PigpioGateway, SENSOR_LOG_REPOSITORY, MqttConnectionPool],
+        SensorDriverFactoryProvider.build({ gpioBackend, sensorLogs, mqttPool }),
+      inject: [GPIO_BACKEND, SENSOR_LOG_REPOSITORY, MqttConnectionPool],
     },
   ],
   exports: [
@@ -100,7 +102,7 @@ const devControllers =
     ListSensorHistoryTargetsUseCase,
     SimulateSensorUseCase,
     ReadSensorLogHistoryUseCase,
-    PigpioGateway,
+    GPIO_BACKEND,
     MqttConnectionPool,
     SENSOR_REPOSITORY,
     SENSOR_LOG_REPOSITORY,

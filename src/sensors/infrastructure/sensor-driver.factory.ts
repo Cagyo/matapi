@@ -8,13 +8,13 @@ import { MockCameraAdapter } from './mock-camera.adapter';
 import { MockGpioAdapter } from './mock-gpio.adapter';
 import { MockMqttAdapter } from './mock-mqtt.adapter';
 import { MockUartCo2Adapter } from './mock-uart-co2.adapter';
+import { GpioBackendPort } from './gpio-backend.port';
 import { MqttConnectionPool } from './mqtt-connection.pool';
 import { MqttSensorAdapter } from './mqtt-sensor.adapter';
-import { PigpioGateway } from './pigpio.gateway';
 import { UartCo2Adapter } from './uart-co2.adapter';
 
 export interface SensorDriverFactoryDeps {
-  pigpio: PigpioGateway;
+  gpioBackend: GpioBackendPort;
   sensorLogs: SensorLogRepositoryPort;
   mqttPool: MqttConnectionPool;
 }
@@ -27,7 +27,7 @@ export interface SensorDriverFactoryDeps {
  */
 @Injectable()
 export class SensorDriverFactoryProvider {
-  static build({ pigpio, sensorLogs, mqttPool }: SensorDriverFactoryDeps): SensorDriverFactory {
+  static build({ gpioBackend, sensorLogs, mqttPool }: SensorDriverFactoryDeps): SensorDriverFactory {
     const isDev =
       process.env.NODE_ENV === 'development' ||
       process.env.NODE_ENV === 'test' ||
@@ -37,7 +37,7 @@ export class SensorDriverFactoryProvider {
         case 'digital':
           return isDev
             ? new MockGpioAdapter(sensorLogs)
-            : new DigitalGpioAdapter(pigpio, sensorLogs);
+            : new DigitalGpioAdapter(gpioBackend, sensorLogs);
         case 'uart':
           return isDev
             ? new MockUartCo2Adapter(sensorLogs)

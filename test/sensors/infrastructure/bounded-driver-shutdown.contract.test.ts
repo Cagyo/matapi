@@ -2,7 +2,11 @@ import { describe, expect, it, vi } from 'vitest';
 import { BaseUartCo2Adapter, Co2Source, UartCo2Defaults } from '../../../src/sensors/infrastructure/base-uart-co2.adapter';
 import { CameraSensorAdapter } from '../../../src/sensors/infrastructure/camera-sensor.adapter';
 import { DigitalGpioAdapter } from '../../../src/sensors/infrastructure/digital-gpio.adapter';
-import { PigpioGateway, PigpioGpio } from '../../../src/sensors/infrastructure/pigpio.gateway';
+import {
+  GpioBackendPort,
+  GpioBackendState,
+  GpioLine,
+} from '../../../src/sensors/infrastructure/gpio-backend.port';
 import { SensorConfig } from '../../../src/sensors/domain/sensor';
 
 const digitalConfig: SensorConfig = {
@@ -62,23 +66,22 @@ class TestUartAdapter extends BaseUartCo2Adapter {
 
 describe('bounded SensorDriver shutdown contract', () => {
   it('makes GPIO inert and completes after cancellation when endNotify hangs', async () => {
-    const gpio = {
-      modeSet: vi.fn().mockResolvedValue(undefined),
-      pullUpDown: vi.fn().mockResolvedValue(undefined),
-      read: vi.fn().mockResolvedValue(1),
-      glitchSet: vi.fn().mockResolvedValue(undefined),
-      notify: vi.fn(),
-      endNotify: vi.fn(() => new Promise<void>(() => undefined)),
-    } as unknown as PigpioGpio;
+    const line: GpioLine = {
+      configure: vi.fn().mockResolvedValue(undefined),
+      read: vi.fn(async (): Promise<0 | 1> => 1),
+      watch: vi.fn().mockResolvedValue(undefined),
+      unwatch: vi.fn(() => new Promise<void>(() => undefined)),
+    };
     const unsubscribe = vi.fn();
-    const gateway = {
-      isConnected: vi.fn(() => true),
+    const backend: GpioBackendPort = {
       connect: vi.fn().mockResolvedValue(undefined),
-      gpio: vi.fn(() => gpio),
-      connectionState: vi.fn(() => ({ connected: true, generation: 1 })),
-      onConnectionState: vi.fn(() => unsubscribe),
-    } as unknown as PigpioGateway;
-    const adapter = new DigitalGpioAdapter(gateway);
+      isAvailable: vi.fn(() => true),
+      state: vi.fn((): GpioBackendState => ({ available: true, generation: 1 })),
+      onStateChange: vi.fn(() => unsubscribe),
+      line: vi.fn(() => line),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    const adapter = new DigitalGpioAdapter(backend);
     await adapter.init(digitalConfig);
     const controller = new AbortController();
 
@@ -90,33 +93,32 @@ describe('bounded SensorDriver shutdown contract', () => {
   });
 
   it('completes after cancellation when a GPIO rebind is still hanging', async () => {
-    const firstGpio = {
-      modeSet: vi.fn().mockResolvedValue(undefined),
-      pullUpDown: vi.fn().mockResolvedValue(undefined),
-      read: vi.fn().mockResolvedValue(1),
-      glitchSet: vi.fn().mockResolvedValue(undefined),
-      notify: vi.fn(),
-      endNotify: vi.fn().mockResolvedValue(undefined),
-    } as unknown as PigpioGpio;
-    const secondGpio = {
-      ...firstGpio,
-      modeSet: vi.fn(() => new Promise<void>(() => undefined)),
-    } as unknown as PigpioGpio;
-    let onConnectionState: ((state: { connected: boolean; generation: number }) => void) | undefined;
-    const gateway = {
-      isConnected: vi.fn(() => true),
+    const firstLine: GpioLine = {
+      configure: vi.fn().mockResolvedValue(undefined),
+      read: vi.fn(async (): Promise<0 | 1> => 1),
+      watch: vi.fn().mockResolvedValue(undefined),
+      unwatch: vi.fn().mockResolvedValue(undefined),
+    };
+    const secondLine: GpioLine = {
+      ...firstLine,
+      configure: vi.fn(() => new Promise<void>(() => undefined)),
+    };
+    let onStateChange: ((state: GpioBackendState) => void) | undefined;
+    const backend: GpioBackendPort = {
       connect: vi.fn().mockResolvedValue(undefined),
-      gpio: vi.fn().mockReturnValueOnce(firstGpio).mockReturnValue(secondGpio),
-      connectionState: vi.fn(() => ({ connected: true, generation: 1 })),
-      onConnectionState: vi.fn((listener) => {
-        onConnectionState = listener;
+      isAvailable: vi.fn(() => true),
+      state: vi.fn((): GpioBackendState => ({ available: true, generation: 1 })),
+      onStateChange: vi.fn((listener: (state: GpioBackendState) => void) => {
+        onStateChange = listener;
         return vi.fn();
       }),
-    } as unknown as PigpioGateway;
-    const adapter = new DigitalGpioAdapter(gateway);
+      line: vi.fn().mockReturnValueOnce(firstLine).mockReturnValue(secondLine),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    const adapter = new DigitalGpioAdapter(backend);
     await adapter.init(digitalConfig);
-    onConnectionState?.({ connected: false, generation: 1 });
-    onConnectionState?.({ connected: true, generation: 2 });
+    onStateChange?.({ available: false, generation: 1 });
+    onStateChange?.({ available: true, generation: 2 });
     await Promise.resolve();
     const controller = new AbortController();
 

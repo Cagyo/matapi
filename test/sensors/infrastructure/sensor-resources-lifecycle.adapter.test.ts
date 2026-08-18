@@ -127,7 +127,7 @@ describe('SensorResourcesLifecycleAdapter', () => {
 
     await expect(lifecycle.onModuleDestroy()).resolves.toBeUndefined();
 
-    expect(warn).toHaveBeenCalledWith('Pigpio gateway close failed');
+    expect(warn).toHaveBeenCalledWith('GPIO backend close failed');
     expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('secret'));
   });
 

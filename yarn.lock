@@ -4374,7 +4374,6 @@ __metadata:
     google-auth-library: "npm:^10.9.1"
     grammy: "npm:^1.34.0"
     mqtt: "npm:^5"
-    pigpio-client: "npm:^1.5.2"
     prettier: "npm:^3.4.2"
     reflect-metadata: "npm:^0.2.2"
     rxjs: "npm:^7.8.1"
@@ -5506,13 +5505,6 @@ __metadata:
   version: 4.0.4
   resolution: "picomatch@npm:4.0.4"
   checksum: 10c0/e2c6023372cc7b5764719a5ffb9da0f8e781212fa7ca4bd0562db929df8e117460f00dff3cb7509dacfc06b86de924b247f504d0ce1806a37fac4633081466b0
-  languageName: node
-  linkType: hard
-
-"pigpio-client@npm:^1.5.2":
-  version: 1.5.2
-  resolution: "pigpio-client@npm:1.5.2"
-  checksum: 10c0/a0b073dee68197ed6e9cfde0c52bd9cfa507eeb542052dff85c3a41593be1286e7d7f6529386773b23505578630c6e0a57febea02260232143eb0cbaf7133744
   languageName: node
   linkType: hard
 
