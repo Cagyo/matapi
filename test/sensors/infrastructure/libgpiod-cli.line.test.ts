@@ -5,11 +5,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   LibgpiodCliLine,
   LineContext,
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   GpioMonitorDownError,
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   GpioLineTerminalError,
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   MONITOR_LIVENESS_THRESHOLD_MS,
 } from '../../../src/sensors/infrastructure/libgpiod-cli.line';
 import { syntaxFor } from '../../../src/sensors/infrastructure/libgpiod-cli.syntax';
@@ -280,5 +277,97 @@ describe('LibgpiodCliLine — respawn and reconciliation', () => {
       expect((context.spawn as ReturnType<typeof vi.fn>).mock.calls.length).toBe(before + 1);
     }
     expect(spawned.length).toBeGreaterThanOrEqual(8);
+  });
+});
+
+describe('LibgpiodCliLine — failure classification and liveness', () => {
+  it('EBUSY with a sweepable orphan is transient: sweep, then retry rung 1', async () => {
+    vi.useFakeTimers();
+    const { line, sweepOrphans, gpiogetResults, context } = makeHarness();
+    sweepOrphans.mockResolvedValueOnce(1); // sweep found and killed our orphan
+    await line.configure({ bias: 'up', debounceUs: 0 });
+    gpiogetResults.push(new Error('gpioget: error reading GPIO: Device or resource busy'));
+
+    await line.watch(() => undefined); // resolves into the ladder
+
+    expect(sweepOrphans).toHaveBeenCalledWith(17);
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(context.spawn).toHaveBeenCalledTimes(1); // retry spawned after the sweep
+  });
+
+  it('EBUSY with a foreign consumer retries on the slow ladder and names the holder', async () => {
+    vi.useFakeTimers();
+    const { line, gpiogetResults, gpioinfoStdout, context, sweepOrphans } = makeHarness();
+    sweepOrphans.mockResolvedValue(0); // nothing of ours to sweep
+    gpioinfoStdout.value = V1_INFO_HELD; // a foreign process holds line 17
+    await line.configure({ bias: 'up', debounceUs: 0 });
+    gpiogetResults.push(new Error('Device or resource busy'));
+
+    await line.watch(() => undefined);
+
+    // Fast ladder must NOT fire; slow ladder must.
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(context.spawn).not.toHaveBeenCalled();
+    gpiogetResults.push(new Error('Device or resource busy'));
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect((context.execFile as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([exe]) => (exe as string).endsWith('gpioget'),
+    ).length).toBe(2);
+
+    // The holder's name reaches the operator through read()'s failure...
+    // FOREIGN_BUSY_RETRY_MS === MONITOR_LIVENESS_THRESHOLD_MS (both 60s), so
+    // this advance lands exactly on the next scheduled retry; the foreign
+    // consumer is still holding the line, so its gpioget still fails too.
+    gpiogetResults.push(new Error('Device or resource busy'));
+    await vi.advanceTimersByTimeAsync(MONITOR_LIVENESS_THRESHOLD_MS);
+    await expect(line.read()).rejects.toThrow(/held by "gpiomon"/);
+  });
+
+  it('escalates ENOENT/EACCES on the chip to the backend and keeps retrying quietly', async () => {
+    vi.useFakeTimers();
+    const { line, gpiogetResults, onChipError } = makeHarness();
+    await line.configure({ bias: 'up', debounceUs: 0 });
+    gpiogetResults.push(new Error('gpioget: cannot open /dev/gpiochip0: Permission denied'));
+
+    await line.watch(() => undefined);
+
+    expect(onChipError).toHaveBeenCalledTimes(1);
+  });
+
+  it('config-invalid is terminal: watch rejects and read rethrows', async () => {
+    const { line, gpiogetResults } = makeHarness();
+    await line.configure({ bias: 'up', debounceUs: 0 });
+    gpiogetResults.push(new Error('gpioget: invalid bias: pull-sideways'));
+
+    await expect(line.watch(() => undefined)).rejects.toThrow(GpioLineTerminalError);
+    await expect(line.read()).rejects.toThrow(GpioLineTerminalError);
+  });
+
+  it('a quiet but healthy monitor serves cache indefinitely (liveness, not level age)', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { line } = makeHarness();
+    await line.configure({ bias: 'up', debounceUs: 0 });
+    await line.watch(() => undefined); // seed read = 1, then silence
+
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000); // a silent day
+    await expect(line.read()).resolves.toBe(1);
+  });
+
+  it('a downed monitor serves cache inside the threshold and throws past it', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { line, spawned, gpiogetResults, gpioinfoStdout } = makeHarness();
+    await line.configure({ bias: 'up', debounceUs: 0 });
+    await line.watch(() => undefined);
+
+    gpioinfoStdout.value = V1_INFO_FREE; // respawns can no longer attach
+    gpiogetResults.push(new Error('Device or resource busy')); // reconcile fails too
+    spawned[0].exit(1);
+    await vi.advanceTimersByTimeAsync(1_000); // enter the ladder, still down
+
+    await expect(line.read()).resolves.toBe(1); // inside threshold: cache
+    await vi.advanceTimersByTimeAsync(MONITOR_LIVENESS_THRESHOLD_MS);
+    await expect(line.read()).rejects.toThrow(GpioMonitorDownError);
   });
 });

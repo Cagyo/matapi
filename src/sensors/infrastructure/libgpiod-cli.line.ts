@@ -338,9 +338,46 @@ export class LibgpiodCliLine implements GpioLine {
   }
 
   private async classifyFailure(error: Error): Promise<SpawnOutcome> {
-    // Full classification table lands in Task 7; until then everything retries.
-    this.logger.warn(`gpio ${this.offset} spawn failure: ${error.message}`);
+    const message = error.message;
+
+    if (/EBUSY|resource busy/iu.test(message)) {
+      const swept = await this.context.sweepOrphans(this.offset).catch(() => 0);
+      if (swept > 0) {
+        this.logger.warn(`gpio ${this.offset}: EBUSY from our own orphan; swept ${swept}, retrying`);
+        return { kind: 'transient' };
+      }
+      // A failure class pigpiod's shared model hid entirely: another gpiomon,
+      // a dtoverlay, gpiozero. The name must reach the operator.
+      this.foreignConsumer = await this.currentConsumer();
+      this.logger.warn(
+        `gpio ${this.offset}: line held by foreign consumer "${this.foreignConsumer ?? 'unknown'}"; retrying every ${FOREIGN_BUSY_RETRY_MS / 1000}s`,
+      );
+      return { kind: 'foreign-busy' };
+    }
+
+    if (/ENOENT|EACCES|No such file|Permission denied/u.test(message)) {
+      this.context.onChipError(error);
+      return { kind: 'transient' }; // backend availability machinery owns recovery
+    }
+
+    if (/invalid|unrecognized option|bad argument/iu.test(message)) {
+      return { kind: 'terminal', detail: `gpio ${this.offset}: ${message}` };
+    }
+
+    this.logger.warn(`gpio ${this.offset}: transient failure: ${message}`);
     return { kind: 'transient' };
+  }
+
+  private async currentConsumer(): Promise<string | null> {
+    try {
+      const { stdout } = await this.context.execFile(
+        this.context.tools.gpioinfo,
+        this.context.syntax.gpioinfoArgs(this.context.chip),
+      );
+      return this.context.syntax.consumerOf(stdout, this.offset);
+    } catch {
+      return null;
+    }
   }
 
   private async gpioget(): Promise<0 | 1> {
