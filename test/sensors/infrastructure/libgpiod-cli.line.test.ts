@@ -164,3 +164,61 @@ describe('LibgpiodCliLine — configure and unmonitored read', () => {
     await expect(line.read()).rejects.toThrow('boom');
   });
 });
+
+describe('LibgpiodCliLine — watch/attach/events/unwatch', () => {
+  it('spawns stdbuf -oL gpiomon and confirms attach via gpioinfo consumer + live child', async () => {
+    const { line, context, spawned } = makeHarness();
+    await line.configure({ bias: 'up', debounceUs: 0 });
+    const levels: (0 | 1)[] = [];
+
+    await line.watch((level) => levels.push(level));
+
+    expect(context.spawn).toHaveBeenCalledWith(
+      '/usr/bin/stdbuf',
+      ['-oL', '/usr/bin/gpiomon', '--bias=pull-up', '--format=%e', 'gpiochip0', '17'],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    expect(spawned).toHaveLength(1);
+    // No synthesized initial level on an immediately-attached first watch.
+    expect(levels).toEqual([]);
+  });
+
+  it('delivers parsed event levels through the watch callback and serves them from cache', async () => {
+    const { line, spawned } = makeHarness();
+    await line.configure({ bias: 'up', debounceUs: 0 });
+    const levels: (0 | 1)[] = [];
+    await line.watch((level) => levels.push(level));
+
+    spawned[0].emitEvent('0');
+    spawned[0].emitEvent('1');
+    spawned[0].emitEvent('not-an-event');
+
+    expect(levels).toEqual([0, 1]);
+    await expect(line.read()).resolves.toBe(1); // cached, no gpioget while monitored
+  });
+
+  it('unwatch kills the monitor and never respawns a deliberate kill', async () => {
+    vi.useFakeTimers();
+    const { line, spawned, context } = makeHarness();
+    await line.configure({ bias: 'up', debounceUs: 0 });
+    await line.watch(() => undefined);
+
+    await line.unwatch();
+
+    expect(spawned[0].signalsSent).toContain('SIGTERM');
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(context.spawn).toHaveBeenCalledTimes(1); // no respawn after the kill
+  });
+
+  it('read() after unwatch is a real gpioget again (poll queues behind the kill)', async () => {
+    const { line, gpiogetResults, execFile } = makeHarness();
+    await line.configure({ bias: 'up', debounceUs: 0 });
+    await line.watch(() => undefined);
+    await line.unwatch();
+    gpiogetResults.push({ stdout: '0\n' });
+
+    await expect(line.read()).resolves.toBe(0);
+    // seed read at watch + this one
+    expect(execFile.mock.calls.filter(([exe]) => exe.endsWith('gpioget'))).toHaveLength(2);
+  });
+});

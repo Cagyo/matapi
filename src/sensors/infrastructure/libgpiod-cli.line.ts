@@ -2,7 +2,6 @@
 import { Logger } from '@nestjs/common';
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
 import { GpioBias, GpioLine } from './gpio-backend.port';
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 import { GPIOMON_CONSUMER_PREFIX, GpiodCliSyntax } from './libgpiod-cli.syntax';
 
 /** Mirrors PIGPIO_RECONNECT_DELAYS_MS; alarm lines never stop retrying. */
@@ -15,12 +14,16 @@ export const FOREIGN_BUSY_RETRY_MS = 60_000;
  * monitor liveness, never level age — see gpio-backend.port.ts.
  */
 export const MONITOR_LIVENESS_THRESHOLD_MS = 60_000;
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 const ATTACH_POLL_ATTEMPTS = 10;
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 const ATTACH_POLL_INTERVAL_MS = 50;
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 const KILL_ESCALATION_MS = 2_000;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolveDelay) => {
+    const timer = setTimeout(resolveDelay, ms);
+    timer.unref?.();
+  });
+}
 
 export type LineExecFile = (
   executable: string,
@@ -49,7 +52,6 @@ export interface LineContext {
 export class GpioLineTerminalError extends Error {}
 export class GpioMonitorDownError extends Error {}
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 type SpawnOutcome =
   | { kind: 'attached' }
   | { kind: 'stopped' }
@@ -118,13 +120,28 @@ export class LibgpiodCliLine implements GpioLine {
   }
 
   watch(onLevel: (level: 0 | 1) => void): Promise<void> {
-    // Implemented in Task 5.
-    return Promise.reject(new Error(`watch not implemented (offset ${this.offset}, cb ${typeof onLevel})`));
+    return this.enqueue(async () => {
+      if (this.terminalError) throw this.terminalError;
+      this.callback = onLevel;
+      if (this.desired === 'watching' && this.attached) return;
+      this.desired = 'watching';
+      this.attempt = 0;
+      this.downSince ??= this.context.now();
+
+      const outcome = await this.spawnAttempt({ pushReconcile: false });
+      if (outcome.kind === 'terminal') {
+        this.terminalError = new GpioLineTerminalError(outcome.detail);
+        throw this.terminalError;
+      }
+      // Transient failures enter the ladder and still resolve —
+      // resumeFromFlapping calls this as `void line.watch(...)`.
+      if (outcome.kind === 'transient') this.scheduleRespawn(false);
+      if (outcome.kind === 'foreign-busy') this.scheduleRespawn(true);
+    });
   }
 
   unwatch(): Promise<void> {
-    // Implemented in Task 5.
-    return Promise.resolve();
+    return this.enqueue(() => this.stopMonitor());
   }
 
   /** Backend shutdown hook. */
@@ -135,6 +152,195 @@ export class LibgpiodCliLine implements GpioLine {
   /** For the backend's orphan sweep: our live child must never be swept. */
   childPid(): number | undefined {
     return this.child?.pid ?? undefined;
+  }
+
+  private async spawnAttempt(options: { pushReconcile: boolean }): Promise<SpawnOutcome> {
+    if (this.desired !== 'watching') return { kind: 'stopped' };
+
+    // 1. Reconcile/seed read while the line is unheld — a transition during
+    //    the blind window still lands.
+    let level: 0 | 1;
+    try {
+      level = await this.gpioget();
+    } catch (error) {
+      return this.classifyFailure(error as Error);
+    }
+    this.cachedLevel = level;
+    if (options.pushReconcile) this.callback?.(level);
+
+    // 2. Spawn. stdbuf -oL because C stdio block-buffers into a pipe; an alarm
+    //    path must not rest on "gpiomon probably flushes".
+    const incarnation = ++this.incarnation;
+    const child = this.context.spawn(
+      this.context.tools.stdbuf,
+      [
+        '-oL',
+        this.context.tools.gpiomon,
+        ...this.context.syntax.gpiomonArgs(this.context.chip, this.offset, this.bias, this.debounceUs),
+      ],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    this.child = child;
+    this.wireChild(child, incarnation);
+
+    // 3. Confirm attach.
+    if (await this.confirmAttach(child)) {
+      this.attached = true;
+      this.downSince = null;
+      this.attempt = 0;
+      this.foreignConsumer = null;
+      return { kind: 'attached' };
+    }
+    const stderr = (this.stderrBuffers.get(incarnation) ?? '').trim();
+    this.stderrBuffers.delete(incarnation);
+    await this.disposeChild(child, incarnation);
+    return this.classifyFailure(new Error(stderr || 'gpiomon did not attach'));
+  }
+
+  private wireChild(child: ChildProcess, incarnation: number): void {
+    let pending = '';
+    child.stdout?.setEncoding('utf8');
+    child.stdout?.on('data', (chunk: string) => {
+      // Stale incarnations are discarded; residual buffered events from the
+      // CURRENT incarnation between 'exit' and 'close' are real and processed.
+      if (incarnation !== this.incarnation) return;
+      pending += chunk;
+      const rows = pending.split('\n');
+      pending = rows.pop() ?? '';
+      for (const row of rows) {
+        const level = this.context.syntax.parseGpiomonEvent(row);
+        if (level === null) continue;
+        this.cachedLevel = level;
+        this.callback?.(level);
+      }
+    });
+    child.stderr?.setEncoding('utf8');
+    child.stderr?.on('data', (chunk: string) => {
+      this.stderrBuffers.set(incarnation, (this.stderrBuffers.get(incarnation) ?? '') + chunk);
+    });
+    child.on('error', () => undefined); // surfaced via attach/exit classification
+    child.on('exit', () => {
+      if (incarnation !== this.incarnation || this.desired !== 'watching') return;
+      this.attached = false;
+      this.downSince = this.context.now();
+      // Wait for the stdout stream to flush and close before scheduling the
+      // reconcile read, so stale buffered edges can never land after it.
+      const stream = child.stdout;
+      const proceed = () => {
+        if (incarnation !== this.incarnation || this.desired !== 'watching') return;
+        this.incarnation += 1; // retire: later 'data' from this stream is discarded
+        this.stderrBuffers.delete(incarnation);
+        this.logger.warn(`gpiomon for offset ${this.offset} exited; scheduling respawn`);
+        this.scheduleRespawn(false);
+      };
+      if (stream && !stream.destroyed) stream.once('close', proceed);
+      else proceed();
+    });
+  }
+
+  private async confirmAttach(child: ChildProcess): Promise<boolean> {
+    const expectedConsumer =
+      this.context.syntax.major === 2 ? `${GPIOMON_CONSUMER_PREFIX}${this.offset}` : null;
+    for (let poll = 0; poll < ATTACH_POLL_ATTEMPTS; poll += 1) {
+      if (child.exitCode !== null || child.signalCode !== null) return false;
+      try {
+        const { stdout } = await this.context.execFile(
+          this.context.tools.gpioinfo,
+          this.context.syntax.gpioinfoArgs(this.context.chip),
+        );
+        const consumer = this.context.syntax.consumerOf(stdout, this.offset);
+        if (consumer !== null) {
+          if (expectedConsumer !== null && consumer !== expectedConsumer) {
+            // v2: unambiguous foreign holder — our child will die EBUSY.
+            this.foreignConsumer = consumer;
+            return false;
+          }
+          // v1: consumer is the fixed "gpiomon"; attach = consumer present AND
+          // our child alive (checked at loop top and again here).
+          if (child.exitCode === null && child.signalCode === null) return true;
+        }
+      } catch {
+        // gpioinfo hiccup — keep polling within the bounded window.
+      }
+      await delay(ATTACH_POLL_INTERVAL_MS);
+    }
+    return false;
+  }
+
+  private async stopMonitor(): Promise<void> {
+    this.desired = 'stopped';
+    this.callback = undefined;
+    if (this.respawnTimer) {
+      clearTimeout(this.respawnTimer);
+      this.respawnTimer = undefined;
+    }
+    const child = this.child;
+    this.child = undefined;
+    this.attached = false;
+    this.downSince = null;
+    this.attempt = 0;
+    this.incarnation += 1; // exit handler sees a stale incarnation: no respawn
+    if (child?.exitCode !== null || child?.signalCode !== null) return;
+    await this.killChild(child);
+  }
+
+  private killChild(child: ChildProcess): Promise<void> {
+    return new Promise<void>((resolveKill) => {
+      const escalation = setTimeout(() => {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          /* already gone */
+        }
+      }, KILL_ESCALATION_MS);
+      escalation.unref();
+      child.once('exit', () => {
+        clearTimeout(escalation);
+        resolveKill();
+      });
+      try {
+        child.kill('SIGTERM');
+      } catch {
+        clearTimeout(escalation);
+        resolveKill();
+      }
+    });
+  }
+
+  private async disposeChild(child: ChildProcess, incarnation: number): Promise<void> {
+    if (this.child === child) this.child = undefined;
+    if (incarnation === this.incarnation) this.incarnation += 1;
+    if (child.exitCode === null && child.signalCode === null) await this.killChild(child);
+  }
+
+  private scheduleRespawn(foreignBusy: boolean): void {
+    // Full ladder — Task 6's tests prove the reconcile/stale-discard ordering.
+    if (this.desired !== 'watching' || this.respawnTimer || this.terminalError) return;
+    const delayMs = foreignBusy
+      ? FOREIGN_BUSY_RETRY_MS
+      : LINE_RESPAWN_DELAYS_MS[Math.min(this.attempt, LINE_RESPAWN_DELAYS_MS.length - 1)];
+    this.attempt += 1;
+    this.respawnTimer = setTimeout(() => {
+      this.respawnTimer = undefined;
+      void this.enqueue(async () => {
+        if (this.desired !== 'watching' || this.attached) return;
+        const outcome = await this.spawnAttempt({ pushReconcile: true });
+        if (outcome.kind === 'terminal') {
+          this.terminalError = new GpioLineTerminalError(outcome.detail);
+          this.logger.error(outcome.detail);
+          return;
+        }
+        if (outcome.kind === 'transient') this.scheduleRespawn(false);
+        if (outcome.kind === 'foreign-busy') this.scheduleRespawn(true);
+      });
+    }, delayMs);
+    this.respawnTimer.unref();
+  }
+
+  private async classifyFailure(error: Error): Promise<SpawnOutcome> {
+    // Full classification table lands in Task 7; until then everything retries.
+    this.logger.warn(`gpio ${this.offset} spawn failure: ${error.message}`);
+    return { kind: 'transient' };
   }
 
   private async gpioget(): Promise<0 | 1> {
