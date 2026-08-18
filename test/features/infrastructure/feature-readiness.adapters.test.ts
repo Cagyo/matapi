@@ -98,6 +98,30 @@ describe('feature readiness adapters', () => {
     expect(openReadWrite).toHaveBeenCalledWith('/dev/gpiochip0');
   });
 
+  it('digital readiness logs the underlying error alongside the check label when the chardev open fails', async () => {
+    const warnSpy = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const execFile = vi.fn(async (executable: string, args: readonly string[]) => {
+      if (executable === '/usr/bin/which') return { stdout: `/usr/bin/${args[0]}\n`, stderr: '' };
+      if (executable === '/usr/bin/gpiodetect') {
+        return { stdout: 'gpiochip0 [pinctrl-rp1] (54 lines)\n', stderr: '' };
+      }
+      if (executable === '/usr/bin/id') return { stdout: 'homeworker gpio\n', stderr: '' };
+      if (executable === '/bin/systemctl') throw new Error('inactive');
+      throw new Error(`unexpected exec: ${executable}`);
+    });
+    const openReadWrite = vi.fn().mockRejectedValue(
+      Object.assign(new Error('EACCES: permission denied, open \'/dev/gpiochip0\''), { code: 'EACCES' }),
+    );
+    const adapter = new DigitalReadinessAdapter({ execFile, files: { openReadWrite } });
+
+    await adapter.verify('digital');
+
+    // An EACCES (not in the gpio group / missing udev rule) and an ENOENT (chardev
+    // absent entirely) need different fixes — the label alone can't tell them apart.
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('gpio chip effective permissions'));
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('EACCES'));
+  });
+
   it('digital readiness opens the GPIO_CHIP override even when another chip carries a known label', async () => {
     process.env.GPIO_CHIP = 'gpiochip4';
     const execFile = vi.fn(async (executable: string, args: readonly string[]) => {

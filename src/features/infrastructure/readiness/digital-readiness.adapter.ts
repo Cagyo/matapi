@@ -65,8 +65,8 @@ export class DigitalReadinessAdapter implements FeatureReadinessPort {
       if (pigpiodActive) throw new Error('pigpiod is still active');
 
       return { ready: true, restartScope: 'worker' };
-    } catch {
-      this.logger.warn(`Feature readiness failed: digital ${check}`);
+    } catch (error) {
+      this.logger.warn(`Feature readiness failed: digital ${check}: ${error instanceof Error ? error.message : String(error)}`);
       return { ready: false, failureCode: 'application-verification-failed' };
     }
   }
