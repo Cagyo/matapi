@@ -8,7 +8,7 @@ import {
 } from '../domain/ports/feature-availability.port';
 
 export interface FeatureImpact {
-  dependencies: 'pigpiod' | 'uart' | 'mosquitto' | 'motion' | 'rtsp-runtime';
+  dependencies: 'gpiod' | 'uart' | 'mosquitto' | 'motion' | 'rtsp-runtime';
   controls: 'digital-sensors' | 'uart-sensors' | 'mqtt-sensors' | 'motion-camera' | 'live-streams';
   monitoring: 'sensor-work' | 'camera-work';
   restartScope: RestartScope;
@@ -20,7 +20,7 @@ export interface FeatureDetail {
 }
 
 const IMPACT: Record<ManageableFeatureName, Omit<FeatureImpact, 'restartScope'>> = {
-  digital: { dependencies: 'pigpiod', controls: 'digital-sensors', monitoring: 'sensor-work' },
+  digital: { dependencies: 'gpiod', controls: 'digital-sensors', monitoring: 'sensor-work' },
   uart: { dependencies: 'uart', controls: 'uart-sensors', monitoring: 'sensor-work' },
   zigbee: { dependencies: 'mosquitto', controls: 'mqtt-sensors', monitoring: 'sensor-work' },
   motion: { dependencies: 'motion', controls: 'motion-camera', monitoring: 'camera-work' },
