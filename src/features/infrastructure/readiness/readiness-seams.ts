@@ -8,7 +8,10 @@ export const SANITIZED_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
 export const READINESS_COMMAND_OPTIONS = {
   env: { PATH: SANITIZED_PATH },
   timeout: 5_000,
-  maxBuffer: 4_096,
+  // 64 KiB, matching EXEC_OPTIONS in src/sensors/infrastructure/libgpiod-cli.backend.ts.
+  // The previous 4 KiB truncated a Pi 5 `gpioinfo` dump (4261 bytes) into an
+  // ERR_CHILD_PROCESS_STDIO_MAXBUFFER rejection that read as a permission fault.
+  maxBuffer: 64 * 1024,
 } as const;
 
 export type FixedExecFile = (
@@ -25,7 +28,7 @@ export interface FileStat {
 }
 
 export function defaultExecFile(): FixedExecFile {
-  return promisify(nodeExecFile) as FixedExecFile;
+  return promisify(nodeExecFile);
 }
 
 export async function openTcp(host: string, port: number): Promise<void> {

@@ -80,7 +80,7 @@ describe('feature readiness adapters', () => {
     });
 
     await expect(adapter.verify('uart')).resolves.toEqual({ ready: true, restartScope: 'worker' });
-    expect(execFile).toHaveBeenCalledWith('/bin/systemctl', ['show', 'serial-getty@serial0.service', '--property=LoadState,UnitFileState,ActiveState'], expect.objectContaining({ timeout: 5_000, maxBuffer: 4_096 }));
+    expect(execFile).toHaveBeenCalledWith('/bin/systemctl', ['show', 'serial-getty@serial0.service', '--property=LoadState,UnitFileState,ActiveState'], expect.objectContaining({ timeout: 5_000, maxBuffer: 65_536 }));
     expect(execFile).toHaveBeenCalledWith('/bin/systemctl', ['show', 'serial-getty@ttyAMA0.service', '--property=LoadState,UnitFileState,ActiveState'], expect.anything());
     expect(execFile).toHaveBeenCalledWith('/bin/systemctl', ['show', 'serial-getty@ttyS0.service', '--property=LoadState,UnitFileState,ActiveState'], expect.anything());
     expect(execFile).toHaveBeenCalledWith('/bin/systemctl', ['show', 'serial-getty@ttyAMA10.service', '--property=LoadState,UnitFileState,ActiveState'], expect.anything());
