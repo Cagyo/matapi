@@ -7,18 +7,20 @@
 
 ## Overview
 
-Digital sensors (door contacts, water leak detectors, PIR motion, mains power relays) connected via GPIO pins. The worker connects to the `pigpiod` daemon via socket — no root required. 
+Digital sensors (door contacts, water leak detectors, PIR motion, mains power relays) connected via GPIO pins. The worker drives the kernel gpiochip character device through the libgpiod CLI tools (`gpiodetect`, `gpioinfo`, `gpioget`, `gpiomon`) as supervised subprocesses — no daemon, no root. Works identically on Pi 3, 4 and 5.
 
 To provide semantic meaning without violating hexagonal layering, digital sensors expose a canonical `stepType` (device class) and a manual inversion switcher (`invert`). Both are fully manageable via Telegram `/config modify` and YAML import/export. The driver adapter auto-infers debouncing and resilience behavior from `stepType`, while the UI/Telegram layer maps boolean states to localized strings.
 
 ## System Setup
 
+Performed by `scripts/install.sh` / the `digital` feature install:
+
 ```bash
-sudo systemctl enable pigpiod
-sudo systemctl start pigpiod
+sudo apt install gpiod
+sudo usermod -aG gpio homeworker   # kernel-enforced access to /dev/gpiochip*
 ```
 
-Worker uses `pigpio` npm package in socket mode.
+The chip is resolved by label (`pinctrl-bcm2835` / `pinctrl-bcm2711` / `pinctrl-rp1`), never by index; `GPIO_CHIP` overrides for exotic carriers. Hardware debounce (`--debounce-period`) is libgpiod-2.x-only and best-effort — the JS debounce table below is authoritative on all versions.
 
 ## Config Schema (`sensors.config` JSON column)
 
@@ -57,7 +59,7 @@ For `leak_hazard` and `alarm`, symmetric debouncing is prohibited to prevent osc
 ### 2. Circuit Breaker with Polled Sampling Mode Fallback (Anti-Flapping)
 To prevent loose wires or EMI from starving Node.js CPU without blinding the system to real emergencies:
 - If a pin fires **>30 transitions within 60 seconds**, the adapter flags runtime status as `FAULTY_FLAPPING`.
-- The adapter **detaches the `pigpiod` socket interrupt** and switches to **10-second Polled Sampling Mode** via `gpio.read()`.
+- The adapter **kills the line's gpiomon monitor (per-line — other sensors keep their monitors)** and switches to **10-second Polled Sampling Mode** via `gpio.read()`.
 - If a real flood or break-in holds the line steady for 10 seconds during polling, the alarm is still reported!
 - An admin notification is emitted: *"⚠️ Sensor '{name}' (GPIO {pin}) switched to polled sampling due to signal flapping!"*
 - If polling also flaps or fails, exponential backoff applies ($5\text{m} \rightarrow 15\text{m} \rightarrow 1\text{h}$).
@@ -65,10 +67,10 @@ To prevent loose wires or EMI from starving Node.js CPU without blinding the sys
 ### 3. Timer Lifecycle Cleanup (`destroy()`)
 To prevent memory leaks and ghost event emissions in PM2 long-running workers, `DigitalGpioAdapter` maintains a strict timer registry (`private activeTimers = new Set<NodeJS.Timeout>()`). Every asymmetric latch, cooldown, or polling timer is registered, and `destroy()` unconditionally executes `clearTimeout`/`clearInterval` across the set before disposing the adapter.
 
-### 4. Generation-Aware pigpiod Reconnect
-Reconnecting the shared pigpiod root alone cannot restore pigpiod's daemon-side `NB` monitoring request. Every new connected gateway generation therefore reacquires its pin handle, reapplies input mode, pull and glitch configuration, reads the level, and creates exactly one fresh `notify()` subscription. The restored read is processed through normal state-change logic so a contact or alarm held active during an outage is reconciled rather than silently overwritten. Callbacks from older generations are ignored.
+### 4. Generation-Aware Backend Recovery
+Per-line monitor respawns are absorbed inside the backend (reconcile read pushed through the same watch callback). Only backend-level failure → recovery (tools removed, gpio group lost, chip renumbered) bumps the backend generation; every new generation reacquires the line, reapplies request config, reads the level, and creates exactly one fresh watch subscription. The restored read flows through normal state-change logic, so a contact or alarm held active during an outage is reconciled rather than silently overwritten. Callbacks from older generations are ignored.
 
-If the anti-flap breaker is active, a reconnect updates the handle used by the existing polled sampler but does not re-register `notify()` until the recovery window expires. On destruction, the adapter first unsubscribes from gateway states, waits for queued rebind work, then clears timers and releases notification resources so later gateway states are inert.
+If the anti-flap breaker is active, a reconnect updates the handle used by the existing polled sampler but does not re-register `watch()` until the recovery window expires. On destruction, the adapter first unsubscribes from backend state changes, waits for queued rebind work, then clears timers and releases the watch subscription so later backend states are inert.
 
 ## i18n & Presentation Contract (`src/locales/en.ts`)
 
@@ -107,6 +109,6 @@ When formatting notifications, the presentation layer checks transition directio
 - `invert` must be a boolean (aliases `activeLow`).
 
 ## Error Handling
-- pigpiod unreachable: adapter raises `DriverUnavailableError`.
+- gpiod tools/chip unavailable: adapter raises `DriverUnavailableError('gpiod', …)`.
 - Pin read failure: log at adapter (warn), translate to `SensorReadError`, mark offline.
 - Flapping signal: circuit breaker trips, interrupt detached, switches to 10s polled sampling mode.

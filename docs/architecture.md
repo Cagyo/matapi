@@ -8,7 +8,7 @@ This repo follows **hexagonal architecture** — also known as ports & adapters.
 
 ```
 interfaces  →  application  →  domain  ←  infrastructure
-   (bot,        (use cases,      (entities,     (drizzle, pigpio,
+   (bot,        (use cases,      (entities,     (drizzle, gpiod,
     HTTP)        ports)           value objects,  grammY, motion,
                                   domain errors)   Google APIs, serialport)
 ```
@@ -17,7 +17,7 @@ Arrows point in the direction a layer may import from. Concretely:
 
 | Layer | May import from | May NOT import |
 |---|---|---|
-| `domain` | nothing (stdlib only) | Nest, Drizzle, grammY, pigpio, serialport, fs, child_process |
+| `domain` | nothing (stdlib only) | Nest, Drizzle, grammY, gpiod CLI, serialport, fs, child_process |
 | `application` | `domain` (same context), `domain` of other contexts via published ports | Any infrastructure package, Nest controllers/gateways, `interfaces/` |
 | `infrastructure` | `domain` + `application` (to implement ports) | Other contexts' `infrastructure` (talk via the other context's published port) |
 | `interfaces` | `application` (to invoke use cases) | `infrastructure` directly (resolve via DI token) |
@@ -47,7 +47,7 @@ A **port** lives in `domain/ports/` (or `application/ports/` if it only exists t
 | [src/sensors/sensor.interface.ts](../src/sensors/sensor.interface.ts) | `src/sensors/domain/{sensor.ts, sensor-event.ts, ports/sensor-driver.port.ts}` |
 | [src/sensors/sensor.registry.ts](../src/sensors/sensor.registry.ts) | `src/sensors/application/sensor-registry.service.ts` |
 | [src/sensors/drivers/digital.driver.ts](../src/sensors/drivers/digital.driver.ts) | `src/sensors/infrastructure/digital-gpio.adapter.ts` |
-| [src/sensors/drivers/pigpio.gateway.ts](../src/sensors/drivers/pigpio.gateway.ts) | `src/sensors/infrastructure/pigpio.gateway.ts` (low-level, internal) |
+| [src/sensors/drivers/pigpio.gateway.ts](../src/sensors/drivers/pigpio.gateway.ts) | `src/sensors/infrastructure/libgpiod-cli.backend.ts` (low-level, internal) |
 | legacy `src/events/event.queue.ts` | [src/events/application/event-queue.service.ts](../src/events/application/event-queue.service.ts) + [src/events/infrastructure/drizzle-event.repository.ts](../src/events/infrastructure/drizzle-event.repository.ts) (implements `EventRepositoryPort`) |
 | [src/telegram/commands/status.command.ts](../src/telegram/commands/status.command.ts) | `src/telegram/interfaces/status.handler.ts` (talks to `SensorQueryPort` from `sensors/application`, not Drizzle) |
 | [src/database/schema.ts](../src/database/schema.ts) | `src/<context>/infrastructure/db/schema.ts` — schema lives with the adapter that owns the table; aggregated by [src/database/database.module.ts](../src/database/database.module.ts) |
@@ -77,7 +77,7 @@ No I/O. No async unless the port itself is async. No Date.now() — inject a `Cl
 
 ### infrastructure/
 
-- One adapter per port per tech (`DigitalGpioAdapter` implements `SensorDriverPort` against pigpio; `MockGpioAdapter` implements it for dev).
+- One adapter per port per tech (`DigitalGpioAdapter` implements `SensorDriverPort` against the gpiod CLI backend; `MockGpioAdapter` implements it for dev).
 - Drizzle schemas, repositories, query builders.
 - grammY bot setup, direct Google Drive gateways, Motion daemon control, serialport wrappers.
 - Maps DB rows / wire formats to domain types **at the boundary**.
@@ -97,13 +97,14 @@ The Nest `*.module.ts` is the **only** place where a port is bound to a concrete
 @Module({
   providers: [
     SensorRegistry,                                    // application
-    { provide: SENSOR_DRIVER_FACTORY,                  // port → adapter switch
-      useFactory: (pigpio) =>
+    { provide: SENSOR_DRIVER_FACTORY,
+      useFactory: (gpio) =>
         process.env.NODE_ENV === 'development'
           ? () => new MockGpioAdapter()
-          : () => new DigitalGpioAdapter(pigpio),
-      inject: [PigpioGateway] },
-    PigpioGateway,
+          : () => new DigitalGpioAdapter(gpio),
+      inject: [GPIO_BACKEND] },
+    LibgpiodCliBackend,
+    { provide: GPIO_BACKEND, useExisting: LibgpiodCliBackend },
   ],
   exports: [SensorRegistry, SENSOR_QUERY_PORT],
 })
@@ -132,4 +133,4 @@ Existing code that violates the rule above remains as-is until touched. Do not f
 
 ## When in doubt
 
-Ask: *"If I swap Drizzle for Postgres / replace grammY with Slack / replace pigpio with a TCP-based GPIO server, how many files change?"* The answer should be: only files in the relevant `infrastructure/` folder, plus one line in the `*.module.ts` composition root.
+Ask: *"If I swap Drizzle for Postgres / replace grammY with Slack / replace the gpiod CLI with a native libgpiod binding, how many files change?"* The answer should be: only files in the relevant `infrastructure/` folder, plus one line in the `*.module.ts` composition root.

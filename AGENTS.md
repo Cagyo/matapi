@@ -16,7 +16,7 @@ Single-package repo. Target runtime: Raspberry Pi 3+ / Raspbian / Node 22 / PM2.
 | Framework | NestJS 10 |
 | DB | SQLite (better-sqlite3) + Drizzle ORM, WAL mode |
 | Bot | grammY + `@grammyjs/{runner,auto-retry,conversations}` |
-| GPIO | pigpio-client (socket to `pigpiod`) |
+| GPIO | libgpiod CLI tools (`gpiod` apt package) via supervised subprocesses |
 | UART | serialport (CO2 sensor) |
 | Camera | Motion daemon (systemd, controlled via sudo) |
 | Cloud sync | Direct Google Drive API with resumable streaming uploads |
@@ -95,7 +95,7 @@ Pair each spec doc with the relevant architecture doc above.
 
 - **Secrets:** never log `TELEGRAM_BOT_TOKEN`, chat IDs, or `.env` contents. `.env` is gitignored — do not commit.
 - **Migrations:** edit `schema.ts` then regenerate; do not hand-edit `migrations/0000_*.sql` or `migrations/meta/`.
-- **GPIO:** worker connects to `pigpiod` over socket; do not run as root, do not call `pigpio` C library directly.
+- **GPIO:** worker drives `/dev/gpiochip*` via the gpiod CLI (`gpiomon`/`gpioget`) with kernel-enforced `gpio`-group access; do not run as root, do not reintroduce pigpiod (it fights the gpiochip interface invisibly).
 - **Destructive ops:** confirm before touching `data/*.db*`, running `prisma migrate reset` equivalents, or `git push --force`.
 - **Pi resource budget:** keep memory < 512 MB (PM2 will restart). Prefer streaming over buffering for camera/Drive.
 
