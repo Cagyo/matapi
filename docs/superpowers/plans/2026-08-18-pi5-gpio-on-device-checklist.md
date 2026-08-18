@@ -47,3 +47,53 @@ nothing off-device can confirm them:
   could never pass again and every `/feature digital install` would have reported
   failure. It now checks the gpiod tools plus a bare `gpiodetect`. Item 8 exercises
   this path end to end.
+
+---
+
+## Digital readiness probe fix — on-device verification (2026-08-18)
+
+Board: Raspberry Pi 5 Model B Rev 1.0 @ 192.168.88.17, libgpiod v2.2.1, worker user
+`homeworker` (uid 999, in group `gpio`). Deployed via `scripts/dev-deploy.sh`; the
+installed tree at `/opt/home-worker` was confirmed to carry the fix (no `gpioinfo`
+remains anywhere under `dist/features/infrastructure/readiness/`).
+
+**Root cause reproduced and both fixes confirmed on the real board**, run as
+`homeworker` against the live `/dev/gpiochip0`:
+
+| Probe | Result |
+|---|---|
+| Old: bare `gpioinfo` under the 4 KiB cap | FAIL — `ERR_CHILD_PROCESS_STDIO_MAXBUFFER` |
+| Old probe under the new 64 KiB cap | PASS |
+| New: `O_RDWR` open of the resolved chip | PASS |
+
+`gpioinfo` emits exactly **4261 bytes** on this board — the figure the design doc
+predicted, and 165 bytes over the old 4096-byte cap.
+
+Verified:
+
+- [x] Deploy — `scripts/dev-deploy.sh` exit 0; install script ran; board rebooted
+      and came back in ~72 s; pm2 `worker` online.
+- [x] **Digital readiness passes.** The real compiled `DigitalReadinessAdapter`
+      from `/opt/home-worker`, run as `homeworker`, returns
+      `{"ready":true,"restartScope":"worker"}`. The `features` row for `digital`
+      is `enabled=1, installed=1, attention_reason=null` — no readiness gate — and
+      the worker log carries no `DigitalReadinessAdapter` warning.
+- [x] Chip resolution agrees between readiness and the backend: both resolve
+      `gpiochip0 [pinctrl-rp1]`. `GPIO_CHIP` is unset on this board, so label-first
+      applies; note `/dev/gpiochip4` exists here as a symlink to `gpiochip0`, and
+      the four `gpio-brcmstb` chips (10–13) are exactly what bare `gpioinfo` was
+      needlessly walking.
+- [x] Checklist item 2 — `gpio-smoke.sh 5` → `PASS: bias plumbing`
+      (chip=gpiochip0, libgpiod-major=2).
+- [x] The capability readiness asserts is genuinely real: `gpiomon` binds as
+      `homeworker` on `gpiochip0` (exit 124 from `timeout`, empty stderr).
+
+Not verified — blocked, not failing:
+
+- [ ] Items 3–4 (a `gpiomon` child per configured sensor; an end-to-end state
+      change reaching Telegram). The `sensors` table has **0 rows** on this board,
+      so no `gpiomon` child can exist and there is nothing to trigger. Re-run both
+      after adding a digital sensor and jumpering its pin. BCM 17, 22 and 27 read
+      high under both pull-up and pull-down here, i.e. they are externally wired —
+      the likely physical sensor pins. BCM 5, 6, 12, 13, 16, 19, 20, 21 and 26 are
+      floating and read cleanly (1 under pull-up, 0 under pull-down).

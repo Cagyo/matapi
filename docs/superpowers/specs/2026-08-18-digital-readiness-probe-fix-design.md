@@ -1,7 +1,7 @@
 # Digital Readiness Probe — Fix the Pi 5 False Negative
 
 **Date:** 2026-08-18
-**Status:** Implemented 2026-08-18; on-device verification pending
+**Status:** Implemented and verified on device 2026-08-18 (Pi 5, libgpiod v2.2.1) — readiness passes; end-to-end sensor trigger still unexercised (no digital sensors configured on that board)
 **Affects:** `src/features/infrastructure/readiness/digital-readiness.adapter.ts`, `src/features/infrastructure/readiness/readiness-seams.ts`, `test/features/infrastructure/feature-readiness.adapters.test.ts`
 
 ## Dependencies
