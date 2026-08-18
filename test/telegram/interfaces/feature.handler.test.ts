@@ -17,7 +17,7 @@ function setup() {
     { name: 'motion', installed: false, enabled: false, ready: false, busy: false, attentionReason: null, display: 'not-installed', action: 'install' },
     { name: 'rtsp', installed: false, enabled: false, ready: false, busy: false, attentionReason: null, display: 'not-installed', action: 'install' },
   ]) };
-  const detail = { execute: vi.fn().mockResolvedValue({ status: list.execute.mock.results ? { name: 'digital', installed: false, enabled: false, ready: false, busy: false, attentionReason: null, display: 'not-installed', action: 'install' } : null, impact: { dependencies: 'pigpiod', controls: 'digital-sensors', monitoring: 'sensor-work', restartScope: 'worker' } }) };
+  const detail = { execute: vi.fn().mockResolvedValue({ status: list.execute.mock.results ? { name: 'digital', installed: false, enabled: false, ready: false, busy: false, attentionReason: null, display: 'not-installed', action: 'install' } : null, impact: { dependencies: 'gpiod', controls: 'digital-sensors', monitoring: 'sensor-work', restartScope: 'worker' } }) };
   const install = { execute: vi.fn().mockResolvedValue({ job: {}, stage: 'running' }) };
   const enable = { execute: vi.fn().mockResolvedValue({}) };
   const disable = { execute: vi.fn().mockResolvedValue({}) };

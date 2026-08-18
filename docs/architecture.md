@@ -47,7 +47,7 @@ A **port** lives in `domain/ports/` (or `application/ports/` if it only exists t
 | [src/sensors/sensor.interface.ts](../src/sensors/sensor.interface.ts) | `src/sensors/domain/{sensor.ts, sensor-event.ts, ports/sensor-driver.port.ts}` |
 | [src/sensors/sensor.registry.ts](../src/sensors/sensor.registry.ts) | `src/sensors/application/sensor-registry.service.ts` |
 | [src/sensors/drivers/digital.driver.ts](../src/sensors/drivers/digital.driver.ts) | `src/sensors/infrastructure/digital-gpio.adapter.ts` |
-| [src/sensors/drivers/pigpio.gateway.ts](../src/sensors/drivers/pigpio.gateway.ts) | `src/sensors/infrastructure/libgpiod-cli.backend.ts` (low-level, internal) |
+| `src/sensors/drivers/pigpio.gateway.ts` (removed in the libgpiod migration) | `src/sensors/infrastructure/libgpiod-cli.backend.ts` (low-level, internal) |
 | legacy `src/events/event.queue.ts` | [src/events/application/event-queue.service.ts](../src/events/application/event-queue.service.ts) + [src/events/infrastructure/drizzle-event.repository.ts](../src/events/infrastructure/drizzle-event.repository.ts) (implements `EventRepositoryPort`) |
 | [src/telegram/commands/status.command.ts](../src/telegram/commands/status.command.ts) | `src/telegram/interfaces/status.handler.ts` (talks to `SensorQueryPort` from `sensors/application`, not Drizzle) |
 | [src/database/schema.ts](../src/database/schema.ts) | `src/<context>/infrastructure/db/schema.ts` — schema lives with the adapter that owns the table; aggregated by [src/database/database.module.ts](../src/database/database.module.ts) |

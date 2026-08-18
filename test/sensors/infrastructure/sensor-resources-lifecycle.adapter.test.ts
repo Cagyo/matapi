@@ -69,9 +69,9 @@ describe('SensorResourcesLifecycleAdapter', () => {
     );
     await registry.reload();
 
-    const pigpio = {
+    const gpioBackend = {
       close: vi.fn(async () => {
-        order.push('pigpio');
+        order.push('gpioBackend');
       }),
     };
     const mqtt = {
@@ -82,7 +82,7 @@ describe('SensorResourcesLifecycleAdapter', () => {
     };
     const lifecycle = new SensorResourcesLifecycleAdapter(
       registry,
-      pigpio as never,
+      gpioBackend as never,
       mqtt as never,
     );
 
@@ -91,7 +91,7 @@ describe('SensorResourcesLifecycleAdapter', () => {
 
     expect(second).toBe(first);
     await Promise.resolve();
-    expect(pigpio.close).not.toHaveBeenCalled();
+    expect(gpioBackend.close).not.toHaveBeenCalled();
     expect(mqtt.destroyAll).not.toHaveBeenCalled();
 
     firstDestroy.resolve();
@@ -99,14 +99,14 @@ describe('SensorResourcesLifecycleAdapter', () => {
 
     expect(firstDriver.destroy).toHaveBeenCalledTimes(1);
     expect(secondDriver.destroy).toHaveBeenCalledTimes(1);
-    expect(pigpio.close).toHaveBeenCalledTimes(1);
+    expect(gpioBackend.close).toHaveBeenCalledTimes(1);
     expect(mqtt.destroyAll).toHaveBeenCalledTimes(1);
     expect(order).toEqual([
       'first:start',
       'first:end',
       'second:start',
       'second:end',
-      'pigpio',
+      'gpioBackend',
       'mqtt',
     ]);
   });
@@ -150,14 +150,14 @@ describe('SensorResourcesLifecycleAdapter', () => {
       vi.fn(() => driver),
     );
     await registry.reload();
-    const pigpio = { close: vi.fn().mockResolvedValue(undefined) };
+    const gpioBackend = { close: vi.fn().mockResolvedValue(undefined) };
     const mqtt = {
       beginLifecycleShutdown: vi.fn(),
       destroyAll: vi.fn().mockResolvedValue(undefined),
     };
     const lifecycle = new SensorResourcesLifecycleAdapter(
       registry,
-      pigpio as never,
+      gpioBackend as never,
       mqtt as never,
     );
 
@@ -168,13 +168,13 @@ describe('SensorResourcesLifecycleAdapter', () => {
 
     await vi.advanceTimersByTimeAsync(5_000);
 
-    expect(pigpio.close).not.toHaveBeenCalled();
+    expect(gpioBackend.close).not.toHaveBeenCalled();
     expect(mqtt.destroyAll).not.toHaveBeenCalled();
     expect(settled).toBe(false);
 
     finishDestroy();
     await shutdown;
-    expect(pigpio.close).toHaveBeenCalledTimes(1);
+    expect(gpioBackend.close).toHaveBeenCalledTimes(1);
     expect(mqtt.destroyAll).toHaveBeenCalledTimes(1);
     expect(settled).toBe(true);
   });
