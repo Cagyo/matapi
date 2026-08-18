@@ -46,11 +46,13 @@ describe('APT lock handling scripts', () => {
   it('keeps the sudoers allowlist aligned with the option-bearing update commands', () => {
     const installScript = readScript('scripts/install.sh');
 
+    // sudoers requires `:` and `=` inside command arguments to be backslash-escaped,
+    // so the allowlist stores DPkg\:\:Lock\:\:Timeout\=300 rather than the bare form.
     expect(installScript).toContain(
-      '$USER ALL=(ALL) NOPASSWD: /usr/bin/apt-get -o DPkg::Lock::Timeout=300 update, /bin/apt-get -o DPkg::Lock::Timeout=300 update',
+      '$USER ALL=(ALL) NOPASSWD: /usr/bin/apt-get -o DPkg\\:\\:Lock\\:\\:Timeout\\=300 update, /bin/apt-get -o DPkg\\:\\:Lock\\:\\:Timeout\\=300 update',
     );
     expect(installScript).toContain(
-      '$USER ALL=(ALL) NOPASSWD: /usr/bin/apt-get -o DPkg::Lock::Timeout=300 install -y --only-upgrade motion ffmpeg mosquitto, /bin/apt-get -o DPkg::Lock::Timeout=300 install -y --only-upgrade motion ffmpeg mosquitto',
+      '$USER ALL=(ALL) NOPASSWD: /usr/bin/apt-get -o DPkg\\:\\:Lock\\:\\:Timeout\\=300 install -y --only-upgrade motion ffmpeg mosquitto, /bin/apt-get -o DPkg\\:\\:Lock\\:\\:Timeout\\=300 install -y --only-upgrade motion ffmpeg mosquitto',
     );
   });
 });
