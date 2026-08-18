@@ -8,22 +8,27 @@ import { UartReadinessAdapter } from '../../../src/features/infrastructure/readi
 import { ZigbeeReadinessAdapter } from '../../../src/features/infrastructure/readiness/zigbee-readiness.adapter';
 
 describe('feature readiness adapters', () => {
-  it('digital readiness passes when gpiod tools, chip, group and permissions hold and pigpiod is absent', async () => {
+  it('digital readiness passes when gpiod tools, chip, group and chip access hold and pigpiod is absent', async () => {
     const execFile = vi.fn(async (executable: string, args: readonly string[]) => {
       if (executable === '/usr/bin/which') return { stdout: `/usr/bin/${args[0]}\n`, stderr: '' };
       if (executable === '/usr/bin/gpiodetect') {
         return { stdout: 'gpiochip0 [pinctrl-rp1] (54 lines)\n', stderr: '' };
       }
       if (executable === '/usr/bin/id') return { stdout: 'homeworker gpio video\n', stderr: '' };
-      if (executable === '/usr/bin/gpioinfo') return { stdout: 'gpiochip0 - 54 lines:\n', stderr: '' };
       if (executable === '/bin/systemctl') throw new Error('inactive'); // pigpiod must NOT be active
       throw new Error(`unexpected exec: ${executable}`);
     });
-    const adapter = new DigitalReadinessAdapter({ execFile });
+    const openReadWrite = vi.fn().mockResolvedValue(undefined);
+    const adapter = new DigitalReadinessAdapter({ execFile, files: { openReadWrite } });
+
     await expect(adapter.verify('digital')).resolves.toEqual({ ready: true, restartScope: 'worker' });
+    // The probe opens the chardev itself — it never shells out to gpioinfo, whose
+    // all-chips dump overflowed the fixed-command buffer on a Pi 5.
+    expect(openReadWrite).toHaveBeenCalledWith('/dev/gpiochip0');
   });
 
   it('digital readiness fails when the worker lacks the gpio group', async () => {
+    vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     const execFile = vi.fn(async (executable: string, args: readonly string[]) => {
       if (executable === '/usr/bin/which') return { stdout: `/usr/bin/${args[0]}\n`, stderr: '' };
       if (executable === '/usr/bin/gpiodetect') {
@@ -32,29 +37,58 @@ describe('feature readiness adapters', () => {
       if (executable === '/usr/bin/id') return { stdout: 'homeworker video\n', stderr: '' };
       return { stdout: '', stderr: '' };
     });
-    const adapter = new DigitalReadinessAdapter({ execFile });
+    const openReadWrite = vi.fn().mockResolvedValue(undefined);
+    const adapter = new DigitalReadinessAdapter({ execFile, files: { openReadWrite } });
+
     await expect(adapter.verify('digital')).resolves.toEqual({
       ready: false,
       failureCode: 'application-verification-failed',
     });
+    expect(openReadWrite).not.toHaveBeenCalled(); // group check short-circuits before the open
   });
 
   it('digital readiness fails while pigpiod is still active — it fights gpiod invisibly', async () => {
+    vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     const execFile = vi.fn(async (executable: string, args: readonly string[]) => {
       if (executable === '/usr/bin/which') return { stdout: `/usr/bin/${args[0]}\n`, stderr: '' };
       if (executable === '/usr/bin/gpiodetect') {
         return { stdout: 'gpiochip0 [pinctrl-bcm2835] (54 lines)\n', stderr: '' };
       }
       if (executable === '/usr/bin/id') return { stdout: 'homeworker gpio\n', stderr: '' };
-      if (executable === '/usr/bin/gpioinfo') return { stdout: 'gpiochip0 - 54 lines:\n', stderr: '' };
       if (executable === '/bin/systemctl') return { stdout: 'active\n', stderr: '' };
       throw new Error(`unexpected exec: ${executable}`);
     });
-    const adapter = new DigitalReadinessAdapter({ execFile });
+    const openReadWrite = vi.fn().mockResolvedValue(undefined);
+    const adapter = new DigitalReadinessAdapter({ execFile, files: { openReadWrite } });
+
     await expect(adapter.verify('digital')).resolves.toEqual({
       ready: false,
       failureCode: 'application-verification-failed',
     });
+    expect(openReadWrite).toHaveBeenCalledWith('/dev/gpiochip0');
+  });
+
+  it('digital readiness fails when the gpio chardev cannot be opened read-write', async () => {
+    vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const execFile = vi.fn(async (executable: string, args: readonly string[]) => {
+      if (executable === '/usr/bin/which') return { stdout: `/usr/bin/${args[0]}\n`, stderr: '' };
+      if (executable === '/usr/bin/gpiodetect') {
+        return { stdout: 'gpiochip0 [pinctrl-rp1] (54 lines)\n', stderr: '' };
+      }
+      if (executable === '/usr/bin/id') return { stdout: 'homeworker gpio\n', stderr: '' };
+      if (executable === '/bin/systemctl') throw new Error('inactive');
+      throw new Error(`unexpected exec: ${executable}`);
+    });
+    const openReadWrite = vi.fn().mockRejectedValue(
+      Object.assign(new Error('EACCES: permission denied, open \'/dev/gpiochip0\''), { code: 'EACCES' }),
+    );
+    const adapter = new DigitalReadinessAdapter({ execFile, files: { openReadWrite } });
+
+    await expect(adapter.verify('digital')).resolves.toEqual({
+      ready: false,
+      failureCode: 'application-verification-failed',
+    });
+    expect(openReadWrite).toHaveBeenCalledWith('/dev/gpiochip0');
   });
 
   it('maps a failed fixed command to the allowlisted application failure', async () => {

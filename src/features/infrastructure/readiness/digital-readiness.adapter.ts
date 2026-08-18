@@ -1,10 +1,15 @@
 import type { FeatureReadinessPort, FeatureReadinessResult } from '../../domain/ports/feature-readiness.port';
 import type { ManageableFeatureName } from '../../domain/manageable-feature';
 import { Logger } from '@nestjs/common';
-import { defaultExecFile, hasGroups, READINESS_COMMAND_OPTIONS, type FixedExecFile } from './readiness-seams';
+import { defaultExecFile, hasGroups, nodeReadinessFiles, READINESS_COMMAND_OPTIONS, type FixedExecFile } from './readiness-seams';
+
+interface DigitalFiles {
+  openReadWrite(path: string): Promise<void>;
+}
 
 export interface DigitalReadinessDependencies {
   execFile?: FixedExecFile;
+  files?: DigitalFiles;
 }
 
 const KNOWN_CHIP_LABELS = ['pinctrl-bcm2835', 'pinctrl-bcm2711', 'pinctrl-rp1'];
@@ -12,9 +17,11 @@ const KNOWN_CHIP_LABELS = ['pinctrl-bcm2835', 'pinctrl-bcm2711', 'pinctrl-rp1'];
 export class DigitalReadinessAdapter implements FeatureReadinessPort {
   private readonly logger = new Logger(DigitalReadinessAdapter.name);
   private readonly execFile: FixedExecFile;
+  private readonly files: DigitalFiles;
 
   constructor(dependencies: DigitalReadinessDependencies = {}) {
     this.execFile = dependencies.execFile ?? defaultExecFile();
+    this.files = dependencies.files ?? nodeReadinessFiles;
   }
 
   async verify(_name: ManageableFeatureName): Promise<FeatureReadinessResult> {
@@ -31,11 +38,17 @@ export class DigitalReadinessAdapter implements FeatureReadinessPort {
       const groups = await this.execFile('/usr/bin/id', ['-nG'], READINESS_COMMAND_OPTIONS);
       if (!hasGroups(groups.stdout, ['gpio'])) throw new Error('worker not in gpio group');
 
-      // Bare gpioinfo (no chip argument) is valid on both libgpiod majors and
-      // proves the running supervisor's EFFECTIVE permissions, not merely that
-      // a device node exists.
+      // Step 2's gpiodetect already proved a gpiod subprocess under the sanitized
+      // PATH can open and ioctl every chip. This open proves THIS process's
+      // effective credentials against the specific chardev its gpiomon children
+      // inherit by fork/exec: both libgpiod majors open the chip O_RDWR|O_CLOEXEC,
+      // and the discretionary check — group ownership, udev rule, ACLs — happens
+      // at open(), not at ioctl time. Scoped to the resolved chip on purpose:
+      // bare `gpioinfo` walked ALL chips, so an unopenable gpio-brcmstb chip we
+      // never drive failed readiness for a healthy pinctrl-rp1. No subprocess,
+      // no output buffer, no size sensitivity.
       check = 'gpio chip effective permissions';
-      await this.execFile('/usr/bin/gpioinfo', [], READINESS_COMMAND_OPTIONS);
+      await this.files.openReadWrite(`/dev/${chip}`);
 
       // Not hygiene: pigpiod mmaps /dev/gpiomem — no gpiochip consumer, no
       // EBUSY — so a survivor silently fights our bias/debounce settings.
