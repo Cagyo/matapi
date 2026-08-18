@@ -12,14 +12,25 @@ if [ "${HOME_WORKER_PRIVILEGED:-0}" = "1" ]; then
   INSTALL_DIR="/opt/home-worker"
   ROOT_BUNDLE_DIR="/usr/lib/home-worker"
   # Keep the fixed routines byte-for-byte command compatible: several of them
-  # intentionally switch to the fixed homeworker account. Root sudo performs
-  # that transition while retaining the routine's literal argv.
-  sudo() { /usr/bin/sudo "$@"; }
+  # intentionally switch to the fixed homeworker account. When this process is
+  # already root, sudo's setuid transition is unavailable under the install
+  # unit's NoNewPrivileges=yes and unnecessary anyway; runuser drops privilege
+  # via setuid()/setgid() rather than exec'ing a setuid binary, so it still
+  # works. A non-root caller (e.g. a manual wizard run) still needs real sudo.
+  if [ "$EUID" -eq 0 ]; then
+    export HOME=/root
+    sudo() { "$@"; }
+    run_as_worker() { runuser -u "$USER" -- "$@"; }
+  else
+    sudo() { /usr/bin/sudo "$@"; }
+    run_as_worker() { /usr/bin/sudo -u "$USER" "$@"; }
+  fi
 else
   USER="${HOME_WORKER_USER:-homeworker}"
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   INSTALL_DIR="${HOME_WORKER_INSTALL_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
   ROOT_BUNDLE_DIR="$INSTALL_DIR"
+  run_as_worker() { sudo -H -u "$USER" "$@"; }
 fi
 
 apt_get() {
@@ -347,7 +358,7 @@ EOF
       "$DIAG_WORK_DIR" "$DIAG_HOME" "$DIAG_CONFIG_DIR"
 
     set +e
-    sudo -H -u "$USER" env -i \
+    run_as_worker env -i \
       PATH="/usr/local/bin:/usr/bin:/bin" \
       HOME="$DIAG_HOME" \
       XDG_CONFIG_HOME="$DIAG_CONFIG_DIR" \
@@ -381,10 +392,16 @@ EOF
     echo "Experimental cloudflared live-stream capability installed."
     ;;
   digital)
-    echo "Installing pigpio GPIO daemon..."
-    apt_get install -y pigpio
-    sudo systemctl enable --now pigpiod.service
-    sudo systemctl is-active --quiet pigpiod.service
+    echo "Installing libgpiod CLI tools..."
+    apt_get install -y gpiod
+    if ! id -nG "$USER" | tr ' ' '\n' | grep -qx gpio; then
+      sudo usermod -aG gpio "$USER"
+    fi
+    # A surviving pigpiod mmaps /dev/gpiomem and silently fights gpiod bias
+    # settings without ever surfacing as a line consumer — stop and mask it.
+    sudo systemctl disable --now pigpiod.service 2>/dev/null || true
+    sudo systemctl mask pigpiod.service 2>/dev/null || true
+    echo "Digital GPIO runtime installed; restart the worker supervisor to refresh its gpio group membership. Until then digital sensors remain unavailable."
     ;;
   *)
     echo "Unknown feature: $FEATURE" >&2

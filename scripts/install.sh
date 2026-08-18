@@ -24,9 +24,10 @@ main() {
   provision_archive_installation_state
   install_node
   install_app
-  setup_pigpiod
+  setup_gpiod
   setup_tmpfs
   prompt_config
+  normalize_database_path
   install_feature_management_artifacts
   configure_serial_headless
   patch_legacy_feature_serial_calls
@@ -58,8 +59,10 @@ setup_hardware_resources() {
     local root_dev disk part
     root_dev=$(findmnt / -o source -n 2>/dev/null || true)
     if [ -n "$root_dev" ]; then
-      disk=$(lsblk -no pkname "$root_dev" 2>/dev/null | head -1 || true)
-      part=$(lsblk -no partn "$root_dev" 2>/dev/null | head -1 || true)
+      # lsblk right-aligns numeric columns, so `partn` yields " 2" and growpart
+      # rejects it with "partition-number must be a number".
+      disk=$(lsblk -no pkname "$root_dev" 2>/dev/null | head -1 | tr -d '[:space:]' || true)
+      part=$(lsblk -no partn "$root_dev" 2>/dev/null | head -1 | tr -d '[:space:]' || true)
       if [ -n "$disk" ] && [ -n "$part" ]; then
         if sudo growpart "/dev/$disk" "$part" 2>/dev/null; then
           sudo resize2fs "$root_dev" 2>/dev/null || true
@@ -227,35 +230,6 @@ install_system_deps() {
     git sqlite3 libsqlite3-dev build-essential python3 python3-setuptools \
     ffmpeg \
     usb-modeswitch
-
-  install_pigpio
-}
-
-install_pigpio() {
-  if command -v pigpiod &>/dev/null; then
-    echo "pigpiod already installed: $(command -v pigpiod)"
-    return 0
-  fi
-
-  if apt-cache show pigpio &>/dev/null 2>&1; then
-    echo "Installing pigpio from apt repository..."
-    if apt_get install -y pigpio python3-pigpio; then
-      return 0
-    fi
-  fi
-
-  echo "Package pigpio not found in apt repository. Building pigpio from source..."
-  local tmpdir
-  tmpdir=$(mktemp -d)
-  if git clone --depth 1 https://github.com/joan2937/pigpio.git "$tmpdir/pigpio" && \
-     make -C "$tmpdir/pigpio" && \
-     sudo make -C "$tmpdir/pigpio" install; then
-    sudo ldconfig || true
-    echo "pigpiod built and installed from source successfully."
-  else
-    echo "WARNING: Failed to install pigpio from source. Continuing installation without pigpiod."
-  fi
-  rm -rf "$tmpdir" || true
 }
 
 install_node() {
@@ -288,6 +262,84 @@ YAML
   export npm_config_jobs=1
   export JOBS=1
   sudo -u "$USER" env NODE_OPTIONS="$NODE_OPTIONS" npm_config_jobs=1 JOBS=1 corepack yarn workspaces focus -A --production
+}
+
+# Paths a deploy must never write over the device's own state, plus developer
+# tooling that has no purpose on a Pi. `.env` and `data/` are runtime state
+# owned by the device; the rest is ~110M of the ~123M previously staged.
+APP_TAR_EXCLUDES=(
+  --exclude='./.env'
+  --exclude='./data'
+  --exclude='*.db'
+  --exclude='./node_modules'
+  --exclude='*/node_modules'
+  --exclude='./.git'
+  --exclude='./.worktrees'
+  --exclude='./.claude'
+  --exclude='./.agents'
+  --exclude='./.superpowers'
+  --exclude='./.impeccable'
+  --exclude='./.codex'
+)
+
+# Copy the deploy source onto the install dir through a tar stream. rsync is
+# deliberately not used anywhere in the deploy path (see dev-deploy.sh), and
+# plain `cp -a` cannot exclude: copying `.env` over the device's own config is
+# exactly what pointed DATABASE_PATH off-device and left the worker running on
+# an empty database.
+# --no-same-owner: the archive's `./` member carries the staging dir's owner
+# (pi), and root would otherwise restore it onto $INSTALL_DIR, leaving nothing
+# able to create files directly inside it as $USER. chown_app_files then sets
+# the real ownership.
+sync_app_files() {
+  local src="$1"
+  echo "Copying updated application files from $src to $INSTALL_DIR..."
+  sudo tar cf - "${APP_TAR_EXCLUDES[@]}" -C "$src" . |
+    sudo tar xf - --no-same-owner -C "$INSTALL_DIR"
+}
+
+# chown the tree but skip node_modules unless its ownership is actually wrong:
+# it is ~17k of the ~31k files, and yarn already creates it as $USER, so
+# walking it on every deploy is pure cost.
+chown_app_files() {
+  # The install dir itself, not only its contents: steps such as the feature
+  # patcher write temp files directly into $INSTALL_DIR, which fails with
+  # EACCES if the directory is owned by anyone but $USER.
+  sudo chown "$USER:$USER" "$INSTALL_DIR"
+  sudo find "$INSTALL_DIR" -maxdepth 1 -mindepth 1 ! -name node_modules \
+    -exec chown -R "$USER:$USER" {} +
+  if [ -d "$INSTALL_DIR/node_modules" ] &&
+     [ "$(stat -c %U "$INSTALL_DIR/node_modules" 2>/dev/null)" != "$USER" ]; then
+    sudo chown -R "$USER:$USER" "$INSTALL_DIR/node_modules"
+  fi
+}
+
+# The device owns its own DATABASE_PATH. A developer .env copied onto a Pi
+# pointed this at a macOS path, so the worker silently created an empty
+# database there and dropped every Telegram command as an unregistered user.
+# Treat anything outside the install dir as foreign and repair it.
+normalize_database_path() {
+  local env_file="$INSTALL_DIR/.env"
+  [ -f "$env_file" ] || return 0
+
+  local expected="$INSTALL_DIR/data/worker.db"
+  local current
+  current="$(database_path)"
+  case "$current" in
+    "$INSTALL_DIR"/*) return 0 ;;
+  esac
+
+  if [ "${HOME_WORKER_ALLOW_EXTERNAL_DB:-0}" = "1" ]; then
+    echo "WARNING: DATABASE_PATH '$current' is outside $INSTALL_DIR (allowed via HOME_WORKER_ALLOW_EXTERNAL_DB)" >&2
+    return 0
+  fi
+
+  echo "WARNING: DATABASE_PATH '$current' is outside $INSTALL_DIR — repairing to $expected" >&2
+  if grep -qE '^[[:space:]]*DATABASE_PATH[[:space:]]*=' "$env_file"; then
+    sudo sed -i -E "s|^[[:space:]]*DATABASE_PATH[[:space:]]*=.*|DATABASE_PATH=$expected|" "$env_file"
+  else
+    printf 'DATABASE_PATH=%s\n' "$expected" | sudo tee -a "$env_file" >/dev/null
+  fi
 }
 
 install_app() {
@@ -336,35 +388,31 @@ install_app() {
       sudo -u "$USER" pm2 stop ecosystem.config.js 2>/dev/null || true
     fi
     if [ -d "$local_source" ] && [ "$local_source" != "$INSTALL_DIR" ] && [ -f "$local_source/package.json" ]; then
-      echo "Copying updated application files from $local_source to $INSTALL_DIR..."
-      sudo cp -a "$local_source/." "$INSTALL_DIR/"
+      sync_app_files "$local_source"
     elif [ -f "$local_app_root/package.json" ] && [ "$local_app_root" != "$INSTALL_DIR" ]; then
-      echo "Copying updated application files from $local_app_root to $INSTALL_DIR..."
-      sudo cp -a "$local_app_root/." "$INSTALL_DIR/"
+      sync_app_files "$local_app_root"
     fi
-    sudo chown -R "$USER:$USER" "$INSTALL_DIR"
+    chown_app_files
   else
     if [ -d "$local_source" ]; then
       if [ -d "$local_source/.git" ]; then
         echo "Cloning local git repository from $local_source..."
         sudo git clone "$local_source" "$INSTALL_DIR"
       elif [ -f "$local_source/package.json" ]; then
-        echo "Copying manually deployed application files from $local_source to $INSTALL_DIR..."
         sudo mkdir -p "$INSTALL_DIR"
-        sudo cp -a "$local_source/." "$INSTALL_DIR/"
+        sync_app_files "$local_source"
       else
         echo "ERROR: Local source directory '$local_source' does not contain package.json or a git repository."
         exit 1
       fi
     elif [ "$REPO" = "https://github.com/CHANGE_ME/home-worker.git" ] && [ -f "$local_app_root/package.json" ] && [ "$local_app_root" != "$INSTALL_DIR" ]; then
-      echo "Copying local application files from $local_app_root to $INSTALL_DIR..."
       sudo mkdir -p "$INSTALL_DIR"
-      sudo cp -a "$local_app_root/." "$INSTALL_DIR/"
+      sync_app_files "$local_app_root"
     else
       echo "Cloning repository from $REPO..."
       sudo git clone "$REPO" "$INSTALL_DIR"
     fi
-    sudo chown -R "$USER:$USER" "$INSTALL_DIR"
+    chown_app_files
   fi
   cd "$INSTALL_DIR"
   sudo chmod +x "$INSTALL_DIR/scripts/"*.sh 2>/dev/null || true
@@ -378,37 +426,22 @@ install_app() {
   fi
 }
 
-setup_pigpiod() {
-  if ! command -v pigpiod &>/dev/null; then
-    echo "WARNING: pigpiod binary not found, skipping daemon setup"
-    return 0
+setup_gpiod() {
+  echo "Setting up libgpiod GPIO access..."
+  apt_get install -y gpiod
+  sudo usermod -aG gpio "$USER"
+
+  # pigpio cannot drive a Pi 5 (GPIO sits behind the RP1 southbridge) and is
+  # unmaintained; the worker now uses the kernel gpiochip interface via the
+  # gpiod CLI tools. pigpiod is masked rather than purged so rollback during
+  # the verification window stays cheap — but not free. Rollback pair:
+  #   sudo systemctl unmask pigpiod && sudo systemctl enable --now pigpiod
+  # (the old code's readiness requires pigpiod to be active again).
+  if systemctl list-unit-files pigpiod.service &>/dev/null 2>&1; then
+    sudo systemctl disable --now pigpiod.service 2>/dev/null || true
+    sudo systemctl mask pigpiod.service 2>/dev/null || true
+    echo "pigpiod disabled and masked."
   fi
-
-  if ! systemctl list-unit-files pigpiod.service &>/dev/null 2>&1; then
-    if [ ! -f /lib/systemd/system/pigpiod.service ] && [ ! -f /etc/systemd/system/pigpiod.service ]; then
-      local pigpiod_bin
-      pigpiod_bin=$(command -v pigpiod)
-      echo "Creating systemd service unit for pigpiod ($pigpiod_bin)..."
-      cat <<EOF | sudo tee /etc/systemd/system/pigpiod.service >/dev/null
-[Unit]
-Description=Daemon required to control GPIO pins via pigpio
-Documentation=man:pigpiod(8)
-
-[Service]
-ExecStart=${pigpiod_bin} -l
-ExecStop=/bin/systemctl kill -s SIGKILL pigpiod
-Type=forking
-
-[Install]
-WantedBy=multi-user.target
-EOF
-      sudo systemctl daemon-reload || true
-    fi
-  fi
-
-  sudo systemctl enable pigpiod || true
-  sudo systemctl start pigpiod || true
-  echo "pigpiod enabled and started"
 }
 
 setup_tmpfs() {
@@ -424,11 +457,15 @@ setup_system_update_sudoers() {
   # sudoers matches command paths AND arguments literally, so keep this list
   # in lockstep with scripts/system-update.sh. Both /usr/bin and /bin path
   # variants are listed for usr-merged and older images.
+  #
+  # sudoers(5) treats ':' and '=' as syntax, so they must be backslash-escaped
+  # inside a command argument. Unescaped, `DPkg::Lock::Timeout=300` fails
+  # visudo validation and /system_update silently loses its privileges.
   local tmp
   tmp="$(mktemp)"
   cat > "$tmp" <<EOF
-$USER ALL=(ALL) NOPASSWD: /usr/bin/apt-get -o DPkg::Lock::Timeout=300 update, /bin/apt-get -o DPkg::Lock::Timeout=300 update
-$USER ALL=(ALL) NOPASSWD: /usr/bin/apt-get -o DPkg::Lock::Timeout=300 install -y --only-upgrade motion ffmpeg mosquitto, /bin/apt-get -o DPkg::Lock::Timeout=300 install -y --only-upgrade motion ffmpeg mosquitto
+$USER ALL=(ALL) NOPASSWD: /usr/bin/apt-get -o DPkg\:\:Lock\:\:Timeout\=300 update, /bin/apt-get -o DPkg\:\:Lock\:\:Timeout\=300 update
+$USER ALL=(ALL) NOPASSWD: /usr/bin/apt-get -o DPkg\:\:Lock\:\:Timeout\=300 install -y --only-upgrade motion ffmpeg mosquitto, /bin/apt-get -o DPkg\:\:Lock\:\:Timeout\=300 install -y --only-upgrade motion ffmpeg mosquitto
 EOF
   if sudo visudo -c -f "$tmp" >/dev/null; then
     sudo install -m 440 -o root -g root "$tmp" /etc/sudoers.d/homeworker-sysupdate
@@ -839,8 +876,13 @@ setup_pm2() {
     sudo -u "$USER" pm2 kill 2>/dev/null || true
   fi
   if sudo -u "$USER" pm2 jlist 2>/dev/null | grep -q "\"name\":\"worker\""; then
-    echo "Reloading existing PM2 worker process..."
-    sudo -u "$USER" pm2 reload ecosystem.config.js 2>/dev/null || sudo -u "$USER" pm2 restart worker
+    # Hard restart, not `pm2 reload`: reload is a rolling restart that boots the
+    # replacement before retiring the old process. The worker holds an exclusive
+    # pid lock (PidLockGateway), so the overlapping instance aborts with "Worker
+    # already running (pid N)" and PM2 retries, spraying errors into the log.
+    # A single-instance app needs stop-then-start, which is what restart does.
+    echo "Restarting existing PM2 worker process..."
+    sudo -u "$USER" pm2 restart ecosystem.config.js --update-env
   else
     echo "Starting PM2 worker process..."
     sudo -u "$USER" pm2 start ecosystem.config.js
@@ -868,6 +910,14 @@ EOF
 
 reboot_system() {
   echo "Rebooting system to apply changes..."
+  # Schedule the reboot rather than calling `reboot` inline: an immediate
+  # reboot tears down the SSH session mid-command, so the deploy exits 255 and
+  # reports a failure for an install that actually succeeded.
+  if command -v systemd-run >/dev/null 2>&1 &&
+     sudo systemd-run --on-active=5s systemctl reboot >/dev/null 2>&1; then
+    echo "Reboot scheduled in 5s; closing session cleanly."
+    return 0
+  fi
   sudo reboot
 }
 
