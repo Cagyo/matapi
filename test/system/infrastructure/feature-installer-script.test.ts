@@ -46,8 +46,12 @@ m.open_checked_result = lambda _fd, name, _uid, _gid: (m.canonical_request(reque
 m.os.listdir = lambda _fd: ['abcdefghijklmnop.running']
 removed = []; m.remove_entry = lambda _fd, name: removed.append(name)
 m.recover_committed_markers(3, 1, 1); assert removed == ['abcdefghijklmnop.running']
-seen = []; m.subprocess.run = lambda *_a, **kw: (seen.append(kw), type('R', (), {'returncode': 0})())[1]
-assert m.verify_feature('digital'); assert seen and seen[0]['timeout'] == m.CHECK_TIMEOUT_SECONDS and seen[0]['shell'] is False
+seen = []; m.subprocess.run = lambda *a, **kw: (seen.append((a, kw)), type('R', (), {'returncode': 0})())[1]
+assert m.verify_feature('digital'); assert seen and seen[0][1]['timeout'] == m.CHECK_TIMEOUT_SECONDS and seen[0][1]['shell'] is False
+digital_argv = [' '.join(a[0]) for a, _kw in seen]
+assert not any('pigpio' in c or '/pigs' in c for c in digital_argv), digital_argv
+assert any('gpiodetect' in c for c in digital_argv), digital_argv
+assert any('gpiomon' in c for c in digital_argv), digital_argv
 `;
     await expect(run('python3', ['-c', program])).resolves.toMatchObject({ stderr: '' });
   });

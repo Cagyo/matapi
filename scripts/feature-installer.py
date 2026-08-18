@@ -368,7 +368,10 @@ def run_routine(feature):
 
 def verify_feature(feature):
     commands = {
-        'digital': (('/usr/bin/which', 'pigpiod'), ('/bin/systemctl', 'is-active', '--quiet', 'pigpiod.service'), ('/usr/bin/pigs', 't')),
+        # gpiod era: the CLI tools we actually spawn must exist, and a bare
+        # gpiodetect must enumerate a chip (the runtime check that replaces
+        # `pigs t`). No pigpiod service check — install-feature.sh masks it.
+        'digital': (('/usr/bin/which', 'gpiodetect'), ('/usr/bin/which', 'gpiomon'), ('/usr/bin/gpiodetect',)),
         'uart': (('/usr/bin/test', '-e', '/dev/serial0'),),
         'zigbee': (('/usr/bin/which', 'mosquitto'), ('/bin/systemctl', 'is-active', '--quiet', 'mosquitto.service')),
         'motion': (('/usr/bin/which', 'motion'), ('/usr/bin/which', 'ffmpeg'), ('/usr/bin/test', '-f', '/etc/motion/motion.conf'), ('/usr/bin/test', '-d', '/home/pi/motion/videos'), ('/bin/systemctl', 'is-active', '--quiet', 'motion.service')),
