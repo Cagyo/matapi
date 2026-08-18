@@ -64,7 +64,6 @@ const V1_INFO_HELD = [
   '\tline  17:      "GPIO17"    "gpiomon"   input  active-high [used]',
   '',
 ].join('\n');
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 const V1_INFO_FREE = V1_INFO_HELD.replace('"gpiomon"', '  unused ').replace(' [used]', '');
 
 interface Harness {
@@ -220,5 +219,66 @@ describe('LibgpiodCliLine — watch/attach/events/unwatch', () => {
     await expect(line.read()).resolves.toBe(0);
     // seed read at watch + this one
     expect(execFile.mock.calls.filter(([exe]) => exe.endsWith('gpioget'))).toHaveLength(2);
+  });
+});
+
+describe('LibgpiodCliLine — respawn and reconciliation', () => {
+  it('respawns a crashed monitor on the ladder and pushes the reconcile level', async () => {
+    vi.useFakeTimers();
+    const { line, spawned, gpiogetResults, context } = makeHarness();
+    await line.configure({ bias: 'up', debounceUs: 0 });
+    const levels: (0 | 1)[] = [];
+    await line.watch((level) => levels.push(level));
+
+    gpiogetResults.push({ stdout: '0\n' }); // level changed during the blind window
+    spawned[0].exit(1); // crash
+    await vi.advanceTimersByTimeAsync(1_000); // first ladder rung
+
+    expect(context.spawn).toHaveBeenCalledTimes(2);
+    expect(levels).toEqual([0]); // reconcile push — the blind-window transition lands
+    await expect(line.read()).resolves.toBe(0);
+  });
+
+  it('discards stale buffered stdout from a dead incarnation after the reconcile push', async () => {
+    vi.useFakeTimers();
+    const { line, spawned, gpiogetResults } = makeHarness();
+    await line.configure({ bias: 'up', debounceUs: 0 });
+    const levels: (0 | 1)[] = [];
+    await line.watch((level) => levels.push(level));
+
+    gpiogetResults.push({ stdout: '1\n' }); // reconcile says: high
+    // The dying monitor flushes a stale "0" edge between exit and close. It is
+    // buffered pre-exit output of the dead incarnation's stream — it must be
+    // processed BEFORE the reconcile (close precedes the reconcile read), and
+    // anything after close must be discarded.
+    spawned[0].exitFlushingLater(1, ['0']);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    // Late line arrived before close → processed (0), then reconcile push (1).
+    // Nothing from the dead stream lands after the reconcile.
+    expect(levels).toEqual([0, 1]);
+    spawned[0].emitEvent('0'); // stream events after close: dead incarnation
+    expect(levels).toEqual([0, 1]);
+    await expect(line.read()).resolves.toBe(1);
+  });
+
+  it('walks the capped ladder indefinitely — alarm lines never stop retrying', async () => {
+    vi.useFakeTimers();
+    const { line, spawned, context, gpioinfoStdout } = makeHarness();
+    gpioinfoStdout.value = V1_INFO_FREE; // attach never confirms
+    await line.configure({ bias: 'up', debounceUs: 0 });
+    // Attach polls (10 × 50 ms) run inside watch(); under fake timers they must
+    // be advanced while watch is pending, or the await deadlocks.
+    const watchPromise = line.watch(() => undefined);
+    await vi.advanceTimersByTimeAsync(600); // first attempt's attach-poll window
+    await watchPromise;
+    // watch resolved into the ladder (transient) — not attached, not rejected.
+
+    for (const rung of [1_000, 2_000, 5_000, 10_000, 30_000, 30_000, 30_000]) {
+      const before = (context.spawn as ReturnType<typeof vi.fn>).mock.calls.length;
+      await vi.advanceTimersByTimeAsync(rung + 500 /* attach poll window */);
+      expect((context.spawn as ReturnType<typeof vi.fn>).mock.calls.length).toBe(before + 1);
+    }
+    expect(spawned.length).toBeGreaterThanOrEqual(8);
   });
 });
