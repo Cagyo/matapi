@@ -1081,6 +1081,8 @@ const ruCatalog = {
     updateSuccess: (commit: string) =>
       `✅ Обновление завершено.\nКоммит: ${commit}`,
     updateFailed: '❌ Обновление не удалось, выполнен откат к предыдущей версии.',
+    helperUpdateRequired:
+      '⚠️ Обновление отклонено: этому релизу нужен более новый корневой установщик. Зайдите по SSH, запустите scripts/install.sh из репозитория от имени администратора, затем повторите /update.',
     rollbackStarting: '⏪ Откат к предыдущей версии...',
     rollbackNoTag: '❌ Нет предыдущей версии для отката.',
     rollbackSuccess: (commit: string) => `✅ Выполнен откат к коммиту ${commit}.`,

@@ -298,4 +298,20 @@ describe('RestartConfirmationService', () => {
     expect(dm.send).not.toHaveBeenCalled();
     expect(await meta.get(RESTART_REASON_KEY)).toBe('user_command');
   });
+
+  it('broadcasts the helper-update guidance after a refused OTA', async () => {
+    const dm: DirectMessengerPort = { send: vi.fn().mockResolvedValue(undefined) };
+    const { workflows, restore } = recoveryDependencies();
+    const service = new RestartConfirmationService(
+      makeMeta({ [RESTART_REASON_KEY]: 'ota_helper_update_required' }),
+      new InMemoryUserRepository([admin(1, 'Ada')]),
+      dm,
+      workflows,
+      restore,
+    );
+
+    await service.run();
+
+    expect(dm.send).toHaveBeenCalledWith(1, en.ota.helperUpdateRequired);
+  });
 });

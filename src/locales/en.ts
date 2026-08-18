@@ -1076,6 +1076,8 @@ const enCatalog = {
     updateSuccess: (commit: string) =>
       `✅ Update complete.\nCommit: ${commit}`,
     updateFailed: '❌ Update failed, rolled back to previous version.',
+    helperUpdateRequired:
+      '⚠️ Update refused: this release requires a newer root installer bundle. SSH in, run scripts/install.sh from the repo as an administrator, then retry /update.',
     rollbackStarting: '⏪ Rolling back to previous version...',
     rollbackNoTag: '❌ No previous version to roll back to.',
     rollbackSuccess: (commit: string) => `✅ Rolled back to commit ${commit}.`,

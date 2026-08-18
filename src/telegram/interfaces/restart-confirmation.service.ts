@@ -123,6 +123,8 @@ export class RestartConfirmationService {
       }
       case 'rollback_failed':
         return catalog.ota.rollbackFailed('see worker logs');
+      case 'ota_helper_update_required':
+        return catalog.ota.helperUpdateRequired;
       default:
         this.logger.warn(`Unknown restart_reason: ${reason}`);
         return null;

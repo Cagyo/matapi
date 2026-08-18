@@ -1077,6 +1077,8 @@ const ukCatalog = {
     updateSuccess: (commit: string) =>
       `✅ Оновлення завершено.\nКоміт: ${commit}`,
     updateFailed: '❌ Оновлення не вдалося, повернуто попередню версію.',
+    helperUpdateRequired:
+      '⚠️ Оновлення відхилено: цей реліз потребує новішого кореневого інсталятора. Зайдіть по SSH, запустіть scripts/install.sh з репозиторію від імені адміністратора, потім повторіть /update.',
     rollbackStarting: '⏪ Повернення до попередньої версії...',
     rollbackNoTag: '❌ Немає попередньої версії, до якої можна повернутися.',
     rollbackSuccess: (commit: string) => `✅ Повернуто версію з коміту ${commit}.`,
