@@ -1,69 +1,66 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { DigitalGpioAdapter } from '../../../src/sensors/infrastructure/digital-gpio.adapter';
 import {
-  PigpioConnectionState,
-  PigpioGateway,
-  PigpioGpio,
-} from '../../../src/sensors/infrastructure/pigpio.gateway';
+  GpioBackendPort,
+  GpioBackendState,
+  GpioLine,
+} from '../../../src/sensors/infrastructure/gpio-backend.port';
 import { DigitalConfigInvalidError } from '../../../src/sensors/domain/errors/digital-config-invalid.error';
 import { DriverUnavailableError } from '../../../src/sensors/domain/errors/driver-unavailable.error';
 import { InvalidGpioPinError } from '../../../src/sensors/domain/errors/invalid-gpio-pin.error';
 import { SensorConfig } from '../../../src/sensors/domain/sensor';
 import { SensorEvent } from '../../../src/sensors/domain/sensor-event';
 
-function makeFakeGpio(initialLevel: 0 | 1 = 1) {
-  return {
-    modeSet: vi.fn().mockResolvedValue(undefined),
-    pullUpDown: vi.fn().mockResolvedValue(undefined),
+function makeFakeLine(initialLevel: 0 | 1 = 1) {
+  const watchers: ((level: 0 | 1) => void)[] = [];
+  const line = {
+    configure: vi.fn().mockResolvedValue(undefined),
     read: vi.fn().mockResolvedValue(initialLevel),
-    glitchSet: vi.fn().mockResolvedValue(undefined),
-    notify: vi.fn(),
-    endNotify: vi.fn().mockResolvedValue(undefined),
-  } as unknown as PigpioGpio & {
-    modeSet: ReturnType<typeof vi.fn>;
-    pullUpDown: ReturnType<typeof vi.fn>;
-    glitchSet: ReturnType<typeof vi.fn>;
-    notify: ReturnType<typeof vi.fn>;
-    endNotify: ReturnType<typeof vi.fn>;
-    read: ReturnType<typeof vi.fn>;
+    watch: vi.fn(async (onLevel: (level: 0 | 1) => void) => {
+      watchers.push(onLevel);
+    }),
+    unwatch: vi.fn(async () => {
+      watchers.length = 0;
+    }),
+    emit(level: 0 | 1) {
+      for (const watcher of [...watchers]) watcher(level);
+    },
   };
+  // Type-checked against the real port — the reason the interface exists.
+  const _typecheck: GpioLine = line;
+  void _typecheck;
+  return line;
 }
 
-function makeGateway(gpio: PigpioGpio, connected = true) {
-  let state: PigpioConnectionState = { connected, generation: connected ? 1 : 0 };
-  const connectionStateListeners = new Set<(state: PigpioConnectionState) => void>();
+function makeBackend(line: ReturnType<typeof makeFakeLine>, available = true) {
+  let state: GpioBackendState = { available, generation: available ? 1 : 0 };
+  const listeners = new Set<(state: GpioBackendState) => void>();
   const unsubscribe = vi.fn();
-  const publishConnectionState = (next: PigpioConnectionState) => {
+  const publishState = (next: GpioBackendState) => {
     state = next;
-    for (const listener of connectionStateListeners) listener(next);
+    for (const listener of listeners) listener(next);
   };
-  return {
-    isConnected: vi.fn(() => state.connected),
+  const backend = {
     connect: vi.fn(async () => {
-      if (!state.connected) {
-        publishConnectionState({ connected: true, generation: state.generation + 1 });
-      }
+      if (!state.available) publishState({ available: true, generation: state.generation + 1 });
     }),
-    gpio: vi.fn().mockReturnValue(gpio),
-    connectionState: vi.fn(() => state),
-    onConnectionState: vi.fn((listener: (next: PigpioConnectionState) => void) => {
-      connectionStateListeners.add(listener);
+    isAvailable: vi.fn(() => state.available),
+    state: vi.fn(() => state),
+    onStateChange: vi.fn((listener: (next: GpioBackendState) => void) => {
+      listeners.add(listener);
       return () => {
         unsubscribe();
-        connectionStateListeners.delete(listener);
+        listeners.delete(listener);
       };
     }),
-    publishConnectionState,
+    line: vi.fn(() => line),
+    close: vi.fn(async () => undefined),
+    publishState,
     unsubscribe,
-  } as unknown as PigpioGateway & {
-    isConnected: ReturnType<typeof vi.fn>;
-    connect: ReturnType<typeof vi.fn>;
-    gpio: ReturnType<typeof vi.fn>;
-    connectionState: ReturnType<typeof vi.fn>;
-    onConnectionState: ReturnType<typeof vi.fn>;
-    publishConnectionState: (state: PigpioConnectionState) => void;
-    unsubscribe: ReturnType<typeof vi.fn>;
   };
+  const _typecheck: GpioBackendPort = backend;
+  void _typecheck;
+  return backend;
 }
 
 async function flushRebind(): Promise<void> {
@@ -84,22 +81,20 @@ const baseConfig: SensorConfig = {
 };
 
 describe('DigitalGpioAdapter', () => {
-  let gpio: ReturnType<typeof makeFakeGpio>;
-  let gateway: ReturnType<typeof makeGateway>;
+  let line: ReturnType<typeof makeFakeLine>;
+  let backend: ReturnType<typeof makeBackend>;
   let adapter: DigitalGpioAdapter;
 
   beforeEach(() => {
-    gpio = makeFakeGpio(1); // active-low → idle high
-    gateway = makeGateway(gpio);
-    adapter = new DigitalGpioAdapter(gateway);
+    line = makeFakeLine(1); // active-low → idle high
+    backend = makeBackend(line);
+    adapter = new DigitalGpioAdapter(backend);
   });
 
-  it('initialises pin as input with pull-up and registers notify', async () => {
+  it('initialises pin with pull-up bias and debounce, and starts watching', async () => {
     await adapter.init(baseConfig);
-    expect(gpio.modeSet).toHaveBeenCalledWith('input');
-    expect(gpio.pullUpDown).toHaveBeenCalledWith(2);
-    expect(gpio.glitchSet).toHaveBeenCalled();
-    expect(gpio.notify).toHaveBeenCalledTimes(1);
+    expect(line.configure).toHaveBeenCalledWith({ bias: 'up', debounceUs: 10_000 });
+    expect(line.watch).toHaveBeenCalledTimes(1);
     expect(adapter.getState().value).toBe(false);
   });
 
@@ -109,8 +104,7 @@ describe('DigitalGpioAdapter', () => {
     adapter.onEvent((e) => events.push(e));
     await adapter.init(baseConfig);
 
-    const cb = (gpio.notify as ReturnType<typeof vi.fn>).mock.calls[0][0] as (l: 0 | 1) => void;
-    cb(0);
+    line.emit(0);
     vi.advanceTimersByTime(100);
 
     expect(events).toHaveLength(1);
@@ -128,7 +122,7 @@ describe('DigitalGpioAdapter', () => {
       ...baseConfig,
       config: { pin: 17, activeLow: false, pull: 'down' },
     });
-    expect(gpio.pullUpDown).toHaveBeenCalledWith(1);
+    expect(line.configure).toHaveBeenCalledWith({ bias: 'down', debounceUs: 10_000 });
     expect(adapter.getState().value).toBe(true);
   });
 
@@ -146,12 +140,11 @@ describe('DigitalGpioAdapter', () => {
     adapter.onEvent((e) => events.push(e));
     await adapter.init({ ...baseConfig, debounceMs: 1000 });
 
-    const cb = (gpio.notify as ReturnType<typeof vi.fn>).mock.calls[0][0] as (l: 0 | 1) => void;
-    cb(0);
+    line.emit(0);
     vi.advanceTimersByTime(300);
-    cb(1);
+    line.emit(1);
     vi.advanceTimersByTime(300);
-    cb(0);
+    line.emit(0);
     vi.advanceTimersByTime(1000);
 
     expect(events).toHaveLength(1);
@@ -168,15 +161,14 @@ describe('DigitalGpioAdapter', () => {
       debounceMs: 5000, // 5s requested
     });
 
-    const cb = (gpio.notify as ReturnType<typeof vi.fn>).mock.calls[0][0] as (l: 0 | 1) => void;
     // Rising edge (dry -> leak): capped at 50ms
-    cb(0);
+    line.emit(0);
     vi.advanceTimersByTime(50);
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ oldValue: false, newValue: true });
 
     // Falling edge (leak -> dry): min 60s cooldown
-    cb(1);
+    line.emit(1);
     vi.advanceTimersByTime(5000);
     expect(events).toHaveLength(1); // still 1!
     vi.advanceTimersByTime(55_000);
@@ -195,14 +187,13 @@ describe('DigitalGpioAdapter', () => {
       debounceMs: 1000,
     });
 
-    const cb = (gpio.notify as ReturnType<typeof vi.fn>).mock.calls[0][0] as (l: 0 | 1) => void;
     // Rising edge: 0ms instant
-    cb(0);
+    line.emit(0);
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ oldValue: false, newValue: true });
 
     // Falling edge: min 5000ms cooldown
-    cb(1);
+    line.emit(1);
     vi.advanceTimersByTime(1000);
     expect(events).toHaveLength(1);
     vi.advanceTimersByTime(4000);
@@ -216,18 +207,17 @@ describe('DigitalGpioAdapter', () => {
     adapter.onEvent((e) => events.push(e));
     await adapter.init({ ...baseConfig, debounceMs: 0 });
 
-    const cb = (gpio.notify as ReturnType<typeof vi.fn>).mock.calls[0][0] as (l: 0 | 1) => void;
     // Emit 31 rapid transitions
     for (let i = 0; i <= 30; i++) {
-      cb((i % 2) as 0 | 1);
+      line.emit((i % 2) as 0 | 1);
     }
 
-    expect(gpio.endNotify).toHaveBeenCalled();
+    expect(line.unwatch).toHaveBeenCalled();
 
     // Now in polled mode (every 10s)
-    gpio.read.mockResolvedValue(0); // level 0 -> true
+    line.read.mockResolvedValue(0); // level 0 -> true
     vi.advanceTimersByTime(10_000);
-    expect(gpio.read).toHaveBeenCalled();
+    expect(line.read).toHaveBeenCalled();
 
     vi.useRealTimers();
   });
@@ -237,8 +227,7 @@ describe('DigitalGpioAdapter', () => {
     adapter.onEvent((event) => events.push(event));
     await adapter.init({ ...baseConfig, debounceMs: 0 });
 
-    const cb = gpio.notify.mock.calls[0][0] as (level: 0 | 1) => void;
-    for (let index = 0; index < 31; index += 1) cb((index % 2) as 0 | 1);
+    for (let index = 0; index < 31; index += 1) line.emit((index % 2) as 0 | 1);
 
     expect(events).toContainEqual(
       expect.objectContaining({
@@ -267,47 +256,44 @@ describe('DigitalGpioAdapter', () => {
     ).rejects.toThrow(DigitalConfigInvalidError);
   });
 
-  it('connects gateway when disconnected', async () => {
-    gateway.isConnected.mockReturnValue(false);
+  it('connects backend when unavailable', async () => {
+    backend.isAvailable.mockReturnValue(false);
     await adapter.init(baseConfig);
-    expect(gateway.connect).toHaveBeenCalledTimes(1);
+    expect(backend.connect).toHaveBeenCalledTimes(1);
   });
 
   it('preserves its connection subscription after an unavailable startup connection', async () => {
-    gateway.isConnected.mockReturnValue(false);
-    gateway.connect.mockRejectedValueOnce(new Error('refused'));
+    backend.isAvailable.mockReturnValue(false);
+    backend.connect.mockRejectedValueOnce(new Error('refused'));
     await expect(adapter.init(baseConfig)).rejects.toThrow(DriverUnavailableError);
 
-    gateway.publishConnectionState({ connected: true, generation: 1 });
+    backend.publishState({ available: true, generation: 1 });
     await flushRebind();
 
-    expect(gpio.modeSet).toHaveBeenCalledWith('input');
-    expect(gpio.notify).toHaveBeenCalledTimes(1);
+    expect(line.configure).toHaveBeenCalledWith({ bias: 'up', debounceUs: 10_000 });
+    expect(line.watch).toHaveBeenCalledTimes(1);
   });
 
   it('restores a fresh GPIO binding once per generation and ignores stale notifications', async () => {
-    const gpioA = makeFakeGpio(1);
-    const gpioB = makeFakeGpio(0);
-    gateway = makeGateway(gpioA);
-    gateway.gpio.mockReturnValueOnce(gpioA).mockReturnValue(gpioB);
-    adapter = new DigitalGpioAdapter(gateway);
+    const lineA = makeFakeLine(1);
+    const lineB = makeFakeLine(0);
+    backend = makeBackend(lineA);
+    backend.line.mockReturnValueOnce(lineA).mockReturnValue(lineB);
+    adapter = new DigitalGpioAdapter(backend);
     const events: SensorEvent[] = [];
     adapter.onEvent((event) => events.push(event));
 
     await adapter.init({ ...baseConfig, debounceMs: 0 });
-    const staleCallback = gpioA.notify.mock.calls[0][0] as (level: 0 | 1) => void;
+    const staleCallback = lineA.watch.mock.calls[0][0];
 
-    gateway.publishConnectionState({ connected: false, generation: 1 });
-    gateway.publishConnectionState({ connected: true, generation: 2 });
+    backend.publishState({ available: false, generation: 1 });
+    backend.publishState({ available: true, generation: 2 });
     await flushRebind();
 
-    expect(gpioA.endNotify).toHaveBeenCalledTimes(1);
-    expect(gpioB.modeSet).toHaveBeenCalledTimes(1);
-    expect(gpioB.modeSet).toHaveBeenCalledWith('input');
-    expect(gpioB.pullUpDown).toHaveBeenCalledWith(2);
-    expect(gpioB.glitchSet).toHaveBeenCalledTimes(1);
-    expect(gpioB.read).toHaveBeenCalledTimes(1);
-    expect(gpioB.notify).toHaveBeenCalledTimes(1);
+    expect(lineA.unwatch).toHaveBeenCalledTimes(1);
+    expect(lineB.configure).toHaveBeenCalledWith({ bias: 'up', debounceUs: 0 });
+    expect(lineB.read).toHaveBeenCalledTimes(1);
+    expect(lineB.watch).toHaveBeenCalledTimes(1);
     expect(events).toEqual([
       expect.objectContaining({ oldValue: false, newValue: true }),
     ]);
@@ -315,55 +301,55 @@ describe('DigitalGpioAdapter', () => {
     staleCallback(1);
     expect(events).toHaveLength(1);
 
-    const restoredCallback = gpioB.notify.mock.calls[0][0] as (level: 0 | 1) => void;
+    const restoredCallback = lineB.watch.mock.calls[0][0];
     restoredCallback(1);
     expect(events).toEqual([
       expect.objectContaining({ oldValue: false, newValue: true }),
       expect.objectContaining({ oldValue: true, newValue: false }),
     ]);
 
-    gateway.publishConnectionState({ connected: true, generation: 2 });
+    backend.publishState({ available: true, generation: 2 });
     await flushRebind();
-    expect(gpioB.notify).toHaveBeenCalledTimes(1);
+    expect(lineB.watch).toHaveBeenCalledTimes(1);
   });
 
   it('keeps a restored GPIO binding in polled mode while the flap breaker is active', async () => {
-    const gpioA = makeFakeGpio(1);
-    const gpioB = makeFakeGpio(1);
-    gateway = makeGateway(gpioA);
-    gateway.gpio.mockReturnValueOnce(gpioA).mockReturnValue(gpioB);
-    adapter = new DigitalGpioAdapter(gateway);
+    const lineA = makeFakeLine(1);
+    const lineB = makeFakeLine(1);
+    backend = makeBackend(lineA);
+    backend.line.mockReturnValueOnce(lineA).mockReturnValue(lineB);
+    adapter = new DigitalGpioAdapter(backend);
     await adapter.init({ ...baseConfig, debounceMs: 0 });
-    const callback = gpioA.notify.mock.calls[0][0] as (level: 0 | 1) => void;
+    const callback = lineA.watch.mock.calls[0][0];
 
     for (let index = 0; index < 31; index += 1) callback((index % 2) as 0 | 1);
-    expect(gpioA.endNotify).toHaveBeenCalled();
+    expect(lineA.unwatch).toHaveBeenCalled();
 
-    gateway.publishConnectionState({ connected: false, generation: 1 });
-    gateway.publishConnectionState({ connected: true, generation: 2 });
+    backend.publishState({ available: false, generation: 1 });
+    backend.publishState({ available: true, generation: 2 });
     await flushRebind();
 
-    expect(gpioB.modeSet).toHaveBeenCalledTimes(1);
-    expect(gpioB.notify).not.toHaveBeenCalled();
+    expect(lineB.configure).toHaveBeenCalledWith({ bias: 'up', debounceUs: 0 });
+    expect(lineB.watch).not.toHaveBeenCalled();
     await adapter.destroy();
   });
 
   it('ignores a stale polled read after the GPIO binding is restored', async () => {
     vi.useFakeTimers();
-    const gpioA = makeFakeGpio(1);
-    const gpioB = makeFakeGpio(1);
+    const lineA = makeFakeLine(1);
+    const lineB = makeFakeLine(1);
     let resolveStaleRead: ((level: 0 | 1) => void) | undefined;
-    gateway = makeGateway(gpioA);
-    gateway.gpio.mockReturnValueOnce(gpioA).mockReturnValue(gpioB);
-    adapter = new DigitalGpioAdapter(gateway);
+    backend = makeBackend(lineA);
+    backend.line.mockReturnValueOnce(lineA).mockReturnValue(lineB);
+    adapter = new DigitalGpioAdapter(backend);
     const events: SensorEvent[] = [];
     adapter.onEvent((event) => events.push(event));
     await adapter.init({ ...baseConfig, debounceMs: 0 });
-    const callback = gpioA.notify.mock.calls[0][0] as (level: 0 | 1) => void;
+    const callback = lineA.watch.mock.calls[0][0];
 
     for (let index = 0; index < 31; index += 1) callback((index % 2) as 0 | 1);
     events.length = 0;
-    gpioA.read.mockImplementationOnce(
+    lineA.read.mockImplementationOnce(
       () => new Promise<0 | 1>((resolve) => {
         resolveStaleRead = resolve;
       }),
@@ -373,8 +359,8 @@ describe('DigitalGpioAdapter', () => {
     await Promise.resolve();
     expect(resolveStaleRead).toBeTypeOf('function');
 
-    gateway.publishConnectionState({ connected: false, generation: 1 });
-    gateway.publishConnectionState({ connected: true, generation: 2 });
+    backend.publishState({ available: false, generation: 1 });
+    backend.publishState({ available: true, generation: 2 });
     await flushRebind();
     expect(adapter.getState().value).toBe(false);
 
@@ -388,38 +374,51 @@ describe('DigitalGpioAdapter', () => {
   });
 
   it('unsubscribes before destruction and ignores queued or later connection states', async () => {
-    const gpioA = makeFakeGpio(1);
-    const gpioB = makeFakeGpio(1);
-    let resolveModeSet: (() => void) | undefined;
-    gpioB.modeSet.mockImplementation(
+    const lineA = makeFakeLine(1);
+    const lineB = makeFakeLine(1);
+    let resolveConfigure: (() => void) | undefined;
+    lineB.configure.mockImplementation(
       () => new Promise<void>((resolve) => {
-        resolveModeSet = resolve;
+        resolveConfigure = resolve;
       }),
     );
-    gateway = makeGateway(gpioA);
-    gateway.gpio.mockReturnValueOnce(gpioA).mockReturnValue(gpioB);
-    adapter = new DigitalGpioAdapter(gateway);
+    backend = makeBackend(lineA);
+    backend.line.mockReturnValueOnce(lineA).mockReturnValue(lineB);
+    adapter = new DigitalGpioAdapter(backend);
     await adapter.init(baseConfig);
 
-    gateway.publishConnectionState({ connected: false, generation: 1 });
-    gateway.publishConnectionState({ connected: true, generation: 2 });
+    backend.publishState({ available: false, generation: 1 });
+    backend.publishState({ available: true, generation: 2 });
     await flushRebind();
-    expect(gpioB.modeSet).toHaveBeenCalledTimes(1);
+    expect(lineB.configure).toHaveBeenCalledWith({ bias: 'up', debounceUs: 10_000 });
     const destroy = adapter.destroy();
-    expect(gateway.unsubscribe).toHaveBeenCalledTimes(1);
-    resolveModeSet?.();
+    expect(backend.unsubscribe).toHaveBeenCalledTimes(1);
+    resolveConfigure?.();
     await destroy;
-    gateway.publishConnectionState({ connected: true, generation: 3 });
+    backend.publishState({ available: true, generation: 3 });
     await flushRebind();
 
-    expect(gpioB.notify).not.toHaveBeenCalled();
-    expect(gpioA.endNotify).toHaveBeenCalledTimes(1);
+    expect(lineB.watch).not.toHaveBeenCalled();
+    expect(lineA.unwatch).toHaveBeenCalledTimes(1);
   });
 
-  it('destroy unregisters notify and clears timers/intervals', async () => {
+  it('destroy unregisters watch and clears timers/intervals', async () => {
     await adapter.init(baseConfig);
     await adapter.destroy();
-    expect(gpio.endNotify).toHaveBeenCalled();
+    expect(line.unwatch).toHaveBeenCalled();
+  });
+
+  it('unwatches when destroy lands while watch() is in flight', async () => {
+    let resolveWatch!: () => void;
+    line.watch.mockImplementation(
+      () => new Promise<void>((resolveInner) => { resolveWatch = resolveInner; }),
+    );
+    const initPromise = adapter.init(baseConfig);
+    await flushRebind(); // bind has stored the line handle and is awaiting watch()
+    const destroyPromise = adapter.destroy();
+    resolveWatch();
+    await Promise.all([initPromise, destroyPromise]);
+    expect(line.unwatch).toHaveBeenCalled();
   });
 
   it('healthCheck returns true when read succeeds', async () => {
@@ -429,7 +428,7 @@ describe('DigitalGpioAdapter', () => {
 
   it('healthCheck returns false and stays offline after a read failure', async () => {
     await adapter.init(baseConfig);
-    gpio.read.mockRejectedValueOnce(new Error('socket gone'));
+    line.read.mockRejectedValueOnce(new Error('socket gone'));
     expect(await adapter.healthCheck()).toBe(false);
     expect(await adapter.healthCheck()).toBe(false);
   });
@@ -442,11 +441,10 @@ describe('DigitalGpioAdapter', () => {
 
   it('records state change to sensor_logs when repository is provided', async () => {
     const logs = { appendBatch: vi.fn().mockResolvedValue(undefined), findRecent: vi.fn() };
-    const loggedAdapter = new DigitalGpioAdapter(gateway, logs);
+    const loggedAdapter = new DigitalGpioAdapter(backend, logs);
     await loggedAdapter.init({ ...baseConfig, debounceMs: 0 });
 
-    const cb = gpio.notify.mock.calls[0][0];
-    cb(0); // activeLow: 0 is active/true
+    line.emit(0); // activeLow: 0 is active/true
 
     expect(logs.appendBatch).toHaveBeenCalledWith([
       expect.objectContaining({
@@ -460,13 +458,12 @@ describe('DigitalGpioAdapter', () => {
   it('records debounce triggered warning to sensor_logs when bouncing occurs', async () => {
     vi.useFakeTimers();
     const logs = { appendBatch: vi.fn().mockResolvedValue(undefined), findRecent: vi.fn() };
-    const loggedAdapter = new DigitalGpioAdapter(gateway, logs);
+    const loggedAdapter = new DigitalGpioAdapter(backend, logs);
     await loggedAdapter.init({ ...baseConfig, debounceMs: 500 });
 
-    const cb = gpio.notify.mock.calls[0][0];
-    cb(0); // transition 0 -> active
+    line.emit(0); // transition 0 -> active
     vi.advanceTimersByTime(100);
-    cb(1); // bounce back to 1 while debounce timer is active
+    line.emit(1); // bounce back to 1 while debounce timer is active
 
     expect(logs.appendBatch).toHaveBeenCalledWith([
       expect.objectContaining({
@@ -481,13 +478,12 @@ describe('DigitalGpioAdapter', () => {
   it('records flapping fault warning to sensor_logs when circuit breaker trips', async () => {
     vi.useFakeTimers();
     const logs = { appendBatch: vi.fn().mockResolvedValue(undefined), findRecent: vi.fn() };
-    const loggedAdapter = new DigitalGpioAdapter(gateway, logs);
+    const loggedAdapter = new DigitalGpioAdapter(backend, logs);
     await loggedAdapter.init(baseConfig);
 
-    const cb = gpio.notify.mock.calls[0][0];
     for (let i = 0; i < 35; i++) {
       vi.advanceTimersByTime(1000);
-      cb(i % 2);
+      line.emit((i % 2) as 0 | 1);
     }
 
     expect(logs.appendBatch).toHaveBeenCalledWith([
@@ -503,19 +499,16 @@ describe('DigitalGpioAdapter', () => {
   it('resumes hardware notifications after the flap cooldown', async () => {
     vi.useFakeTimers();
     await adapter.init(baseConfig);
-    const cb = (gpio.notify as ReturnType<typeof vi.fn>).mock.calls[0][0] as (l: 0 | 1) => void;
 
     // Trip the anti-flap breaker: >30 transitions inside the 60s window.
-    for (let i = 0; i < 32; i += 1) cb((i % 2) as 0 | 1);
-    expect(gpio.endNotify).toHaveBeenCalled(); // switched to polled mode
-    const notifyCallsBefore = (gpio.notify as ReturnType<typeof vi.fn>).mock.calls.length;
+    for (let i = 0; i < 32; i += 1) line.emit((i % 2) as 0 | 1);
+    expect(line.unwatch).toHaveBeenCalled(); // switched to polled mode
+    const watchCallsBefore = line.watch.mock.calls.length;
 
     // Advance past the recovery window; the 10s polled tick performs the check.
     await vi.advanceTimersByTimeAsync(5 * 60_000 + 10_000);
 
-    expect((gpio.notify as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(
-      notifyCallsBefore,
-    );
+    expect(line.watch.mock.calls.length).toBeGreaterThan(watchCallsBefore);
     vi.useRealTimers();
   });
 });

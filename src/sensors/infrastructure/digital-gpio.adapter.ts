@@ -12,24 +12,24 @@ import { SensorEvent } from '../domain/sensor-event';
 import { SensorReading } from '../domain/sensor-reading';
 import { en } from '../../locales/en';
 import {
-  PigpioConnectionState,
-  PigpioGateway,
-  PigpioGpio,
-  PudMode,
-} from './pigpio.gateway';
+  GpioBackendPort,
+  GpioBackendState,
+  GpioBias,
+  GpioLine,
+} from './gpio-backend.port';
 import { completeWithinDriverShutdownContext } from './driver-shutdown';
 
 interface DigitalConfig {
   pin: GpioPin;
   activeLow: boolean;
   invert: boolean;
-  pull: PudMode;
+  pull: GpioBias;
   stepType: DigitalStepType;
 }
 
 /**
- * Production digital GPIO adapter. Connects to pigpiod via PigpioGateway.
- * - Hardware glitch filter (pigpio glitchSet) to reject jitter (≤10 ms).
+ * Production digital GPIO adapter. Connects to a gpiod backend via GpioBackendPort.
+ * - Hardware bias/debounce request (libgpiod line request config) to reject jitter (≤10 ms).
  * - Auto-inferred debouncing strategies based on stepType (Symmetric, Asymmetric Alarm, Asymmetric Cooldown).
  * - Anti-flapping hardware circuit breaker (>30 transitions/min switches to 10s Polled Sampling Mode).
  * - Strict timer lifecycle cleanup to prevent memory leaks in PM2 workers.
@@ -39,9 +39,9 @@ export class DigitalGpioAdapter implements SensorDriverPort {
   private readonly logger = new Logger(DigitalGpioAdapter.name);
   private config?: SensorConfig;
   private digital?: DigitalConfig;
-  private gpio?: PigpioGpio;
+  private line?: GpioLine;
   private listener?: (event: SensorEvent) => void;
-  private gatewayUnsubscribe?: () => void;
+  private backendUnsubscribe?: () => void;
   private restoredGeneration = 0;
   private requestedGeneration = 0;
   private connectedGeneration = 0;
@@ -63,7 +63,7 @@ export class DigitalGpioAdapter implements SensorDriverPort {
   private static readonly FLAP_RECOVERY_MS = 5 * 60 * 1000;
 
   constructor(
-    private readonly gateway: PigpioGateway,
+    private readonly backend: GpioBackendPort,
     private readonly logs?: SensorLogRepositoryPort,
   ) {}
 
@@ -85,53 +85,52 @@ export class DigitalGpioAdapter implements SensorDriverPort {
     this.config = config;
     this.digital = this.parseConfig(config.config);
 
-    // Subscribe before the first connect attempt so an unavailable pigpiod at
+    // Subscribe before the first connect attempt so an unavailable gpio backend at
     // startup can later restore this configured driver without a registry reload.
-    this.gatewayUnsubscribe = this.gateway.onConnectionState((state) => {
-      this.handleConnectionState(state);
+    this.backendUnsubscribe = this.backend.onStateChange((state) => {
+      this.handleBackendState(state);
     });
 
-    if (this.gateway.isConnected()) {
-      this.handleConnectionState(this.gateway.connectionState());
+    if (this.backend.isAvailable()) {
+      this.handleBackendState(this.backend.state());
       await this.bindPromise;
     } else {
       try {
-        await this.gateway.connect();
+        await this.backend.connect();
       } catch (err) {
         this.offline = true;
         if (err instanceof DriverUnavailableError) throw err;
-        throw new DriverUnavailableError('pigpiod', (err as Error).message);
+        throw new DriverUnavailableError('gpiod', (err as Error).message);
       }
-      // `connect()` publishes a connected state synchronously before resolving.
-      // Await the binding it queued so a successful init has a configured handle.
+      // connect() publishes an available state synchronously before resolving.
       await this.bindPromise;
     }
   }
 
   async destroy(context?: SensorDriverShutdownContext): Promise<void> {
     this.destroyed = true;
-    this.gatewayUnsubscribe?.();
-    this.gatewayUnsubscribe = undefined;
+    this.backendUnsubscribe?.();
+    this.backendUnsubscribe = undefined;
     this.clearActiveTimers();
     if (this.polledInterval) {
       clearInterval(this.polledInterval);
       this.polledInterval = undefined;
     }
     this.listener = undefined;
-    const gpio = this.gpio;
-    this.gpio = undefined;
+    const line = this.line;
+    this.line = undefined;
 
-    const [bindResult, notifyResult] = await Promise.all([
+    const [bindResult, unwatchResult] = await Promise.all([
       completeWithinDriverShutdownContext(this.bindPromise, context),
       completeWithinDriverShutdownContext(
-        Promise.resolve().then(() => gpio?.endNotify()),
+        Promise.resolve().then(() => line?.unwatch()),
         context,
       ),
     ]);
     if (bindResult === 'cancelled') this.logger.warn('GPIO bind cleanup timed out during destroy');
     if (bindResult === 'failed') this.logger.warn('GPIO bind cleanup failed during destroy');
-    if (notifyResult === 'cancelled') this.logger.warn('GPIO notify cleanup timed out during destroy');
-    if (notifyResult === 'failed') this.logger.warn('GPIO notify cleanup failed during destroy');
+    if (unwatchResult === 'cancelled') this.logger.warn('GPIO unwatch timed out during destroy');
+    if (unwatchResult === 'failed') this.logger.warn('GPIO unwatch failed during destroy');
   }
 
   getState(): SensorReading {
@@ -147,9 +146,9 @@ export class DigitalGpioAdapter implements SensorDriverPort {
   }
 
   async healthCheck(): Promise<boolean> {
-    if (!this.gpio || this.offline) return false;
+    if (!this.line || this.offline) return false;
     try {
-      this.rawLevel = await this.gpio.read();
+      this.rawLevel = await this.line.read();
       return true;
     } catch (err) {
       this.logger.warn(`healthCheck read failed: ${(err as Error).message}`);
@@ -164,9 +163,9 @@ export class DigitalGpioAdapter implements SensorDriverPort {
     return typeof pin === 'number' ? pin : null;
   }
 
-  private handleConnectionState(state: PigpioConnectionState): void {
+  private handleBackendState(state: GpioBackendState): void {
     if (this.destroyed || !this.config || !this.digital) return;
-    if (!state.connected) {
+    if (!state.available) {
       this.offline = true;
       this.connectedGeneration = 0;
       this.clearActiveTimers();
@@ -192,7 +191,7 @@ export class DigitalGpioAdapter implements SensorDriverPort {
       } catch (err) {
         this.offline = true;
         this.logger.warn(
-          `Digital "${this.config?.name}" failed to bind after pigpiod connection: ${(err as Error).message}`,
+          `Digital "${this.config?.name}" failed to bind after gpio backend recovery: ${(err as Error).message}`,
         );
       }
     });
@@ -201,33 +200,31 @@ export class DigitalGpioAdapter implements SensorDriverPort {
   private async bindGpio(generation: number): Promise<void> {
     if (!this.config || !this.digital || this.destroyed) return;
 
-    const previousGpio = this.gpio;
-    if (previousGpio) {
+    const previousLine = this.line;
+    if (previousLine) {
       try {
-        await previousGpio.endNotify();
+        await previousLine.unwatch();
       } catch (err) {
-        this.logger.warn(`endNotify before GPIO rebind failed: ${(err as Error).message}`);
+        this.logger.warn(`unwatch before GPIO rebind failed: ${(err as Error).message}`);
       }
     }
-    this.gpio = undefined;
+    this.line = undefined;
 
-    const gpio = this.gateway.gpio(this.digital.pin.value);
-    await gpio.modeSet('input');
-    if (this.destroyed) return;
-    await gpio.pullUpDown(this.pudCode(this.digital.pull));
-    if (this.destroyed) return;
-
-    // Hardware glitch filter rejects jitter only. Long debounce stays in JS.
-    // Cap hardware filter at 10ms (within pigpio's 0-300000 µs limit).
-    const glitchUs = Math.min(10_000, Math.max(0, this.config.debounceMs * 1000));
-    await gpio.glitchSet(glitchUs);
+    const line = this.backend.line(this.digital.pin.value);
+    // Bias and debounce are properties of a libgpiod request, not mutable
+    // settings — one call per request config. Cap matches the old glitch
+    // filter: 10 ms; long debounce stays in JS.
+    const debounceUs = Math.min(10_000, Math.max(0, this.config.debounceMs * 1000));
+    await line.configure({ bias: this.digital.pull, debounceUs });
     if (this.destroyed) return;
 
-    const level = await gpio.read();
+    const level = await line.read();
     if (this.destroyed || generation !== this.connectedGeneration) return;
 
     const isInitialBinding = this.restoredGeneration === 0;
-    this.gpio = gpio;
+    // Contract: store the handle BEFORE awaiting watch(), so destroy() always
+    // has something to unwatch.
+    this.line = line;
     this.restoredGeneration = generation;
     this.offline = false;
     if (isInitialBinding) {
@@ -239,7 +236,12 @@ export class DigitalGpioAdapter implements SensorDriverPort {
     }
 
     if (!this.isFlapping) {
-      gpio.notify((notifyLevel) => this.handleNotify(generation, notifyLevel));
+      await line.watch((notifyLevel) => this.handleNotify(generation, notifyLevel));
+      if (this.destroyed) {
+        // destroy() interleaved with the await — undo the registration.
+        await line.unwatch().catch(() => undefined);
+        return;
+      }
     }
 
     this.logger.log(
@@ -292,26 +294,28 @@ export class DigitalGpioAdapter implements SensorDriverPort {
 
   private startPolledSampling(): void {
     if (this.polledInterval) clearInterval(this.polledInterval);
-    this.gpio?.endNotify().catch((err) => {
-      this.logger.warn(`endNotify during flapping failed: ${(err as Error).message}`);
+    // Safe fire-and-forget: per-line ops serialize, so the first poll read at
+    // +10 s queues behind this kill rather than racing a dying monitor.
+    this.line?.unwatch().catch((err) => {
+      this.logger.warn(`unwatch during flapping failed: ${(err as Error).message}`);
     });
 
     this.polledSince = Date.now();
     this.polledInterval = setInterval(() => {
       void (async () => {
-        const gpio = this.gpio;
+        const line = this.line;
         const generation = this.restoredGeneration;
-        if (this.offline || !gpio || !this.config || !this.digital) return;
+        if (this.offline || !line || !this.config || !this.digital) return;
         if (Date.now() - this.polledSince >= DigitalGpioAdapter.FLAP_RECOVERY_MS) {
           this.resumeFromFlapping();
           return;
         }
         try {
-          const level = await gpio.read();
+          const level = await line.read();
           if (
             this.destroyed ||
             this.offline ||
-            this.gpio !== gpio ||
+            this.line !== line ||
             this.restoredGeneration !== generation
           ) {
             return;
@@ -334,9 +338,13 @@ export class DigitalGpioAdapter implements SensorDriverPort {
     this.isFlapping = false;
     this.transitionTimestamps = [];
     this.debounceLogged = false;
-    if (!this.gpio || this.offline || this.destroyed) return;
+    if (!this.line || this.offline || this.destroyed) return;
     const generation = this.restoredGeneration;
-    this.gpio.notify((level) => this.handleNotify(generation, level));
+    void this.line
+      .watch((level) => this.handleNotify(generation, level))
+      .catch((err) => {
+        this.logger.warn(`re-watch after flap cooldown failed terminally: ${(err as Error).message}`);
+      });
     this.logger.log(
       `Digital "${this.config?.name}" resumed hardware notifications after flap cooldown`,
     );
@@ -439,17 +447,6 @@ export class DigitalGpioAdapter implements SensorDriverPort {
 
   private mapValue(level: 0 | 1): boolean {
     return this.digital?.invert ? level === 0 : level === 1;
-  }
-
-  private pudCode(pull: PudMode): 0 | 1 | 2 {
-    switch (pull) {
-      case 'up':
-        return 2;
-      case 'down':
-        return 1;
-      case 'none':
-        return 0;
-    }
   }
 
   private parseConfig(raw: Record<string, unknown>): DigitalConfig {
