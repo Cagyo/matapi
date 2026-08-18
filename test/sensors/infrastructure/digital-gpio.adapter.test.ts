@@ -428,9 +428,39 @@ describe('DigitalGpioAdapter', () => {
 
   it('healthCheck returns false and stays offline after a read failure', async () => {
     await adapter.init(baseConfig);
-    line.read.mockRejectedValueOnce(new Error('socket gone'));
+    line.read.mockRejectedValue(new Error('socket gone'));
     expect(await adapter.healthCheck()).toBe(false);
     expect(await adapter.healthCheck()).toBe(false);
+  });
+
+  it('healthCheck success after a transient read failure clears offline and re-seeds', async () => {
+    vi.useFakeTimers();
+    const events: SensorEvent[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await adapter.init(baseConfig);
+
+    line.read.mockRejectedValueOnce(new Error('monitor down past liveness threshold'));
+    await expect(adapter.healthCheck()).resolves.toBe(false); // sets offline
+
+    // While deaf, watch events are dropped — this is the bug class being closed.
+    line.emit(0);
+    vi.advanceTimersByTime(1_000);
+    expect(events).toHaveLength(0);
+
+    // Line recovered; healthCheck read succeeds with a level that changed
+    // during the deaf window.
+    line.read.mockResolvedValueOnce(0); // active-low: 0 = active
+    await expect(adapter.healthCheck()).resolves.toBe(true);
+    vi.advanceTimersByTime(100); // baseConfig debounceMs
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: 'state_change', newValue: true });
+  });
+
+  it('healthCheck still reports false while the line stays broken', async () => {
+    await adapter.init(baseConfig);
+    line.read.mockRejectedValue(new Error('still down'));
+    await expect(adapter.healthCheck()).resolves.toBe(false);
+    await expect(adapter.healthCheck()).resolves.toBe(false); // no early-return masking
   });
 
   it('getPin static helper extracts numeric pin', () => {

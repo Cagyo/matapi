@@ -146,9 +146,21 @@ export class DigitalGpioAdapter implements SensorDriverPort {
   }
 
   async healthCheck(): Promise<boolean> {
-    if (!this.line || this.offline) return false;
+    // Half 1: `offline` removed from the guard — otherwise "a successful
+    // healthCheck clears offline" is unreachable.
+    if (!this.line) return false;
     try {
-      this.rawLevel = await this.line.read();
+      const level = await this.line.read();
+      if (this.offline) {
+        // Half 2: clear the flag and re-seed level state from this same read.
+        // The backend's post-recovery re-emit lands in handleNotify, whose
+        // offline guard would drop it whenever recovery precedes this tick —
+        // the usual order. Reseeding here makes the ordering irrelevant.
+        this.offline = false;
+        this.processLevelChange(level, Date.now());
+      } else {
+        this.rawLevel = level;
+      }
       return true;
     } catch (err) {
       this.logger.warn(`healthCheck read failed: ${(err as Error).message}`);
