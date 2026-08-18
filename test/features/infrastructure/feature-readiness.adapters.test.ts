@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { constants } from 'node:fs';
 import { Logger } from '@nestjs/common';
 import { DigitalReadinessAdapter } from '../../../src/features/infrastructure/readiness/digital-readiness.adapter';
@@ -8,6 +8,13 @@ import { UartReadinessAdapter } from '../../../src/features/infrastructure/readi
 import { ZigbeeReadinessAdapter } from '../../../src/features/infrastructure/readiness/zigbee-readiness.adapter';
 
 describe('feature readiness adapters', () => {
+  beforeEach(() => {
+    delete process.env.GPIO_CHIP;
+  });
+  afterEach(() => {
+    delete process.env.GPIO_CHIP;
+  });
+
   it('digital readiness passes when gpiod tools, chip, group and chip access hold and pigpiod is absent', async () => {
     const execFile = vi.fn(async (executable: string, args: readonly string[]) => {
       if (executable === '/usr/bin/which') return { stdout: `/usr/bin/${args[0]}\n`, stderr: '' };
@@ -89,6 +96,54 @@ describe('feature readiness adapters', () => {
       failureCode: 'application-verification-failed',
     });
     expect(openReadWrite).toHaveBeenCalledWith('/dev/gpiochip0');
+  });
+
+  it('digital readiness opens the GPIO_CHIP override even when another chip carries a known label', async () => {
+    process.env.GPIO_CHIP = 'gpiochip4';
+    const execFile = vi.fn(async (executable: string, args: readonly string[]) => {
+      if (executable === '/usr/bin/which') return { stdout: `/usr/bin/${args[0]}\n`, stderr: '' };
+      if (executable === '/usr/bin/gpiodetect') {
+        return {
+          stdout: 'gpiochip0 [pinctrl-rp1] (54 lines)\ngpiochip4 [gpio-brcmstb] (32 lines)\n',
+          stderr: '',
+        };
+      }
+      if (executable === '/usr/bin/id') return { stdout: 'homeworker gpio\n', stderr: '' };
+      if (executable === '/bin/systemctl') throw new Error('inactive');
+      throw new Error(`unexpected exec: ${executable}`);
+    });
+    const openReadWrite = vi.fn().mockResolvedValue(undefined);
+    const adapter = new DigitalReadinessAdapter({ execFile, files: { openReadWrite } });
+
+    await expect(adapter.verify('digital')).resolves.toEqual({ ready: true, restartScope: 'worker' });
+    // Must match resolveChip() in libgpiod-cli.syntax.ts, or readiness would green-light
+    // gpiochip0 while gpiomon drives gpiochip4.
+    expect(openReadWrite).toHaveBeenCalledWith('/dev/gpiochip4');
+  });
+
+  it('digital readiness fails when GPIO_CHIP matches no detected chip', async () => {
+    vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    process.env.GPIO_CHIP = 'gpiochip9';
+    // Everything except the chip resolution is healthy on purpose: only then does
+    // the case discriminate between override-first and label-first precedence.
+    const execFile = vi.fn(async (executable: string, args: readonly string[]) => {
+      if (executable === '/usr/bin/which') return { stdout: `/usr/bin/${args[0]}\n`, stderr: '' };
+      if (executable === '/usr/bin/gpiodetect') {
+        return { stdout: 'gpiochip0 [pinctrl-rp1] (54 lines)\n', stderr: '' };
+      }
+      if (executable === '/usr/bin/id') return { stdout: 'homeworker gpio\n', stderr: '' };
+      if (executable === '/bin/systemctl') throw new Error('inactive');
+      throw new Error(`unexpected exec: ${executable}`);
+    });
+    const openReadWrite = vi.fn().mockResolvedValue(undefined);
+    const adapter = new DigitalReadinessAdapter({ execFile, files: { openReadWrite } });
+
+    await expect(adapter.verify('digital')).resolves.toEqual({
+      ready: false,
+      failureCode: 'application-verification-failed',
+    });
+    // No silent fallback to the known label — resolveChip() throws here, so readiness fails here.
+    expect(openReadWrite).not.toHaveBeenCalled();
   });
 
   it('maps a failed fixed command to the allowlisted application failure', async () => {

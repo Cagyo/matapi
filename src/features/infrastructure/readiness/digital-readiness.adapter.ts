@@ -72,13 +72,24 @@ export class DigitalReadinessAdapter implements FeatureReadinessPort {
   }
 }
 
+/**
+ * Override-first, mirroring resolveChip() in
+ * src/sensors/infrastructure/libgpiod-cli.syntax.ts. Never resolve by index: the
+ * RP1 chip moved between gpiochip4 and gpiochip0 across firmware releases. A
+ * GPIO_CHIP that matches nothing resolves to null (readiness fails) rather than
+ * falling back to a known label — resolveChip() throws in that case, and a
+ * divergence here would pass readiness on a chip the sensors then fail on.
+ */
 function knownChipName(gpiodetectStdout: string): string | null {
-  const override = process.env.GPIO_CHIP;
+  const chips: Array<{ name: string; label: string }> = [];
   for (const row of gpiodetectStdout.split('\n')) {
     const match = /^(\S+)\s+\[([^\]]+)\]/.exec(row.trim());
-    if (!match) continue;
-    if (KNOWN_CHIP_LABELS.includes(match[2])) return match[1];
-    if (override && (match[1] === override || match[2] === override)) return match[1];
+    if (match) chips.push({ name: match[1], label: match[2] });
   }
-  return null;
+
+  const override = process.env.GPIO_CHIP;
+  if (override) {
+    return chips.find((chip) => chip.name === override || chip.label === override)?.name ?? null;
+  }
+  return chips.find((chip) => KNOWN_CHIP_LABELS.includes(chip.label))?.name ?? null;
 }
