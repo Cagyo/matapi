@@ -19,6 +19,10 @@ node_modules/
 dist/
 *.tsbuildinfo
 
+# python (scripts/feature-installer.py, live-stream helpers)
+__pycache__/
+*.pyc
+
 # data
 data/
 *.db
