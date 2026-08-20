@@ -181,11 +181,15 @@ Worker catches ENOSPC on every write, degrades gracefully.
 
 ## Crash-Loop Protection
 
-| Setting | Value | Env override | Purpose |
+| Setting | Value | Env var | Purpose |
 |---|---|---|---|
 | `max_restarts` | 10 | `PM2_MAX_RESTARTS` | Consecutive *unstable* restarts before PM2 parks the app in `errored` |
 | `min_uptime` | 60000 ms | `PM2_MIN_UPTIME` | How long a start must survive to count as successful |
 | `restart_delay` | 10000 ms | `PM2_RESTART_DELAY` | Wait between a crash and the next start |
+
+The `PM2_*` vars are read when PM2 evaluates `ecosystem.config.js`, so they must be **exported in the shell
+that invokes PM2** — e.g. `PM2_MIN_UPTIME=30000 pm2 restart ecosystem.config.js --update-env`. Nothing sources
+`.env` into the PM2 CLI (`setup_pm2`, `scripts/install.sh`), so a value set only in `.env` has no effect.
 
 `max_restarts` only counts restarts that PM2 classified as *unstable*, i.e. the process exited before
 `min_uptime`. **`min_uptime` is what makes the cap engage at all.** Without it PM2 applies a 1000 ms default:
@@ -193,9 +197,13 @@ a boot-time fault that crashed the worker just over a second after start counted
 cap never fired — one incident logged 615 restarts with `status: online` and `unstable restarts: 0`, spinning
 at roughly one crash per second for hours while Telegram and the GPIO sensors stayed down.
 
-60 s clears the worst-case cold boot on a Raspberry Pi 3 (SQLite open + migrations, sensor registry reload,
-feature verification, archive boot recovery), so a slow-but-legitimate start is never mistaken for a crash
-loop, while every boot-phase failure lands well inside the window.
+PM2 increments `unstable_restarts` only when the process exits *before* `min_uptime`, and resets it to 0 after
+any start that outlives the window — a slow-but-legitimate start that reaches steady state is never counted, at
+any value. 60 s is chosen so that every boot-phase failure lands well inside the window even on a Raspberry Pi 3
+cold boot (SQLite open + migrations, sensor registry reload, feature verification, archive boot recovery), which
+is what makes the cap engage at all. Mind the direction when retuning: **lowering** `min_uptime` makes PM2 more
+tolerant of a fast crash loop, not less. Together with `restart_delay` it sets the retry budget —
+`max_restarts × (time-to-crash + restart_delay)` ≈ 2-3 minutes of retrying before PM2 gives up.
 
 **Accepted consequence:** a genuinely broken deploy now exhausts the cap in ~2-3 minutes and the worker stays
 **down** in `errored` rather than crash-looping — no alerts until someone intervenes. That is deliberate:

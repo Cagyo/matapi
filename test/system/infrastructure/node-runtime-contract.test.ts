@@ -70,7 +70,9 @@ describe('supported runtime contract', () => {
     expect(Number(app.min_uptime)).toBeGreaterThanOrEqual(healthCheckSeconds * 1000);
   });
 
-  it('lets an operator retune the restart policy without editing the file', async () => {
+  it('lets an operator retune the restart policy via exported PM2_* env vars', async () => {
+    // Exported in the shell that runs `pm2 start|restart` — .env is not sourced
+    // into the PM2 CLI, so these keys are inert when set only in .env.
     const app = await pm2App({
       PM2_MIN_UPTIME: '15000',
       PM2_RESTART_DELAY: '2000',

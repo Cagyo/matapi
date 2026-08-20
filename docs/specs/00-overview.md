@@ -114,7 +114,7 @@ DISK_EMERGENCY_PERCENT=95
 # Backup
 BACKUP_LOCAL_PATH=/opt/home-worker/data/backup.db
 
-# PM2
+# PM2 (read by ecosystem.config.js; export for `pm2 start`, not sourced from .env)
 PM2_MAX_MEMORY_RESTART=512M
 PM2_MAX_RESTARTS=10
 PM2_MIN_UPTIME=60000

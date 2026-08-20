@@ -253,7 +253,7 @@ CO2_CRITICAL_PPM=1200
 
 # Motion / Camera
 MOTION_VIDEO_SEGMENT_SEC=30
-MOTION_LOCAL_DIR=/var/lib/motion
+MOTION_LOCAL_DIR=/home/pi/motion/videos
 
 # Google Drive
 HOME_WORKER_ARCHIVE_KEY_PATH=/etc/home-worker/archive.key
@@ -897,7 +897,7 @@ on_picture_save curl -s "http://localhost:4000/motion/snapshot?file=%f"
 ### 11.2 File Structure
 
 ```
-/var/lib/motion/
+/home/pi/motion/videos/
 ├── 2026/
 │   ├── 03/
 │   │   └── 08/
@@ -1351,7 +1351,7 @@ install_feature() {
   case $1 in
     motion)
       sudo apt-get install -y motion
-      mkdir -p /var/lib/motion
+      mkdir -p /home/pi/motion/videos
       install_rclone
       ;;
     zigbee)
