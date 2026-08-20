@@ -94,7 +94,11 @@ export class GoogleDriveAccountAdapter implements DriveAccountPort {
   }
 
   private async resolveFolder(input: ResolveFolderInput): Promise<string> {
-    if (input.storedId !== null) {
+    // Google accepts the special "root" alias in requests but returns the
+    // canonical opaque root ID in file metadata. Revalidate a reserved root
+    // through the root-constrained list query instead of trusting a parent ID
+    // that cannot be compared to the alias.
+    if (input.storedId !== null && input.parentId !== ROOT_PARENT_ID) {
       const stored = await this.callDrive(() => this.drive.loadFolder(input.storedId!, input.signal));
       if (stored !== null && isExpectedFolder(stored, input)) return stored.id;
     }
@@ -201,7 +205,7 @@ function isExpectedFolder(file: GoogleDriveFolder, input: ResolveFolderInput): b
     && file.driveId === null
     && file.ownedByMe === true
     && file.shared === false
-    && sameOnlyValue(file.parents, input.parentId)
+    && hasExpectedParent(file.parents, input.parentId)
     && file.owners !== null
     && file.owners.length === 1
     && file.owners[0].permissionId === input.accountPermissionId
@@ -243,6 +247,13 @@ function parseInt64(value: string | null, name: string): number {
 
 function sameOnlyValue(values: readonly string[] | null, expected: string): boolean {
   return values !== null && values.length === 1 && values[0] === expected;
+}
+
+function hasExpectedParent(values: readonly string[] | null, expected: string): boolean {
+  if (expected === ROOT_PARENT_ID) {
+    return values !== null && values.length === 1 && isText(values[0]);
+  }
+  return sameOnlyValue(values, expected);
 }
 
 function isText(value: unknown): value is string {

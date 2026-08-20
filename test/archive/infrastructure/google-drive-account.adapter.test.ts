@@ -48,13 +48,14 @@ describe("GoogleDriveAccountAdapter", () => {
     drive.files.set("root-folder", folder("root-folder", "root", "root"));
     drive.files.set("motion-folder", folder("motion-folder", "motion", "root-folder"));
     drive.files.set("backups-folder", folder("backups-folder", "backups", "root-folder"));
+    drive.folderPages = [page([folder("root-folder", "root", "canonical-root-id")])];
 
     await expect(adapter.resolveManagedFolders(saved, signal)).resolves.toEqual({
       rootId: "root-folder",
       motionId: "motion-folder",
       backupsId: "backups-folder",
     });
-    expect(drive.listStarts).toEqual([]);
+    expect(drive.listStarts).toEqual([null]);
     expect(drive.created).toEqual([]);
   });
 
@@ -111,6 +112,39 @@ describe("GoogleDriveAccountAdapter", () => {
     ]);
   });
 
+  it("accepts the canonical root folder ID returned for Google's root alias", async () => {
+    const drive = new DriveStub();
+    const adapter = adapterFor(drive);
+    drive.canonicalRootId = "canonical-root-id";
+    drive.folderPages = [page([]), page([]), page([])];
+    drive.generatedIds = ["root-created", "motion-created", "backups-created"];
+
+    await expect(adapter.resolveManagedFolders(connection(), signal)).resolves.toEqual({
+      rootId: "root-created",
+      motionId: "motion-created",
+      backupsId: "backups-created",
+    });
+  });
+
+  it("does not trust a persisted root reservation outside My Drive root", async () => {
+    const drive = new DriveStub();
+    const reservations = new ReservationStub();
+    const adapter = adapterFor(drive, reservations);
+    reservations.ids.rootId = "root-reserved";
+    drive.files.set("root-reserved", folder("root-reserved", "root", "elsewhere"));
+    drive.folderPages = [
+      page([folder("root-at-my-drive-root", "root", "canonical-root-id")]),
+      page([folder("motion-folder", "motion", "root-at-my-drive-root")]),
+      page([folder("backups-folder", "backups", "root-at-my-drive-root")]),
+    ];
+
+    await expect(adapter.resolveManagedFolders(connection(), signal)).resolves.toEqual({
+      rootId: "root-at-my-drive-root",
+      motionId: "motion-folder",
+      backupsId: "backups-folder",
+    });
+  });
+
   it("recovers a persisted generated ID after the create response is lost", async () => {
     const drive = new DriveStub();
     const reservations = new ReservationStub();
@@ -123,7 +157,11 @@ describe("GoogleDriveAccountAdapter", () => {
     expect(reservations.ids).toEqual({ rootId: "root-reserved", motionId: null, backupsId: null });
 
     drive.files.set("root-reserved", folder("root-reserved", "root", "root"));
-    drive.folderPages = [page([folder("motion-folder", "motion", "root-reserved")]), page([folder("backups-folder", "backups", "root-reserved")])];
+    drive.folderPages = [
+      page([folder("root-reserved", "root", "canonical-root-id")]),
+      page([folder("motion-folder", "motion", "root-reserved")]),
+      page([folder("backups-folder", "backups", "root-reserved")]),
+    ];
     await expect(adapter.resolveManagedFolders(connection(), signal)).resolves.toEqual({
       rootId: "root-reserved", motionId: "motion-folder", backupsId: "backups-folder",
     });
@@ -223,14 +261,15 @@ describe("GoogleDriveGateway", () => {
 
 class DriveStub {
   about = aboutFixture();
-  folderPages: Array<GoogleDriveFolderPage | Error> = [];
+  folderPages: (GoogleDriveFolderPage | Error)[] = [];
   files = new Map<string, GoogleDriveFolder>();
   generatedIds: string[] = [];
   createFailures = new Map<string, Error>();
-  listStarts: Array<string | null> = [];
-  created: Array<{ id: string; role: string; parentId: string }> = [];
+  listStarts: (string | null)[] = [];
+  created: { id: string; role: string; parentId: string }[] = [];
   deletedIds: string[] = [];
   aboutError: Error | null = null;
+  canonicalRootId: string | null = null;
 
   constructor(private readonly journal: string[] = []) {}
 
@@ -261,7 +300,10 @@ class DriveStub {
     this.created.push(input);
     const failure = this.createFailures.get(input.id);
     if (failure) throw failure;
-    const created = folder(input.id, input.role, input.parentId);
+    const returnedParentId = input.parentId === "root" && this.canonicalRootId !== null
+      ? this.canonicalRootId
+      : input.parentId;
+    const created = folder(input.id, input.role, returnedParentId);
     this.files.set(created.id, created);
     return created;
   }
@@ -287,7 +329,7 @@ class ReservationStub {
 }
 
 function adapterFor(drive: DriveStub, reservations?: ReservationStub): GoogleDriveAccountAdapter {
-  return new GoogleDriveAccountAdapter(drive as unknown as GoogleDriveGateway, (reservations ?? new ReservationStub()) as never);
+  return new GoogleDriveAccountAdapter(drive as unknown as GoogleDriveGateway, (reservations ?? new ReservationStub()));
 }
 
 function connection(folders: { rootId: string; motionId: string; backupsId: string } | null = null): DriveConnection {
