@@ -1,5 +1,6 @@
 import {
   Injectable,
+  Logger,
   type OnApplicationBootstrap,
   type OnModuleDestroy,
 } from '@nestjs/common';
@@ -21,11 +22,13 @@ import {
 } from './archive-wake.service';
 
 const SHUTDOWN_WAIT_MS = 1_000;
+const ARCHIVE_OPERATION_FAILED = 'ARCHIVE_OPERATION_FAILED';
 
 /** Deterministic archive boot recovery and bounded pre-Nest shutdown. */
 @Injectable()
 export class ArchiveRuntimeLifecycleService
 implements OnApplicationBootstrap, OnModuleDestroy {
+  private readonly logger = new Logger(ArchiveRuntimeLifecycleService.name);
   private controller = new AbortController();
   private startPromise: Promise<void> | null = null;
   private shutdownPromise: Promise<void> | null = null;
@@ -52,7 +55,11 @@ implements OnApplicationBootstrap, OnModuleDestroy {
   }
 
   async onApplicationBootstrap(): Promise<void> {
-    await this.start();
+    try {
+      await this.start();
+    } catch {
+      this.logger.error(`Archive boot recovery failed: ${ARCHIVE_OPERATION_FAILED}`);
+    }
   }
 
   start(): Promise<void> {
@@ -96,21 +103,39 @@ implements OnApplicationBootstrap, OnModuleDestroy {
 
       await this.repository.recoverExpiredLeases(nowMs);
       throwIfAborted(signal);
-      await this.hooks.reconcileMotion(signal);
+      await this.runBootJob('Motion reconciliation', () => this.hooks.reconcileMotion(signal));
       throwIfAborted(signal);
-      await this.hooks.runRemoteMaintenance(this.remoteMutationLock, signal);
+      await this.runBootJob('remote maintenance', () =>
+        this.hooks.runRemoteMaintenance(this.remoteMutationLock, signal));
       throwIfAborted(signal);
-      const referencedPaths = new Set(await this.repository.listUnverifiedArtifactPaths());
+      await this.runBootJob('stale snapshot cleanup', async () => {
+        const referencedPaths = new Set(await this.repository.listUnverifiedArtifactPaths());
+        await this.snapshots.removeStaleTemporarySnapshots({ nowMs, referencedPaths });
+      });
       throwIfAborted(signal);
-      await this.snapshots.removeStaleTemporarySnapshots({ nowMs, referencedPaths });
-      throwIfAborted(signal);
-      await this.backups.execute({ nowMs });
+      await this.runBootJob('database backup', async () => {
+        await this.backups.execute({ nowMs });
+      });
       throwIfAborted(signal);
       this.scheduler.startTimers();
       this.wake.wake();
     } catch (error) {
       if (this.controller.signal.aborted) return;
       throw error;
+    }
+  }
+
+  /**
+   * Boot-time best-effort work. The scheduler already retries these every tick,
+   * so a failure here must stay loud without stopping timers from starting.
+   */
+  private async runBootJob(name: string, job: () => Promise<void>): Promise<void> {
+    try {
+      await job();
+    } catch {
+      if (!this.controller.signal.aborted) {
+        this.logger.warn(`${name} failed: ${ARCHIVE_OPERATION_FAILED}`);
+      }
     }
   }
 

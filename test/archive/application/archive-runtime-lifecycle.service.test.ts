@@ -207,4 +207,185 @@ describe('ArchiveRuntimeLifecycleService', () => {
     expect(scheduler.startTimers).not.toHaveBeenCalled();
     expect(scheduler.shutdown).toHaveBeenCalledOnce();
   });
+
+  interface BootOverrides {
+    expireStaged?: () => Promise<readonly string[]>;
+    recoverExpiredLeases?: () => Promise<number>;
+    listUnverifiedArtifactPaths?: () => Promise<readonly string[]>;
+    removeStaleTemporarySnapshots?: () => Promise<number>;
+    backup?: () => Promise<{ created: boolean; reason: string }>;
+    reconcileMotion?: (signal: AbortSignal) => Promise<void>;
+    remoteMaintenance?: () => Promise<void>;
+  }
+
+  function bootFixture(overrides: BootOverrides = {}) {
+    const hooks = new ArchiveSchedulerHooksService();
+    hooks.registerCamera({
+      reconcileMotion: overrides.reconcileMotion ?? (async () => undefined),
+      cleanupLocal: async () => undefined,
+    });
+    hooks.registerRemoteMaintenance(overrides.remoteMaintenance ?? (async () => undefined));
+    const wake = new ArchiveWakeService();
+    const wakeSpy = vi.spyOn(wake, 'wake');
+    const scheduler = { startTimers: vi.fn(), shutdown: vi.fn(async () => undefined) };
+    const snapshots = {
+      removeStaleTemporarySnapshots: vi.fn(overrides.removeStaleTemporarySnapshots ?? (async () => 0)),
+    };
+    const backups = {
+      execute: vi.fn(overrides.backup ?? (async () => ({ created: false, reason: 'not_due' }))),
+    } as unknown as CreateDatabaseBackupUseCase;
+    const lifecycle = new ArchiveRuntimeLifecycleService(
+      {
+        expireStaged: vi.fn(overrides.expireStaged ?? (async () => [])),
+        listInterruptedMaintenance: vi.fn(async () => []),
+      },
+      {
+        recoverExpiredLeases: vi.fn(overrides.recoverExpiredLeases ?? (async () => 0)),
+        listUnverifiedArtifactPaths: vi.fn(overrides.listUnverifiedArtifactPaths ?? (async () => [])),
+      } as unknown as ArchiveArtifactRepositoryPort,
+      { execute: vi.fn() },
+      { cancelAll: vi.fn() },
+      snapshots,
+      backups,
+      scheduler,
+      hooks,
+      { now: () => new Date(1_000) },
+      undefined,
+      wake,
+    );
+    const logger = (lifecycle as unknown as {
+      logger: { warn: (message: string) => void; error: (message: string) => void };
+    }).logger;
+    return {
+      lifecycle,
+      scheduler,
+      snapshots,
+      backups,
+      wakeSpy,
+      warn: vi.spyOn(logger, 'warn').mockImplementation(() => undefined),
+      error: vi.spyOn(logger, 'error').mockImplementation(() => undefined),
+    };
+  }
+
+  it('starts scheduling when boot Motion reconciliation fails', async () => {
+    const fixture = bootFixture({
+      reconcileMotion: async () => { throw new Error('EACCES: /home/pi/motion/videos'); },
+    });
+
+    await expect(fixture.lifecycle.start()).resolves.toBeUndefined();
+
+    expect(fixture.snapshots.removeStaleTemporarySnapshots).toHaveBeenCalledOnce();
+    expect(fixture.backups.execute).toHaveBeenCalledOnce();
+    expect(fixture.scheduler.startTimers).toHaveBeenCalledOnce();
+    expect(fixture.wakeSpy).toHaveBeenCalledOnce();
+    expect(fixture.warn).toHaveBeenCalledWith('Motion reconciliation failed: ARCHIVE_OPERATION_FAILED');
+    expect(fixture.warn.mock.calls.flat().join(' ')).not.toContain('/home/pi');
+  });
+
+  it('starts scheduling when boot remote maintenance fails', async () => {
+    const fixture = bootFixture({
+      remoteMaintenance: async () => { throw new Error('drive unreachable'); },
+    });
+
+    await fixture.lifecycle.start();
+
+    expect(fixture.backups.execute).toHaveBeenCalledOnce();
+    expect(fixture.scheduler.startTimers).toHaveBeenCalledOnce();
+    expect(fixture.wakeSpy).toHaveBeenCalledOnce();
+    expect(fixture.warn).toHaveBeenCalledWith('remote maintenance failed: ARCHIVE_OPERATION_FAILED');
+  });
+
+  it('starts scheduling when stale snapshot cleanup fails', async () => {
+    const fixture = bootFixture({
+      removeStaleTemporarySnapshots: async () => { throw new Error('EIO'); },
+    });
+
+    await fixture.lifecycle.start();
+
+    expect(fixture.backups.execute).toHaveBeenCalledOnce();
+    expect(fixture.scheduler.startTimers).toHaveBeenCalledOnce();
+    expect(fixture.warn).toHaveBeenCalledWith('stale snapshot cleanup failed: ARCHIVE_OPERATION_FAILED');
+  });
+
+  it('skips snapshot pruning but keeps scheduling when the referenced path lookup fails', async () => {
+    const fixture = bootFixture({
+      listUnverifiedArtifactPaths: async () => { throw new Error('EIO'); },
+    });
+
+    await fixture.lifecycle.start();
+
+    expect(fixture.snapshots.removeStaleTemporarySnapshots).not.toHaveBeenCalled();
+    expect(fixture.backups.execute).toHaveBeenCalledOnce();
+    expect(fixture.scheduler.startTimers).toHaveBeenCalledOnce();
+    expect(fixture.warn).toHaveBeenCalledWith('stale snapshot cleanup failed: ARCHIVE_OPERATION_FAILED');
+  });
+
+  it('starts scheduling when the boot catch-up backup fails', async () => {
+    const fixture = bootFixture({
+      backup: async () => { throw new Error('sqlite is locked'); },
+    });
+
+    await fixture.lifecycle.start();
+
+    expect(fixture.scheduler.startTimers).toHaveBeenCalledOnce();
+    expect(fixture.wakeSpy).toHaveBeenCalledOnce();
+    expect(fixture.warn).toHaveBeenCalledWith('database backup failed: ARCHIVE_OPERATION_FAILED');
+  });
+
+  it('fails boot recovery when expiring staged credentials fails', async () => {
+    const fixture = bootFixture({
+      expireStaged: async () => { throw new Error('database is locked'); },
+    });
+
+    await expect(fixture.lifecycle.start()).rejects.toThrow('database is locked');
+
+    expect(fixture.scheduler.startTimers).not.toHaveBeenCalled();
+    expect(fixture.wakeSpy).not.toHaveBeenCalled();
+  });
+
+  it('fails boot recovery when expired lease recovery fails', async () => {
+    const fixture = bootFixture({
+      recoverExpiredLeases: async () => { throw new Error('database is locked'); },
+    });
+
+    await expect(fixture.lifecycle.start()).rejects.toThrow('database is locked');
+
+    expect(fixture.backups.execute).not.toHaveBeenCalled();
+    expect(fixture.scheduler.startTimers).not.toHaveBeenCalled();
+  });
+
+  it('keeps the application bootstrap hook alive when boot recovery fails', async () => {
+    const fixture = bootFixture({
+      expireStaged: async () => { throw new Error('database is locked'); },
+    });
+
+    await expect(fixture.lifecycle.onApplicationBootstrap()).resolves.toBeUndefined();
+    await expect(fixture.lifecycle.start()).rejects.toThrow('database is locked');
+
+    expect(fixture.error).toHaveBeenCalledWith('Archive boot recovery failed: ARCHIVE_OPERATION_FAILED');
+    expect(fixture.error.mock.calls.flat().join(' ')).not.toContain('database is locked');
+  });
+
+  it('fences later boot recovery work when a contained step throws during shutdown', async () => {
+    let reconcileStarted!: () => void;
+    const started = new Promise<void>((resolve) => { reconcileStarted = resolve; });
+    const fixture = bootFixture({
+      reconcileMotion: async (signal) => {
+        reconcileStarted();
+        await new Promise<void>((resolve) => {
+          signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+        throw new Error('motion scan aborted');
+      },
+    });
+
+    const boot = fixture.lifecycle.start();
+    await started;
+    await fixture.lifecycle.shutdown();
+    await boot;
+
+    expect(fixture.backups.execute).not.toHaveBeenCalled();
+    expect(fixture.scheduler.startTimers).not.toHaveBeenCalled();
+    expect(fixture.warn).not.toHaveBeenCalled();
+  });
 });
