@@ -46,7 +46,7 @@ trap on_exit EXIT
 # Check for required CLI dependencies before running
 check_dependencies() {
   local missing=()
-  for cmd in sshpass corepack rsync ssh; do
+  for cmd in sshpass corepack tar ssh; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
       missing+=("$cmd")
     fi
@@ -104,9 +104,35 @@ fi
 echo "Building TypeScript locally off the Pi..."
 corepack yarn build
 
-# Sync worker codebase to development Raspberry Pi
-echo "Uploading files to $REMOTE_USER@$REMOTE_HOST:~/matapi..."
-sshpass -p "$REMOTE_PASS" rsync -avz --delete --chmod=ugo=rwX --exclude 'data' --exclude 'node_modules' --exclude '.git' --exclude '.yarn' --exclude '.env' --exclude '.env.*' --exclude 'features.json' -e "sshpass -p '$REMOTE_PASS' ssh ${SSH_OPTS[*]}" "$PROJECT_ROOT" "$REMOTE_USER@$REMOTE_HOST:~/matapi"
+# Sync worker codebase to development Raspberry Pi over a tar stream.
+# rsync is deliberately not used: macOS ships openrsync, whose exclude-rule
+# encoding overflows GNU rsync's recv_rules buffer on the Pi and aborts the
+# transfer with code 22. tar exists on both sides and needs no negotiation.
+#
+# `.env*`, `data` and `features.json` are runtime state the device owns —
+# shipping a developer copy once pointed DATABASE_PATH at a macOS path and the
+# worker ran on an empty database. The staging dir is wiped before extracting
+# to keep the mirror semantics the previous `--delete` provided.
+TAR_EXCLUDES=(
+  --exclude='./node_modules' --exclude='*/node_modules'
+  --exclude='./.git' --exclude='./.yarn'
+  --exclude='./.env' --exclude='./.env.*' --exclude='*.db'
+  --exclude='./data' --exclude='./features.json'
+  --exclude='./.worktrees' --exclude='./.claude' --exclude='./.agents'
+  --exclude='./.superpowers' --exclude='./.impeccable' --exclude='./.codex'
+)
+# macOS bsdtar attaches Apple xattrs that GNU tar on the Pi cannot read: it
+# emits ~1k "Ignoring unknown extended header" lines and materialises them as
+# extra files. GNU tar has no --no-mac-metadata, so add these only on macOS.
+TAR_CREATE_OPTS=()
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  TAR_CREATE_OPTS=(--no-mac-metadata --no-xattrs)
+fi
+
+echo "Uploading files to $REMOTE_USER@$REMOTE_HOST:~/matapi/worker..."
+tar czf - "${TAR_CREATE_OPTS[@]}" "${TAR_EXCLUDES[@]}" -C "$PROJECT_ROOT" . |
+  sshpass -p "$REMOTE_PASS" ssh "${SSH_OPTS[@]}" "$REMOTE_USER@$REMOTE_HOST" \
+    "rm -rf ~/matapi/worker && mkdir -p ~/matapi/worker && tar xzf - -C ~/matapi/worker"
 normalize_staging_permissions
 
 # Ensure scripts are executable after upload

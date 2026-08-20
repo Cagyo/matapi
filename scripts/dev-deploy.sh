@@ -22,7 +22,7 @@ set -euo pipefail
 
 # Trap any exit with non-zero status to prevent terminal window from closing immediately
 REMOTE_USER="${REMOTE_USER:-pi}"
-REMOTE_HOST="${REMOTE_HOST:-matapitest.local}"
+REMOTE_HOST="${REMOTE_HOST:-matapi.local}"
 REMOTE_PASS="${REMOTE_PASS:-raspberry}"
 SSH_OPTS=(-4 -o ConnectTimeout=10 -o ControlMaster=auto -o ControlPath=/tmp/matapi-dev-deploy-ssh-%r@%h:%p -o ControlPersist=300)
 
@@ -46,7 +46,7 @@ trap on_exit EXIT
 # Check for required CLI dependencies before running
 check_dependencies() {
   local missing=()
-  for cmd in sshpass corepack rsync ssh; do
+  for cmd in sshpass corepack tar ssh; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
       missing+=("$cmd")
     fi
@@ -88,9 +88,35 @@ fi
 echo "Building TypeScript locally off the Pi..."
 corepack yarn build
 
-# Sync worker codebase to development Raspberry Pi
-echo "Uploading files to $REMOTE_USER@$REMOTE_HOST:~/matapi..."
-sshpass -p "$REMOTE_PASS" rsync -avz --exclude 'node_modules' --exclude '.git' --exclude '.yarn' -e "sshpass -p '$REMOTE_PASS' ssh ${SSH_OPTS[*]}" "$PROJECT_ROOT" "$REMOTE_USER@$REMOTE_HOST:~/matapi"
+# Sync worker codebase to development Raspberry Pi over a tar stream.
+# rsync is deliberately not used: macOS ships openrsync, whose exclude-rule
+# encoding overflows GNU rsync's recv_rules buffer on the Pi and aborts the
+# transfer with code 22. tar exists on both sides and needs no negotiation.
+#
+# `.env` and *.db are runtime state the device owns — shipping a developer copy
+# once pointed DATABASE_PATH at a macOS path, so the worker ran on an empty
+# database and dropped every Telegram command. The tooling dirs were ~110M of
+# the ~123M previously staged on each deploy.
+TAR_EXCLUDES=(
+  --exclude='./node_modules' --exclude='*/node_modules'
+  --exclude='./.git' --exclude='./.yarn'
+  --exclude='./.env' --exclude='*.db'
+  --exclude='./.worktrees' --exclude='./.claude' --exclude='./.agents'
+  --exclude='./.superpowers' --exclude='./.impeccable' --exclude='./.codex'
+)
+# macOS bsdtar attaches Apple xattrs that GNU tar on the Pi cannot read: it
+# emits ~1k "Ignoring unknown extended header" lines and materialises them as
+# extra files (3410 landed instead of 2371). GNU tar has no --no-mac-metadata,
+# so only add these when creating the archive on macOS.
+TAR_CREATE_OPTS=()
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  TAR_CREATE_OPTS=(--no-mac-metadata --no-xattrs)
+fi
+
+echo "Uploading files to $REMOTE_USER@$REMOTE_HOST:~/matapi/worker..."
+tar czf - "${TAR_CREATE_OPTS[@]}" "${TAR_EXCLUDES[@]}" -C "$PROJECT_ROOT" . |
+  sshpass -p "$REMOTE_PASS" ssh "${SSH_OPTS[@]}" "$REMOTE_USER@$REMOTE_HOST" \
+    "mkdir -p ~/matapi/worker && tar xzf - -C ~/matapi/worker"
 
 # Ensure scripts are executable after upload
 echo "Setting executable permissions on scripts..."
