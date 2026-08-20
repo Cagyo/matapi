@@ -37,7 +37,7 @@ describe('CompletedMotionVideoRecoveryScheduler', () => {
     scheduler.onApplicationBootstrap();
 
     await vi.waitFor(() => expect(reconcileBatch).toHaveBeenCalledOnce());
-    expect(reconcileBatch).toHaveBeenCalledWith(null, undefined);
+    expect(reconcileBatch).toHaveBeenCalledWith(null, expect.any(AbortSignal));
     expect(progress.motionTraversalCompleted).toHaveBeenCalledWith(100);
   });
 
@@ -92,7 +92,8 @@ describe('CompletedMotionVideoRecoveryScheduler', () => {
     await scheduler.reconcile(signal);
 
     expect(reconcileBatch).toHaveBeenCalledOnce();
-    expect(reconcileBatch).toHaveBeenCalledWith(null, signal);
+    expect(reconcileBatch).toHaveBeenCalledWith(null, expect.any(AbortSignal));
+    expect(reconcileBatch.mock.calls[0][1]).not.toBe(signal);
   });
 
   it('propagates an awaited failure and permits the next pass', async () => {
@@ -189,6 +190,43 @@ describe('CompletedMotionVideoRecoveryScheduler', () => {
     expect(reconcileBatch.mock.calls[0][0]).toBeNull();
     expect(reconcileBatch.mock.calls[1][0]).toEqual({ frames: [{ relativeDirectory: '2026', nextEntry: 64 }] });
     expect(reconcileBatch.mock.calls[2][0]).toBeNull();
+  });
+
+  it('lets a later Archive caller cancel a traversal started by a detached wake', async () => {
+    let traversalSignal: AbortSignal | undefined;
+    const reconcileBatch = vi.fn()
+      .mockImplementationOnce(async (_cursor, signal?: AbortSignal) => {
+        traversalSignal = signal;
+        await new Promise<void>((_resolve, reject) => {
+          const abort = () => reject(
+            signal?.reason instanceof Error
+              ? signal.reason
+              : new DOMException('Aborted', 'AbortError'),
+          );
+          if (signal?.aborted) abort();
+          else signal?.addEventListener('abort', abort, { once: true });
+        });
+        return { cursor: null, complete: true };
+      })
+      .mockResolvedValueOnce({ cursor: null, complete: true });
+    const scheduler = schedulerWith(reconcileBatch);
+
+    scheduler.wake('boot');
+    await vi.waitFor(() => expect(reconcileBatch).toHaveBeenCalledOnce());
+    const lifecycle = new AbortController();
+    const add = vi.spyOn(lifecycle.signal, 'addEventListener');
+    const remove = vi.spyOn(lifecycle.signal, 'removeEventListener');
+    const joined = scheduler.reconcile(lifecycle.signal);
+
+    lifecycle.abort(new DOMException('shutdown', 'AbortError'));
+
+    await expect(joined).rejects.toMatchObject({ name: 'AbortError' });
+    expect(traversalSignal?.aborted).toBe(true);
+    expect(add).toHaveBeenCalledWith('abort', expect.any(Function), { once: true });
+    expect(remove).toHaveBeenCalledWith('abort', expect.any(Function));
+    await expect(scheduler.reconcile()).resolves.toBeUndefined();
+    expect(reconcileBatch).toHaveBeenCalledTimes(2);
+    expect(reconcileBatch.mock.calls[1][0]).toBeNull();
   });
 });
 

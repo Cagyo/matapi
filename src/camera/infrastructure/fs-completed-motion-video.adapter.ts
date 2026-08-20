@@ -13,6 +13,7 @@ import type {
 
 const STABILITY_MS = 60_000;
 const HASH_BUFFER_BYTES = 64 * 1024;
+const MAX_SCAN_ENTRIES = 64;
 const MOTION_VIDEO_PATH = /^(\d{4})\/(\d{2})\/(\d{2})\/(\d{6})-[A-Za-z0-9][A-Za-z0-9._-]*\.(avi|mkv|mp4)$/u;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
@@ -118,6 +119,7 @@ export class FsCompletedMotionVideoAdapter implements CompletedMotionVideoPort {
     if (!(await this.inspectDirectory(''))) {
       return { descriptors: [], cursor: null, complete: true, visitedEntries: 0 };
     }
+    const entryLimit = Math.min(input.entryLimit, MAX_SCAN_ENTRIES);
     const frames: ScanFrame[] = input.cursor === null
       ? [{ relativeDirectory: '', nextEntry: 0 }]
       : input.cursor.frames.map((frame) => ({
@@ -126,7 +128,7 @@ export class FsCompletedMotionVideoAdapter implements CompletedMotionVideoPort {
       }));
     const descriptors: CompletedMotionVideoDescriptor[] = [];
     let visited = 0;
-    while (frames.length > 0 && visited < input.entryLimit) {
+    while (frames.length > 0 && visited < entryLimit) {
       const frame = frames.shift()!;
       if (!validFrame(frame)) continue;
       if (!(await this.inspectDirectory(frame.relativeDirectory))) continue;
@@ -137,7 +139,7 @@ export class FsCompletedMotionVideoAdapter implements CompletedMotionVideoPort {
         const entries = await readdir(directory, { withFileTypes: true, encoding: 'utf8' });
         const ordered = entries.sort((left, right) => String(left.name).localeCompare(String(right.name)));
         let index = frame.nextEntry;
-        for (; index < ordered.length && visited < input.entryLimit; index += 1) {
+        for (; index < ordered.length && visited < entryLimit; index += 1) {
           const entry = ordered[index];
           visited += 1;
           if (entry.isSymbolicLink()) continue;
@@ -274,10 +276,10 @@ function motionSourceTimeMs(match: RegExpExecArray): number | null {
 }
 
 function validFrame(frame: ScanFrame): boolean {
-  return Number.isSafeInteger(frame.nextEntry)
-    && frame.nextEntry >= 0
-    && !frame.relativeDirectory.includes('\0')
-    && frame.relativeDirectory !== '..'
-    && !frame.relativeDirectory.startsWith('../')
-    && !frame.relativeDirectory.startsWith('/');
+  if (!Number.isSafeInteger(frame.nextEntry) || frame.nextEntry < 0) return false;
+  if (frame.relativeDirectory === '') return true;
+  if (frame.relativeDirectory.includes('\0') || frame.relativeDirectory.startsWith('/')) return false;
+  return frame.relativeDirectory.split('/').every(
+    (component) => component !== '' && component !== '.' && component !== '..',
+  );
 }

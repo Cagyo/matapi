@@ -24,6 +24,8 @@ const SYSTEM_CLOCK: RecoveryClock = { now: Date.now };
 export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBootstrap {
   private readonly logger = new Logger(CompletedMotionVideoRecoveryScheduler.name);
   private inFlight: Promise<void> | null = null;
+  private activeController: AbortController | null = null;
+  private readonly abortListenerCleanups = new Set<() => void>();
   private cursor: CompletedMotionVideoScanCursor | null = null;
   private pendingWake = false;
 
@@ -55,18 +57,58 @@ export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBoots
 
   reconcile(signal?: AbortSignal): Promise<void> {
     if (this.mode !== 'real') return Promise.resolve();
-    if (this.inFlight !== null) return this.inFlight;
+    if (this.inFlight !== null) {
+      this.bridgeAbort(signal, this.activeController);
+      return this.inFlight;
+    }
 
-    const shared = this.runTraversal(signal).finally(() => {
+    const controller = new AbortController();
+    this.activeController = controller;
+    this.bridgeAbort(signal, controller);
+    const shared = this.runTraversal(controller.signal).finally(() => {
       if (this.inFlight !== shared) return;
       this.inFlight = null;
-      if (this.pendingWake) {
+      this.cleanupAbortListeners();
+      if (this.activeController === controller) this.activeController = null;
+      if (controller.signal.aborted) {
+        this.pendingWake = false;
+      } else if (this.pendingWake) {
         this.pendingWake = false;
         this.dispatchBestEffort();
       }
     });
     this.inFlight = shared;
     return shared;
+  }
+
+  private bridgeAbort(
+    signal: AbortSignal | undefined,
+    controller: AbortController | null,
+  ): void {
+    if (!signal || !controller || controller.signal.aborted) return;
+    if (signal.aborted) {
+      controller.abort(abortReason(signal));
+      return;
+    }
+    let listening = true;
+    const cleanup = () => {
+      if (!listening) return;
+      listening = false;
+      signal.removeEventListener('abort', abort);
+      this.abortListenerCleanups.delete(cleanup);
+    };
+    const abort = () => {
+      cleanup();
+      if (this.activeController === controller && !controller.signal.aborted) {
+        controller.abort(abortReason(signal));
+      }
+    };
+    this.abortListenerCleanups.add(cleanup);
+    signal.addEventListener('abort', abort, { once: true });
+  }
+
+  private cleanupAbortListeners(): void {
+    [...this.abortListenerCleanups].forEach((cleanup) => cleanup());
   }
 
   private async runTraversal(signal?: AbortSignal): Promise<void> {
@@ -95,7 +137,8 @@ export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBoots
   }
 
   private dispatchBestEffort(): void {
-    void this.reconcile().catch(() => {
+    void this.reconcile().catch((error: unknown) => {
+      if (isAbortError(error)) return;
       this.logger.error('Completed Motion recovery failed');
     });
   }
@@ -115,6 +158,16 @@ function throwIfAborted(signal?: AbortSignal): void {
       ? signal.reason
       : new DOMException('Aborted', 'AbortError');
   }
+}
+
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new DOMException('Aborted', 'AbortError');
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
 }
 
 function yieldToEventLoop(): Promise<void> {

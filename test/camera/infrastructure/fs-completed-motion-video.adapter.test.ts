@@ -164,6 +164,49 @@ describe('FsCompletedMotionVideoAdapter', () => {
     expect(second.cursor).toBeNull();
   });
 
+  it('rejects resumed cursor components that could escape the Motion root', async () => {
+    const { root, adapter } = await fixture();
+    const outside = `${root}-outside`;
+    directories.push(outside);
+    await mkdir(outside, { recursive: true });
+    await writeFile(join(outside, 'outside.txt'), 'must not be visited');
+    await mkdir(join(root, 'inside'), { recursive: true });
+
+    for (const relativeDirectory of [
+      'inside/../../' + outside.split('/').at(-1),
+      'inside/../2026',
+      'inside//child',
+      './2026',
+    ]) {
+      const batch = await adapter.scanBatch({
+        cursor: { frames: [{ relativeDirectory, nextEntry: 0 }] },
+        entryLimit: 64,
+      });
+      expect(batch).toEqual({
+        descriptors: [],
+        cursor: null,
+        complete: true,
+        visitedEntries: 0,
+      });
+    }
+  });
+
+  it('enforces a hard 64-entry boundary when callers request a larger batch', async () => {
+    const { root, adapter } = await fixture();
+    await unlink(join(root, '2026', '07', '29', '120000-12345.mp4'));
+    const directory = join(root, 'invalid');
+    await mkdir(directory, { recursive: true });
+    for (let index = 0; index < 100; index += 1) {
+      await writeFile(join(directory, `${String(index).padStart(3, '0')}.txt`), 'invalid');
+    }
+
+    const batch = await adapter.scanBatch({ cursor: null, entryLimit: 1_000 });
+
+    expect(batch.visitedEntries).toBe(64);
+    expect(batch.complete).toBe(false);
+    expect(batch.cursor).not.toBeNull();
+  });
+
   it('returns valid descriptors while invalid and unstable entries still consume traversal budget', async () => {
     const { root } = await fixture('120000-first.mp4');
     const directory = join(root, '2026', '07', '29');
