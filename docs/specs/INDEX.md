@@ -59,6 +59,7 @@ Use this file to decide **which** `docs/*.md` to load. Each doc declares its own
 | [24](24-ota.md) | OTA Updates | Update mechanism, atomic swap, rollback |
 | [25](25-install.md) | Installation | `install.sh`, systemd, pigpiod, motion |
 | [26](26-dev.md) | Development Workflow | Local dev, mock GPIO, vitest, fixtures |
+| [27](27-sensor-wifi.md) | Wi-Fi Sensor Autodiscovery | Autodetect and onboard Wi-Fi smart plugs like Tapo/Shelly |
 | [spec](home-worker-spec.md) | System Spec | Full requirements & background — load only when needed |
 
 ## Loading Rules for Agents
