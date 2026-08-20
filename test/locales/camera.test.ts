@@ -21,6 +21,19 @@ describe('en.camera', () => {
     }
   });
 
+  it('renders the motion scan admin alert in every locale', () => {
+    for (const catalog of [en, ru, uk]) {
+      const rendered = catalog.camera.adminAlert.motionScanFailing('motion_fs_access_denied');
+      expect(rendered).toContain('motion_fs_access_denied');
+      expect(rendered).toContain('Motion');
+      expect(rendered).not.toContain('/');
+    }
+    expect(ru.camera.adminAlert.motionScanFailing('motion_fs_io_failure'))
+      .not.toBe(en.camera.adminAlert.motionScanFailing('motion_fs_io_failure'));
+    expect(uk.camera.adminAlert.motionScanFailing('motion_fs_io_failure'))
+      .not.toBe(ru.camera.adminAlert.motionScanFailing('motion_fs_io_failure'));
+  });
+
   it('renders the snapshot caption', () => {
     const at = new Date('2026-04-08T14:35:00');
     expect(en.camera.snapshotCaption('front_door', at)).toBe(

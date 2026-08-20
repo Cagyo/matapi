@@ -59,7 +59,7 @@ import {
   liveStreamOptionsFromEnv,
   type LiveStreamOptions,
 } from './camera.tokens';
-import { ADMIN_ALERT } from './domain/ports/admin-alert.port';
+import { ADMIN_ALERT, type AdminAlertPort } from './domain/ports/admin-alert.port';
 import {
   LIVE_STREAM_CAPABILITY,
   type LiveStreamCapabilityPort,
@@ -236,15 +236,19 @@ function isInstallationId(value: string | undefined): value is string {
         cameraMode: CameraMode,
         registration: RegisterCompletedMotionVideosUseCase,
         progress: ArchiveRuntimeSignalPort,
+        alerts: AdminAlertPort,
       ) => new CompletedMotionVideoRecoveryScheduler(
         cameraMode,
         registration,
         progress,
+        undefined, // clock: the scheduler keeps its own system clock
+        alerts,
       ),
       inject: [
         CAMERA_MODE,
         RegisterCompletedMotionVideosUseCase,
         ARCHIVE_RUNTIME_SIGNAL,
+        ADMIN_ALERT,
       ],
     },
     {

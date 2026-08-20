@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CompletedMotionVideoRecoveryScheduler } from '../../../src/camera/application/completed-motion-video-recovery.scheduler';
 import { RegisterCompletedMotionVideosUseCase } from '../../../src/camera/application/register-completed-motion-videos.use-case';
+import type { AdminAlertPort } from '../../../src/camera/domain/ports/admin-alert.port';
+import { CompletedMotionVideoFilesystemError } from '../../../src/camera/domain/errors/completed-motion-video-filesystem.error';
 
 function deferred() {
   let resolve!: () => void;
@@ -338,8 +340,280 @@ describe('CompletedMotionVideoRecoveryScheduler', () => {
   });
 });
 
-function schedulerWith(reconcileBatch: ReturnType<typeof vi.fn>) {
+describe('CompletedMotionVideoRecoveryScheduler scan-failure alerting', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('stays quiet while consecutive traversal failures remain below the threshold', async () => {
+    const alerts = alertRecorder();
+    const reconcileBatch = vi.fn().mockRejectedValue(scanFailure());
+    const scheduler = schedulerWith(reconcileBatch, alerts);
+
+    await failTraversals(scheduler, 2);
+
+    expect(alerts.alert).not.toHaveBeenCalled();
+  });
+
+  it('raises exactly one admin alert on the third consecutive failed traversal', async () => {
+    const alerts = alertRecorder();
+    const reconcileBatch = vi.fn().mockRejectedValue(scanFailure());
+    const scheduler = schedulerWith(reconcileBatch, alerts);
+
+    await failTraversals(scheduler, 3);
+
+    expect(alerts.alert).toHaveBeenCalledOnce();
+    expect(alerts.alert).toHaveBeenCalledWith('motion-scan-failing', 'motion_fs_access_denied');
+  });
+
+  it('stays latched while the scan keeps failing', async () => {
+    const alerts = alertRecorder();
+    const reconcileBatch = vi.fn().mockRejectedValue(scanFailure());
+    const scheduler = schedulerWith(reconcileBatch, alerts);
+
+    await failTraversals(scheduler, 8);
+
+    expect(alerts.alert).toHaveBeenCalledOnce();
+  });
+
+  it('re-arms the latch after a successful traversal', async () => {
+    const alerts = alertRecorder();
+    const reconcileBatch = vi.fn()
+      .mockRejectedValueOnce(scanFailure())
+      .mockRejectedValueOnce(scanFailure())
+      .mockRejectedValueOnce(scanFailure())
+      .mockResolvedValueOnce({ cursor: null, complete: true })
+      .mockRejectedValue(scanFailure());
+    const scheduler = schedulerWith(reconcileBatch, alerts);
+
+    await failTraversals(scheduler, 3);
+    expect(alerts.alert).toHaveBeenCalledOnce();
+
+    await expect(scheduler.reconcile()).resolves.toBeUndefined();
+    await failTraversals(scheduler, 2);
+    expect(alerts.alert).toHaveBeenCalledOnce();
+
+    await failTraversals(scheduler, 1);
+    expect(alerts.alert).toHaveBeenCalledTimes(2);
+  });
+
+  it('counts one shared traversal as a single failure however many callers await it', async () => {
+    const alerts = alertRecorder();
+    const active = { current: deferred() };
+    const reconcileBatch = vi.fn(async () => {
+      await active.current.promise;
+      throw scanFailure();
+    });
+    const scheduler = schedulerWith(reconcileBatch, alerts);
+
+    for (let traversal = 0; traversal < 3; traversal += 1) {
+      active.current = deferred();
+      const first = scheduler.reconcile();
+      const second = scheduler.reconcile();
+      const third = scheduler.reconcile();
+      expect(second).toBe(first);
+      expect(third).toBe(first);
+      active.current.resolve();
+      await Promise.allSettled([first, second, third]);
+      if (traversal < 2) expect(alerts.alert).not.toHaveBeenCalled();
+    }
+
+    expect(reconcileBatch).toHaveBeenCalledTimes(3);
+    expect(alerts.alert).toHaveBeenCalledOnce();
+  });
+
+  it('never counts an aborted traversal toward the alert latch', async () => {
+    const alerts = alertRecorder();
+    const controller = new AbortController();
+    const reconcileBatch = vi.fn()
+      .mockRejectedValueOnce(scanFailure())
+      .mockRejectedValueOnce(scanFailure())
+      .mockImplementationOnce(async () => {
+        controller.abort(new DOMException('shutdown', 'AbortError'));
+        throw controller.signal.reason;
+      })
+      .mockRejectedValue(scanFailure());
+    const scheduler = schedulerWith(reconcileBatch, alerts);
+
+    await failTraversals(scheduler, 2);
+    await expect(scheduler.reconcile(controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
+
+    expect(alerts.alert).not.toHaveBeenCalled();
+
+    await failTraversals(scheduler, 1);
+
+    expect(alerts.alert).toHaveBeenCalledOnce();
+  });
+
+  it('does not count a scan error raised while the traversal is being cancelled', async () => {
+    const alerts = alertRecorder();
+    const controller = new AbortController();
+    const reconcileBatch = vi.fn()
+      .mockRejectedValueOnce(scanFailure())
+      .mockRejectedValueOnce(scanFailure())
+      .mockImplementationOnce(async () => {
+        // Shutdown lands mid-syscall; the adapter reports the raw failure.
+        controller.abort(new DOMException('shutdown', 'AbortError'));
+        throw scanFailure();
+      })
+      .mockRejectedValue(scanFailure());
+    const scheduler = schedulerWith(reconcileBatch, alerts);
+
+    await failTraversals(scheduler, 2);
+    await expect(scheduler.reconcile(controller.signal))
+      .rejects.toBeInstanceOf(CompletedMotionVideoFilesystemError);
+
+    expect(alerts.alert).not.toHaveBeenCalled();
+
+    await failTraversals(scheduler, 1);
+
+    expect(alerts.alert).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the traversal contract intact when the admin alert rejects', async () => {
+    const unhandled: unknown[] = [];
+    const capture = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', capture);
+    try {
+      const alerts = alertRecorder(async () => {
+        throw new Error('telegram DM to /home/pi admin failed');
+      });
+      const failure = scanFailure();
+      const reconcileBatch = vi.fn().mockRejectedValue(failure);
+      const scheduler = schedulerWith(reconcileBatch, alerts);
+      const logger = (scheduler as unknown as { logger: { warn(message: string): void } }).logger;
+      const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+
+      await expect(scheduler.reconcile()).rejects.toBe(failure);
+      await expect(scheduler.reconcile()).rejects.toBe(failure);
+      await expect(scheduler.reconcile()).rejects.toBe(failure);
+
+      expect(alerts.alert).toHaveBeenCalledOnce();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+      expect(warn).toHaveBeenCalledOnce();
+      expect(warn.mock.calls[0]?.[0]).not.toContain('/home/pi');
+    } finally {
+      process.off('unhandledRejection', capture);
+    }
+  });
+
+  it('does not blame the scan when only the traversal progress write keeps failing', async () => {
+    const alerts = alertRecorder();
+    const reconcileBatch = vi.fn().mockResolvedValue({ cursor: null, complete: true });
+    const progressFailure = new Error('database is locked');
+    const progress = { motionTraversalCompleted: vi.fn(async () => { throw progressFailure; }) };
+    const scheduler = new CompletedMotionVideoRecoveryScheduler(
+      'real', { reconcileBatch }, progress, { now: () => 100 }, alerts,
+    );
+
+    for (let index = 0; index < 6; index += 1) {
+      await expect(scheduler.reconcile()).rejects.toBe(progressFailure);
+    }
+
+    expect(alerts.alert).not.toHaveBeenCalled();
+  });
+
+  it('never lets a throwing alert delegate replace the scan error', async () => {
+    const alerts = {
+      alert: vi.fn(() => {
+        throw new Error('no admin-alert delegate registered');
+      }),
+    } as unknown as AdminAlertPort & { alert: ReturnType<typeof vi.fn> };
+    const failure = scanFailure();
+    const reconcileBatch = vi.fn().mockRejectedValue(failure);
+    const scheduler = schedulerWith(reconcileBatch, alerts);
+    const logger = (scheduler as unknown as { logger: { warn(message: string): void } }).logger;
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+
+    await failTraversals(scheduler, 2);
+    await expect(scheduler.reconcile()).rejects.toBe(failure);
+
+    expect(alerts.alert).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith('Completed Motion recovery alert failed');
+  });
+
+  it('never alerts in stub mode', async () => {
+    const alerts = alertRecorder();
+    const reconcileBatch = vi.fn().mockRejectedValue(scanFailure());
+    const scheduler = new CompletedMotionVideoRecoveryScheduler(
+      'stub',
+      { reconcileBatch },
+      { motionTraversalCompleted: vi.fn(async () => undefined) },
+      { now: () => 100 },
+      alerts,
+    );
+
+    scheduler.onApplicationBootstrap();
+    for (let index = 0; index < 5; index += 1) {
+      scheduler.reconcileTick();
+      await expect(scheduler.reconcile()).resolves.toBeUndefined();
+    }
+
+    expect(reconcileBatch).not.toHaveBeenCalled();
+    expect(alerts.alert).not.toHaveBeenCalled();
+  });
+
+  it('never passes a raw filesystem path as the alert detail', async () => {
+    const alerts = alertRecorder();
+    const reconcileBatch = vi.fn().mockRejectedValue(
+      new Error("EACCES: permission denied, lstat '/home/pi/motion/videos'"),
+    );
+    const scheduler = schedulerWith(reconcileBatch, alerts);
+
+    await failTraversals(scheduler, 3);
+
+    expect(alerts.alert).toHaveBeenCalledOnce();
+    expect(alerts.alert).toHaveBeenCalledWith('motion-scan-failing', undefined);
+    expect(JSON.stringify(alerts.alert.mock.calls)).not.toContain('/home/pi');
+  });
+
+  it('alerts from the detached safety tick as well as the Archive caller', async () => {
+    const alerts = alertRecorder();
+    const reconcileBatch = vi.fn().mockRejectedValue(scanFailure());
+    const scheduler = schedulerWith(reconcileBatch, alerts);
+    const logger = (scheduler as unknown as { logger: { error(message: string): void } }).logger;
+    vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+
+    for (let tick = 0; tick < 3; tick += 1) {
+      scheduler.reconcileTick();
+      await vi.waitFor(() => expect(reconcileBatch).toHaveBeenCalledTimes(tick + 1));
+      await vi.waitFor(() => expect((scheduler as unknown as { inFlight: unknown }).inFlight).toBeNull());
+    }
+
+    expect(alerts.alert).toHaveBeenCalledOnce();
+    expect(alerts.alert).toHaveBeenCalledWith('motion-scan-failing', 'motion_fs_access_denied');
+  });
+});
+
+function schedulerWith(reconcileBatch: ReturnType<typeof vi.fn>, alerts?: AdminAlertPort) {
   return new CompletedMotionVideoRecoveryScheduler(
-    'real', { reconcileBatch }, { motionTraversalCompleted: vi.fn(async () => undefined) }, { now: () => 100 },
+    'real',
+    { reconcileBatch },
+    { motionTraversalCompleted: vi.fn(async () => undefined) },
+    { now: () => 100 },
+    alerts,
   );
+}
+
+function alertRecorder(behaviour?: () => Promise<void>) {
+  return {
+    alert: vi.fn(async (_kind: string, _detail?: string) => {
+      if (behaviour) await behaviour();
+    }),
+  } as unknown as AdminAlertPort & { alert: ReturnType<typeof vi.fn> };
+}
+
+function scanFailure() {
+  return new CompletedMotionVideoFilesystemError('motion_fs_access_denied', 'inspect');
+}
+
+async function failTraversals(
+  scheduler: CompletedMotionVideoRecoveryScheduler,
+  count: number,
+): Promise<void> {
+  for (let index = 0; index < count; index += 1) {
+    await expect(scheduler.reconcile()).rejects.toBeInstanceOf(Error);
+  }
 }
