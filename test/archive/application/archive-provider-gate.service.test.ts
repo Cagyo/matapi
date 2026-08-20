@@ -39,6 +39,33 @@ describe('ArchiveProviderGateService', () => {
     await expect(gate.inspect('generation-1', 'upload')).resolves.toEqual({ kind: 'allowed' });
   });
 
+  it('does not replace an upload cooldown when another operation fails retryably', async () => {
+    const { gate } = fixture();
+    await gate.recordFailure('generation-1', 'upload', new DriveRateLimitedError({
+      retryAfterMs: 60_000, sessionUsable: false, operationPhase: 'session-chunk',
+    }));
+
+    await gate.recordFailure('generation-1', 'account', new DriveTemporaryUnavailableError());
+
+    await expect(gate.inspect('generation-1', 'upload')).resolves.toEqual({
+      kind: 'cooldown', untilMs: 61_000,
+    });
+    await expect(gate.inspect('generation-1', 'account')).resolves.toEqual({ kind: 'allowed' });
+  });
+
+  it('does not replace an upload recovery probe when another operation fails retryably', async () => {
+    const { gate, clock } = fixture();
+    await gate.recordFailure('generation-1', 'upload', new DriveRateLimitedError({
+      retryAfterMs: 1_000, sessionUsable: true, operationPhase: 'metadata',
+    }));
+    clock.value += 1_001;
+
+    await gate.recordFailure('generation-1', 'account', new DriveTemporaryUnavailableError());
+
+    await expect(gate.inspect('generation-1', 'upload')).resolves.toEqual({ kind: 'probe' });
+    await expect(gate.inspect('generation-1', 'account')).resolves.toEqual({ kind: 'allowed' });
+  });
+
   it('resets stale provider state when the active generation changes', async () => {
     const { repository, gate } = fixture();
     const initial = await repository.load();

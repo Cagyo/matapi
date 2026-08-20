@@ -129,6 +129,7 @@ export class ArchiveProviderGateService {
       const nowMs = this.nowMs();
       const classified = classifyFailure(error, current.failureStreak, nowMs, this.jitter);
       if (classified === null) return;
+      if (preservesOtherOperationAdmission(current, operationClass, classified)) return;
       const next: Omit<ArchiveProviderState, 'revision'> = {
         generationId,
         operationClass,
@@ -275,6 +276,18 @@ function withoutRevision(state: ArchiveProviderState): Omit<ArchiveProviderState
 function isClear(state: ArchiveProviderState): boolean {
   return state.operationClass === null && state.failureClass === null && state.failureStreak === 0
     && state.cooldownUntilMs === null && state.blockReason === null;
+}
+
+function preservesOtherOperationAdmission(
+  current: ArchiveProviderState,
+  operationClass: ArchiveProviderOperationClass,
+  incoming: { blockReason: string | null },
+): boolean {
+  if (incoming.blockReason !== null) return false;
+  if (current.blockReason !== null) return true;
+  return current.operationClass !== null
+    && current.operationClass !== operationClass
+    && current.cooldownUntilMs !== null;
 }
 
 function isInlineRetryable(error: Error): boolean {
