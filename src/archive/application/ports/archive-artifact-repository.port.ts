@@ -78,6 +78,8 @@ export interface AttemptLease {
 }
 
 export interface ClaimAttempt {
+  /** Restrict queue admission to the generation selected before dispatch. */
+  generationId: string;
   owner: string;
   nowMs: number;
   leaseMs: number;

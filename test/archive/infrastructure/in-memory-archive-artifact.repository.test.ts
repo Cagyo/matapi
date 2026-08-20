@@ -33,6 +33,22 @@ describe('InMemoryArchiveArtifactRepository session clearing', () => {
     expect(cleared).toMatchObject({ owner: 'worker', revision: saved.revision + 1 });
     expect((await repository.loadAttempt(attempt.id))?.session).toBeNull();
   });
+
+  it('does not claim a due attempt owned by a retired generation', async () => {
+    const repository = new InMemoryArchiveArtifactRepository();
+    const retired = await repository.register(artifactFixture());
+    const active = await repository.register({
+      ...artifactFixture(),
+      sourceIdentity: 'motion:active-generation',
+      sourceFingerprint: 'c'.repeat(64),
+    });
+    await repository.createAttempt(retired.id, 'generation-retired', 'file-retired', 'folder-1', 10);
+    await repository.createAttempt(active.id, 'generation-active', 'file-active', 'folder-1', 20);
+
+    await expect(repository.claimNextAttempt({
+      generationId: 'generation-active', owner: 'worker', nowMs: 100, leaseMs: 100,
+    })).resolves.toMatchObject({ attempt: { remoteObjectId: 'file-active' } });
+  });
 });
 
 function artifactFixture() {

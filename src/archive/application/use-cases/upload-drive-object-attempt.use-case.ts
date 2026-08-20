@@ -59,6 +59,8 @@ export type UploadDriveObjectAttemptResult =
   | { kind: 'verified'; attemptId: string; fileId: string }
   | { kind: 'replaced'; attemptId: string; replacementAttemptId: string; replacementFileId: string };
 
+export type UploadGenerationSelected = (generationId: string) => void;
+
 export interface UploadDriveObjectAttemptOptions {
   now?: () => number;
   owner?: () => string;
@@ -106,16 +108,27 @@ export class UploadDriveObjectAttemptUseCase {
     this.providerGate = configured.providerGate;
   }
 
-  async execute(id: string, signal: AbortSignal): Promise<UploadDriveObjectAttemptResult> {
+  async execute(
+    id: string,
+    signal: AbortSignal,
+    onGenerationSelected?: UploadGenerationSelected,
+  ): Promise<UploadDriveObjectAttemptResult> {
     if (this.activityGate !== undefined) {
-      return this.activityGate.runActivity(() => this.executeActive(id, signal));
+      return this.activityGate.runActivity(
+        () => this.executeActive(id, signal, onGenerationSelected),
+      );
     }
-    return this.executeActive(id, signal);
+    return this.executeActive(id, signal, onGenerationSelected);
   }
 
-  private async executeActive(id: string, signal: AbortSignal): Promise<UploadDriveObjectAttemptResult> {
+  private async executeActive(
+    id: string,
+    signal: AbortSignal,
+    onGenerationSelected?: UploadGenerationSelected,
+  ): Promise<UploadDriveObjectAttemptResult> {
     throwIfAborted(signal);
     const connection = await this.requireActiveConnection();
+    onGenerationSelected?.(connection.id);
     let attempt = await this.repository.loadAttempt(id);
     let artifact: ArchiveArtifact | null;
     if (attempt === null) {
@@ -142,6 +155,7 @@ export class UploadDriveObjectAttemptUseCase {
         throw error;
       }
       const claimed = await this.repository.claimAttempt(attempt.id, {
+        generationId: connection.id,
         owner: this.owner(), nowMs: this.now(), leaseMs: this.leaseMs,
       });
       return this.runClaimed(claimed, connection, signal, prepared.containerId);
@@ -153,6 +167,7 @@ export class UploadDriveObjectAttemptUseCase {
     }
 
     const claimed = await this.repository.claimAttempt(attempt.id, {
+      generationId: connection.id,
       owner: this.owner(), nowMs: this.now(), leaseMs: this.leaseMs,
     });
     return this.runClaimed(claimed, connection, signal);
@@ -162,19 +177,24 @@ export class UploadDriveObjectAttemptUseCase {
   async executeClaimed(
     claimed: ClaimedAttempt,
     signal: AbortSignal,
+    onGenerationSelected?: UploadGenerationSelected,
   ): Promise<UploadDriveObjectAttemptResult> {
     if (this.activityGate !== undefined) {
-      return this.activityGate.runActivity(() => this.executeClaimedActive(claimed, signal));
+      return this.activityGate.runActivity(
+        () => this.executeClaimedActive(claimed, signal, onGenerationSelected),
+      );
     }
-    return this.executeClaimedActive(claimed, signal);
+    return this.executeClaimedActive(claimed, signal, onGenerationSelected);
   }
 
   private async executeClaimedActive(
     claimed: ClaimedAttempt,
     signal: AbortSignal,
+    onGenerationSelected?: UploadGenerationSelected,
   ): Promise<UploadDriveObjectAttemptResult> {
     throwIfAborted(signal);
     const connection = await this.requireActiveConnection();
+    onGenerationSelected?.(connection.id);
     this.requireConnection(claimed.artifact, connection, claimed.attempt);
     const artifact = await this.prepareExistingAdmission(
       claimed.artifact, claimed.attempt, signal, claimed.lease,
@@ -697,6 +717,7 @@ export class UploadDriveObjectAttemptUseCase {
       path = MotionArchivePath.parse(artifact.relativePath);
     } catch (error) {
       const lease = claimedLease ?? (await this.repository.claimAttempt(attempt.id, {
+        generationId: attempt.generationId,
         owner: this.owner(), nowMs: this.now(), leaseMs: this.leaseMs,
       })).lease;
       await this.repository.terminalizeArtifactAttempt({

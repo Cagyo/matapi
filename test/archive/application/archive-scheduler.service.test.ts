@@ -18,6 +18,7 @@ import { ArchiveProviderGateService } from '../../../src/archive/application/arc
 import { InMemoryArchiveProviderStateRepository } from '../../../src/archive/infrastructure/persistence/in-memory-archive-provider-state.repository';
 import type { ArchiveArtifact } from '../../../src/archive/domain/archive-artifact.entity';
 import type { DriveCredentialRepositoryPort } from '../../../src/archive/application/ports/drive-credential-repository.port';
+import { DriveConnection } from '../../../src/archive/domain/drive-connection.entity';
 
 function claimedAttempt(overrides: Partial<ClaimedAttempt['attempt']> = {}): ClaimedAttempt {
   return {
@@ -36,8 +37,22 @@ function claimedAttempt(overrides: Partial<ClaimedAttempt['attempt']> = {}): Cla
   };
 }
 
+function activeConnection(id: string): DriveConnection {
+  return DriveConnection.stage({ id, installationId: 'installation-1', nowMs: 1 }).activate({
+    permissionId: `owner-${id}`,
+    email: null,
+    displayName: null,
+    folders: { rootId: 'root-folder', motionId: 'motion-folder', backupsId: 'backup-folder' },
+    nowMs: 2,
+  });
+}
+
 function setup(options: {
-  upload?: (claimed?: ClaimedAttempt, signal?: AbortSignal) => Promise<unknown>;
+  upload?: (
+    claimed?: ClaimedAttempt,
+    signal?: AbortSignal,
+  ) => Promise<unknown>;
+  selectedGenerationId?: string;
   backup?: () => Promise<unknown>;
 } = {}) {
   const clock = { now: vi.fn(() => new Date(10_000)) } satisfies ClockPort;
@@ -75,25 +90,43 @@ function setup(options: {
     execute: vi.fn(options.backup ?? (async () => ({ created: false, reason: 'not_due' }))),
   } as unknown as CreateDatabaseBackupUseCase;
   const uploads = {
-    execute: vi.fn(async (artifactId: string, signal: AbortSignal) => {
+    execute: vi.fn(async (
+      artifactId: string,
+      signal: AbortSignal,
+      onGenerationSelected?: (generationId: string) => void,
+    ) => {
+      onGenerationSelected?.(options.selectedGenerationId ?? 'generation-1');
       const queued = queuedArtifacts.findIndex(({ id }) => id === artifactId);
       if (queued >= 0) queuedArtifacts.splice(queued, 1);
       admissionTimes.push(clock.now().getTime());
       activeUploads += 1;
       highestActiveUploads = Math.max(highestActiveUploads, activeUploads);
       try {
-        return await (options.upload ?? (async () => ({ kind: 'verified' })))(undefined, signal);
+        return await (options.upload ?? (async () => ({ kind: 'verified' })))(
+          undefined,
+          signal,
+        );
       } finally {
         settleTimes.push(clock.now().getTime());
         activeUploads -= 1;
       }
     }),
-    executeClaimed: vi.fn(async (claimed: ClaimedAttempt, signal: AbortSignal) => {
+    executeClaimed: vi.fn(async (
+      claimed: ClaimedAttempt,
+      signal: AbortSignal,
+      onGenerationSelected?: (generationId: string) => void,
+    ) => {
+      onGenerationSelected?.(
+        options.selectedGenerationId ?? claimed.attempt.generationId,
+      );
       admissionTimes.push(clock.now().getTime());
       activeUploads += 1;
       highestActiveUploads = Math.max(highestActiveUploads, activeUploads);
       try {
-        return await (options.upload ?? (async () => ({ kind: 'verified' })))(claimed, signal);
+        return await (options.upload ?? (async () => ({ kind: 'verified' })))(
+          claimed,
+          signal,
+        );
       } finally {
         settleTimes.push(clock.now().getTime());
         activeUploads -= 1;
@@ -113,8 +146,8 @@ function setup(options: {
     clock,
   );
   const credentials = {
-    loadActive: vi.fn(async () => ({ id: 'generation-1' })),
-  } as unknown as Pick<DriveCredentialRepositoryPort, 'loadActive'>;
+    loadActive: vi.fn(async () => activeConnection('generation-1')),
+  } satisfies Pick<DriveCredentialRepositoryPort, 'loadActive'>;
   const scheduler = new ArchiveSchedulerService(
     repository,
     backups,
@@ -168,6 +201,7 @@ describe('ArchiveSchedulerService', () => {
     await vi.waitFor(() => expect(fixture.uploads.execute).toHaveBeenCalledWith(
       fixture.video.id,
       expect.any(AbortSignal),
+      expect.any(Function),
     ));
     await fixture.scheduler.shutdown();
   });
@@ -300,6 +334,31 @@ describe('ArchiveSchedulerService', () => {
     await fixture.scheduler.shutdown();
   });
 
+  it('attributes quota settlement to the generation selected during upload admission', async () => {
+    const fixture = setup({
+      selectedGenerationId: 'generation-2',
+      upload: async () => {
+        throw new DriveQuotaExceededError();
+      },
+    });
+    fixture.seedFreshVideos(1);
+    vi.mocked(fixture.retention.execute).mockResolvedValue({
+      deletedIds: [], reclaimedBytes: 0,
+      remainingDeficitBytes: 4_096, accountingWindowActive: true,
+    });
+    vi.mocked(fixture.credentials.loadActive)
+      .mockResolvedValueOnce(activeConnection('generation-1'))
+      .mockResolvedValue(activeConnection('generation-2'));
+    fixture.scheduler.startTimers();
+    await vi.waitFor(() => expect(fixture.retention.execute).toHaveBeenCalledOnce());
+
+    await expect(fixture.providerGate.inspect('generation-2', 'upload'))
+      .resolves.toEqual({ kind: 'blocked', reason: 'quota_exhausted' });
+    await expect(fixture.providerGate.inspect('generation-1', 'upload'))
+      .resolves.toEqual({ kind: 'allowed' });
+    await fixture.scheduler.shutdown();
+  });
+
   it('does not overlap scheduler ticks', async () => {
     let release!: () => void;
     const blocked = new Promise<void>((resolve) => { release = resolve; });
@@ -331,7 +390,8 @@ describe('ArchiveSchedulerService', () => {
     expect(fixture.uploads.execute).toHaveBeenCalledTimes(2);
     expect(vi.mocked(fixture.repository.claimNextAttempt).mock.calls).toContainEqual([
       expect.objectContaining({
-        kind: 'motion_video', retryOnly: true, forceVideoRetryBeforeMs: 10_000,
+        generationId: 'generation-1', kind: 'motion_video', retryOnly: true,
+        forceVideoRetryBeforeMs: 10_000,
       }),
     ]);
     await fixture.scheduler.shutdown();
@@ -346,9 +406,44 @@ describe('ArchiveSchedulerService', () => {
     await vi.waitFor(() => expect(fixture.uploads.execute).toHaveBeenCalledOnce());
 
     expect(fixture.repository.listUnattemptedArtifacts).toHaveBeenCalledWith({
-      kind: 'database_backup', limit: 1,
+      kind: 'database_backup', generationId: 'generation-1', nowMs: 10_000, limit: 1,
     });
-    expect(fixture.uploads.execute).toHaveBeenCalledWith('backup-1', expect.any(AbortSignal));
+    expect(fixture.uploads.execute).toHaveBeenCalledWith(
+      'backup-1',
+      expect.any(AbortSignal),
+      expect.any(Function),
+    );
+    await fixture.scheduler.shutdown();
+  });
+
+  it('does not let an older blocked artifact starve a later artifact eligible for the active generation', async () => {
+    const fixture = setup();
+    const blocked = { ...fixture.video, id: 'blocked-oldest', createdAtMs: 1 };
+    const eligible = { ...fixture.video, id: 'eligible-later', createdAtMs: 2 };
+    let videoSelectionCount = 0;
+    vi.mocked(fixture.repository.claimNextAttempt).mockResolvedValue(null);
+    vi.mocked(fixture.repository.listUnattemptedArtifacts).mockImplementation(async (selection) => {
+      if (selection.kind === 'database_backup') return [];
+      videoSelectionCount += 1;
+      if (videoSelectionCount > 1) return [];
+      return selection.generationId === 'generation-1' && selection.nowMs === 10_000
+        ? [eligible]
+        : [blocked];
+    });
+
+    fixture.scheduler.startTimers();
+    await vi.waitFor(() => expect(fixture.uploads.execute).toHaveBeenCalledOnce());
+
+    expect(fixture.uploads.execute).toHaveBeenCalledWith(
+      'eligible-later',
+      expect.any(AbortSignal),
+      expect.any(Function),
+    );
+    expect(fixture.uploads.execute).not.toHaveBeenCalledWith(
+      'blocked-oldest',
+      expect.any(AbortSignal),
+      expect.any(Function),
+    );
     await fixture.scheduler.shutdown();
   });
 
@@ -422,19 +517,25 @@ describe('ArchiveSchedulerService', () => {
     );
   });
 
-  it('catches and logs pump failures without an unhandled rejection', async () => {
+  it('recovers immediately from a transient claim failure when registration wakes a stalled pump', async () => {
     vi.useFakeTimers();
     const fixture = setup();
-    vi.mocked(fixture.repository.claimNextAttempt).mockRejectedValue(new Error('claim failed'));
+    vi.mocked(fixture.repository.claimNextAttempt)
+      .mockRejectedValueOnce(new Error('claim failed'))
+      .mockResolvedValue(null);
     const logger = (fixture.scheduler as unknown as {
       logger: { error: (message: string) => void };
     }).logger;
     const log = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
 
     fixture.scheduler.startTimers();
-    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(0);
+    fixture.seedFreshVideos(1);
+    fixture.wake.wake();
+    await vi.advanceTimersByTimeAsync(0);
 
     expect(log).toHaveBeenCalledWith('Archive scheduler pump failed: claim failed');
+    expect(fixture.uploads.execute).toHaveBeenCalledOnce();
     await fixture.scheduler.shutdown();
   });
 });

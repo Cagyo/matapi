@@ -107,6 +107,7 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
       this.recoverExpiredInTransaction(tx, input.nowMs);
       const row = tx.select().from(driveObjectAttempts).where(and(
         eq(driveObjectAttempts.id, attemptId),
+        input.generationId === undefined ? undefined : eq(driveObjectAttempts.generationId, input.generationId),
         inArray(driveObjectAttempts.state, ['pending', 'retryable']),
         lte(driveObjectAttempts.nextAttemptAt, input.nowMs),
         or(isNull(driveObjectAttempts.leaseExpiresAt), lte(driveObjectAttempts.leaseExpiresAt, input.nowMs)),
@@ -125,6 +126,9 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
         lte(driveObjectAttempts.nextAttemptAt, input.nowMs),
         or(isNull(driveObjectAttempts.leaseExpiresAt), lte(driveObjectAttempts.leaseExpiresAt, input.nowMs)),
       ];
+      if (input.generationId !== undefined) {
+        conditions.push(eq(driveObjectAttempts.generationId, input.generationId));
+      }
       if (input.kind !== undefined) conditions.push(eq(archiveArtifacts.kind, input.kind));
       if (input.retryOnly) conditions.push(eq(driveObjectAttempts.state, 'retryable'));
       const row = tx.select({ attempt: driveObjectAttempts, kind: archiveArtifacts.kind }).from(driveObjectAttempts)
@@ -139,7 +143,11 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
   async claimExpiredAttempt(attemptId: string, input: ClaimAttempt): Promise<ClaimedAttempt> {
     validateClaim(input);
     return this.immediate((tx) => {
-      const row = tx.select().from(driveObjectAttempts).where(and(eq(driveObjectAttempts.id, attemptId), lte(driveObjectAttempts.leaseExpiresAt, input.nowMs))).get();
+      const row = tx.select().from(driveObjectAttempts).where(and(
+        eq(driveObjectAttempts.id, attemptId),
+        input.generationId === undefined ? undefined : eq(driveObjectAttempts.generationId, input.generationId),
+        lte(driveObjectAttempts.leaseExpiresAt, input.nowMs),
+      )).get();
       if (!row) throw new DriveAttemptLeaseLostError();
       return this.claim(tx, row, input, false);
     });
@@ -1075,6 +1083,9 @@ function toScheduler(row: typeof archiveSchedulerState.$inferSelect): ArchiveSch
 function validateClaim(input: ClaimAttempt): void {
   if (!input.owner || !Number.isSafeInteger(input.nowMs) || !Number.isSafeInteger(input.leaseMs) || input.leaseMs <= 0) {
     throw new DriveObjectConflictError('Attempt lease is malformed');
+  }
+  if (input.generationId?.length === 0) {
+    throw new DriveObjectConflictError('Attempt lease generation is malformed');
   }
 }
 

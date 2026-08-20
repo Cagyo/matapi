@@ -712,6 +712,21 @@ describe('DrizzleArchiveArtifactRepository', () => {
     expect(fairClaim?.attempt.remoteObjectId).toBe('video-new');
   });
 
+  it('does not claim a due attempt owned by a retired generation', async () => {
+    const retired = await repository.register(artifactFixture());
+    const active = await repository.register({
+      ...artifactFixture(),
+      sourceIdentity: 'motion:active-generation',
+      sourceFingerprint: 'c'.repeat(64),
+    });
+    await repository.createAttempt(retired.id, 'generation-retired', 'file-retired', 'folder-1', 100);
+    await repository.createAttempt(active.id, 'generation-active', 'file-active', 'folder-1', 200);
+
+    await expect(repository.claimNextAttempt({
+      generationId: 'generation-active', owner: 'worker', nowMs: 1_000, leaseMs: 5_000,
+    })).resolves.toMatchObject({ attempt: { remoteObjectId: 'file-active' } });
+  });
+
   it('orders retention candidates by provider creation time, not local attempt creation time', async () => {
     const firstArtifact = await repository.register(artifactFixture());
     const secondArtifact = await repository.register({ ...artifactFixture(), sourceFingerprint: 'c'.repeat(64), relativePath: 'motion/second.mp4' });

@@ -148,6 +148,20 @@ describe('UploadDriveObjectAttemptUseCase', () => {
     expect(await fixture.repository.listAttempts(fixture.artifactId)).toEqual([]);
   });
 
+  it('reports the exact selected generation before a provider failure escapes', async () => {
+    const fixture = await setup();
+    fixture.drive.generateError = new Error('temporary provider failure');
+    const selected: string[] = [];
+
+    await expect(fixture.useCase.execute(
+      fixture.artifactId,
+      signal,
+      (generationId) => selected.push(generationId),
+    )).rejects.toThrow('temporary provider failure');
+
+    expect(selected).toEqual(['generation-1']);
+  });
+
   it.each([
     ['changed', 'local_source_changed'],
     ['missing', 'local_source_missing'],

@@ -104,6 +104,7 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
     this.recoverExpired(input.nowMs);
     const entry = this.attempts.get(attemptId);
     if (!entry || (entry.attempt.state !== 'pending' && entry.attempt.state !== 'retryable')
+      || (input.generationId !== undefined && entry.attempt.generationId !== input.generationId)
       || entry.nextAttemptMs > input.nowMs || (entry.lease !== null && entry.lease.expiresAtMs > input.nowMs)) {
       throw new DriveAttemptLeaseLostError();
     }
@@ -117,6 +118,7 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
       .filter(([, entry]) => {
         const artifact = this.artifacts.get(entry.attempt.artifactId);
         return (entry.attempt.state === 'pending' || entry.attempt.state === 'retryable')
+          && (input.generationId === undefined || entry.attempt.generationId === input.generationId)
           && entry.nextAttemptMs <= input.nowMs
           && (input.kind === undefined || artifact?.kind === input.kind)
           && (!input.retryOnly || entry.attempt.state === 'retryable');
@@ -129,7 +131,10 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
   async claimExpiredAttempt(attemptId: string, input: ClaimAttempt): Promise<ClaimedAttempt> {
     validateClaim(input);
     const entry = this.attempts.get(attemptId);
-    if (!entry?.lease || entry.lease.expiresAtMs > input.nowMs) throw new DriveAttemptLeaseLostError();
+    if (!entry?.lease || entry.lease.expiresAtMs > input.nowMs
+      || (input.generationId !== undefined && entry.attempt.generationId !== input.generationId)) {
+      throw new DriveAttemptLeaseLostError();
+    }
     return this.claim(attemptId, entry, input, false);
   }
 
@@ -727,6 +732,9 @@ function emptySchedulerState(): ArchiveSchedulerState {
 function validateClaim(input: ClaimAttempt): void {
   if (!input.owner || !Number.isSafeInteger(input.nowMs) || !Number.isSafeInteger(input.leaseMs) || input.leaseMs <= 0) {
     throw new DriveObjectConflictError('Attempt lease is malformed');
+  }
+  if (input.generationId?.length === 0) {
+    throw new DriveObjectConflictError('Attempt lease generation is malformed');
   }
 }
 

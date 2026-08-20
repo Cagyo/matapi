@@ -205,51 +205,63 @@ export class ArchiveSchedulerService {
   private async runPump(): Promise<void> {
     const signal = this.controller.signal;
     while (this.acceptingWork && !signal.aborted) {
-      const context = await this.loadProviderContext();
-      if (context.generationId !== null && canDispatch(context.admission)) {
-        const worked = await this.dispatchOneTransfer(
-          this.clock.now().getTime(),
-          signal,
-          context.generationId,
-        );
-        if (worked) {
-          await yieldToEventLoop();
-          continue;
+      const recoveryEpoch = this.wake.snapshot();
+      try {
+        const context = await this.loadProviderContext();
+        if (context.generationId !== null && canDispatch(context.admission)) {
+          const worked = await this.dispatchOneTransfer(
+            this.clock.now().getTime(),
+            signal,
+            context.generationId,
+          );
+          if (worked) {
+            await yieldToEventLoop();
+            continue;
+          }
         }
-      }
 
-      const expectedEpoch = this.wake.snapshot();
-      const finalContext = await this.loadProviderContext();
-      if (finalContext.generationId !== null && canDispatch(finalContext.admission)) {
-        const worked = await this.dispatchOneTransfer(
-          this.clock.now().getTime(),
-          signal,
-          finalContext.generationId,
-        );
-        if (worked) {
-          await yieldToEventLoop();
-          continue;
+        const expectedEpoch = this.wake.snapshot();
+        const finalContext = await this.loadProviderContext();
+        if (finalContext.generationId !== null && canDispatch(finalContext.admission)) {
+          const worked = await this.dispatchOneTransfer(
+            this.clock.now().getTime(),
+            signal,
+            finalContext.generationId,
+          );
+          if (worked) {
+            await yieldToEventLoop();
+            continue;
+          }
         }
-      }
-      if (signal.aborted || !this.acceptingWork) return;
-      const nowMs = this.clock.now().getTime();
-      const deadlineMs = finalContext.generationId === null
-        ? null
-        : await this.repository.readNextDeadline(
-          finalContext.generationId,
-          nowMs,
-          finalContext.admission.kind === 'cooldown'
-            ? finalContext.admission.untilMs
-            : null,
+        if (signal.aborted || !this.acceptingWork) return;
+        const nowMs = this.clock.now().getTime();
+        const deadlineMs = finalContext.generationId === null
+          ? null
+          : await this.repository.readNextDeadline(
+            finalContext.generationId,
+            nowMs,
+            finalContext.admission.kind === 'cooldown'
+              ? finalContext.admission.untilMs
+              : null,
+          );
+        await this.wake.waitForChange(
+          expectedEpoch,
+          deadlineMs,
+          this.intervalMs,
+          signal,
         );
-      await this.wake.waitForChange(
-        expectedEpoch,
-        deadlineMs,
-        this.intervalMs,
-        signal,
-      );
-      if (deadlineMs !== null && this.wake.snapshot() === expectedEpoch) {
-        this.wake.wake();
+        if (deadlineMs !== null && this.wake.snapshot() === expectedEpoch) {
+          this.wake.wake();
+        }
+      } catch (error) {
+        if (signal.aborted || !this.acceptingWork) return;
+        this.logger.error(`Archive scheduler pump failed: ${message(error)}`);
+        await this.wake.waitForChange(
+          recoveryEpoch,
+          null,
+          this.intervalMs,
+          signal,
+        );
       }
     }
   }
@@ -278,6 +290,7 @@ export class ArchiveSchedulerService {
       ? nowMs
       : undefined;
     const baseClaim = {
+      generationId,
       owner: this.owner(),
       nowMs,
       leaseMs: this.leaseMs,
@@ -288,21 +301,26 @@ export class ArchiveSchedulerService {
       kind: 'database_backup',
     });
     if (backupClaim !== null) {
-      await this.dispatchClaimed(backupClaim, signal, nowMs, generationId);
+      await this.dispatchClaimed(backupClaim, signal, nowMs);
       return true;
     }
     if (signal.aborted) return false;
     const [newBackup] = await this.repository.listUnattemptedArtifacts({
-      kind: 'database_backup', limit: 1,
+      kind: 'database_backup', generationId, nowMs, limit: 1,
     });
     if (signal.aborted) return false;
     if (newBackup !== undefined) {
       this.consecutiveFreshVideos = 0;
+      let selectedGenerationId: string | null = null;
       await this.runTransfer(
-        this.uploads.execute(newBackup.id, signal),
+        this.uploads.execute(
+          newBackup.id,
+          signal,
+          (selected) => { selectedGenerationId = selected; },
+        ),
         signal,
         newBackup.size,
-        generationId,
+        () => selectedGenerationId,
       );
       return true;
     }
@@ -314,22 +332,27 @@ export class ArchiveSchedulerService {
         forceVideoRetryBeforeMs,
       });
       if (retry !== null) {
-        await this.dispatchClaimed(retry, signal, nowMs, generationId);
+        await this.dispatchClaimed(retry, signal, nowMs);
         return true;
       }
       if (signal.aborted) return false;
     }
     const [newVideo] = await this.repository.listUnattemptedArtifacts({
-      kind: 'motion_video', limit: 1,
+      kind: 'motion_video', generationId, nowMs, limit: 1,
     });
     if (signal.aborted) return false;
     if (newVideo !== undefined) {
       this.consecutiveFreshVideos += 1;
+      let selectedGenerationId: string | null = null;
       await this.runTransfer(
-        this.uploads.execute(newVideo.id, signal),
+        this.uploads.execute(
+          newVideo.id,
+          signal,
+          (selected) => { selectedGenerationId = selected; },
+        ),
         signal,
         newVideo.size,
-        generationId,
+        () => selectedGenerationId,
       );
       return true;
     }
@@ -338,7 +361,7 @@ export class ArchiveSchedulerService {
       kind: 'motion_video',
     });
     if (claimed !== null) {
-      await this.dispatchClaimed(claimed, signal, nowMs, generationId);
+      await this.dispatchClaimed(claimed, signal, nowMs);
       return true;
     }
     return false;
@@ -348,7 +371,6 @@ export class ArchiveSchedulerService {
     claimed: ClaimedAttempt,
     signal: AbortSignal,
     nowMs: number,
-    generationId: string,
   ): Promise<void> {
     if (signal.aborted) {
       try {
@@ -365,11 +387,16 @@ export class ArchiveSchedulerService {
       return;
     }
     this.noteAdmission(claimed);
+    let selectedGenerationId: string | null = null;
     await this.runTransfer(
-      this.uploads.executeClaimed(claimed, signal),
+      this.uploads.executeClaimed(
+        claimed,
+        signal,
+        (selected) => { selectedGenerationId = selected; },
+      ),
       signal,
       claimed.artifact.size,
-      generationId,
+      () => selectedGenerationId,
     );
   }
 
@@ -377,7 +404,7 @@ export class ArchiveSchedulerService {
     transferOperation: Promise<unknown>,
     signal: AbortSignal,
     pendingArtifactBytes: number,
-    generationId: string,
+    selectedGenerationId: () => string | null,
   ): Promise<void> {
     const transfer = transferOperation
       .then(async () => { await this.recordSchedulerSuccess({ lastUploadSuccessMs: this.clock.now().getTime() }); })
@@ -394,7 +421,10 @@ export class ArchiveSchedulerService {
               this.logger.warn(`Archive quota reclamation failed: ${message(retentionError)}`);
             }
           }
-          await this.providerGate?.recordQuotaOutcome(generationId, remainingDeficitBytes);
+          const generationId = selectedGenerationId();
+          if (generationId !== null) {
+            await this.providerGate?.recordQuotaOutcome(generationId, remainingDeficitBytes);
+          }
         }
         this.logger.warn(`Archive upload failed: ${message(error)}`);
       });
