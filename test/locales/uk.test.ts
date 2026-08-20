@@ -1,12 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import { uk } from '../../src/locales/uk';
+import type { ArchiveDrainState } from '../../src/archive/application/use-cases/report-drive-status.use-case';
 
 const date = new Date('2030-01-01T12:00:00Z');
-const gdrive = (count: number) => uk.gdrive.body({
+const gdrive = (count: number, drainState: ArchiveDrainState = 'idle') => uk.gdrive.body({
   connection: null, account: null, folders: null,
-  last: { refreshAtMs: null, uploadAtMs: null, backupAtMs: null, reconcileAtMs: null, cleanupAtMs: null },
+  last: {
+    refreshAtMs: null, uploadAtMs: null, backupAtMs: null,
+    reconcileAtMs: null, cleanupAtMs: null,
+    motionTraversalAtMs: null, artifactRegistrationAtMs: null,
+  },
   artifacts: { pending: count }, attempts: { pending: count, missing: 0, detached: 0 },
   generations: [], quota: null, reclamation: null, requiredActions: [],
+  queue: { queuedVideos: 0, retryableVideos: 0, oldestQueuedVideoAgeMs: null, unhealthyDateFolders: 0 },
+  drainState,
 });
 
 describe('Ukrainian count-bearing formatters', () => {
@@ -48,5 +55,20 @@ describe('Ukrainian count-bearing formatters', () => {
     expect(gdrive(1)).toContain('Артефактів: 1; спроб: 1');
     expect(gdrive(2)).toContain('Артефактів: 2; спроб: 2');
     expect(gdrive(5)).toContain('Артефактів: 5; спроб: 5');
+  });
+
+  it.each([
+    ['active', 'активне завантаження'],
+    ['idle', 'очікування'],
+    ['cooling-down', 'пауза провайдера'],
+    ['branch-blocked', 'гілку папок заблоковано'],
+    ['quota-blocked', 'квоту вичерпано'],
+    ['capacity-blocked', 'ліміт місткості'],
+    ['policy-blocked', 'політику заблоковано'],
+    ['reauthorization-required', 'потрібна повторна авторизація'],
+  ] as const)('localizes the %s Drive drain state', (state, label) => {
+    const rendered = gdrive(0, state);
+    expect(rendered).toContain(`Стан черги: ${label}`);
+    if (state !== label) expect(rendered).not.toContain(`Стан черги: ${state}`);
   });
 });

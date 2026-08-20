@@ -28,6 +28,8 @@ export class RegisterArchiveArtifactUseCase implements ArchiveRegistrationPort {
     const registeredAtMs = this.clock.now().getTime();
     for (;;) {
       const state = await this.artifacts.readSchedulerState();
+      if (state.lastArtifactRegistrationSuccessMs !== null
+        && state.lastArtifactRegistrationSuccessMs >= registeredAtMs) break;
       if (await this.artifacts.compareAndSetSchedulerState(state.revision, {
         lastArtifactRegistrationSuccessMs: registeredAtMs,
       })) break;

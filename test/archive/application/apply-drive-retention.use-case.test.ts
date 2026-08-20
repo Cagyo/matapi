@@ -552,13 +552,16 @@ function activeConnection() {
 }
 
 function artifactFixture(id: string, kind: 'motion_video' | 'database_backup') {
+  const relativePath = kind === 'motion_video'
+    ? `2029/12/31/120000-${id}.mp4`
+    : id;
   return ArchiveArtifact.restore({
     id: `artifact-${id}`,
     installationId: 'installation-1',
     kind,
     sourceIdentity: `${kind}:${id}`,
     trustedPath: `/archive/${id}`,
-    relativePath: id,
+    relativePath,
     size: LOCAL_BYTES.byteLength,
     mtimeNs: '500000000',
     sourceTimeMs: NOW - DAY_MS,
@@ -580,7 +583,9 @@ function remoteFixture(
 ): VerifiedDriveObject {
   return {
     id,
-    name: artifact.relativePath,
+    name: artifact.kind === 'motion_video'
+      ? artifact.relativePath.split('/').at(-1)!
+      : artifact.relativePath,
     parentId: artifact.kind === 'database_backup' ? 'backups-1' : 'motion-1',
     mimeType: artifact.kind === 'database_backup' ? 'application/vnd.sqlite3' : 'video/mp4',
     size: artifact.size,

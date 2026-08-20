@@ -157,6 +157,13 @@ cooldown/backlog age, remote detachment/missing objects, retired generations,
 prolonged upload/backup failure, corrupt credentials, clock health, and local
 disk pressure.
 
+The aggregate archive, attempt, and queue sections never enumerate artifact,
+attempt, object, or date-folder IDs. Managed root, Motion, and Backups folder
+hyperlinks are the approved exception: `/gdrive status` is restricted to the
+private administrator interface, and those three navigation links are useful
+for direct inspection. The exception does not permit local paths, filenames,
+per-object links, provider payloads, tokens, or session data.
+
 ## Release evidence
 
 Automated tests use in-memory repositories and fake Google gateways. Before a

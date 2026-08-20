@@ -4,6 +4,7 @@ import type { SensorSeverity, SensorType } from '../sensors/domain/sensor';
 import type { ImportSummary } from '../sensors/application/import-sensors.use-case';
 import type { DepUpdate } from '../system/domain/ports/system-deps.port';
 import type { User } from '../telegram/domain/user.entity';
+import type { ArchiveDrainState } from '../archive/application/use-cases/report-drive-status.use-case';
 import { deepFreeze } from './freeze';
 
 const presentation = {
@@ -169,7 +170,7 @@ export interface GdriveStatusView {
   reclamation: { windowStartedMs: number | null; reclaimedBytes: number } | null;
   requiredActions: readonly ('reauthorize' | 'check-clock' | 'manual-cleanup')[];
   queue: { queuedVideos: number; retryableVideos: number; oldestQueuedVideoAgeMs: number | null; unhealthyDateFolders: number };
-  drainState: string;
+  drainState: ArchiveDrainState;
 }
 
 export interface SystemOnlineView {

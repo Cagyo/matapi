@@ -12,6 +12,7 @@ import type { CreateDatabaseBackupUseCase } from '../../../src/archive/applicati
 import type { UploadDriveObjectAttemptUseCase } from '../../../src/archive/application/use-cases/upload-drive-object-attempt.use-case';
 import type { ClockPort } from '../../../src/events/domain/ports/clock.port';
 import { DriveQuotaExceededError } from '../../../src/archive/domain/errors/drive-quota-exceeded.error';
+import { DriveProviderCapacityBlockedError } from '../../../src/archive/domain/errors/drive-provider-capacity-blocked.error';
 import type { ArchiveRetentionPort } from '../../../src/archive/application/ports/archive-retention.port';
 import { ArchiveWakeService } from '../../../src/archive/application/archive-wake.service';
 import { ArchiveProviderGateService } from '../../../src/archive/application/archive-provider-gate.service';
@@ -347,6 +348,23 @@ describe('ArchiveSchedulerService', () => {
     await fixture.scheduler.shutdown();
   });
 
+  it('does not record upload success when settlement only reserves a replacement attempt', async () => {
+    const fixture = setup({ upload: async () => ({
+      kind: 'replaced', attemptId: 'attempt-1',
+      replacementAttemptId: 'attempt-2', replacementFileId: 'file-2',
+    }) });
+    fixture.seedFreshVideos(1);
+
+    fixture.scheduler.startTimers();
+    await vi.waitFor(() => expect(fixture.uploads.execute).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(fixture.scheduler.readActivitySnapshot()).toBeNull());
+
+    expect(fixture.repository.compareAndSetSchedulerState).not.toHaveBeenCalledWith(
+      expect.any(Number), expect.objectContaining({ lastUploadSuccessMs: expect.any(Number) }),
+    );
+    await fixture.scheduler.shutdown();
+  });
+
   it('publishes generation-tagged video activity before an uploading row exists', async () => {
     let release!: () => void;
     const fixture = setup({ upload: () => new Promise<void>((resolve) => { release = resolve; }) });
@@ -491,6 +509,23 @@ describe('ArchiveSchedulerService', () => {
     ]);
   });
 
+  it('alerts for a prolonged transient cooldown owned by non-upload Drive work', async () => {
+    const fixture = setup({
+      nowMs: 1_000_000,
+      providerState: {
+        revision: 1, generationId: 'generation-1', operationClass: 'reconcile',
+        failureClass: 'transport', failureStreak: 1, cooldownUntilMs: 2_000_000,
+        blockReason: null, updatedAtMs: 100_000,
+      },
+    });
+
+    await fixture.scheduler.tick();
+
+    expect(fixture.alerts.alert).toHaveBeenCalledWith(
+      'provider-cooldown-prolonged', { generationId: 'generation-1' },
+    );
+  });
+
   it('sleeps until the earliest durable deadline without tight polling', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(10_000);
@@ -513,6 +548,24 @@ describe('ArchiveSchedulerService', () => {
     const claimCountAfterDeadline = fixture.repository.claimNextAttempt.mock.calls.length;
     await vi.advanceTimersByTimeAsync(100);
     expect(fixture.repository.claimNextAttempt).toHaveBeenCalledTimes(claimCountAfterDeadline);
+    await fixture.scheduler.shutdown();
+  });
+
+  it('does not dispatch uploads during a transient cooldown owned by folder work', async () => {
+    vi.useFakeTimers();
+    const fixture = setup();
+    fixture.seedFreshVideos(1);
+    await fixture.providerGate.ensureGeneration('generation-1');
+    await fixture.providerGate.recordFailure(
+      'generation-1',
+      'folder',
+      new DriveProviderCapacityBlockedError('temporary'),
+    );
+
+    fixture.scheduler.startTimers();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(fixture.uploads.execute).not.toHaveBeenCalled();
     await fixture.scheduler.shutdown();
   });
 
@@ -786,7 +839,7 @@ describe('ArchiveSchedulerService', () => {
     vi.useFakeTimers();
     const fixture = setup();
     vi.mocked(fixture.repository.claimNextAttempt)
-      .mockRejectedValueOnce(new Error('claim failed'))
+      .mockRejectedValueOnce(new Error('/private/motion/secret-video.avi'))
       .mockResolvedValue(null);
     const logger = (fixture.scheduler as unknown as {
       logger: { error: (message: string) => void };
@@ -799,8 +852,28 @@ describe('ArchiveSchedulerService', () => {
     fixture.wake.wake();
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(log).toHaveBeenCalledWith('Archive scheduler pump failed: claim failed');
+    expect(log).toHaveBeenCalledWith('Archive scheduler pump failed: ARCHIVE_OPERATION_FAILED');
+    expect(log.mock.calls.flat().join(' ')).not.toContain('/private/motion');
     expect(fixture.uploads.execute).toHaveBeenCalledOnce();
+    await fixture.scheduler.shutdown();
+  });
+
+  it('logs a fixed code instead of a path-bearing upload error', async () => {
+    const fixture = setup({
+      upload: async () => { throw new Error('EIO: /private/motion/secret-video.mkv'); },
+    });
+    fixture.seedFreshVideos(1);
+    const logger = (fixture.scheduler as unknown as {
+      logger: { warn: (message: string) => void };
+    }).logger;
+    const log = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+
+    fixture.scheduler.startTimers();
+    await vi.waitFor(() => expect(fixture.uploads.execute).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(fixture.scheduler.readActivitySnapshot()).toBeNull());
+
+    expect(log).toHaveBeenCalledWith('Archive upload failed: ARCHIVE_OPERATION_FAILED');
+    expect(log.mock.calls.flat().join(' ')).not.toContain('/private/motion');
     await fixture.scheduler.shutdown();
   });
 });

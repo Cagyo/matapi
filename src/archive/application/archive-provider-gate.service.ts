@@ -134,13 +134,12 @@ export class ArchiveProviderGateService {
 
   async inspect(
     generationId: string,
-    operationClass: ArchiveProviderOperationClass,
+    _operationClass: ArchiveProviderOperationClass,
   ): Promise<ArchiveProviderAdmission> {
     const state = await this.loadGeneration(generationId);
     if (state === null) return { kind: 'blocked', reason: 'stale_generation' };
     if (state.blockReason !== null) return { kind: 'blocked', reason: state.blockReason };
     if (state.failureClass === 'quota') return { kind: 'allowed' };
-    if (state.operationClass !== operationClass) return { kind: 'allowed' };
     if (state.cooldownUntilMs === null) return { kind: 'allowed' };
     return state.cooldownUntilMs > this.nowMs()
       ? { kind: 'cooldown', untilMs: state.cooldownUntilMs }
@@ -348,8 +347,16 @@ function throwIfAborted(signal?: AbortSignal): void {
 async function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     if (signal?.aborted) { reject(abortReason(signal)); return; }
-    const timer = setTimeout(resolve, ms);
-    signal?.addEventListener('abort', () => { clearTimeout(timer); reject(abortReason(signal)); }, { once: true });
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      reject(abortReason(signal!));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
   });
 }
 

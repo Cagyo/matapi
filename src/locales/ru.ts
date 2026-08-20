@@ -4,6 +4,7 @@ import type { SensorSeverity, SensorType } from '../sensors/domain/sensor';
 import type { ImportSummary } from '../sensors/application/import-sensors.use-case';
 import type { DepUpdate } from '../system/domain/ports/system-deps.port';
 import type { User } from '../telegram/domain/user.entity';
+import type { ArchiveDrainState } from '../archive/application/use-cases/report-drive-status.use-case';
 import type { LocaleCatalog } from './catalog';
 import { deepFreeze } from './freeze';
 
@@ -58,6 +59,17 @@ const presentation = {
     durationSeconds: (seconds: number) => `${seconds} с`,
     eventDurationSeconds: (seconds: number) => ` (${seconds} с)`,
   },
+};
+
+const DRIVE_DRAIN_LABELS: Record<ArchiveDrainState, string> = {
+  active: 'активная загрузка',
+  idle: 'ожидание',
+  'cooling-down': 'пауза провайдера',
+  'branch-blocked': 'ветка папок заблокирована',
+  'quota-blocked': 'квота исчерпана',
+  'capacity-blocked': 'лимит ёмкости',
+  'policy-blocked': 'политика заблокирована',
+  'reauthorization-required': 'требуется повторная авторизация',
 };
 
 function fmtDate(date: Date | null | undefined, withSeconds = false): string {
@@ -180,7 +192,7 @@ export interface GdriveStatusView {
   reclamation: { windowStartedMs: number | null; reclaimedBytes: number } | null;
   requiredActions: readonly ('reauthorize' | 'check-clock' | 'manual-cleanup')[];
   queue: { queuedVideos: number; retryableVideos: number; oldestQueuedVideoAgeMs: number | null; unhealthyDateFolders: number };
-  drainState: string;
+  drainState: ArchiveDrainState;
 }
 
 export interface SystemOnlineView {
@@ -1308,7 +1320,7 @@ const ruCatalog = {
         `💾 Последняя резервная копия: ${fmtDate(v.last.backupAtMs === null ? null : new Date(v.last.backupAtMs))}`,
         `🔎 Последний обход Motion: ${fmtDate(v.last.motionTraversalAtMs == null ? null : new Date(v.last.motionTraversalAtMs))}`,
         `📝 Последняя регистрация артефакта: ${fmtDate(v.last.artifactRegistrationAtMs == null ? null : new Date(v.last.artifactRegistrationAtMs))}`,
-        `Состояние очереди: ${v.drainState ?? 'idle'}`,
+        `Состояние очереди: ${DRIVE_DRAIN_LABELS[v.drainState]}`,
         `Видео в очереди: ${v.queue?.queuedVideos ?? 0}`,
         `Видео для повтора: ${v.queue?.retryableVideos ?? 0}`,
         `Возраст старейшего видео: ${formatAgeMs(v.queue?.oldestQueuedVideoAgeMs ?? null)}`,

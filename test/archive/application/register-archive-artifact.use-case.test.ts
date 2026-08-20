@@ -54,4 +54,30 @@ describe('RegisterArchiveArtifactUseCase', () => {
     });
     expect(order).toEqual(['register', 'persist-success', 'wake']);
   });
+
+  it('never moves the durable registration timestamp backwards after a concurrent CAS', async () => {
+    const repository = {
+      register: vi.fn(async () => ({ id: 'artifact-1' })),
+      readSchedulerState: vi.fn(async () => ({
+        revision: 8, backupLeaseOwner: null, backupLeaseExpiresAtMs: null,
+        lastBackupSuccessMs: null, lastUploadSuccessMs: null,
+        lastReconcileSuccessMs: null, lastCleanupSuccessMs: null,
+        lastMotionTraversalSuccessMs: null,
+        lastArtifactRegistrationSuccessMs: 3_000,
+      })),
+      compareAndSetSchedulerState: vi.fn(async () => true),
+    };
+    const wake = new ArchiveWakeService();
+    const wakeSpy = vi.spyOn(wake, 'wake');
+    const registration = new RegisterArchiveArtifactUseCase(
+      repository as never,
+      { now: () => new Date(2_000) },
+      wake,
+    );
+
+    await registration.register(input);
+
+    expect(repository.compareAndSetSchedulerState).not.toHaveBeenCalled();
+    expect(wakeSpy).toHaveBeenCalledOnce();
+  });
 });

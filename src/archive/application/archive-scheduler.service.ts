@@ -36,6 +36,7 @@ const DEFAULT_SHUTDOWN_WAIT_MS = 1_000;
 const PROLONGED_PROVIDER_COOLDOWN_MS = 15 * 60 * 1_000;
 const PROLONGED_BACKLOG_AGE_MS = 24 * 60 * 60 * 1_000;
 const LOCAL_DISK_PRESSURE_PERCENT = 70;
+const ARCHIVE_OPERATION_FAILED = 'ARCHIVE_OPERATION_FAILED';
 
 export interface ArchiveCameraSchedulerHooks {
   reconcileMotion(signal: AbortSignal): Promise<void>;
@@ -163,8 +164,8 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
     this.acceptingWork = true;
     this.ensurePump();
     this.timer = setInterval(() => {
-      void this.tick().catch((error: unknown) => {
-        this.logger.error(`Archive scheduler tick failed: ${message(error)}`);
+      void this.tick().catch(() => {
+        this.logger.error(`Archive scheduler tick failed: ${ARCHIVE_OPERATION_FAILED}`);
       });
     }, this.intervalMs);
     this.timer.unref?.();
@@ -234,9 +235,9 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
     if (!this.acceptingWork || this.activePump !== null) return;
     const running = this.runPump();
     this.activePump = running;
-    void running.catch((error: unknown) => {
+    void running.catch(() => {
       if (!this.controller.signal.aborted) {
-        this.logger.error(`Archive scheduler pump failed: ${message(error)}`);
+        this.logger.error(`Archive scheduler pump failed: ${ARCHIVE_OPERATION_FAILED}`);
       }
     }).finally(() => {
       if (this.activePump === running) this.activePump = null;
@@ -294,9 +295,9 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
         if (deadlineMs !== null && this.wake.snapshot() === expectedEpoch) {
           this.wake.wake();
         }
-      } catch (error) {
+      } catch {
         if (signal.aborted || !this.acceptingWork) return;
-        this.logger.error(`Archive scheduler pump failed: ${message(error)}`);
+        this.logger.error(`Archive scheduler pump failed: ${ARCHIVE_OPERATION_FAILED}`);
         await this.wake.waitForChange(
           recoveryEpoch,
           null,
@@ -428,8 +429,8 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
           nowMs,
           nowMs,
         );
-      } catch (error) {
-        this.logger.warn(`Failed to release cancelled archive claim: ${message(error)}`);
+      } catch {
+        this.logger.warn(`Failed to release cancelled archive claim: ${ARCHIVE_OPERATION_FAILED}`);
       }
       return;
     }
@@ -461,7 +462,11 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
   ): Promise<void> {
     this.activity = activity;
     const transfer = transferOperation
-      .then(async () => { await this.recordSchedulerSuccess({ lastUploadSuccessMs: this.clock.now().getTime() }); })
+      .then(async (result) => {
+        if (isVerifiedTransferResult(result)) {
+          await this.recordSchedulerSuccess({ lastUploadSuccessMs: this.clock.now().getTime() });
+        }
+      })
       .catch(async (error: unknown) => {
         if (signal.aborted) return;
         if (error instanceof DriveQuotaExceededError) {
@@ -471,8 +476,8 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
             try {
               const result = await this.retention.execute({ requiredBytes }, signal);
               remainingDeficitBytes = result.remainingDeficitBytes;
-            } catch (retentionError) {
-              this.logger.warn(`Archive quota reclamation failed: ${message(retentionError)}`);
+            } catch {
+              this.logger.warn(`Archive quota reclamation failed: ${ARCHIVE_OPERATION_FAILED}`);
             }
           }
           const generationId = selectedGenerationId();
@@ -480,7 +485,7 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
             await this.providerGate?.recordQuotaOutcome(generationId, remainingDeficitBytes);
           }
         }
-        this.logger.warn(`Archive upload failed: ${message(error)}`);
+        this.logger.warn(`Archive upload failed: ${ARCHIVE_OPERATION_FAILED}`);
       });
     const tracked = transfer.finally(() => {
       if (this.activeUpload === tracked) this.activeUpload = null;
@@ -536,8 +541,8 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
   private async runJob(name: string, job: () => Promise<void>): Promise<void> {
     try {
       await job();
-    } catch (error) {
-      if (!this.controller.signal.aborted) this.logger.warn(`${name} failed: ${message(error)}`);
+    } catch {
+      if (!this.controller.signal.aborted) this.logger.warn(`${name} failed: ${ARCHIVE_OPERATION_FAILED}`);
     }
   }
 }
@@ -564,7 +569,6 @@ export function deriveArchiveOperationalAlertKinds(input: {
     kinds.add('quota-reclamation-required');
   }
   if (providerMatches
-    && input.provider.operationClass === 'upload'
     && input.provider.cooldownUntilMs !== null
     && input.provider.cooldownUntilMs > input.nowMs
     && input.nowMs - input.provider.updatedAtMs >= PROLONGED_PROVIDER_COOLDOWN_MS) {
@@ -592,8 +596,11 @@ function positive(value: number, label: string): number {
   return value;
 }
 
-function message(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+function isVerifiedTransferResult(result: unknown): boolean {
+  return typeof result === 'object'
+    && result !== null
+    && 'kind' in result
+    && result.kind === 'verified';
 }
 
 function canDispatch(admission: ArchiveProviderAdmission): boolean {

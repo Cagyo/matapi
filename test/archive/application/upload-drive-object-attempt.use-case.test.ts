@@ -457,6 +457,11 @@ describe('UploadDriveObjectAttemptUseCase', () => {
     ['source mutation', (fixture: Awaited<ReturnType<typeof setup>>) => { fixture.source.mutateAfterRead = true; }],
     ['Drive checksum mismatch', (fixture: Awaited<ReturnType<typeof setup>>) => { fixture.drive.remoteOverride = { sha256: '0'.repeat(64) }; }],
     ['missing binary revision', (fixture: Awaited<ReturnType<typeof setup>>) => { fixture.drive.remoteOverride = { headRevisionId: '' }; }],
+    ['owner permission from another account', (fixture: Awaited<ReturnType<typeof setup>>) => {
+      fixture.drive.remoteOverride = {
+        sharing: { ownerPermissionId: 'owner-2', shared: false, permissionIds: ['owner-2'] },
+      };
+    }],
   ])('refuses atomic verification for %s', async (_name, arrange) => {
     const fixture = await setup();
     arrange(fixture);

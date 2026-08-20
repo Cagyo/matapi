@@ -40,6 +40,7 @@ import { ArchiveAdminAlertService } from './application/archive-admin-alert.serv
 import {
   ArchiveSchedulerHooksService,
   ArchiveSchedulerService,
+  type ArchiveSchedulerOptions,
 } from './application/archive-scheduler.service';
 import { ArchiveTransferSemaphoreService } from './application/archive-transfer-semaphore.service';
 import { ArchiveWakeService } from './application/archive-wake.service';
@@ -137,6 +138,7 @@ import { archiveSchedulerOptionsFromConfig } from './infrastructure/archive-sche
 
 const ARCHIVE_BOOT_RECOVERY_REGISTRATION = Symbol('ARCHIVE_BOOT_RECOVERY_REGISTRATION');
 const ARCHIVE_REMOTE_MAINTENANCE_REGISTRATION = Symbol('ARCHIVE_REMOTE_MAINTENANCE_REGISTRATION');
+const ARCHIVE_SCHEDULER_OPTIONS = Symbol('ARCHIVE_SCHEDULER_OPTIONS');
 const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
 
 /** Archive composition root. Cross-context consumers receive only ports and application services. */
@@ -192,12 +194,23 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
     },
     ArchiveWakeService,
     {
+      provide: ARCHIVE_SCHEDULER_OPTIONS,
+      useFactory: () => archiveSchedulerOptionsFromConfig(loadDefaults().archive, process.env),
+    },
+    {
       provide: ArchiveProviderGateService,
       useFactory: (
         state: ArchiveProviderStateRepositoryPort,
         clock: ClockPort,
-      ) => new ArchiveProviderGateService(state, clock),
-      inject: [ARCHIVE_PROVIDER_STATE_REPOSITORY, CLOCK],
+        options: ArchiveSchedulerOptions,
+      ) => new ArchiveProviderGateService(
+        state,
+        clock,
+        undefined,
+        undefined,
+        { maximumSleepMs: options.intervalMs },
+      ),
+      inject: [ARCHIVE_PROVIDER_STATE_REPOSITORY, CLOCK, ARCHIVE_SCHEDULER_OPTIONS],
     },
     {
       provide: RegisterArchiveArtifactUseCase,
@@ -631,6 +644,7 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         lock: ArchiveRemoteMutationLockService,
         retention: ArchiveRetentionPort,
         clock: ClockPort,
+        options: ArchiveSchedulerOptions,
         wake: ArchiveWakeService,
         providerGate: ArchiveProviderGateService,
         credentials: DriveCredentialRepositoryPort,
@@ -645,7 +659,7 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         lock,
         retention,
         clock,
-        archiveSchedulerOptionsFromConfig(loadDefaults().archive, process.env),
+        options,
         wake,
         providerGate,
         credentials,
@@ -669,6 +683,7 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         ArchiveRemoteMutationLockService,
         ARCHIVE_RETENTION,
         CLOCK,
+        ARCHIVE_SCHEDULER_OPTIONS,
         ArchiveWakeService,
         ArchiveProviderGateService,
         DRIVE_CREDENTIAL_REPOSITORY,

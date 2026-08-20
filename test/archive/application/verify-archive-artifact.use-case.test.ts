@@ -26,6 +26,18 @@ describe('VerifyArchiveArtifactUseCase', () => {
     expect(fixture.loadedIds).toEqual(['file-1']);
   });
 
+  it.each([
+    ['AVI', '2026/08/13/120000-clip.avi', '120000-clip.avi', 'video/x-msvideo'],
+    ['MKV', '2026/08/13/120000-clip.mkv', '120000-clip.mkv', 'video/x-matroska'],
+  ])('authorizes cleanup for an exact %s object', async (_format, relativePath, fileName, contentType) => {
+    const fixture = await setup('local', 'generation-1', { relativePath, fileName, contentType });
+
+    await expect(fixture.verification.inspect(fixture.artifactId)).resolves.toMatchObject({
+      cleanupSafe: true,
+      reason: 'verified',
+    });
+  });
+
   it('fails closed when local bytes changed even if size and mtime stayed the same', async () => {
     const fixture = await setup('other');
 
@@ -146,7 +158,15 @@ describe('VerifyArchiveArtifactUseCase', () => {
   );
 });
 
-async function setup(local = 'local', activeGeneration = 'generation-1') {
+async function setup(
+  local = 'local',
+  activeGeneration = 'generation-1',
+  motion: { relativePath: string; fileName: string; contentType: string } = {
+    relativePath: '2026/08/13/120000-clip.mp4',
+    fileName: 'clip.mp4',
+    contentType: 'video/mp4',
+  },
+) {
   const repository = new InMemoryArchiveArtifactRepository();
   const connection = DriveConnection.restore({
     id: 'generation-1', installationId: 'installation-1', status: 'active', revision: 1,
@@ -160,12 +180,12 @@ async function setup(local = 'local', activeGeneration = 'generation-1') {
   let hashRelease: Promise<void> | null = null;
   const artifact = await repository.register({
     installationId: 'installation-1', kind: 'motion_video', sourceIdentity: 'motion:clip',
-    trustedPath: '/motion/clip.mp4', relativePath: 'clip.mp4', size: 5,
+    trustedPath: `/motion/${motion.fileName}`, relativePath: motion.relativePath, size: 5,
     mtimeNs: '500000000', sourceTimeMs: 500, sha256: DIGEST, sourceFingerprint: FINGERPRINT,
   });
   const attempt = await repository.createAttempt(artifact.id, connection.id, 'file-1', 'motion-1', 1_000);
   const claimed = await repository.claimAttempt(attempt.id, { owner: 'upload', nowMs: 1_100, leaseMs: 10_000 });
-  const remote = remoteObject();
+  const remote = remoteObject({ name: motion.fileName, mimeType: motion.contentType });
   await repository.markVerified(attempt.id, claimed.lease, {
     objectId: remote.id, name: remote.name, containerId: remote.parentId, contentType: remote.mimeType,
     size: remote.size, sha256: remote.sha256, md5: remote.md5, providerCreatedAtMs: remote.createdTimeMs,
@@ -229,7 +249,7 @@ async function setup(local = 'local', activeGeneration = 'generation-1') {
   };
 }
 
-function remoteObject(): VerifiedDriveObject {
+function remoteObject(overrides: Partial<VerifiedDriveObject> = {}): VerifiedDriveObject {
   return {
     id: 'file-1', name: 'clip.mp4', parentId: 'motion-1', mimeType: 'video/mp4', size: 5,
     sha256: DIGEST, md5: 'c'.repeat(32), createdTimeMs: 1_000, headRevisionId: 'head-1', version: '1',
@@ -240,5 +260,6 @@ function remoteObject(): VerifiedDriveObject {
     }),
     sharing: { ownerPermissionId: 'owner-1', shared: false, permissionIds: ['owner-1'] },
     webViewLink: 'https://drive.example/file-1',
+    ...overrides,
   };
 }

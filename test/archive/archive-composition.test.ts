@@ -127,6 +127,30 @@ describe('ArchiveModule composition', () => {
     ]));
   });
 
+  it('shares one resolved scheduler interval with the provider wait clamp', () => {
+    const providers = Reflect.getMetadata('providers', ArchiveModule) as ProviderRecord[];
+    const gateProvider = providerFor(providers, ArchiveProviderGateService);
+    const schedulerProvider = providerFor(providers, ArchiveSchedulerService);
+    const schedulerOptionsToken = gateProvider.inject?.[2];
+    const repository = {
+      load: vi.fn(async () => ({
+        revision: 0, generationId: null, operationClass: null, failureClass: null,
+        failureStreak: 0, cooldownUntilMs: null, blockReason: null, updatedAtMs: 0,
+      })),
+      activateGeneration: vi.fn(async () => true),
+      compareAndSet: vi.fn(async () => true),
+    };
+    const gate = gateProvider.useFactory?.(
+      repository,
+      { now: () => new Date(0) },
+      { intervalMs: 30_000, leaseMs: 300_000, newerVideoBatch: 3 },
+    ) as ArchiveProviderGateService;
+
+    expect(schedulerOptionsToken).toBeDefined();
+    expect(schedulerProvider.inject).toContain(schedulerOptionsToken);
+    expect((gate as unknown as { maximumSleepMs: number }).maximumSleepMs).toBe(30_000);
+  });
+
   it('keeps infrastructure dependencies behind Archive boundaries', () => {
     const root = resolve(process.cwd(), 'src');
     const violations: string[] = [];

@@ -184,7 +184,7 @@ describe('ReportDriveStatusUseCase', () => {
     await expect(useCase.execute()).resolves.toMatchObject({ drainState: expected });
   });
 
-  it('ignores a cooldown owned by a non-upload provider operation', async () => {
+  it('reports a transient cooldown owned by any Drive operation', async () => {
     const useCase = statusUseCase({
       provider: {
         load: async () => ({
@@ -195,7 +195,7 @@ describe('ReportDriveStatusUseCase', () => {
       },
     });
 
-    await expect(useCase.execute()).resolves.toMatchObject({ drainState: 'idle' });
+    await expect(useCase.execute()).resolves.toMatchObject({ drainState: 'cooling-down' });
   });
 
   it('retries assembly when the active generation changes before return', async () => {

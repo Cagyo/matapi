@@ -3,6 +3,7 @@ import { encodeArchiveAppProperties } from '../domain/app-properties';
 import type { ArchiveArtifact } from '../domain/archive-artifact.entity';
 import type { DriveConnection } from '../domain/drive-connection.entity';
 import type { VerifiedDriveObject } from '../domain/drive-object-metadata.value-object';
+import { MotionArchivePath } from '../domain/motion-archive-path.value-object';
 import type {
   ArchiveObjectAttempt,
   VerifiedArchiveObject,
@@ -159,7 +160,9 @@ function expectedProperties(artifact: ArchiveArtifact, generationId: string) {
 }
 
 function mimeTypeFor(artifact: ArchiveArtifact): string {
-  return artifact.kind === 'motion_video' ? 'video/mp4' : 'application/vnd.sqlite3';
+  return artifact.kind === 'motion_video'
+    ? MotionArchivePath.parse(artifact.relativePath).contentType
+    : 'application/vnd.sqlite3';
 }
 
 function sameRecord(

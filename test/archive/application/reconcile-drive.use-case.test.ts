@@ -106,7 +106,14 @@ function source(available = true): ArchiveUploadSourcePort {
   };
 }
 
-async function fixture(localAvailable = true) {
+async function fixture(
+  localAvailable = true,
+  motion: { relativePath: string; fileName: string; contentType: string } = {
+    relativePath: '2026/08/13/120000-clip.mp4',
+    fileName: 'clip.mp4',
+    contentType: 'video/mp4',
+  },
+) {
   const repository = new InMemoryArchiveArtifactRepository();
   const active = connection();
   const artifact = await repository.register({
@@ -114,7 +121,7 @@ async function fixture(localAvailable = true) {
     kind: 'motion_video',
     sourceIdentity: 'motion:clip',
     trustedPath: '/motion/clip.mp4',
-    relativePath: '2026/08/13/120000-clip.mp4',
+    relativePath: motion.relativePath,
     size: 5,
     mtimeNs: '500000000',
     sourceTimeMs: 500,
@@ -133,8 +140,10 @@ async function fixture(localAvailable = true) {
     nowMs: 1_100,
     leaseMs: 10_000,
   });
-  await repository.markVerified(attempt.id, claimed.lease, archiveObject(remote()), 1_200);
+  const verifiedRemote = remote({ name: motion.fileName, mimeType: motion.contentType });
+  await repository.markVerified(attempt.id, claimed.lease, archiveObject(verifiedRemote), 1_200);
   const drive = new FakeDrive();
+  drive.object = verifiedRemote;
   const resolver = { execute: vi.fn().mockResolvedValue(active.folders!.motionId) };
   const alerts: { kind: string; generationId: string; artifactId?: string }[] = [];
   const reconcile = Reflect.construct(ReconcileDriveUseCase, [
@@ -204,6 +213,36 @@ describe('ReconcileDriveUseCase', () => {
 
     expect((await fixtureValue.repository.listAttempts(fixtureValue.artifact.id))[0].state).toBe('verified');
     expect(fixtureValue.resolver.execute).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['AVI', '2026/08/13/120000-clip.avi', '120000-clip.avi', 'video/x-msvideo'],
+    ['MKV', '2026/08/13/120000-clip.mkv', '120000-clip.mkv', 'video/x-matroska'],
+  ])('keeps an exact verified %s object attached', async (_format, relativePath, fileName, contentType) => {
+    const fixtureValue = await fixture(true, { relativePath, fileName, contentType });
+
+    await fixtureValue.reconcile.execute({ limit: 20 }, signal);
+
+    expect((await fixtureValue.repository.listAttempts(fixtureValue.artifact.id))[0].state)
+      .toBe('verified');
+  });
+
+  it.each([
+    ['AVI', '2026/08/13/120000-clip.avi', '120000-clip.avi', 'video/x-msvideo'],
+    ['MKV', '2026/08/13/120000-clip.mkv', '120000-clip.mkv', 'video/x-matroska'],
+  ])('adopts one exact managed %s object', async (_format, relativePath, fileName, contentType) => {
+    const fixtureValue = await fixture(true, { relativePath, fileName, contentType });
+    const [attempt] = await fixtureValue.repository.listAttempts(fixtureValue.artifact.id);
+    await fixtureValue.repository.markMissing(attempt.id, attempt.revision, 'missing', NOW);
+    fixtureValue.drive.object = null;
+    fixtureValue.drive.listed = [[remote({
+      id: 'restored-file', name: fileName, mimeType: contentType,
+    })]];
+
+    await fixtureValue.reconcile.execute({ limit: 20 }, signal);
+
+    expect((await fixtureValue.repository.listAttempts(fixtureValue.artifact.id)).at(-1))
+      .toMatchObject({ remoteObjectId: 'restored-file', state: 'verified' });
   });
 
   it('recreates a removed flat object under the resolved day only when the source survives', async () => {

@@ -135,7 +135,6 @@ export class ReportDriveStatusUseCase {
         ? providerBlockFor(providerState)
         : null;
     const coolingDown = providerState.generationId === active?.id
-      && providerState.operationClass === 'upload'
       && providerState.cooldownUntilMs !== null
       && providerState.cooldownUntilMs > nowMs;
     const activity = this.schedulerActivity.readActivitySnapshot();

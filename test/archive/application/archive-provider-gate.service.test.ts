@@ -62,7 +62,7 @@ describe('ArchiveProviderGateService', () => {
       retryAfterMs: 60_000, sessionUsable: false, operationPhase: 'session-chunk',
     }));
 
-    await expect(gate.inspect('generation-1', 'account')).resolves.toEqual({ kind: 'allowed' });
+    await expect(gate.inspect('generation-1', 'account')).resolves.toMatchObject({ kind: 'cooldown' });
     await gate.recordSuccess('generation-1', 'account', false);
 
     await expect(gate.inspect('generation-1', 'upload')).resolves.toMatchObject({ kind: 'cooldown' });
@@ -77,7 +77,7 @@ describe('ArchiveProviderGateService', () => {
 
     await expect(gate.run({
       generationId: 'generation-1', operationClass: 'account', operation: async () => 'account-ok',
-    })).resolves.toBe('account-ok');
+    })).rejects.toBeInstanceOf(DriveTemporaryUnavailableError);
     await expect(gate.inspect('generation-1', 'upload')).resolves.toEqual({ kind: 'probe' });
 
     await expect(gate.run({
@@ -97,7 +97,9 @@ describe('ArchiveProviderGateService', () => {
     await expect(gate.inspect('generation-1', 'upload')).resolves.toEqual({
       kind: 'cooldown', untilMs: 61_000,
     });
-    await expect(gate.inspect('generation-1', 'account')).resolves.toEqual({ kind: 'allowed' });
+    await expect(gate.inspect('generation-1', 'account')).resolves.toEqual({
+      kind: 'cooldown', untilMs: 61_000,
+    });
   });
 
   it('does not replace an upload recovery probe when another operation fails retryably', async () => {
@@ -110,7 +112,7 @@ describe('ArchiveProviderGateService', () => {
     await gate.recordFailure('generation-1', 'account', new DriveTemporaryUnavailableError());
 
     await expect(gate.inspect('generation-1', 'upload')).resolves.toEqual({ kind: 'probe' });
-    await expect(gate.inspect('generation-1', 'account')).resolves.toEqual({ kind: 'allowed' });
+    await expect(gate.inspect('generation-1', 'account')).resolves.toEqual({ kind: 'probe' });
   });
 
   it('resets stale provider state when the active generation changes', async () => {
@@ -220,12 +222,26 @@ describe('ArchiveProviderGateService', () => {
     });
   });
 
-  it('scopes a temporary capacity cooldown to its failed operation', async () => {
+  it('applies a temporary capacity cooldown to every Drive operation in the generation', async () => {
     const { gate } = await fixture();
     await gate.recordFailure('generation-1', 'upload', new DriveProviderCapacityBlockedError('temporary'));
 
-    await expect(gate.inspect('generation-1', 'folder')).resolves.toEqual({ kind: 'allowed' });
+    await expect(gate.inspect('generation-1', 'folder')).resolves.toMatchObject({ kind: 'cooldown' });
     await expect(gate.inspect('generation-1', 'upload')).resolves.toMatchObject({ kind: 'cooldown' });
+  });
+
+  it.each([
+    ['upload 429', 'upload', new DriveRateLimitedError({
+      retryAfterMs: 60_000, sessionUsable: false, operationPhase: 'session-chunk',
+    }), 'folder'],
+    ['folder daily limit', 'folder', new DriveProviderCapacityBlockedError('temporary'), 'account'],
+    ['reconcile outage', 'reconcile', new DriveTemporaryUnavailableError(), 'delete'],
+  ] as const)('makes %s generation-wide', async (_scenario, owner, error, observer) => {
+    const { gate } = await fixture();
+
+    await gate.recordFailure('generation-1', owner, error);
+
+    await expect(gate.inspect('generation-1', observer)).resolves.toMatchObject({ kind: 'cooldown' });
   });
 
   it('defers a quota block until the exact-ID retention outcome is known', async () => {
@@ -283,6 +299,55 @@ describe('ArchiveProviderGateService', () => {
       operation: async () => 'never', signal: controller.signal,
     })).rejects.toThrow('cancelled');
     expect(sleep).toHaveBeenCalledTimes(1);
+  });
+
+  it('removes the abort listener after both timer settlement and cancellation', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    try {
+      const repository = new InMemoryArchiveProviderStateRepository();
+      const gate = new ArchiveProviderGateService(
+        repository,
+        { now: () => new Date(Date.now()) },
+        undefined,
+        { random: () => 0 },
+        { maximumSleepMs: 5_000 },
+      );
+      await gate.ensureGeneration('generation-1');
+      await gate.recordFailure('generation-1', 'upload', new DriveRateLimitedError({
+        retryAfterMs: 100, sessionUsable: false, operationPhase: 'session-query',
+      }));
+      const settledController = new AbortController();
+      const settledRemove = vi.spyOn(settledController.signal, 'removeEventListener');
+      const settled = gate.run({
+        generationId: 'generation-1', operationClass: 'upload',
+        operation: async () => 'never', signal: settledController.signal,
+      });
+      const settledExpectation = expect(settled)
+        .rejects.toBeInstanceOf(DriveTemporaryUnavailableError);
+
+      await vi.advanceTimersByTimeAsync(100);
+      await settledExpectation;
+      expect(settledRemove).toHaveBeenCalledWith('abort', expect.any(Function));
+
+      await gate.recordFailure('generation-1', 'upload', new DriveRateLimitedError({
+        retryAfterMs: 5_000, sessionUsable: false, operationPhase: 'session-query',
+      }));
+      const cancelledController = new AbortController();
+      const cancelledRemove = vi.spyOn(cancelledController.signal, 'removeEventListener');
+      const cancelled = gate.run({
+        generationId: 'generation-1', operationClass: 'upload',
+        operation: async () => 'never', signal: cancelledController.signal,
+      });
+      const cancelledExpectation = expect(cancelled).rejects.toMatchObject({ name: 'AbortError' });
+      await vi.advanceTimersByTimeAsync(0);
+      cancelledController.abort(new DOMException('stop', 'AbortError'));
+
+      await cancelledExpectation;
+      expect(cancelledRemove).toHaveBeenCalledWith('abort', expect.any(Function));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

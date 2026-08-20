@@ -37,6 +37,7 @@ import type { ResolveMotionArchiveContainerUseCase } from './resolve-motion-arch
 import type { ArchiveProviderGateService } from '../archive-provider-gate.service';
 import { DriveTemporaryUnavailableError } from '../../domain/errors/drive-temporary-unavailable.error';
 import { DriveRateLimitedError } from '../../domain/errors/drive-rate-limited.error';
+import { ArchiveSourceFilesystemError } from '../../domain/errors/archive-source-filesystem.error';
 
 const CHUNK_SIZE = 256 * 1024;
 const DEFAULT_LEASE_MS = 5 * 60 * 1_000;
@@ -588,7 +589,8 @@ export class UploadDriveObjectAttemptUseCase {
       || !matchesArchiveAppProperties(expectedProperties, remote.appProperties)
       || !remote.ownedByMe || !remote.canDelete || remote.trashed
       || remote.sharing.shared || remote.sharing.permissionIds.length !== 1
-      || remote.sharing.permissionIds[0] !== remote.sharing.ownerPermissionId) {
+      || remote.sharing.ownerPermissionId !== connection.permissionId
+      || remote.sharing.permissionIds[0] !== connection.permissionId) {
       if (replaceMismatch) {
         return this.replaceConflict(attempt, connection, lease, signal, updateLease);
       }
@@ -1006,8 +1008,9 @@ function localIdentityErrorCode(
 }
 
 function isMissingSource(error: unknown): boolean {
-  return !!error && typeof error === 'object'
-    && (error as { code?: unknown }).code === 'ENOENT';
+  return (error instanceof ArchiveSourceFilesystemError && error.code === 'archive_source_missing')
+    || (!!error && typeof error === 'object'
+      && (error as { code?: unknown }).code === 'ENOENT');
 }
 
 function isContainerResolver(
