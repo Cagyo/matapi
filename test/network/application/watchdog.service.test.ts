@@ -14,6 +14,13 @@ function fakeWatchdog(): WatchdogPort & {
   };
 }
 
+function loggerErrorSpy(service: WatchdogService): ReturnType<typeof vi.spyOn> {
+  const logger = (service as unknown as {
+    logger: { error: (message: string) => void };
+  }).logger;
+  return vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+}
+
 describe('WatchdogService', () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -65,5 +72,67 @@ describe('WatchdogService', () => {
 
     expect(watchdog.pet).toHaveBeenCalledTimes(2);
     await service.onModuleDestroy();
+  });
+
+  it('keeps booting when the watchdog device cannot be opened', async () => {
+    process.env.WATCHDOG_PET_INTERVAL_MS = '15000';
+    vi.useFakeTimers();
+    const watchdog = fakeWatchdog();
+    watchdog.open.mockRejectedValue(Object.assign(
+      new Error("EACCES: permission denied, open '/dev/watchdog'"),
+      { code: 'EACCES' },
+    ));
+    const service = new WatchdogService(true, watchdog);
+    const error = loggerErrorSpy(service);
+
+    await expect(service.onApplicationBootstrap()).resolves.toBeUndefined();
+
+    await vi.advanceTimersByTimeAsync(45000);
+    expect(watchdog.pet).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledWith('Hardware watchdog inactive: EACCES');
+    const logged = error.mock.calls.flat().join(' ');
+    expect(logged).not.toContain('/dev/watchdog');
+    expect(logged).not.toContain('permission denied');
+  });
+
+  it('does not disarm a watchdog device that never opened', async () => {
+    const watchdog = fakeWatchdog();
+    watchdog.open.mockRejectedValue(Object.assign(new Error('device busy'), { code: 'EBUSY' }));
+    const service = new WatchdogService(true, watchdog);
+    loggerErrorSpy(service);
+
+    await service.onApplicationBootstrap();
+
+    await expect(service.onModuleDestroy()).resolves.toBeUndefined();
+    expect(watchdog.close).not.toHaveBeenCalled();
+  });
+
+  it('names the error class when the open failure carries no code', async () => {
+    class WatchdogDeviceError extends Error {
+      override readonly name = 'WatchdogDeviceError';
+    }
+    const watchdog = fakeWatchdog();
+    watchdog.open.mockRejectedValue(new WatchdogDeviceError('no such device'));
+    const service = new WatchdogService(true, watchdog);
+    const error = loggerErrorSpy(service);
+
+    await service.onApplicationBootstrap();
+
+    expect(error).toHaveBeenCalledWith('Hardware watchdog inactive: WatchdogDeviceError');
+  });
+
+  it('falls back to a fixed code when the open failure code could carry a path', async () => {
+    const watchdog = fakeWatchdog();
+    watchdog.open.mockRejectedValue(Object.assign(
+      new Error('open failed'),
+      { code: "ENOENT: /dev/watchdog0" },
+    ));
+    const service = new WatchdogService(true, watchdog);
+    const error = loggerErrorSpy(service);
+
+    await service.onApplicationBootstrap();
+
+    expect(error).toHaveBeenCalledWith('Hardware watchdog inactive: WATCHDOG_OPEN_FAILED');
+    expect(error.mock.calls.flat().join(' ')).not.toContain('/dev/watchdog0');
   });
 });

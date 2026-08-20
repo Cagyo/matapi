@@ -8,6 +8,22 @@ import { InMemoryFeatureRepository } from '../../../src/features/infrastructure/
 import { InMemoryFeatureQuery } from '../../../src/features/infrastructure/in-memory-feature.query';
 import { VerifyFeatureReadinessUseCase } from '../../../src/features/application/verify-feature-readiness.use-case';
 import type { FeatureReadinessBarrierPort } from '../../../src/features/domain/ports/feature-readiness-barrier.port';
+import type { Feature } from '../../../src/features/domain/feature.entity';
+import type { FeatureQueryPort } from '../../../src/features/domain/ports/feature-query.port';
+
+const DIGITAL: Feature = { name: 'digital', installed: true, enabled: true, config: null, attentionReason: null };
+
+/** A `FeatureQueryPort` whose read fails, standing in for an unreadable database. */
+function failingQuery(error: Error): FeatureQueryPort {
+  return { listAll: () => Promise.reject(error) };
+}
+
+function loggerErrorSpy(boot: FeatureReadinessBootService): ReturnType<typeof vi.spyOn> {
+  const logger = (boot as unknown as {
+    logger: { error: (message: string) => void };
+  }).logger;
+  return vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+}
 
 describe('FeatureReadinessBootService', () => {
   it('shares one initial verification pass among concurrent callers', async () => {
@@ -59,5 +75,63 @@ describe('FeatureReadinessBootService', () => {
 
     expect((await features.findByName('digital'))?.attentionReason).toBeNull();
     expect((await features.findByName('motion'))?.attentionReason).toBe('readiness-failed');
+  });
+
+  it('resolves the readiness barrier when the feature listing fails', async () => {
+    const verify = new VerifyFeatureReadinessUseCase(
+      new InMemoryFeatureRepository([DIGITAL]), new InMemoryFeatureReadinessAdapter(),
+    );
+    const execute = vi.spyOn(verify, 'execute');
+    const boot = new FeatureReadinessBootService(
+      failingQuery(Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY' })), verify,
+    );
+    const error = loggerErrorSpy(boot);
+
+    await expect(boot.onApplicationBootstrap()).resolves.toBeUndefined();
+    await expect(boot.awaitInitialVerification()).resolves.toBeUndefined();
+
+    expect(execute).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledWith('Feature readiness verification skipped: SQLITE_BUSY');
+    expect(error.mock.calls.flat().join(' ')).not.toContain('database is locked');
+  });
+
+  it('lets feature availability proceed after the feature listing fails', async () => {
+    const features = new InMemoryFeatureRepository([DIGITAL]);
+    const boot = new FeatureReadinessBootService(
+      failingQuery(new Error('unreadable')),
+      new VerifyFeatureReadinessUseCase(features, new InMemoryFeatureReadinessAdapter()),
+    );
+    loggerErrorSpy(boot);
+    const barrier: FeatureReadinessBarrierPort = {
+      awaitInitialVerification: () => boot.awaitInitialVerification(),
+    };
+    const availability = new FeatureAvailabilityService(
+      features, new InMemoryFeatureInstallJobRepository(features), barrier,
+    );
+
+    await boot.onApplicationBootstrap();
+
+    await expect(availability.inspect('digital')).resolves.toMatchObject({ installed: true });
+    await expect(availability.requireReady('digital')).resolves.toBeUndefined();
+  });
+
+  it('falls back to a fixed code when the listing failure code could carry a path', async () => {
+    const boot = new FeatureReadinessBootService(
+      failingQuery(Object.assign(
+        new Error('unable to open database file'),
+        { code: 'SQLITE_CANTOPEN: /opt/home-worker/data/worker.db' },
+      )),
+      new VerifyFeatureReadinessUseCase(
+        new InMemoryFeatureRepository([DIGITAL]), new InMemoryFeatureReadinessAdapter(),
+      ),
+    );
+    const error = loggerErrorSpy(boot);
+
+    await boot.onApplicationBootstrap();
+
+    expect(error).toHaveBeenCalledWith(
+      'Feature readiness verification skipped: FEATURE_VERIFICATION_FAILED',
+    );
+    expect(error.mock.calls.flat().join(' ')).not.toContain('/opt/home-worker');
   });
 });
