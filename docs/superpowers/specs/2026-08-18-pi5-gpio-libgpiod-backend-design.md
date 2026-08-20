@@ -195,8 +195,23 @@ flushes per event, but an alarm path must not rest on "probably". `stdbuf` is co
 present on every Raspberry Pi OS image, and a no-op if gpiomon already flushes.
 
 Attach is confirmed by polling `gpioinfo` for the line's consumer field, bounded (for
-example 10 attempts at 50 ms). This works on both versions; v1 prints nothing at startup,
-so it is the only positive attach signal there.
+example 10 attempts at 50 ms), **conjoined with "our child is still alive"**. On v1 the
+consumer string is the fixed `gpiomon` — indistinguishable from a foreign `gpiomon` that
+won the race for the line while ours died with `EBUSY` — so the consumer field alone can
+confirm the wrong process. Attach = consumer present **and** our spawned child running
+(argv signature match, reusing the orphan-sweep matcher, when in doubt). This works on
+both versions; v1 prints nothing at startup, so it is the only positive attach signal
+there.
+
+**`watch()` resolution semantics** (single, explicit rule): `watch()` resolves once the
+first spawn attempt has completed — attach confirmed, *or* the failure classified
+transient and the internal ladder entered. It rejects only on terminal classification.
+Resolution therefore does **not** guarantee an attached monitor; the monitor-liveness
+signal in `read()`'s classification is the sole source of truth for coverage, and
+`healthCheck()` surfaces a line whose ladder never lands. A delayed first attach counts
+as a respawn for reconciliation purposes: the backend runs the reconcile `gpioget` and
+pushes the level through the `watch` callback, since the adapter's pre-`watch` initial
+read may by then be arbitrarily stale.
 
 ### Respawn
 
@@ -231,13 +246,18 @@ A foreign consumer is a failure class pigpiod's shared model hid entirely — an
 `read()`:
 
 - unmonitored → real `gpioget` (exactly the circuit breaker's 10 s polled path)
-- monitored → cached last level, **bounded by a staleness threshold**
-- throws on terminal classification, and when the cached level exceeds the staleness
-  bound — never merely because a respawn is in flight
+- monitored → cached last level, **bounded by monitor liveness, not level age**
+- throws on terminal classification, and when the monitor has been down longer than a
+  liveness threshold — never merely because a respawn is in flight
 
-The staleness bound is required: without it a line whose monitor died and is still
-climbing the backoff ladder would serve an indefinitely old value, and `healthCheck()`
-would report a dead sensor as healthy. The bound is what makes the
+The bound must key off **monitor liveness** — child process alive and attach confirmed —
+because level age cannot work here: the cache refreshes only on edges and on respawn
+reconciliation (the backend cannot `gpioget` a line its own monitor holds — that is the
+EBUSY fact above), so a healthy monitor on a quiet alarm line accumulates unbounded cache
+age while being perfectly fine. A time-based bound would either falsely condemn healthy
+silent lines or be too large to catch anything. The liveness rule: serve cache while the
+monitor is attached, or down for less than the threshold (~2× the reconnect ladder cap);
+throw once it has been down longer. This is what makes the
 `healthCheck()`-clears-`offline` fix below necessary rather than merely defensive — the
 two changes only work as a pair.
 
@@ -259,6 +279,11 @@ so argv matching is the primary mechanism there. A PPID==1 heuristic is explicit
 relied upon — orphans may reparent to a `systemd --user` instance rather than init.
 
 Startup sweep and on-`EBUSY` recovery are both retained; both are correctness.
+
+One accepted edge: the sweep matches argv, not ownership, so a second worker instance
+started by hand (`yarn start` alongside PM2) would sweep the running instance's *live*
+monitors. PM2 `instances=1` makes this a misuse scenario, not an operational one; noted
+so nobody "fixes" it into a PPID heuristic later.
 
 ### Version strategy
 
@@ -294,9 +319,19 @@ There is a latent bug on the pigpio path today. `handleNotify` drops every event
 therefore leaves that sensor **permanently deaf**.
 
 Under the new backend this becomes reachable through per-line recovery, which by design
-does not bump the backend generation. The fix is one policy touch: a successful
-`healthCheck()` clears `offline`, paired with the backend re-emitting the current level
-after each line recovery.
+does not bump the backend generation. The fix has **two mandatory halves**:
+
+1. Remove `this.offline` from `healthCheck()`'s short-circuit guard
+   (`digital-gpio.adapter.ts:150`, `if (!this.gpio || this.offline) return false;`).
+   Without this, "a successful healthCheck clears offline" is unreachable — healthCheck
+   returns false before ever attempting the read whenever `offline` is already set.
+2. On healthCheck success, the **adapter clears `offline` and re-seeds its level state
+   from that same read**. Do *not* rely on the backend re-emitting a level after line
+   recovery: that push arrives through `handleNotify`, whose `offline` guard drops it
+   whenever recovery precedes the next healthCheck tick — which is the usual order,
+   since recovery is what lets healthCheck succeed. The re-emit would be silently
+   discarded and the sensor would stay stale until the next real edge, exactly the bug
+   class being closed. The adapter-side read-and-reseed makes the ordering irrelevant.
 
 This is the single intentional behavioural change to the adapter and must be called out
 in review.
@@ -314,12 +349,14 @@ Required contract:
    `unwatch` queued behind an in-flight `watch` always lands after spawn and attach, or
    cancels it.
 4. `watch()` delivers no callback before it resolves, and does **not** synthesize an
-   initial level on first watch — the adapter has just read it, and a synthesized push
-   would double-process. Reconciliation pushes happen on respawns only.
+   initial level on a first watch whose attach succeeded immediately — the adapter has
+   just read it, and a synthesized push would double-process. Reconciliation pushes
+   happen on respawns *and* on a delayed first attach (one that resolved into the
+   ladder), per the resolution-semantics rule above.
 5. `watch()` rejects **only** on terminal classification. Transient spawn failures enter
-   the internal ladder and still resolve — otherwise a failed respawn after flap cooldown
-   would silently kill the sensor, because `resumeFromFlapping` calls it as
-   `void line.watch(...)`.
+   the internal ladder and still resolve (see the resolution-semantics rule) — otherwise
+   a failed respawn after flap cooldown would silently kill the sensor, because
+   `resumeFromFlapping` calls it as `void line.watch(...)`.
 
 `unwatch()` may stay async. `startPolledSampling`'s fire-and-forget call is safe because
 the first poll fires at +10 s while the kill completes in milliseconds. The real
@@ -384,7 +421,10 @@ Required changes:
 - `scripts/install.sh`: replace `install_pigpio` and `setup_pigpiod` with `setup_gpiod` —
   `apt install gpiod`, `usermod -aG gpio "$USER"`, `systemctl disable --now pigpiod` **and
   mask it**. Idempotent; tolerates pigpiod's absence. Masking rather than purging keeps
-  rollback free during the verification window.
+  rollback *cheap* during the verification window — but not free: the old code's
+  readiness requires `systemctl is-active pigpiod` to succeed, so rolling back also
+  requires a root `systemctl unmask pigpiod && systemctl enable --now pigpiod`. Document
+  that pair in the rollback note so an operator mid-incident is not surprised.
 - `scripts/install-feature.sh`: the `digital)` case installs `gpiod` and adds the `gpio`
   group, and prints the same supervisor-restart warning the rtsp case already prints —
   group changes do not reach the running PM2 daemon.
@@ -422,7 +462,9 @@ structural casts replaced by the real interface.
 
 New backend-level cases: orphan sweep identification; `EBUSY` ours vs foreign; respawn
 with reconciliation; stale-incarnation event discard; destroy landing mid-`watch`;
-`unwatch` then `read` serialization; alarm-line infinite retry.
+`unwatch` then `read` serialization; alarm-line infinite retry; monitor-liveness bound
+(quiet healthy line serves cache indefinitely, downed monitor past the threshold throws);
+`healthCheck` success while `offline` clears the flag and re-seeds level.
 
 **On-device smoke, run from the install path:** `gpioget --bias=pull-up` versus
 `--bias=pull-down` on a configured-but-unwired pin must read differently. This proves chip
@@ -454,6 +496,12 @@ These are explicitly unresolved and must be pinned from real hardware, not docum
 5. The registry's `healthCheck` cadence, which bounds the deaf window that fix #1 closes.
 6. Whether orphaned children reparent to init or to `systemd --user` under PM2 — informative
    only; identification does not depend on it.
+7. Whether pull-bias state persists in the pinctrl hardware after a request is released,
+   on both bcm2835/bcm2711 and RP1. `gpioget --bias=…` applies bias only while its request
+   is held; in the ~30 ms blind window between `gpioget` exiting and `gpiomon` attaching
+   the line is unrequested, and bias persistence there is pinctrl implementation behaviour,
+   not a kernel contract. A genuinely floating alarm line could sit at the wrong level at
+   the moment of attach if pulls reset on release.
 
 ## Out of scope
 
