@@ -97,6 +97,10 @@ describe('BootRecoveryService', () => {
     expect(error).toHaveBeenCalledTimes(1);
     const line = String(error.mock.calls[0][0]);
     expect(line).toContain('ARCHIVE_OPERATION_FAILED');
+    // The archive context logs its own `Archive boot recovery failed: <code>`
+    // for the same rejection. Sharing that prefix here read as two faults.
+    expect(line).not.toContain('Archive boot recovery failed');
+    expect(line).toContain('Continuing boot diagnostics after a contained archive failure');
     expect(line).not.toContain('/home/pi');
     expect(line).not.toContain('permission denied');
     expect(line).not.toContain('scandir');

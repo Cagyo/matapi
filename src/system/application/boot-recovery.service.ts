@@ -86,8 +86,11 @@ export class BootRecoveryService {
       await recover();
       return true;
     } catch {
+      // Deliberately not "Archive boot recovery failed": the archive context
+      // logs that line, with its own discriminated code, for this same single
+      // rejection. A shared prefix made one fault read as two.
       this.logger.error(
-        `Archive boot recovery failed, continuing boot diagnostics: ${ARCHIVE_OPERATION_FAILED}`,
+        `Continuing boot diagnostics after a contained archive failure: ${ARCHIVE_OPERATION_FAILED}`,
       );
       return false;
     }
