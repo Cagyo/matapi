@@ -228,6 +228,88 @@ describe('CompletedMotionVideoRecoveryScheduler', () => {
     expect(reconcileBatch).toHaveBeenCalledTimes(2);
     expect(reconcileBatch.mock.calls[1][0]).toBeNull();
   });
+
+  it('discards pre-abort wakes but preserves one wake received before cancellation settles', async () => {
+    const abortObserved = deferred();
+    const releaseRejection = deferred();
+    let concurrent = 0;
+    let maximum = 0;
+    const reconcileBatch = vi.fn()
+      .mockImplementationOnce(async (_cursor, signal?: AbortSignal) => {
+        concurrent += 1;
+        maximum = Math.max(maximum, concurrent);
+        await new Promise<void>((resolve) => {
+          const aborted = () => {
+            abortObserved.resolve();
+            resolve();
+          };
+          if (signal?.aborted) aborted();
+          else signal?.addEventListener('abort', aborted, { once: true });
+        });
+        await releaseRejection.promise;
+        concurrent -= 1;
+        throw signal?.reason instanceof Error
+          ? signal.reason
+          : new DOMException('Aborted', 'AbortError');
+      })
+      .mockImplementationOnce(async () => {
+        concurrent += 1;
+        maximum = Math.max(maximum, concurrent);
+        concurrent -= 1;
+        return { cursor: null, complete: true };
+      });
+    const scheduler = schedulerWith(reconcileBatch);
+
+    scheduler.wake('boot');
+    await vi.waitFor(() => expect(reconcileBatch).toHaveBeenCalledOnce());
+    scheduler.wake('safety');
+    const lifecycle = new AbortController();
+    const joined = scheduler.reconcile(lifecycle.signal);
+    lifecycle.abort(new DOMException('shutdown', 'AbortError'));
+    await abortObserved.promise;
+    scheduler.wake('motion-event');
+    releaseRejection.resolve();
+
+    await expect(joined).rejects.toMatchObject({ name: 'AbortError' });
+    await vi.waitFor(() => expect(reconcileBatch).toHaveBeenCalledTimes(2));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(reconcileBatch).toHaveBeenCalledTimes(2);
+    expect(reconcileBatch.mock.calls[1][0]).toBeNull();
+    expect(maximum).toBe(1);
+  });
+
+  it('does not restart for a wake that predates traversal cancellation', async () => {
+    const abortObserved = deferred();
+    const releaseRejection = deferred();
+    const reconcileBatch = vi.fn(async (_cursor, signal?: AbortSignal) => {
+      await new Promise<void>((resolve) => {
+        const aborted = () => {
+          abortObserved.resolve();
+          resolve();
+        };
+        if (signal?.aborted) aborted();
+        else signal?.addEventListener('abort', aborted, { once: true });
+      });
+      await releaseRejection.promise;
+      throw signal?.reason instanceof Error
+        ? signal.reason
+        : new DOMException('Aborted', 'AbortError');
+    });
+    const scheduler = schedulerWith(reconcileBatch);
+
+    scheduler.wake('boot');
+    await vi.waitFor(() => expect(reconcileBatch).toHaveBeenCalledOnce());
+    scheduler.wake('safety');
+    const lifecycle = new AbortController();
+    const joined = scheduler.reconcile(lifecycle.signal);
+    lifecycle.abort(new DOMException('shutdown', 'AbortError'));
+    await abortObserved.promise;
+    releaseRejection.resolve();
+
+    await expect(joined).rejects.toMatchObject({ name: 'AbortError' });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(reconcileBatch).toHaveBeenCalledOnce();
+  });
 });
 
 function schedulerWith(reconcileBatch: ReturnType<typeof vi.fn>) {

@@ -70,9 +70,7 @@ export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBoots
       this.inFlight = null;
       this.cleanupAbortListeners();
       if (this.activeController === controller) this.activeController = null;
-      if (controller.signal.aborted) {
-        this.pendingWake = false;
-      } else if (this.pendingWake) {
+      if (this.pendingWake) {
         this.pendingWake = false;
         this.dispatchBestEffort();
       }
@@ -87,7 +85,7 @@ export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBoots
   ): void {
     if (!signal || !controller || controller.signal.aborted) return;
     if (signal.aborted) {
-      controller.abort(abortReason(signal));
+      this.abortTraversal(controller, signal);
       return;
     }
     let listening = true;
@@ -100,11 +98,18 @@ export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBoots
     const abort = () => {
       cleanup();
       if (this.activeController === controller && !controller.signal.aborted) {
-        controller.abort(abortReason(signal));
+        this.abortTraversal(controller, signal);
       }
     };
     this.abortListenerCleanups.add(cleanup);
     signal.addEventListener('abort', abort, { once: true });
+  }
+
+  private abortTraversal(controller: AbortController, signal: AbortSignal): void {
+    // Wakes queued before cancellation belong to the canceled traversal. A
+    // wake arriving after this boundary is preserved by the normal wake path.
+    this.pendingWake = false;
+    controller.abort(abortReason(signal));
   }
 
   private cleanupAbortListeners(): void {
