@@ -178,6 +178,7 @@ export interface SystemOnlineView {
   sensorsTotal: number;
   dbRecovery: DbRecovery;
   clockSynchronized: boolean;
+  archiveRecovered: boolean;
   now: Date;
 }
 
@@ -1522,6 +1523,9 @@ If setup is interrupted or the bot restarts, press Connect Drive again.`,
         lines.push('⚠️ Database was restored from local backup after corruption.');
       } else if (v.dbRecovery === 'recreated_empty') {
         lines.push('⚠️ Database was recreated empty after corruption — re-import config.');
+      }
+      if (!v.archiveRecovered) {
+        lines.push('⚠️ Archive recovery failed — video uploads and backups are paused until the next restart.');
       }
       if (!v.clockSynchronized) {
         lines.push('⚠️ System clock is not synchronized — early timestamps may drift.');

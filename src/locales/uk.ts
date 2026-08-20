@@ -200,6 +200,7 @@ export interface SystemOnlineView {
   sensorsTotal: number;
   dbRecovery: DbRecovery;
   clockSynchronized: boolean;
+  archiveRecovered: boolean;
   now: Date;
 }
 
@@ -1488,6 +1489,9 @@ Home Worker потрібен OAuth-клієнт у контрольованом�
         lines.push('⚠️ Базу даних відновлено з локальної резервної копії після пошкодження.');
       } else if (v.dbRecovery === 'recreated_empty') {
         lines.push('⚠️ Після пошкодження створено порожню базу даних — повторно імпортуйте конфігурацію.');
+      }
+      if (!v.archiveRecovered) {
+        lines.push('⚠️ Не вдалося відновити роботу архіву — вивантаження відео та резервні копії призупинено до наступного перезапуску.');
       }
       if (!v.clockSynchronized) {
         lines.push('⚠️ Системний годинник не синхронізовано — ранні мітки часу можуть бути неточними.');

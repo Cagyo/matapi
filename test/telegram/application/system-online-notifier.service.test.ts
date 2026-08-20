@@ -36,7 +36,11 @@ function sensorQuery(sensors: Sensor[]): SensorQueryPort {
 describe('SystemOnlineNotifier', () => {
   it('broadcasts a system-online notice with the online sensor count', async () => {
     const bootRecovery = {
-      run: vi.fn(async () => ({ dbRecovery: null, clockSynchronized: true })),
+      run: vi.fn(async () => ({
+        dbRecovery: null,
+        clockSynchronized: true,
+        archiveRecovered: true,
+      })),
     } as unknown as BootRecoveryService;
     const sensors = sensorQuery([makeSensor('a'), makeSensor('b')]);
     const probe = vi.fn(async () => [
@@ -62,6 +66,7 @@ describe('SystemOnlineNotifier', () => {
       run: vi.fn(async () => ({
         dbRecovery: 'restored_from_backup' as const,
         clockSynchronized: false,
+        archiveRecovered: true,
       })),
     } as unknown as BootRecoveryService;
     const sensors = sensorQuery([]);
@@ -78,7 +83,11 @@ describe('SystemOnlineNotifier', () => {
   });
 
   it('still runs boot recovery but skips the broadcast when notifier not ready', async () => {
-    const run = vi.fn(async () => ({ dbRecovery: null, clockSynchronized: true }));
+    const run = vi.fn(async () => ({
+      dbRecovery: null,
+      clockSynchronized: true,
+      archiveRecovered: true,
+    }));
     const bootRecovery = { run } as unknown as BootRecoveryService;
     const sensors = sensorQuery([]);
     const health = { probe: async () => [] };
@@ -90,5 +99,48 @@ describe('SystemOnlineNotifier', () => {
 
     expect(run).toHaveBeenCalledTimes(1);
     expect(notify).not.toHaveBeenCalled();
+  });
+  it('renders a healthy boot notice with no warning lines', async () => {
+    const bootRecovery = {
+      run: vi.fn(async () => ({
+        dbRecovery: null,
+        clockSynchronized: true,
+        archiveRecovered: true,
+      })),
+    } as unknown as BootRecoveryService;
+    const sensors = sensorQuery([makeSensor('a')]);
+    const health = { probe: async () => [{ sensorId: 'a', status: 'online' as const }] };
+    const notify = vi.fn().mockResolvedValue(undefined);
+    const notifier = { isReady: () => true, notify } as unknown as EventNotifierService;
+
+    const service = new SystemOnlineNotifier(bootRecovery, sensors, health, notifier);
+    await service.run();
+
+    const message = notify.mock.calls[0][0] as { text: string };
+    const lines = message.text.split('\n');
+    expect(lines.slice(0, -1)).toEqual(['🟢 System online', '🔌 Sensors: 1/1 online']);
+    expect(message.text).not.toContain('⚠️');
+  });
+
+  it('still broadcasts, with an archive warning, when archive recovery failed', async () => {
+    const bootRecovery = {
+      run: vi.fn(async () => ({
+        dbRecovery: null,
+        clockSynchronized: true,
+        archiveRecovered: false,
+      })),
+    } as unknown as BootRecoveryService;
+    const sensors = sensorQuery([makeSensor('a')]);
+    const health = { probe: async () => [{ sensorId: 'a', status: 'online' as const }] };
+    const notify = vi.fn().mockResolvedValue(undefined);
+    const notifier = { isReady: () => true, notify } as unknown as EventNotifierService;
+
+    const service = new SystemOnlineNotifier(bootRecovery, sensors, health, notifier);
+    await service.run();
+
+    expect(notify).toHaveBeenCalledTimes(1);
+    const message = notify.mock.calls[0][0] as { text: string };
+    expect(message.text).toContain('1/1 online');
+    expect(message.text).toContain('Archive recovery failed');
   });
 });

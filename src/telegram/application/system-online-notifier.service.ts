@@ -47,6 +47,7 @@ export class SystemOnlineNotifier {
       sensorsTotal: sensors.length,
       dbRecovery: diagnostics.dbRecovery,
       clockSynchronized: diagnostics.clockSynchronized,
+      archiveRecovered: diagnostics.archiveRecovered,
       now: new Date(),
     });
 

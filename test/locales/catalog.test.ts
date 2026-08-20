@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { format } from 'date-fns';
 import { catalogs, catalogFor } from '../../src/locales/catalog';
 import { en } from '../../src/locales/en';
 
@@ -158,5 +159,46 @@ describe('catalogFor', () => {
     expect(english.home.workflow.retryReturn).toBe('Retry return');
     expect(english.home.workflow.returnUnavailable).toContain('temporarily unavailable');
     expect(english.home.workflow.outcomeNotice('Restart complete.')).toBe('Restart complete.');
+  });
+});
+
+describe('system online notice', () => {
+  const healthy = {
+    sensorsOnline: 1,
+    sensorsTotal: 2,
+    dbRecovery: null,
+    clockSynchronized: true,
+    archiveRecovered: true,
+    now: new Date('2030-01-01T12:00:00Z'),
+  } as const;
+
+  it('renders a healthy boot notice byte-for-byte as before the archive flag', () => {
+    const stamp = format(healthy.now, 'dd.MM.yyyy HH:mm');
+
+    expect(catalogs.en.system.online(healthy))
+      .toBe(`🟢 System online\n🔌 Sensors: 1/2 online\n${stamp}`);
+    expect(catalogs.ru.system.online(healthy))
+      .toBe(`🟢 Система в сети\n🔌 Датчики: 1/2 в сети\n${stamp}`);
+    expect(catalogs.uk.system.online(healthy))
+      .toBe(`🟢 Система в мережі\n🔌 Датчики: 1/2 у мережі\n${stamp}`);
+  });
+
+  it('adds one archive warning line in every locale when archive recovery failed', () => {
+    for (const catalog of [catalogs.en, catalogs.ru, catalogs.uk]) {
+      const healthyLines = catalog.system.online(healthy).split('\n');
+      const failedLines = catalog.system.online({ ...healthy, archiveRecovered: false }).split('\n');
+
+      expect(failedLines).toHaveLength(healthyLines.length + 1);
+      const [added] = failedLines.filter((line) => !healthyLines.includes(line));
+      expect(added).toMatch(/^⚠️ /);
+      expect(added).not.toContain('/home/pi');
+    }
+
+    expect(catalogs.en.system.online({ ...healthy, archiveRecovered: false }))
+      .toContain('Archive recovery failed');
+    expect(catalogs.ru.system.online({ ...healthy, archiveRecovered: false }))
+      .toContain('архива');
+    expect(catalogs.uk.system.online({ ...healthy, archiveRecovered: false }))
+      .toContain('архіву');
   });
 });

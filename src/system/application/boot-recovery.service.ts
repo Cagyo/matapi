@@ -6,10 +6,25 @@ import {
   ClockSyncProbePort,
 } from '../domain/ports/clock-sync.port';
 
+/**
+ * Path-free marker for an archive boot failure contained here. The archive
+ * context logs its own discriminated code from `onApplicationBootstrap`, so
+ * this line only has to record that the failure was caught and did not stop
+ * the rest of boot recovery — no error text or path is read.
+ */
+const ARCHIVE_OPERATION_FAILED = 'ARCHIVE_OPERATION_FAILED';
+
 /** Diagnostics gathered during boot recovery, surfaced to the online notice. */
 export interface BootDiagnostics {
   dbRecovery: DbRecovery;
   clockSynchronized: boolean;
+  /**
+   * `false` only when a registered archive recovery hook actually rejected.
+   * A boot with no hook registered reports `true`: there is no failure to
+   * report, and warning about an archive that was never wired would cry wolf
+   * on every boot of an archive-less configuration.
+   */
+  archiveRecovered: boolean;
 }
 
 /**
@@ -34,7 +49,7 @@ export class BootRecoveryService {
   }
 
   async run(): Promise<BootDiagnostics> {
-    await this.archiveRecovery?.();
+    const archiveRecovered = await this.recoverArchive();
     const dbRecovery = this.recoveryState.recovery;
     if (dbRecovery === 'restored_from_backup') {
       this.logger.warn('Database was restored from local backup after corruption');
@@ -53,6 +68,26 @@ export class BootRecoveryService {
       this.logger.warn('Clock not synchronized — early timestamps may drift');
     }
 
-    return { dbRecovery, clockSynchronized: clock.synchronized };
+    return { dbRecovery, clockSynchronized: clock.synchronized, archiveRecovered };
+  }
+
+  /**
+   * Archive recovery used to run unguarded as the first statement of `run()`,
+   * so an archive failure suppressed the "system online" broadcast — the one
+   * channel that should have reported the outage. Contain it: the remaining
+   * diagnostics still run and the outcome reaches the operator.
+   */
+  private async recoverArchive(): Promise<boolean> {
+    const recover = this.archiveRecovery;
+    if (recover === null) return true;
+    try {
+      await recover();
+      return true;
+    } catch {
+      this.logger.error(
+        `Archive boot recovery failed, continuing boot diagnostics: ${ARCHIVE_OPERATION_FAILED}`,
+      );
+      return false;
+    }
   }
 }
