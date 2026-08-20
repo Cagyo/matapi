@@ -7,6 +7,10 @@ import { DriveFolderBranchBlockedError } from '../../domain/errors/drive-folder-
 import type { MotionArchivePath } from '../../domain/motion-archive-path.value-object';
 import type { ArchiveRemoteMutationLockService } from '../archive-remote-mutation-lock.service';
 import {
+  ARCHIVE_ADMIN_ALERT,
+  type ArchiveAdminAlertPort,
+} from '../ports/archive-admin-alert.port';
+import {
   DRIVE_FOLDER,
   DriveFolderPageTokenRejectedError,
   type DriveFolderMetadata,
@@ -50,6 +54,8 @@ export class ResolveMotionArchiveContainerUseCase {
     @Inject(DRIVE_FOLDER_RESERVATION_REPOSITORY)
     private readonly reservations: DriveFolderReservationRepositoryPort,
     private readonly remoteMutationLock: Pick<ArchiveRemoteMutationLockService, 'runExclusive'>,
+    @Inject(ARCHIVE_ADMIN_ALERT)
+    private readonly alerts: ArchiveAdminAlertPort,
     options: ResolveMotionArchiveContainerOptions = {},
   ) {
     this.now = options.now ?? Date.now;
@@ -296,7 +302,10 @@ export class ResolveMotionArchiveContainerUseCase {
       BLOCKED_CODE,
       this.now(),
     );
-    if (marked !== null) throw blocked();
+    if (marked !== null) {
+      await this.alertBlockedBranch(connection.id);
+      throw blocked();
+    }
     if (remainingReloads < 1) throw blocked();
     const winner = await this.reservations.loadCurrent(
       connection.id,
@@ -328,7 +337,10 @@ export class ResolveMotionArchiveContainerUseCase {
       BLOCKED_CODE,
       this.now(),
     );
-    if (marked !== null) throw blocked();
+    if (marked !== null) {
+      await this.alertBlockedBranch(connection.id);
+      throw blocked();
+    }
     if (remainingReloads < 1) throw blocked();
     const winner = await this.reservations.loadCurrent(
       connection.id,
@@ -365,6 +377,13 @@ export class ResolveMotionArchiveContainerUseCase {
       folderId,
       parentFolderId: parentId,
     };
+  }
+
+  private async alertBlockedBranch(generationId: string): Promise<void> {
+    await this.alerts.alert('folder-branch-unhealthy', {
+      generationId,
+      errorCode: BLOCKED_CODE,
+    }).catch(() => undefined);
   }
 
   private async listCandidates(

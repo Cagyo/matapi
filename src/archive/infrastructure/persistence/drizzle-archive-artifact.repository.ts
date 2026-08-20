@@ -730,7 +730,7 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
     return deadlines.length === 0 ? null : Math.min(...deadlines);
   }
 
-  async readQueueStatus(generationId: string): Promise<ArchiveQueueStatus> {
+  async readQueueStatus(generationId: string, nowMs?: number): Promise<ArchiveQueueStatus> {
     const queueCondition = and(
       eq(archiveArtifacts.kind, 'motion_video'),
       eq(archiveArtifacts.state, 'pending'),
@@ -759,12 +759,45 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
         isNotNull(archiveArtifacts.motionDayPath),
         exists(blockedHeadsQuery(this.db, generationId)),
       )).limit(1).get();
+    const healthyDue = nowMs === undefined ? undefined : this.db.select({ id: archiveArtifacts.id })
+      .from(archiveArtifacts)
+      .leftJoin(driveObjectAttempts, and(
+        eq(driveObjectAttempts.artifactId, archiveArtifacts.id),
+        eq(driveObjectAttempts.generationId, generationId),
+      ))
+      .where(and(
+        queueCondition,
+        or(
+          and(
+            isNull(driveObjectAttempts.id),
+            lte(archiveArtifacts.admissionNextAt, nowMs),
+          ),
+          and(
+            inArray(driveObjectAttempts.state, ['pending', 'retryable']),
+            lte(driveObjectAttempts.nextAttemptAt, nowMs),
+          ),
+        ),
+        or(
+          isNull(archiveArtifacts.motionDayPath),
+          notExists(blockedHeadsQuery(this.db, generationId)),
+        ),
+      )).limit(1).get();
     return {
       queuedVideos: aggregate?.count ?? 0,
       retryableVideos: retryableIds.size,
       oldestQueuedVideoAtMs: aggregate?.oldest ?? null,
-      branchBlocked: blocked !== undefined,
+      branchBlocked: blocked !== undefined && (nowMs === undefined || healthyDue === undefined),
     };
+  }
+
+  async readUnhealthyDateFolderCount(generationId: string): Promise<number> {
+    return this.db.select({ count: count() })
+      .from(driveMotionFolderReservations)
+      .where(and(
+        eq(driveMotionFolderReservations.generationId, generationId),
+        eq(driveMotionFolderReservations.currentSlot, 1),
+        inArray(driveMotionFolderReservations.state, ['detached', 'conflict']),
+      )).get()?.count ?? 0;
   }
 
   async readSchedulerState(): Promise<ArchiveSchedulerState> {
@@ -1062,6 +1095,7 @@ function emptySchedulerState(): ArchiveSchedulerState {
     revision: 0, backupLeaseOwner: null, backupLeaseExpiresAtMs: null,
     lastBackupSuccessMs: null, lastUploadSuccessMs: null,
     lastReconcileSuccessMs: null, lastCleanupSuccessMs: null,
+    lastMotionTraversalSuccessMs: null,
     lastArtifactRegistrationSuccessMs: null,
   };
 }
@@ -1070,6 +1104,7 @@ function schedulerRow(state: ArchiveSchedulerState) {
   return { id: 1, revision: state.revision, backupLeaseOwner: state.backupLeaseOwner, backupLeaseExpiresAt: state.backupLeaseExpiresAtMs,
     lastBackupSuccessMs: state.lastBackupSuccessMs, lastUploadSuccessMs: state.lastUploadSuccessMs,
     lastReconcileSuccessMs: state.lastReconcileSuccessMs, lastCleanupSuccessMs: state.lastCleanupSuccessMs,
+    lastMotionTraversalSuccessMs: state.lastMotionTraversalSuccessMs,
     lastArtifactRegistrationSuccessMs: state.lastArtifactRegistrationSuccessMs };
 }
 
@@ -1077,6 +1112,7 @@ function toScheduler(row: typeof archiveSchedulerState.$inferSelect): ArchiveSch
   return { revision: row.revision, backupLeaseOwner: row.backupLeaseOwner, backupLeaseExpiresAtMs: row.backupLeaseExpiresAt,
     lastBackupSuccessMs: row.lastBackupSuccessMs, lastUploadSuccessMs: row.lastUploadSuccessMs,
     lastReconcileSuccessMs: row.lastReconcileSuccessMs, lastCleanupSuccessMs: row.lastCleanupSuccessMs,
+    lastMotionTraversalSuccessMs: row.lastMotionTraversalSuccessMs,
     lastArtifactRegistrationSuccessMs: row.lastArtifactRegistrationSuccessMs };
 }
 

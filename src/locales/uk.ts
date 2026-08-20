@@ -172,13 +172,15 @@ export interface GdriveStatusView {
   connection: { generationId: string; state: string; errorCode: string | null } | null;
   account: { permissionId: string; email: string | null; displayName: string | null } | null;
   folders: { root: string; motion: string; backups: string } | null;
-  last: { refreshAtMs: number | null; uploadAtMs: number | null; backupAtMs: number | null; reconcileAtMs: number | null; cleanupAtMs: number | null };
+  last: { refreshAtMs: number | null; uploadAtMs: number | null; backupAtMs: number | null; reconcileAtMs: number | null; cleanupAtMs: number | null; motionTraversalAtMs: number | null; artifactRegistrationAtMs: number | null };
   artifacts: Record<string, number>;
   attempts: Record<string, number>;
   generations: readonly { generationId: string; state: string; retiredAtMs: number | null }[];
   quota: { limitBytes: number | null; usageBytes: number; usageInDriveBytes: number; usageInDriveTrashBytes: number } | null;
   reclamation: { windowStartedMs: number | null; reclaimedBytes: number } | null;
   requiredActions: readonly ('reauthorize' | 'check-clock' | 'manual-cleanup')[];
+  queue: { queuedVideos: number; retryableVideos: number; oldestQueuedVideoAgeMs: number | null; unhealthyDateFolders: number };
+  drainState: string;
 }
 
 export interface SystemOnlineView {
@@ -1300,6 +1302,13 @@ const ukCatalog = {
         `📦 Використано: ${gb(v.quota?.usageBytes ?? null)} / ${gb(v.quota?.limitBytes ?? null)} (${percent(v.quota?.usageBytes ?? null, v.quota?.limitBytes ?? null)})`,
         `📤 Останнє завантаження: ${fmtDate(v.last.uploadAtMs === null ? null : new Date(v.last.uploadAtMs))}`,
         `💾 Остання резервна копія: ${fmtDate(v.last.backupAtMs === null ? null : new Date(v.last.backupAtMs))}`,
+        `🔎 Останній обхід Motion: ${fmtDate(v.last.motionTraversalAtMs == null ? null : new Date(v.last.motionTraversalAtMs))}`,
+        `📝 Остання реєстрація артефакту: ${fmtDate(v.last.artifactRegistrationAtMs == null ? null : new Date(v.last.artifactRegistrationAtMs))}`,
+        `Стан черги: ${v.drainState ?? 'idle'}`,
+        `Відео в черзі: ${v.queue?.queuedVideos ?? 0}`,
+        `Відео для повтору: ${v.queue?.retryableVideos ?? 0}`,
+        `Вік найстарішого відео: ${formatAgeMs(v.queue?.oldestQueuedVideoAgeMs ?? null)}`,
+        `Нездорових папок дат: ${v.queue?.unhealthyDateFolders ?? 0}`,
         `📋 Артефактів: ${Object.values(v.artifacts).reduce((sum, count) => sum + count, 0)}; спроб: ${Object.values(v.attempts).reduce((sum, count) => sum + count, 0)}`,
         `⚠️ Відсутні / відокремлені: ${v.attempts.missing ?? 0} / ${v.attempts.detached ?? 0}`,
       ];
@@ -1324,6 +1333,10 @@ const ukCatalog = {
       'credential-corrupt': '🚨 Облікові дані Google Drive недоступні або пошкоджені.',
       'clock-unhealthy': '⚠️ Стан системного годинника не дозволяє безпечне обслуговування архіву.',
       'local-disk-pressure': '🚨 Тиск на локальний диск загрожує проміжному сховищу архіву.',
+      'folder-branch-unhealthy': '⚠️ Гілка папок архіву за датами потребує перевірки адміністратора.',
+      'provider-cooldown-prolonged': '⚠️ Доступ до Google Drive тривалий час залишається на паузі.',
+      'provider-capacity-blocked': '⚠️ Місткість Google Drive потребує дії адміністратора.',
+      'backlog-age-prolonged': '⚠️ Черга архівних відео надто довго залишається необробленою.',
     },
     cleanButton: '🧹 Запустити очищення зараз',
   },
@@ -1482,4 +1495,12 @@ export interface ConfigDisplay {
   config: Record<string, unknown>;
   debounceMs: number;
   severity: SensorSeverity;
+}
+
+function formatAgeMs(value: number | null): string {
+  if (value === null) return presentation.date.never;
+  if (value < 60_000) return `${Math.floor(value / 1_000)} с`;
+  if (value < 3_600_000) return `${Math.floor(value / 60_000)} хв`;
+  if (value < 86_400_000) return `${Math.floor(value / 3_600_000)} год`;
+  return `${Math.floor(value / 86_400_000)} д`;
 }

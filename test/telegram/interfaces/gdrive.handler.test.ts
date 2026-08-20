@@ -27,6 +27,16 @@ describe('GdriveHandler status', () => {
     expect(ctx.reply).not.toHaveBeenCalled();
   });
 
+  it('does not compute or render private archive status for a non-admin private chat', async () => {
+    const { handler, ctx, status } = setupDriveHandler();
+    ctx.localeState.user.role = 'member';
+
+    await handler.handleStatus(ctx as never);
+
+    expect(status.execute).not.toHaveBeenCalled();
+    expect(ctx.reply).not.toHaveBeenCalled();
+  });
+
   it('begins the direct Storage workflow and delivers status before origin restoration', async () => {
     const { handler, ctx, status, workflows, events } = setupDriveHandler({ statusReceipt: true });
     status.execute.mockResolvedValue({

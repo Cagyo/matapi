@@ -1,4 +1,5 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
+import { CLOCK, type ClockPort } from '../../../events/domain/ports/clock.port';
 import { DriveConnection } from '../../domain/drive-connection.entity';
 import {
   ARCHIVE_ARTIFACT_REPOSITORY,
@@ -15,18 +16,48 @@ import {
   type DriveCredentialRepositoryPort,
   type DriveStatusConnection,
 } from '../ports/drive-credential-repository.port';
+import {
+  ARCHIVE_PROVIDER_STATE_REPOSITORY,
+  type ArchiveProviderState,
+  type ArchiveProviderStateRepositoryPort,
+} from '../ports/archive-provider-state-repository.port';
+
+export type ArchiveDrainState =
+  | 'active'
+  | 'idle'
+  | 'cooling-down'
+  | 'branch-blocked'
+  | 'quota-blocked'
+  | 'capacity-blocked'
+  | 'policy-blocked'
+  | 'reauthorization-required';
 
 export interface DriveStatusReport {
   connection: { generationId: string; state: string; errorCode: string | null } | null;
   account: { permissionId: string; email: string | null; displayName: string | null } | null;
   folders: { root: string; motion: string; backups: string } | null;
-  last: { refreshAtMs: number | null; uploadAtMs: number | null; backupAtMs: number | null; reconcileAtMs: number | null; cleanupAtMs: number | null };
+  last: {
+    refreshAtMs: number | null;
+    uploadAtMs: number | null;
+    backupAtMs: number | null;
+    reconcileAtMs: number | null;
+    cleanupAtMs: number | null;
+    motionTraversalAtMs: number | null;
+    artifactRegistrationAtMs: number | null;
+  };
   artifacts: ArchiveStatusCounts['artifacts'];
   attempts: ArchiveStatusCounts['attempts'];
   generations: readonly { generationId: string; state: string; retiredAtMs: number | null }[];
   quota: DriveQuota | null;
   reclamation: { windowStartedMs: number | null; reclaimedBytes: number } | null;
   requiredActions: readonly ('reauthorize' | 'check-clock' | 'manual-cleanup')[];
+  queue: {
+    queuedVideos: number;
+    retryableVideos: number;
+    oldestQueuedVideoAgeMs: number | null;
+    unhealthyDateFolders: number;
+  };
+  drainState: ArchiveDrainState;
 }
 
 /** Read-only, sanitized Drive projection. It never reads encrypted credentials. */
@@ -41,29 +72,48 @@ export class ReportDriveStatusUseCase {
     @Inject(ARCHIVE_ARTIFACT_REPOSITORY)
     private readonly artifacts: Pick<
       ArchiveArtifactRepositoryPort,
-      'readStatusCounts' | 'readSchedulerState'
+      'readStatusCounts' | 'readSchedulerState' | 'readQueueStatus' |
+      'readUnhealthyDateFolderCount'
     >,
     @Inject(DRIVE_ACCOUNT)
     private readonly account: Pick<DriveAccountPort, 'readQuota'>,
+    @Optional() @Inject(ARCHIVE_PROVIDER_STATE_REPOSITORY)
+    private readonly providerState: Pick<ArchiveProviderStateRepositoryPort, 'load'> = EMPTY_PROVIDER_STATE,
+    @Optional() @Inject(CLOCK)
+    private readonly clock: Pick<ClockPort, 'now'> = SYSTEM_CLOCK,
   ) {}
 
   async execute(signal: AbortSignal = AbortSignal.timeout(10_000)): Promise<DriveStatusReport> {
-    const [connections, counts, scheduler] = await Promise.all([
+    const nowMs = this.clock.now().getTime();
+    const [connections, counts, scheduler, providerState] = await Promise.all([
       this.connections.listStatusConnections(),
       this.artifacts.readStatusCounts(),
       this.artifacts.readSchedulerState(),
+      this.providerState.load(),
     ]);
     const active = connections.find((connection) =>
       connection.status === 'active' || connection.status === 'reauth_required',
     ) ?? null;
-    const [quota, reclamation] = active === null
-      ? [null, null]
+    const [quota, reclamation, queue, unhealthyDateFolders] = active === null
+      ? [null, null, EMPTY_QUEUE, 0] as const
       : await Promise.all([
         active.status === 'active'
           ? this.account.readQuota(toConnection(active), signal).catch(() => null)
           : Promise.resolve(null),
         this.connections.readQuotaReclamation(active.id),
+        this.artifacts.readQueueStatus(active.id, nowMs),
+        this.artifacts.readUnhealthyDateFolderCount(active.id),
       ]);
+
+    const providerBlock = active?.status === 'reauth_required'
+      || active?.errorCode === 'authorization_required'
+      ? 'reauthorization-required'
+      : providerState.generationId === active?.id
+        ? providerBlockFor(providerState)
+        : null;
+    const coolingDown = providerState.generationId === active?.id
+      && providerState.cooldownUntilMs !== null
+      && providerState.cooldownUntilMs > nowMs;
 
     return {
       connection: active === null
@@ -81,6 +131,8 @@ export class ReportDriveStatusUseCase {
         backupAtMs: scheduler.lastBackupSuccessMs,
         reconcileAtMs: scheduler.lastReconcileSuccessMs,
         cleanupAtMs: scheduler.lastCleanupSuccessMs,
+        motionTraversalAtMs: scheduler.lastMotionTraversalSuccessMs,
+        artifactRegistrationAtMs: scheduler.lastArtifactRegistrationSuccessMs,
       },
       artifacts: counts.artifacts,
       attempts: counts.attempts,
@@ -90,9 +142,64 @@ export class ReportDriveStatusUseCase {
       quota,
       reclamation,
       requiredActions: requiredActions(active, connections, counts),
+      queue: {
+        queuedVideos: queue.queuedVideos,
+        retryableVideos: queue.retryableVideos,
+        oldestQueuedVideoAgeMs: queue.oldestQueuedVideoAtMs === null
+          ? null
+          : Math.max(0, nowMs - queue.oldestQueuedVideoAtMs),
+        unhealthyDateFolders,
+      },
+      drainState: deriveArchiveDrainState({
+        providerBlock,
+        hasActiveTransfer: counts.attempts.uploading > 0,
+        queuedVideos: queue.queuedVideos,
+        branchBlocked: queue.branchBlocked,
+        coolingDown,
+      }),
     };
   }
 }
+
+export function deriveArchiveDrainState(input: {
+  providerBlock: Extract<ArchiveDrainState,
+    'quota-blocked' | 'capacity-blocked' | 'policy-blocked' | 'reauthorization-required'> | null;
+  hasActiveTransfer: boolean;
+  queuedVideos: number;
+  branchBlocked: boolean;
+  coolingDown: boolean;
+}): ArchiveDrainState {
+  if (input.providerBlock !== null) return input.providerBlock;
+  if (input.hasActiveTransfer) return 'active';
+  if (input.queuedVideos > 0 && input.branchBlocked) return 'branch-blocked';
+  if (input.coolingDown) return 'cooling-down';
+  return 'idle';
+}
+
+function providerBlockFor(state: ArchiveProviderState): Extract<ArchiveDrainState,
+  'quota-blocked' | 'capacity-blocked' | 'policy-blocked' | 'reauthorization-required'> | null {
+  if (state.blockReason === 'reauthorization_required') return 'reauthorization-required';
+  if (state.blockReason === 'policy_blocked') return 'policy-blocked';
+  if (state.blockReason === 'account_creation_limit') return 'capacity-blocked';
+  if (state.blockReason === 'quota_exhausted') return 'quota-blocked';
+  return null;
+}
+
+const EMPTY_QUEUE = {
+  queuedVideos: 0,
+  retryableVideos: 0,
+  oldestQueuedVideoAtMs: null,
+  branchBlocked: false,
+} as const;
+
+const EMPTY_PROVIDER_STATE: Pick<ArchiveProviderStateRepositoryPort, 'load'> = {
+  load: async () => ({
+    revision: 0, generationId: null, operationClass: null, failureClass: null,
+    failureStreak: 0, cooldownUntilMs: null, blockReason: null, updatedAtMs: 0,
+  }),
+};
+
+const SYSTEM_CLOCK: Pick<ClockPort, 'now'> = { now: () => new Date() };
 
 function toConnection(connection: DriveStatusConnection): DriveConnection {
   return DriveConnection.restore({

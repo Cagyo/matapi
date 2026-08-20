@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ArchiveRemoteMutationLockService } from '../../../src/archive/application/archive-remote-mutation-lock.service';
 import type {
   DriveFolderCreateInput,
@@ -326,6 +326,51 @@ describe('ResolveMotionArchiveContainerUseCase', () => {
       state: 'detached', errorCode: 'DRIVE_FOLDER_BRANCH_BLOCKED',
     });
   });
+
+  it('emits one sanitized durable alert after a current head is detached', async () => {
+    const alert = vi.fn().mockResolvedValue(undefined);
+    const context = createContext([], undefined, undefined, { alert });
+    await seedLevel(context.repository, context.drive, {
+      normalizedPath: '2026', level: 'year', role: 'motion-year', segmentName: '2026',
+      folderId: 'existing-year', parentFolderId: 'motion-1',
+    });
+    context.drive.exact.set('existing-year', {
+      ...context.drive.exact.get('existing-year')!,
+      name: 'renamed-by-user',
+    });
+
+    await expect(context.useCase.execute(connection(), path, signal))
+      .rejects.toBeInstanceOf(DriveFolderBranchBlockedError);
+
+    expect(alert).toHaveBeenCalledOnce();
+    expect(alert).toHaveBeenCalledWith('folder-branch-unhealthy', {
+      generationId: 'generation-1',
+      errorCode: 'DRIVE_FOLDER_BRANCH_BLOCKED',
+    });
+    expect(JSON.stringify(alert.mock.calls)).not.toContain('existing-year');
+    expect(JSON.stringify(alert.mock.calls)).not.toContain('2026');
+  });
+
+  it('keeps the durable blocked result when unhealthy-branch alert delivery fails', async () => {
+    const context = createContext([], undefined, undefined, {
+      alert: vi.fn().mockRejectedValue(new Error('Telegram unavailable')),
+    });
+    await seedLevel(context.repository, context.drive, {
+      normalizedPath: '2026', level: 'year', role: 'motion-year', segmentName: '2026',
+      folderId: 'existing-year', parentFolderId: 'motion-1',
+    });
+    context.drive.exact.set('existing-year', {
+      ...context.drive.exact.get('existing-year')!,
+      name: 'renamed-by-user',
+    });
+
+    await expect(context.useCase.execute(connection(), path, signal)).rejects.toMatchObject({
+      code: 'DRIVE_FOLDER_BRANCH_BLOCKED',
+      message: 'Drive motion folder branch is blocked',
+    });
+    expect(await context.repository.loadCurrent('generation-1', '2026'))
+      .toMatchObject({ state: 'detached' });
+  });
 });
 
 class FakeDriveFolderPort implements DriveFolderPort {
@@ -505,6 +550,7 @@ function createContext(
   generatedIds: string[] = [],
   drive = new FakeDriveFolderPort([...generatedIds]),
   providedRepository?: DriveFolderReservationRepositoryPort,
+  alerts = { alert: async () => undefined },
 ) {
   const journal = drive.journal;
   const memory = providedRepository instanceof LoseFirstCurrentSlotRepository
@@ -516,6 +562,7 @@ function createContext(
     drive,
     repository,
     new ArchiveRemoteMutationLockService(),
+    alerts,
     { now: () => 100, reservationId: () => `reservation-${++reservation}`, pageSize: 100, maxPages: 5 },
   );
   return {

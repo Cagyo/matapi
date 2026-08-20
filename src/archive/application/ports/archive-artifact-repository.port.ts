@@ -155,6 +155,7 @@ export interface ArchiveSchedulerState {
   lastUploadSuccessMs: number | null;
   lastReconcileSuccessMs: number | null;
   lastCleanupSuccessMs: number | null;
+  lastMotionTraversalSuccessMs: number | null;
   lastArtifactRegistrationSuccessMs: number | null;
 }
 
@@ -165,6 +166,7 @@ export interface ArchiveSchedulerUpdate {
   lastUploadSuccessMs?: number | null;
   lastReconcileSuccessMs?: number | null;
   lastCleanupSuccessMs?: number | null;
+  lastMotionTraversalSuccessMs?: number | null;
   lastArtifactRegistrationSuccessMs?: number | null;
 }
 
@@ -226,7 +228,8 @@ export interface ArchiveArtifactRepositoryPort {
   /** Aggregate-only status read; source paths, IDs, metadata, and errors stay private. */
   readStatusCounts(): Promise<ArchiveStatusCounts>;
   readNextDeadline(generationId: string, nowMs: number, providerCooldownUntilMs: number | null): Promise<number | null>;
-  readQueueStatus(generationId: string): Promise<ArchiveQueueStatus>;
+  readQueueStatus(generationId: string, nowMs?: number): Promise<ArchiveQueueStatus>;
+  readUnhealthyDateFolderCount(generationId: string): Promise<number>;
   readSchedulerState(): Promise<ArchiveSchedulerState>;
   compareAndSetSchedulerState(expectedRevision: number, update: ArchiveSchedulerUpdate): Promise<boolean>;
   releaseGenerationLeases(generationId: string, nowMs: number): Promise<void>;

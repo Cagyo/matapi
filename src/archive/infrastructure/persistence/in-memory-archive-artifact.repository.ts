@@ -524,7 +524,7 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
     return deadlines.length === 0 ? null : Math.min(...deadlines);
   }
 
-  async readQueueStatus(generationId: string): Promise<ArchiveQueueStatus> {
+  async readQueueStatus(generationId: string, nowMs?: number): Promise<ArchiveQueueStatus> {
     const queued = [...this.artifacts.values()].filter((artifact) => (
       artifact.kind === 'motion_video' && artifact.state === 'pending'
       && artifact.admission.state !== 'terminal'
@@ -540,21 +540,33 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
         retryableArtifactIds.add(attempt.artifactId);
       }
     }
-    let branchBlocked = false;
+    const blockedByArtifact = new Map<string, boolean>();
     for (const artifact of queued) {
-      if (await this.isBlocked(artifact, generationId)) {
-        branchBlocked = true;
-        break;
-      }
+      blockedByArtifact.set(artifact.id, await this.isBlocked(artifact, generationId));
     }
+    const anyBlocked = [...blockedByArtifact.values()].some(Boolean);
+    const hasHealthyDueCandidate = nowMs === undefined ? false : queued.some((artifact) => {
+      if (blockedByArtifact.get(artifact.id) === true) return false;
+      const attempts = [...this.attempts.values()].filter(({ attempt }) => (
+        attempt.artifactId === artifact.id && attempt.generationId === generationId
+      ));
+      if (attempts.length === 0) return artifact.admission.nextAttemptMs <= nowMs;
+      return attempts.some(({ attempt, nextAttemptMs }) => (
+        ['pending', 'retryable'].includes(attempt.state) && nextAttemptMs <= nowMs
+      ));
+    });
     return {
       queuedVideos: queued.length,
       retryableVideos: retryableArtifactIds.size,
       oldestQueuedVideoAtMs: queued.length === 0
         ? null
         : Math.min(...queued.map((artifact) => artifact.createdAtMs)),
-      branchBlocked,
+      branchBlocked: anyBlocked && (nowMs === undefined || !hasHealthyDueCandidate),
     };
+  }
+
+  async readUnhealthyDateFolderCount(generationId: string): Promise<number> {
+    return this.folderReservations.countUnhealthy(generationId);
   }
 
   async readSchedulerState(): Promise<ArchiveSchedulerState> {
@@ -725,6 +737,7 @@ function emptySchedulerState(): ArchiveSchedulerState {
     revision: 0, backupLeaseOwner: null, backupLeaseExpiresAtMs: null,
     lastBackupSuccessMs: null, lastUploadSuccessMs: null,
     lastReconcileSuccessMs: null, lastCleanupSuccessMs: null,
+    lastMotionTraversalSuccessMs: null,
     lastArtifactRegistrationSuccessMs: null,
   };
 }

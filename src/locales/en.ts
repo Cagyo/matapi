@@ -161,13 +161,15 @@ export interface GdriveStatusView {
   connection: { generationId: string; state: string; errorCode: string | null } | null;
   account: { permissionId: string; email: string | null; displayName: string | null } | null;
   folders: { root: string; motion: string; backups: string } | null;
-  last: { refreshAtMs: number | null; uploadAtMs: number | null; backupAtMs: number | null; reconcileAtMs: number | null; cleanupAtMs: number | null };
+  last: { refreshAtMs: number | null; uploadAtMs: number | null; backupAtMs: number | null; reconcileAtMs: number | null; cleanupAtMs: number | null; motionTraversalAtMs: number | null; artifactRegistrationAtMs: number | null };
   artifacts: Record<string, number>;
   attempts: Record<string, number>;
   generations: readonly { generationId: string; state: string; retiredAtMs: number | null }[];
   quota: { limitBytes: number | null; usageBytes: number; usageInDriveBytes: number; usageInDriveTrashBytes: number } | null;
   reclamation: { windowStartedMs: number | null; reclaimedBytes: number } | null;
   requiredActions: readonly ('reauthorize' | 'check-clock' | 'manual-cleanup')[];
+  queue: { queuedVideos: number; retryableVideos: number; oldestQueuedVideoAgeMs: number | null; unhealthyDateFolders: number };
+  drainState: string;
 }
 
 export interface SystemOnlineView {
@@ -1343,6 +1345,13 @@ const enCatalog = {
         `📤 Last upload: ${fmtDate(v.last.uploadAtMs === null ? null : new Date(v.last.uploadAtMs))}`,
         `💾 Last backup: ${fmtDate(v.last.backupAtMs === null ? null : new Date(v.last.backupAtMs))}`,
         `🔄 Last reconcile / cleanup: ${fmtDate(v.last.reconcileAtMs === null ? null : new Date(v.last.reconcileAtMs))} / ${fmtDate(v.last.cleanupAtMs === null ? null : new Date(v.last.cleanupAtMs))}`,
+        `🔎 Last Motion traversal: ${fmtDate(v.last.motionTraversalAtMs == null ? null : new Date(v.last.motionTraversalAtMs))}`,
+        `📝 Last artifact registration: ${fmtDate(v.last.artifactRegistrationAtMs == null ? null : new Date(v.last.artifactRegistrationAtMs))}`,
+        `Drain state: ${v.drainState ?? 'idle'}`,
+        `Queued videos: ${v.queue?.queuedVideos ?? 0}`,
+        `Retryable videos: ${v.queue?.retryableVideos ?? 0}`,
+        `Oldest queued video age: ${formatAgeMs(v.queue?.oldestQueuedVideoAgeMs ?? null)}`,
+        `Unhealthy date folders: ${v.queue?.unhealthyDateFolders ?? 0}`,
         `📋 Artifacts: ${Object.values(v.artifacts).reduce((sum, count) => sum + count, 0)}; attempts: ${Object.values(v.attempts).reduce((sum, count) => sum + count, 0)}`,
         `⚠️ Missing / detached: ${v.attempts.missing ?? 0} / ${v.attempts.detached ?? 0}`,
       ];
@@ -1369,6 +1378,10 @@ const enCatalog = {
       'credential-corrupt': '🚨 Google Drive credentials are unavailable or corrupted.',
       'clock-unhealthy': '⚠️ System clock health prevents safe archive maintenance.',
       'local-disk-pressure': '🚨 Local disk pressure threatens archive staging capacity.',
+      'folder-branch-unhealthy': '⚠️ An archive date-folder branch needs administrator review.',
+      'provider-cooldown-prolonged': '⚠️ Google Drive access has remained in cooldown for an extended period.',
+      'provider-capacity-blocked': '⚠️ Google Drive capacity requires administrator action.',
+      'backlog-age-prolonged': '⚠️ The archive video backlog has remained pending for an extended period.',
     },
     cleanButton: '🧹 Trigger Clean Now',
   },
@@ -1527,4 +1540,12 @@ export interface ConfigDisplay {
   config: Record<string, unknown>;
   debounceMs: number;
   severity: SensorSeverity;
+}
+
+function formatAgeMs(value: number | null): string {
+  if (value === null) return presentation.date.never;
+  if (value < 60_000) return `${Math.floor(value / 1_000)}s`;
+  if (value < 3_600_000) return `${Math.floor(value / 60_000)}m`;
+  if (value < 86_400_000) return `${Math.floor(value / 3_600_000)}h`;
+  return `${Math.floor(value / 86_400_000)}d`;
 }

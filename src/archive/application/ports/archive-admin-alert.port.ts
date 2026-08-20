@@ -12,6 +12,10 @@ export const ARCHIVE_ADMIN_ALERT_KINDS = [
   'credential-corrupt',
   'clock-unhealthy',
   'local-disk-pressure',
+  'folder-branch-unhealthy',
+  'provider-cooldown-prolonged',
+  'provider-capacity-blocked',
+  'backlog-age-prolonged',
 ] as const;
 
 export type ArchiveAdminAlertKind = (typeof ARCHIVE_ADMIN_ALERT_KINDS)[number];

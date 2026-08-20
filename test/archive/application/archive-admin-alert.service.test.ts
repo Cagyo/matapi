@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ArchiveAdminAlertService } from '../../../src/archive/application/archive-admin-alert.service';
+import type { ArchiveAdminAlertKind } from '../../../src/archive/application/ports/archive-admin-alert.port';
 
 describe('ArchiveAdminAlertService', () => {
   it('persists cooldown before delivery so a boot loop cannot flood', async () => {
@@ -15,6 +16,58 @@ describe('ArchiveAdminAlertService', () => {
     expect(delivery.sent).toHaveLength(1);
     expect(repository.cooldowns['reauthorization-required']).toBeGreaterThan(now);
     expect(delivery.sawPersistedCooldown).toBe(true);
+  });
+
+  it.each([
+    'folder-branch-unhealthy',
+    'provider-cooldown-prolonged',
+    'provider-capacity-blocked',
+    'reauthorization-required',
+    'backlog-age-prolonged',
+    'local-disk-pressure',
+  ] as const)('deduplicates durable sanitized %s alerts independently', async (kind) => {
+    const repository = new InMemoryCooldownRepository();
+    const delivery = new RecordingDelivery(repository);
+    const alerts = new ArchiveAdminAlertService(repository, { now: () => new Date(1_000) });
+    alerts.register(delivery);
+
+    await alerts.alert(kind, {
+      generationId: 'generation-1',
+      artifactId: 'artifact-1',
+      errorCode: 'DRIVE_FOLDER_BRANCH_BLOCKED',
+    });
+    await alerts.alert(kind, {
+      generationId: 'generation-1',
+      artifactId: 'artifact-1',
+      errorCode: '/home/pi/motion/private.mp4?provider-body=secret',
+    });
+
+    expect(delivery.sent).toEqual([{
+      kind,
+      generationId: 'generation-1',
+      artifactId: 'artifact-1',
+      errorCode: 'DRIVE_FOLDER_BRANCH_BLOCKED',
+    }]);
+    expect(JSON.stringify(delivery.sent)).not.toContain('/home/pi/motion');
+    expect(repository.cooldowns[kind]).toBeGreaterThan(1_000);
+  });
+
+  it('drops path-shaped and provider-shaped context before online delivery', async () => {
+    const repository = new InMemoryCooldownRepository();
+    const delivery = new RecordingDelivery(repository);
+    const alerts = new ArchiveAdminAlertService(repository, { now: () => new Date(1_000) });
+    alerts.register(delivery);
+
+    await alerts.alert('local-disk-pressure', {
+      generationId: 'generation-1',
+      artifactId: '/home/pi/motion/2026/08/13/private.mp4',
+      errorCode: 'provider response: token=secret',
+    });
+
+    expect(delivery.sent).toEqual([{
+      kind: 'local-disk-pressure',
+      generationId: 'generation-1',
+    }]);
   });
 });
 
@@ -33,12 +86,12 @@ class InMemoryCooldownRepository {
 }
 
 class RecordingDelivery {
-  sent: unknown[] = [];
+  sent: { kind: ArchiveAdminAlertKind; generationId: string; artifactId?: string; errorCode?: string }[] = [];
   sawPersistedCooldown = false;
 
   constructor(private readonly repository: InMemoryCooldownRepository) {}
 
-  async send(alert: unknown): Promise<void> {
+  async send(alert: { kind: ArchiveAdminAlertKind; generationId: string; artifactId?: string; errorCode?: string }): Promise<void> {
     this.sawPersistedCooldown = this.repository.cooldowns['reauthorization-required'] !== undefined;
     this.sent.push(alert);
   }
