@@ -474,6 +474,10 @@ export class ArchiveSchedulerService {
       this.repository.readQueueStatus(active.id, nowMs),
       this.localDisk?.usagePercent().catch(() => null) ?? Promise.resolve(null),
     ]);
+    const confirmed = await this.credentials.loadActive();
+    if (confirmed?.id !== active.id
+      || confirmed.revision !== active.revision
+      || confirmed.status !== active.status) return;
     const kinds = deriveArchiveOperationalAlertKinds({
       nowMs,
       generationId: active.id,
@@ -527,8 +531,7 @@ export function deriveArchiveOperationalAlertKinds(input: {
     || (providerMatches && input.provider.blockReason === 'reauthorization_required')) {
     kinds.add('reauthorization-required');
   }
-  if (providerMatches && (input.provider.failureClass === 'capacity'
-    || input.provider.blockReason === 'account_creation_limit')) {
+  if (providerMatches && input.provider.blockReason === 'account_creation_limit') {
     kinds.add('provider-capacity-blocked');
   }
   if (providerMatches && input.provider.blockReason === 'quota_exhausted') {

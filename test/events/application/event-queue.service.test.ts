@@ -19,6 +19,10 @@ class RecordingEventRepository implements EventRepositoryPort {
     return { id: this.enqueued.length, ...event };
   }
 
+  async enqueueArchiveAdminAlert(input: Parameters<EventRepositoryPort['enqueueArchiveAdminAlert']>[0]): Promise<QueuedEvent> {
+    return this.enqueue(input.event);
+  }
+
   async pending(): Promise<QueuedEvent[]> {
     return [];
   }

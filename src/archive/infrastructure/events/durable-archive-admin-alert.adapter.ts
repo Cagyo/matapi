@@ -7,14 +7,17 @@ import type {
   ArchiveAdminAlertKind,
   ArchiveAdminAlertPort,
 } from '../../application/ports/archive-admin-alert.port';
-import type { ArchiveAdminAlertService } from '../../application/archive-admin-alert.service';
+import {
+  ARCHIVE_ADMIN_ALERT_COOLDOWN_MS,
+  type ArchiveAdminAlertService,
+} from '../../application/archive-admin-alert.service';
 
 /** Persists a generic alert before the cooldown-limited Telegram delivery stage. */
 @Injectable()
 export class DurableArchiveAdminAlertAdapter implements ArchiveAdminAlertPort {
   constructor(
-    private readonly queue: Pick<EventQueueService, 'enqueueSystemEvent'>,
-    private readonly gate: Pick<ArchiveAdminAlertService, 'claim'>,
+    private readonly queue: Pick<EventQueueService, 'enqueueArchiveAdminAlert'>,
+    private readonly gate: Pick<ArchiveAdminAlertService, 'prepare'>,
     private readonly clock: ClockPort,
     private readonly immediate?: Pick<NotificationService, 'process'>,
   ) {}
@@ -23,16 +26,22 @@ export class DurableArchiveAdminAlertAdapter implements ArchiveAdminAlertPort {
     kind: ArchiveAdminAlertKind,
     context: Omit<ArchiveAdminAlert, 'kind'>,
   ): Promise<void> {
-    const alert = await this.gate.claim(kind, context);
+    const alert = await this.gate.prepare(kind, context);
     if (alert === null) return;
-    const queued = await this.queue.enqueueSystemEvent({
+    const createdAt = this.clock.now();
+    const queued = await this.queue.enqueueArchiveAdminAlert({
+      generationId: alert.generationId,
+      kind: alert.kind,
+      nowMs: createdAt.getTime(),
+      cooldownUntilMs: createdAt.getTime() + ARCHIVE_ADMIN_ALERT_COOLDOWN_MS,
       type: 'archive_admin_alert',
       payload: {
         kind: alert.kind,
         ...(alert.errorCode === undefined ? {} : { errorCode: alert.errorCode }),
       },
-      createdAt: this.clock.now(),
+      createdAt,
     });
+    if (queued === null) return;
     await this.immediate?.process(queued).catch(() => undefined);
   }
 }

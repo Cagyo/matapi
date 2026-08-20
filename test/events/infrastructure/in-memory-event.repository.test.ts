@@ -102,4 +102,24 @@ describe('InMemoryEventRepository', () => {
     expect(warning).toHaveBeenNthCalledWith(1, expect.stringContaining('1'));
     expect(warning).toHaveBeenNthCalledWith(2, expect.stringContaining('2'));
   });
+
+  it('does not retain an alert cooldown when enqueue fails before a retry', async () => {
+    const repository = new InMemoryEventRepository();
+    vi.spyOn(repository, 'enqueue').mockRejectedValueOnce(new Error('injected enqueue failure'));
+    const input = {
+      generationId: 'generation-1', kind: 'provider-capacity-blocked',
+      nowMs: 1_000, cooldownUntilMs: 3_601_000,
+      event: {
+        sensorId: null as const, type: 'archive_admin_alert',
+        payload: { kind: 'provider-capacity-blocked' }, createdAt: new Date(1_000),
+      },
+    };
+
+    await expect(repository.enqueueArchiveAdminAlert(input)).rejects.toThrow('injected enqueue failure');
+    await expect(repository.enqueueArchiveAdminAlert(input)).resolves.toMatchObject({
+      payload: { kind: 'provider-capacity-blocked' },
+    });
+    await expect(repository.enqueueArchiveAdminAlert(input)).resolves.toBeNull();
+    await expect(repository.pending()).resolves.toHaveLength(1);
+  });
 });

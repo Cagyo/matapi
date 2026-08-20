@@ -15,7 +15,7 @@ describe('DurableArchiveAdminAlertAdapter', () => {
     });
     const repository = new InMemoryEventRepository();
     const queue = new EventQueueService(repository, { findById: async () => null } as never);
-    const enqueue = vi.spyOn(queue, 'enqueueSystemEvent');
+    const enqueue = vi.spyOn(repository, 'enqueue');
     const direct = { send: vi.fn(async () => undefined) };
     const gate = new ArchiveAdminAlertService(
       credentials,
@@ -48,6 +48,37 @@ describe('DurableArchiveAdminAlertAdapter', () => {
     await expect(repository.pending()).resolves.toEqual([]);
   });
 
+  it('retries after an enqueue failure without committing a cooldown-only claim', async () => {
+    const credentials = new InMemoryDriveCredentialRepository();
+    await credentials.stage({
+      id: 'generation-1', installationId: 'installation-1',
+      client: { clientId: 'client', clientSecret: 'secret' }, clientIdHash: 'hash',
+      adminUserId: 1, chatId: 1, receiptId: 'receipt', createdAtMs: 1, expiresAtMs: 2,
+    });
+    const repository = new InMemoryEventRepository();
+    const queue = new EventQueueService(repository, { findById: async () => null } as never);
+    vi.spyOn(repository, 'enqueue').mockRejectedValueOnce(new Error('injected enqueue failure'));
+    const gate = new ArchiveAdminAlertService(
+      credentials,
+      { now: () => new Date('2030-01-01T00:00:00.000Z') },
+    );
+    const immediate = { process: vi.fn(async () => undefined) };
+    const adapter = new DurableArchiveAdminAlertAdapter(queue, gate, {
+      now: () => new Date('2030-01-01T00:00:00.000Z'),
+    }, immediate);
+
+    await expect(adapter.alert('provider-capacity-blocked', {
+      generationId: 'generation-1',
+    })).rejects.toThrow('injected enqueue failure');
+    await adapter.alert('provider-capacity-blocked', { generationId: 'generation-1' });
+    await adapter.alert('provider-capacity-blocked', { generationId: 'generation-1' });
+
+    await expect(repository.pending()).resolves.toMatchObject([
+      { type: 'archive_admin_alert', payload: { kind: 'provider-capacity-blocked' } },
+    ]);
+    expect(immediate.process).toHaveBeenCalledOnce();
+  });
+
   it('durably queues the admin alert before attempting online delivery', async () => {
     const repository = new InMemoryEventRepository();
     const queue = new EventQueueService(repository, {
@@ -55,7 +86,7 @@ describe('DurableArchiveAdminAlertAdapter', () => {
     } as never);
     const adapter = new DurableArchiveAdminAlertAdapter(
       queue,
-      { claim: async (kind, context) => ({ ...context, kind }) },
+      { prepare: async (kind, context) => ({ ...context, kind }) },
       { now: () => new Date('2030-01-01T00:00:00.000Z') },
       { process: async () => { throw new Error('Telegram unavailable'); } },
     );
@@ -86,7 +117,7 @@ describe('DurableArchiveAdminAlertAdapter', () => {
     const queue = new EventQueueService(repository, { findById: async () => null } as never);
     const adapter = new DurableArchiveAdminAlertAdapter(
       queue,
-      { claim: async (alertKind) => ({ generationId: 'generation-1', kind: alertKind }) },
+      { prepare: async (alertKind) => ({ generationId: 'generation-1', kind: alertKind }) },
       { now: () => new Date('2030-01-01T00:00:00.000Z') },
     );
 
@@ -109,7 +140,7 @@ describe('DurableArchiveAdminAlertAdapter', () => {
     const adapter = new DurableArchiveAdminAlertAdapter(
       queue,
       {
-        claim: async (kind) => ({
+        prepare: async (kind) => ({
           kind,
           generationId: 'private-generation-id',
           artifactId: 'private-artifact-id',

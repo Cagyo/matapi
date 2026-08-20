@@ -74,7 +74,7 @@ describe('ArchiveAdminAlertService', () => {
     const repository = new InMemoryCooldownRepository();
     const alerts = new ArchiveAdminAlertService(repository, { now: () => new Date(1_000) });
 
-    await expect(alerts.claim('provider-capacity-blocked', {
+    await expect(alerts.prepare('provider-capacity-blocked', {
       generationId: 'generation-1',
       errorCode: 'provider-body-secret',
     })).resolves.toEqual({

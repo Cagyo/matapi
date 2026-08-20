@@ -142,4 +142,42 @@ describe('DrizzleEventRepository', () => {
 
     expect(await repository.countPending()).toBe(2);
   });
+
+  it('rolls back an alert cooldown when outbox insertion fails and accepts one retry', async () => {
+    db.insert(schema.driveConnections).values({
+      id: 'generation-1', installationId: 'installation-1', status: 'active', revision: 1,
+      clientIdHash: 'hash', currentSlot: 1, createdAt: 1, updatedAt: 1, alertCooldowns: {},
+    }).run();
+    await expect(repository.enqueueArchiveAdminAlert({
+      generationId: 'generation-1', kind: 'provider-capacity-blocked',
+      nowMs: 1_000, cooldownUntilMs: 3_601_000,
+      event: {
+        sensorId: null, type: 'archive_admin_alert',
+        payload: { kind: 'provider-capacity-blocked', invalidJson: 1n },
+        createdAt: new Date(1_000),
+      },
+    })).rejects.toThrow();
+
+    expect(db.select({ cooldowns: schema.driveConnections.alertCooldowns })
+      .from(schema.driveConnections).get()?.cooldowns).toEqual({});
+    await expect(repository.pending()).resolves.toEqual([]);
+
+    await expect(repository.enqueueArchiveAdminAlert({
+      generationId: 'generation-1', kind: 'provider-capacity-blocked',
+      nowMs: 1_000, cooldownUntilMs: 3_601_000,
+      event: {
+        sensorId: null, type: 'archive_admin_alert',
+        payload: { kind: 'provider-capacity-blocked' }, createdAt: new Date(1_000),
+      },
+    })).resolves.toMatchObject({ payload: { kind: 'provider-capacity-blocked' } });
+    await expect(repository.enqueueArchiveAdminAlert({
+      generationId: 'generation-1', kind: 'provider-capacity-blocked',
+      nowMs: 1_000, cooldownUntilMs: 3_601_000,
+      event: {
+        sensorId: null, type: 'archive_admin_alert',
+        payload: { kind: 'provider-capacity-blocked' }, createdAt: new Date(1_000),
+      },
+    })).resolves.toBeNull();
+    await expect(repository.pending()).resolves.toHaveLength(1);
+  });
 });

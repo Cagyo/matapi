@@ -1,7 +1,7 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { asc, count, eq, inArray, isNull } from 'drizzle-orm';
+import { and, asc, count, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../database/database.module';
-import { events } from '../../database/schema';
+import { driveConnections, events } from '../../database/schema';
 import {
   EVENT_QUEUE_OPTIONS,
   EventQueueOptions,
@@ -11,9 +11,13 @@ import {
   QueuedEvent,
   QueuedEventPayload,
 } from '../domain/queued-event.entity';
-import { EventRepositoryPort } from '../domain/ports/event-repository.port';
+import {
+  type ArchiveAdminAlertOutboxInput,
+  EventRepositoryPort,
+} from '../domain/ports/event-repository.port';
 
 type EventRow = typeof events.$inferSelect;
+type EventWriter = Pick<AppDatabase, 'delete' | 'insert' | 'select' | 'update'>;
 
 @Injectable()
 export class DrizzleEventRepository implements EventRepositoryPort {
@@ -26,44 +30,34 @@ export class DrizzleEventRepository implements EventRepositoryPort {
   ) {}
 
   async enqueue(event: NewQueuedEvent): Promise<QueuedEvent> {
-    const { queued, evicted } = this.db.transaction((tx) => {
-      const [{ value }] = tx
-        .select({ value: count() })
-        .from(events)
-        .where(isNull(events.sentAt))
-        .all();
-      let evicted = false;
-
-      if (value >= this.options.maxUnsentEvents) {
-        const oldest = tx
-          .select({ id: events.id })
-          .from(events)
-          .where(isNull(events.sentAt))
-          .orderBy(asc(events.createdAt), asc(events.id))
-          .limit(1)
-          .get();
-        if (oldest) {
-          tx.delete(events).where(eq(events.id, oldest.id)).run();
-          evicted = true;
-        }
-      }
-
-      const [row] = tx
-        .insert(events)
-        .values({
-          sensorId: event.sensorId,
-          type: event.type,
-          payload: event.payload,
-          createdAt: event.createdAt,
-        })
-        .returning()
-        .all();
-
-      return { queued: this.toQueuedEvent(row), evicted };
-    });
+    const { queued, evicted } = this.db.transaction((tx) => this.enqueueWithin(tx, event));
 
     if (evicted) this.recordOverflow();
     return queued;
+  }
+
+  async enqueueArchiveAdminAlert(input: ArchiveAdminAlertOutboxInput): Promise<QueuedEvent | null> {
+    const result = this.db.transaction((tx) => {
+      const row = tx.select({ cooldowns: driveConnections.alertCooldowns })
+        .from(driveConnections)
+        .where(eq(driveConnections.id, input.generationId))
+        .get();
+      if (row === undefined) return null;
+      const current = parseCooldowns(row.cooldowns);
+      if ((current[input.kind] ?? 0) > input.nowMs) return null;
+      const next = { ...current, [input.kind]: input.cooldownUntilMs };
+      const updated = tx.update(driveConnections)
+        .set({ alertCooldowns: next })
+        .where(and(
+          eq(driveConnections.id, input.generationId),
+          sql`${driveConnections.alertCooldowns} = ${JSON.stringify(current)}`,
+        ))
+        .run();
+      if (updated.changes !== 1) return null;
+      return this.enqueueWithin(tx, input.event);
+    });
+    if (result?.evicted) this.recordOverflow();
+    return result?.queued ?? null;
   }
 
   async pending(limit = 50): Promise<QueuedEvent[]> {
@@ -89,6 +83,38 @@ export class DrizzleEventRepository implements EventRepositoryPort {
   async markSent(ids: number[], sentAt: Date): Promise<void> {
     if (ids.length === 0) return;
     this.db.update(events).set({ sentAt }).where(inArray(events.id, ids)).run();
+  }
+
+  private enqueueWithin(writer: EventWriter, event: NewQueuedEvent): {
+    queued: QueuedEvent;
+    evicted: boolean;
+  } {
+    const [{ value }] = writer
+      .select({ value: count() })
+      .from(events)
+      .where(isNull(events.sentAt))
+      .all();
+    let evicted = false;
+    if (value >= this.options.maxUnsentEvents) {
+      const oldest = writer
+        .select({ id: events.id })
+        .from(events)
+        .where(isNull(events.sentAt))
+        .orderBy(asc(events.createdAt), asc(events.id))
+        .limit(1)
+        .get();
+      if (oldest) {
+        writer.delete(events).where(eq(events.id, oldest.id)).run();
+        evicted = true;
+      }
+    }
+    const [row] = writer.insert(events).values({
+      sensorId: event.sensorId,
+      type: event.type,
+      payload: event.payload,
+      createdAt: event.createdAt,
+    }).returning().all();
+    return { queued: this.toQueuedEvent(row), evicted };
   }
 
   private toQueuedEvent(row: EventRow): QueuedEvent {
@@ -120,4 +146,11 @@ export class DrizzleEventRepository implements EventRepositoryPort {
 
 function isPowerOfTwo(value: number): boolean {
   return value > 0 && Number.isInteger(Math.log2(value));
+}
+
+function parseCooldowns(value: unknown): Record<string, number> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value).filter(
+    ([key, entry]) => key.length > 0 && Number.isSafeInteger(entry) && Number(entry) >= 0,
+  ));
 }

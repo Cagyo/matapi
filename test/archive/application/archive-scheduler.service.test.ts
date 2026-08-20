@@ -360,6 +360,55 @@ describe('ArchiveSchedulerService', () => {
     );
   });
 
+  it('does not emit an alert for a generation replaced during maintenance projection', async () => {
+    const fixture = setup({
+      providerState: {
+        revision: 1, generationId: 'generation-1', operationClass: 'upload',
+        failureClass: 'capacity', failureStreak: 1, cooldownUntilMs: null,
+        blockReason: 'account_creation_limit', updatedAtMs: 9_000,
+      },
+    });
+    fixture.credentials.loadActive
+      .mockResolvedValueOnce(activeConnection('generation-1'))
+      .mockResolvedValueOnce(activeConnection('generation-2'));
+
+    await fixture.scheduler.tick();
+
+    expect(fixture.alerts.alert).not.toHaveBeenCalled();
+  });
+
+  it('does not map temporary provider capacity to immediate administrator action', async () => {
+    const fixture = setup({
+      nowMs: 1_000_000,
+      providerState: {
+        revision: 1, generationId: 'generation-1', operationClass: 'upload',
+        failureClass: 'capacity', failureStreak: 1, cooldownUntilMs: 2_000_000,
+        blockReason: null, updatedAtMs: 100_001,
+      },
+    });
+
+    await fixture.scheduler.tick();
+
+    expect(fixture.alerts.alert).not.toHaveBeenCalled();
+  });
+
+  it('maps temporary provider capacity only to prolonged cooldown at the threshold', async () => {
+    const fixture = setup({
+      nowMs: 1_000_000,
+      providerState: {
+        revision: 1, generationId: 'generation-1', operationClass: 'upload',
+        failureClass: 'capacity', failureStreak: 1, cooldownUntilMs: 2_000_000,
+        blockReason: null, updatedAtMs: 100_000,
+      },
+    });
+
+    await fixture.scheduler.tick();
+
+    expect(fixture.alerts.alert.mock.calls).toEqual([
+      ['provider-cooldown-prolonged', { generationId: 'generation-1' }],
+    ]);
+  });
+
   it('sleeps until the earliest durable deadline without tight polling', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(10_000);

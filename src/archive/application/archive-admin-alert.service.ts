@@ -11,7 +11,7 @@ import type {
   ArchiveAdminAlertPort,
 } from './ports/archive-admin-alert.port';
 
-const COOLDOWN_MS = 60 * 60 * 1_000;
+export const ARCHIVE_ADMIN_ALERT_COOLDOWN_MS = 60 * 60 * 1_000;
 const MAX_CAS_RETRIES = 3;
 
 /**
@@ -44,13 +44,16 @@ export class ArchiveAdminAlertService implements ArchiveAdminAlertPort {
     kind: ArchiveAdminAlertKind,
     context: Omit<ArchiveAdminAlert, 'kind'>,
   ): Promise<void> {
-    const alert = await this.claim(kind, context);
+    const alert = await this.prepare(kind, context);
     if (alert === null) return;
+    const nowMs = this.clock.now().getTime();
+    const persisted = await this.persistCooldown(alert.generationId, kind, nowMs);
+    if (!persisted) return;
     await this.deliver(alert);
   }
 
-  /** Accepts one sanitized alert only after winning its durable cooldown CAS. */
-  async claim(
+  /** Resolves and sanitizes alert context without mutating cooldown state. */
+  async prepare(
     kind: ArchiveAdminAlertKind,
     context: Omit<ArchiveAdminAlert, 'kind'>,
   ): Promise<ArchiveAdminAlert | null> {
@@ -58,10 +61,6 @@ export class ArchiveAdminAlertService implements ArchiveAdminAlertPort {
     const generationId = suppliedGenerationId
       ?? sanitizedIdentifier((await this.repository.loadActive())?.id);
     if (!generationId) return null;
-    const nowMs = this.clock.now().getTime();
-    const persisted = await this.persistCooldown(generationId, kind, nowMs);
-    if (!persisted) return null;
-
     const artifactId = sanitizedIdentifier(context.artifactId);
     const errorCode = sanitizedErrorCode(context.errorCode);
     return {
@@ -89,7 +88,7 @@ export class ArchiveAdminAlertService implements ArchiveAdminAlertPort {
       const current = await this.repository.readAlertCooldowns(generationId);
       if (current === null) return false;
       if ((current[kind] ?? 0) > nowMs) return false;
-      const next = { ...current, [kind]: nowMs + COOLDOWN_MS };
+      const next = { ...current, [kind]: nowMs + ARCHIVE_ADMIN_ALERT_COOLDOWN_MS };
       if (await this.repository.compareAndSetAlertCooldowns({
         generationId,
         expected: current,
