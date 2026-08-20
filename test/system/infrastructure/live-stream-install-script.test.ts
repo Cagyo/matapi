@@ -81,7 +81,7 @@ describe('experimental live-stream installation', () => {
     expect(featureScript).toContain('apt_get install -y cloudflared');
     expect(featureScript).toContain('"$cloudflared_bin" --config "$config" version');
     expect(featureScript).toContain('"$cloudflared_bin" --config "$config" tunnel diag');
-    expect(featureScript).toContain('sudo -H -u "$USER"');
+    expect(featureScript).toContain('run_as_worker env -i');
     expect(featureScript).toContain('DNS resolution and outbound port 7844');
     expect(installScript).toContain("includes('rtsp')");
   });
@@ -154,10 +154,10 @@ describe('experimental live-stream installation', () => {
     expect(featureScript).toContain('HOME="$DIAG_HOME"');
     expect(featureScript).toContain('XDG_CONFIG_HOME="$DIAG_CONFIG_DIR"');
     expect(featureScript).toMatch(
-      /sudo -H -u "\$USER" env -i[\s\S]*sh -c '[\s\S]*"\$cloudflared_bin" --config "\$config" version/,
+      /run_as_worker env -i[\s\S]*sh -c '[\s\S]*"\$cloudflared_bin" --config "\$config" version/,
     );
     expect(featureScript).toMatch(
-      /sudo -H -u "\$USER" env -i[\s\S]*sh -c '[\s\S]*"\$cloudflared_bin" --config "\$config" tunnel diag/,
+      /run_as_worker env -i[\s\S]*sh -c '[\s\S]*"\$cloudflared_bin" --config "\$config" tunnel diag/,
     );
     expect(featureScript).toContain('trap cleanup_cloudflared_diagnostics EXIT');
     expect(featureScript).toContain('sudo rm -rf "$DIAG_DIR"');

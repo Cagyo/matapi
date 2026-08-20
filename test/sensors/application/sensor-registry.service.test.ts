@@ -30,7 +30,7 @@ function availableFeatures(): FeatureAvailabilityPort {
     awaitInitialVerification: vi.fn().mockResolvedValue(undefined),
     inspect: vi.fn(),
     requireReady: vi.fn().mockResolvedValue(undefined),
-  } as unknown as FeatureAvailabilityPort;
+  };
 }
 
 function makeRegistry(
@@ -353,7 +353,7 @@ describe('SensorRegistryService', () => {
     const repo = new InMemorySensorRepository([digitalSensor()]);
     let eventListener: ((event: SensorEvent) => void) | undefined;
     const driver: SensorDriverPort = {
-      init: vi.fn().mockRejectedValue(new DriverUnavailableError('pigpiod', 'refused')),
+      init: vi.fn().mockRejectedValue(new DriverUnavailableError('gpiod', 'refused')),
       destroy: vi.fn().mockResolvedValue(undefined),
       getState: vi.fn(),
       onEvent: vi.fn((listener: (event: SensorEvent) => void) => {
