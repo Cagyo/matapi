@@ -67,7 +67,7 @@ export class ArchiveProviderGateService {
       return this.run(input);
     }
     if (admission.kind === 'probe') {
-      if (input.probe !== true || !(await this.claimProbe(input.generationId))) {
+      if (input.probe !== true || !(await this.claimProbe(input.generationId, input.operationClass))) {
         throw new DriveTemporaryUnavailableError('Drive provider recovery probe is pending');
       }
     }
@@ -107,11 +107,12 @@ export class ArchiveProviderGateService {
 
   async inspect(
     generationId: string,
-    _operationClass: ArchiveProviderOperationClass,
+    operationClass: ArchiveProviderOperationClass,
   ): Promise<ArchiveProviderAdmission> {
     const state = await this.ensureGeneration(generationId);
     if (state.blockReason !== null) return { kind: 'blocked', reason: state.blockReason };
     if (state.failureClass === 'quota') return { kind: 'allowed' };
+    if (state.operationClass !== operationClass) return { kind: 'allowed' };
     if (state.cooldownUntilMs === null) return { kind: 'allowed' };
     return state.cooldownUntilMs > this.nowMs()
       ? { kind: 'cooldown', untilMs: state.cooldownUntilMs }
@@ -144,11 +145,11 @@ export class ArchiveProviderGateService {
   async recordSuccess(
     generationId: string,
     operationClass: ArchiveProviderOperationClass,
-    postCooldownProbe: boolean,
+    _postCooldownProbe: boolean,
   ): Promise<void> {
     for (;;) {
       const current = await this.ensureGeneration(generationId);
-      if (!postCooldownProbe && current.operationClass !== operationClass) return;
+      if (current.operationClass !== operationClass) return;
       if (isClear(current)) return;
       if (await this.repository.compareAndSet(current.revision, clearState(generationId, this.nowMs()))) return;
     }
@@ -175,10 +176,16 @@ export class ArchiveProviderGateService {
     }
   }
 
-  private async claimProbe(generationId: string): Promise<boolean> {
+  private async claimProbe(
+    generationId: string,
+    operationClass: ArchiveProviderOperationClass,
+  ): Promise<boolean> {
     for (;;) {
       const current = await this.ensureGeneration(generationId);
-      if (current.blockReason !== null || current.cooldownUntilMs === null || current.cooldownUntilMs > this.nowMs()) return false;
+      if (current.blockReason !== null
+        || current.operationClass !== operationClass
+        || current.cooldownUntilMs === null
+        || current.cooldownUntilMs > this.nowMs()) return false;
       const next = {
         ...withoutRevision(current),
         cooldownUntilMs: this.nowMs() + this.maximumSleepMs,

@@ -15,9 +15,28 @@ describe('ArchiveProviderGateService', () => {
       retryAfterMs: 60_000, sessionUsable: false, operationPhase: 'session-chunk',
     }));
 
+    await expect(gate.inspect('generation-1', 'account')).resolves.toEqual({ kind: 'allowed' });
     await gate.recordSuccess('generation-1', 'account', false);
 
     await expect(gate.inspect('generation-1', 'upload')).resolves.toMatchObject({ kind: 'cooldown' });
+  });
+
+  it('does not let an unrelated operation claim or clear an upload recovery probe', async () => {
+    const { gate, clock } = fixture();
+    await gate.recordFailure('generation-1', 'upload', new DriveRateLimitedError({
+      retryAfterMs: 1_000, sessionUsable: true, operationPhase: 'metadata',
+    }));
+    clock.value += 1_001;
+
+    await expect(gate.run({
+      generationId: 'generation-1', operationClass: 'account', operation: async () => 'account-ok',
+    })).resolves.toBe('account-ok');
+    await expect(gate.inspect('generation-1', 'upload')).resolves.toEqual({ kind: 'probe' });
+
+    await expect(gate.run({
+      generationId: 'generation-1', operationClass: 'upload', probe: true, operation: async () => 'upload-ok',
+    })).resolves.toBe('upload-ok');
+    await expect(gate.inspect('generation-1', 'upload')).resolves.toEqual({ kind: 'allowed' });
   });
 
   it('resets stale provider state when the active generation changes', async () => {
@@ -125,6 +144,14 @@ describe('ArchiveProviderGateService', () => {
     await expect(gate.inspect('generation-1', 'upload')).resolves.toEqual({
       kind: 'cooldown', untilMs: clock.value + 60 * 60 * 1_000,
     });
+  });
+
+  it('scopes a temporary capacity cooldown to its failed operation', async () => {
+    const { gate } = fixture();
+    await gate.recordFailure('generation-1', 'upload', new DriveProviderCapacityBlockedError('temporary'));
+
+    await expect(gate.inspect('generation-1', 'folder')).resolves.toEqual({ kind: 'allowed' });
+    await expect(gate.inspect('generation-1', 'upload')).resolves.toMatchObject({ kind: 'cooldown' });
   });
 
   it('defers a quota block until the exact-ID retention outcome is known', async () => {
