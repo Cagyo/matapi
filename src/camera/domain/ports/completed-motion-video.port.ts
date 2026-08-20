@@ -11,10 +11,33 @@ export interface CompletedMotionVideoDescriptor {
   sourceFingerprint: string;
 }
 
+/** Serializable, process-local position in one deterministic filesystem traversal. */
+export interface CompletedMotionVideoScanCursor {
+  readonly frames: readonly {
+    relativeDirectory: string;
+    nextEntry: number;
+  }[];
+}
+
+export interface CompletedMotionVideoScanBatch {
+  descriptors: readonly CompletedMotionVideoDescriptor[];
+  cursor: CompletedMotionVideoScanCursor | null;
+  complete: boolean;
+  visitedEntries: number;
+}
+
+export interface CompletedMotionRecoveryBatch {
+  cursor: CompletedMotionVideoScanCursor | null;
+  complete: boolean;
+}
+
 export const COMPLETED_MOTION_VIDEO = Symbol('COMPLETED_MOTION_VIDEO');
 
 /** Camera-owned trust boundary for Motion's completed local video files. */
 export interface CompletedMotionVideoPort {
   resolve(candidatePath: string): Promise<CompletedMotionVideoDescriptor | null>;
-  scan(limit: number): Promise<readonly CompletedMotionVideoDescriptor[]>;
+  scanBatch(input: {
+    cursor: CompletedMotionVideoScanCursor | null;
+    entryLimit: number;
+  }): Promise<CompletedMotionVideoScanBatch>;
 }

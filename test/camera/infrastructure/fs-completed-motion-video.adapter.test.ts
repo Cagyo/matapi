@@ -96,6 +96,7 @@ describe('FsCompletedMotionVideoAdapter', () => {
       }),
       'utf8',
     ).digest('hex'));
+    expect(descriptor?.sourceTimeMs).toBe(Date.UTC(2026, 6, 29, 12, 0, 0));
   });
 
   it('fails closed when production installation identity is missing or malformed', async () => {
@@ -139,25 +140,134 @@ describe('FsCompletedMotionVideoAdapter', () => {
     expect(await adapter.resolve(file)).toBeNull();
   });
 
-  it('rotates bounded scan work so later entries are eventually observed', async () => {
-    const { root } = await fixture('120000-first.mp4');
-    const directory = join(root, '2026', '07', '29');
-    const second = join(directory, '120001-second.mp4');
-    await writeFile(second, 'completed video');
-    const stableAt = new Date(Date.now() - 61_000);
-    await utimes(second, stableAt, stableAt);
-    const adapter = new FsCompletedMotionVideoAdapter({
-      root, now: () => Date.now(), installationId, scanMultiplier: 1,
-    });
-
-    const observed = new Set<string>();
-    for (let index = 0; index < 12; index += 1) {
-      (await adapter.scan(1)).forEach((descriptor) => observed.add(descriptor.relativePath));
+  it('advances an explicit cursor through an invalid-only batch', async () => {
+    const { root, adapter } = await fixture();
+    await unlink(join(root, '2026', '07', '29', '120000-12345.mp4'));
+    const directory = join(root, 'invalid');
+    await mkdir(directory, { recursive: true });
+    for (let index = 0; index < 80; index += 1) {
+      await writeFile(join(directory, `${String(index).padStart(3, '0')}.txt`), 'invalid');
     }
 
-    expect(observed).toEqual(new Set([
+    const first = await adapter.scanBatch({ cursor: null, entryLimit: 64 });
+    expect(first.descriptors).toEqual([]);
+    expect(first.visitedEntries).toBe(64);
+    expect(first.complete).toBe(false);
+    expect(first.cursor).not.toBeNull();
+
+    const input = first.cursor!;
+    const snapshot = structuredClone(input);
+    const second = await adapter.scanBatch({ cursor: input, entryLimit: 64 });
+    expect(input).toEqual(snapshot);
+    expect(second.descriptors).toEqual([]);
+    expect(second.complete).toBe(true);
+    expect(second.cursor).toBeNull();
+  });
+
+  it('returns valid descriptors while invalid and unstable entries still consume traversal budget', async () => {
+    const { root } = await fixture('120000-first.mp4');
+    const directory = join(root, '2026', '07', '29');
+    const valid = join(directory, '120001-second.mkv');
+    const unstable = join(directory, '120002-third.avi');
+    await writeFile(valid, 'second video');
+    await writeFile(unstable, 'unstable video');
+    await writeFile(join(directory, 'notes.txt'), 'invalid');
+    const stableAt = new Date(Date.now() - 61_000);
+    await utimes(valid, stableAt, stableAt);
+    const adapter = new FsCompletedMotionVideoAdapter({ root, now: () => Date.now(), installationId });
+
+    const observed: string[] = [];
+    let cursor = null;
+    let complete = false;
+    while (!complete) {
+      const batch = await adapter.scanBatch({ cursor, entryLimit: 2 });
+      observed.push(...batch.descriptors.map((candidate) => candidate.relativePath));
+      cursor = batch.cursor;
+      complete = batch.complete;
+      expect(batch.visitedEntries).toBeLessThanOrEqual(2);
+    }
+
+    expect(observed).toEqual([
       '2026/07/29/120000-first.mp4',
-      '2026/07/29/120001-second.mp4',
-    ]));
+      '2026/07/29/120001-second.mkv',
+    ]);
+  });
+
+  it('hashes large files sequentially and accepts the full bytes', async () => {
+    const { root, file } = await fixture();
+    const directory = join(root, '2026', '07', '29');
+    const second = join(directory, '120001-second.mp4');
+    const bytes = Buffer.alloc((64 * 1024 * 2) + 17, 0x5a);
+    await writeFile(file, bytes);
+    await writeFile(second, bytes);
+    const stableAt = new Date(Date.now() - 61_000);
+    await utimes(file, stableAt, stableAt);
+    await utimes(second, stableAt, stableAt);
+    let active = 0;
+    let maximum = 0;
+    const adapter = new FsCompletedMotionVideoAdapter({
+      root,
+      now: () => Date.now(),
+      installationId,
+      afterHash: async () => {
+        active += 1;
+        maximum = Math.max(maximum, active);
+        await Promise.resolve();
+        active -= 1;
+      },
+    });
+
+    let cursor = null;
+    const descriptors = [];
+    let complete = false;
+    while (!complete) {
+      const batch = await adapter.scanBatch({ cursor, entryLimit: 64 });
+      descriptors.push(...batch.descriptors);
+      cursor = batch.cursor;
+      complete = batch.complete;
+    }
+
+    expect(maximum).toBe(1);
+    expect(descriptors).toHaveLength(2);
+    expect(descriptors.every((candidate) => candidate.sha256 === createHash('sha256').update(bytes).digest('hex'))).toBe(true);
+  });
+
+  it('leaves files inserted behind the cursor for the next traversal', async () => {
+    const { root, adapter } = await fixture();
+    const directory = join(root, '2026', '07', '29');
+    for (let index = 1; index <= 70; index += 1) {
+      await writeFile(join(directory, `${String(120000 + index).padStart(6, '0')}-video.mp4`), 'video');
+    }
+    const stableAt = new Date(Date.now() - 61_000);
+    const files = await import('node:fs/promises').then(({ readdir }) => readdir(directory));
+    await Promise.all(files.map((name) => utimes(join(directory, name), stableAt, stableAt)));
+
+    const first = await adapter.scanBatch({ cursor: null, entryLimit: 64 });
+    const inserted = join(root, '2025', '01', '01', '000000-inserted.mp4');
+    await mkdir(join(root, '2025', '01', '01'), { recursive: true });
+    await writeFile(inserted, 'inserted');
+    await utimes(inserted, stableAt, stableAt);
+
+    const currentTraversal: string[] = [...first.descriptors.map((candidate) => candidate.relativePath)];
+    let cursor = first.cursor;
+    let complete = first.complete;
+    while (!complete) {
+      const batch = await adapter.scanBatch({ cursor, entryLimit: 64 });
+      currentTraversal.push(...batch.descriptors.map((candidate) => candidate.relativePath));
+      cursor = batch.cursor;
+      complete = batch.complete;
+    }
+    expect(currentTraversal).not.toContain('2025/01/01/000000-inserted.mp4');
+
+    const nextTraversal: string[] = [];
+    cursor = null;
+    complete = false;
+    while (!complete) {
+      const batch = await adapter.scanBatch({ cursor, entryLimit: 64 });
+      nextTraversal.push(...batch.descriptors.map((candidate) => candidate.relativePath));
+      cursor = batch.cursor;
+      complete = batch.complete;
+    }
+    expect(nextTraversal).toContain('2025/01/01/000000-inserted.mp4');
   });
 });

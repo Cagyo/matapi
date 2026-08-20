@@ -8,6 +8,8 @@ import {
   COMPLETED_MOTION_VIDEO,
   type CompletedMotionVideoDescriptor,
   type CompletedMotionVideoPort,
+  type CompletedMotionRecoveryBatch,
+  type CompletedMotionVideoScanCursor,
 } from '../domain/ports/completed-motion-video.port';
 import {
   MEDIA_REPOSITORY,
@@ -39,7 +41,10 @@ export class RegisterCompletedMotionVideosUseCase {
     await this.registerPath(event.videoPath, [event.id]);
   }
 
-  async reconcile(signal?: AbortSignal): Promise<void> {
+  async reconcileBatch(
+    cursor: CompletedMotionVideoScanCursor | null,
+    signal?: AbortSignal,
+  ): Promise<CompletedMotionRecoveryBatch> {
     throwIfAborted(signal);
     const processedPaths = new Set<string>();
     const grouped = new Map<string, {
@@ -61,7 +66,7 @@ export class RegisterCompletedMotionVideosUseCase {
       }
       const matching = await this.media.findCompletedEventsByVideoPath(descriptor.trustedPath);
       throwIfAborted(signal);
-      if (await this.hasReferencedEvent(descriptor.trustedPath)) {
+      if (await this.attachExistingArtifact(descriptor.trustedPath, matching.map((candidate) => candidate.id))) {
         throwIfAborted(signal);
         continue;
       }
@@ -73,15 +78,18 @@ export class RegisterCompletedMotionVideosUseCase {
       );
     }
 
-    const scanned = await this.completedVideos.scan(RECONCILIATION_LIMIT);
+    const scanned = await this.completedVideos.scanBatch({
+      cursor,
+      entryLimit: RECONCILIATION_LIMIT,
+    });
     throwIfAborted(signal);
-    for (const descriptor of scanned) {
+    for (const descriptor of scanned.descriptors) {
       throwIfAborted(signal);
       if (processedPaths.has(descriptor.trustedPath)) continue;
       processedPaths.add(descriptor.trustedPath);
       const matching = await this.media.findCompletedEventsByVideoPath(descriptor.trustedPath);
       throwIfAborted(signal);
-      if (await this.hasReferencedEvent(descriptor.trustedPath)) {
+      if (await this.attachExistingArtifact(descriptor.trustedPath, matching.map((candidate) => candidate.id))) {
         throwIfAborted(signal);
         continue;
       }
@@ -105,6 +113,7 @@ export class RegisterCompletedMotionVideosUseCase {
       await this.registerDescriptor(descriptor, [...eventIds]);
       throwIfAborted(signal);
     }
+    return { cursor: scanned.cursor, complete: scanned.complete };
   }
 
   private async registerPath(path: string, fallbackEventIds: readonly number[]): Promise<void> {
@@ -114,8 +123,9 @@ export class RegisterCompletedMotionVideosUseCase {
       return;
     }
     const matching = await this.media.findCompletedEventsByVideoPath(descriptor.trustedPath);
-    if (await this.hasReferencedEvent(descriptor.trustedPath)) return;
-    await this.registerDescriptor(descriptor, matching.length > 0 ? matching.map((event) => event.id) : fallbackEventIds);
+    const eventIds = matching.length > 0 ? matching.map((event) => event.id) : fallbackEventIds;
+    if (await this.attachExistingArtifact(descriptor.trustedPath, eventIds)) return;
+    await this.registerDescriptor(descriptor, eventIds);
   }
 
   private async registerDescriptor(
@@ -139,10 +149,25 @@ export class RegisterCompletedMotionVideosUseCase {
     groups.set(descriptor.sourceFingerprint, { descriptor, eventIds: new Set(eventIds) });
   }
 
-  private async hasReferencedEvent(videoPath: string): Promise<boolean> {
-    return (await this.media.findEventsByVideoPath(videoPath)).some(
-      (event) => event.archiveArtifactId !== null,
-    );
+  private async attachExistingArtifact(
+    videoPath: string,
+    candidateEventIds: readonly number[],
+  ): Promise<boolean> {
+    const events = await this.media.findEventsByVideoPath(videoPath);
+    const artifactId = events.find((event) => event.archiveArtifactId !== null)?.archiveArtifactId;
+    if (!artifactId) return false;
+    const unreferenced = new Set(events
+      .filter((event) => event.archiveArtifactId === null)
+      .map((event) => event.id));
+    candidateEventIds.forEach((id) => {
+      if (events.some((event) => event.id === id && event.archiveArtifactId === null)) {
+        unreferenced.add(id);
+      }
+    });
+    if (unreferenced.size > 0) {
+      await this.requireWriter().attachArchiveArtifact([...unreferenced], artifactId);
+    }
+    return true;
   }
 
   private toArchiveArtifact(descriptor: CompletedMotionVideoDescriptor): RegisterArchiveArtifact {

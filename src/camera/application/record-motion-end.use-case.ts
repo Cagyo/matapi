@@ -7,6 +7,9 @@ import {
 import { MEDIA_WRITER, MediaWriterPort } from '../domain/ports/media-writer.port';
 import { FEATURE_AVAILABILITY, type FeatureAvailabilityPort } from '../../features/domain/ports/feature-availability.port';
 import { RegisterCompletedMotionVideosUseCase } from './register-completed-motion-videos.use-case';
+import {
+  CompletedMotionVideoRecoveryScheduler,
+} from './completed-motion-video-recovery.scheduler';
 
 /**
  * Records the end of a motion event (spec 20). Invoked by Motion's
@@ -23,7 +26,8 @@ export class RecordMotionEndUseCase {
     @Inject(MEDIA_REPOSITORY) private readonly media: MediaRepositoryPort,
     @Inject(MEDIA_WRITER) private readonly writer: MediaWriterPort,
     @Inject(FEATURE_AVAILABILITY) private readonly availability?: FeatureAvailabilityPort,
-    private readonly registerCompletedVideos?: RegisterCompletedMotionVideosUseCase,
+    private readonly registerCompletedVideos?: Pick<RegisterCompletedMotionVideosUseCase, 'executeForEvent'>,
+    private readonly recovery?: Pick<CompletedMotionVideoRecoveryScheduler, 'wake'>,
   ) {}
 
   async execute(cameraRef: string | undefined, videoPath: string): Promise<void> {
@@ -44,7 +48,7 @@ export class RecordMotionEndUseCase {
       videoPath,
     );
     if (closed) {
-      await this.registerCompletedVideos?.executeForEvent(closed.id);
+      await this.registerAndWake(closed.id);
       return;
     }
 
@@ -53,10 +57,18 @@ export class RecordMotionEndUseCase {
     await this.writer.createEvent(camera.id, startedAt);
     await this.availability?.requireReady('motion');
     const standalone = await this.writer.closeLatestOpenEvent(camera.id, endedAt, videoPath);
-    if (standalone) await this.registerCompletedVideos?.executeForEvent(standalone.id);
+    if (standalone) await this.registerAndWake(standalone.id);
     this.logger.log(
       `Motion end for ${camera.name} with no open event — created standalone video event ${videoPath}`,
     );
+  }
+
+  private async registerAndWake(eventId: number): Promise<void> {
+    try {
+      await this.registerCompletedVideos?.executeForEvent(eventId);
+    } finally {
+      this.recovery?.wake('motion-event');
+    }
   }
 
   private async resolveCamera(cameraRef?: string): Promise<Camera | null> {
@@ -86,14 +98,15 @@ function motionFileStartedAt(videoPath: string): Date | null {
   const hour = Number(match[4]);
   const minute = Number(match[5]);
   const second = Number(match[6]);
-  const date = new Date(year, month - 1, day, hour, minute, second);
+  const timestamp = Date.UTC(year, month - 1, day, hour, minute, second);
+  const date = new Date(timestamp);
   if (
-    date.getFullYear() !== year ||
-    date.getMonth() !== month - 1 ||
-    date.getDate() !== day ||
-    date.getHours() !== hour ||
-    date.getMinutes() !== minute ||
-    date.getSeconds() !== second
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day ||
+    date.getUTCHours() !== hour ||
+    date.getUTCMinutes() !== minute ||
+    date.getUTCSeconds() !== second
   ) {
     return null;
   }

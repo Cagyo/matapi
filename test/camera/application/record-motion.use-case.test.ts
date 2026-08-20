@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { RecordMotionEndUseCase } from '../../../src/camera/application/record-motion-end.use-case';
 import { RecordMotionStartUseCase } from '../../../src/camera/application/record-motion-start.use-case';
 import { RecordSnapshotUseCase } from '../../../src/camera/application/record-snapshot.use-case';
@@ -106,7 +106,21 @@ describe('RecordMotionEndUseCase', () => {
     );
 
     const last = await repo.lastEvent();
-    expect(last?.startedAt).toEqual(new Date(2026, 6, 9, 18, 49, 49));
+    expect(last?.startedAt).toEqual(new Date(Date.UTC(2026, 6, 9, 18, 49, 49)));
+  });
+
+  it('wakes traversal even when immediate stability defers registration', async () => {
+    const repo = repoWith([camera('front_door')]);
+    await repo.createEvent('front_door', new Date('2026-07-01T10:00:00Z'));
+    const registration = { executeForEvent: vi.fn(async () => undefined) };
+    const recovery = { wake: vi.fn() };
+    const useCase = new RecordMotionEndUseCase(repo, repo, undefined, registration, recovery);
+
+    await useCase.execute('front_door', '/var/lib/motion/clip.mkv');
+
+    expect(registration.executeForEvent).toHaveBeenCalledOnce();
+    expect(recovery.wake).toHaveBeenCalledOnce();
+    expect(recovery.wake).toHaveBeenCalledWith('motion-event');
   });
 });
 

@@ -1,28 +1,55 @@
-import { Inject, Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional, type OnApplicationBootstrap } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
+import type { ArchiveRuntimeSignalPort } from '../../archive/application/ports/archive-runtime-signal.port';
 import { CAMERA_MODE, type CameraMode } from '../camera.tokens';
+import type { CompletedMotionVideoScanCursor } from '../domain/ports/completed-motion-video.port';
 import { RegisterCompletedMotionVideosUseCase } from './register-completed-motion-videos.use-case';
 
 const RECOVERY_INTERVAL_MS = 2 * 60 * 1000;
 
-/** Boots and periodically reconciles Motion files while preventing overlap. */
+export type CompletedMotionRecoveryWakeReason = 'boot' | 'motion-event' | 'safety';
+
+interface RecoveryClock {
+  now(): number;
+}
+
+const NOOP_PROGRESS: ArchiveRuntimeSignalPort = {
+  motionTraversalCompleted: async () => undefined,
+};
+
+const SYSTEM_CLOCK: RecoveryClock = { now: Date.now };
+
+/** Cooperatively drains one explicit filesystem traversal without overlapping it. */
 @Injectable()
 export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBootstrap {
   private readonly logger = new Logger(CompletedMotionVideoRecoveryScheduler.name);
   private inFlight: Promise<void> | null = null;
+  private cursor: CompletedMotionVideoScanCursor | null = null;
+  private pendingWake = false;
 
   constructor(
     @Inject(CAMERA_MODE) private readonly mode: CameraMode,
     @Inject(RegisterCompletedMotionVideosUseCase)
-    private readonly registration: Pick<RegisterCompletedMotionVideosUseCase, 'reconcile'>,
+    private readonly registration: Pick<RegisterCompletedMotionVideosUseCase, 'reconcileBatch'>,
+    @Optional() private readonly progress: ArchiveRuntimeSignalPort = NOOP_PROGRESS,
+    @Optional() private readonly clock: RecoveryClock = SYSTEM_CLOCK,
   ) {}
 
   onApplicationBootstrap(): void {
-    this.dispatchBestEffort();
+    this.wake('boot');
   }
 
   @Interval('completed-motion-video-recovery', RECOVERY_INTERVAL_MS)
   reconcileTick(): void {
+    this.wake('safety');
+  }
+
+  wake(_reason: CompletedMotionRecoveryWakeReason): void {
+    if (this.mode !== 'real') return;
+    if (this.inFlight !== null) {
+      this.pendingWake = true;
+      return;
+    }
     this.dispatchBestEffort();
   }
 
@@ -30,13 +57,41 @@ export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBoots
     if (this.mode !== 'real') return Promise.resolve();
     if (this.inFlight !== null) return this.inFlight;
 
-    const shared = Promise.resolve()
-      .then(() => this.registration.reconcile(signal))
-      .finally(() => {
-        if (this.inFlight === shared) this.inFlight = null;
-      });
+    const shared = this.runTraversal(signal).finally(() => {
+      if (this.inFlight !== shared) return;
+      this.inFlight = null;
+      if (this.pendingWake) {
+        this.pendingWake = false;
+        this.dispatchBestEffort();
+      }
+    });
     this.inFlight = shared;
     return shared;
+  }
+
+  private async runTraversal(signal?: AbortSignal): Promise<void> {
+    try {
+      let cursor = copyCursor(this.cursor);
+      while (true) {
+        throwIfAborted(signal);
+        const batch = await this.registration.reconcileBatch(copyCursor(cursor), signal);
+        throwIfAborted(signal);
+        if (batch.complete) {
+          this.cursor = null;
+          await this.progress.motionTraversalCompleted(this.clock.now());
+          return;
+        }
+        if (batch.cursor === null) {
+          throw new Error('Incomplete Motion traversal did not return a cursor');
+        }
+        cursor = copyCursor(batch.cursor);
+        this.cursor = copyCursor(cursor);
+        await yieldToEventLoop();
+      }
+    } catch (error) {
+      this.cursor = null;
+      throw error;
+    }
   }
 
   private dispatchBestEffort(): void {
@@ -44,4 +99,24 @@ export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBoots
       this.logger.error('Completed Motion recovery failed');
     });
   }
+}
+
+function copyCursor(
+  cursor: CompletedMotionVideoScanCursor | null,
+): CompletedMotionVideoScanCursor | null {
+  return cursor === null
+    ? null
+    : { frames: cursor.frames.map((frame) => ({ ...frame })) };
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error
+      ? signal.reason
+      : new DOMException('Aborted', 'AbortError');
+  }
+}
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }

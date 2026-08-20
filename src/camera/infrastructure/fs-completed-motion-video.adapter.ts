@@ -7,11 +7,12 @@ import { canonicalSourceFingerprintInput } from '../../archive/domain/archive-ar
 import type {
   CompletedMotionVideoDescriptor,
   CompletedMotionVideoPort,
+  CompletedMotionVideoScanBatch,
+  CompletedMotionVideoScanCursor,
 } from '../domain/ports/completed-motion-video.port';
 
 const STABILITY_MS = 60_000;
 const HASH_BUFFER_BYTES = 64 * 1024;
-const DEFAULT_SCAN_MULTIPLIER = 20;
 const MOTION_VIDEO_PATH = /^(\d{4})\/(\d{2})\/(\d{2})\/(\d{6})-[A-Za-z0-9][A-Za-z0-9._-]*\.(avi|mkv|mp4)$/u;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
@@ -20,7 +21,6 @@ export interface FsCompletedMotionVideoOptions {
   installationId?: string;
   now?: () => number;
   stabilityMs?: number;
-  scanMultiplier?: number;
   /** Test seam invoked after the stable descriptor bytes are hashed. */
   afterHash?: () => Promise<void> | void;
 }
@@ -37,7 +37,7 @@ interface InspectedCandidate {
 }
 
 interface ScanFrame {
-  relativePath: string;
+  relativeDirectory: string;
   nextEntry: number;
 }
 
@@ -52,16 +52,13 @@ export class FsCompletedMotionVideoAdapter implements CompletedMotionVideoPort {
   private readonly installationId: string | null;
   private readonly now: () => number;
   private readonly stabilityMs: number;
-  private readonly scanMultiplier: number;
   private readonly afterHash?: () => Promise<void> | void;
-  private readonly scanQueue: ScanFrame[] = [];
 
   constructor(options: FsCompletedMotionVideoOptions = {}) {
     this.root = resolve(options.root ?? process.env.MOTION_LOCAL_DIR ?? '/home/pi/motion/videos');
     this.installationId = isInstallationId(options.installationId) ? options.installationId : null;
     this.now = options.now ?? Date.now;
     this.stabilityMs = options.stabilityMs ?? STABILITY_MS;
-    this.scanMultiplier = options.scanMultiplier ?? DEFAULT_SCAN_MULTIPLIER;
     this.afterHash = options.afterHash;
   }
 
@@ -111,43 +108,64 @@ export class FsCompletedMotionVideoAdapter implements CompletedMotionVideoPort {
     };
   }
 
-  async scan(limit: number): Promise<readonly CompletedMotionVideoDescriptor[]> {
-    if (!this.installationId || !Number.isSafeInteger(limit) || limit <= 0) return [];
-    if (!(await this.inspectDirectory(''))) {
-      this.scanQueue.splice(0);
-      return [];
+  async scanBatch(input: {
+    cursor: CompletedMotionVideoScanCursor | null;
+    entryLimit: number;
+  }): Promise<CompletedMotionVideoScanBatch> {
+    if (!this.installationId || !Number.isSafeInteger(input.entryLimit) || input.entryLimit <= 0) {
+      return { descriptors: [], cursor: null, complete: true, visitedEntries: 0 };
     }
-    if (this.scanQueue.length === 0) this.scanQueue.push({ relativePath: '', nextEntry: 0 });
-
+    if (!(await this.inspectDirectory(''))) {
+      return { descriptors: [], cursor: null, complete: true, visitedEntries: 0 };
+    }
+    const frames: ScanFrame[] = input.cursor === null
+      ? [{ relativeDirectory: '', nextEntry: 0 }]
+      : input.cursor.frames.map((frame) => ({
+        relativeDirectory: frame.relativeDirectory,
+        nextEntry: frame.nextEntry,
+      }));
     const descriptors: CompletedMotionVideoDescriptor[] = [];
     let visited = 0;
-    const budget = limit * this.scanMultiplier;
-    while (this.scanQueue.length > 0 && descriptors.length < limit && visited < budget) {
-      const frame = this.scanQueue.shift()!;
-      const directory = frame.relativePath ? join(this.root, frame.relativePath) : this.root;
+    while (frames.length > 0 && visited < input.entryLimit) {
+      const frame = frames.shift()!;
+      if (!validFrame(frame)) continue;
+      if (!(await this.inspectDirectory(frame.relativeDirectory))) continue;
+      const directory = frame.relativeDirectory
+        ? join(this.root, frame.relativeDirectory)
+        : this.root;
       try {
         const entries = await readdir(directory, { withFileTypes: true, encoding: 'utf8' });
         const ordered = entries.sort((left, right) => String(left.name).localeCompare(String(right.name)));
         let index = frame.nextEntry;
-        for (; index < ordered.length && descriptors.length < limit && visited < budget; index += 1) {
+        for (; index < ordered.length && visited < input.entryLimit; index += 1) {
           const entry = ordered[index];
           visited += 1;
           if (entry.isSymbolicLink()) continue;
-          const child = frame.relativePath ? `${frame.relativePath}/${entry.name}` : String(entry.name);
+          const child = frame.relativeDirectory
+            ? `${frame.relativeDirectory}/${entry.name}`
+            : String(entry.name);
           if (entry.isDirectory()) {
-            this.scanQueue.push({ relativePath: child, nextEntry: 0 });
+            frames.push({ relativeDirectory: child, nextEntry: 0 });
             continue;
           }
           if (!entry.isFile()) continue;
           const descriptor = await this.resolve(join(this.root, child));
           if (descriptor) descriptors.push(descriptor);
         }
-        if (index < ordered.length) this.scanQueue.push({ relativePath: frame.relativePath, nextEntry: index });
+        if (index < ordered.length) {
+          frames.unshift({ relativeDirectory: frame.relativeDirectory, nextEntry: index });
+        }
       } catch {
         continue;
       }
     }
-    return descriptors;
+    const complete = frames.length === 0;
+    return {
+      descriptors,
+      cursor: complete ? null : { frames: frames.map((frame) => ({ ...frame })) },
+      complete,
+      visitedEntries: visited,
+    };
   }
 
   private toContainedCandidate(candidatePath: string): { absolutePath: string; relativePath: string } | null {
@@ -247,9 +265,19 @@ function motionSourceTimeMs(match: RegExpExecArray): number | null {
   const hour = Number(hhmmss.slice(0, 2));
   const minute = Number(hhmmss.slice(2, 4));
   const second = Number(hhmmss.slice(4, 6));
-  const value = new Date(year, month - 1, day, hour, minute, second);
-  return value.getFullYear() === year && value.getMonth() === month - 1 && value.getDate() === day
-    && value.getHours() === hour && value.getMinutes() === minute && value.getSeconds() === second
-    ? value.getTime()
+  const timestamp = Date.UTC(year, month - 1, day, hour, minute, second);
+  const value = new Date(timestamp);
+  return value.getUTCFullYear() === year && value.getUTCMonth() === month - 1 && value.getUTCDate() === day
+    && value.getUTCHours() === hour && value.getUTCMinutes() === minute && value.getUTCSeconds() === second
+    ? timestamp
     : null;
+}
+
+function validFrame(frame: ScanFrame): boolean {
+  return Number.isSafeInteger(frame.nextEntry)
+    && frame.nextEntry >= 0
+    && !frame.relativeDirectory.includes('\0')
+    && frame.relativeDirectory !== '..'
+    && !frame.relativeDirectory.startsWith('../')
+    && !frame.relativeDirectory.startsWith('/');
 }
