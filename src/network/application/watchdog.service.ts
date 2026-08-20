@@ -9,7 +9,7 @@ import { WATCHDOG, WatchdogPort } from '../domain/ports/watchdog.port';
 import { WATCHDOG_ENABLED } from '../network.tokens';
 
 const DEFAULT_PET_INTERVAL_MS = 15_000;
-const WATCHDOG_OPEN_FAILED = 'WATCHDOG_OPEN_FAILED';
+const WATCHDOG_OPERATION_FAILED = 'WATCHDOG_OPERATION_FAILED';
 const SAFE_FAILURE_CODE = /^[A-Za-z0-9_]{1,64}$/;
 
 function resolvePetInterval(): number {
@@ -18,12 +18,12 @@ function resolvePetInterval(): number {
 }
 
 /**
- * Path-free discriminator for the one-shot open failure. Node errno codes
- * (`EACCES`, `EBUSY`, `ENODEV`) and domain error codes are safe by
- * construction; the character guard rejects anything else, which is how a
- * code carrying a device path degrades to the fixed token.
+ * Path-free discriminator for a watchdog failure; the caller's message names
+ * the operation. Node errno codes (`EACCES`, `EBUSY`, `EIO`) and domain error
+ * codes are safe by construction; the character guard rejects anything else,
+ * which is how a code carrying a device path degrades to the fixed token.
  */
-function openFailureCode(error: unknown): string {
+function watchdogFailureCode(error: unknown): string {
   const code = typeof error === 'object' && error !== null && 'code' in error
     && typeof error.code === 'string'
     ? error.code
@@ -32,7 +32,7 @@ function openFailureCode(error: unknown): string {
     ?? (error instanceof Error && error.name !== 'Error' ? error.name : null);
   return candidate !== null && SAFE_FAILURE_CODE.test(candidate)
     ? candidate
-    : WATCHDOG_OPEN_FAILED;
+    : WATCHDOG_OPERATION_FAILED;
 }
 
 /**
@@ -64,7 +64,7 @@ export class WatchdogService
       // net for the whole process lifetime, and nothing retries the open —
       // hence error, not warn. It must still not take the worker down with
       // it: Telegram, sensors and the archive do not depend on the watchdog.
-      this.logger.error(`Hardware watchdog inactive: ${openFailureCode(error)}`);
+      this.logger.error(`Hardware watchdog inactive: ${watchdogFailureCode(error)}`);
       return;
     }
     this.opened = true;
@@ -79,15 +79,26 @@ export class WatchdogService
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
     if (!this.opened) return;
+    // Claim the transition before awaiting so a repeated destroy cannot
+    // double-close, and a failed disarm is not retried into the same fault.
     this.opened = false;
-    await this.watchdog.close();
+    try {
+      await this.watchdog.close();
+    } catch (error) {
+      // Nest awaits destroy hooks in sequence without catching, so a rejection
+      // here skips every remaining module's cleanup and the gateway reports a
+      // generic close failure. Worse, a failed magic-close leaves the device
+      // armed: the Pi reboots after the timeout despite a clean shutdown, and
+      // this is the only line that will say why.
+      this.logger.error(`Hardware watchdog disarm failed: ${watchdogFailureCode(error)}`);
+    }
   }
 
   private async pet(): Promise<void> {
     try {
       await this.watchdog.pet();
-    } catch (err) {
-      this.logger.warn(`Watchdog pet failed: ${(err as Error).message}`);
+    } catch (error) {
+      this.logger.warn(`Watchdog pet failed: ${watchdogFailureCode(error)}`);
     }
   }
 }

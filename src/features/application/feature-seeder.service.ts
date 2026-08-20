@@ -3,6 +3,7 @@ import { FEATURE_CATALOG } from '../domain/feature-catalog';
 import { FEATURE_QUERY, type FeatureQueryPort } from '../domain/ports/feature-query.port';
 import { FEATURE_REPOSITORY, type FeatureRepositoryPort } from '../domain/ports/feature-repository.port';
 import { FEATURE_SEED_CONFIG, type FeatureSeedConfigPort } from '../domain/ports/feature-seed-config.port';
+import { featureFailureCode } from './feature-failure-code';
 
 /** Seeds absent catalogue rows without allowing unverified configuration to mark success. */
 @Injectable()
@@ -31,8 +32,10 @@ export class FeatureSeederService implements OnModuleInit {
       })));
       this.logger.log(`Seeded ${missing.length} missing feature catalogue rows`);
     } catch (error) {
-      const cause = error as Error;
-      this.logger.error(`Feature seeding failed: ${cause.message}`, cause.stack);
+      // Same port and same boot as the readiness barrier, and this hook runs
+      // first: logging the raw message and stack here would publish the
+      // database path that the barrier's later log withholds.
+      this.logger.error(`Feature seeding failed: ${featureFailureCode(error)}`);
     }
   }
 }

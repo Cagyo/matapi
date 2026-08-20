@@ -132,7 +132,43 @@ describe('WatchdogService', () => {
 
     await service.onApplicationBootstrap();
 
-    expect(error).toHaveBeenCalledWith('Hardware watchdog inactive: WATCHDOG_OPEN_FAILED');
+    expect(error).toHaveBeenCalledWith('Hardware watchdog inactive: WATCHDOG_OPERATION_FAILED');
     expect(error.mock.calls.flat().join(' ')).not.toContain('/dev/watchdog0');
+  });
+
+  it('logs and survives a watchdog device that will not disarm', async () => {
+    const watchdog = fakeWatchdog();
+    watchdog.close.mockRejectedValue(Object.assign(
+      new Error("EIO: i/o error, write '/dev/watchdog'"),
+      { code: 'EIO' },
+    ));
+    const service = new WatchdogService(true, watchdog);
+    const error = loggerErrorSpy(service);
+
+    await service.onApplicationBootstrap();
+
+    await expect(service.onModuleDestroy()).resolves.toBeUndefined();
+    expect(error).toHaveBeenCalledWith('Hardware watchdog disarm failed: EIO');
+    expect(error.mock.calls.flat().join(' ')).not.toContain('/dev/watchdog');
+  });
+
+  it('does not disarm when destroyed before bootstrap', async () => {
+    const watchdog = fakeWatchdog();
+    const service = new WatchdogService(true, watchdog);
+
+    await service.onModuleDestroy();
+
+    expect(watchdog.close).not.toHaveBeenCalled();
+  });
+
+  it('disarms once across repeated destroys', async () => {
+    const watchdog = fakeWatchdog();
+    const service = new WatchdogService(true, watchdog);
+
+    await service.onApplicationBootstrap();
+    await service.onModuleDestroy();
+    await service.onModuleDestroy();
+
+    expect(watchdog.close).toHaveBeenCalledTimes(1);
   });
 });

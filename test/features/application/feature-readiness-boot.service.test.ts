@@ -130,7 +130,7 @@ describe('FeatureReadinessBootService', () => {
     await boot.onApplicationBootstrap();
 
     expect(error).toHaveBeenCalledWith(
-      'Feature readiness verification skipped: FEATURE_VERIFICATION_FAILED',
+      'Feature readiness verification skipped: FEATURE_OPERATION_FAILED',
     );
     expect(error.mock.calls.flat().join(' ')).not.toContain('/opt/home-worker');
   });

@@ -2,6 +2,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { FeatureSeederService } from '../../../src/features/application/feature-seeder.service';
 import { FEATURE_CATALOG } from '../../../src/features/domain/feature-catalog';
 
+function loggerErrorSpy(seeder: FeatureSeederService): ReturnType<typeof vi.spyOn> {
+  const logger = (seeder as unknown as {
+    logger: { error: (message: string) => void };
+  }).logger;
+  return vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+}
+
 describe('FeatureSeederService', () => {
   let seeder: FeatureSeederService;
   let config: { loadEnabled: ReturnType<typeof vi.fn> };
@@ -48,5 +55,31 @@ describe('FeatureSeederService', () => {
       { name: 'zigbee', installed: false, enabled: false },
       { name: 'rtsp', installed: false, enabled: false },
     ]));
+  });
+
+  it('names the failure code without leaking the database path when seeding fails', async () => {
+    query.listAll.mockRejectedValue(Object.assign(
+      new Error('unable to open database file /opt/home-worker/data/worker.db'),
+      { code: 'SQLITE_CANTOPEN' },
+    ));
+    const error = loggerErrorSpy(seeder);
+
+    await expect(seeder.onModuleInit()).resolves.toBeUndefined();
+
+    expect(error).toHaveBeenCalledWith('Feature seeding failed: SQLITE_CANTOPEN');
+    expect(error.mock.calls.flat().join(' ')).not.toContain('/opt/home-worker');
+  });
+
+  it('falls back to a fixed code when the seeding failure code could carry a path', async () => {
+    query.listAll.mockRejectedValue(Object.assign(
+      new Error('seed failed'),
+      { code: 'SQLITE_CANTOPEN: /opt/home-worker/data/worker.db' },
+    ));
+    const error = loggerErrorSpy(seeder);
+
+    await seeder.onModuleInit();
+
+    expect(error).toHaveBeenCalledWith('Feature seeding failed: FEATURE_OPERATION_FAILED');
+    expect(error.mock.calls.flat().join(' ')).not.toContain('/opt/home-worker');
   });
 });

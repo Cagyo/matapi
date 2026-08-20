@@ -7,7 +7,12 @@ export const WATCHDOG = Symbol('WATCHDOG');
  * Pi after its timeout. Device/file concerns live in the adapter.
  */
 export interface WatchdogPort {
-  /** Open the watchdog device. Petting must follow within the kernel timeout. */
+  /**
+   * Open the watchdog device. Petting must follow within the kernel timeout.
+   * Must not leave a resource acquired if it throws: the caller treats a
+   * failed open as "never opened" and will not call `close()`, so an adapter
+   * that acquires a handle and then throws leaks the fd with the device armed.
+   */
   open(): Promise<void>;
 
   /** Pet the watchdog to defer the reboot timer. */
