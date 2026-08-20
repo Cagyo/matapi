@@ -16,6 +16,7 @@ import type {
 import { DriveConnection } from '../../domain/drive-connection.entity';
 import { DriveObjectConflictError } from '../../domain/errors/drive-object-conflict.error';
 import { DriveSetupBusyError } from '../../domain/errors/drive-setup-busy.error';
+import type { ArchiveAdminAlertStateLockPort } from '../../application/ports/archive-admin-alert-outbox.port';
 
 interface Entry {
   connection: DriveConnection;
@@ -32,8 +33,15 @@ interface Entry {
 }
 
 /** In-memory parity adapter for isolated use-case tests. */
-export class InMemoryDriveCredentialRepository implements DriveCredentialRepositoryPort {
+export class InMemoryDriveCredentialRepository implements DriveCredentialRepositoryPort, ArchiveAdminAlertStateLockPort {
   private readonly entries = new Map<string, Entry>();
+  private alertStateTail: Promise<void> = Promise.resolve();
+
+  withArchiveAdminAlertStateLock<T>(operation: () => Promise<T>): Promise<T> {
+    const turn = this.alertStateTail.then(operation);
+    this.alertStateTail = turn.then(() => undefined, () => undefined);
+    return turn;
+  }
 
   async stage(input: StageDriveConnection): Promise<DriveConnection> {
     if ([...this.entries.values()].some(({ connection }) => connection.status === 'staged')) throw new DriveSetupBusyError();
@@ -80,24 +88,26 @@ export class InMemoryDriveCredentialRepository implements DriveCredentialReposit
     return { revision: entry.connection.revision, ...entry.reservations };
   }
 
-  async activate(input: ActivateDriveConnection): Promise<{ active: DriveConnection; retiringId: string | null }> {
-    const staged = this.entries.get(input.stagedId);
-    if (staged?.connection.status !== 'staged' || staged.connection.revision !== input.expectedRevision) throw conflict('Staged Drive connection changed before activation');
-    const current = [...this.entries.values()].find(({ connection }) => connection.status === 'active' || connection.status === 'reauth_required');
-    if (current?.clientIdHash === staged.clientIdHash && current.connection.permissionId === input.permissionId && current.connection.installationId === staged.connection.installationId) {
-      current.client = staged.client && { ...staged.client };
-      current.tokens = staged.tokens && { ...staged.tokens };
-      current.connection = current.connection.status === 'reauth_required'
-        ? current.connection.activate({ ...input, nowMs: input.activatedAtMs })
-        : revise(current.connection, current.connection.revision + 1, input.activatedAtMs);
-      this.entries.delete(input.stagedId);
-      return { active: current.connection, retiringId: null };
-    }
-    if (current) current.connection = current.connection.beginRetirement(input.activatedAtMs);
-    staged.connection = staged.connection.activate({ ...input, nowMs: input.activatedAtMs });
-    staged.receiptId = null;
-    staged.expiresAtMs = null;
-    return { active: staged.connection, retiringId: current?.connection.id ?? null };
+  activate(input: ActivateDriveConnection): Promise<{ active: DriveConnection; retiringId: string | null }> {
+    return this.withArchiveAdminAlertStateLock(async () => {
+      const staged = this.entries.get(input.stagedId);
+      if (staged?.connection.status !== 'staged' || staged.connection.revision !== input.expectedRevision) throw conflict('Staged Drive connection changed before activation');
+      const current = [...this.entries.values()].find(({ connection }) => connection.status === 'active' || connection.status === 'reauth_required');
+      if (current?.clientIdHash === staged.clientIdHash && current.connection.permissionId === input.permissionId && current.connection.installationId === staged.connection.installationId) {
+        current.client = staged.client && { ...staged.client };
+        current.tokens = staged.tokens && { ...staged.tokens };
+        current.connection = current.connection.status === 'reauth_required'
+          ? current.connection.activate({ ...input, nowMs: input.activatedAtMs })
+          : revise(current.connection, current.connection.revision + 1, input.activatedAtMs);
+        this.entries.delete(input.stagedId);
+        return { active: current.connection, retiringId: null };
+      }
+      if (current) current.connection = current.connection.beginRetirement(input.activatedAtMs);
+      staged.connection = staged.connection.activate({ ...input, nowMs: input.activatedAtMs });
+      staged.receiptId = null;
+      staged.expiresAtMs = null;
+      return { active: staged.connection, retiringId: current?.connection.id ?? null };
+    });
   }
 
   async loadActive(): Promise<DriveConnection | null> {
@@ -144,43 +154,53 @@ export class InMemoryDriveCredentialRepository implements DriveCredentialReposit
     return { client: { ...entry.client }, tokens: { ...entry.tokens }, revision: entry.connection.revision };
   }
 
-  async replaceCredentials(generationId: string, expectedRevision: number, client: DriveClientCredentials, tokens: OAuthTokenSet): Promise<DriveConnection> {
-    const entry = this.entries.get(generationId);
-    if (entry?.connection.revision !== expectedRevision) throw conflict('Drive connection credentials changed before replacement');
-    entry.client = { ...client };
-    entry.tokens = { ...tokens };
-    entry.connection = revise(entry.connection, expectedRevision + 1, Date.now());
-    return entry.connection;
+  replaceCredentials(generationId: string, expectedRevision: number, client: DriveClientCredentials, tokens: OAuthTokenSet): Promise<DriveConnection> {
+    return this.withArchiveAdminAlertStateLock(async () => {
+      const entry = this.entries.get(generationId);
+      if (entry?.connection.revision !== expectedRevision) throw conflict('Drive connection credentials changed before replacement');
+      entry.client = { ...client };
+      entry.tokens = { ...tokens };
+      entry.connection = revise(entry.connection, expectedRevision + 1, Date.now());
+      return entry.connection;
+    });
   }
 
-  async mergeRefreshedTokens(input: MergeRefreshedTokens): Promise<boolean> {
-    const entry = this.entries.get(input.generationId);
-    if (!entry || (entry.connection.status !== 'active' && entry.connection.status !== 'reauth_required') || entry.connection.revision !== input.expectedRevision || !entry.tokens) return false;
-    entry.tokens = { ...input.tokens, refreshToken: input.tokens.refreshToken ?? entry.tokens.refreshToken };
-    entry.connection = revise(entry.connection, input.expectedRevision + 1, input.refreshedAtMs);
-    return true;
+  mergeRefreshedTokens(input: MergeRefreshedTokens): Promise<boolean> {
+    return this.withArchiveAdminAlertStateLock(async () => {
+      const entry = this.entries.get(input.generationId);
+      if (!entry || (entry.connection.status !== 'active' && entry.connection.status !== 'reauth_required') || entry.connection.revision !== input.expectedRevision || !entry.tokens) return false;
+      entry.tokens = { ...input.tokens, refreshToken: input.tokens.refreshToken ?? entry.tokens.refreshToken };
+      entry.connection = revise(entry.connection, input.expectedRevision + 1, input.refreshedAtMs);
+      return true;
+    });
   }
 
-  async requireReauthorization(generationId: string, expectedRevision: number, _errorCode: string, atMs: number): Promise<boolean> {
-    const entry = this.entries.get(generationId);
-    if (entry?.connection.status !== 'active' || entry.connection.revision !== expectedRevision) return false;
-    entry.connection = entry.connection.requireReauthorization(atMs);
-    return true;
+  requireReauthorization(generationId: string, expectedRevision: number, _errorCode: string, atMs: number): Promise<boolean> {
+    return this.withArchiveAdminAlertStateLock(async () => {
+      const entry = this.entries.get(generationId);
+      if (entry?.connection.status !== 'active' || entry.connection.revision !== expectedRevision) return false;
+      entry.connection = entry.connection.requireReauthorization(atMs);
+      return true;
+    });
   }
 
-  async beginDisconnect(generationId: string, expectedRevision: number): Promise<DriveConnection> {
-    const entry = this.entries.get(generationId);
-    if (entry?.connection.revision !== expectedRevision || (entry.connection.status !== 'active' && entry.connection.status !== 'reauth_required')) throw conflict('Drive connection changed before disconnection');
-    entry.connection = entry.connection.beginDisconnect(Date.now());
-    return entry.connection;
+  beginDisconnect(generationId: string, expectedRevision: number): Promise<DriveConnection> {
+    return this.withArchiveAdminAlertStateLock(async () => {
+      const entry = this.entries.get(generationId);
+      if (entry?.connection.revision !== expectedRevision || (entry.connection.status !== 'active' && entry.connection.status !== 'reauth_required')) throw conflict('Drive connection changed before disconnection');
+      entry.connection = entry.connection.beginDisconnect(Date.now());
+      return entry.connection;
+    });
   }
 
-  async completeSecretRemoval(generationId: string, terminal: DriveConnectionTerminalStatus, atMs: number, _revocationErrorCode: string | null): Promise<void> {
-    const entry = this.entries.get(generationId);
-    if (!entry) return;
-    entry.connection = terminal === 'retired_unmanaged' ? entry.connection.retireUnmanaged(atMs) : entry.connection.disconnect(atMs);
-    entry.client = null;
-    entry.tokens = null;
+  completeSecretRemoval(generationId: string, terminal: DriveConnectionTerminalStatus, atMs: number, _revocationErrorCode: string | null): Promise<void> {
+    return this.withArchiveAdminAlertStateLock(async () => {
+      const entry = this.entries.get(generationId);
+      if (!entry) return;
+      entry.connection = terminal === 'retired_unmanaged' ? entry.connection.retireUnmanaged(atMs) : entry.connection.disconnect(atMs);
+      entry.client = null;
+      entry.tokens = null;
+    });
   }
 
   async listInterruptedMaintenance(): Promise<readonly DriveConnection[]> {

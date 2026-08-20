@@ -20,3 +20,8 @@ export interface ArchiveAdminAlertOutboxInput {
 export interface ArchiveAdminAlertOutboxPort {
   enqueue(input: ArchiveAdminAlertOutboxInput): Promise<QueuedEvent | null>;
 }
+
+/** Optional in-process transaction boundary for shared credential and alert state. */
+export interface ArchiveAdminAlertStateLockPort {
+  withArchiveAdminAlertStateLock<T>(operation: () => Promise<T>): Promise<T>;
+}

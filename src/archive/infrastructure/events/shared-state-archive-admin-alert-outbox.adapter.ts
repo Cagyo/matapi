@@ -2,24 +2,24 @@ import type { DriveCredentialRepositoryPort } from '../../application/ports/driv
 import type {
   ArchiveAdminAlertOutboxInput,
   ArchiveAdminAlertOutboxPort,
+  ArchiveAdminAlertStateLockPort,
 } from '../../application/ports/archive-admin-alert-outbox.port';
 import type { EventRepositoryPort } from '../../../events/domain/ports/event-repository.port';
 import type { QueuedEvent } from '../../../events/domain/queued-event.entity';
 
 /** In-process parity adapter that serializes credential cooldown and event mutations. */
 export class SharedStateArchiveAdminAlertOutboxAdapter implements ArchiveAdminAlertOutboxPort {
-  private tail: Promise<void> = Promise.resolve();
-
   constructor(
     private readonly credentials: Pick<DriveCredentialRepositoryPort,
-      'loadActive' | 'readAlertCooldowns' | 'compareAndSetAlertCooldowns'>,
+      'loadActive' | 'readAlertCooldowns' | 'compareAndSetAlertCooldowns'>
+      & ArchiveAdminAlertStateLockPort,
     private readonly events: Pick<EventRepositoryPort, 'enqueue'>,
   ) {}
 
   enqueue(input: ArchiveAdminAlertOutboxInput): Promise<QueuedEvent | null> {
-    const turn = this.tail.then(() => this.enqueueExclusive(input));
-    this.tail = turn.then(() => undefined, () => undefined);
-    return turn;
+    return this.credentials.withArchiveAdminAlertStateLock(
+      () => this.enqueueExclusive(input),
+    );
   }
 
   private async enqueueExclusive(input: ArchiveAdminAlertOutboxInput): Promise<QueuedEvent | null> {

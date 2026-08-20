@@ -10,7 +10,10 @@ import type {
   ArchiveAdminAlertKind,
   ArchiveAdminAlertPort,
 } from './ports/archive-admin-alert.port';
-import type { ArchiveAdminAlertActiveFence } from './ports/archive-admin-alert-outbox.port';
+import type {
+  ArchiveAdminAlertActiveFence,
+  ArchiveAdminAlertStateLockPort,
+} from './ports/archive-admin-alert-outbox.port';
 
 export const ARCHIVE_ADMIN_ALERT_COOLDOWN_MS = 60 * 60 * 1_000;
 const MAX_CAS_RETRIES = 3;
@@ -19,6 +22,11 @@ export interface PreparedArchiveAdminAlert {
   alert: ArchiveAdminAlert;
   fence: ArchiveAdminAlertActiveFence;
 }
+
+type AlertCooldownRepository = Pick<
+  DriveCredentialRepositoryPort,
+  'loadActive' | 'readAlertCooldowns' | 'compareAndSetAlertCooldowns'
+> & Partial<ArchiveAdminAlertStateLockPort>;
 
 /**
  * Persists a per-generation cooldown before optional Telegram delivery.
@@ -31,10 +39,7 @@ export class ArchiveAdminAlertService implements ArchiveAdminAlertPort {
 
   constructor(
     @Inject(DRIVE_CREDENTIAL_REPOSITORY)
-    private readonly repository: Pick<
-      DriveCredentialRepositoryPort,
-      'loadActive' | 'readAlertCooldowns' | 'compareAndSetAlertCooldowns'
-    >,
+    private readonly repository: AlertCooldownRepository,
     @Inject(CLOCK) private readonly clock: Pick<ClockPort, 'now'>,
   ) {}
 
@@ -50,12 +55,14 @@ export class ArchiveAdminAlertService implements ArchiveAdminAlertPort {
     kind: ArchiveAdminAlertKind,
     context: Omit<ArchiveAdminAlert, 'kind'>,
   ): Promise<void> {
-    const prepared = await this.prepare(kind, context);
-    if (prepared === null) return;
-    const nowMs = this.clock.now().getTime();
-    const persisted = await this.persistCooldown(prepared.alert.generationId, kind, nowMs);
-    if (!persisted) return;
-    await this.deliver(prepared.alert);
+    const alert = await withAlertStateLock(this.repository, async () => {
+      const prepared = await this.prepare(kind, context);
+      if (prepared === null) return null;
+      const nowMs = this.clock.now().getTime();
+      const persisted = await this.persistCooldown(prepared.alert.generationId, kind, nowMs);
+      return persisted ? prepared.alert : null;
+    });
+    if (alert !== null) await this.deliver(alert);
   }
 
   /** Resolves and sanitizes alert context without mutating cooldown state. */
@@ -109,6 +116,13 @@ export class ArchiveAdminAlertService implements ArchiveAdminAlertPort {
     }
     return false;
   }
+}
+
+function withAlertStateLock<T>(
+  repository: AlertCooldownRepository,
+  operation: () => Promise<T>,
+): Promise<T> {
+  return repository.withArchiveAdminAlertStateLock?.(operation) ?? operation();
 }
 
 function sanitizedIdentifier(value: string | null | undefined): string | null {

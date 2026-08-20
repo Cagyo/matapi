@@ -91,6 +91,83 @@ describe('DurableArchiveAdminAlertAdapter', () => {
     ]);
   });
 
+  it('serializes activation behind the active-fenced outbox commit', async () => {
+    const fixture = await activeFixture();
+    const staged = await fixture.credentials.stage({
+      id: 'generation-2', installationId: 'installation-1',
+      client: { clientId: 'client-2', clientSecret: 'secret-2' }, clientIdHash: 'hash-2',
+      adminUserId: 1, chatId: 1, receiptId: 'receipt-2', createdAtMs: 3, expiresAtMs: 4,
+    });
+    const originalRead = fixture.credentials.readAlertCooldowns.bind(fixture.credentials);
+    let releaseRead!: () => void;
+    let announceRead!: () => void;
+    const readStarted = new Promise<void>((resolve) => { announceRead = resolve; });
+    const readGate = new Promise<void>((resolve) => { releaseRead = resolve; });
+    vi.spyOn(fixture.credentials, 'readAlertCooldowns').mockImplementationOnce(async (id) => {
+      const cooldowns = await originalRead(id);
+      announceRead();
+      await readGate;
+      return cooldowns;
+    });
+    const order: string[] = [];
+    const originalEnqueue = fixture.repository.enqueue.bind(fixture.repository);
+    vi.spyOn(fixture.repository, 'enqueue').mockImplementation(async (event) => {
+      order.push('enqueued');
+      return originalEnqueue(event);
+    });
+    const adapter = new DurableArchiveAdminAlertAdapter(fixture.outbox, fixture.gate, CLOCK);
+
+    const alert = adapter.alert('provider-capacity-blocked', { generationId: 'generation-1' });
+    await readStarted;
+    const activation = fixture.credentials.activate({
+      stagedId: staged.id, expectedRevision: staged.revision, permissionId: 'owner-2',
+      email: null, displayName: null,
+      folders: { rootId: 'root-2', motionId: 'motion-2', backupsId: 'backups-2' },
+      activatedAtMs: 5,
+    }).then((result) => {
+      order.push('activated');
+      return result;
+    });
+    releaseRead();
+
+    await alert;
+    await activation;
+
+    expect(order).toEqual(['enqueued', 'activated']);
+    await expect(fixture.repository.pending()).resolves.toMatchObject([
+      { payload: { kind: 'provider-capacity-blocked' } },
+    ]);
+  });
+
+  it('preserves a different direct cooldown when a durable enqueue fails', async () => {
+    const fixture = await activeFixture();
+    const delivery = { send: vi.fn(async () => undefined) };
+    fixture.gate.register(delivery);
+    let rejectFirst!: (error: Error) => void;
+    vi.spyOn(fixture.repository, 'enqueue').mockImplementationOnce(async () =>
+      new Promise((_, reject) => { rejectFirst = reject; }));
+    const adapter = new DurableArchiveAdminAlertAdapter(fixture.outbox, fixture.gate, CLOCK);
+
+    const failing = adapter.alert('provider-capacity-blocked', { generationId: 'generation-1' });
+    await vi.waitFor(() => expect(fixture.repository.enqueue).toHaveBeenCalledOnce());
+    const direct = fixture.gate.alert('local-disk-pressure', { generationId: 'generation-1' });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    rejectFirst(new Error('injected enqueue failure'));
+
+    await expect(failing).rejects.toThrow('injected enqueue failure');
+    await expect(direct).resolves.toBeUndefined();
+    await adapter.alert('provider-capacity-blocked', { generationId: 'generation-1' });
+
+    expect(delivery.send).toHaveBeenCalledOnce();
+    await expect(fixture.repository.pending()).resolves.toMatchObject([
+      { payload: { kind: 'provider-capacity-blocked' } },
+    ]);
+    await expect(fixture.credentials.readAlertCooldowns('generation-1')).resolves.toMatchObject({
+      'local-disk-pressure': NOW.getTime() + 3_600_000,
+      'provider-capacity-blocked': NOW.getTime() + 3_600_000,
+    });
+  });
+
   it('rejects an alert for an unknown generation', async () => {
     const fixture = await activeFixture();
     const adapter = new DurableArchiveAdminAlertAdapter(fixture.outbox, fixture.gate, CLOCK);

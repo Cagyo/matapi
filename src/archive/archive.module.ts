@@ -52,6 +52,7 @@ import {
 } from './application/ports/archive-admin-alert.port';
 import {
   ARCHIVE_ADMIN_ALERT_OUTBOX,
+  type ArchiveAdminAlertStateLockPort,
   type ArchiveAdminAlertOutboxPort,
 } from './application/ports/archive-admin-alert-outbox.port';
 import { ARCHIVE_REGISTRATION } from './application/ports/archive-registration.port';
@@ -165,7 +166,7 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
       ? {
         provide: SharedStateArchiveAdminAlertOutboxAdapter,
         useFactory: (
-          credentials: DriveCredentialRepositoryPort,
+          credentials: DriveCredentialRepositoryPort & ArchiveAdminAlertStateLockPort,
           events: EventRepositoryPort,
         ) => new SharedStateArchiveAdminAlertOutboxAdapter(credentials, events),
         inject: [DRIVE_CREDENTIAL_REPOSITORY, EVENT_REPOSITORY],
