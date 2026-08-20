@@ -125,8 +125,11 @@ describe('DrizzleDriveFolderReservationRepository', () => {
             return transaction(...args);
           };
         }
-        const value = Reflect.get(target, property, target);
-        return typeof value === 'function' ? value.bind(target) : value;
+        const value: unknown = Reflect.get(target, property, target);
+        if (typeof value === 'function') {
+          return (...args: never[]): unknown => Reflect.apply(value, target, args) as unknown;
+        }
+        return value;
       },
     });
     const instrumentedRepository = new DrizzleDriveFolderReservationRepository(instrumentedDb);

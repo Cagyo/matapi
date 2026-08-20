@@ -16,7 +16,9 @@ const sdk = vi.hoisted(() => ({
 vi.mock("@googleapis/drive", () => ({
   auth: {
     OAuth2: class {
-      setCredentials(): void {}
+      setCredentials(): void {
+        return undefined;
+      }
     },
   },
   drive: () => ({
