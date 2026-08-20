@@ -14,12 +14,12 @@ describe('archive manifest migration', () => {
     databases.push(sqlite);
     migrate(drizzle(sqlite, { schema }), { migrationsFolder: './migrations' });
 
-    const tables = sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>;
+    const tables = sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[];
     expect(tables.map(({ name }) => name)).toEqual(expect.arrayContaining([
       'archive_artifacts', 'drive_object_attempts', 'archive_scheduler_state',
     ]));
 
-    const attemptColumns = sqlite.prepare('PRAGMA table_info(drive_object_attempts)').all() as Array<{ name: string }>;
+    const attemptColumns = sqlite.prepare('PRAGMA table_info(drive_object_attempts)').all() as { name: string }[];
     expect(attemptColumns.map(({ name }) => name)).toEqual(expect.arrayContaining([
       'remote_file_id', 'lease_owner', 'lease_expires_at', 'session_ciphertext',
       'session_nonce', 'session_auth_tag', 'confirmed_offset', 'verified_sha256',

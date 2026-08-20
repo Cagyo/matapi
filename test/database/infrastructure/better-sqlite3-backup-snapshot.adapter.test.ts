@@ -144,8 +144,8 @@ describe('BetterSqlite3BackupSnapshotAdapter', () => {
 
 class RecordingFiles implements BackupSnapshotFileSystem {
   operations: string[] = [];
-  entries: Array<{ name: string; isFile: boolean; mtimeMs: number }> = [];
-  reservationOutcomes: Array<'EEXIST' | 'ok'> = [];
+  entries: { name: string; isFile: boolean; mtimeMs: number }[] = [];
+  reservationOutcomes: ('EEXIST' | 'ok')[] = [];
   publishResult = true;
 
   async ensureDirectory(): Promise<void> { this.operations.push('mkdir'); }

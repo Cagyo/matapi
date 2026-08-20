@@ -10,7 +10,7 @@ type ExecFile = (
 ) => unknown;
 
 export class SystemdFeatureInstallControllerAdapter implements FeatureInstallControllerPort {
-  constructor(private readonly execFile: ExecFile = childExecFile as unknown as ExecFile) {}
+  constructor(private readonly execFile: ExecFile = childExecFile) {}
 
   async start(): Promise<void> {
     await new Promise<void>((resolve, reject) => this.execFile('/usr/bin/sudo', ['-n', '/bin/systemctl', 'start', '--no-block', UNIT], {

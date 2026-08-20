@@ -236,7 +236,7 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
       throw new DriveObjectConflictError('Drive attempt does not belong to the archive artifact');
     }
     const artifact = this.artifacts.get(input.artifactId);
-    if (!artifact || artifact.admission.revision !== input.expectedAdmissionRevision) {
+    if (artifact?.admission.revision !== input.expectedAdmissionRevision) {
       throw new DriveObjectConflictError('Archive admission changed before terminalization');
     }
     const terminalArtifact = artifact.markAdmissionTerminal(input.errorCode, input.nowMs);
@@ -665,7 +665,7 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
 
   private requireRevisionFence(attemptId: string, revision: number, nowMs: number): Entry {
     const entry = this.attempts.get(attemptId);
-    if (!entry || entry.attempt.revision !== revision || (entry.lease?.expiresAtMs ?? -1) > nowMs) {
+    if (entry?.attempt.revision !== revision || (entry.lease?.expiresAtMs ?? -1) > nowMs) {
       throw new DriveObjectConflictError('Drive attempt changed before replacement');
     }
     return entry;
@@ -677,7 +677,7 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
     transition: (artifact: ArchiveArtifact) => ArchiveArtifact,
   ): ArchiveArtifact {
     const artifact = this.artifacts.get(artifactId);
-    if (!artifact || artifact.admission.revision !== expectedRevision) {
+    if (artifact?.admission.revision !== expectedRevision) {
       throw new DriveObjectConflictError('Archive admission changed before transition');
     }
     const next = transition(artifact);

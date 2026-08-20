@@ -7,7 +7,7 @@ const sdk = vi.hoisted(() => ({
   getInput: null as Record<string, unknown> | null,
   createInput: null as Record<string, unknown> | null,
   generateInput: null as Record<string, unknown> | null,
-  listResponse: { files: [], nextPageToken: null, incompleteSearch: false } as Record<string, unknown> | Error,
+  listResponse: { files: [], nextPageToken: null, incompleteSearch: false },
   getResponse: null as Record<string, unknown> | Error | null,
   createResponse: null as Record<string, unknown> | Error,
   generatedIds: ["folder-generated"] as string[],
@@ -180,7 +180,7 @@ function adapterFor(): GoogleDriveFolderAdapter {
       tokens: { accessToken: "access", refreshToken: "refresh", expiryDateMs: null, tokenType: "Bearer", scope: null },
       revision: 1,
     }),
-  } as never);
+  });
 }
 
 function connection(): DriveConnection {

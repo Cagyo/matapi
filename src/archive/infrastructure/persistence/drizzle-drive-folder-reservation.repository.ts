@@ -106,7 +106,7 @@ export class DrizzleDriveFolderReservationRepository implements DriveFolderReser
     try {
       return this.immediate((tx) => {
         const current = this.current(tx, input.replacement.generationId, input.replacement.normalizedPath);
-        if (!current || current.id !== input.expected.id || current.revision !== input.expected.revision
+        if (current?.id !== input.expected.id || current.revision !== input.expected.revision
           || current.folderId !== input.expected.folderId) return lost(current);
 
         const missing = toReservation(current);

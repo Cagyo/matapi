@@ -5,7 +5,7 @@ function shape(value: unknown): unknown {
   if (typeof value === 'function') return 'function';
   if (Array.isArray(value)) return value.map(shape);
   if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.keys(value as object).sort().map((key) => [key, shape((value as Record<string, unknown>)[key])]));
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, shape((value as Record<string, unknown>)[key])]));
   }
   return typeof value;
 }

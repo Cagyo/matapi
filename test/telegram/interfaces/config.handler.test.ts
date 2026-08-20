@@ -109,7 +109,7 @@ describe('ConfigHandler', () => {
       workflows as never,
       drafts,
       navigation as never,
-      availability as never,
+      availability,
     );
 
     const commandCallbacks: Record<string, (...args: any[]) => any> = {};
@@ -238,7 +238,7 @@ describe('ConfigHandler', () => {
       editMessageReplyMarkup,
       reply,
       localeState: localeState('uk'),
-    } as never);
+    });
 
     expect(reply).toHaveBeenCalledWith(catalogFor('uk').home.recovery.unavailable, expect.anything());
     expect(reply).not.toHaveBeenCalledWith(expect.stringContaining('Крок 2'), expect.anything());

@@ -167,7 +167,7 @@ describe('ResolveMotionArchiveContainerUseCase', () => {
   });
 
   it.each([
-    ['incomplete search', { folders: [], nextPageToken: null, incompleteSearch: true } as DriveFolderPage],
+    ['incomplete search', { folders: [], nextPageToken: null, incompleteSearch: true }],
     ['multiple exact candidates', null],
   ] as const)('durably marks %s as a conflict without creating a folder', async (scenario, configuredPage) => {
     const context = createContext(['conflict-marker-id']);

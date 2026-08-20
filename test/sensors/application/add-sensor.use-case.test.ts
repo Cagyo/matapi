@@ -26,7 +26,7 @@ function makeUseCase(seed: Sensor[] = [], available = true): {
       if (!available) throw new FeatureUnavailableError('digital', 'installed-off');
     }),
   };
-  const useCase = new AddSensorUseCase(repo, clock, reload, availability as never);
+  const useCase = new AddSensorUseCase(repo, clock, reload, availability);
   return { useCase, repo, reload, availability };
 }
 

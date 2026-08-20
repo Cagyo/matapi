@@ -14,7 +14,7 @@ describe('motion archive reference migration', () => {
     databases.push(sqlite);
     migrate(drizzle(sqlite, { schema }), { migrationsFolder: './migrations' });
 
-    const columns = sqlite.prepare('PRAGMA table_info(motion_events)').all() as Array<{ name: string }>;
+    const columns = sqlite.prepare('PRAGMA table_info(motion_events)').all() as { name: string }[];
     expect(columns.map(({ name }) => name)).toContain('archive_artifact_id');
     expect(columns.map(({ name }) => name)).not.toEqual(expect.arrayContaining([
       'uploaded_to_gdrive', 'gdrive_file_id',
@@ -47,7 +47,7 @@ describe('motion archive reference migration', () => {
 
     const row = sqlite.prepare('SELECT archive_artifact_id FROM motion_events WHERE id = 1').get() as { archive_artifact_id: string | null };
     expect(row.archive_artifact_id).toBeNull();
-    const columns = sqlite.prepare('PRAGMA table_info(motion_events)').all() as Array<{ name: string }>;
+    const columns = sqlite.prepare('PRAGMA table_info(motion_events)').all() as { name: string }[];
     expect(columns.map(({ name }) => name)).not.toEqual(expect.arrayContaining([
       'uploaded_to_gdrive', 'gdrive_file_id',
     ]));

@@ -14,7 +14,7 @@ describe('Google Drive connections migration', () => {
     databases.push(sqlite);
     migrate(drizzle(sqlite, { schema }), { migrationsFolder: './migrations' });
 
-    const columns = sqlite.prepare('PRAGMA table_info(drive_connections)').all() as Array<{ name: string }>;
+    const columns = sqlite.prepare('PRAGMA table_info(drive_connections)').all() as { name: string }[];
     const names = columns.map(({ name }) => name);
     expect(names).toEqual(expect.arrayContaining([
       'client_envelope', 'token_envelope', 'current_slot', 'staged_slot', 'revision', 'client_id_hash',

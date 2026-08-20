@@ -32,8 +32,7 @@ export class InMemoryFeatureRepository implements FeatureRepositoryPort {
     enabled: boolean;
   }): Promise<Feature | null> {
     const feature = this.features.find((candidate) => candidate.name === input.name);
-    if (!feature
-      || feature.installed !== input.expected.installed
+    if (feature?.installed !== input.expected.installed
       || feature.enabled !== input.expected.enabled
       || feature.attentionReason !== input.expected.attentionReason) return null;
     feature.enabled = input.enabled;
@@ -46,8 +45,7 @@ export class InMemoryFeatureRepository implements FeatureRepositoryPort {
     attentionReason: FeatureAttentionReason | null;
   }): Promise<Feature | null> {
     const feature = this.features.find((candidate) => candidate.name === input.name);
-    if (!feature
-      || feature.installed !== input.expected.installed
+    if (feature?.installed !== input.expected.installed
       || feature.enabled !== input.expected.enabled
       || feature.attentionReason !== input.expected.attentionReason) return null;
     feature.attentionReason = input.attentionReason;

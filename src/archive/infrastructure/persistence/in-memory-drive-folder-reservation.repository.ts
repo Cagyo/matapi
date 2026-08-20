@@ -33,7 +33,7 @@ export class InMemoryDriveFolderReservationRepository implements DriveFolderRese
 
   async markVerified(id: string, expectedRevision: number, nowMs: number): Promise<DriveFolderReservation | null> {
     const current = this.reservations.get(id);
-    if (!current || current.revision !== expectedRevision) return null;
+    if (current?.revision !== expectedRevision) return null;
     const verified = current.verify(nowMs);
     this.reservations.set(id, verified);
     return this.clone(verified);
@@ -41,7 +41,7 @@ export class InMemoryDriveFolderReservationRepository implements DriveFolderRese
 
   async markBlocked(id: string, expectedRevision: number, state: 'detached' | 'conflict', errorCode: string, nowMs: number): Promise<DriveFolderReservation | null> {
     const current = this.reservations.get(id);
-    if (!current || current.revision !== expectedRevision) return null;
+    if (current?.revision !== expectedRevision) return null;
     const blocked = current.block(state, errorCode, nowMs);
     this.reservations.set(id, blocked);
     return this.clone(blocked);
@@ -53,7 +53,7 @@ export class InMemoryDriveFolderReservationRepository implements DriveFolderRese
     nowMs: number;
   }): Promise<{ kind: 'stored'; reservation: DriveFolderReservation } | { kind: 'lost'; current: DriveFolderReservation | null }> {
     const current = this.currentFor(input.replacement.generationId, input.replacement.normalizedPath);
-    if (!current || current.id !== input.expected.id || current.revision !== input.expected.revision
+    if (current?.id !== input.expected.id || current.revision !== input.expected.revision
       || current.folderId !== input.expected.folderId || this.reservations.has(input.replacement.id)
       || this.hasFolderId(input.replacement.folderId)) {
       return { kind: 'lost', current: this.cloneNullable(current) };

@@ -159,7 +159,7 @@ export class DrizzleFeatureInstallJobRepository implements FeatureInstallJobRepo
   private requireActiveJob(tx: JobWriter, id: string, allowQueued: boolean): JobRow {
     const job = tx.select().from(featureInstallJobs).where(eq(featureInstallJobs.id, id)).get();
     const validStatus = job?.status === 'running' || (allowQueued && job?.status === 'queued');
-    if (!job || job.activeSlot !== 1 || !validStatus) {
+    if (job?.activeSlot !== 1 || !validStatus) {
       throw new RangeError(`Install job '${id}' is not active`);
     }
     return job;

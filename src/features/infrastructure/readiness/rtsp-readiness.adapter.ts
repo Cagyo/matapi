@@ -6,7 +6,7 @@ import { defaultExecFile, hasGroups, modeOf, nodeReadinessFiles, READINESS_COMMA
 interface RtspFiles { stat(path: string): Promise<FileStat>; }
 export interface RtspReadinessDependencies { execFile?: FixedExecFile; files?: RtspFiles; }
 
-const ROOT_FILES: ReadonlyArray<readonly [string, number]> = [
+const ROOT_FILES: readonly (readonly [string, number])[] = [
   ['/usr/lib/home-worker/live-stream-net-helper', 0o755],
   ['/usr/lib/home-worker/live-stream-ffmpeg-runner', 0o755],
   ['/etc/systemd/system/homeworker-stream-net.service', 0o644],
@@ -15,7 +15,7 @@ const ROOT_FILES: ReadonlyArray<readonly [string, number]> = [
   ['/etc/tmpfiles.d/homeworker-stream.conf', 0o644],
   ['/etc/home-worker/live-stream-policy.json', 0o600],
 ];
-const RUNTIME_DIRECTORIES: ReadonlyArray<readonly [string, number]> = [
+const RUNTIME_DIRECTORIES: readonly (readonly [string, number])[] = [
   ['/run/home-worker', 0o750],
   ['/run/home-worker/live-stream-config', 0o2730],
   ['/run/home-worker/live-stream-output', 0o3770],
@@ -54,7 +54,7 @@ export class RtspReadinessAdapter implements FeatureReadinessPort {
     }
   }
 
-  private async assertRootFiles(entries: ReadonlyArray<readonly [string, number]>, directories: boolean, expectedGid: number): Promise<void> {
+  private async assertRootFiles(entries: readonly (readonly [string, number])[], directories: boolean, expectedGid: number): Promise<void> {
     for (const [path, expectedMode] of entries) {
       const file = await this.files.stat(path);
       if (file.uid !== 0 || file.gid !== expectedGid || modeOf(file) !== expectedMode || file.isDirectory() !== directories) throw new Error('runtime ownership or mode mismatch');

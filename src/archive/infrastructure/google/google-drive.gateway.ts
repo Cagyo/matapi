@@ -283,14 +283,14 @@ function providerMessage(value: unknown): unknown {
   return providerError(value)?.message;
 }
 
-function providerError(value: unknown): { reason?: unknown; errors?: Array<{ reason?: unknown }>; message?: unknown } | null {
+function providerError(value: unknown): { reason?: unknown; errors?: { reason?: unknown }[]; message?: unknown } | null {
   if (typeof value !== "object" || value === null) return null;
   const response = (value as { response?: unknown }).response;
   if (typeof response !== "object" || response === null) return null;
   const data = (response as { data?: unknown }).data;
   if (typeof data !== "object" || data === null) return null;
   const error = (data as { error?: unknown }).error;
-  return typeof error === "object" && error !== null ? error as { reason?: unknown; errors?: Array<{ reason?: unknown }>; message?: unknown } : null;
+  return typeof error === "object" && error !== null ? error : null;
 }
 
 function safeFailureMessage(status: number | null, reason: string | null): string {

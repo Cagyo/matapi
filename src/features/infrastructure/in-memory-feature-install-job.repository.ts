@@ -21,8 +21,7 @@ export class InMemoryFeatureInstallJobRepository implements FeatureInstallJobRep
   async createQueued(input: CreateFeatureInstallJob): Promise<FeatureInstallJob> {
     return this.serialize(async () => {
       const feature = await this.features.findByName(input.feature);
-      if (!feature
-        || feature.installed !== input.expected.installed
+      if (feature?.installed !== input.expected.installed
         || feature.enabled !== input.expected.enabled) {
         throw new FeatureStateChangedError(input.feature);
       }
@@ -126,7 +125,7 @@ export class InMemoryFeatureInstallJobRepository implements FeatureInstallJobRep
 
   private requireActive(id: string, allowQueued: boolean): FeatureInstallJob {
     const job = this.jobs.get(id);
-    if (!job || job.activeSlot !== 1 || (job.status !== 'running' && !(allowQueued && job.status === 'queued'))) {
+    if (job?.activeSlot !== 1 || (job.status !== 'running' && !(allowQueued && job.status === 'queued'))) {
       throw new RangeError(`Install job '${id}' is not active`);
     }
     return job;
@@ -134,7 +133,7 @@ export class InMemoryFeatureInstallJobRepository implements FeatureInstallJobRep
 
   private requireQueued(id: string): FeatureInstallJob {
     const job = this.jobs.get(id);
-    if (!job || job.activeSlot !== 1 || job.status !== 'queued') {
+    if (job?.activeSlot !== 1 || job.status !== 'queued') {
       throw new RangeError(`Install job '${id}' is not active`);
     }
     return job;
@@ -168,8 +167,7 @@ export class InMemoryFeatureInstallJobRepository implements FeatureInstallJobRep
         },
         enabled: desired.enabled,
       });
-      if (updated
-        && updated.installed === desired.installed
+      if (updated?.installed === desired.installed
         && updated.enabled === desired.enabled
         && updated.attentionReason === desired.attentionReason) return;
       throw new RangeError(`Feature '${name}' state changed before terminalization`);

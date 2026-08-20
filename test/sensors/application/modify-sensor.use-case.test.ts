@@ -35,7 +35,7 @@ function makeUseCase(seed: Sensor[] = [], available = true) {
       if (!available) throw new FeatureUnavailableError('digital', 'installed-off');
     }),
   };
-  return { useCase: new ModifySensorUseCase(repo, clock, reload, availability as never), repo, reload };
+  return { useCase: new ModifySensorUseCase(repo, clock, reload, availability), repo, reload };
 }
 
 describe('ModifySensorUseCase', () => {
