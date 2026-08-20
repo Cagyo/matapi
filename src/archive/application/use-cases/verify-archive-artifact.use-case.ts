@@ -118,19 +118,35 @@ export class VerifyArchiveArtifactUseCase implements ArchiveVerificationPort {
     }
     const webViewLink = remote?.webViewLink ?? null;
     if (!(await hasUnchangedTrustedSource(artifact, this.source, signal))) {
-      return {
+      return this.authorizeCurrentGeneration(active, {
         artifactId,
         cleanupSafe: false,
         webViewLink,
         reason: 'local-changed',
-      };
+      });
     }
-    return {
+    return this.authorizeCurrentGeneration(active, {
       artifactId,
       cleanupSafe: true,
       webViewLink,
       reason: 'verified',
-    };
+    });
+  }
+
+  private async authorizeCurrentGeneration(
+    expected: { id: string; revision: number; installationId: string },
+    result: ArchiveVerification,
+  ): Promise<ArchiveVerification> {
+    return this.lock.runExclusive(async () => {
+      const current = await this.credentials.loadActive();
+      if (current?.status !== 'active'
+        || current.id !== expected.id
+        || current.revision !== expected.revision
+        || current.installationId !== expected.installationId) {
+        return this.result(result.artifactId, 'retired-generation');
+      }
+      return result;
+    });
   }
 
   private result(

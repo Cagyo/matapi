@@ -8,6 +8,7 @@ import { InMemoryArchiveArtifactRepository } from '../../../src/archive/infrastr
 import { ArchiveProviderGateService } from '../../../src/archive/application/archive-provider-gate.service';
 import { InMemoryArchiveProviderStateRepository } from '../../../src/archive/infrastructure/persistence/in-memory-archive-provider-state.repository';
 import { DrivePolicyBlockedError } from '../../../src/archive/domain/errors/drive-policy-blocked.error';
+import { ArchiveRemoteMutationLockService } from '../../../src/archive/application/archive-remote-mutation-lock.service';
 
 const DIGEST = '25bf8e1a2393f1108d37029b3df5593236c755742ec93465bbafa9b290bddcf6';
 const FINGERPRINT = 'b'.repeat(64);
@@ -51,6 +52,24 @@ describe('VerifyArchiveArtifactUseCase', () => {
     fixture.changeActiveGenerationOnLoad('generation-2');
 
     await expect(fixture.verification.inspect(fixture.artifactId)).resolves.toMatchObject({
+      cleanupSafe: false,
+      webViewLink: null,
+      reason: 'retired-generation',
+    });
+  });
+
+  it('fails closed when activation changes generation while the local digest is streaming', async () => {
+    const fixture = await setup();
+    const hash = fixture.pauseLocalHash();
+
+    const inspection = fixture.verification.inspect(fixture.artifactId);
+    await hash.started;
+    expect(fixture.loadedIds).toEqual(['file-1']);
+    await fixture.activateGeneration('generation-2');
+    hash.continue();
+
+    await expect(inspection).resolves.toEqual({
+      artifactId: fixture.artifactId,
       cleanupSafe: false,
       webViewLink: null,
       reason: 'retired-generation',
@@ -137,6 +156,8 @@ async function setup(local = 'local', activeGeneration = 'generation-1') {
   });
   let activeGenerationId = activeGeneration;
   let nextGenerationOnLoad: string | null = null;
+  let hashStarted: (() => void) | null = null;
+  let hashRelease: Promise<void> | null = null;
   const artifact = await repository.register({
     installationId: 'installation-1', kind: 'motion_video', sourceIdentity: 'motion:clip',
     trustedPath: '/motion/clip.mp4', relativePath: 'clip.mp4', size: 5,
@@ -154,9 +175,14 @@ async function setup(local = 'local', activeGeneration = 'generation-1') {
   }, 1_200);
   const loadedIds: string[] = [];
   let lockCalls = 0;
+  const sharedLock = new ArchiveRemoteMutationLockService();
   const source: ArchiveUploadSourcePort = {
     stat: async () => ({ size: 5, mtimeNs: '500000000' }),
-    open: async function* () { yield Buffer.from(local); },
+    open: async function* () {
+      hashStarted?.();
+      if (hashRelease !== null) await hashRelease;
+      yield Buffer.from(local);
+    },
   };
   const verification = new (VerifyArchiveArtifactUseCase as unknown as new (
     ...args: unknown[]
@@ -177,7 +203,7 @@ async function setup(local = 'local', activeGeneration = 'generation-1') {
     {
       runExclusive: async <T>(operation: () => Promise<T>) => {
         lockCalls += 1;
-        return operation();
+        return sharedLock.runExclusive(operation);
       },
     },
   );
@@ -188,6 +214,17 @@ async function setup(local = 'local', activeGeneration = 'generation-1') {
     remote,
     loadedIds,
     changeActiveGenerationOnLoad(generationId: string) { nextGenerationOnLoad = generationId; },
+    activateGeneration: (generationId: string) => sharedLock.runExclusive(async () => {
+      activeGenerationId = generationId;
+    }),
+    pauseLocalHash() {
+      let notifyStarted!: () => void;
+      let release!: () => void;
+      const started = new Promise<void>((resolve) => { notifyStarted = resolve; });
+      hashStarted = notifyStarted;
+      hashRelease = new Promise<void>((resolve) => { release = resolve; });
+      return { started, continue: release };
+    },
     get lockCalls() { return lockCalls; },
   };
 }
