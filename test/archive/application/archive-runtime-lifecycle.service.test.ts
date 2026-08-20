@@ -10,6 +10,8 @@ import type { CreateDatabaseBackupUseCase } from '../../../src/archive/applicati
 import { DriveConnection } from '../../../src/archive/domain/drive-connection.entity';
 import type { ClockPort } from '../../../src/events/domain/ports/clock.port';
 import { ArchiveWakeService } from '../../../src/archive/application/archive-wake.service';
+import { BootRecoveryService } from '../../../src/system/application/boot-recovery.service';
+import { DatabaseRecoveryState } from '../../../src/database/database-recovery.state';
 
 function connection(
   status: 'retiring' | 'disconnecting',
@@ -234,11 +236,12 @@ describe('ArchiveRuntimeLifecycleService', () => {
     const backups = {
       execute: vi.fn(overrides.backup ?? (async () => ({ created: false, reason: 'not_due' }))),
     } as unknown as CreateDatabaseBackupUseCase;
+    const credentials = {
+      expireStaged: vi.fn(overrides.expireStaged ?? (async () => [])),
+      listInterruptedMaintenance: vi.fn(async () => []),
+    };
     const lifecycle = new ArchiveRuntimeLifecycleService(
-      {
-        expireStaged: vi.fn(overrides.expireStaged ?? (async () => [])),
-        listInterruptedMaintenance: vi.fn(async () => []),
-      },
+      credentials,
       {
         recoverExpiredLeases: vi.fn(overrides.recoverExpiredLeases ?? (async () => 0)),
         listUnverifiedArtifactPaths: vi.fn(overrides.listUnverifiedArtifactPaths ?? (async () => [])),
@@ -258,6 +261,7 @@ describe('ArchiveRuntimeLifecycleService', () => {
     }).logger;
     return {
       lifecycle,
+      credentials,
       scheduler,
       snapshots,
       backups,
@@ -491,5 +495,72 @@ describe('ArchiveRuntimeLifecycleService', () => {
 
     expect(fixture.scheduler.startTimers).not.toHaveBeenCalled();
     expect(fixture.wakeSpy).not.toHaveBeenCalled();
+  });
+  it('caches a failed boot instead of re-running the critical chain', async () => {
+    const fixture = bootFixture({
+      expireStaged: async () => { throw new Error('database is locked'); },
+    });
+
+    const first = await fixture.lifecycle.start().catch((error: unknown) => error);
+    const second = await fixture.lifecycle.start().catch((error: unknown) => error);
+
+    // Same rejection object: the second call returned the cached promise
+    // rather than re-executing `recoverBoot()` — which would repeat the
+    // remote Drive mutations in `retire.execute` under degraded conditions.
+    expect(second).toBe(first);
+    expect(fixture.credentials.expireStaged).toHaveBeenCalledOnce();
+  });
+
+  it('runs boot recovery once across the bootstrap hook and the boot-recovery registration', async () => {
+    const fixture = bootFixture({
+      expireStaged: async () => { throw new Error('database is locked'); },
+    });
+
+    // Production order: Nest fires the archive hook before the Telegram
+    // gateway's, which is what reaches `start()` through BootRecoveryService.
+    await expect(fixture.lifecycle.onApplicationBootstrap()).resolves.toBeUndefined();
+    await expect(fixture.lifecycle.start()).rejects.toThrow('database is locked');
+
+    expect(fixture.credentials.expireStaged).toHaveBeenCalledOnce();
+    expect(fixture.error).toHaveBeenCalledOnce();
+  });
+
+  it('shuts down cleanly after a failed boot', async () => {
+    const fixture = bootFixture({
+      expireStaged: async () => { throw new Error('database is locked'); },
+    });
+    await expect(fixture.lifecycle.start()).rejects.toThrow('database is locked');
+
+    await expect(fixture.lifecycle.shutdown()).resolves.toBeUndefined();
+
+    expect(fixture.scheduler.shutdown).toHaveBeenCalledOnce();
+  });
+  it('reports a transient boot failure to boot recovery instead of masking it with a retry', async () => {
+    let attempts = 0;
+    const fixture = bootFixture({
+      expireStaged: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error('database is locked');
+        return [];
+      },
+    });
+    const bootRecovery = new BootRecoveryService(
+      { probe: async () => ({ synchronized: true, offsetMs: null }) },
+      new DatabaseRecoveryState(),
+    );
+    // The registration contract from archive.module.ts.
+    bootRecovery.registerArchiveRecovery(() => fixture.lifecycle.start());
+    vi.spyOn(
+      (bootRecovery as unknown as { logger: { error: (message: string) => void } }).logger,
+      'error',
+    ).mockImplementation(() => undefined);
+
+    await fixture.lifecycle.onApplicationBootstrap();
+    const diagnostics = await bootRecovery.run();
+
+    // A second attempt would have succeeded and broadcast a clean "system
+    // online" over a journal that records a real failure.
+    expect(diagnostics.archiveRecovered).toBe(false);
+    expect(attempts).toBe(1);
   });
 });

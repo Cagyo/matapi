@@ -100,6 +100,7 @@ describe('SystemOnlineNotifier', () => {
     expect(run).toHaveBeenCalledTimes(1);
     expect(notify).not.toHaveBeenCalled();
   });
+
   it('renders a healthy boot notice with no warning lines', async () => {
     const bootRecovery = {
       run: vi.fn(async () => ({

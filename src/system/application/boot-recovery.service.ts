@@ -7,10 +7,12 @@ import {
 } from '../domain/ports/clock-sync.port';
 
 /**
- * Path-free marker for an archive boot failure contained here. The archive
- * context logs its own discriminated code from `onApplicationBootstrap`, so
- * this line only has to record that the failure was caught and did not stop
- * the rest of boot recovery — no error text or path is read.
+ * Path-free marker for an archive boot failure contained here. The `catch`
+ * binds nothing, so this line cannot leak an errno, a message, or a scan
+ * path no matter how the archive context is refactored — safety here does
+ * not rest on any behaviour outside this file. (The errno stays discoverable
+ * in the journal: the archive context logs its own discriminated code from
+ * `onApplicationBootstrap`, which Nest fires first.)
  */
 const ARCHIVE_OPERATION_FAILED = 'ARCHIVE_OPERATION_FAILED';
 

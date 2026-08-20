@@ -172,15 +172,24 @@ describe('system online notice', () => {
     now: new Date('2030-01-01T12:00:00Z'),
   } as const;
 
-  it('renders a healthy boot notice byte-for-byte as before the archive flag', () => {
-    const stamp = format(healthy.now, 'dd.MM.yyyy HH:mm');
+  const allWarnings = {
+    ...healthy,
+    dbRecovery: 'recreated_empty',
+    clockSynchronized: false,
+    archiveRecovered: false,
+  } as const;
 
+  function stampFor(catalog: (typeof catalogs)['en']): string {
+    return format(healthy.now, catalog.presentation.date.format);
+  }
+
+  it('renders a healthy boot notice byte-for-byte as before the archive flag', () => {
     expect(catalogs.en.system.online(healthy))
-      .toBe(`🟢 System online\n🔌 Sensors: 1/2 online\n${stamp}`);
+      .toBe(`🟢 System online\n🔌 Sensors: 1/2 online\n${stampFor(catalogs.en)}`);
     expect(catalogs.ru.system.online(healthy))
-      .toBe(`🟢 Система в сети\n🔌 Датчики: 1/2 в сети\n${stamp}`);
+      .toBe(`🟢 Система в сети\n🔌 Датчики: 1/2 в сети\n${stampFor(catalogs.ru)}`);
     expect(catalogs.uk.system.online(healthy))
-      .toBe(`🟢 Система в мережі\n🔌 Датчики: 1/2 у мережі\n${stamp}`);
+      .toBe(`🟢 Система в мережі\n🔌 Датчики: 1/2 у мережі\n${stampFor(catalogs.uk)}`);
   });
 
   it('adds one archive warning line in every locale when archive recovery failed', () => {
@@ -191,7 +200,6 @@ describe('system online notice', () => {
       expect(failedLines).toHaveLength(healthyLines.length + 1);
       const [added] = failedLines.filter((line) => !healthyLines.includes(line));
       expect(added).toMatch(/^⚠️ /);
-      expect(added).not.toContain('/home/pi');
     }
 
     expect(catalogs.en.system.online({ ...healthy, archiveRecovered: false }))
@@ -200,5 +208,26 @@ describe('system online notice', () => {
       .toContain('архива');
     expect(catalogs.uk.system.online({ ...healthy, archiveRecovered: false }))
       .toContain('архіву');
+  });
+
+  it('orders the archive warning between the database and clock warnings', () => {
+    expect(catalogs.en.system.online(allWarnings).split('\n')).toEqual([
+      '🟢 System online',
+      '🔌 Sensors: 1/2 online',
+      '⚠️ Database was recreated empty after corruption — re-import config.',
+      '⚠️ Archive recovery failed — video uploads and backups are paused until the next restart.',
+      '⚠️ System clock is not synchronized — early timestamps may drift.',
+      stampFor(catalogs.en),
+    ]);
+
+    for (const catalog of [catalogs.ru, catalogs.uk]) {
+      const lines = catalog.system.online(allWarnings).split('\n');
+      const warnings = lines.filter((line) => line.startsWith('⚠️ '));
+
+      expect(lines).toHaveLength(6);
+      expect(warnings).toHaveLength(3);
+      expect(warnings[1]).toBe(lines[3]);
+      expect(warnings[1]).toMatch(/арх[иі]в/);
+    }
   });
 });

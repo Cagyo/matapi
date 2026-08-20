@@ -66,10 +66,7 @@ implements OnApplicationBootstrap, OnModuleDestroy {
   start(): Promise<void> {
     if (this.startPromise !== null) return this.startPromise;
     if (this.closing) return Promise.resolve();
-    this.startPromise = this.recoverBoot().catch((error) => {
-      this.startPromise = null;
-      throw error;
-    });
+    this.startPromise = this.recoverBoot();
     return this.startPromise;
   }
 
