@@ -26,6 +26,62 @@ describe('supported runtime contract', () => {
     expect(ecosystem).toContain('max_memory_restart:');
   });
 
+  const pm2App = async (
+    overrides: Record<string, string> = {},
+  ): Promise<Record<string, number | string>> => {
+    const env = { ...process.env, ...overrides };
+    for (const key of ['PM2_MIN_UPTIME', 'PM2_RESTART_DELAY', 'PM2_MAX_RESTARTS']) {
+      if (!(key in overrides)) {
+        delete env[key];
+      }
+    }
+    const { stdout } = await run(
+      'node',
+      [
+        '-e',
+        'process.stdout.write(JSON.stringify(require(process.argv[1]).apps[0]))',
+        resolve('ecosystem.config.js'),
+      ],
+      { env },
+    );
+    return JSON.parse(stdout) as Record<string, number | string>;
+  };
+
+  it('throttles a crash loop and lets max_restarts actually engage', async () => {
+    const app = await pm2App();
+
+    // Without min_uptime PM2 applies a 1000 ms default: a boot-time fault that
+    // survived just over a second counted as a *stable* restart, so max_restarts
+    // never engaged and the worker looped ~615 times while reporting `online`.
+    expect(app.min_uptime).toBe(60000);
+    expect(app.restart_delay).toBe(10000);
+    expect(app.max_restarts).toBe(10);
+  });
+
+  it('counts a start as successful only if it outlives the OTA health check', async () => {
+    const updater = readFileSync('scripts/update.sh', 'utf8');
+    const healthCheckSeconds = Number(
+      /HEALTH_CHECK_SEC="\$\{UPDATE_HEALTH_CHECK_SEC:-(\d+)\}"/.exec(updater)?.[1],
+    );
+
+    const app = await pm2App();
+
+    expect(healthCheckSeconds).toBeGreaterThan(0);
+    expect(Number(app.min_uptime)).toBeGreaterThanOrEqual(healthCheckSeconds * 1000);
+  });
+
+  it('lets an operator retune the restart policy without editing the file', async () => {
+    const app = await pm2App({
+      PM2_MIN_UPTIME: '15000',
+      PM2_RESTART_DELAY: '2000',
+      PM2_MAX_RESTARTS: '25',
+    });
+
+    expect(app.min_uptime).toBe(15000);
+    expect(app.restart_delay).toBe(2000);
+    expect(app.max_restarts).toBe(25);
+  });
+
   it('provisions immutable installation archive state for the worker group', () => {
     expect(installer).toContain('local ARCHIVE_STATE_DIR="/etc/home-worker"');
     expect(installer).toContain('local ARCHIVE_KEY_PATH="$ARCHIVE_STATE_DIR/archive.key"');

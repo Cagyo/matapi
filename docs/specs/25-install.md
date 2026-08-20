@@ -224,13 +224,35 @@ module.exports = {
     cwd: '/opt/home-worker',
     instances: 1,
     max_memory_restart: '512M',
-    max_restarts: 10,
+    kill_timeout: 10000,
+    max_restarts: 10,      // PM2_MAX_RESTARTS
+    min_uptime: 60000,     // PM2_MIN_UPTIME — below this a restart is "unstable"
+    restart_delay: 10000,  // PM2_RESTART_DELAY — throttles a crash loop
     env: {
       NODE_ENV: 'production'
     }
   }]
 };
 ```
+
+`min_uptime` is what makes `max_restarts` engage; without it PM2's 1000 ms default lets a fast crash loop run
+forever while reporting `online`. See [23-reliability.md](23-reliability.md) → *Crash-Loop Protection* for the
+values and the accepted `errored`-instead-of-looping tradeoff.
+
+### Motion media permissions
+
+`ensure_motion_video_storage_permissions()` runs after feature installation and applies `chmod 755 /home/pi`
+**whether or not the camera feature is installed** (it still skips everything else when there is no
+`/home/pi/motion/videos`, and does nothing at all when `/home/pi` is absent).
+
+The worker scans `MOTION_LOCAL_DIR` (default `/home/pi/motion/videos`) on every boot regardless of the camera
+feature. Raspbian ships `/home/pi` as mode `700`, so without the traversal bit that scan fails with `EACCES` —
+an operational error the archive treats as a real fault — instead of `ENOENT`, which it skips silently.
+Deliberate tradeoff: on a camera-less device this makes `/home/pi` world-readable when it otherwise would not
+be. Accepted because the worker runs as `$USER` out of `$INSTALL_DIR` and keeps nothing under `/home/pi`, and
+because `install-feature.sh` applies the same mode as soon as the camera feature is installed. Do **not**
+"fix" this by repointing `MOTION_LOCAL_DIR`: Motion's own `target_dir` is hardcoded to that path by the
+feature installer and the feature health checks assert it.
 
 ### .gitignore (must include)
 

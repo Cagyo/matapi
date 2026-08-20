@@ -117,6 +117,8 @@ BACKUP_LOCAL_PATH=/opt/home-worker/data/backup.db
 # PM2
 PM2_MAX_MEMORY_RESTART=512M
 PM2_MAX_RESTARTS=10
+PM2_MIN_UPTIME=60000
+PM2_RESTART_DELAY=10000
 ```
 
 The setup wizard generates `CLAIM_ADMIN_TOKEN` during first-time configuration, writes it only to the mode-`0600` `.env`, and shows the complete claim command once on its local completion page. Treat that command as a one-use secret.

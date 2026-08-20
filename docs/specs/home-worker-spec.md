@@ -273,6 +273,8 @@ BACKUP_LOCAL_PATH=/opt/home-worker/data/backup.db
 # PM2
 PM2_MAX_MEMORY_RESTART=512M
 PM2_MAX_RESTARTS=10
+PM2_MIN_UPTIME=60000
+PM2_RESTART_DELAY=10000
 ```
 
 ### 6.2 Defaults Config File (`config/defaults.yml`)
@@ -1296,7 +1298,7 @@ Update script snapshots current state, applies updates, runs 30-second health ch
 
 ### 15.4 Crash-Loop Detection
 
-PM2 configured with `max_restarts: 10`. After 10 consecutive crash restarts, PM2 stops trying. The external heartbeat (UptimeRobot) detects this and alerts. Additionally, the update script sends failure notifications directly via Telegram API (curl) if the worker can't start.
+PM2 configured with `max_restarts: 10`, `min_uptime: 60000` and `restart_delay: 10000`. `max_restarts` counts only restarts where the process died before `min_uptime`; without an explicit `min_uptime` PM2's 1000 ms default let a fast crash loop run indefinitely while still reporting `online`. After 10 such restarts PM2 stops trying and the app goes `errored`. The external heartbeat (UptimeRobot) detects this and alerts. Additionally, the update script sends failure notifications directly via Telegram API (curl) if the worker can't start. See specs 23 and 25 for the current values and the accepted tradeoff.
 
 ---
 
@@ -1321,7 +1323,7 @@ Key steps:
 8. Prompt for Telegram bot token
 9. Write `.env` with defaults from `.env.example`
 10. Run DB migrations
-11. Configure PM2 + systemd autostart (instances: 1, max_memory_restart: 512M, max_restarts: 10)
+11. Configure PM2 + systemd autostart (instances: 1, max_memory_restart: 512M, max_restarts: 10, min_uptime: 60000, restart_delay: 10000)
 12. Mount `/tmp` and `/var/log` as tmpfs (add to `/etc/fstab`)
 13. Start worker
 14. Print: "Bot is running. Send /claim_admin to your bot to become admin."
@@ -1467,7 +1469,7 @@ Pi has a built-in hardware watchdog (`bcm2835_wdt`). If the worker process doesn
 
 ### 21.3 Crash-Loop Protection
 
-PM2 `max_restarts: 10` prevents infinite restart loops. `max_memory_restart: 512M` prevents OOM. External heartbeat detects the resulting downtime.
+PM2 `max_restarts: 10` combined with `min_uptime: 60000` prevents infinite restart loops — the cap only engages for restarts shorter than `min_uptime`, and `restart_delay: 10000` throttles the retries in between. `max_memory_restart: 512M` prevents OOM. External heartbeat detects the resulting downtime.
 
 ---
 

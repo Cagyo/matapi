@@ -1,10 +1,12 @@
 import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
+  existsSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -19,6 +21,48 @@ function motionCase(script: string): string {
 
 function shQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function mode(path: string): number {
+  return statSync(path).mode & 0o777;
+}
+
+/** Sources scripts/install.sh as a library and runs one installer function. */
+function runInstallFunction(
+  tempDir: string,
+  functionName: string,
+  env: Record<string, string>,
+): string {
+  const harnessDir = join(tempDir, 'harness');
+  const fakeBin = join(harnessDir, 'bin');
+  execFileSync('mkdir', ['-p', fakeBin]);
+  // Privileged commands run unprivileged here; `chown` to a foreign owner is the
+  // one step an unprivileged test user cannot perform, so it becomes a no-op.
+  writeFileSync(
+    join(fakeBin, 'sudo'),
+    '#!/bin/sh\nif [ "$1" = "-u" ]; then shift 2; fi\nif [ "$1" = "chown" ]; then exit 0; fi\nexec "$@"\n',
+  );
+  chmodSync(join(fakeBin, 'sudo'), 0o755);
+
+  const harness = join(harnessDir, 'run.sh');
+  writeFileSync(
+    harness,
+    [
+      '#!/bin/bash',
+      'set -euo pipefail',
+      `export PATH=${shQuote(fakeBin)}:"$PATH"`,
+      'export HOME_WORKER_INSTALL_LIBRARY=1',
+      `. ${shQuote(resolve('scripts/install.sh'))}`,
+      functionName,
+      '',
+    ].join('\n'),
+  );
+  chmodSync(harness, 0o755);
+
+  return execFileSync('bash', [harness], {
+    encoding: 'utf8',
+    env: { ...process.env, ...env },
+  });
 }
 
 describe('motion install scripts', () => {
@@ -62,14 +106,68 @@ describe('motion install scripts', () => {
   it('repairs Motion video permissions during the main install flow', () => {
     const script = readFileSync(resolve('scripts/install.sh'), 'utf8');
 
-    expect(script).toContain('ensure_motion_video_storage_permissions');
-    expect(script).toContain('local thumbnails_dir="/home/pi/motion/thumbnails"');
-    expect(script).toContain('sudo mkdir -p "$thumbnails_dir"');
-    expect(script).toContain('sudo chmod 755 /home/pi');
-    expect(script).toContain('sudo chown -R motion:motion /home/pi/motion');
-    expect(script).toContain('sudo chmod 755 /home/pi/motion');
-    expect(script).toContain('sudo chmod -R 775 "$motion_dir"');
-    expect(script).toContain('sudo chmod -R 775 "$thumbnails_dir"');
+    expect(script).toMatch(
+      /install_selected_features\s*\n\s*ensure_motion_video_storage_permissions/,
+    );
+
+    const tempDir = mkdtempSync(join(tmpdir(), 'home-worker-motion-perms-'));
+    try {
+      const motionHome = join(tempDir, 'home', 'pi');
+      const motionDir = join(motionHome, 'motion', 'videos');
+      execFileSync('mkdir', ['-p', motionDir]);
+      writeFileSync(join(motionDir, 'clip.mp4'), 'video');
+      chmodSync(motionHome, 0o700);
+
+      runInstallFunction(tempDir, 'ensure_motion_video_storage_permissions', {
+        HOME_WORKER_MOTION_HOME: motionHome,
+      });
+
+      expect(mode(motionHome)).toBe(0o755);
+      expect(mode(join(motionHome, 'motion'))).toBe(0o755);
+      expect(mode(motionDir)).toBe(0o775);
+      expect(mode(join(motionDir, 'clip.mp4'))).toBe(0o775);
+      expect(mode(join(motionHome, 'motion', 'thumbnails'))).toBe(0o775);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the home directory traversable when the camera feature was never installed', () => {
+    // Regression: the worker scans MOTION_LOCAL_DIR on every boot regardless of
+    // the camera feature. Skipping `chmod 755 /home/pi` because the media
+    // directory is absent left the scan hitting EACCES instead of ENOENT, which
+    // crash-looped a camera-less device.
+    const tempDir = mkdtempSync(join(tmpdir(), 'home-worker-motion-perms-bare-'));
+    try {
+      const motionHome = join(tempDir, 'home', 'pi');
+      execFileSync('mkdir', ['-p', motionHome]);
+      chmodSync(motionHome, 0o700);
+
+      runInstallFunction(tempDir, 'ensure_motion_video_storage_permissions', {
+        HOME_WORKER_MOTION_HOME: motionHome,
+      });
+
+      expect(mode(motionHome)).toBe(0o755);
+      expect(existsSync(join(motionHome, 'motion'))).toBe(false);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does nothing when the Motion home directory does not exist at all', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'home-worker-motion-perms-missing-'));
+    try {
+      const motionHome = join(tempDir, 'home', 'pi');
+
+      expect(() =>
+        runInstallFunction(tempDir, 'ensure_motion_video_storage_permissions', {
+          HOME_WORKER_MOTION_HOME: motionHome,
+        }),
+      ).not.toThrow();
+      expect(existsSync(motionHome)).toBe(false);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it('dispatches the experimental live-stream installer only for an explicit rtsp selection', () => {

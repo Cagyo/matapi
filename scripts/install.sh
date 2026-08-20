@@ -785,21 +785,49 @@ EOF
 }
 
 ensure_motion_video_storage_permissions() {
-  local motion_dir="/home/pi/motion/videos"
-  local thumbnails_dir="/home/pi/motion/thumbnails"
+  local motion_home="/home/pi"
+  if [ "${HOME_WORKER_INSTALL_LIBRARY:-0}" = "1" ]; then
+    motion_home="${HOME_WORKER_MOTION_HOME:?HOME_WORKER_MOTION_HOME is required for installer tests}"
+  fi
+  local motion_root="$motion_home/motion"
+  local motion_dir="$motion_root/videos"
+  local thumbnails_dir="$motion_root/thumbnails"
+
+  # Nothing to repair on a device whose install user is not "pi" and that has no
+  # /home/pi at all; chmod on a missing directory would abort the install.
+  if [ ! -d "$motion_home" ]; then
+    return
+  fi
+
+  # `sudo chmod 755 "$motion_home"` runs in BOTH branches on purpose. The worker
+  # scans MOTION_LOCAL_DIR (default "$motion_home/motion/videos") on every boot
+  # whether or not the camera feature is installed, and Raspbian ships /home/pi
+  # as mode 700. Without the traversal bit that scan fails with EACCES — an
+  # operational error the archive treats as a real fault — instead of ENOENT,
+  # which it skips silently. Skipping the chmod when the media directory is
+  # absent crash-looped a camera-less device (615 restarts; Telegram and GPIO
+  # sensors down for hours).
+  #
+  # Deliberate, plan-sanctioned tradeoff: on a device without the camera feature
+  # this makes /home/pi world-readable when it otherwise would not be. Accepted
+  # because the worker runs as "$USER" out of "$INSTALL_DIR" and stores nothing
+  # under /home/pi, and because install-feature.sh applies the very same mode as
+  # soon as the camera feature is installed.
   if [ ! -d "$motion_dir" ]; then
+    echo "No Motion media yet; keeping $motion_home traversable for the video scan..."
+    sudo chmod 755 "$motion_home"
     return
   fi
 
   echo "Ensuring Motion media storage permissions..."
   sudo mkdir -p "$thumbnails_dir"
-  sudo chmod 755 /home/pi
+  sudo chmod 755 "$motion_home"
   if id motion &>/dev/null; then
-    sudo chown -R motion:motion /home/pi/motion
+    sudo chown -R motion:motion "$motion_root"
   else
-    sudo chown -R "$USER:$USER" /home/pi/motion
+    sudo chown -R "$USER:$USER" "$motion_root"
   fi
-  sudo chmod 755 /home/pi/motion
+  sudo chmod 755 "$motion_root"
   sudo chmod -R 775 "$motion_dir"
   sudo chmod -R 775 "$thumbnails_dir"
 }

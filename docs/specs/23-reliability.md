@@ -181,7 +181,31 @@ Worker catches ENOSPC on every write, degrades gracefully.
 
 ## Crash-Loop Protection
 
-PM2 `max_restarts: 10`. After 10 consecutive crashes, PM2 stops. External heartbeat detects downtime and alerts.
+| Setting | Value | Env override | Purpose |
+|---|---|---|---|
+| `max_restarts` | 10 | `PM2_MAX_RESTARTS` | Consecutive *unstable* restarts before PM2 parks the app in `errored` |
+| `min_uptime` | 60000 ms | `PM2_MIN_UPTIME` | How long a start must survive to count as successful |
+| `restart_delay` | 10000 ms | `PM2_RESTART_DELAY` | Wait between a crash and the next start |
+
+`max_restarts` only counts restarts that PM2 classified as *unstable*, i.e. the process exited before
+`min_uptime`. **`min_uptime` is what makes the cap engage at all.** Without it PM2 applies a 1000 ms default:
+a boot-time fault that crashed the worker just over a second after start counted as a *stable* restart, so the
+cap never fired — one incident logged 615 restarts with `status: online` and `unstable restarts: 0`, spinning
+at roughly one crash per second for hours while Telegram and the GPIO sensors stayed down.
+
+60 s clears the worst-case cold boot on a Raspberry Pi 3 (SQLite open + migrations, sensor registry reload,
+feature verification, archive boot recovery), so a slow-but-legitimate start is never mistaken for a crash
+loop, while every boot-phase failure lands well inside the window.
+
+**Accepted consequence:** a genuinely broken deploy now exhausts the cap in ~2-3 minutes and the worker stays
+**down** in `errored` rather than crash-looping — no alerts until someone intervenes. That is deliberate:
+`errored` is visible (`pm2 list`, external heartbeat) and recoverable (`pm2 restart`, OTA rollback, or
+`pm2 resurrect` on the next boot), whereas an invisible loop is neither. `restart_delay` also helps the OTA
+path: a crash-looping deploy now spends most of each cycle in `waiting restart`, so `update.sh`'s single
+post-restart status sample is likely — though not guaranteed — to see something other than `online` and roll
+back. `min_uptime` must stay at or above `UPDATE_HEALTH_CHECK_SEC` so that a start PM2
+calls successful is at least one the OTA health check would also accept — asserted in
+`test/system/infrastructure/node-runtime-contract.test.ts`.
 
 ## Single Instance Constraint
 
