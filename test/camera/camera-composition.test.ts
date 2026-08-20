@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ArchiveSchedulerHooksService } from '../../src/archive/application/archive-scheduler.service';
+import { ARCHIVE_RUNTIME_SIGNAL } from '../../src/archive/application/ports/archive-runtime-signal.port';
 import { CleanupCoordinatorService } from '../../src/camera/application/cleanup-coordinator.service';
 import { CompletedMotionVideoRecoveryScheduler } from '../../src/camera/application/completed-motion-video-recovery.scheduler';
 import { CameraModule } from '../../src/camera/camera.module';
@@ -78,7 +79,16 @@ describe('CameraModule archive recovery composition', () => {
       useFactory?: (...dependencies: unknown[]) => unknown;
     }
     const providers = Reflect.getMetadata('providers', CameraModule) as unknown[];
-    expect(providers).toContain(CompletedMotionVideoRecoveryScheduler);
+
+    const recoveryProvider = providers.find(
+      (provider): provider is ProviderMetadata => typeof provider === 'object'
+        && provider !== null
+        && 'provide' in provider
+        && provider.provide === CompletedMotionVideoRecoveryScheduler,
+    );
+    expect(recoveryProvider).toMatchObject({
+      inject: expect.arrayContaining([ARCHIVE_RUNTIME_SIGNAL]),
+    });
 
     const hookRegistration = providers.find(
       (provider): provider is ProviderMetadata => typeof provider === 'object'

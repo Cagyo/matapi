@@ -5,6 +5,7 @@ import { AppModule } from '../../src/app.module';
 import { CameraModule } from '../../src/camera/camera.module';
 import { TelegramModule } from '../../src/telegram/telegram.module';
 import { ARCHIVE_REGISTRATION } from '../../src/archive/application/ports/archive-registration.port';
+import { ARCHIVE_RUNTIME_SIGNAL } from '../../src/archive/application/ports/archive-runtime-signal.port';
 import { ARCHIVE_VERIFICATION } from '../../src/archive/application/ports/archive-verification.port';
 import { ARCHIVE_ADMIN_ALERT } from '../../src/archive/application/ports/archive-admin-alert.port';
 import { ArchiveRemoteMutationLockService } from '../../src/archive/application/archive-remote-mutation-lock.service';
@@ -15,6 +16,13 @@ import { ReportDriveStatusUseCase } from '../../src/archive/application/use-case
 import { CLOCK } from '../../src/events/domain/ports/clock.port';
 import { DRIVE_DEVICE_AUTHORIZATION } from '../../src/archive/application/ports/drive-device-authorization.port';
 import { ArchiveSchedulerHooksService } from '../../src/archive/application/archive-scheduler.service';
+import { ArchiveSchedulerService } from '../../src/archive/application/archive-scheduler.service';
+import { ArchiveWakeService } from '../../src/archive/application/archive-wake.service';
+import { ArchiveProviderGateService } from '../../src/archive/application/archive-provider-gate.service';
+import { ARCHIVE_PROVIDER_STATE_REPOSITORY } from '../../src/archive/application/ports/archive-provider-state-repository.port';
+import { DRIVE_FOLDER } from '../../src/archive/application/ports/drive-folder.port';
+import { DRIVE_FOLDER_RESERVATION_REPOSITORY } from '../../src/archive/application/ports/drive-folder-reservation-repository.port';
+import { ResolveMotionArchiveContainerUseCase } from '../../src/archive/application/use-cases/resolve-motion-archive-container.use-case';
 import {
   DriveAuthorizationOutcomeRegistrationService,
 } from '../../src/archive/application/drive-authorization-polling.service';
@@ -23,14 +31,18 @@ import { SubmitDriveClientUseCase } from '../../src/archive/application/use-case
 import { ConfirmDriveAccountUseCase } from '../../src/archive/application/use-cases/confirm-drive-account.use-case';
 import { CancelDriveConnectionUseCase } from '../../src/archive/application/use-cases/cancel-drive-connection.use-case';
 import { DisconnectDriveUseCase } from '../../src/archive/application/use-cases/disconnect-drive.use-case';
+import { RetireDriveConnectionUseCase } from '../../src/archive/application/use-cases/retire-drive-connection.use-case';
+import { UploadDriveObjectAttemptUseCase } from '../../src/archive/application/use-cases/upload-drive-object-attempt.use-case';
 import { ARCHIVE_CLOCK } from '../../src/archive/application/ports/archive-clock.port';
 import { ApplyDriveRetentionUseCase } from '../../src/archive/application/use-cases/apply-drive-retention.use-case';
 import { ARCHIVE_RETENTION } from '../../src/archive/application/ports/archive-retention.port';
+import { DRIVE_ACCOUNT } from '../../src/archive/application/ports/drive-account.port';
 import { DriveClockUnhealthyError } from '../../src/archive/domain/errors/drive-clock-unhealthy.error';
 import { NestFactory } from '@nestjs/core';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative, resolve } from 'node:path';
+import { readdirSync, readFileSync } from 'node:fs';
 
 describe('ArchiveModule composition', () => {
   it('is imported by the application, Camera, and Telegram composition roots', () => {
@@ -43,6 +55,7 @@ describe('ArchiveModule composition', () => {
     const exports = Reflect.getMetadata('exports', ArchiveModule) as unknown[];
     expect(exports).toEqual(expect.arrayContaining([
       ARCHIVE_REGISTRATION,
+      ARCHIVE_RUNTIME_SIGNAL,
       ARCHIVE_VERIFICATION,
       ARCHIVE_RETENTION,
       BeginDriveConnectionUseCase,
@@ -59,6 +72,75 @@ describe('ArchiveModule composition', () => {
     ]));
     expect(exports.some((value) => typeof value === 'function' && /Adapter|Repository/u.test(value.name))).toBe(false);
     expect(exports).not.toContain(ApplyDriveRetentionUseCase);
+  });
+
+  it('binds every durable date-folder, provider-gate, wake, and runtime-signal seam', () => {
+    const providers = Reflect.getMetadata('providers', ArchiveModule) as ProviderRecord[];
+    const tokens = providers.map((provider) => providerToken(provider));
+
+    expect(tokens).toEqual(expect.arrayContaining([
+      DRIVE_FOLDER,
+      DRIVE_FOLDER_RESERVATION_REPOSITORY,
+      ARCHIVE_PROVIDER_STATE_REPOSITORY,
+      ResolveMotionArchiveContainerUseCase,
+      ArchiveProviderGateService,
+      ArchiveWakeService,
+      ARCHIVE_RUNTIME_SIGNAL,
+    ]));
+    expect(providerFor(providers, ARCHIVE_RUNTIME_SIGNAL)).toMatchObject({
+      useExisting: ArchiveSchedulerService,
+    });
+  });
+
+  it('injects one shared mutation lock and provider gate across active-generation work', () => {
+    const providers = Reflect.getMetadata('providers', ArchiveModule) as ProviderRecord[];
+
+    for (const token of [
+      ConfirmDriveAccountUseCase,
+      RetireDriveConnectionUseCase,
+      ResolveMotionArchiveContainerUseCase,
+      ApplyDriveRetentionUseCase,
+      UploadDriveObjectAttemptUseCase,
+      ArchiveSchedulerService,
+    ]) {
+      expect(providerFor(providers, token).inject).toContain(ArchiveRemoteMutationLockService);
+    }
+    for (const token of [
+      ResolveMotionArchiveContainerUseCase,
+      UploadDriveObjectAttemptUseCase,
+      ArchiveSchedulerService,
+    ]) {
+      expect(providerFor(providers, token).inject).toContain(ArchiveProviderGateService);
+    }
+    expect(providerFor(providers, ConfirmDriveAccountUseCase).inject)
+      .toEqual(expect.arrayContaining([ArchiveProviderGateService, ArchiveWakeService]));
+    expect(providerFor(providers, ARCHIVE_VERIFICATION).inject).toContain(ArchiveProviderGateService);
+    expect(providerFor(providers, ReportDriveStatusUseCase).inject).toEqual(expect.arrayContaining([
+      DRIVE_ACCOUNT,
+      ARCHIVE_PROVIDER_STATE_REPOSITORY,
+      ArchiveSchedulerService,
+    ]));
+  });
+
+  it('keeps infrastructure dependencies behind Archive boundaries', () => {
+    const root = resolve(process.cwd(), 'src');
+    const violations: string[] = [];
+    for (const file of typescriptFiles(resolve(root, 'camera'))) {
+      const source = readFileSync(file, 'utf8');
+      if (/from\s+['"][^'"]*archive\/infrastructure(?:\/|['"])/u.test(source)) {
+        violations.push(relative(root, file));
+      }
+    }
+    for (const layer of ['application', 'domain']) {
+      for (const file of typescriptFiles(resolve(root, 'archive', layer))) {
+        const source = readFileSync(file, 'utf8');
+        if (/from\s+['"](?:@googleapis\/drive|drizzle-orm(?:\/[^'"]*)?|[^'"]*camera\/infrastructure(?:\/|['"]))/u.test(source)) {
+          violations.push(relative(root, file));
+        }
+      }
+    }
+
+    expect(violations).toEqual([]);
   });
 
   it('bootstraps the actual Archive and Camera composition graph', async () => {
@@ -166,6 +248,9 @@ describe('ArchiveModule composition', () => {
       { execute: vi.fn(async () => { order.push('reconcile'); }) },
       { execute: vi.fn(async () => { order.push('retention'); }) },
       { alert: vi.fn(async () => undefined) },
+      { loadActive: vi.fn(async () => null) },
+      { run: vi.fn(async ({ operation }: { operation(): Promise<unknown> }) => operation()) },
+      new ArchiveRemoteMutationLockService(),
     );
 
     await hooks.runRemoteMaintenance(
@@ -185,6 +270,9 @@ describe('ArchiveModule composition', () => {
       { execute: vi.fn(async () => undefined) },
       { execute: vi.fn(async () => { throw new DriveClockUnhealthyError(); }) },
       { alert },
+      { loadActive: vi.fn(async () => null) },
+      { run: vi.fn(async ({ operation }: { operation(): Promise<unknown> }) => operation()) },
+      new ArchiveRemoteMutationLockService(),
     );
 
     await expect(hooks.runRemoteMaintenance(
@@ -201,7 +289,14 @@ describe('ArchiveModule composition', () => {
 interface ProviderRecord {
   provide?: unknown;
   inject?: unknown[];
+  useExisting?: unknown;
   useFactory?: (...dependencies: unknown[]) => unknown;
+}
+
+function providerToken(provider: ProviderRecord): unknown {
+  return typeof provider === 'object' && provider !== null && 'provide' in provider
+    ? provider.provide
+    : provider;
 }
 
 function providerFor(providers: ProviderRecord[], token: unknown): ProviderRecord {
@@ -224,4 +319,12 @@ function remoteMaintenanceProvider(): {
   );
   if (provider?.useFactory === undefined) throw new Error('Remote maintenance provider is missing');
   return { useFactory: provider.useFactory };
+}
+
+function typescriptFiles(root: string): string[] {
+  return readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
+    const path = resolve(root, entry.name);
+    if (entry.isDirectory()) return typescriptFiles(path);
+    return entry.isFile() && path.endsWith('.ts') ? [path] : [];
+  });
 }

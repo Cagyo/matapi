@@ -4,6 +4,7 @@ import type { DriveCredentialRepositoryPort } from '../ports/drive-credential-re
 import type { DriveConnection } from '../../domain/drive-connection.entity';
 import type { DriveConnectionTerminalStatus } from '../ports/drive-credential-repository.port';
 import { DriveTemporaryUnavailableError } from '../../domain/errors/drive-temporary-unavailable.error';
+import { ArchiveRemoteMutationLockService } from '../archive-remote-mutation-lock.service';
 
 const REVOCATION_TIMEOUT_MS = 5_000;
 
@@ -13,9 +14,15 @@ export class RetireDriveConnectionUseCase {
     private readonly credentials: Pick<DriveCredentialRepositoryPort, 'loadCredentials' | 'beginDisconnect' | 'completeSecretRemoval'>,
     private readonly authorization: Pick<DriveDeviceAuthorizationPort, 'revoke'>,
     private readonly clock: ClockPort,
+    private readonly remoteMutationLock: Pick<ArchiveRemoteMutationLockService, 'runExclusive'> =
+      new ArchiveRemoteMutationLockService(),
   ) {}
 
   async execute(connection: DriveConnection, signal?: AbortSignal): Promise<void> {
+    await this.remoteMutationLock.runExclusive(() => this.executeExclusive(connection, signal));
+  }
+
+  private async executeExclusive(connection: DriveConnection, signal?: AbortSignal): Promise<void> {
     const terminal = terminalStatus(connection);
     const credentials = await this.credentials.loadCredentials(connection.id);
     if (connection.status === 'active' || connection.status === 'reauth_required') {

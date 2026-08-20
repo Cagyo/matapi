@@ -29,6 +29,10 @@ import {
   type ClockSyncProbePort,
 } from '../system/domain/ports/clock-sync.port';
 import {
+  SYSTEM_HEALTH,
+  type SystemHealthPort,
+} from '../system/domain/ports/system-health.port';
+import {
   ArchiveRuntimeLifecycleService,
 } from './application/archive-runtime-lifecycle.service';
 import { ArchiveRemoteMutationLockService } from './application/archive-remote-mutation-lock.service';
@@ -38,6 +42,8 @@ import {
   ArchiveSchedulerService,
 } from './application/archive-scheduler.service';
 import { ArchiveTransferSemaphoreService } from './application/archive-transfer-semaphore.service';
+import { ArchiveWakeService } from './application/archive-wake.service';
+import { ArchiveProviderGateService } from './application/archive-provider-gate.service';
 import {
   DriveAuthorizationOutcomeRegistrationService,
   DriveAuthorizationPollingService,
@@ -56,6 +62,7 @@ import {
   type ArchiveAdminAlertOutboxPort,
 } from './application/ports/archive-admin-alert-outbox.port';
 import { ARCHIVE_REGISTRATION } from './application/ports/archive-registration.port';
+import { ARCHIVE_RUNTIME_SIGNAL } from './application/ports/archive-runtime-signal.port';
 import { ARCHIVE_VERIFICATION } from './application/ports/archive-verification.port';
 import { ARCHIVE_SECRET_CIPHER } from './application/ports/archive-secret-cipher.port';
 import {
@@ -77,6 +84,18 @@ import {
   DRIVE_DEVICE_AUTHORIZATION,
   type DriveDeviceAuthorizationPort,
 } from './application/ports/drive-device-authorization.port';
+import {
+  DRIVE_FOLDER,
+  type DriveFolderPort,
+} from './application/ports/drive-folder.port';
+import {
+  DRIVE_FOLDER_RESERVATION_REPOSITORY,
+  type DriveFolderReservationRepositoryPort,
+} from './application/ports/drive-folder-reservation-repository.port';
+import {
+  ARCHIVE_PROVIDER_STATE_REPOSITORY,
+  type ArchiveProviderStateRepositoryPort,
+} from './application/ports/archive-provider-state-repository.port';
 import { BeginDriveConnectionUseCase } from './application/use-cases/begin-drive-connection.use-case';
 import { CancelDriveConnectionUseCase } from './application/use-cases/cancel-drive-connection.use-case';
 import { ConfirmDriveAccountUseCase } from './application/use-cases/confirm-drive-account.use-case';
@@ -89,6 +108,7 @@ import { ReportDriveStatusUseCase } from './application/use-cases/report-drive-s
 import { SubmitDriveClientUseCase } from './application/use-cases/submit-drive-client.use-case';
 import { VerifyArchiveArtifactUseCase } from './application/use-cases/verify-archive-artifact.use-case';
 import { ApplyDriveRetentionUseCase } from './application/use-cases/apply-drive-retention.use-case';
+import { ResolveMotionArchiveContainerUseCase } from './application/use-cases/resolve-motion-archive-container.use-case';
 import { DriveClockUnhealthyError } from './domain/errors/drive-clock-unhealthy.error';
 import {
   ARCHIVE_UPLOAD_SOURCE,
@@ -98,6 +118,7 @@ import {
 import { GoogleDeviceAuthorizationAdapter } from './infrastructure/google/google-device-authorization.adapter';
 import { GoogleDriveArchiveAdapter } from './infrastructure/google/google-drive-archive.adapter';
 import { GoogleDriveConnectionAccountAdapter } from './infrastructure/google/google-drive-connection-account.adapter';
+import { GoogleDriveFolderAdapter } from './infrastructure/google/google-drive-folder.adapter';
 import { AesGcmArchiveSecretAdapter } from './infrastructure/persistence/aes-gcm-archive-secret.adapter';
 import { DrizzleArchiveArtifactRepository } from './infrastructure/persistence/drizzle-archive-artifact.repository';
 import { DrizzleDriveCredentialRepository } from './infrastructure/persistence/drizzle-drive-credential.repository';
@@ -107,6 +128,10 @@ import { DrizzleArchiveAdminAlertOutboxAdapter } from './infrastructure/events/d
 import { SharedStateArchiveAdminAlertOutboxAdapter } from './infrastructure/events/shared-state-archive-admin-alert-outbox.adapter';
 import { InMemoryArchiveArtifactRepository } from './infrastructure/persistence/in-memory-archive-artifact.repository';
 import { InMemoryDriveCredentialRepository } from './infrastructure/persistence/in-memory-drive-credential.repository';
+import { DrizzleDriveFolderReservationRepository } from './infrastructure/persistence/drizzle-drive-folder-reservation.repository';
+import { InMemoryDriveFolderReservationRepository } from './infrastructure/persistence/in-memory-drive-folder-reservation.repository';
+import { DrizzleArchiveProviderStateRepository } from './infrastructure/persistence/drizzle-archive-provider-state.repository';
+import { InMemoryArchiveProviderStateRepository } from './infrastructure/persistence/in-memory-archive-provider-state.repository';
 import { SystemArchiveClockAdapter } from './infrastructure/system-archive-clock.adapter';
 import { archiveSchedulerOptionsFromConfig } from './infrastructure/archive-scheduler-options.adapter';
 
@@ -131,14 +156,58 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         ? InMemoryDriveCredentialRepository
         : DrizzleDriveCredentialRepository,
     },
-    archiveMode === 'memory' ? InMemoryArchiveArtifactRepository : DrizzleArchiveArtifactRepository,
+    archiveMode === 'memory'
+      ? InMemoryDriveFolderReservationRepository
+      : DrizzleDriveFolderReservationRepository,
+    {
+      provide: DRIVE_FOLDER_RESERVATION_REPOSITORY,
+      useExisting: archiveMode === 'memory'
+        ? InMemoryDriveFolderReservationRepository
+        : DrizzleDriveFolderReservationRepository,
+    },
+    archiveMode === 'memory'
+      ? InMemoryArchiveProviderStateRepository
+      : DrizzleArchiveProviderStateRepository,
+    {
+      provide: ARCHIVE_PROVIDER_STATE_REPOSITORY,
+      useExisting: archiveMode === 'memory'
+        ? InMemoryArchiveProviderStateRepository
+        : DrizzleArchiveProviderStateRepository,
+    },
+    archiveMode === 'memory'
+      ? {
+        provide: InMemoryArchiveArtifactRepository,
+        useFactory: (reservations: DriveFolderReservationRepositoryPort) =>
+          new InMemoryArchiveArtifactRepository(
+            reservations as InMemoryDriveFolderReservationRepository,
+          ),
+        inject: [DRIVE_FOLDER_RESERVATION_REPOSITORY],
+      }
+      : DrizzleArchiveArtifactRepository,
     {
       provide: ARCHIVE_ARTIFACT_REPOSITORY,
       useExisting: archiveMode === 'memory'
         ? InMemoryArchiveArtifactRepository
         : DrizzleArchiveArtifactRepository,
     },
-    RegisterArchiveArtifactUseCase,
+    ArchiveWakeService,
+    {
+      provide: ArchiveProviderGateService,
+      useFactory: (
+        state: ArchiveProviderStateRepositoryPort,
+        clock: ClockPort,
+      ) => new ArchiveProviderGateService(state, clock),
+      inject: [ARCHIVE_PROVIDER_STATE_REPOSITORY, CLOCK],
+    },
+    {
+      provide: RegisterArchiveArtifactUseCase,
+      useFactory: (
+        repository: ArchiveArtifactRepositoryPort,
+        clock: ClockPort,
+        wake: ArchiveWakeService,
+      ) => new RegisterArchiveArtifactUseCase(repository, clock, wake),
+      inject: [ARCHIVE_ARTIFACT_REPOSITORY, CLOCK, ArchiveWakeService],
+    },
     { provide: ARCHIVE_REGISTRATION, useExisting: RegisterArchiveArtifactUseCase },
     {
       provide: DRIVE_DEVICE_AUTHORIZATION,
@@ -151,7 +220,27 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
       inject: [CLOCK],
     },
     GoogleDriveConnectionAccountAdapter,
-    { provide: DRIVE_ACCOUNT, useExisting: GoogleDriveConnectionAccountAdapter },
+    {
+      provide: DRIVE_ACCOUNT,
+      useFactory: (
+        account: GoogleDriveConnectionAccountAdapter,
+        gate: ArchiveProviderGateService,
+      ): DriveAccountPort => ({
+        resolveAccount: (connection, signal) => account.resolveAccount(connection, signal),
+        resolveManagedFolders: (connection, signal) =>
+          account.resolveManagedFolders(connection, signal),
+        readQuota: (connection, signal) => gate.run({
+          generationId: connection.id,
+          operationClass: 'account',
+          probe: true,
+          operation: () => account.readQuota(connection, signal),
+          signal,
+        }),
+      }),
+      inject: [GoogleDriveConnectionAccountAdapter, ArchiveProviderGateService],
+    },
+    GoogleDriveFolderAdapter,
+    { provide: DRIVE_FOLDER, useExisting: GoogleDriveFolderAdapter },
     {
       provide: GoogleDriveArchiveAdapter,
       useFactory: (credentials: DriveCredentialRepositoryPort) =>
@@ -195,13 +284,65 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
     },
     { provide: ARCHIVE_ADMIN_ALERT, useExisting: DurableArchiveAdminAlertAdapter },
     {
+      provide: ResolveMotionArchiveContainerUseCase,
+      useFactory: (
+        drive: DriveFolderPort,
+        reservations: DriveFolderReservationRepositoryPort,
+        lock: ArchiveRemoteMutationLockService,
+        alerts: ArchiveAdminAlertPort,
+        gate: ArchiveProviderGateService,
+      ) => {
+        const resolver = new ResolveMotionArchiveContainerUseCase(
+          drive,
+          reservations,
+          lock,
+          alerts,
+        );
+        return {
+          execute: (
+            ...args: Parameters<ResolveMotionArchiveContainerUseCase['execute']>
+          ) => gate.run({
+            generationId: args[0].id,
+            operationClass: 'folder',
+            probe: true,
+            operation: () => resolver.execute(...args),
+            signal: args[2],
+          }),
+        } satisfies Pick<ResolveMotionArchiveContainerUseCase, 'execute'>;
+      },
+      inject: [
+        DRIVE_FOLDER,
+        DRIVE_FOLDER_RESERVATION_REPOSITORY,
+        ArchiveRemoteMutationLockService,
+        ARCHIVE_ADMIN_ALERT,
+        ArchiveProviderGateService,
+      ],
+    },
+    {
       provide: ReportDriveStatusUseCase,
       useFactory: (
         credentials: DriveCredentialRepositoryPort,
         repository: ArchiveArtifactRepositoryPort,
         account: DriveAccountPort,
-      ) => new ReportDriveStatusUseCase(credentials, repository, account),
-      inject: [DRIVE_CREDENTIAL_REPOSITORY, ARCHIVE_ARTIFACT_REPOSITORY, DRIVE_ACCOUNT],
+        providerState: ArchiveProviderStateRepositoryPort,
+        clock: ClockPort,
+        scheduler: ArchiveSchedulerService,
+      ) => new ReportDriveStatusUseCase(
+        credentials,
+        repository,
+        account,
+        providerState,
+        clock,
+        scheduler,
+      ),
+      inject: [
+        DRIVE_CREDENTIAL_REPOSITORY,
+        ARCHIVE_ARTIFACT_REPOSITORY,
+        DRIVE_ACCOUNT,
+        ARCHIVE_PROVIDER_STATE_REPOSITORY,
+        CLOCK,
+        ArchiveSchedulerService,
+      ],
     },
     {
       provide: VerifyArchiveArtifactUseCase,
@@ -220,7 +361,32 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         ArchiveRemoteMutationLockService,
       ],
     },
-    { provide: ARCHIVE_VERIFICATION, useExisting: VerifyArchiveArtifactUseCase },
+    {
+      provide: ARCHIVE_VERIFICATION,
+      useFactory: (
+        verification: VerifyArchiveArtifactUseCase,
+        credentials: DriveCredentialRepositoryPort,
+        gate: ArchiveProviderGateService,
+      ) => ({
+        inspect: async (
+          ...args: Parameters<VerifyArchiveArtifactUseCase['inspect']>
+        ) => {
+          const active = await credentials.loadActive();
+          if (active?.status !== 'active') return verification.inspect(...args);
+          return gate.run({
+            generationId: active.id,
+            operationClass: 'reconcile',
+            probe: true,
+            operation: () => verification.inspect(...args),
+          });
+        },
+      }),
+      inject: [
+        VerifyArchiveArtifactUseCase,
+        DRIVE_CREDENTIAL_REPOSITORY,
+        ArchiveProviderGateService,
+      ],
+    },
     {
       provide: ReconcileDriveUseCase,
       useFactory: (
@@ -229,13 +395,22 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         drive: DriveArchivePort,
         source: ArchiveUploadSourcePort,
         alerts: ArchiveAdminAlertPort,
-      ) => new ReconcileDriveUseCase(repository, credentials, drive, source, alerts),
+        resolver: Pick<ResolveMotionArchiveContainerUseCase, 'execute'>,
+      ) => new ReconcileDriveUseCase(
+        repository,
+        credentials,
+        drive,
+        source,
+        alerts,
+        resolver,
+      ),
       inject: [
         ARCHIVE_ARTIFACT_REPOSITORY,
         DRIVE_CREDENTIAL_REPOSITORY,
         DRIVE_ARCHIVE,
         ARCHIVE_UPLOAD_SOURCE,
         ARCHIVE_ADMIN_ALERT,
+        ResolveMotionArchiveContainerUseCase,
       ],
     },
     {
@@ -267,7 +442,7 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
       inject: [
         DRIVE_DEVICE_AUTHORIZATION,
         DRIVE_CREDENTIAL_REPOSITORY,
-        DRIVE_ACCOUNT,
+        GoogleDriveConnectionAccountAdapter,
         DriveAuthorizationOutcomeRegistrationService,
       ],
     },
@@ -296,10 +471,27 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
       provide: ConfirmDriveAccountUseCase,
       useFactory: (
         credentials: DriveCredentialRepositoryPort,
-        account: DriveAccountPort,
+        account: GoogleDriveConnectionAccountAdapter,
         clock: ClockPort,
-      ) => new ConfirmDriveAccountUseCase(credentials, account, clock),
-      inject: [DRIVE_CREDENTIAL_REPOSITORY, DRIVE_ACCOUNT, CLOCK],
+        wake: ArchiveWakeService,
+        lock: ArchiveRemoteMutationLockService,
+        gate: ArchiveProviderGateService,
+      ) => new ConfirmDriveAccountUseCase(
+        credentials,
+        account,
+        clock,
+        wake,
+        lock,
+        gate,
+      ),
+      inject: [
+        DRIVE_CREDENTIAL_REPOSITORY,
+        GoogleDriveConnectionAccountAdapter,
+        CLOCK,
+        ArchiveWakeService,
+        ArchiveRemoteMutationLockService,
+        ArchiveProviderGateService,
+      ],
     },
     {
       provide: CancelDriveConnectionUseCase,
@@ -332,8 +524,14 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         credentials: DriveCredentialRepositoryPort,
         authorization: DriveDeviceAuthorizationPort,
         clock: ClockPort,
-      ) => new RetireDriveConnectionUseCase(credentials, authorization, clock),
-      inject: [DRIVE_CREDENTIAL_REPOSITORY, DRIVE_DEVICE_AUTHORIZATION, CLOCK],
+        lock: ArchiveRemoteMutationLockService,
+      ) => new RetireDriveConnectionUseCase(credentials, authorization, clock, lock),
+      inject: [
+        DRIVE_CREDENTIAL_REPOSITORY,
+        DRIVE_DEVICE_AUTHORIZATION,
+        CLOCK,
+        ArchiveRemoteMutationLockService,
+      ],
     },
     {
       provide: CreateDatabaseBackupUseCase,
@@ -365,9 +563,18 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         cipher: AesGcmArchiveSecretAdapter,
         source: ArchiveUploadSourcePort,
         semaphore: ArchiveTransferSemaphoreService,
+        resolver: Pick<ResolveMotionArchiveContainerUseCase, 'execute'>,
         activityGate: ArchiveRemoteMutationLockService,
+        providerGate: ArchiveProviderGateService,
       ) => new UploadDriveObjectAttemptUseCase(
-        repository, credentials, drive, cipher, source, semaphore, { activityGate },
+        repository,
+        credentials,
+        drive,
+        cipher,
+        source,
+        semaphore,
+        resolver,
+        { activityGate, providerGate },
       ),
       inject: [
         ARCHIVE_ARTIFACT_REPOSITORY,
@@ -376,7 +583,9 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         ARCHIVE_SECRET_CIPHER,
         ARCHIVE_UPLOAD_SOURCE,
         ArchiveTransferSemaphoreService,
+        ResolveMotionArchiveContainerUseCase,
         ArchiveRemoteMutationLockService,
+        ArchiveProviderGateService,
       ],
     },
     {
@@ -384,28 +593,47 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
       useFactory: (
         repository: ArchiveArtifactRepositoryPort,
         credentials: DriveCredentialRepositoryPort,
-        account: DriveAccountPort,
+        account: GoogleDriveConnectionAccountAdapter,
         drive: DriveArchivePort,
         source: ArchiveUploadSourcePort,
         clock: ArchiveClockPort,
         lock: ArchiveRemoteMutationLockService,
-      ) => new ApplyDriveRetentionUseCase(
-        repository,
-        credentials,
-        account,
-        drive,
-        source,
-        clock,
-        lock,
-      ),
+        gate: ArchiveProviderGateService,
+      ) => {
+        const retention = new ApplyDriveRetentionUseCase(
+          repository,
+          credentials,
+          account,
+          drive,
+          source,
+          clock,
+          lock,
+        );
+        return {
+          execute: async (
+            ...args: Parameters<ApplyDriveRetentionUseCase['execute']>
+          ) => {
+            const active = await credentials.loadActive();
+            if (active?.status !== 'active') return retention.execute(...args);
+            return gate.run({
+              generationId: active.id,
+              operationClass: 'delete',
+              probe: true,
+              operation: () => retention.execute(...args),
+              signal: args[1],
+            });
+          },
+        } satisfies ArchiveRetentionPort;
+      },
       inject: [
         ARCHIVE_ARTIFACT_REPOSITORY,
         DRIVE_CREDENTIAL_REPOSITORY,
-        DRIVE_ACCOUNT,
+        GoogleDriveConnectionAccountAdapter,
         DRIVE_ARCHIVE,
         ARCHIVE_UPLOAD_SOURCE,
         ARCHIVE_CLOCK,
         ArchiveRemoteMutationLockService,
+        ArchiveProviderGateService,
       ],
     },
     { provide: ARCHIVE_RETENTION, useExisting: ApplyDriveRetentionUseCase },
@@ -419,6 +647,12 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         lock: ArchiveRemoteMutationLockService,
         retention: ArchiveRetentionPort,
         clock: ClockPort,
+        wake: ArchiveWakeService,
+        providerGate: ArchiveProviderGateService,
+        credentials: DriveCredentialRepositoryPort,
+        providerState: ArchiveProviderStateRepositoryPort,
+        alerts: ArchiveAdminAlertPort,
+        health: SystemHealthPort,
       ) => new ArchiveSchedulerService(
         repository,
         backups,
@@ -428,6 +662,20 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         retention,
         clock,
         archiveSchedulerOptionsFromConfig(loadDefaults().archive, process.env),
+        wake,
+        providerGate,
+        credentials,
+        providerState,
+        alerts,
+        {
+          usagePercent: async () => {
+            const snapshot = await health.collect();
+            if (snapshot.diskUsedBytes === null
+              || snapshot.diskTotalBytes === null
+              || snapshot.diskTotalBytes <= 0) return Number.NaN;
+            return (snapshot.diskUsedBytes / snapshot.diskTotalBytes) * 100;
+          },
+        },
       ),
       inject: [
         ARCHIVE_ARTIFACT_REPOSITORY,
@@ -437,8 +685,15 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         ArchiveRemoteMutationLockService,
         ARCHIVE_RETENTION,
         CLOCK,
+        ArchiveWakeService,
+        ArchiveProviderGateService,
+        DRIVE_CREDENTIAL_REPOSITORY,
+        ARCHIVE_PROVIDER_STATE_REPOSITORY,
+        ARCHIVE_ADMIN_ALERT,
+        SYSTEM_HEALTH,
       ],
     },
+    { provide: ARCHIVE_RUNTIME_SIGNAL, useExisting: ArchiveSchedulerService },
     {
       provide: ArchiveRuntimeLifecycleService,
       useFactory: (
@@ -452,9 +707,10 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         hooks: ArchiveSchedulerHooksService,
         clock: ClockPort,
         lock: ArchiveRemoteMutationLockService,
+        wake: ArchiveWakeService,
       ) => new ArchiveRuntimeLifecycleService(
         credentials, repository, retire, polling, snapshots, backups,
-        scheduler, hooks, clock, lock,
+        scheduler, hooks, clock, lock, wake,
       ),
       inject: [
         DRIVE_CREDENTIAL_REPOSITORY,
@@ -467,6 +723,7 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         ArchiveSchedulerHooksService,
         CLOCK,
         ArchiveRemoteMutationLockService,
+        ArchiveWakeService,
       ],
     },
     {
@@ -476,9 +733,24 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         reconcile: ReconcileDriveUseCase,
         retention: ArchiveRetentionPort,
         alerts: ArchiveAdminAlertPort,
+        credentials: DriveCredentialRepositoryPort,
+        gate: ArchiveProviderGateService,
+        sharedLock: ArchiveRemoteMutationLockService,
       ) => {
-        hooks.registerRemoteMaintenance(async (lock, signal) => {
-          await reconcile.execute({ limit: 20 }, signal, lock);
+        hooks.registerRemoteMaintenance(async (_lock, signal) => {
+          const active = await credentials.loadActive();
+          const reconcileOperation = () => reconcile.execute({ limit: 20 }, signal, sharedLock);
+          if (active?.status === 'active') {
+            await gate.run({
+              generationId: active.id,
+              operationClass: 'reconcile',
+              probe: true,
+              operation: reconcileOperation,
+              signal,
+            });
+          } else {
+            await reconcileOperation();
+          }
           if (signal.aborted) return;
           try {
             await retention.execute({ requiredBytes: 0 }, signal);
@@ -497,6 +769,9 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         ReconcileDriveUseCase,
         ARCHIVE_RETENTION,
         ARCHIVE_ADMIN_ALERT,
+        DRIVE_CREDENTIAL_REPOSITORY,
+        ArchiveProviderGateService,
+        ArchiveRemoteMutationLockService,
       ],
     },
     {
@@ -512,12 +787,9 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
     },
   ],
   exports: [
-    DRIVE_CREDENTIAL_REPOSITORY,
-    ARCHIVE_ARTIFACT_REPOSITORY,
     ARCHIVE_REGISTRATION,
+    ARCHIVE_RUNTIME_SIGNAL,
     ARCHIVE_VERIFICATION,
-    DRIVE_DEVICE_AUTHORIZATION,
-    DRIVE_ACCOUNT,
     BeginDriveConnectionUseCase,
     SubmitDriveClientUseCase,
     ConfirmDriveAccountUseCase,

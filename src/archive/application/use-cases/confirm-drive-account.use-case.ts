@@ -7,6 +7,8 @@ import {
   ArchiveWakeService,
   DEFAULT_ARCHIVE_WAKE_SERVICE,
 } from '../archive-wake.service';
+import type { ArchiveProviderGateService } from '../archive-provider-gate.service';
+import { ArchiveRemoteMutationLockService } from '../archive-remote-mutation-lock.service';
 
 /** Binds the approved account to the exact staged receipt and activates it atomically. */
 export class ConfirmDriveAccountUseCase {
@@ -15,6 +17,9 @@ export class ConfirmDriveAccountUseCase {
     private readonly accounts: DriveAccountPort,
     private readonly clock: ClockPort,
     private readonly wake: ArchiveWakeService = DEFAULT_ARCHIVE_WAKE_SERVICE,
+    private readonly remoteMutationLock: Pick<ArchiveRemoteMutationLockService, 'runExclusive'> =
+      new ArchiveRemoteMutationLockService(),
+    private readonly providerGate?: Pick<ArchiveProviderGateService, 'ensureGeneration'>,
   ) {}
 
   async execute(input: {
@@ -25,8 +30,20 @@ export class ConfirmDriveAccountUseCase {
     effectiveDeadlineMs: number;
     signal: AbortSignal;
   }): Promise<'activated' | 'pending' | 'stale'> {
+    return this.remoteMutationLock.runExclusive(() => this.executeExclusive(input));
+  }
+
+  private async executeExclusive(input: {
+    generationId: string;
+    receiptId: string;
+    adminUserId: number;
+    chatId: number;
+    effectiveDeadlineMs: number;
+    signal: AbortSignal;
+  }): Promise<'activated' | 'pending' | 'stale'> {
     const staged = await this.loadBound(input);
     if (!staged) return 'stale';
+    let activated = false;
     try {
       this.assertLive(input.effectiveDeadlineMs);
       const material = await this.credentials.loadCredentials(staged.id);
@@ -39,10 +56,12 @@ export class ConfirmDriveAccountUseCase {
       const activatedAtMs = this.clock.now().getTime();
       this.assertLive(input.effectiveDeadlineMs, activatedAtMs);
       await this.credentials.activate({ stagedId: staged.id, expectedRevision: staged.revision, ...account, folders, activatedAtMs });
+      activated = true;
+      await this.providerGate?.ensureGeneration(staged.id);
       this.wake.wake();
       return 'activated';
     } catch (error) {
-      await this.credentials.discardStaged(staged.id, input.receiptId);
+      if (!activated) await this.credentials.discardStaged(staged.id, input.receiptId);
       throw error;
     }
   }

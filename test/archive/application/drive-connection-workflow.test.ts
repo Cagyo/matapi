@@ -14,8 +14,81 @@ import { DriveSetupExpiredError } from '../../../src/archive/domain/errors/drive
 import { DriveTemporaryUnavailableError } from '../../../src/archive/domain/errors/drive-temporary-unavailable.error';
 import { InMemoryDriveCredentialRepository } from '../../../src/archive/infrastructure/persistence/in-memory-drive-credential.repository';
 import { ArchiveWakeService } from '../../../src/archive/application/archive-wake.service';
+import { ArchiveRemoteMutationLockService } from '../../../src/archive/application/archive-remote-mutation-lock.service';
+import { ArchiveProviderGateService } from '../../../src/archive/application/archive-provider-gate.service';
+import { InMemoryArchiveProviderStateRepository } from '../../../src/archive/infrastructure/persistence/in-memory-archive-provider-state.repository';
 
 describe('Drive connection workflow', () => {
+  it('activates a staged generation under the shared mutation lock and replaces stale provider state', async () => {
+    const credentials = new InMemoryDriveCredentialRepository();
+    await credentials.stage({
+      id: 'old-generation', installationId: 'installation-1',
+      client: { clientId: 'old.apps.googleusercontent.com', clientSecret: 'old-secret' },
+      clientIdHash: 'old', adminUserId: 1, chatId: 1, receiptId: 'old-receipt',
+      createdAtMs: 1, expiresAtMs: 100,
+    });
+    await credentials.storeExchangedTokens('old-generation', 0, {
+      accessToken: null, refreshToken: 'old-refresh', expiryDateMs: null,
+      tokenType: null, scope: null,
+    });
+    await credentials.activate({
+      stagedId: 'old-generation', expectedRevision: 1, permissionId: 'old-permission',
+      email: null, displayName: null,
+      folders: { rootId: 'old-root', motionId: 'old-motion', backupsId: 'old-backups' },
+      activatedAtMs: 2,
+    });
+    await credentials.stage({
+      id: 'new-generation', installationId: 'installation-1',
+      client: { clientId: 'new.apps.googleusercontent.com', clientSecret: 'new-secret' },
+      clientIdHash: 'new', adminUserId: 7, chatId: 9, receiptId: 'new-receipt',
+      createdAtMs: 3, expiresAtMs: 100,
+    });
+    await credentials.storeExchangedTokens('new-generation', 0, {
+      accessToken: null, refreshToken: 'new-refresh', expiryDateMs: null,
+      tokenType: null, scope: null,
+    });
+    const providerState = new InMemoryArchiveProviderStateRepository();
+    const gate = new ArchiveProviderGateService(providerState, { now: () => new Date(10) });
+    await gate.ensureGeneration('old-generation');
+    await gate.recordFailure(
+      'old-generation',
+      'account',
+      new DrivePolicyBlockedError(),
+    );
+    const lock = new ArchiveRemoteMutationLockService();
+    const exclusive = vi.spyOn(lock, 'runExclusive');
+    const accounts = {
+      resolveAccount: vi.fn().mockResolvedValue({
+        permissionId: 'new-permission', email: null, displayName: null,
+      }),
+      resolveManagedFolders: vi.fn().mockResolvedValue({
+        rootId: 'new-root', motionId: 'new-motion', backupsId: 'new-backups',
+      }),
+    };
+    const workflow = new ConfirmDriveAccountUseCase(
+      credentials,
+      accounts as never,
+      { now: () => new Date(10) },
+      new ArchiveWakeService(),
+      lock,
+      gate,
+    );
+
+    await expect(workflow.execute({
+      generationId: 'new-generation', receiptId: 'new-receipt', adminUserId: 7,
+      chatId: 9, effectiveDeadlineMs: 100, signal: new AbortController().signal,
+    })).resolves.toBe('activated');
+
+    expect(exclusive).toHaveBeenCalledOnce();
+    expect(accounts.resolveAccount).toHaveBeenCalledOnce();
+    expect((await credentials.loadActive())?.id).toBe('new-generation');
+    await expect(providerState.load()).resolves.toMatchObject({
+      generationId: 'new-generation',
+      operationClass: null,
+      blockReason: null,
+    });
+  });
+
   it('wakes archive dispatch after the newly confirmed generation is active', async () => {
     const credentials = new InMemoryDriveCredentialRepository();
     await credentials.stage({

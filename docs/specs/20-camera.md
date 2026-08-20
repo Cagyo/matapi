@@ -67,7 +67,9 @@ Videos cut into 30-second segments (`MOTION_VIDEO_SEGMENT_SEC`).
 
 ### POST /motion/event-end
 - Update `motion_events` row with `endedAt`, `videoPath`
-- Queue file for Google Drive upload
+- Attempt immediate bounded registration, then wake the cooperative recovery
+  traversal even when the file is not stable yet. Camera publishes only the
+  provider-neutral Archive registration/runtime-signal ports.
 
 ### POST /motion/snapshot
 - Update `motion_events` row with `snapshotPath`
@@ -96,6 +98,21 @@ The adapter implements the 2-second cache (`MOTION_SNAPSHOT_CACHE_TTL_MS`) and t
 ## Multiple Cameras
 
 Schema supports multiple cameras from day one. Commands default to first camera if name omitted.
+
+## Completed-video recovery traversal
+
+Boot, Motion completion, and the two-minute safety trigger wake one cooperative
+filesystem traversal. The traversal carries an explicit, copied directory
+cursor; scans at most 64 filesystem entries and registers at most 64 durable
+events per batch; hashes sequentially; and yields to the event loop before its
+immediate continuation. A second wake coalesces behind the active traversal and
+never starts an overlapping scan. Cancellation clears the cursor so the next
+traversal starts from a fresh no-follow validation boundary.
+
+Only a fully completed traversal reports `motionTraversalCompleted(completedAtMs)`
+through `ARCHIVE_RUNTIME_SIGNAL`. Archive records that timestamp with a
+monotonic scheduler CAS and immediately wakes its drain pump. Camera never
+imports an Archive repository or Google adapter.
 
 ## Motion Daemon Lifecycle
 

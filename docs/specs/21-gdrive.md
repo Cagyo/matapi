@@ -46,12 +46,32 @@ discards only the exact staged receipt/generation.
 
 ## Folder and object model
 
-Each installation uses private `Home Worker`, `Motion`, and `Backups` folders.
+Each installation uses private `Home Worker Archive`, `Motion`, and `Backups`
+folders. Motion videos live at the exact nested path
+`Home Worker Archive/Motion/YYYY/MM/DD/filename`; the date is derived once from
+the trusted local Motion relative path. Database backups remain direct children
+of `Backups` and never receive date folders.
+
+Every year, month, and day folder has an immutable generated Drive ID and
+installation/generation/role/path app properties. Discovery is bounded,
+paginated, exact-parent, exact-owner, private, and fail-closed on incomplete
+search or conflicting candidates. The durable folder repository keeps
+append-only reservations: one revision-fenced current row per generation/path,
+with earlier or replaced IDs retained as audit history. Missing IDs are replaced
+through CAS; detached/conflicting branches remain blocked and alert an
+administrator instead of creating parallel folder trees.
+
 Every object is created under an immutable attempt row with installation,
 generation, kind, source fingerprint, digest, and source-time app properties.
 Replacement creates a new attempt; earlier Drive IDs and metadata remain audit
 history. Legacy `motion_events` upload columns remain readable for rollback but
 never authorize local or remote deletion.
+
+Motion admission stores the first validated day path immutably and uses an
+independent admission revision. Retryable admission records an absolute retry
+deadline; terminal invalid/local-source outcomes never re-enter selection.
+Queue selection excludes blocked date prefixes and is stable by creation time
+and artifact ID before applying its bound.
 
 ## Upload and recovery
 
@@ -63,6 +83,13 @@ never authorize local or remote deletion.
 - A stalled transfer does not block snapshots, Motion registration, status,
   local cleanup, backups, or later non-overlapping scheduler work.
 - Shutdown aborts in-flight network work within the PM2 handoff window.
+
+A generation-scoped provider gate persists reason-first cooldown and block
+state before work yields. Transport and rate-limit failures use bounded retry
+slots and one post-cooldown probe; quota, capacity, policy, and reauthorization
+remain distinct. A block from an old generation cannot block staged OAuth or
+account confirmation: confirmation runs under the shared mutation lock, commits
+the new active generation, replaces provider state, and then wakes dispatch.
 
 ## Backup
 
@@ -101,19 +128,39 @@ Archive paths use the existing `MOTION_LOCAL_DIR`, `BACKUP_LOCAL_PATH`,
 `HOME_WORKER_ARCHIVE_KEY_PATH`, and `HOME_WORKER_INSTALLATION_ID_PATH` seams.
 Invalid schedule overrides fall back to checked-in defaults.
 
+The interval is a safety/maintenance cadence, not an upload throttle. One
+monotonic wake epoch drives one continuous single-flight pump: registration,
+generation activation, traversal completion, transfer settlement, and durable
+deadline expiry wake it. After each transfer settles it yields once and admits
+the next eligible backup/video immediately, while preserving backup priority
+and bounded fresh-video/retry fairness. There is never more than one active
+upload. Backup creation, Motion traversal, reconciliation, retention, local
+cleanup, Telegram, and Motion recording remain independently responsive.
+
+One `ArchiveRemoteMutationLockService` instance fences generation activation,
+retirement, folder resolution, reconciliation mutation, and exact-ID retention.
+The provider gate wraps active-generation folder, upload, reconciliation,
+account/quota, and deletion paths; staged OAuth and reauthorization bypass old
+active-generation admission state.
+
 ## Status and alerts
 
-`/gdrive status` reports generation state, permission identity, quota, archive
-counts, last backup/upload/reconcile/cleanup times, reclamation accounting, and
-required actions. Durable, cooldown-deduplicated alerts cover reauthorization,
-policy rejection, quota review, remote detachment/missing objects, retired
-generations, prolonged upload/backup failure, corrupt credentials, clock
-health, and local disk pressure.
+`/gdrive status` reports generation state, permission identity, quota, aggregate
+archive/attempt and queued/retryable-video counts, oldest queue age, unhealthy
+date-folder count, current drain state, traversal/registration progress, last
+backup/upload/reconcile/cleanup times, reclamation accounting, and required
+actions. It never reports a local path, filename, date branch, artifact ID,
+Drive ID, provider body, token, or session URI. Durable,
+cooldown-deduplicated alerts cover reauthorization, policy rejection, quota
+review, unhealthy date-folder branches, provider capacity, prolonged provider
+cooldown/backlog age, remote detachment/missing objects, retired generations,
+prolonged upload/backup failure, corrupt credentials, clock health, and local
+disk pressure.
 
 ## Release evidence
 
 Automated tests use in-memory repositories and fake Google gateways. Before a
 release, an operator must complete and record
-`test/archive/google-drive-live-smoke.md` on the actual supported Raspberry Pi
+`test/archive/google-drive-date-folders-live-smoke.md` on the actual supported Raspberry Pi
 hardware/OS/architecture combinations. CI evidence is not a substitute for
 that on-device and disposable-account record.

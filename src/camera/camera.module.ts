@@ -2,6 +2,10 @@ import { Module } from '@nestjs/common';
 import { readFileSync } from 'node:fs';
 import { ArchiveModule } from '../archive/archive.module';
 import { ARCHIVE_REGISTRATION, type ArchiveRegistrationPort } from '../archive/application/ports/archive-registration.port';
+import {
+  ARCHIVE_RUNTIME_SIGNAL,
+  type ArchiveRuntimeSignalPort,
+} from '../archive/application/ports/archive-runtime-signal.port';
 import { ArchiveSchedulerHooksService } from '../archive/application/archive-scheduler.service';
 import { DatabaseModule } from '../database/database.module';
 import { EventModule } from '../events/event.module';
@@ -226,7 +230,23 @@ function isInstallationId(value: string | undefined): value is string {
       ),
       inject: [MEDIA_REPOSITORY, MEDIA_WRITER, COMPLETED_MOTION_VIDEO, ARCHIVE_REGISTRATION],
     },
-    CompletedMotionVideoRecoveryScheduler,
+    {
+      provide: CompletedMotionVideoRecoveryScheduler,
+      useFactory: (
+        cameraMode: CameraMode,
+        registration: RegisterCompletedMotionVideosUseCase,
+        progress: ArchiveRuntimeSignalPort,
+      ) => new CompletedMotionVideoRecoveryScheduler(
+        cameraMode,
+        registration,
+        progress,
+      ),
+      inject: [
+        CAMERA_MODE,
+        RegisterCompletedMotionVideosUseCase,
+        ARCHIVE_RUNTIME_SIGNAL,
+      ],
+    },
     {
       provide: 'ARCHIVE_CAMERA_SCHEDULER_HOOK_REGISTRATION',
       useFactory: (

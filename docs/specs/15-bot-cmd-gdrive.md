@@ -57,11 +57,22 @@ never copied into a reply.
 ## Status
 
 The handler calls `ReportDriveStatusUseCase` and reports the active generation,
-permission identity, quota, archive/attempt counts, last successful operations,
-reclamation state, detached/missing objects, retired audit generations, and
-required action. Folder links are shown only in the administrator's private
-chat. Errors are sanitized and never include credentials, tokens, session URLs,
-provider response bodies, or bot-token-bearing URLs.
+permission identity, quota, aggregate artifact/attempt counts, last successful
+backup/upload/reconciliation/cleanup times, last completed Motion traversal,
+last artifact registration, reclamation state, detached/missing objects, and
+retired audit generations. Queue reporting is aggregate-only: queued and
+retryable video counts, oldest queued-video age, unhealthy date-folder count,
+and one drain state (`active`, `idle`, `cooling-down`, `branch-blocked`,
+`quota-blocked`, `capacity-blocked`, `policy-blocked`, or
+`reauthorization-required`). Required actions remain explicit.
+
+Folder links are shown only in the administrator's private chat. Errors are
+sanitized and never include credentials, tokens, session URLs, local paths,
+filenames, date branches, Drive object IDs, provider response bodies, or
+bot-token-bearing URLs. Objects created by an older release directly under the
+Motion folder remain flat audit objects until exact reconciliation/replacement;
+status must warn when such an object needs attention and must not imply that it
+was silently moved into a date folder.
 
 ## Disconnect
 

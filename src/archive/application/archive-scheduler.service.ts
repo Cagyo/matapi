@@ -27,6 +27,7 @@ import type {
 } from './ports/archive-provider-state-repository.port';
 import type { LocalStoragePort } from '../../camera/domain/ports/local-storage.port';
 import type { ArchiveSchedulerActivitySnapshot } from './use-cases/report-drive-status.use-case';
+import type { ArchiveRuntimeSignalPort } from './ports/archive-runtime-signal.port';
 
 const DEFAULT_INTERVAL_MS = 2 * 60 * 1_000;
 const DEFAULT_LEASE_MS = 5 * 60 * 1_000;
@@ -90,7 +91,7 @@ export interface ArchiveSchedulerOptions {
  * Motion reconciliation, local cleanup, or a later non-overlapping tick.
  */
 @Injectable()
-export class ArchiveSchedulerService {
+export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
   private readonly logger = new Logger(ArchiveSchedulerService.name);
   private readonly intervalMs: number;
   private readonly leaseMs: number;
@@ -133,6 +134,26 @@ export class ArchiveSchedulerService {
 
   readActivitySnapshot(): ArchiveSchedulerActivitySnapshot | null {
     return this.activity === null ? null : { ...this.activity };
+  }
+
+  async motionTraversalCompleted(completedAtMs: number): Promise<void> {
+    if (!Number.isSafeInteger(completedAtMs) || completedAtMs < 0) {
+      throw new Error('Motion traversal completion time is invalid');
+    }
+    for (;;) {
+      const state = await this.repository.readSchedulerState();
+      if (state.lastMotionTraversalSuccessMs !== null
+        && state.lastMotionTraversalSuccessMs >= completedAtMs) {
+        this.wake.wake();
+        return;
+      }
+      if (await this.repository.compareAndSetSchedulerState(state.revision, {
+        lastMotionTraversalSuccessMs: completedAtMs,
+      })) {
+        this.wake.wake();
+        return;
+      }
+    }
   }
 
   startTimers(): void {

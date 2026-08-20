@@ -225,6 +225,88 @@ describe('ArchiveSchedulerService', () => {
     vi.restoreAllMocks();
   });
 
+  it('persists Motion traversal progress by scheduler CAS and wakes the drain pump', async () => {
+    const fixture = setup();
+    const before = fixture.wake.snapshot();
+    fixture.repository.readSchedulerState.mockResolvedValueOnce({
+      revision: 7,
+      backupLeaseOwner: null,
+      backupLeaseExpiresAtMs: null,
+      lastBackupSuccessMs: null,
+      lastUploadSuccessMs: null,
+      lastReconcileSuccessMs: null,
+      lastCleanupSuccessMs: null,
+      lastMotionTraversalSuccessMs: 100,
+      lastArtifactRegistrationSuccessMs: null,
+    });
+
+    await fixture.scheduler.motionTraversalCompleted(200);
+
+    expect(fixture.repository.compareAndSetSchedulerState).toHaveBeenCalledWith(7, {
+      lastMotionTraversalSuccessMs: 200,
+    });
+    expect(fixture.wake.snapshot()).toBe(before + 1);
+  });
+
+  it('keeps Motion traversal progress monotonic and retries a lost scheduler CAS', async () => {
+    const fixture = setup();
+    fixture.repository.readSchedulerState
+      .mockResolvedValueOnce({
+        revision: 7,
+        backupLeaseOwner: null,
+        backupLeaseExpiresAtMs: null,
+        lastBackupSuccessMs: null,
+        lastUploadSuccessMs: null,
+        lastReconcileSuccessMs: null,
+        lastCleanupSuccessMs: null,
+        lastMotionTraversalSuccessMs: 100,
+        lastArtifactRegistrationSuccessMs: null,
+      })
+      .mockResolvedValueOnce({
+        revision: 8,
+        backupLeaseOwner: null,
+        backupLeaseExpiresAtMs: null,
+        lastBackupSuccessMs: null,
+        lastUploadSuccessMs: null,
+        lastReconcileSuccessMs: null,
+        lastCleanupSuccessMs: null,
+        lastMotionTraversalSuccessMs: 150,
+        lastArtifactRegistrationSuccessMs: null,
+      })
+      .mockResolvedValueOnce({
+        revision: 9,
+        backupLeaseOwner: null,
+        backupLeaseExpiresAtMs: null,
+        lastBackupSuccessMs: null,
+        lastUploadSuccessMs: null,
+        lastReconcileSuccessMs: null,
+        lastCleanupSuccessMs: null,
+        lastMotionTraversalSuccessMs: 300,
+        lastArtifactRegistrationSuccessMs: null,
+      });
+    fixture.repository.compareAndSetSchedulerState
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+
+    await fixture.scheduler.motionTraversalCompleted(200);
+    await fixture.scheduler.motionTraversalCompleted(150);
+
+    expect(fixture.repository.compareAndSetSchedulerState.mock.calls).toEqual([
+      [7, { lastMotionTraversalSuccessMs: 200 }],
+      [8, { lastMotionTraversalSuccessMs: 200 }],
+    ]);
+  });
+
+  it.each([-1, Number.NaN, Number.POSITIVE_INFINITY, 1.5])(
+    'rejects invalid Motion traversal progress: %s',
+    async (completedAtMs) => {
+      const fixture = setup();
+      await expect(fixture.scheduler.motionTraversalCompleted(completedAtMs))
+        .rejects.toThrow('Motion traversal completion time is invalid');
+      expect(fixture.repository.compareAndSetSchedulerState).not.toHaveBeenCalled();
+    },
+  );
+
   it('does not lose a registration between the final empty read and wait arming', async () => {
     const fixture = setup();
     vi.mocked(fixture.repository.claimNextAttempt).mockResolvedValue(null);

@@ -2,7 +2,7 @@ import 'reflect-metadata';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 interface Provider {
-  provide?: { description?: string };
+  provide?: { description?: string; name?: string };
   useFactory?: () => unknown;
   useExisting?: { description?: string };
   inject?: { description?: string }[];
@@ -21,11 +21,17 @@ async function runtimeAdapters(mode: 'real' | 'stub') {
   };
   const gateway = providers.find((candidate) => candidate.provide?.description === 'LIVE_STREAM_GATEWAY');
   const probe = providers.find((candidate) => candidate.provide?.description === 'LIVE_SOURCE_PROBE');
+  const recovery = providers.find(
+    (candidate) => candidate.provide?.name === 'CompletedMotionVideoRecoveryScheduler',
+  );
   return {
     egress: create('STREAM_EGRESS'),
     sandbox: create('STREAM_SANDBOX'),
     gatewayInjectsRuntime: gateway?.inject?.some((token) => token.description === 'RTSP_STREAM_RUNTIME'),
     probeCoordinator: probe?.useExisting?.description,
+    recoveryRuntimeSignal: recovery?.inject?.some(
+      (token) => token.description === 'ARCHIVE_RUNTIME_SIGNAL',
+    ),
   };
 }
 
@@ -41,6 +47,7 @@ describe('CameraModule restricted RTSP runtime composition', () => {
     expect(adapters.sandbox?.constructor.name).toBe('SystemdFfmpegStreamAdapter');
     expect(adapters.gatewayInjectsRuntime).toBe(true);
     expect(adapters.probeCoordinator).toBe('RTSP_RUNTIME_COORDINATOR');
+    expect(adapters.recoveryRuntimeSignal).toBe(true);
   }, 15_000);
 
   it('keeps both privileged runtime ports unavailable in stub mode', async () => {
@@ -48,5 +55,6 @@ describe('CameraModule restricted RTSP runtime composition', () => {
     expect(adapters.egress?.constructor.name).toBe('UnavailableStreamEgressAdapter');
     expect(adapters.sandbox?.constructor.name).toBe('UnavailableStreamSandboxAdapter');
     expect(adapters.gatewayInjectsRuntime).toBe(true);
+    expect(adapters.recoveryRuntimeSignal).toBe(true);
   }, 15_000);
 });
