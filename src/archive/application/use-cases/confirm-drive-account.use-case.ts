@@ -3,6 +3,10 @@ import type { DriveAccountPort } from '../ports/drive-account.port';
 import type { DriveCredentialRepositoryPort } from '../ports/drive-credential-repository.port';
 import { DriveConfigurationError } from '../../domain/errors/drive-configuration.error';
 import { DriveSetupExpiredError } from '../../domain/errors/drive-setup-expired.error';
+import {
+  ArchiveWakeService,
+  DEFAULT_ARCHIVE_WAKE_SERVICE,
+} from '../archive-wake.service';
 
 /** Binds the approved account to the exact staged receipt and activates it atomically. */
 export class ConfirmDriveAccountUseCase {
@@ -10,6 +14,7 @@ export class ConfirmDriveAccountUseCase {
     private readonly credentials: Pick<DriveCredentialRepositoryPort, 'loadStaged' | 'loadCredentials' | 'activate' | 'discardStaged'>,
     private readonly accounts: DriveAccountPort,
     private readonly clock: ClockPort,
+    private readonly wake: ArchiveWakeService = DEFAULT_ARCHIVE_WAKE_SERVICE,
   ) {}
 
   async execute(input: {
@@ -34,6 +39,7 @@ export class ConfirmDriveAccountUseCase {
       const activatedAtMs = this.clock.now().getTime();
       this.assertLive(input.effectiveDeadlineMs, activatedAtMs);
       await this.credentials.activate({ stagedId: staged.id, expectedRevision: staged.revision, ...account, folders, activatedAtMs });
+      this.wake.wake();
       return 'activated';
     } catch (error) {
       await this.credentials.discardStaged(staged.id, input.receiptId);

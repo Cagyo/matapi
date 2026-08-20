@@ -1050,19 +1050,26 @@ function queuePriority(input: ClaimAttempt) {
 }
 
 function emptySchedulerState(): ArchiveSchedulerState {
-  return { revision: 0, backupLeaseOwner: null, backupLeaseExpiresAtMs: null, lastBackupSuccessMs: null, lastUploadSuccessMs: null, lastReconcileSuccessMs: null, lastCleanupSuccessMs: null };
+  return {
+    revision: 0, backupLeaseOwner: null, backupLeaseExpiresAtMs: null,
+    lastBackupSuccessMs: null, lastUploadSuccessMs: null,
+    lastReconcileSuccessMs: null, lastCleanupSuccessMs: null,
+    lastArtifactRegistrationSuccessMs: null,
+  };
 }
 
 function schedulerRow(state: ArchiveSchedulerState) {
   return { id: 1, revision: state.revision, backupLeaseOwner: state.backupLeaseOwner, backupLeaseExpiresAt: state.backupLeaseExpiresAtMs,
     lastBackupSuccessMs: state.lastBackupSuccessMs, lastUploadSuccessMs: state.lastUploadSuccessMs,
-    lastReconcileSuccessMs: state.lastReconcileSuccessMs, lastCleanupSuccessMs: state.lastCleanupSuccessMs };
+    lastReconcileSuccessMs: state.lastReconcileSuccessMs, lastCleanupSuccessMs: state.lastCleanupSuccessMs,
+    lastArtifactRegistrationSuccessMs: state.lastArtifactRegistrationSuccessMs };
 }
 
 function toScheduler(row: typeof archiveSchedulerState.$inferSelect): ArchiveSchedulerState {
   return { revision: row.revision, backupLeaseOwner: row.backupLeaseOwner, backupLeaseExpiresAtMs: row.backupLeaseExpiresAt,
     lastBackupSuccessMs: row.lastBackupSuccessMs, lastUploadSuccessMs: row.lastUploadSuccessMs,
-    lastReconcileSuccessMs: row.lastReconcileSuccessMs, lastCleanupSuccessMs: row.lastCleanupSuccessMs };
+    lastReconcileSuccessMs: row.lastReconcileSuccessMs, lastCleanupSuccessMs: row.lastCleanupSuccessMs,
+    lastArtifactRegistrationSuccessMs: row.lastArtifactRegistrationSuccessMs };
 }
 
 function validateClaim(input: ClaimAttempt): void {

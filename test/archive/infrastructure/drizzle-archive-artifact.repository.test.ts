@@ -584,8 +584,15 @@ describe('DrizzleArchiveArtifactRepository', () => {
     const verified = (await repository.listAttempts(artifact.id))[0];
     expect(verified).toMatchObject({ state: 'verified', verifiedObject: { objectId: 'file-1', containerId: 'folder-1' } });
     const state = await repository.readSchedulerState();
-    expect(await repository.compareAndSetSchedulerState(state.revision, { lastUploadSuccessMs: 1_100 })).toBe(true);
+    expect(await repository.compareAndSetSchedulerState(state.revision, {
+      lastUploadSuccessMs: 1_100,
+      lastArtifactRegistrationSuccessMs: 1_050,
+    })).toBe(true);
     expect(await repository.compareAndSetSchedulerState(state.revision, { lastUploadSuccessMs: 1_200 })).toBe(false);
+    expect(await repository.readSchedulerState()).toMatchObject({
+      lastUploadSuccessMs: 1_100,
+      lastArtifactRegistrationSuccessMs: 1_050,
+    });
   });
 
   it('returns a persisted resumable session and clears it when verification terminalizes the attempt', async () => {

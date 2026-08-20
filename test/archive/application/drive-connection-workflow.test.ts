@@ -13,8 +13,36 @@ import { DriveReauthorizationRequiredError } from '../../../src/archive/domain/e
 import { DriveSetupExpiredError } from '../../../src/archive/domain/errors/drive-setup-expired.error';
 import { DriveTemporaryUnavailableError } from '../../../src/archive/domain/errors/drive-temporary-unavailable.error';
 import { InMemoryDriveCredentialRepository } from '../../../src/archive/infrastructure/persistence/in-memory-drive-credential.repository';
+import { ArchiveWakeService } from '../../../src/archive/application/archive-wake.service';
 
 describe('Drive connection workflow', () => {
+  it('wakes archive dispatch after the newly confirmed generation is active', async () => {
+    const credentials = new InMemoryDriveCredentialRepository();
+    await credentials.stage({
+      id: 'generation-00001', installationId: 'installation-1',
+      client: { clientId: 'new.apps.googleusercontent.com', clientSecret: 'new-secret' },
+      clientIdHash: 'new', adminUserId: 7, chatId: 9, receiptId: 'receipt-1',
+      createdAtMs: 1, expiresAtMs: 100,
+    });
+    await credentials.storeExchangedTokens('generation-00001', 0, {
+      accessToken: null, refreshToken: 'refresh', expiryDateMs: null,
+      tokenType: null, scope: null,
+    });
+    const wake = new ArchiveWakeService();
+    const wakeSpy = vi.spyOn(wake, 'wake');
+    const workflow = new ConfirmDriveAccountUseCase(credentials, {
+      resolveAccount: vi.fn().mockResolvedValue({ permissionId: 'permission-1', email: null, displayName: null }),
+      resolveManagedFolders: vi.fn().mockResolvedValue({ rootId: 'root', motionId: 'motion', backupsId: 'backups' }),
+    } as never, { now: () => new Date(10) }, wake);
+
+    await expect(workflow.execute({
+      generationId: 'generation-00001', receiptId: 'receipt-1', adminUserId: 7,
+      chatId: 9, effectiveDeadlineMs: 100, signal: new AbortController().signal,
+    })).resolves.toBe('activated');
+
+    expect(wakeSpy).toHaveBeenCalledOnce();
+  });
+
   it('does not activate a staged account before the device poll stores tokens', async () => {
     const credentials = new InMemoryDriveCredentialRepository();
     await credentials.stage({

@@ -716,7 +716,12 @@ function revise(attempt: DriveObjectAttempt, nowMs: number): DriveObjectAttempt 
 }
 
 function emptySchedulerState(): ArchiveSchedulerState {
-  return { revision: 0, backupLeaseOwner: null, backupLeaseExpiresAtMs: null, lastBackupSuccessMs: null, lastUploadSuccessMs: null, lastReconcileSuccessMs: null, lastCleanupSuccessMs: null };
+  return {
+    revision: 0, backupLeaseOwner: null, backupLeaseExpiresAtMs: null,
+    lastBackupSuccessMs: null, lastUploadSuccessMs: null,
+    lastReconcileSuccessMs: null, lastCleanupSuccessMs: null,
+    lastArtifactRegistrationSuccessMs: null,
+  };
 }
 
 function validateClaim(input: ClaimAttempt): void {

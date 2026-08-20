@@ -153,6 +153,7 @@ export interface ArchiveSchedulerState {
   lastUploadSuccessMs: number | null;
   lastReconcileSuccessMs: number | null;
   lastCleanupSuccessMs: number | null;
+  lastArtifactRegistrationSuccessMs: number | null;
 }
 
 export interface ArchiveSchedulerUpdate {
@@ -162,6 +163,7 @@ export interface ArchiveSchedulerUpdate {
   lastUploadSuccessMs?: number | null;
   lastReconcileSuccessMs?: number | null;
   lastCleanupSuccessMs?: number | null;
+  lastArtifactRegistrationSuccessMs?: number | null;
 }
 
 export interface ArchiveStatusCounts {

@@ -15,6 +15,10 @@ import {
   type ArchiveSchedulerService,
 } from './archive-scheduler.service';
 import { ArchiveRemoteMutationLockService } from './archive-remote-mutation-lock.service';
+import {
+  ArchiveWakeService,
+  DEFAULT_ARCHIVE_WAKE_SERVICE,
+} from './archive-wake.service';
 
 const SHUTDOWN_WAIT_MS = 1_000;
 
@@ -40,6 +44,7 @@ implements OnApplicationBootstrap, OnModuleDestroy {
     private readonly hooks: ArchiveSchedulerHooksService,
     private readonly clock: ClockPort,
     private readonly remoteMutationLock: ArchiveRemoteMutationLockService = new ArchiveRemoteMutationLockService(),
+    private readonly wake: ArchiveWakeService = DEFAULT_ARCHIVE_WAKE_SERVICE,
   ) {}
 
   get signal(): AbortSignal {
@@ -102,6 +107,7 @@ implements OnApplicationBootstrap, OnModuleDestroy {
       await this.backups.execute({ nowMs });
       throwIfAborted(signal);
       this.scheduler.startTimers();
+      this.wake.wake();
     } catch (error) {
       if (this.controller.signal.aborted) return;
       throw error;

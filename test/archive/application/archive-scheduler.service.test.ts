@@ -13,6 +13,11 @@ import type { UploadDriveObjectAttemptUseCase } from '../../../src/archive/appli
 import type { ClockPort } from '../../../src/events/domain/ports/clock.port';
 import { DriveQuotaExceededError } from '../../../src/archive/domain/errors/drive-quota-exceeded.error';
 import type { ArchiveRetentionPort } from '../../../src/archive/application/ports/archive-retention.port';
+import { ArchiveWakeService } from '../../../src/archive/application/archive-wake.service';
+import { ArchiveProviderGateService } from '../../../src/archive/application/archive-provider-gate.service';
+import { InMemoryArchiveProviderStateRepository } from '../../../src/archive/infrastructure/persistence/in-memory-archive-provider-state.repository';
+import type { ArchiveArtifact } from '../../../src/archive/domain/archive-artifact.entity';
+import type { DriveCredentialRepositoryPort } from '../../../src/archive/application/ports/drive-credential-repository.port';
 
 function claimedAttempt(overrides: Partial<ClaimedAttempt['attempt']> = {}): ClaimedAttempt {
   return {
@@ -31,11 +36,33 @@ function claimedAttempt(overrides: Partial<ClaimedAttempt['attempt']> = {}): Cla
   };
 }
 
-function setup(options: { upload?: () => Promise<unknown>; backup?: () => Promise<unknown> } = {}) {
+function setup(options: {
+  upload?: (claimed?: ClaimedAttempt, signal?: AbortSignal) => Promise<unknown>;
+  backup?: () => Promise<unknown>;
+} = {}) {
+  const clock = { now: vi.fn(() => new Date(10_000)) } satisfies ClockPort;
+  const video = {
+    id: 'video-artifact', kind: 'motion_video', installationId: 'installation-1',
+    size: 4_096, createdAtMs: 1,
+  } as ArchiveArtifact;
+  const queuedArtifacts: ArchiveArtifact[] = [];
+  const claimedAttempts: ClaimedAttempt[] = [];
+  const admissionTimes: number[] = [];
+  const settleTimes: number[] = [];
+  let activeUploads = 0;
+  let highestActiveUploads = 0;
   const repository = {
-    claimNextAttempt: vi.fn(async (input: { kind?: string }) =>
-      input.kind === 'database_backup' ? null : claimedAttempt()),
-    listUnattemptedArtifacts: vi.fn(async () => []),
+    claimNextAttempt: vi.fn(async (input: { kind?: string }) => {
+      const index = claimedAttempts.findIndex(({ artifact }) => artifact.kind === input.kind);
+      return index < 0 ? null : claimedAttempts.splice(index, 1)[0];
+    }),
+    listUnattemptedArtifacts: vi.fn(async (selection: { kind: string }) =>
+      queuedArtifacts.filter(({ kind }) => kind === selection.kind).slice(0, 1)),
+    readNextDeadline: vi.fn(async (
+      _generationId: string,
+      _nowMs: number,
+      _providerCooldownUntilMs: number | null,
+    ) => null),
     readSchedulerState: vi.fn(async () => ({
       revision: 0, backupLeaseOwner: null, backupLeaseExpiresAtMs: null,
       lastBackupSuccessMs: null, lastUploadSuccessMs: null,
@@ -48,8 +75,30 @@ function setup(options: { upload?: () => Promise<unknown>; backup?: () => Promis
     execute: vi.fn(options.backup ?? (async () => ({ created: false, reason: 'not_due' }))),
   } as unknown as CreateDatabaseBackupUseCase;
   const uploads = {
-    execute: vi.fn(async () => ({ kind: 'verified' })),
-    executeClaimed: vi.fn(options.upload ?? (async () => ({ kind: 'verified' }))),
+    execute: vi.fn(async (artifactId: string, signal: AbortSignal) => {
+      const queued = queuedArtifacts.findIndex(({ id }) => id === artifactId);
+      if (queued >= 0) queuedArtifacts.splice(queued, 1);
+      admissionTimes.push(clock.now().getTime());
+      activeUploads += 1;
+      highestActiveUploads = Math.max(highestActiveUploads, activeUploads);
+      try {
+        return await (options.upload ?? (async () => ({ kind: 'verified' })))(undefined, signal);
+      } finally {
+        settleTimes.push(clock.now().getTime());
+        activeUploads -= 1;
+      }
+    }),
+    executeClaimed: vi.fn(async (claimed: ClaimedAttempt, signal: AbortSignal) => {
+      admissionTimes.push(clock.now().getTime());
+      activeUploads += 1;
+      highestActiveUploads = Math.max(highestActiveUploads, activeUploads);
+      try {
+        return await (options.upload ?? (async () => ({ kind: 'verified' })))(claimed, signal);
+      } finally {
+        settleTimes.push(clock.now().getTime());
+        activeUploads -= 1;
+      }
+    }),
   } as unknown as UploadDriveObjectAttemptUseCase;
   const retention = {
     execute: vi.fn(async () => ({
@@ -58,7 +107,14 @@ function setup(options: { upload?: () => Promise<unknown>; backup?: () => Promis
     })),
   } as ArchiveRetentionPort;
   const hooks = new ArchiveSchedulerHooksService();
-  const clock: ClockPort = { now: () => new Date(10_000) };
+  const wake = new ArchiveWakeService();
+  const providerGate = new ArchiveProviderGateService(
+    new InMemoryArchiveProviderStateRepository(),
+    clock,
+  );
+  const credentials = {
+    loadActive: vi.fn(async () => ({ id: 'generation-1' })),
+  } as unknown as Pick<DriveCredentialRepositoryPort, 'loadActive'>;
   const scheduler = new ArchiveSchedulerService(
     repository,
     backups,
@@ -68,8 +124,27 @@ function setup(options: { upload?: () => Promise<unknown>; backup?: () => Promis
     retention,
     clock,
     { intervalMs: 60_000, shutdownWaitMs: 10, newerVideoBatch: 2 },
+    wake,
+    providerGate,
+    credentials,
   );
-  return { repository, backups, uploads, retention, hooks, scheduler };
+  return {
+    repository, backups, uploads, retention, hooks, scheduler, wake, providerGate, clock,
+    credentials, video,
+    seedFreshVideos(count: number) {
+      queuedArtifacts.push(...Array.from({ length: count }, (_, index) => ({
+        ...video, id: `video-${index + 1}`,
+      })));
+    },
+    seedFreshBackups(count: number) {
+      queuedArtifacts.push(...Array.from({ length: count }, (_, index) => ({
+        ...video, id: `backup-${index + 1}`, kind: 'database_backup' as const,
+      })));
+    },
+    seedClaimedAttempts(...attempts: ClaimedAttempt[]) { claimedAttempts.push(...attempts); },
+    maxConcurrentUploads: () => highestActiveUploads,
+    elapsedBetweenAdmissions: () => admissionTimes.slice(1).map((time, index) => time - settleTimes[index]),
+  };
 }
 
 describe('ArchiveSchedulerService', () => {
@@ -78,13 +153,80 @@ describe('ArchiveSchedulerService', () => {
     vi.restoreAllMocks();
   });
 
+  it('does not lose a registration between the final empty read and wait arming', async () => {
+    const fixture = setup();
+    vi.mocked(fixture.repository.claimNextAttempt).mockResolvedValue(null);
+    vi.mocked(fixture.repository.listUnattemptedArtifacts).mockResolvedValue([]);
+    fixture.repository.readNextDeadline.mockImplementationOnce(async () => {
+      fixture.wake.wake();
+      fixture.repository.listUnattemptedArtifacts.mockResolvedValueOnce([fixture.video]);
+      return null;
+    });
+
+    fixture.scheduler.startTimers();
+
+    await vi.waitFor(() => expect(fixture.uploads.execute).toHaveBeenCalledWith(
+      fixture.video.id,
+      expect.any(AbortSignal),
+    ));
+    await fixture.scheduler.shutdown();
+  });
+
+  it('admits the next item immediately after settlement with one active transfer', async () => {
+    let releaseFirst!: () => void;
+    const first = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const upload = vi.fn()
+      .mockImplementationOnce(async () => first)
+      .mockResolvedValue({ kind: 'verified' });
+    const fixture = setup({ upload });
+    fixture.seedFreshVideos(3);
+
+    fixture.scheduler.startTimers();
+    await vi.waitFor(() => expect(fixture.uploads.execute).toHaveBeenCalledOnce());
+    expect(fixture.maxConcurrentUploads()).toBe(1);
+    releaseFirst();
+    await vi.waitFor(() => expect(fixture.uploads.execute).toHaveBeenCalledTimes(3));
+
+    expect(fixture.maxConcurrentUploads()).toBe(1);
+    expect(fixture.elapsedBetweenAdmissions()).toEqual([0, 0]);
+    await fixture.scheduler.shutdown();
+  });
+
+  it('sleeps until the earliest durable deadline without tight polling', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000);
+    const fixture = setup();
+    fixture.clock.now.mockImplementation(() => new Date(Date.now()));
+    vi.mocked(fixture.repository.readNextDeadline).mockImplementation(
+      async (_generationId, nowMs) => nowMs < 20_000 ? 20_000 : null,
+    );
+    vi.mocked(fixture.repository.claimNextAttempt).mockResolvedValue(null);
+    vi.mocked(fixture.repository.listUnattemptedArtifacts).mockResolvedValue([]);
+
+    fixture.scheduler.startTimers();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.repository.readNextDeadline).toHaveBeenCalledOnce();
+    vi.mocked(fixture.repository.claimNextAttempt).mockClear();
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(fixture.repository.claimNextAttempt).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fixture.repository.claimNextAttempt).toHaveBeenCalled();
+    const claimCountAfterDeadline = fixture.repository.claimNextAttempt.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(100);
+    expect(fixture.repository.claimNextAttempt).toHaveBeenCalledTimes(claimCountAfterDeadline);
+    await fixture.scheduler.shutdown();
+  });
+
   it('does not let a stalled video transfer block backup creation or unrelated cleanup', async () => {
     const stalled = new Promise<never>(() => undefined);
     const fixture = setup({ upload: () => stalled });
+    fixture.seedClaimedAttempts(claimedAttempt());
     const registration = vi.fn(async () => undefined);
     const localCleanup = vi.fn(async () => undefined);
     fixture.hooks.registerCamera({ reconcileMotion: registration, cleanupLocal: localCleanup });
 
+    fixture.scheduler.startTimers();
+    await vi.waitFor(() => expect(fixture.uploads.executeClaimed).toHaveBeenCalledOnce());
     await fixture.scheduler.tick();
     await fixture.scheduler.tick();
 
@@ -92,6 +234,7 @@ describe('ArchiveSchedulerService', () => {
     expect(registration).toHaveBeenCalledTimes(2);
     expect(localCleanup).toHaveBeenCalledTimes(2);
     expect(fixture.uploads.executeClaimed).toHaveBeenCalledTimes(1);
+    await fixture.scheduler.shutdown();
   });
 
   it('reclaims the pending artifact size after quota failure before a later upload retry', async () => {
@@ -106,6 +249,10 @@ describe('ArchiveSchedulerService', () => {
         return { kind: 'verified' };
       });
     const fixture = setup({ upload });
+    fixture.seedClaimedAttempts(
+      claimedAttempt({ id: 'quota-attempt' }),
+      claimedAttempt({ id: 'retry-attempt', retryCount: 1 }),
+    );
     const retention = fixture.retention;
     vi.mocked(retention.execute).mockImplementation(
       async (input: { requiredBytes: number }) => {
@@ -119,15 +266,38 @@ describe('ArchiveSchedulerService', () => {
       },
     );
 
-    await fixture.scheduler.tick();
+    fixture.scheduler.startTimers();
     await vi.waitFor(() => expect(retention.execute).toHaveBeenCalledWith(
       { requiredBytes: 4_096 },
       expect.any(AbortSignal),
     ));
-    await fixture.scheduler.tick();
     await vi.waitFor(() => expect(upload).toHaveBeenCalledTimes(2));
 
     expect(order).toEqual(['upload:quota', 'reclaim:4096', 'upload:verified']);
+    await fixture.scheduler.shutdown();
+  });
+
+  it('does not admit another artifact while quota reclamation leaves a positive deficit', async () => {
+    const upload = vi.fn(async () => { throw new DriveQuotaExceededError(); });
+    const fixture = setup({ upload });
+    fixture.seedClaimedAttempts(
+      claimedAttempt({ id: 'quota-attempt' }),
+      claimedAttempt({ id: 'must-wait-attempt' }),
+    );
+    vi.mocked(fixture.retention.execute).mockResolvedValue({
+      deletedIds: ['old-backup'], reclaimedBytes: 3_000,
+      remainingDeficitBytes: 1_096, accountingWindowActive: true,
+    });
+
+    fixture.scheduler.startTimers();
+    await vi.waitFor(() => expect(fixture.retention.execute).toHaveBeenCalledOnce());
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(upload).toHaveBeenCalledOnce();
+    await expect(fixture.providerGate.inspect('generation-1', 'upload')).resolves.toEqual({
+      kind: 'blocked', reason: 'quota_exhausted',
+    });
+    await fixture.scheduler.shutdown();
   });
 
   it('does not overlap scheduler ticks', async () => {
@@ -146,22 +316,17 @@ describe('ArchiveSchedulerService', () => {
 
   it('requests backup priority and admits a due video retry after a bounded fresh-video batch', async () => {
     const fixture = setup();
-    const fresh = {
-      id: 'fresh-artifact', kind: 'motion_video', installationId: 'installation-1',
-    } as ClaimedAttempt['artifact'];
-    vi.mocked(fixture.repository.listUnattemptedArtifacts)
-      .mockImplementation(async (selection) =>
-        selection.kind === 'motion_video' && vi.mocked(fixture.uploads.execute).mock.calls.length < 2
-          ? [fresh]
-          : []);
+    fixture.seedFreshVideos(2);
+    let retryClaimed = false;
     vi.mocked(fixture.repository.claimNextAttempt)
-      .mockImplementation(async (input) => input.kind === 'motion_video' && input.retryOnly
-        ? claimedAttempt({ id: 'video-retry', retryCount: 2 })
-        : null);
+      .mockImplementation(async (input) => {
+        if (input.kind !== 'motion_video' || !input.retryOnly || retryClaimed) return null;
+        retryClaimed = true;
+        return claimedAttempt({ id: 'video-retry', retryCount: 2 });
+      });
 
-    await fixture.scheduler.tick();
-    await fixture.scheduler.tick();
-    await fixture.scheduler.tick();
+    fixture.scheduler.startTimers();
+    await vi.waitFor(() => expect(fixture.uploads.executeClaimed).toHaveBeenCalledOnce());
 
     expect(fixture.uploads.execute).toHaveBeenCalledTimes(2);
     expect(vi.mocked(fixture.repository.claimNextAttempt).mock.calls).toContainEqual([
@@ -169,23 +334,22 @@ describe('ArchiveSchedulerService', () => {
         kind: 'motion_video', retryOnly: true, forceVideoRetryBeforeMs: 10_000,
       }),
     ]);
+    await fixture.scheduler.shutdown();
   });
 
   it('starts the first upload for a newly registered artifact without holding a database transaction', async () => {
     const fixture = setup();
-    const backup = {
-      id: 'backup-artifact', kind: 'database_backup', installationId: 'installation-1',
-    } as ClaimedAttempt['artifact'];
+    fixture.seedFreshBackups(1);
     vi.mocked(fixture.repository.claimNextAttempt).mockResolvedValue(null);
-    vi.mocked(fixture.repository.listUnattemptedArtifacts)
-      .mockImplementation(async (selection) => selection.kind === 'database_backup' ? [backup] : []);
 
-    await fixture.scheduler.tick();
+    fixture.scheduler.startTimers();
+    await vi.waitFor(() => expect(fixture.uploads.execute).toHaveBeenCalledOnce());
 
     expect(fixture.repository.listUnattemptedArtifacts).toHaveBeenCalledWith({
       kind: 'database_backup', limit: 1,
     });
-    expect(fixture.uploads.execute).toHaveBeenCalledWith('backup-artifact', expect.any(AbortSignal));
+    expect(fixture.uploads.execute).toHaveBeenCalledWith('backup-1', expect.any(AbortSignal));
+    await fixture.scheduler.shutdown();
   });
 
   it('aborts the active upload without abandoning durable recovery state', async () => {
@@ -195,8 +359,10 @@ describe('ArchiveSchedulerService', () => {
       activeSignal = signal;
       await new Promise<void>(() => undefined);
     } });
+    fixture.seedClaimedAttempts(claimedAttempt());
 
-    await fixture.scheduler.tick();
+    fixture.scheduler.startTimers();
+    await vi.waitFor(() => expect(activeSignal).toBeDefined());
     await fixture.scheduler.shutdown();
 
     expect(activeSignal?.aborted).toBe(true);
@@ -238,14 +404,13 @@ describe('ArchiveSchedulerService', () => {
       return null;
     });
 
-    const tick = fixture.scheduler.tick();
+    fixture.scheduler.startTimers();
     await vi.waitFor(() => {
       expect(fixture.repository.claimNextAttempt).toHaveBeenCalledOnce();
     });
     const shutdown = fixture.scheduler.shutdown();
     resolveClaim(claimedAttempt());
     await shutdown;
-    await tick;
 
     expect(fixture.uploads.executeClaimed).not.toHaveBeenCalled();
     expect(fixture.repository.markRetryable).toHaveBeenCalledWith(
@@ -257,7 +422,7 @@ describe('ArchiveSchedulerService', () => {
     );
   });
 
-  it('catches and logs timer-dispatched tick failures', async () => {
+  it('catches and logs pump failures without an unhandled rejection', async () => {
     vi.useFakeTimers();
     const fixture = setup();
     vi.mocked(fixture.repository.claimNextAttempt).mockRejectedValue(new Error('claim failed'));
@@ -269,7 +434,7 @@ describe('ArchiveSchedulerService', () => {
     fixture.scheduler.startTimers();
     await vi.advanceTimersByTimeAsync(60_000);
 
-    expect(log).toHaveBeenCalledWith('Archive scheduler tick failed: claim failed');
+    expect(log).toHaveBeenCalledWith('Archive scheduler pump failed: claim failed');
     await fixture.scheduler.shutdown();
   });
 });

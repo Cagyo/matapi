@@ -9,6 +9,7 @@ import type { RetireDriveConnectionUseCase } from '../../../src/archive/applicat
 import type { CreateDatabaseBackupUseCase } from '../../../src/archive/application/use-cases/create-database-backup.use-case';
 import { DriveConnection } from '../../../src/archive/domain/drive-connection.entity';
 import type { ClockPort } from '../../../src/events/domain/ports/clock.port';
+import { ArchiveWakeService } from '../../../src/archive/application/archive-wake.service';
 
 function connection(
   status: 'retiring' | 'disconnecting',
@@ -24,6 +25,33 @@ function connection(
 }
 
 describe('ArchiveRuntimeLifecycleService', () => {
+  it('wakes the pump after boot recovery starts archive scheduling', async () => {
+    const wake = new ArchiveWakeService();
+    const wakeSpy = vi.spyOn(wake, 'wake');
+    const scheduler = { startTimers: vi.fn(), shutdown: vi.fn(async () => undefined) };
+    const lifecycle = new ArchiveRuntimeLifecycleService(
+      { expireStaged: vi.fn(async () => []), listInterruptedMaintenance: vi.fn(async () => []) },
+      {
+        recoverExpiredLeases: vi.fn(async () => 0),
+        listUnverifiedArtifactPaths: vi.fn(async () => []),
+      } as unknown as ArchiveArtifactRepositoryPort,
+      { execute: vi.fn() },
+      { cancelAll: vi.fn() },
+      { removeStaleTemporarySnapshots: vi.fn(async () => 0) },
+      { execute: vi.fn(async () => ({ created: false, reason: 'not_due' })) },
+      scheduler,
+      new ArchiveSchedulerHooksService(),
+      { now: () => new Date(1_000) },
+      undefined,
+      wake,
+    );
+
+    await lifecycle.start();
+
+    expect(scheduler.startTimers).toHaveBeenCalledOnce();
+    expect(wakeSpy).toHaveBeenCalledOnce();
+  });
+
   it('recovers retiring and disconnecting generations before normal scheduling', async () => {
     const order: string[] = [];
     const credentials = {
