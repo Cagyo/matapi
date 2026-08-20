@@ -10,9 +10,15 @@ import type {
   ArchiveAdminAlertKind,
   ArchiveAdminAlertPort,
 } from './ports/archive-admin-alert.port';
+import type { ArchiveAdminAlertActiveFence } from './ports/archive-admin-alert-outbox.port';
 
 export const ARCHIVE_ADMIN_ALERT_COOLDOWN_MS = 60 * 60 * 1_000;
 const MAX_CAS_RETRIES = 3;
+
+export interface PreparedArchiveAdminAlert {
+  alert: ArchiveAdminAlert;
+  fence: ArchiveAdminAlertActiveFence;
+}
 
 /**
  * Persists a per-generation cooldown before optional Telegram delivery.
@@ -44,30 +50,36 @@ export class ArchiveAdminAlertService implements ArchiveAdminAlertPort {
     kind: ArchiveAdminAlertKind,
     context: Omit<ArchiveAdminAlert, 'kind'>,
   ): Promise<void> {
-    const alert = await this.prepare(kind, context);
-    if (alert === null) return;
+    const prepared = await this.prepare(kind, context);
+    if (prepared === null) return;
     const nowMs = this.clock.now().getTime();
-    const persisted = await this.persistCooldown(alert.generationId, kind, nowMs);
+    const persisted = await this.persistCooldown(prepared.alert.generationId, kind, nowMs);
     if (!persisted) return;
-    await this.deliver(alert);
+    await this.deliver(prepared.alert);
   }
 
   /** Resolves and sanitizes alert context without mutating cooldown state. */
   async prepare(
     kind: ArchiveAdminAlertKind,
     context: Omit<ArchiveAdminAlert, 'kind'>,
-  ): Promise<ArchiveAdminAlert | null> {
+  ): Promise<PreparedArchiveAdminAlert | null> {
     const suppliedGenerationId = sanitizedIdentifier(context.generationId);
-    const generationId = suppliedGenerationId
-      ?? sanitizedIdentifier((await this.repository.loadActive())?.id);
-    if (!generationId) return null;
+    const active = await this.repository.loadActive();
+    if (active === null
+      || (active.status !== 'active' && active.status !== 'reauth_required')
+      || (suppliedGenerationId !== null && suppliedGenerationId !== active.id)) {
+      return null;
+    }
     const artifactId = sanitizedIdentifier(context.artifactId);
     const errorCode = sanitizedErrorCode(context.errorCode);
     return {
-      generationId,
-      kind,
-      ...(artifactId === null ? {} : { artifactId }),
-      ...(errorCode === null ? {} : { errorCode }),
+      alert: {
+        generationId: active.id,
+        kind,
+        ...(artifactId === null ? {} : { artifactId }),
+        ...(errorCode === null ? {} : { errorCode }),
+      },
+      fence: { id: active.id, revision: active.revision, status: active.status },
     };
   }
 

@@ -10,8 +10,8 @@ describe('ArchiveAdminAlertService', () => {
     const alerts = new ArchiveAdminAlertService(repository, { now: () => new Date(now) });
     alerts.register(delivery);
 
-    await alerts.alert('reauthorization-required', { generationId: 'g1' });
-    await alerts.alert('reauthorization-required', { generationId: 'g1' });
+    await alerts.alert('reauthorization-required', { generationId: 'generation-1' });
+    await alerts.alert('reauthorization-required', { generationId: 'generation-1' });
 
     expect(delivery.sent).toHaveLength(1);
     expect(repository.cooldowns['reauthorization-required']).toBeGreaterThan(now);
@@ -78,14 +78,18 @@ describe('ArchiveAdminAlertService', () => {
       generationId: 'generation-1',
       errorCode: 'provider-body-secret',
     })).resolves.toEqual({
-      kind: 'provider-capacity-blocked',
-      generationId: 'generation-1',
+      alert: { kind: 'provider-capacity-blocked', generationId: 'generation-1' },
+      fence: { id: 'generation-1', revision: 4, status: 'active' },
     });
   });
 });
 
 class InMemoryCooldownRepository {
   readonly cooldowns: Record<string, number> = {};
+
+  async loadActive() {
+    return { id: 'generation-1', revision: 4, status: 'active' } as never;
+  }
 
   async readAlertCooldowns(): Promise<Record<string, number>> {
     return { ...this.cooldowns };

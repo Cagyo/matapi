@@ -6,15 +6,22 @@ import {
   TIMEZONE_OPTIONS,
   type TimezoneOptions,
 } from '../config/application/ports/timezone-options.port';
-import { DatabaseModule } from '../database/database.module';
+import { type AppDatabase, DatabaseModule, DB } from '../database/database.module';
 import {
   DATABASE_BACKUP_SNAPSHOT,
   type DatabaseBackupSnapshotPort,
 } from '../database/application/ports/database-backup-snapshot.port';
 import { EventModule } from '../events/event.module';
-import { EventQueueService } from '../events/application/event-queue.service';
 import { NotificationService } from '../events/application/notification.service';
+import {
+  EVENT_QUEUE_OPTIONS,
+  type EventQueueOptions,
+} from '../events/application/ports/event-queue-options.port';
 import { CLOCK, type ClockPort } from '../events/domain/ports/clock.port';
+import {
+  EVENT_REPOSITORY,
+  type EventRepositoryPort,
+} from '../events/domain/ports/event-repository.port';
 import { SystemModule } from '../system/system.module';
 import { BootRecoveryService } from '../system/application/boot-recovery.service';
 import {
@@ -43,6 +50,10 @@ import {
   ARCHIVE_ADMIN_ALERT,
   type ArchiveAdminAlertPort,
 } from './application/ports/archive-admin-alert.port';
+import {
+  ARCHIVE_ADMIN_ALERT_OUTBOX,
+  type ArchiveAdminAlertOutboxPort,
+} from './application/ports/archive-admin-alert-outbox.port';
 import { ARCHIVE_REGISTRATION } from './application/ports/archive-registration.port';
 import { ARCHIVE_VERIFICATION } from './application/ports/archive-verification.port';
 import { ARCHIVE_SECRET_CIPHER } from './application/ports/archive-secret-cipher.port';
@@ -91,6 +102,8 @@ import { DrizzleArchiveArtifactRepository } from './infrastructure/persistence/d
 import { DrizzleDriveCredentialRepository } from './infrastructure/persistence/drizzle-drive-credential.repository';
 import { FsArchiveUploadSourceAdapter } from './infrastructure/persistence/fs-archive-upload-source.adapter';
 import { DurableArchiveAdminAlertAdapter } from './infrastructure/events/durable-archive-admin-alert.adapter';
+import { DrizzleArchiveAdminAlertOutboxAdapter } from './infrastructure/events/drizzle-archive-admin-alert-outbox.adapter';
+import { SharedStateArchiveAdminAlertOutboxAdapter } from './infrastructure/events/shared-state-archive-admin-alert-outbox.adapter';
 import { InMemoryArchiveArtifactRepository } from './infrastructure/persistence/in-memory-archive-artifact.repository';
 import { InMemoryDriveCredentialRepository } from './infrastructure/persistence/in-memory-drive-credential.repository';
 import { SystemArchiveClockAdapter } from './infrastructure/system-archive-clock.adapter';
@@ -148,15 +161,36 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
     FsArchiveUploadSourceAdapter,
     { provide: ARCHIVE_UPLOAD_SOURCE, useExisting: FsArchiveUploadSourceAdapter },
     ArchiveAdminAlertService,
+    archiveMode === 'memory'
+      ? {
+        provide: SharedStateArchiveAdminAlertOutboxAdapter,
+        useFactory: (
+          credentials: DriveCredentialRepositoryPort,
+          events: EventRepositoryPort,
+        ) => new SharedStateArchiveAdminAlertOutboxAdapter(credentials, events),
+        inject: [DRIVE_CREDENTIAL_REPOSITORY, EVENT_REPOSITORY],
+      }
+      : {
+        provide: DrizzleArchiveAdminAlertOutboxAdapter,
+        useFactory: (db: AppDatabase, options: EventQueueOptions) =>
+          new DrizzleArchiveAdminAlertOutboxAdapter(db, options),
+        inject: [DB, EVENT_QUEUE_OPTIONS],
+      },
+    {
+      provide: ARCHIVE_ADMIN_ALERT_OUTBOX,
+      useExisting: archiveMode === 'memory'
+        ? SharedStateArchiveAdminAlertOutboxAdapter
+        : DrizzleArchiveAdminAlertOutboxAdapter,
+    },
     {
       provide: DurableArchiveAdminAlertAdapter,
       useFactory: (
-        queue: EventQueueService,
+        outbox: ArchiveAdminAlertOutboxPort,
         alerts: ArchiveAdminAlertService,
         clock: ClockPort,
         notifications: NotificationService,
-      ) => new DurableArchiveAdminAlertAdapter(queue, alerts, clock, notifications),
-      inject: [EventQueueService, ArchiveAdminAlertService, CLOCK, NotificationService],
+      ) => new DurableArchiveAdminAlertAdapter(outbox, alerts, clock, notifications),
+      inject: [ARCHIVE_ADMIN_ALERT_OUTBOX, ArchiveAdminAlertService, CLOCK, NotificationService],
     },
     { provide: ARCHIVE_ADMIN_ALERT, useExisting: DurableArchiveAdminAlertAdapter },
     {

@@ -2,7 +2,6 @@ import { Logger } from '@nestjs/common';
 import { EventQueueOptions } from '../application/ports/event-queue-options.port';
 import { NewQueuedEvent, QueuedEvent } from '../domain/queued-event.entity';
 import { EventRepositoryPort } from '../domain/ports/event-repository.port';
-import type { ArchiveAdminAlertOutboxInput } from '../domain/ports/event-repository.port';
 
 type StoredQueuedEvent = QueuedEvent & { sentAt: Date | null };
 
@@ -11,7 +10,6 @@ export class InMemoryEventRepository implements EventRepositoryPort {
   private readonly events: StoredQueuedEvent[] = [];
   private readonly logger = new Logger(InMemoryEventRepository.name);
   private overflowCount = 0;
-  private readonly archiveAlertCooldowns = new Map<string, Record<string, number>>();
 
   constructor(
     private readonly options: Pick<EventQueueOptions, 'maxUnsentEvents'> = {
@@ -36,25 +34,6 @@ export class InMemoryEventRepository implements EventRepositoryPort {
     this.nextId += 1;
     this.events.push(queued);
     return this.toQueuedEvent(queued);
-  }
-
-  async enqueueArchiveAdminAlert(input: ArchiveAdminAlertOutboxInput): Promise<QueuedEvent | null> {
-    const current = this.archiveAlertCooldowns.get(input.generationId) ?? {};
-    if ((current[input.kind] ?? 0) > input.nowMs) return null;
-    const next = { ...current, [input.kind]: input.cooldownUntilMs };
-    this.archiveAlertCooldowns.set(input.generationId, next);
-    try {
-      return await this.enqueue(input.event);
-    } catch (error) {
-      const latest = this.archiveAlertCooldowns.get(input.generationId) ?? {};
-      if (latest[input.kind] === input.cooldownUntilMs) {
-        const restored = { ...latest };
-        if (current[input.kind] === undefined) delete restored[input.kind];
-        else restored[input.kind] = current[input.kind];
-        this.archiveAlertCooldowns.set(input.generationId, restored);
-      }
-      throw error;
-    }
   }
 
   async pending(limit = 50): Promise<QueuedEvent[]> {

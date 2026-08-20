@@ -5,7 +5,6 @@ import {
 } from '../../sensors/domain/ports/sensor-query.port';
 import {
   EVENT_REPOSITORY,
-  type ArchiveAdminAlertOutboxInput,
   EventRepositoryPort,
 } from '../domain/ports/event-repository.port';
 import { QueuedEvent } from '../domain/queued-event.entity';
@@ -48,22 +47,4 @@ export class EventQueueService {
     });
   }
 
-  async enqueueArchiveAdminAlert(input: Omit<ArchiveAdminAlertOutboxInput, 'event'> & {
-    type: string;
-    payload: Record<string, unknown>;
-    createdAt: Date;
-  }): Promise<QueuedEvent | null> {
-    return this.eventRepository.enqueueArchiveAdminAlert({
-      generationId: input.generationId,
-      kind: input.kind,
-      nowMs: input.nowMs,
-      cooldownUntilMs: input.cooldownUntilMs,
-      event: {
-        sensorId: null,
-        type: input.type,
-        payload: input.payload,
-        createdAt: input.createdAt,
-      },
-    });
-  }
 }

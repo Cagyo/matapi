@@ -1,7 +1,7 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { and, asc, count, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { asc, count, eq, inArray, isNull } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../database/database.module';
-import { driveConnections, events } from '../../database/schema';
+import { events } from '../../database/schema';
 import {
   EVENT_QUEUE_OPTIONS,
   EventQueueOptions,
@@ -11,10 +11,7 @@ import {
   QueuedEvent,
   QueuedEventPayload,
 } from '../domain/queued-event.entity';
-import {
-  type ArchiveAdminAlertOutboxInput,
-  EventRepositoryPort,
-} from '../domain/ports/event-repository.port';
+import { EventRepositoryPort } from '../domain/ports/event-repository.port';
 
 type EventRow = typeof events.$inferSelect;
 type EventWriter = Pick<AppDatabase, 'delete' | 'insert' | 'select' | 'update'>;
@@ -34,30 +31,6 @@ export class DrizzleEventRepository implements EventRepositoryPort {
 
     if (evicted) this.recordOverflow();
     return queued;
-  }
-
-  async enqueueArchiveAdminAlert(input: ArchiveAdminAlertOutboxInput): Promise<QueuedEvent | null> {
-    const result = this.db.transaction((tx) => {
-      const row = tx.select({ cooldowns: driveConnections.alertCooldowns })
-        .from(driveConnections)
-        .where(eq(driveConnections.id, input.generationId))
-        .get();
-      if (row === undefined) return null;
-      const current = parseCooldowns(row.cooldowns);
-      if ((current[input.kind] ?? 0) > input.nowMs) return null;
-      const next = { ...current, [input.kind]: input.cooldownUntilMs };
-      const updated = tx.update(driveConnections)
-        .set({ alertCooldowns: next })
-        .where(and(
-          eq(driveConnections.id, input.generationId),
-          sql`${driveConnections.alertCooldowns} = ${JSON.stringify(current)}`,
-        ))
-        .run();
-      if (updated.changes !== 1) return null;
-      return this.enqueueWithin(tx, input.event);
-    });
-    if (result?.evicted) this.recordOverflow();
-    return result?.queued ?? null;
   }
 
   async pending(limit = 50): Promise<QueuedEvent[]> {
@@ -146,11 +119,4 @@ export class DrizzleEventRepository implements EventRepositoryPort {
 
 function isPowerOfTwo(value: number): boolean {
   return value > 0 && Number.isInteger(Math.log2(value));
-}
-
-function parseCooldowns(value: unknown): Record<string, number> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
-  return Object.fromEntries(Object.entries(value).filter(
-    ([key, entry]) => key.length > 0 && Number.isSafeInteger(entry) && Number(entry) >= 0,
-  ));
 }
