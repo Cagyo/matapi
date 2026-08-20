@@ -29,6 +29,7 @@ describe('filterEnv', () => {
       {
         PATH: '/usr/bin',
         TELEGRAM_BOT_TOKEN: 'secret',
+        PM2_HOME: '/home/homeworker/.pm2',
         DATABASE_PATH: '/db',
         HOME_WORKER_REPO: 'git@github.com:me/home-worker.git',
         HOME_WORKER_RELEASE_URL: 'https://example/r.tar.gz',
@@ -37,6 +38,9 @@ describe('filterEnv', () => {
     );
     expect(out).toEqual({
       PATH: '/usr/bin',
+      // update.sh's config-file restart has to reach the same PM2 daemon its
+      // health check queries — see the note in OTA_ENV_ALLOWLIST.
+      PM2_HOME: '/home/homeworker/.pm2',
       DATABASE_PATH: '/db',
       HOME_WORKER_REPO: 'git@github.com:me/home-worker.git',
       HOME_WORKER_RELEASE_URL: 'https://example/r.tar.gz',

@@ -13,6 +13,12 @@ INSTALL_DIR="${HOME_WORKER_INSTALL_DIR:-/opt/home-worker}"
 LOCKFILE="${HOME_WORKER_UPDATE_LOCK:-/tmp/home-worker-updating.lock}"
 APP_NAME="${PM2_APP_NAME:-worker}"
 HEALTH_CHECK_SEC="${UPDATE_HEALTH_CHECK_SEC:-30}"
+RESTART_RECHECK_SEC="${UPDATE_RESTART_RECHECK_SEC:-15}"
+# Pre-migration database snapshot, and whether `db:migrate` actually moved the
+# schema. Declared up here because rollback_to_snapshot reads both and can be
+# reached long before the migration step.
+DB_SNAPSHOT=""
+SCHEMA_CHANGED=0
 FEATURE_HELPER="/usr/lib/home-worker/feature-installer"
 FEATURE_HELPER_VERSION="/usr/lib/home-worker/feature-installer.version"
 FEATURE_HELPER_MANIFEST="/usr/lib/home-worker/feature-installer.manifest"
@@ -78,6 +84,43 @@ write_meta() {
   else
     KEY="$key" VAL="$value" DBP="$DB_PATH" INST="$INSTALL_DIR" node -e "const Database=require(process.env.INST+'/node_modules/better-sqlite3');const db=new Database(process.env.DBP);db.prepare('INSERT INTO system_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(process.env.KEY,process.env.VAL);db.close();"
   fi
+}
+
+# Number of migrations drizzle has recorded as applied, or "unknown".
+applied_migration_count() {
+  if command -v sqlite3 >/dev/null 2>&1; then
+    sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM __drizzle_migrations;" 2>/dev/null || echo unknown
+  else
+    DBP="$DB_PATH" INST="$INSTALL_DIR" node -e "const Database=require(process.env.INST+'/node_modules/better-sqlite3');const db=new Database(process.env.DBP,{readonly:true,fileMustExist:true});try{process.stdout.write(String(db.prepare('SELECT COUNT(*) AS n FROM __drizzle_migrations').get().n));}finally{db.close();}" 2>/dev/null || echo unknown
+  fi
+}
+
+# WAL-safe copy of the live database into "$1". Uses SQLite's online backup API
+# — the same mechanism BetterSqlite3BackupSnapshotAdapter uses in-process —
+# because a plain `cp` of the main file is not a consistent snapshot while a
+# -wal sidecar is live. Verified with `PRAGMA quick_check` before it is trusted,
+# exactly as that adapter does before publishing.
+snapshot_database() {
+  local target="$1"
+  rm -f "$target"
+  if command -v sqlite3 >/dev/null 2>&1; then
+    local esc_target=${target//"'"/"''"}
+    sqlite3 "$DB_PATH" ".backup '$esc_target'" >/dev/null 2>&1 || return 1
+    [[ "$(sqlite3 "$target" "PRAGMA quick_check;" 2>/dev/null | head -1)" == "ok" ]] || return 1
+  else
+    DBP="$DB_PATH" OUT="$target" INST="$INSTALL_DIR" node -e "const Database=require(process.env.INST+'/node_modules/better-sqlite3');const db=new Database(process.env.DBP,{fileMustExist:true});db.backup(process.env.OUT).then(()=>{const copy=new Database(process.env.OUT,{readonly:true,fileMustExist:true});const rows=copy.pragma('quick_check');copy.close();db.close();process.exit(rows.length===1&&rows[0].quick_check==='ok'?0:1);}).catch(()=>{db.close();process.exit(1);});" >/dev/null 2>&1 || return 1
+  fi
+}
+
+# Puts a snapshot back in place of the live database. The worker must already be
+# stopped: the -wal/-shm sidecars belong to the *migrated* database, so they are
+# discarded first — replaying them onto the restored file would corrupt it.
+restore_database() {
+  local source="$1"
+  [[ -f "$source" ]] || return 1
+  rm -f "$DB_PATH-wal" "$DB_PATH-shm"
+  cp "$source" "$DB_PATH.restoring" || return 1
+  mv "$DB_PATH.restoring" "$DB_PATH" || return 1
 }
 
 if [[ -e "$LOCKFILE" ]]; then
@@ -184,8 +227,12 @@ restart_worker() {
   # same daemon the health check below queries — scrubbing those would let the
   # restart address a different daemon, where `--only` matches nothing.
   local -a scrubbed=(env -i "PATH=$PATH")
+  # PM2_* are config knobs, inert inside the app's own environment, and spec 23
+  # tells operators to export them for exactly this kind of restart — scrubbing
+  # them would silently revert a device's tuning on every update.
   local passthrough
-  for passthrough in HOME PM2_HOME; do
+  for passthrough in HOME PM2_HOME PM2_APP_NAME PM2_MAX_MEMORY_RESTART \
+    PM2_MAX_RESTARTS PM2_MIN_UPTIME PM2_RESTART_DELAY; do
     if [[ -n "${!passthrough:-}" ]]; then
       scrubbed+=("$passthrough=${!passthrough}")
     fi
@@ -195,9 +242,14 @@ restart_worker() {
   "${scrubbed[@]}" pm2 startOrRestart "$INSTALL_DIR/ecosystem.config.js" --update-env --only "$APP_NAME"
 }
 
-# Prints "<status> <restart_time>" for $APP_NAME, or "unknown unknown".
+# Prints "<status> <restart_time>" for $APP_NAME, or a non-numeric sentinel.
+# The node one-liner is the only thing that writes: a failed `pm2 jlist` feeds it
+# empty stdin, which it reports as "unknown unknown". The trailing `|| true` only
+# absorbs the pipeline's exit status (pipefail) so the caller's command
+# substitution does not trip `set -e`; appending a second sentinel there would
+# concatenate two readings into one word.
 pm2_app_state() {
-  pm2 jlist 2>/dev/null | APP_NAME="$APP_NAME" node -e "let s='';process.stdin.on('data',c=>s+=c);process.stdin.on('end',()=>{try{const apps=JSON.parse(s);const app=apps.find(a=>a.name===process.env.APP_NAME);process.stdout.write(app?app.pm2_env.status+' '+app.pm2_env.restart_time:'missing unknown');}catch(_){process.stdout.write('unknown unknown');}});" || echo "unknown unknown"
+  pm2 jlist 2>/dev/null | APP_NAME="$APP_NAME" node -e "let s='';process.stdin.on('data',c=>s+=c);process.stdin.on('end',()=>{try{const apps=JSON.parse(s);const app=apps.find(a=>a.name===process.env.APP_NAME);process.stdout.write(app?app.pm2_env.status+' '+app.pm2_env.restart_time:'missing unknown');}catch(_){process.stdout.write('unknown unknown');}});" || true
 }
 
 rollback_to_snapshot() {
@@ -218,14 +270,35 @@ rollback_to_snapshot() {
       tar -xzf "$newest" -C "$INSTALL_DIR" || true
     fi
   fi
+  if [[ "$SCHEMA_CHANGED" == "1" && -n "$DB_SNAPSHOT" ]]; then
+    # Rolling back restores code only; the migration is not reversible. Old code
+    # against a forward schema fails every query touching a rebuilt table, which
+    # with min_uptime in force parks the worker in `errored` within minutes — and
+    # on a stock install nothing raises an alarm (spec 23). Restoring costs the
+    # data written during the update window; running the old code against the new
+    # schema costs the device.
+    #
+    # Stop first: the worker must not hold the file open while it is replaced,
+    # and write_meta below must land in the restored database rather than in one
+    # about to be discarded. Scoped to this branch on purpose — a rollback that
+    # never touched the schema keeps the old behaviour of never taking the worker
+    # down, only restarting it.
+    pm2 stop "$APP_NAME" >/dev/null 2>&1 || true
+    if restore_database "$DB_SNAPSHOT"; then
+      echo "Restored the pre-migration database snapshot" >&2
+    else
+      echo "WARNING: could not restore $DB_SNAPSHOT; the database is still on the new schema" >&2
+    fi
+  fi
   install_production_deps || true
   write_meta "restart_reason" "ota_update_failed"
   write_meta "update_status" "failed"
-  # By name, not from the config file: this is the get-the-service-back-up path,
-  # and the ecosystem.config.js on disk has just been reverted to the previous
-  # release's. Reusing the loaded pm2_env keeps the restart policy that is
-  # already in force and keeps this path to its single moving part.
-  pm2 restart "$APP_NAME" || true
+  # Through the config file, not by name: startOrRestart has already overwritten
+  # the live pm2_env with the *new* release's config, and the file on disk has
+  # just been reverted. Restarting by name would replay the new config against
+  # old code while dump.pm2 still held the pre-update one — a three-way split
+  # that changes behaviour again at the next reboot.
+  restart_worker || pm2 restart "$APP_NAME" || true
 }
 
 # Create rollback snapshot before updating
@@ -234,8 +307,9 @@ ROLLBACK_SNAPSHOT="$INSTALL_DIR/data/rollbacks/rollback-$(date +%s).tar.gz"
 echo "Creating pre-update rollback snapshot: $ROLLBACK_SNAPSHOT..."
 tar -czf "$ROLLBACK_SNAPSHOT" --exclude="data" --exclude="node_modules" --exclude=".git" -C "$INSTALL_DIR" .
 
-# Prune old rollback snapshots (retain only 3 most recent)
+# Prune old rollback snapshots (retain only 3 most recent of each kind)
 ls -t "$INSTALL_DIR/data/rollbacks"/rollback-*.tar.gz 2>/dev/null | tail -n +4 | xargs -I {} rm -f "{}" || true
+ls -t "$INSTALL_DIR/data/rollbacks"/db-*.db 2>/dev/null | tail -n +4 | xargs -I {} rm -f "{}" || true
 
 # Determine if updating via GitHub Release tarball or Git fallback
 REPO_URL="${HOME_WORKER_REPO:-}"
@@ -332,10 +406,40 @@ else
     exit 1
   fi
 fi
-if ! corepack yarn db:migrate; then
-  echo "migrations failed, rolling back" >&2
+# Migrations are one-way: rolling back restores code but never un-applies a
+# schema change, and this repo's own history contains DROP COLUMN / table
+# rebuilds despite spec 24's additivity policy. Snapshot first so a rollback has
+# something to restore. Taken before the migration runs, so a failure here costs
+# nothing — nothing has been applied yet.
+MIGRATIONS_BEFORE="$(applied_migration_count)"
+DB_SNAPSHOT="$INSTALL_DIR/data/rollbacks/db-$(date +%s).db"
+echo "Creating pre-migration database snapshot: $DB_SNAPSHOT..."
+if ! snapshot_database "$DB_SNAPSHOT"; then
+  echo "pre-migration database snapshot failed, rolling back" >&2
+  DB_SNAPSHOT=""
   rollback_to_snapshot "$ROLLBACK_SNAPSHOT" "${ROLLBACK_TAG:-$CURRENT_COMMIT}"
   exit 1
+fi
+
+if ! corepack yarn db:migrate; then
+  echo "migrations failed, rolling back" >&2
+  # A partially applied migration is exactly what the snapshot is for.
+  SCHEMA_CHANGED=1
+  rollback_to_snapshot "$ROLLBACK_SNAPSHOT" "${ROLLBACK_TAG:-$CURRENT_COMMIT}"
+  exit 1
+fi
+
+# Restore on rollback only when the schema actually moved. Most updates carry no
+# new migration, and restoring then would discard everything the worker recorded
+# during the update window for no benefit. When either count is unreadable,
+# assume it moved: losing the window beats leaving old code on a new schema.
+MIGRATIONS_AFTER="$(applied_migration_count)"
+if [[ "$MIGRATIONS_BEFORE" =~ ^[0-9]+$ && "$MIGRATIONS_AFTER" =~ ^[0-9]+$ ]]; then
+  if (( MIGRATIONS_AFTER > MIGRATIONS_BEFORE )); then
+    SCHEMA_CHANGED=1
+  fi
+else
+  SCHEMA_CHANGED=1
 fi
 
 write_meta "update_status" "pending"
@@ -371,16 +475,36 @@ fi
 # never trigger a rollback on its own.
 if [[ "$RESTART_BASELINE" =~ ^[0-9]+$ && "$RESTART_COUNT" =~ ^[0-9]+$ ]] &&
    (( RESTART_COUNT > RESTART_BASELINE + 1 )); then
-  echo "Health check failed (worker restarted $((RESTART_COUNT - RESTART_BASELINE - 1))x after the update restart), rolling back" >&2
-  rollback_to_snapshot "$ROLLBACK_SNAPSHOT" "${ROLLBACK_TAG:-$CURRENT_COMMIT}"
-  exit 1
+  # One extra restart is not proof of a loop. A feature-install job resumed on
+  # boot self-restarts the worker once (FeatureInstallRecoveryService ->
+  # ReconcileFeatureInstallUseCase -> Pm2ProcessRestarter), and refusing a good
+  # update for that would be worse than the miss. A loop keeps incrementing; a
+  # one-off does not — so re-sample before deciding.
+  echo "Worker restarted during the health check; re-sampling before rolling back" >&2
+  sleep "$RESTART_RECHECK_SEC"
+  RECHECK_STATE="$(pm2_app_state)"
+  RECHECK_STATUS="${RECHECK_STATE%% *}"
+  RECHECK_COUNT="${RECHECK_STATE##* }"
+  if [[ "$RECHECK_STATUS" != "online" ]] ||
+     { [[ "$RECHECK_COUNT" =~ ^[0-9]+$ ]] && (( RECHECK_COUNT > RESTART_COUNT )); }; then
+    echo "Health check failed (pm2 status=$RECHECK_STATUS, still restarting), rolling back" >&2
+    rollback_to_snapshot "$ROLLBACK_SNAPSHOT" "${ROLLBACK_TAG:-$CURRENT_COMMIT}"
+    exit 1
+  fi
 fi
 
 # Persist the freshly evaluated pm2_env so the next boot's `pm2 resurrect`
 # replays this restart policy and not the pre-update one. Deliberately after the
 # health check: a failed update must never be written into dump.pm2.
-pm2 save >/dev/null 2>&1 ||
+if pm2 save >/dev/null 2>&1; then
+  write_meta "update_pm2_save" "ok"
+else
+  # This script runs detached with stdio ignored, so a stderr warning here is
+  # invisible on the one path where it matters. Persist it the way the helper
+  # refusal at the top of the file does.
+  write_meta "update_pm2_save" "failed"
   echo "warning: pm2 save failed; the restart policy will not survive a reboot" >&2
+fi
 
 write_meta "update_status" "success"
 echo "Update complete: $NEW_COMMIT"

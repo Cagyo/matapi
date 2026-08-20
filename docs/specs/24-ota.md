@@ -190,7 +190,9 @@ restart counter distinguishes "up" from "up again". Together they catch:
 - Failed DB migrations that crash on startup
 - A build that starts, crashes, and is restarted by PM2 inside the check window
 
-If either check fails — or if the restart command itself fails — rollback is automatic.
+If either check fails — or if the restart command itself fails — rollback is automatic. A `restart_time` that
+advanced by more than one triggers a 15 s re-sample rather than an immediate rollback, so a single legitimate
+self-restart (a feature-install job resumed on boot) does not refuse a good update.
 
 ## Node.js Major Version Policy
 
@@ -208,3 +210,28 @@ If either check fails — or if the restart command itself fails — rollback is
 - Migrations must be backward-compatible: old code should work with new schema
 - This matters because rollback restores old code but does NOT rollback the DB migration
 - When writing migrations: only add columns (with defaults), don't remove or rename
+
+**Enforced, not just documented.** `test/system/infrastructure/migration-additivity.test.ts` fails on a new
+migration containing `DROP COLUMN`, `DROP TABLE`, `RENAME TO` or `RENAME COLUMN`. Four migrations predating
+that check are grandfathered in an explicit list — the policy was written down but nothing held it, and old
+code meeting a rebuilt table fails every query touching it, which with `min_uptime` in force parks the worker
+in `errored` within minutes and, on a stock install with no `HEARTBEAT_URL`, raises no alarm at all.
+
+**Backed by a snapshot.** Because the policy was violable, `update.sh` also takes a database snapshot
+immediately before `db:migrate` (`snapshot_database`) and restores it on rollback (`restore_database`). The
+snapshot uses SQLite's online backup API — via the `sqlite3` CLI, which is a `core` apt dependency, falling
+back to `better-sqlite3`'s `db.backup()` — because a plain `cp` of the main file is not consistent while a
+`-wal` sidecar is live. It is the same mechanism `BetterSqlite3BackupSnapshotAdapter` uses in-process, down to
+the `PRAGMA quick_check` before the copy is trusted.
+
+The restore is **conditional and not free**:
+
+- It runs only when `db:migrate` actually advanced `__drizzle_migrations` (or when that count is unreadable,
+  where it assumes the worst). Most updates carry no new migration, and restoring then would discard the
+  update window's writes for no benefit.
+- When it does run it **loses every row written during the update window** — a build on a Pi 3 plus the health
+  check is minutes of sensor and motion events. That is the price of a one-way migration, and the reason the
+  additivity policy is now enforced rather than trusted.
+- The worker is stopped first (`pm2 stop`): restoring under a live process would leave it reading the old file
+  through an open handle, and the `-wal`/`-shm` sidecars belong to the *migrated* database, so they are
+  discarded rather than replayed onto the restored file.

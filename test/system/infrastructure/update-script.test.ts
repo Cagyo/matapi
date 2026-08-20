@@ -26,10 +26,16 @@ interface RestartAttempt {
   commands: string[];
   /** The environment the last pm2 invocation saw. */
   environment: Record<string, string>;
+  /** Exit status of restart_worker() itself. */
+  status: number | null;
 }
 
 /** Runs update.sh's restart_worker() against a fake pm2 in a throwaway install. */
-function runRestartWorker(ecosystemSource: string, appName: string): RestartAttempt {
+function runRestartWorker(
+  ecosystemSource: string,
+  appName: string,
+  pm2ExitCode = 0,
+): RestartAttempt {
   const tempDir = mkdtempSync(join(tmpdir(), 'home-worker-update-restart-'));
   try {
     const installDir = join(tempDir, 'install');
@@ -48,7 +54,7 @@ function runRestartWorker(ecosystemSource: string, appName: string): RestartAtte
         '#!/bin/sh',
         `printf '%s\\n' "$*" >> ${JSON.stringify(commandLog)}`,
         `env > ${JSON.stringify(environmentDump)}`,
-        'exit 0',
+        `exit ${pm2ExitCode}`,
         '',
       ].join('\n'),
     );
@@ -73,7 +79,8 @@ function runRestartWorker(ecosystemSource: string, appName: string): RestartAtte
     );
     chmodSync(harness, 0o755);
 
-    execFileSync('bash', [harness], {
+    // spawnSync, not execFileSync: a non-zero restart is a case under test.
+    const run = spawnSync('bash', [harness], {
       encoding: 'utf8',
       env: {
         ...process.env,
@@ -93,6 +100,108 @@ function runRestartWorker(ecosystemSource: string, appName: string): RestartAtte
     return {
       commands: readFileSync(commandLog, 'utf8').split('\n').filter(Boolean),
       environment,
+      status: run.status,
+    };
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+/** Runs update.sh's pm2_app_state() against a fake pm2 with the given exit code. */
+function runPm2AppState(pm2ExitCode: number): {
+  stdout: string;
+  baselineField: string;
+  status: number | null;
+} {
+  const tempDir = mkdtempSync(join(tmpdir(), 'home-worker-update-state-'));
+  try {
+    const fakeBin = join(tempDir, 'bin');
+    mkdirSync(fakeBin, { recursive: true });
+    writeFileSync(join(fakeBin, 'pm2'), `#!/bin/sh\nexit ${pm2ExitCode}\n`);
+    chmodSync(join(fakeBin, 'pm2'), 0o755);
+
+    const harness = join(tempDir, 'state.sh');
+    writeFileSync(
+      harness,
+      [
+        '#!/bin/bash',
+        'set -euo pipefail',
+        `export PATH=${JSON.stringify(fakeBin)}:"$PATH"`,
+        'APP_NAME=worker',
+        updateFunction('pm2_app_state'),
+        // Exactly how update.sh consumes it, including the command substitution
+        // that would trip `set -e` on a non-zero pipeline.
+        'BASELINE="$(pm2_app_state | cut -d\' \' -f2)"',
+        'pm2_app_state',
+        'printf \'\\n%s\' "$BASELINE"',
+        '',
+      ].join('\n'),
+    );
+    chmodSync(harness, 0o755);
+
+    const run = spawnSync('bash', [harness], { encoding: 'utf8' });
+    const [stdout = '', baselineField = ''] = String(run.stdout).split('\n');
+
+    return { stdout, baselineField, status: run.status };
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+/** Runs a snapshot/restore sequence through update.sh's own shell functions. */
+function runDatabaseSnapshotCycle(): {
+  afterSnapshot: string;
+  afterMutation: string;
+  afterRestore: string;
+  sidecarsRemoved: boolean;
+} {
+  const tempDir = mkdtempSync(join(tmpdir(), 'home-worker-update-db-'));
+  try {
+    const installDir = join(tempDir, 'install');
+    mkdirSync(join(installDir, 'data', 'rollbacks'), { recursive: true });
+    const databasePath = join(installDir, 'data', 'worker.db');
+    const snapshotPath = join(installDir, 'data', 'rollbacks', 'db-1.db');
+
+    // WAL mode with an open sidecar is the state a live worker leaves behind,
+    // and the reason a plain `cp` of the main file is not a snapshot.
+    execFileSync('sqlite3', [
+      databasePath,
+      'PRAGMA journal_mode=WAL; CREATE TABLE events (id integer primary key, legacy text); INSERT INTO events (id, legacy) VALUES (1, \'before\');',
+    ]);
+
+    const harness = join(tempDir, 'db.sh');
+    writeFileSync(
+      harness,
+      [
+        '#!/bin/bash',
+        'set -euo pipefail',
+        `INSTALL_DIR=${JSON.stringify(installDir)}`,
+        `DB_PATH=${JSON.stringify(databasePath)}`,
+        `SNAPSHOT=${JSON.stringify(snapshotPath)}`,
+        updateFunction('snapshot_database'),
+        updateFunction('restore_database'),
+        'snapshot_database "$SNAPSHOT"',
+        'sqlite3 "$SNAPSHOT" "SELECT legacy FROM events;"',
+        // The migration this stands in for: a rebuild the old code cannot read.
+        'sqlite3 "$DB_PATH" "UPDATE events SET legacy = \'after\'; ALTER TABLE events DROP COLUMN legacy;"',
+        'sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM pragma_table_info(\'events\') WHERE name = \'legacy\';"',
+        'restore_database "$SNAPSHOT"',
+        // Checked before anything reopens the database: a WAL-mode connection
+        // recreates the sidecars, which would mask the discard.
+        'if [ -e "$DB_PATH-wal" ] || [ -e "$DB_PATH-shm" ]; then echo present; else echo absent; fi',
+        'sqlite3 "$DB_PATH" "SELECT legacy FROM events;"',
+        '',
+      ].join('\n'),
+    );
+    chmodSync(harness, 0o755);
+
+    const lines = execFileSync('bash', [harness], { encoding: 'utf8' }).trim().split('\n');
+
+    return {
+      afterSnapshot: lines[0] ?? '',
+      afterMutation: lines[1] ?? '',
+      sidecarsRemoved: lines[2] === 'absent',
+      afterRestore: lines[3] ?? '',
     };
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
@@ -171,7 +280,18 @@ describe('update.sh repository URL normalization', () => {
     // Both readings degrade to a non-numeric sentinel so a `pm2 jlist` hiccup
     // can never look like a restart and trigger a rollback on its own.
     expect(parser).toContain("'missing unknown'");
-    expect(parser).toContain('echo "unknown unknown"');
+    expect(parser).toContain("'unknown unknown'");
+  });
+
+  it('emits exactly one sentinel pair when pm2 cannot be read', () => {
+    // A `|| echo` fallback next to the parser's own sentinel appended a second
+    // reading to the first, so `cut -f2` saw "unknownunknown" rather than the
+    // documented "unknown".
+    const state = runPm2AppState(1);
+
+    expect(state.stdout).toBe('unknown unknown');
+    expect(state.baselineField).toBe('unknown');
+    expect(state.status).toBe(0);
   });
 
   it('restarts from ecosystem.config.js so an updated PM2 restart policy takes effect', () => {
@@ -218,6 +338,33 @@ describe('update.sh repository URL normalization', () => {
     expect(attempt.commands).toEqual(['restart worker']);
   });
 
+  it('reports a failed restart so the caller can roll back, on both branches', () => {
+    // The `if ! restart_worker` guard exists for this; previously a failing
+    // restart aborted under `set -e` with new code on disk and no rollback.
+    expect(
+      runRestartWorker(readFileSync(resolve('ecosystem.config.js'), 'utf8'), 'worker', 7).status,
+    ).toBe(7);
+    expect(
+      runRestartWorker(
+        "module.exports = { apps: [{ name: 'something-else', script: 'dist/main.js' }] };\n",
+        'worker',
+        7,
+      ).status,
+    ).toBe(7);
+  });
+
+  it('rolls back when the restart command itself fails', () => {
+    const script = readFileSync(resolve('scripts/update.sh'), 'utf8');
+
+    expect(script).toContain('if ! restart_worker; then');
+    const guard = script.indexOf('if ! restart_worker; then');
+    const rollback = script.indexOf('rollback_to_snapshot', guard);
+    const sleep = script.indexOf('sleep "$HEALTH_CHECK_SEC"');
+
+    expect(rollback).toBeGreaterThan(guard);
+    expect(rollback).toBeLessThan(sleep);
+  });
+
   it('tolerates the update restart itself but rolls back on a crash during the check', () => {
     // A crash-looping build reads `online` for most of each restart_delay cycle,
     // so the status sample alone misses it; the counter does not.
@@ -238,12 +385,43 @@ describe('update.sh repository URL normalization', () => {
     const script = readFileSync(resolve('scripts/update.sh'), 'utf8');
     const statusCheck = script.indexOf('Health check failed (pm2 status=$STATUS)');
     const restartCheck = script.indexOf('RESTART_COUNT > RESTART_BASELINE + 1');
-    const save = script.indexOf('\npm2 save >/dev/null');
+    const save = script.indexOf('if pm2 save >/dev/null');
 
     expect(statusCheck).toBeGreaterThan(-1);
     expect(restartCheck).toBeGreaterThan(statusCheck);
     expect(save).toBeGreaterThan(restartCheck);
     expect(script.indexOf('write_meta "update_status" "success"')).toBeGreaterThan(save);
+  });
+
+  it('snapshots the database WAL-safely and puts it back on rollback', () => {
+    // Rolling back restores code but never un-applies a migration, and this
+    // repo's own history drops columns. Old code against a forward schema fails
+    // every query touching the rebuilt table (spec 24 -> Migration Safety).
+    const cycle = runDatabaseSnapshotCycle();
+
+    expect(cycle.afterSnapshot).toBe('before');
+    expect(cycle.afterMutation).toBe('0');
+    expect(cycle.afterRestore).toBe('before');
+    // The sidecars belong to the migrated database; replaying them onto the
+    // restored file would corrupt it.
+    expect(cycle.sidecarsRemoved).toBe(true);
+  });
+
+  it('restores the database only when the migration actually moved the schema', () => {
+    // Most updates carry no new migration; restoring then would discard every
+    // event the worker recorded during the update window for no benefit.
+    const script = readFileSync(resolve('scripts/update.sh'), 'utf8');
+
+    expect(script).toContain('MIGRATIONS_BEFORE="$(applied_migration_count)"');
+    expect(script).toContain('if (( MIGRATIONS_AFTER > MIGRATIONS_BEFORE )); then');
+    expect(script).toContain('if [[ "$SCHEMA_CHANGED" == "1" && -n "$DB_SNAPSHOT" ]]; then');
+    // Snapshot before migrating, and quiesce the worker before touching the file.
+    expect(script.indexOf('snapshot_database "$DB_SNAPSHOT"')).toBeLessThan(
+      script.indexOf('corepack yarn db:migrate'),
+    );
+    expect(script.indexOf('pm2 stop "$APP_NAME"')).toBeLessThan(
+      script.indexOf('restore_database "$DB_SNAPSHOT"'),
+    );
   });
 
   it('checks the fetched helper requirement before resetting to a candidate commit', () => {

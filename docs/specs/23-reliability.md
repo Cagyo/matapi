@@ -208,8 +208,9 @@ re-reads `ecosystem.config.js`. Two paths do re-read it:
   restarts nothing and still exits 0. The restart runs under a scrubbed environment (`env -i` with `PATH` and
   `HOME`): the config-file path bakes the caller's environment into the stored `pm2_env`, and update.sh's own
   environment carries `DATABASE_PATH`, `HOME_WORKER_*` and `UPDATE_HEALTH_CHECK_SEC`, which `dotenv` would then
-  never be able to override from `.env`. The scrub keeps `PATH`, `HOME` and `PM2_HOME`, so the restart reaches
-  the same PM2 daemon the health check queries.
+  never be able to override from `.env`. The scrub keeps `PATH`, `HOME` and `PM2_HOME` so the restart reaches
+  the same PM2 daemon the health check queries, and the `PM2_*` tuning knobs above so that a value an operator
+  exported for this device is re-applied rather than silently reverted on every update.
 
 > **One-release lag.** The release that ships a change to `update.sh` is applied by the **old** `update.sh`
 > already running in memory. A restart-policy change therefore engages on the update *after* the one that
@@ -251,13 +252,21 @@ guarantees is the inverse and more useful property: **a start the 30 s OTA check
 before 60 s is still counted `unstable` by PM2**, so the crash-loop cap is a proper backstop for the health
 check's blind spot rather than a restatement of it.
 
-The OTA health check does not rely on that window alone. A crash-looping deploy can still read `online` at the
-instant `update.sh` samples it — `restart_delay` keeps most of each cycle in `waiting restart`, but a build
-that survives ~25 s is `online` most of the time. So `update.sh` also records PM2's `restart_time` immediately
-*before* the restart and compares it after the sleep. One increment is the update's own restart; anything
-beyond that means PM2 brought the worker back at least once inside the window, and the update rolls back.
-Taking the baseline before the restart keeps the reading out of a race with PM2's own bookkeeping, and both
-readings degrade to a non-numeric sentinel, so a failed `pm2 jlist` can never trigger a rollback on its own.
+The OTA health check does not rely on that window alone, and it cannot: with `min_uptime` at 60 s and
+`restart_delay` at 10 s, exhausting `max_restarts` takes minutes, so **PM2's own cap can never fire inside the
+30 s health check**. Inside that window `update.sh` is the only backstop there is.
+
+The status sample alone is not enough either. `restart_delay` does not make a loop obvious the way it might
+seem: it catches the slow end — a build crashing at ~25 s is very likely to be sampled in `waiting restart` —
+but a build that crashes at 8 s is back `online` by 18 s and reads `online` at t=30. Cycles under ~20 s are
+what the counter is actually for. So `update.sh` records PM2's `restart_time` immediately *before* the restart
+and compares it after the sleep. One increment is the update's own restart. Beyond that it does **not** roll
+back immediately — it sleeps `UPDATE_RESTART_RECHECK_SEC` (15 s) and re-reads: a crash loop keeps
+incrementing, while a legitimate one-off does not. `FeatureInstallRecoveryService` resuming a feature-install
+job on boot self-restarts the worker exactly once, and refusing a good update for that would be worse than the
+miss it avoids. Taking the baseline before the restart keeps the reading out of a race with PM2's own
+bookkeeping, and every reading degrades to a non-numeric sentinel, so a failed `pm2 jlist` can never trigger a
+rollback on its own.
 
 ## Single Instance Constraint
 

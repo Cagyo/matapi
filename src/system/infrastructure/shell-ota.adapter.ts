@@ -27,6 +27,11 @@ export const OTA_ENV_ALLOWLIST = [
   'HOME_WORKER_REPO',
   'HOME_WORKER_RELEASE_URL',
   'PM2_APP_NAME',
+  // update.sh restarts through `pm2 startOrRestart ecosystem.config.js` and has
+  // to reach the same PM2 daemon its health check queries. Without this, a
+  // device with a non-default PM2_HOME falls back to $HOME/.pm2 and the restart
+  // can address a different daemon, where `--only` silently matches nothing.
+  'PM2_HOME',
   'DATABASE_PATH',
   'UPDATE_HEALTH_CHECK_SEC',
 ] as const;
