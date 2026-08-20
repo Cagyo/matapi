@@ -6,6 +6,7 @@ import {
 import { MotionEvent } from '../../../src/camera/domain/motion-event.entity';
 import { InMemoryMediaRepository } from '../../../src/camera/infrastructure/in-memory-media.repository';
 import type { ArchiveVerificationPort } from '../../../src/archive/application/ports/archive-verification.port';
+import { providerBlockedArchiveVerification } from './provider-blocked-archive-verification.fixture';
 
 function event(id: number, startedAt: string): MotionEvent {
   return {
@@ -90,4 +91,18 @@ describe('BrowseMotionEventsUseCase', () => {
       archiveWebViewLink: 'https://drive.example/current-private-link',
     });
   });
+
+  it.each(['blocked', 'cooldown'] as const)(
+    'keeps browsing responsive and link-free while provider admission is %s',
+    async (admission) => {
+      const blocked = await providerBlockedArchiveVerification(admission);
+      const archived = event(1, '2026-04-08T18:00:00');
+      archived.archiveArtifactId = blocked.artifactId;
+
+      const result = await useCase([archived], blocked.verification).latest();
+
+      expect(result.events[0]).toMatchObject({ archiveWebViewLink: null });
+      expect(blocked.loadedIds).toEqual([]);
+    },
+  );
 });

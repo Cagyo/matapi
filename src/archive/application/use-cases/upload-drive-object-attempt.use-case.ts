@@ -138,7 +138,11 @@ export class UploadDriveObjectAttemptUseCase {
       const prepared = await this.prepareUnattemptedArtifact(artifact, connection, signal);
       artifact = prepared.artifact;
       try {
-        const fileId = await this.drive.generateFileId(connection, signal);
+        const fileId = await this.runProviderUpload(
+          connection.id,
+          () => this.drive.generateFileId(connection, signal),
+          signal,
+        );
         attempt = await this.repository.createAttempt(
           artifact.id, connection.id, fileId, prepared.containerId, this.now(),
         );
@@ -297,7 +301,15 @@ export class UploadDriveObjectAttemptUseCase {
         }
         if (status.kind === 'resume') offset = status.confirmedOffset;
         if (status.kind === 'expired') {
-          const recovered = await this.drive.loadObject(connection, attempt.remoteObjectId, signal);
+          const recovered = await this.runProviderUpload(
+            connection.id,
+            () => this.drive.loadObject(connection, attempt.remoteObjectId, signal),
+            signal,
+            async (waitMs) => {
+              lease = await this.renewForProviderWait(attempt.id, lease, waitMs);
+              updateLease(lease);
+            },
+          );
           if (recovered !== null) {
             return this.verifyLoaded(attempt, artifact, connection, expectedProperties, recovered, lease, signal, updateLease, undefined, true);
           }
@@ -311,7 +323,15 @@ export class UploadDriveObjectAttemptUseCase {
         session = null;
       }
     } else {
-      const recovered = await this.drive.loadObject(connection, attempt.remoteObjectId, signal);
+      const recovered = await this.runProviderUpload(
+        connection.id,
+        () => this.drive.loadObject(connection, attempt.remoteObjectId, signal),
+        signal,
+        async (waitMs) => {
+          lease = await this.renewForProviderWait(attempt.id, lease, waitMs);
+          updateLease(lease);
+        },
+      );
       if (recovered !== null) {
         return this.verifyLoaded(attempt, artifact, connection, expectedProperties, recovered, lease, signal, updateLease, undefined, true);
       }
@@ -332,12 +352,20 @@ export class UploadDriveObjectAttemptUseCase {
           updateLease(lease);
         });
       } catch (error) {
-        const recovered = await this.drive.loadObject(connection, attempt.remoteObjectId, signal);
+        const recovered = await this.runProviderUpload(
+          connection.id,
+          () => this.drive.loadObject(connection, attempt.remoteObjectId, signal),
+          signal,
+          async (waitMs) => {
+            lease = await this.renewForProviderWait(attempt.id, lease, waitMs);
+            updateLease(lease);
+          },
+        );
         if (recovered !== null) {
           return this.verifyLoaded(attempt, artifact, connection, expectedProperties, recovered, lease, signal, updateLease, undefined, true);
         }
         if (isConflict(error)) {
-          return this.replaceConflict(attempt, connection, lease, signal);
+          return this.replaceConflict(attempt, connection, lease, signal, updateLease);
         }
         throw error;
       }
@@ -450,13 +478,22 @@ export class UploadDriveObjectAttemptUseCase {
     signal: AbortSignal,
     updateLease: (lease: AttemptLease) => void,
   ): Promise<UploadDriveObjectAttemptResult | null> {
-    const recovered = await this.drive.loadObject(connection, attempt.remoteObjectId, signal);
+    let activeLease = lease;
+    const recovered = await this.runProviderUpload(
+      connection.id,
+      () => this.drive.loadObject(connection, attempt.remoteObjectId, signal),
+      signal,
+      async (waitMs) => {
+        activeLease = await this.renewForProviderWait(attempt.id, activeLease, waitMs);
+        updateLease(activeLease);
+      },
+    );
     if (recovered !== null) {
       return this.verifyLoaded(
-        attempt, artifact, connection, expectedProperties, recovered, lease, signal, updateLease, undefined, true,
+        attempt, artifact, connection, expectedProperties, recovered, activeLease, signal, updateLease, undefined, true,
       );
     }
-    const cleared = await this.repository.clearSession(attempt.id, lease, this.now());
+    const cleared = await this.repository.clearSession(attempt.id, activeLease, this.now());
     updateLease(cleared);
     return null;
   }
@@ -496,9 +533,28 @@ export class UploadDriveObjectAttemptUseCase {
     updateLease: (lease: AttemptLease) => void,
     transferredDigest?: string,
   ): Promise<UploadDriveObjectAttemptResult> {
-    const remote = await this.drive.loadObject(connection, attempt.remoteObjectId, signal);
+    let activeLease = lease;
+    const remote = await this.runProviderUpload(
+      connection.id,
+      () => this.drive.loadObject(connection, attempt.remoteObjectId, signal),
+      signal,
+      async (waitMs) => {
+        activeLease = await this.renewForProviderWait(attempt.id, activeLease, waitMs);
+        updateLease(activeLease);
+      },
+    );
     if (remote === null) throw new DriveObjectConflictError('Reserved Drive object is missing after upload');
-    return this.verifyLoaded(attempt, artifact, connection, expectedProperties, remote, lease, signal, updateLease, transferredDigest);
+    return this.verifyLoaded(
+      attempt,
+      artifact,
+      connection,
+      expectedProperties,
+      remote,
+      activeLease,
+      signal,
+      updateLease,
+      transferredDigest,
+    );
   }
 
   private async verifyLoaded(
@@ -533,7 +589,9 @@ export class UploadDriveObjectAttemptUseCase {
       || !remote.ownedByMe || !remote.canDelete || remote.trashed
       || remote.sharing.shared || remote.sharing.permissionIds.length !== 1
       || remote.sharing.permissionIds[0] !== remote.sharing.ownerPermissionId) {
-      if (replaceMismatch) return this.replaceConflict(attempt, connection, lease, signal);
+      if (replaceMismatch) {
+        return this.replaceConflict(attempt, connection, lease, signal, updateLease);
+      }
       throw new DriveObjectConflictError('Drive object verification is not exact and private');
     }
     await this.repository.markVerified(attempt.id, lease, toArchiveObject(remote), this.now());
@@ -588,10 +646,20 @@ export class UploadDriveObjectAttemptUseCase {
     connection: DriveConnection,
     lease: AttemptLease,
     signal: AbortSignal,
+    updateLease: (lease: AttemptLease) => void,
   ): Promise<UploadDriveObjectAttemptResult> {
-    const replacementFileId = await this.drive.generateFileId(connection, signal);
+    let activeLease = lease;
+    const replacementFileId = await this.runProviderUpload(
+      connection.id,
+      () => this.drive.generateFileId(connection, signal),
+      signal,
+      async (waitMs) => {
+        activeLease = await this.renewForProviderWait(attempt.id, activeLease, waitMs);
+        updateLease(activeLease);
+      },
+    );
     const replacement = await this.repository.replaceConflictingAttempt(
-      attempt.id, lease, replacementFileId, 'reserved_id_conflict', this.now(),
+      attempt.id, activeLease, replacementFileId, 'reserved_id_conflict', this.now(),
     );
     return { kind: 'replaced', attemptId: attempt.id, replacementAttemptId: replacement.id, replacementFileId };
   }
@@ -612,9 +680,29 @@ export class UploadDriveObjectAttemptUseCase {
     };
     if (attempt.session !== null) {
       const session = await this.decryptSession(artifact, attempt);
-      await this.drive.querySession({ connection, uri: session.uri, totalSize: artifact.size }, signal);
+      await this.runProviderUpload(
+        connection.id,
+        () => this.drive.querySession({
+          connection,
+          uri: session.uri,
+          totalSize: artifact.size,
+        }, signal),
+        signal,
+        async (waitMs) => {
+          activeLease = await this.renewForProviderWait(attempt.id, activeLease, waitMs);
+          trackLease(activeLease);
+        },
+      );
     }
-    const remote = await this.drive.loadObject(connection, attempt.remoteObjectId, signal);
+    const remote = await this.runProviderUpload(
+      connection.id,
+      () => this.drive.loadObject(connection, attempt.remoteObjectId, signal),
+      signal,
+      async (waitMs) => {
+        activeLease = await this.renewForProviderWait(attempt.id, activeLease, waitMs);
+        trackLease(activeLease);
+      },
+    );
     if (remote !== null && !remote.trashed) {
       try {
         return await this.verifyLoaded(
@@ -639,7 +727,15 @@ export class UploadDriveObjectAttemptUseCase {
         if (!(error instanceof DriveObjectConflictError)) throw error;
       }
     }
-    const replacementFileId = await this.drive.generateFileId(connection, signal);
+    const replacementFileId = await this.runProviderUpload(
+      connection.id,
+      () => this.drive.generateFileId(connection, signal),
+      signal,
+      async (waitMs) => {
+        activeLease = await this.renewForProviderWait(attempt.id, activeLease, waitMs);
+        trackLease(activeLease);
+      },
+    );
     const replacement = await this.repository.replaceAttemptForContainer({
       attemptId: attempt.id,
       fence: { kind: 'lease', lease: activeLease },

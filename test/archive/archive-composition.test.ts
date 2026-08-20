@@ -35,6 +35,7 @@ import { RetireDriveConnectionUseCase } from '../../src/archive/application/use-
 import { UploadDriveObjectAttemptUseCase } from '../../src/archive/application/use-cases/upload-drive-object-attempt.use-case';
 import { ARCHIVE_CLOCK } from '../../src/archive/application/ports/archive-clock.port';
 import { ApplyDriveRetentionUseCase } from '../../src/archive/application/use-cases/apply-drive-retention.use-case';
+import { VerifyArchiveArtifactUseCase } from '../../src/archive/application/use-cases/verify-archive-artifact.use-case';
 import { ARCHIVE_RETENTION } from '../../src/archive/application/ports/archive-retention.port';
 import { DRIVE_ACCOUNT } from '../../src/archive/application/ports/drive-account.port';
 import { DriveClockUnhealthyError } from '../../src/archive/domain/errors/drive-clock-unhealthy.error';
@@ -114,7 +115,11 @@ describe('ArchiveModule composition', () => {
     }
     expect(providerFor(providers, ConfirmDriveAccountUseCase).inject)
       .toEqual(expect.arrayContaining([ArchiveProviderGateService, ArchiveWakeService]));
-    expect(providerFor(providers, ARCHIVE_VERIFICATION).inject).toContain(ArchiveProviderGateService);
+    expect(providerFor(providers, VerifyArchiveArtifactUseCase).inject)
+      .toContain(ArchiveProviderGateService);
+    expect(providerFor(providers, ARCHIVE_VERIFICATION)).toMatchObject({
+      useExisting: VerifyArchiveArtifactUseCase,
+    });
     expect(providerFor(providers, ReportDriveStatusUseCase).inject).toEqual(expect.arrayContaining([
       DRIVE_ACCOUNT,
       ARCHIVE_PROVIDER_STATE_REPOSITORY,

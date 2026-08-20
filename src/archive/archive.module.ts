@@ -352,41 +352,25 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         drive: DriveArchivePort,
         source: ArchiveUploadSourcePort,
         lock: ArchiveRemoteMutationLockService,
-      ) => new VerifyArchiveArtifactUseCase(repository, credentials, drive, source, lock),
+        gate: ArchiveProviderGateService,
+      ) => new VerifyArchiveArtifactUseCase(
+        repository,
+        credentials,
+        drive,
+        source,
+        lock,
+        gate,
+      ),
       inject: [
         ARCHIVE_ARTIFACT_REPOSITORY,
         DRIVE_CREDENTIAL_REPOSITORY,
         DRIVE_ARCHIVE,
         ARCHIVE_UPLOAD_SOURCE,
         ArchiveRemoteMutationLockService,
-      ],
-    },
-    {
-      provide: ARCHIVE_VERIFICATION,
-      useFactory: (
-        verification: VerifyArchiveArtifactUseCase,
-        credentials: DriveCredentialRepositoryPort,
-        gate: ArchiveProviderGateService,
-      ) => ({
-        inspect: async (
-          ...args: Parameters<VerifyArchiveArtifactUseCase['inspect']>
-        ) => {
-          const active = await credentials.loadActive();
-          if (active?.status !== 'active') return verification.inspect(...args);
-          return gate.run({
-            generationId: active.id,
-            operationClass: 'reconcile',
-            probe: true,
-            operation: () => verification.inspect(...args),
-          });
-        },
-      }),
-      inject: [
-        VerifyArchiveArtifactUseCase,
-        DRIVE_CREDENTIAL_REPOSITORY,
         ArchiveProviderGateService,
       ],
     },
+    { provide: ARCHIVE_VERIFICATION, useExisting: VerifyArchiveArtifactUseCase },
     {
       provide: ReconcileDriveUseCase,
       useFactory: (
@@ -738,7 +722,11 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         sharedLock: ArchiveRemoteMutationLockService,
       ) => {
         hooks.registerRemoteMaintenance(async (_lock, signal) => {
-          const active = await credentials.loadActive();
+          const active = await sharedLock.runExclusive(async () => {
+            const current = await credentials.loadActive();
+            if (current?.status === 'active') await gate.ensureGeneration(current.id);
+            return current;
+          });
           const reconcileOperation = () => reconcile.execute({ limit: 20 }, signal, sharedLock);
           if (active?.status === 'active') {
             await gate.run({

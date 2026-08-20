@@ -148,6 +148,92 @@ describe('UploadDriveObjectAttemptUseCase', () => {
     expect(await fixture.repository.listAttempts(fixture.artifactId)).toEqual([]);
   });
 
+  it('persists provider admission when reserved-ID generation is rate limited', async () => {
+    const fixture = await setup({ providerGate: true });
+    fixture.drive.generateError = providerRateLimit('metadata');
+
+    await expect(fixture.useCase.execute(fixture.artifactId, signal))
+      .rejects.toBeInstanceOf(DriveRateLimitedError);
+
+    await expect(fixture.providerState.load()).resolves.toMatchObject({
+      generationId: 'generation-1',
+      operationClass: 'upload',
+      failureClass: 'rate-limit',
+      cooldownUntilMs: now + 60_000,
+    });
+  });
+
+  it('persists provider admission when exact-ID reconciliation is rate limited', async () => {
+    const fixture = await setup({ createAttempt: true, providerGate: true });
+    fixture.drive.loadError = providerRateLimit('metadata');
+
+    await expect(fixture.useCase.execute(fixture.attemptId(), signal))
+      .rejects.toBeInstanceOf(DriveRateLimitedError);
+
+    await expect(fixture.providerState.load()).resolves.toMatchObject({
+      generationId: 'generation-1',
+      operationClass: 'upload',
+      failureClass: 'rate-limit',
+      cooldownUntilMs: now + 60_000,
+    });
+  });
+
+  it('persists provider admission when changed-container session reconciliation is rate limited', async () => {
+    const fixture = await setup({
+      createAttempt: true,
+      providerGate: true,
+      attemptContainerId: 'old-day-folder',
+    });
+    await fixture.seedSession(0);
+    fixture.resolver.execute.mockResolvedValue('new-day-folder');
+    fixture.drive.queryError = providerRateLimit('session-query');
+
+    await expect(fixture.useCase.execute(fixture.attemptId(), signal))
+      .rejects.toBeInstanceOf(DriveRateLimitedError);
+
+    await expect(fixture.providerState.load()).resolves.toMatchObject({
+      generationId: 'generation-1',
+      operationClass: 'upload',
+      failureClass: 'rate-limit',
+      cooldownUntilMs: fixture.clock.value + 60_000,
+    });
+  });
+
+  it('persists provider admission when conflict replacement-ID generation is rate limited', async () => {
+    const fixture = await setup({ providerGate: true });
+    fixture.drive.conflictOnBegin = true;
+    fixture.drive.onBegin = async () => {
+      fixture.drive.generateError = providerRateLimit('metadata');
+    };
+
+    await expect(fixture.useCase.execute(fixture.artifactId, signal))
+      .rejects.toBeInstanceOf(DriveRateLimitedError);
+
+    await expect(fixture.providerState.load()).resolves.toMatchObject({
+      generationId: 'generation-1',
+      operationClass: 'upload',
+      failureClass: 'rate-limit',
+      cooldownUntilMs: fixture.clock.value + 60_000,
+    });
+  });
+
+  it('keeps the retry fence current across replacement-ID provider waits', async () => {
+    const fixture = await setup({ providerGate: true });
+    fixture.drive.conflictOnBegin = true;
+    fixture.drive.onBegin = async () => {
+      fixture.drive.generateError = new DriveTemporaryUnavailableError('replacement unavailable');
+    };
+
+    await expect(fixture.useCase.execute(fixture.artifactId, signal))
+      .rejects.toThrow('replacement unavailable');
+
+    expect(fixture.providerSleeps.length).toBeGreaterThan(0);
+    expect((await fixture.repository.listAttempts(fixture.artifactId))[0]).toMatchObject({
+      state: 'retryable',
+      errorCode: 'temporary_failure',
+    });
+  });
+
   it('reports the exact selected generation before a provider failure escapes', async () => {
     const fixture = await setup();
     fixture.drive.generateError = new Error('temporary provider failure');
@@ -489,14 +575,16 @@ async function setup(options: {
   const semaphore = new ArchiveTransferSemaphoreService();
   const clock = { value: now, now() { return this.value; } };
   const providerSleeps: number[] = [];
+  const providerState = new InMemoryArchiveProviderStateRepository();
   const providerGate = options.providerGate
     ? new ArchiveProviderGateService(
-      new InMemoryArchiveProviderStateRepository(),
+      providerState,
       { now: () => new Date(clock.value) },
       { sleep: async (ms: number) => { providerSleeps.push(ms); clock.value += ms; } },
       { random: () => 0.5 },
     )
     : undefined;
+  if (providerGate !== undefined) await providerGate.ensureGeneration(connection.id);
   const credentials = { loadActive: vi.fn(async () => connection) };
   const create = () => new UploadDriveObjectAttemptUseCase(
     repository, credentials, drive, cipher, source, semaphore,
@@ -508,7 +596,7 @@ async function setup(options: {
   );
   const fixture = {
     repository, artifactId: artifact.id, source, drive, cipher, semaphore, clock, resolver, journal,
-    useCase: create(), newUseCase: create, providerSleeps,
+    useCase: create(), newUseCase: create, providerSleeps, providerState,
     attemptId: () => drive.lastAttemptId ?? '',
     seedSession: async (confirmedOffset: number) => {
       const attempt = (await repository.listAttempts(artifact.id))[0];
@@ -605,6 +693,7 @@ class FakeDrive implements DriveArchivePort {
   failChunkOnce = false;
   failChunkAfterConsumeOnce = false;
   queryError: Error | null = null;
+  loadError: Error | null = null;
   remoteOverride: Partial<VerifiedDriveObject> = {};
   fallbackName = '120000-clip.mp4';
   fallbackParentId = 'day-folder-1';
@@ -681,11 +770,22 @@ class FakeDrive implements DriveArchivePort {
 
   async loadObject(_connection: unknown, fileId: string): Promise<VerifiedDriveObject | null> {
     this.loadIds.push(fileId);
+    if (this.loadError !== null) throw this.loadError;
     return this.objects.get(fileId) ?? null;
   }
 
   async listManagedObjects() { return { objects: [], nextPageToken: null, incompleteSearch: false }; }
   async deleteExact() { return undefined; }
+}
+
+function providerRateLimit(
+  operationPhase: 'metadata' | 'session-query',
+): DriveRateLimitedError {
+  return new DriveRateLimitedError({
+    retryAfterMs: 60_000,
+    sessionUsable: false,
+    operationPhase,
+  });
 }
 
 function verified(

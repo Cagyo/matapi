@@ -9,6 +9,7 @@ import { SystemMetaRepositoryPort } from '../../../src/system/domain/ports/syste
 import { MotionEvent } from '../../../src/camera/domain/motion-event.entity';
 import { InMemoryMediaRepository } from '../../../src/camera/infrastructure/in-memory-media.repository';
 import type { ArchiveVerificationPort } from '../../../src/archive/application/ports/archive-verification.port';
+import { providerBlockedArchiveVerification } from './provider-blocked-archive-verification.fixture';
 
 function uploadedEvent(id: number): MotionEvent {
   return {
@@ -215,6 +216,27 @@ describe('CleanupLocalStorageUseCase', () => {
 
     expect(storage.deleteFile).not.toHaveBeenCalled();
   });
+
+  it.each(['blocked', 'cooldown'] as const)(
+    'keeps local media and remains responsive while provider admission is %s',
+    async (admission) => {
+      const blocked = await providerBlockedArchiveVerification(admission);
+      const repo = new InMemoryMediaRepository();
+      const candidate = uploadedEvent(1);
+      candidate.archiveArtifactId = blocked.artifactId;
+      repo.seedEvents([candidate]);
+      const { useCase, storage } = build({
+        repo,
+        archive: blocked.verification,
+        storage: fakeStorage([85, 60]),
+      });
+
+      await expect(useCase.execute()).resolves.toEqual({ thresholdUsed: 80 });
+
+      expect(storage.deleteFile).not.toHaveBeenCalled();
+      expect(blocked.loadedIds).toEqual([]);
+    },
+  );
 
   it('does not mark local-deleted when any referenced file deletion fails', async () => {
     const repo = new InMemoryMediaRepository();

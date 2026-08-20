@@ -1,10 +1,13 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { ArchiveUploadSourcePort } from '../../../src/archive/application/use-cases/upload-drive-object-attempt.use-case';
 import { VerifyArchiveArtifactUseCase } from '../../../src/archive/application/use-cases/verify-archive-artifact.use-case';
 import { encodeArchiveAppProperties } from '../../../src/archive/domain/app-properties';
 import { DriveConnection } from '../../../src/archive/domain/drive-connection.entity';
 import type { VerifiedDriveObject } from '../../../src/archive/domain/drive-object-metadata.value-object';
 import { InMemoryArchiveArtifactRepository } from '../../../src/archive/infrastructure/persistence/in-memory-archive-artifact.repository';
+import { ArchiveProviderGateService } from '../../../src/archive/application/archive-provider-gate.service';
+import { InMemoryArchiveProviderStateRepository } from '../../../src/archive/infrastructure/persistence/in-memory-archive-provider-state.repository';
+import { DrivePolicyBlockedError } from '../../../src/archive/domain/errors/drive-policy-blocked.error';
 
 const DIGEST = '25bf8e1a2393f1108d37029b3df5593236c755742ec93465bbafa9b290bddcf6';
 const FINGERPRINT = 'b'.repeat(64);
@@ -43,6 +46,17 @@ describe('VerifyArchiveArtifactUseCase', () => {
     expect(fixture.loadedIds).toEqual([]);
   });
 
+  it('fails closed when activation changes during the exact remote read', async () => {
+    const fixture = await setup();
+    fixture.changeActiveGenerationOnLoad('generation-2');
+
+    await expect(fixture.verification.inspect(fixture.artifactId)).resolves.toMatchObject({
+      cleanupSafe: false,
+      webViewLink: null,
+      reason: 'retired-generation',
+    });
+  });
+
   it('sticky-detaches observed remote drift under the archive mutation lock', async () => {
     const fixture = await setup();
     fixture.remote.version = '2';
@@ -56,6 +70,61 @@ describe('VerifyArchiveArtifactUseCase', () => {
     expect((await fixture.repository.listAttempts(fixture.artifactId))[0].state)
       .toBe('detached');
   });
+
+  it.each([
+    ['no-current-attempt', {
+      loadArtifact: async () => null,
+      loadAttempt: async () => null,
+      listAttempts: async () => [],
+    }],
+    ['busy', {
+      loadArtifact: async () => ({ currentVerifiedAttemptId: null }),
+      loadAttempt: async () => null,
+      listAttempts: async () => [{ state: 'pending' }],
+    }],
+    ['retired-generation', {
+      loadArtifact: async () => ({
+        installationId: 'installation-1',
+        currentVerifiedAttemptId: 'attempt-1',
+      }),
+      loadAttempt: async () => ({
+        id: 'attempt-1', generationId: 'retired-generation', state: 'verified',
+        verifiedObject: {},
+      }),
+      listAttempts: async () => [],
+    }],
+  ] as const)(
+    'returns the local-only %s outcome without consulting blocked provider admission',
+    async (reason, repository) => {
+      const providerState = new InMemoryArchiveProviderStateRepository();
+      const gate = new ArchiveProviderGateService(providerState, { now: () => new Date(2_000) });
+      await gate.ensureGeneration('generation-1');
+      await gate.recordFailure('generation-1', 'upload', new DrivePolicyBlockedError());
+      const loadObject = vi.fn();
+      const verification = new (VerifyArchiveArtifactUseCase as unknown as new (
+        ...args: unknown[]
+      ) => VerifyArchiveArtifactUseCase)(
+        { ...repository, markDetached: vi.fn(), acceptReconciledRename: vi.fn() },
+        { loadActive: async () => DriveConnection.restore({
+          id: 'generation-1', installationId: 'installation-1', status: 'active', revision: 1,
+          permissionId: 'owner-1', email: null, displayName: null,
+          folders: { rootId: 'root-1', motionId: 'motion-1', backupsId: 'backups-1' },
+          createdAtMs: 1, updatedAtMs: 1, activatedAtMs: 1, retiredAtMs: null,
+        }) },
+        { loadObject },
+        { stat: vi.fn(), open: vi.fn() },
+        undefined,
+        gate,
+      );
+
+      await expect(verification.inspect('artifact-1')).resolves.toMatchObject({
+        cleanupSafe: false,
+        webViewLink: null,
+        reason,
+      });
+      expect(loadObject).not.toHaveBeenCalled();
+    },
+  );
 });
 
 async function setup(local = 'local', activeGeneration = 'generation-1') {
@@ -66,7 +135,8 @@ async function setup(local = 'local', activeGeneration = 'generation-1') {
     folders: { rootId: 'root-1', motionId: 'motion-1', backupsId: 'backups-1' },
     createdAtMs: 1, updatedAtMs: 1, activatedAtMs: 1, retiredAtMs: null,
   });
-  const active = DriveConnection.restore({ ...connection, id: activeGeneration });
+  let activeGenerationId = activeGeneration;
+  let nextGenerationOnLoad: string | null = null;
   const artifact = await repository.register({
     installationId: 'installation-1', kind: 'motion_video', sourceIdentity: 'motion:clip',
     trustedPath: '/motion/clip.mp4', relativePath: 'clip.mp4', size: 5,
@@ -92,9 +162,16 @@ async function setup(local = 'local', activeGeneration = 'generation-1') {
     ...args: unknown[]
   ) => VerifyArchiveArtifactUseCase)(
     repository,
-    { loadActive: async () => active },
+    { loadActive: async () => DriveConnection.restore({
+      ...connection,
+      id: activeGenerationId,
+    }) },
     {
-      loadObject: async (_connection, id) => { loadedIds.push(id); return remote; },
+      loadObject: async (_connection, id) => {
+        loadedIds.push(id);
+        if (nextGenerationOnLoad !== null) activeGenerationId = nextGenerationOnLoad;
+        return remote;
+      },
     },
     source,
     {
@@ -104,7 +181,15 @@ async function setup(local = 'local', activeGeneration = 'generation-1') {
       },
     },
   );
-  return { verification, repository, artifactId: artifact.id, remote, loadedIds, get lockCalls() { return lockCalls; } };
+  return {
+    verification,
+    repository,
+    artifactId: artifact.id,
+    remote,
+    loadedIds,
+    changeActiveGenerationOnLoad(generationId: string) { nextGenerationOnLoad = generationId; },
+    get lockCalls() { return lockCalls; },
+  };
 }
 
 function remoteObject(): VerifiedDriveObject {

@@ -28,6 +28,10 @@ export type ArchiveProviderAdmission =
   | { kind: 'cooldown'; untilMs: number }
   | { kind: 'blocked'; reason: string };
 
+export type ArchiveProviderImmediateResult<T> =
+  | { kind: 'executed'; value: T }
+  | { kind: 'denied' };
+
 /** Durable generation-scoped admission and bounded retry policy for Drive work. */
 @Injectable()
 export class ArchiveProviderGateService {
@@ -82,7 +86,8 @@ export class ArchiveProviderGateService {
         if (!(error instanceof Error)) throw error;
         await this.recordFailure(input.generationId, input.operationClass, error);
         if (!isInlineRetryable(error) || retries >= RETRY_SLOTS_MS.length) throw error;
-        const state = await this.ensureGeneration(input.generationId);
+        const state = await this.loadGeneration(input.generationId);
+        if (state === null) throw error;
         const deadline = state.cooldownUntilMs;
         if (deadline === null) throw error;
         await this.wait(deadline, input.signal, input.beforeWait);
@@ -92,6 +97,28 @@ export class ArchiveProviderGateService {
           throw error;
         }
       }
+    }
+  }
+
+  /** One provider attempt without waiting or claiming a recovery probe. */
+  async runIfAllowed<T>(input: {
+    generationId: string;
+    operationClass: ArchiveProviderOperationClass;
+    operation: () => Promise<T>;
+    signal?: AbortSignal;
+  }): Promise<ArchiveProviderImmediateResult<T>> {
+    throwIfAborted(input.signal);
+    const admission = await this.inspect(input.generationId, input.operationClass);
+    if (admission.kind !== 'allowed') return { kind: 'denied' };
+    try {
+      const value = await input.operation();
+      await this.recordSuccess(input.generationId, input.operationClass, false);
+      return { kind: 'executed', value };
+    } catch (error) {
+      if (error instanceof Error) {
+        await this.recordFailure(input.generationId, input.operationClass, error);
+      }
+      throw error;
     }
   }
 
@@ -109,7 +136,8 @@ export class ArchiveProviderGateService {
     generationId: string,
     operationClass: ArchiveProviderOperationClass,
   ): Promise<ArchiveProviderAdmission> {
-    const state = await this.ensureGeneration(generationId);
+    const state = await this.loadGeneration(generationId);
+    if (state === null) return { kind: 'blocked', reason: 'stale_generation' };
     if (state.blockReason !== null) return { kind: 'blocked', reason: state.blockReason };
     if (state.failureClass === 'quota') return { kind: 'allowed' };
     if (state.operationClass !== operationClass) return { kind: 'allowed' };
@@ -125,7 +153,8 @@ export class ArchiveProviderGateService {
     error: Error,
   ): Promise<void> {
     for (;;) {
-      const current = await this.ensureGeneration(generationId);
+      const current = await this.loadGeneration(generationId);
+      if (current === null) return;
       const nowMs = this.nowMs();
       const classified = classifyFailure(error, current.failureStreak, nowMs, this.jitter);
       if (classified === null) return;
@@ -149,7 +178,8 @@ export class ArchiveProviderGateService {
     _postCooldownProbe: boolean,
   ): Promise<void> {
     for (;;) {
-      const current = await this.ensureGeneration(generationId);
+      const current = await this.loadGeneration(generationId);
+      if (current === null) return;
       if (current.operationClass !== operationClass) return;
       if (isClear(current)) return;
       if (await this.repository.compareAndSet(current.revision, clearState(generationId, this.nowMs()))) return;
@@ -161,7 +191,8 @@ export class ArchiveProviderGateService {
       throw new Error('Drive quota deficit is invalid');
     }
     for (;;) {
-      const current = await this.ensureGeneration(generationId);
+      const current = await this.loadGeneration(generationId);
+      if (current === null) return;
       const next = remainingDeficitBytes === 0
         ? clearState(generationId, this.nowMs())
         : {
@@ -182,7 +213,8 @@ export class ArchiveProviderGateService {
     operationClass: ArchiveProviderOperationClass,
   ): Promise<boolean> {
     for (;;) {
-      const current = await this.ensureGeneration(generationId);
+      const current = await this.loadGeneration(generationId);
+      if (current === null) return false;
       if (current.blockReason !== null
         || current.operationClass !== operationClass
         || current.cooldownUntilMs === null
@@ -212,6 +244,11 @@ export class ArchiveProviderGateService {
     const value = this.clock.now().getTime();
     if (!Number.isFinite(value)) throw new Error('Archive provider clock is invalid');
     return Math.max(0, Math.floor(value));
+  }
+
+  private async loadGeneration(generationId: string): Promise<ArchiveProviderState | null> {
+    const current = await this.repository.load();
+    return current.generationId === generationId ? current : null;
   }
 }
 

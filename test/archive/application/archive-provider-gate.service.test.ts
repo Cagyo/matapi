@@ -9,8 +9,55 @@ import { DriveTemporaryUnavailableError } from '../../../src/archive/domain/erro
 import { InMemoryArchiveProviderStateRepository } from '../../../src/archive/infrastructure/persistence/in-memory-archive-provider-state.repository';
 
 describe('ArchiveProviderGateService', () => {
+  it('rejects stale-generation inspection without reactivating old provider state', async () => {
+    const { repository, gate } = await fixture();
+    await gate.ensureGeneration('generation-1');
+    await gate.ensureGeneration('generation-2');
+
+    await expect(gate.inspect('generation-1', 'upload')).resolves.toEqual({
+      kind: 'blocked',
+      reason: 'stale_generation',
+    });
+    await expect(repository.load()).resolves.toMatchObject({
+      generationId: 'generation-2',
+    });
+  });
+
+  it.each(['success', 'failure'] as const)(
+    'drops a stale in-flight %s outcome after explicit generation activation',
+    async (outcome) => {
+      const { repository, gate } = await fixture();
+      await gate.ensureGeneration('generation-1');
+      let release!: () => void;
+      let started!: () => void;
+      const didStart = new Promise<void>((resolve) => { started = resolve; });
+      const hold = new Promise<void>((resolve) => { release = resolve; });
+      const running = gate.run({
+        generationId: 'generation-1',
+        operationClass: 'upload',
+        operation: async () => {
+          started();
+          await hold;
+          if (outcome === 'failure') throw new DrivePolicyBlockedError();
+          return 'ok';
+        },
+      });
+      await didStart;
+
+      await gate.ensureGeneration('generation-2');
+      release();
+      if (outcome === 'failure') await expect(running).rejects.toBeInstanceOf(DrivePolicyBlockedError);
+      else await expect(running).resolves.toBe('ok');
+
+      await expect(repository.load()).resolves.toMatchObject({
+        generationId: 'generation-2',
+        blockReason: null,
+      });
+    },
+  );
+
   it('does not let unrelated metadata success clear an upload cooldown', async () => {
-    const { gate } = fixture();
+    const { gate } = await fixture();
     await gate.recordFailure('generation-1', 'upload', new DriveRateLimitedError({
       retryAfterMs: 60_000, sessionUsable: false, operationPhase: 'session-chunk',
     }));
@@ -22,7 +69,7 @@ describe('ArchiveProviderGateService', () => {
   });
 
   it('does not let an unrelated operation claim or clear an upload recovery probe', async () => {
-    const { gate, clock } = fixture();
+    const { gate, clock } = await fixture();
     await gate.recordFailure('generation-1', 'upload', new DriveRateLimitedError({
       retryAfterMs: 1_000, sessionUsable: true, operationPhase: 'metadata',
     }));
@@ -40,7 +87,7 @@ describe('ArchiveProviderGateService', () => {
   });
 
   it('does not replace an upload cooldown when another operation fails retryably', async () => {
-    const { gate } = fixture();
+    const { gate } = await fixture();
     await gate.recordFailure('generation-1', 'upload', new DriveRateLimitedError({
       retryAfterMs: 60_000, sessionUsable: false, operationPhase: 'session-chunk',
     }));
@@ -54,7 +101,7 @@ describe('ArchiveProviderGateService', () => {
   });
 
   it('does not replace an upload recovery probe when another operation fails retryably', async () => {
-    const { gate, clock } = fixture();
+    const { gate, clock } = await fixture();
     await gate.recordFailure('generation-1', 'upload', new DriveRateLimitedError({
       retryAfterMs: 1_000, sessionUsable: true, operationPhase: 'metadata',
     }));
@@ -67,7 +114,7 @@ describe('ArchiveProviderGateService', () => {
   });
 
   it('resets stale provider state when the active generation changes', async () => {
-    const { repository, gate } = fixture();
+    const { repository, gate } = await fixture();
     const initial = await repository.load();
     await repository.activateGeneration(initial.revision, 'generation-1', 10);
     const generationOne = await repository.load();
@@ -86,7 +133,7 @@ describe('ArchiveProviderGateService', () => {
       .mockReturnValueOnce(0.1).mockReturnValueOnce(0.2).mockReturnValueOnce(0.3)
       .mockReturnValueOnce(0.4).mockReturnValueOnce(0.5).mockReturnValueOnce(0.6)
       .mockReturnValue(0.7);
-    const { gate, sleeps, clock } = fixture({ random });
+    const { gate, sleeps, clock } = await fixture({ random });
     const operation = vi.fn(async () => { throw new DriveTemporaryUnavailableError(); });
 
     await expect(gate.run({ generationId: 'generation-1', operationClass: 'upload', operation }))
@@ -100,7 +147,7 @@ describe('ArchiveProviderGateService', () => {
   });
 
   it('clamps a valid provider Retry-After to 24 hours', async () => {
-    const { gate, clock } = fixture();
+    const { gate, clock } = await fixture();
 
     await gate.recordFailure('generation-1', 'upload', new DriveRateLimitedError({
       retryAfterMs: 48 * 60 * 60 * 1_000,
@@ -114,7 +161,7 @@ describe('ArchiveProviderGateService', () => {
   });
 
   it('returns to the pump after one maximum sleep while a durable cooldown remains', async () => {
-    const { gate, sleeps } = fixture();
+    const { gate, sleeps } = await fixture();
     await gate.recordFailure('generation-1', 'upload', new DriveRateLimitedError({
       retryAfterMs: 24 * 60 * 60 * 1_000,
       sessionUsable: false,
@@ -131,7 +178,7 @@ describe('ArchiveProviderGateService', () => {
   });
 
   it('does not retry before a provider-supplied Retry-After exceeds the in-process clamp', async () => {
-    const { gate, sleeps } = fixture();
+    const { gate, sleeps } = await fixture();
     const operation = vi.fn(async () => { throw new DriveRateLimitedError({
       retryAfterMs: 240_000,
       sessionUsable: true,
@@ -152,7 +199,7 @@ describe('ArchiveProviderGateService', () => {
     [new DrivePolicyBlockedError(), 'blocked'],
     [new DriveReauthorizationRequiredError(), 'blocked'],
   ] as const)('persists provider-wide capacity, policy, and auth outcomes', async (error, kind) => {
-    const { gate } = fixture();
+    const { gate } = await fixture();
 
     await gate.recordFailure('generation-1', 'folder', error);
 
@@ -160,7 +207,7 @@ describe('ArchiveProviderGateService', () => {
   });
 
   it('returns temporary capacity control to the pump without sleeping for the one-hour deadline', async () => {
-    const { gate, sleeps, clock } = fixture();
+    const { gate, sleeps, clock } = await fixture();
     const operation = vi.fn(async () => { throw new DriveProviderCapacityBlockedError('temporary'); });
 
     await expect(gate.run({ generationId: 'generation-1', operationClass: 'upload', operation }))
@@ -174,7 +221,7 @@ describe('ArchiveProviderGateService', () => {
   });
 
   it('scopes a temporary capacity cooldown to its failed operation', async () => {
-    const { gate } = fixture();
+    const { gate } = await fixture();
     await gate.recordFailure('generation-1', 'upload', new DriveProviderCapacityBlockedError('temporary'));
 
     await expect(gate.inspect('generation-1', 'folder')).resolves.toEqual({ kind: 'allowed' });
@@ -182,7 +229,7 @@ describe('ArchiveProviderGateService', () => {
   });
 
   it('defers a quota block until the exact-ID retention outcome is known', async () => {
-    const { gate } = fixture();
+    const { gate } = await fixture();
     await gate.recordFailure('generation-1', 'upload', new DriveQuotaExceededError());
     await expect(gate.inspect('generation-1', 'upload')).resolves.toMatchObject({ kind: 'allowed' });
 
@@ -196,7 +243,7 @@ describe('ArchiveProviderGateService', () => {
   });
 
   it('allows exactly an explicit post-cooldown probe and clears it on success', async () => {
-    const { gate, clock } = fixture();
+    const { gate, clock } = await fixture();
     await gate.recordFailure('generation-1', 'upload', new DriveRateLimitedError({
       retryAfterMs: 1_000, sessionUsable: true, operationPhase: 'metadata',
     }));
@@ -239,7 +286,7 @@ describe('ArchiveProviderGateService', () => {
   });
 });
 
-function fixture(options: { random?: () => number } = {}) {
+async function fixture(options: { random?: () => number } = {}) {
   const repository = new InMemoryArchiveProviderStateRepository();
   const clock = { value: 1_000 };
   const sleeps: number[] = [];
@@ -249,5 +296,6 @@ function fixture(options: { random?: () => number } = {}) {
     { sleep: async (ms: number) => { sleeps.push(ms); clock.value += ms; } },
     { random: options.random ?? (() => 0.5) },
   );
+  await gate.ensureGeneration('generation-1');
   return { repository, clock, sleeps, gate };
 }

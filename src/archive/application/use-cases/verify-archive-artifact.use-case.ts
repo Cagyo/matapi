@@ -24,6 +24,7 @@ import {
   hasUnchangedTrustedSource,
 } from '../archive-object-verification';
 import { ArchiveRemoteMutationLockService } from '../archive-remote-mutation-lock.service';
+import type { ArchiveProviderGateService } from '../archive-provider-gate.service';
 
 /** Fresh exact-ID verification used at every local-cleanup/link decision. */
 @Injectable()
@@ -41,6 +42,7 @@ export class VerifyArchiveArtifactUseCase implements ArchiveVerificationPort {
     private readonly source: ArchiveUploadSourcePort,
     private readonly lock: Pick<ArchiveRemoteMutationLockService, 'runExclusive'> =
       new ArchiveRemoteMutationLockService(),
+    private readonly providerGate?: Pick<ArchiveProviderGateService, 'runIfAllowed'>,
   ) {}
 
   async inspect(artifactId: string): Promise<ArchiveVerification> {
@@ -74,7 +76,26 @@ export class VerifyArchiveArtifactUseCase implements ArchiveVerificationPort {
       return this.result(artifactId, 'retired-generation');
     }
     const signal = new AbortController().signal;
-    const remote = await this.drive.loadObject(active, attempt.remoteObjectId, signal);
+    const admitted = this.providerGate === undefined
+      ? { kind: 'executed' as const, value: await this.drive.loadObject(
+        active,
+        attempt.remoteObjectId,
+        signal,
+      ) }
+      : await this.providerGate.runIfAllowed({
+        generationId: active.id,
+        operationClass: 'reconcile',
+        operation: () => this.drive.loadObject(active, attempt.remoteObjectId, signal),
+        signal,
+      });
+    if (admitted.kind === 'denied') return this.result(artifactId, 'busy');
+    const remote = admitted.value;
+    const confirmedActive = await this.credentials.loadActive();
+    if (confirmedActive?.status !== 'active'
+      || confirmedActive.id !== active.id
+      || confirmedActive.installationId !== active.installationId) {
+      return this.result(artifactId, 'retired-generation');
+    }
     const classification = classifyRemoteObject(artifact, attempt, active, remote);
     if (classification === 'missing') return this.result(artifactId, 'missing');
     if (classification === 'detached') {

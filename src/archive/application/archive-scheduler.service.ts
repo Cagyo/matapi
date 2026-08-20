@@ -119,7 +119,8 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
     private readonly clock: ClockPort,
     options: ArchiveSchedulerOptions = {},
     private readonly wake: ArchiveWakeService = DEFAULT_ARCHIVE_WAKE_SERVICE,
-    private readonly providerGate?: Pick<ArchiveProviderGateService, 'inspect' | 'recordQuotaOutcome'>,
+    private readonly providerGate?: Pick<ArchiveProviderGateService,
+      'ensureGeneration' | 'inspect' | 'recordQuotaOutcome'>,
     private readonly credentials?: Pick<DriveCredentialRepositoryPort, 'loadActive'>,
     private readonly providerState?: Pick<ArchiveProviderStateRepositoryPort, 'load'>,
     private readonly alerts?: ArchiveAdminAlertPort,
@@ -310,14 +311,18 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
     generationId: string | null;
     admission: ArchiveProviderAdmission;
   }> {
-    const active = await this.credentials?.loadActive();
-    if (active === null || active === undefined) {
-      return { generationId: null, admission: { kind: 'allowed' } };
-    }
-    const admission = this.providerGate === undefined
-      ? { kind: 'allowed' as const }
-      : await this.providerGate.inspect(active.id, 'upload');
-    return { generationId: active.id, admission };
+    return this.remoteMutationLock.runExclusive(async () => {
+      const active = await this.credentials?.loadActive();
+      if (active === null || active === undefined) {
+        return { generationId: null, admission: { kind: 'allowed' } };
+      }
+      if (this.providerGate === undefined) {
+        return { generationId: active.id, admission: { kind: 'allowed' } };
+      }
+      await this.providerGate.ensureGeneration(active.id);
+      const admission = await this.providerGate.inspect(active.id, 'upload');
+      return { generationId: active.id, admission };
+    });
   }
 
   private async dispatchOneTransfer(

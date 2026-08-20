@@ -57,8 +57,13 @@ export class ConfirmDriveAccountUseCase {
       this.assertLive(input.effectiveDeadlineMs, activatedAtMs);
       await this.credentials.activate({ stagedId: staged.id, expectedRevision: staged.revision, ...account, folders, activatedAtMs });
       activated = true;
-      await this.providerGate?.ensureGeneration(staged.id);
       this.wake.wake();
+      try {
+        await this.providerGate?.ensureGeneration(staged.id);
+      } catch {
+        // The credential commit is authoritative. The woken scheduler retries
+        // generation-state synchronization under the shared mutation lock.
+      }
       return 'activated';
     } catch (error) {
       if (!activated) await this.credentials.discardStaged(staged.id, input.receiptId);

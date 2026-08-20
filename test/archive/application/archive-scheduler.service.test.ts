@@ -599,7 +599,7 @@ describe('ArchiveSchedulerService', () => {
     await fixture.scheduler.shutdown();
   });
 
-  it('attributes quota settlement to the generation selected during upload admission', async () => {
+  it('drops quota settlement when the selected upload generation is no longer active', async () => {
     const fixture = setup({
       selectedGenerationId: 'generation-2',
       upload: async () => {
@@ -618,9 +618,9 @@ describe('ArchiveSchedulerService', () => {
     await vi.waitFor(() => expect(fixture.retention.execute).toHaveBeenCalledOnce());
 
     await expect(fixture.providerGate.inspect('generation-2', 'upload'))
-      .resolves.toEqual({ kind: 'blocked', reason: 'quota_exhausted' });
-    await expect(fixture.providerGate.inspect('generation-1', 'upload'))
       .resolves.toEqual({ kind: 'allowed' });
+    await expect(fixture.providerGate.inspect('generation-1', 'upload'))
+      .resolves.toEqual({ kind: 'blocked', reason: 'stale_generation' });
     await fixture.scheduler.shutdown();
   });
 
