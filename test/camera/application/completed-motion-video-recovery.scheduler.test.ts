@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CompletedMotionVideoRecoveryScheduler } from '../../../src/camera/application/completed-motion-video-recovery.scheduler';
 import { RegisterCompletedMotionVideosUseCase } from '../../../src/camera/application/register-completed-motion-videos.use-case';
-import type { AdminAlertPort } from '../../../src/camera/domain/ports/admin-alert.port';
+import { AdminAlertService } from '../../../src/camera/application/admin-alert.service';
+import type {
+  AdminAlertPort,
+  CameraAdminAlert,
+} from '../../../src/camera/domain/ports/admin-alert.port';
 import { CompletedMotionVideoFilesystemError } from '../../../src/camera/domain/errors/completed-motion-video-filesystem.error';
 
 function deferred() {
@@ -148,7 +152,7 @@ describe('CompletedMotionVideoRecoveryScheduler', () => {
     scheduler.reconcileTick();
 
     await vi.waitFor(() => expect(log).toHaveBeenCalledOnce());
-    expect(log).toHaveBeenCalledWith('Completed Motion recovery failed');
+    expect(log).toHaveBeenCalledWith('Completed Motion recovery failed: CAMERA_OPERATION_FAILED');
   });
 
   it('performs no reconciliation in stub mode', async () => {
@@ -493,6 +497,7 @@ describe('CompletedMotionVideoRecoveryScheduler scan-failure alerting', () => {
       await new Promise<void>((resolve) => setImmediate(resolve));
       expect(unhandled).toEqual([]);
       expect(warn).toHaveBeenCalledOnce();
+      expect(warn.mock.calls[0]?.[0]).toBe('Completed Motion recovery alert failed: CAMERA_OPERATION_FAILED');
       expect(warn.mock.calls[0]?.[0]).not.toContain('/home/pi');
     } finally {
       process.off('unhandledRejection', capture);
@@ -531,7 +536,47 @@ describe('CompletedMotionVideoRecoveryScheduler scan-failure alerting', () => {
     await expect(scheduler.reconcile()).rejects.toBe(failure);
 
     expect(alerts.alert).toHaveBeenCalledOnce();
-    expect(warn).toHaveBeenCalledWith('Completed Motion recovery alert failed');
+    expect(warn).toHaveBeenCalledWith('Completed Motion recovery alert failed: CAMERA_OPERATION_FAILED');
+  });
+
+  it('does not repeat the alert while the scan keeps failing inside the repeat window', async () => {
+    const alerts = alertRecorder();
+    const clock = mutableClock();
+    const reconcileBatch = vi.fn().mockRejectedValue(scanFailure());
+    const scheduler = schedulerWith(reconcileBatch, alerts, clock);
+
+    await failTraversals(scheduler, 3);
+    expect(alerts.alert).toHaveBeenCalledOnce();
+
+    clock.nowMs += SCAN_ALERT_REPEAT_MS - 1;
+    await failTraversals(scheduler, 10);
+
+    expect(alerts.alert).toHaveBeenCalledOnce();
+  });
+
+  it('re-alerts after the repeat window so a first alert lost to boot ordering is not permanent silence', async () => {
+    // Boot order is Archive (failure #1) → Camera (failure #2) → Telegram,
+    // which registers the delegate. An alert raised before that is dropped by
+    // AdminAlertService, which still resolves, so the scheduler cannot see it.
+    const alerts = new AdminAlertService();
+    const alertLogger = (alerts as unknown as { logger: { warn(message: string): void } }).logger;
+    vi.spyOn(alertLogger, 'warn').mockImplementation(() => undefined);
+    const delegate = { alert: vi.fn(async (): Promise<void> => undefined) };
+    const clock = mutableClock();
+    const reconcileBatch = vi.fn().mockRejectedValue(scanFailure());
+    const scheduler = schedulerWith(reconcileBatch, alerts, clock);
+
+    await failTraversals(scheduler, 3);
+    alerts.register(delegate);
+    await failTraversals(scheduler, 20);
+
+    expect(delegate.alert).not.toHaveBeenCalled();
+
+    clock.nowMs += SCAN_ALERT_REPEAT_MS;
+    await failTraversals(scheduler, 1);
+
+    await vi.waitFor(() => expect(delegate.alert).toHaveBeenCalledOnce());
+    expect(delegate.alert).toHaveBeenCalledWith('motion-scan-failing', 'motion_fs_access_denied');
   });
 
   it('never alerts in stub mode', async () => {
@@ -574,12 +619,13 @@ describe('CompletedMotionVideoRecoveryScheduler scan-failure alerting', () => {
     const reconcileBatch = vi.fn().mockRejectedValue(scanFailure());
     const scheduler = schedulerWith(reconcileBatch, alerts);
     const logger = (scheduler as unknown as { logger: { error(message: string): void } }).logger;
-    vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const log = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
 
     for (let tick = 0; tick < 3; tick += 1) {
       scheduler.reconcileTick();
-      await vi.waitFor(() => expect(reconcileBatch).toHaveBeenCalledTimes(tick + 1));
-      await vi.waitFor(() => expect((scheduler as unknown as { inFlight: unknown }).inFlight).toBeNull());
+      // The detached failure log runs after the traversal releases its slot,
+      // so waiting on it is the observable "tick finished" signal.
+      await vi.waitFor(() => expect(log).toHaveBeenCalledTimes(tick + 1));
     }
 
     expect(alerts.alert).toHaveBeenCalledOnce();
@@ -587,22 +633,32 @@ describe('CompletedMotionVideoRecoveryScheduler scan-failure alerting', () => {
   });
 });
 
-function schedulerWith(reconcileBatch: ReturnType<typeof vi.fn>, alerts?: AdminAlertPort) {
+const SCAN_ALERT_REPEAT_MS = 6 * 60 * 60 * 1000;
+
+function mutableClock(startMs = 100) {
+  const clock = { nowMs: startMs, now: () => clock.nowMs };
+  return clock;
+}
+
+function schedulerWith(
+  reconcileBatch: ReturnType<typeof vi.fn>,
+  alerts?: AdminAlertPort,
+  clock: { now(): number } = { now: () => 100 },
+) {
   return new CompletedMotionVideoRecoveryScheduler(
     'real',
     { reconcileBatch },
     { motionTraversalCompleted: vi.fn(async () => undefined) },
-    { now: () => 100 },
+    clock,
     alerts,
   );
 }
 
 function alertRecorder(behaviour?: () => Promise<void>) {
-  return {
-    alert: vi.fn(async (_kind: string, _detail?: string) => {
-      if (behaviour) await behaviour();
-    }),
-  } as unknown as AdminAlertPort & { alert: ReturnType<typeof vi.fn> };
+  const alert = vi.fn(async (_kind: CameraAdminAlert, _detail?: string): Promise<void> => {
+    if (behaviour) await behaviour();
+  });
+  return { alert } satisfies AdminAlertPort;
 }
 
 function scanFailure() {

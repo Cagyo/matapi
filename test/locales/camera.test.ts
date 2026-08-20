@@ -21,6 +21,9 @@ describe('en.camera', () => {
     }
   });
 
+  // The ru/uk strings are required by the LocaleCatalog shape, not reached at
+  // runtime: TelegramAdminAlertAdapter hardcodes `en` for every camera alert
+  // kind. This is catalogue hygiene, not proof of a localized delivery path.
   it('renders the motion scan admin alert in every locale', () => {
     for (const catalog of [en, ru, uk]) {
       const rendered = catalog.camera.adminAlert.motionScanFailing('motion_fs_access_denied');

@@ -1327,7 +1327,7 @@ const enCatalog = {
       gdriveSyncFailing: (error: string) =>
         `⚠️ Google Drive sync failing: ${error}`,
       motionScanFailing: (code: string) =>
-        `⚠️ Motion video traversal keeps failing (${code}). New recordings are not being archived until it recovers.`,
+        `⚠️ Motion video traversal keeps failing (${code}). New recordings are not being archived.`,
       diskWarning:
         '⚠️ Disk usage is high and approaching the critical threshold. Uploaded media will be cleaned up automatically if it keeps climbing.',
       emergencyDiskCleanup:

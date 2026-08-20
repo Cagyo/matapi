@@ -13,8 +13,24 @@ const RECOVERY_INTERVAL_MS = 2 * 60 * 1000;
  * Consecutive failed traversals before admins are alerted. At the two-minute
  * safety tick a persistently unreadable scan root reaches this within roughly
  * four minutes, while a one-off transient filesystem error is ridden out.
+ *
+ * The load-bearing constraint is not transient tolerance: this must exceed the
+ * number of traversals that can fail before `AdminAlertService` has a delegate,
+ * because an alert raised earlier is dropped by a service that still resolves.
+ * Nest boots modules by descending distance, so Archive's boot job fails once
+ * and Camera's boot wake fails once before Telegram registers the delegate —
+ * two today, leaving a margin of one. Adding another boot-phase `reconcile()`
+ * caller, or a retry inside `runBootJob`, means raising this too.
+ * `SCAN_ALERT_REPEAT_MS` is the backstop if that margin is ever lost.
  */
 const SCAN_FAILURE_ALERT_THRESHOLD = 3;
+
+/**
+ * How long the raised alert suppresses repeats. A dropped or undelivered first
+ * alert retries on the next failure past this window instead of leaving the
+ * outage silent forever; a genuinely stuck scan costs at most four DMs a day.
+ */
+const SCAN_ALERT_REPEAT_MS = 6 * 60 * 60 * 1000;
 
 export type CompletedMotionRecoveryWakeReason = 'boot' | 'motion-event' | 'safety';
 
@@ -41,8 +57,13 @@ export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBoots
   private readonly abortListenerCleanups = new Set<() => void>();
   private cursor: CompletedMotionVideoScanCursor | null = null;
   private pendingWake = false;
+  /**
+   * Consecutive failed traversals. A failing progress write also lands here,
+   * but `clearScanFailures()` runs first on a completed scan, so that case
+   * always sits at 1 and never accumulates toward an alert.
+   */
   private consecutiveFailures = 0;
-  private scanFailureAlerted = false;
+  private scanAlertAtMs: number | null = null;
 
   constructor(
     @Inject(CAMERA_MODE) private readonly mode: CameraMode,
@@ -157,7 +178,11 @@ export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBoots
     } catch (error) {
       this.cursor = null;
       // A cancelled traversal reports nothing about the scan root, so it
-      // neither arms nor clears the latch.
+      // neither arms nor clears the latch. The second clause is the one that
+      // does the work: `abortReason()` propagates a caller's non-`AbortError`
+      // reason verbatim, and an adapter can reject with a raw filesystem error
+      // when shutdown lands mid-syscall, so a cancellation can surface as an
+      // arbitrary error. The first clause is defence in depth.
       if (!isAbortError(error) && signal?.aborted !== true) {
         this.recordScanFailure(error);
       }
@@ -168,31 +193,33 @@ export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBoots
   /**
    * Counts one traversal outcome — never one awaiting caller — and raises a
    * single admin alert once the scan has failed `SCAN_FAILURE_ALERT_THRESHOLD`
-   * times in a row. Alerting is best effort: it must not delay, mask or fail
-   * the traversal its caller is awaiting.
+   * times in a row, repeated no more than once per `SCAN_ALERT_REPEAT_MS`.
+   * Alerting is best effort: it must not delay, mask or fail the traversal its
+   * caller is awaiting.
    */
   private recordScanFailure(error: unknown): void {
     this.consecutiveFailures += 1;
-    if (this.scanFailureAlerted) return;
+    const nowMs = this.clock.now();
+    if (this.scanAlertAtMs !== null && nowMs - this.scanAlertAtMs < SCAN_ALERT_REPEAT_MS) return;
     if (this.consecutiveFailures < SCAN_FAILURE_ALERT_THRESHOLD) return;
-    this.scanFailureAlerted = true;
+    this.scanAlertAtMs = nowMs;
     const code = scanFailureCode(error);
     void Promise.resolve()
       .then(() => this.alerts.alert('motion-scan-failing', code))
       .catch(() => {
-        this.logger.warn('Completed Motion recovery alert failed');
+        this.logger.warn('Completed Motion recovery alert failed: CAMERA_OPERATION_FAILED');
       });
   }
 
   private clearScanFailures(): void {
     this.consecutiveFailures = 0;
-    this.scanFailureAlerted = false;
+    this.scanAlertAtMs = null;
   }
 
   private dispatchBestEffort(): void {
     void this.reconcile().catch((error: unknown) => {
       if (isAbortError(error)) return;
-      this.logger.error('Completed Motion recovery failed');
+      this.logger.error('Completed Motion recovery failed: CAMERA_OPERATION_FAILED');
     });
   }
 }
