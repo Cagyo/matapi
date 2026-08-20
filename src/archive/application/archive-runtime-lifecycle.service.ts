@@ -23,6 +23,7 @@ import {
 
 const SHUTDOWN_WAIT_MS = 1_000;
 const ARCHIVE_OPERATION_FAILED = 'ARCHIVE_OPERATION_FAILED';
+const SAFE_FAILURE_CODE = /^[A-Za-z0-9_]{1,64}$/;
 
 /** Deterministic archive boot recovery and bounded pre-Nest shutdown. */
 @Injectable()
@@ -57,8 +58,8 @@ implements OnApplicationBootstrap, OnModuleDestroy {
   async onApplicationBootstrap(): Promise<void> {
     try {
       await this.start();
-    } catch {
-      this.logger.error(`Archive boot recovery failed: ${ARCHIVE_OPERATION_FAILED}`);
+    } catch (error) {
+      this.logger.error(`Archive boot recovery failed: ${bootFailureCode(error)}`);
     }
   }
 
@@ -126,8 +127,9 @@ implements OnApplicationBootstrap, OnModuleDestroy {
   }
 
   /**
-   * Boot-time best-effort work. The scheduler already retries these every tick,
+   * Boot-time best-effort work. The scheduler retries most of these every tick,
    * so a failure here must stay loud without stopping timers from starting.
+   * Stale snapshot cleanup is boot-only and waits for the next restart.
    */
   private async runBootJob(name: string, job: () => Promise<void>): Promise<void> {
     try {
@@ -162,6 +164,25 @@ function compareMaintenance(
   return maintenanceOrder(left.status) - maintenanceOrder(right.status)
     || left.createdAtMs - right.createdAtMs
     || left.id.localeCompare(right.id);
+}
+
+/**
+ * Path-free discriminator for a boot failure. Nothing retries the critical
+ * chain, so the single log line it produces is the only evidence an operator
+ * gets. Node errno codes (`EACCES`, `SQLITE_BUSY`) and domain error codes are
+ * safe by construction; the character guard rejects anything else, which is
+ * how a code carrying a filesystem path degrades to the fixed token.
+ */
+function bootFailureCode(error: unknown): string {
+  const code = typeof error === 'object' && error !== null && 'code' in error
+    && typeof error.code === 'string'
+    ? error.code
+    : null;
+  const candidate = code
+    ?? (error instanceof Error && error.name !== 'Error' ? error.name : null);
+  return candidate !== null && SAFE_FAILURE_CODE.test(candidate)
+    ? candidate
+    : ARCHIVE_OPERATION_FAILED;
 }
 
 function throwIfAborted(signal: AbortSignal): void {

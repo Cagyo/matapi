@@ -388,4 +388,108 @@ describe('ArchiveRuntimeLifecycleService', () => {
     expect(fixture.scheduler.startTimers).not.toHaveBeenCalled();
     expect(fixture.warn).not.toHaveBeenCalled();
   });
+
+  it('names the failing error code when the bootstrap hook swallows a boot failure', async () => {
+    const fixture = bootFixture({
+      expireStaged: async () => { throw Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY' }); },
+    });
+
+    await fixture.lifecycle.onApplicationBootstrap();
+
+    expect(fixture.error).toHaveBeenCalledWith('Archive boot recovery failed: SQLITE_BUSY');
+  });
+
+  it('names the error class when the boot failure carries no code', async () => {
+    class DriveTemporaryUnavailableError extends Error {
+      override readonly name = 'DriveTemporaryUnavailableError';
+    }
+    const fixture = bootFixture({
+      recoverExpiredLeases: async () => { throw new DriveTemporaryUnavailableError('drive is gone'); },
+    });
+
+    await fixture.lifecycle.onApplicationBootstrap();
+
+    expect(fixture.error).toHaveBeenCalledWith(
+      'Archive boot recovery failed: DriveTemporaryUnavailableError',
+    );
+  });
+
+  it('falls back to the fixed code when a boot failure code could carry a path', async () => {
+    const fixture = bootFixture({
+      expireStaged: async () => {
+        throw Object.assign(new Error('open failed'), { code: 'EACCES: /home/pi/motion/videos' });
+      },
+    });
+
+    await fixture.lifecycle.onApplicationBootstrap();
+
+    expect(fixture.error).toHaveBeenCalledWith('Archive boot recovery failed: ARCHIVE_OPERATION_FAILED');
+    expect(fixture.error.mock.calls.flat().join(' ')).not.toContain('/home/pi');
+  });
+
+  it('stops at the fence after Motion reconciliation when shutdown races it', async () => {
+    let abort = (): void => undefined;
+    const remoteMaintenance = vi.fn(async () => undefined);
+    const fixture = bootFixture({
+      remoteMaintenance,
+      reconcileMotion: async () => {
+        abort();
+        throw new Error('motion scan aborted');
+      },
+    });
+    abort = () => { void fixture.lifecycle.shutdown(); };
+
+    await fixture.lifecycle.start();
+
+    expect(remoteMaintenance).not.toHaveBeenCalled();
+    expect(fixture.scheduler.startTimers).not.toHaveBeenCalled();
+  });
+
+  it('stops at the fence after remote maintenance when shutdown races it', async () => {
+    let abort = (): void => undefined;
+    const fixture = bootFixture({
+      remoteMaintenance: async () => {
+        abort();
+        throw new Error('drive unreachable');
+      },
+    });
+    abort = () => { void fixture.lifecycle.shutdown(); };
+
+    await fixture.lifecycle.start();
+
+    expect(fixture.snapshots.removeStaleTemporarySnapshots).not.toHaveBeenCalled();
+    expect(fixture.scheduler.startTimers).not.toHaveBeenCalled();
+  });
+
+  it('stops at the fence after stale snapshot cleanup when shutdown races it', async () => {
+    let abort = (): void => undefined;
+    const fixture = bootFixture({
+      removeStaleTemporarySnapshots: async () => {
+        abort();
+        throw new Error('EIO');
+      },
+    });
+    abort = () => { void fixture.lifecycle.shutdown(); };
+
+    await fixture.lifecycle.start();
+
+    expect(fixture.backups.execute).not.toHaveBeenCalled();
+    expect(fixture.scheduler.startTimers).not.toHaveBeenCalled();
+  });
+
+  it('stops at the fence after the catch-up backup when shutdown races it', async () => {
+    let abort = (): void => undefined;
+    const fixture = bootFixture({
+      backup: async () => {
+        abort();
+        throw new Error('sqlite is locked');
+      },
+    });
+    abort = () => { void fixture.lifecycle.shutdown(); };
+
+    await fixture.lifecycle.start();
+
+    expect(fixture.scheduler.startTimers).not.toHaveBeenCalled();
+    expect(fixture.wakeSpy).not.toHaveBeenCalled();
+  });
 });
