@@ -19,6 +19,8 @@ import { InMemoryArchiveProviderStateRepository } from '../../../src/archive/inf
 import type { ArchiveArtifact } from '../../../src/archive/domain/archive-artifact.entity';
 import type { DriveCredentialRepositoryPort } from '../../../src/archive/application/ports/drive-credential-repository.port';
 import { DriveConnection } from '../../../src/archive/domain/drive-connection.entity';
+import type { ArchiveProviderState } from '../../../src/archive/application/ports/archive-provider-state-repository.port';
+import type { ArchiveAdminAlertKind } from '../../../src/archive/application/ports/archive-admin-alert.port';
 
 function claimedAttempt(overrides: Partial<ClaimedAttempt['attempt']> = {}): ClaimedAttempt {
   return {
@@ -54,8 +56,13 @@ function setup(options: {
   ) => Promise<unknown>;
   selectedGenerationId?: string;
   backup?: () => Promise<unknown>;
+  nowMs?: number;
+  connection?: DriveConnection | null;
+  providerState?: ArchiveProviderState;
+  queueStatus?: { queuedVideos: number; retryableVideos: number; oldestQueuedVideoAtMs: number | null; branchBlocked: boolean };
+  diskUsagePercent?: number | null;
 } = {}) {
-  const clock = { now: vi.fn(() => new Date(10_000)) } satisfies ClockPort;
+  const clock = { now: vi.fn(() => new Date(options.nowMs ?? 10_000)) } satisfies ClockPort;
   const video = {
     id: 'video-artifact', kind: 'motion_video', installationId: 'installation-1',
     size: 4_096, createdAtMs: 1,
@@ -85,6 +92,9 @@ function setup(options: {
     })),
     compareAndSetSchedulerState: vi.fn(async () => true),
     markRetryable: vi.fn(async () => undefined),
+    readQueueStatus: vi.fn(async () => options.queueStatus ?? ({
+      queuedVideos: 0, retryableVideos: 0, oldestQueuedVideoAtMs: null, branchBlocked: false,
+    })),
   } as unknown as ArchiveArtifactRepositoryPort;
   const backups = {
     execute: vi.fn(options.backup ?? (async () => ({ created: false, reason: 'not_due' }))),
@@ -146,9 +156,35 @@ function setup(options: {
     clock,
   );
   const credentials = {
-    loadActive: vi.fn(async () => activeConnection('generation-1')),
+    loadActive: vi.fn(async () => options.connection === undefined
+      ? activeConnection('generation-1')
+      : options.connection),
   } satisfies Pick<DriveCredentialRepositoryPort, 'loadActive'>;
-  const scheduler = new ArchiveSchedulerService(
+  const providerState = {
+    load: vi.fn(async () => options.providerState ?? ({
+      revision: 0, generationId: null, operationClass: null, failureClass: null,
+      failureStreak: 0, cooldownUntilMs: null, blockReason: null, updatedAtMs: 0,
+    })),
+  };
+  const alerts = { alert: vi.fn(async (_kind: ArchiveAdminAlertKind) => undefined) };
+  const localDisk = { usagePercent: vi.fn(async () => options.diskUsagePercent ?? null) };
+  const Scheduler = ArchiveSchedulerService as unknown as new (
+    repository: ArchiveArtifactRepositoryPort,
+    backups: CreateDatabaseBackupUseCase,
+    uploads: UploadDriveObjectAttemptUseCase,
+    hooks: ArchiveSchedulerHooksService,
+    lock: ArchiveRemoteMutationLockService,
+    retention: ArchiveRetentionPort,
+    clock: ClockPort,
+    options: { intervalMs: number; shutdownWaitMs: number; newerVideoBatch: number },
+    wake: ArchiveWakeService,
+    providerGate: ArchiveProviderGateService,
+    credentials: Pick<DriveCredentialRepositoryPort, 'loadActive'>,
+    providerState: typeof providerState,
+    alerts: typeof alerts,
+    localDisk: typeof localDisk,
+  ) => ArchiveSchedulerService;
+  const scheduler = new Scheduler(
     repository,
     backups,
     uploads,
@@ -160,10 +196,13 @@ function setup(options: {
     wake,
     providerGate,
     credentials,
+    providerState,
+    alerts,
+    localDisk,
   );
   return {
     repository, backups, uploads, retention, hooks, scheduler, wake, providerGate, clock,
-    credentials, video,
+    credentials, providerState, alerts, localDisk, video,
     seedFreshVideos(count: number) {
       queuedArtifacts.push(...Array.from({ length: count }, (_, index) => ({
         ...video, id: `video-${index + 1}`,
@@ -224,6 +263,101 @@ describe('ArchiveSchedulerService', () => {
     expect(fixture.maxConcurrentUploads()).toBe(1);
     expect(fixture.elapsedBetweenAdmissions()).toEqual([0, 0]);
     await fixture.scheduler.shutdown();
+  });
+
+  it('publishes generation-tagged video activity before an uploading row exists', async () => {
+    let release!: () => void;
+    const fixture = setup({ upload: () => new Promise<void>((resolve) => { release = resolve; }) });
+    fixture.seedFreshVideos(1);
+    const activity = fixture.scheduler as unknown as {
+      readActivitySnapshot?: () => { generationId: string; artifactKind: string; startedAtMs: number } | null;
+    };
+
+    fixture.scheduler.startTimers();
+    await vi.waitFor(() => expect(fixture.uploads.execute).toHaveBeenCalledOnce());
+    expect(typeof activity.readActivitySnapshot).toBe('function');
+    expect(activity.readActivitySnapshot?.()).toEqual({
+      generationId: 'generation-1', artifactKind: 'motion_video', startedAtMs: 10_000,
+    });
+
+    release();
+    await vi.waitFor(() => expect(activity.readActivitySnapshot?.()).toBeNull());
+    await fixture.scheduler.shutdown();
+  });
+
+  it.each([
+    ['prolonged upload cooldown', {
+      nowMs: 1_000_000,
+      providerState: {
+        revision: 1, generationId: 'generation-1', operationClass: 'upload' as const,
+        failureClass: 'rate-limit' as const, failureStreak: 1,
+        cooldownUntilMs: 2_000_000, blockReason: null, updatedAtMs: 100_000,
+      },
+    }, 'provider-cooldown-prolonged'],
+    ['capacity block', {
+      providerState: {
+        revision: 1, generationId: 'generation-1', operationClass: 'upload' as const,
+        failureClass: 'capacity' as const, failureStreak: 1,
+        cooldownUntilMs: null, blockReason: 'account_creation_limit', updatedAtMs: 9_000,
+      },
+    }, 'provider-capacity-blocked'],
+    ['storage quota block', {
+      providerState: {
+        revision: 1, generationId: 'generation-1', operationClass: 'upload' as const,
+        failureClass: 'quota' as const, failureStreak: 1,
+        cooldownUntilMs: null, blockReason: 'quota_exhausted', updatedAtMs: 9_000,
+      },
+    }, 'quota-reclamation-required'],
+    ['reauthorization', {
+      connection: activeConnection('generation-1').requireReauthorization(9_000),
+    }, 'reauthorization-required'],
+    ['prolonged backlog', {
+      nowMs: 86_410_000,
+      queueStatus: {
+        queuedVideos: 1, retryableVideos: 0, oldestQueuedVideoAtMs: 10_000, branchBlocked: false,
+      },
+    }, 'backlog-age-prolonged'],
+    ['local disk pressure', { diskUsagePercent: 70 }, 'local-disk-pressure'],
+  ] as const)('emits a production %s alert from the maintenance tick', async (
+    _scenario,
+    options,
+    expected,
+  ) => {
+    const fixture = setup(options);
+
+    await fixture.scheduler.tick();
+
+    expect(fixture.alerts.alert).toHaveBeenCalledWith(expected, {
+      generationId: 'generation-1',
+    });
+  });
+
+  it('does not emit prolonged alerts one millisecond before their thresholds', async () => {
+    const fixture = setup({
+      nowMs: 86_409_999,
+      providerState: {
+        revision: 1, generationId: 'generation-1', operationClass: 'upload',
+        failureClass: 'rate-limit', failureStreak: 1,
+        cooldownUntilMs: 90_000_000, blockReason: null,
+        updatedAtMs: 85_510_000,
+      },
+      queueStatus: {
+        queuedVideos: 1, retryableVideos: 0, oldestQueuedVideoAtMs: 10_000, branchBlocked: false,
+      },
+      diskUsagePercent: 69,
+    });
+
+    await fixture.scheduler.tick();
+
+    expect(fixture.alerts.alert).not.toHaveBeenCalledWith(
+      'provider-cooldown-prolonged', expect.anything(),
+    );
+    expect(fixture.alerts.alert).not.toHaveBeenCalledWith(
+      'backlog-age-prolonged', expect.anything(),
+    );
+    expect(fixture.alerts.alert).not.toHaveBeenCalledWith(
+      'local-disk-pressure', expect.anything(),
+    );
   });
 
   it('sleeps until the earliest durable deadline without tight polling', async () => {

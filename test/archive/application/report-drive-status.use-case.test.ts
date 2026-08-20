@@ -159,19 +159,109 @@ describe('ReportDriveStatusUseCase', () => {
       drainState: 'reauthorization-required',
     });
   });
+
+  it.each([
+    ['expired global row', 1, null, 'idle'],
+    ['retired generation activity', 0, { generationId: 'generation-retired', artifactKind: 'motion_video', startedAtMs: 9_000 }, 'idle'],
+    ['current backup activity', 0, { generationId: 'generation-1', artifactKind: 'database_backup', startedAtMs: 9_000 }, 'idle'],
+    ['current video activity before an uploading row exists', 0, { generationId: 'generation-1', artifactKind: 'motion_video', startedAtMs: 9_000 }, 'active'],
+  ] as const)('uses the scheduler snapshot for %s', async (
+    _scenario,
+    uploading,
+    activity,
+    expected,
+  ) => {
+    const artifacts = aggregateArtifacts();
+    artifacts.readStatusCounts = async () => ({
+      artifacts: { stabilizing: 0, pending: 1, verified: 0, local_missing: 0, superseded: 0 },
+      attempts: { pending: 0, uploading, retryable: 0, verified: 0, missing: 0, detached: 0, conflict: 0, abandoned: 0, deleted: 0 },
+    });
+    const useCase = statusUseCase({
+      artifacts,
+      activity: { readActivitySnapshot: () => activity },
+    });
+
+    await expect(useCase.execute()).resolves.toMatchObject({ drainState: expected });
+  });
+
+  it('ignores a cooldown owned by a non-upload provider operation', async () => {
+    const useCase = statusUseCase({
+      provider: {
+        load: async () => ({
+          revision: 1, generationId: 'generation-1', operationClass: 'delete' as const,
+          failureClass: 'rate-limit' as const, failureStreak: 1,
+          cooldownUntilMs: 20_000, blockReason: null, updatedAtMs: 9_000,
+        }),
+      },
+    });
+
+    await expect(useCase.execute()).resolves.toMatchObject({ drainState: 'idle' });
+  });
+
+  it('retries assembly when the active generation changes before return', async () => {
+    let reads = 0;
+    const connections = activeConnections();
+    connections.listStatusConnections = async () => {
+      reads += 1;
+      return activeStatusConnections(reads === 1 ? 'generation-1' : 'generation-2');
+    };
+    const useCase = statusUseCase({ connections });
+
+    const report = await useCase.execute();
+
+    expect(reads).toBeGreaterThanOrEqual(3);
+    expect(report.connection?.generationId).toBe('generation-2');
+  });
 });
+
+function statusUseCase(overrides: {
+  connections?: ReturnType<typeof activeConnections>;
+  artifacts?: ReturnType<typeof aggregateArtifacts>;
+  provider?: { load(): Promise<{
+    revision: number; generationId: string | null; operationClass: 'account' | 'folder' | 'upload' | 'reconcile' | 'delete' | null;
+    failureClass: 'transport' | 'rate-limit' | 'quota' | 'capacity' | 'authorization' | 'policy' | null;
+    failureStreak: number; cooldownUntilMs: number | null; blockReason: string | null; updatedAtMs: number;
+  }> };
+  activity?: { readActivitySnapshot(): unknown };
+} = {}): ReportDriveStatusUseCase {
+  const Constructor = ReportDriveStatusUseCase as unknown as new (
+    connections: ReturnType<typeof activeConnections>,
+    artifacts: ReturnType<typeof aggregateArtifacts>,
+    account: { readQuota(): Promise<null> },
+    provider: NonNullable<typeof overrides.provider>,
+    clock: { now(): Date },
+    activity: NonNullable<typeof overrides.activity>,
+  ) => ReportDriveStatusUseCase;
+  return new Constructor(
+    overrides.connections ?? activeConnections(),
+    overrides.artifacts ?? aggregateArtifacts(),
+    { readQuota: async () => null },
+    overrides.provider ?? {
+      load: async () => ({
+        revision: 0, generationId: null, operationClass: null, failureClass: null,
+        failureStreak: 0, cooldownUntilMs: null, blockReason: null, updatedAtMs: 0,
+      }),
+    },
+    { now: () => new Date(10_000) },
+    overrides.activity ?? { readActivitySnapshot: () => null },
+  );
+}
 
 function activeConnections() {
   return {
-    listStatusConnections: async () => [{
-      id: 'generation-1', installationId: 'installation-1', status: 'active' as const,
-      revision: 0, permissionId: 'perm-1', email: null, displayName: null,
-      folders: { rootId: 'root-1', motionId: 'motion-1', backupsId: 'backups-1' },
-      createdAtMs: 1, updatedAtMs: 2, activatedAtMs: 2, retiredAtMs: null,
-      errorCode: null,
-    }],
+    listStatusConnections: async () => activeStatusConnections('generation-1'),
     readQuotaReclamation: async () => null,
   };
+}
+
+function activeStatusConnections(id: string) {
+  return [{
+    id, installationId: 'installation-1', status: 'active' as const,
+    revision: 0, permissionId: `perm-${id}`, email: null, displayName: null,
+    folders: { rootId: 'root-1', motionId: 'motion-1', backupsId: 'backups-1' },
+    createdAtMs: 1, updatedAtMs: 2, activatedAtMs: 2, retiredAtMs: null,
+    errorCode: null,
+  }];
 }
 
 function aggregateArtifacts() {

@@ -32,6 +32,16 @@ export type ArchiveDrainState =
   | 'policy-blocked'
   | 'reauthorization-required';
 
+export interface ArchiveSchedulerActivitySnapshot {
+  generationId: string;
+  artifactKind: 'motion_video' | 'database_backup';
+  startedAtMs: number;
+}
+
+export interface ArchiveSchedulerActivityReader {
+  readActivitySnapshot(): ArchiveSchedulerActivitySnapshot | null;
+}
+
 export interface DriveStatusReport {
   connection: { generationId: string; state: string; errorCode: string | null } | null;
   account: { permissionId: string; email: string | null; displayName: string | null } | null;
@@ -81,19 +91,32 @@ export class ReportDriveStatusUseCase {
     private readonly providerState: Pick<ArchiveProviderStateRepositoryPort, 'load'> = EMPTY_PROVIDER_STATE,
     @Optional() @Inject(CLOCK)
     private readonly clock: Pick<ClockPort, 'now'> = SYSTEM_CLOCK,
+    @Optional()
+    private readonly schedulerActivity: ArchiveSchedulerActivityReader = EMPTY_ACTIVITY,
   ) {}
 
   async execute(signal: AbortSignal = AbortSignal.timeout(10_000)): Promise<DriveStatusReport> {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const connections = await this.connections.listStatusConnections();
+      const active = selectActive(connections);
+      const report = await this.assemble(connections, active, signal);
+      const confirmed = selectActive(await this.connections.listStatusConnections());
+      if (sameActiveFence(active, confirmed)) return report;
+    }
+    throw new Error('Drive status changed during bounded assembly');
+  }
+
+  private async assemble(
+    connections: readonly DriveStatusConnection[],
+    active: DriveStatusConnection | null,
+    signal: AbortSignal,
+  ): Promise<DriveStatusReport> {
     const nowMs = this.clock.now().getTime();
-    const [connections, counts, scheduler, providerState] = await Promise.all([
-      this.connections.listStatusConnections(),
+    const [counts, scheduler, providerState] = await Promise.all([
       this.artifacts.readStatusCounts(),
       this.artifacts.readSchedulerState(),
       this.providerState.load(),
     ]);
-    const active = connections.find((connection) =>
-      connection.status === 'active' || connection.status === 'reauth_required',
-    ) ?? null;
     const [quota, reclamation, queue, unhealthyDateFolders] = active === null
       ? [null, null, EMPTY_QUEUE, 0] as const
       : await Promise.all([
@@ -112,8 +135,10 @@ export class ReportDriveStatusUseCase {
         ? providerBlockFor(providerState)
         : null;
     const coolingDown = providerState.generationId === active?.id
+      && providerState.operationClass === 'upload'
       && providerState.cooldownUntilMs !== null
       && providerState.cooldownUntilMs > nowMs;
+    const activity = this.schedulerActivity.readActivitySnapshot();
 
     return {
       connection: active === null
@@ -152,7 +177,9 @@ export class ReportDriveStatusUseCase {
       },
       drainState: deriveArchiveDrainState({
         providerBlock,
-        hasActiveTransfer: counts.attempts.uploading > 0,
+        hasActiveTransfer: active !== null
+          && activity?.generationId === active.id
+          && activity.artifactKind === 'motion_video',
         queuedVideos: queue.queuedVideos,
         branchBlocked: queue.branchBlocked,
         coolingDown,
@@ -200,6 +227,22 @@ const EMPTY_PROVIDER_STATE: Pick<ArchiveProviderStateRepositoryPort, 'load'> = {
 };
 
 const SYSTEM_CLOCK: Pick<ClockPort, 'now'> = { now: () => new Date() };
+const EMPTY_ACTIVITY: ArchiveSchedulerActivityReader = { readActivitySnapshot: () => null };
+
+function selectActive(connections: readonly DriveStatusConnection[]): DriveStatusConnection | null {
+  return connections.find((connection) =>
+    connection.status === 'active' || connection.status === 'reauth_required',
+  ) ?? null;
+}
+
+function sameActiveFence(
+  first: DriveStatusConnection | null,
+  second: DriveStatusConnection | null,
+): boolean {
+  return first?.id === second?.id
+    && first?.revision === second?.revision
+    && first?.status === second?.status;
+}
 
 function toConnection(connection: DriveStatusConnection): DriveConnection {
   return DriveConnection.restore({

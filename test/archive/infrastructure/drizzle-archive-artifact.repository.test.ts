@@ -228,6 +228,30 @@ describe('DrizzleArchiveArtifactRepository', () => {
     });
   });
 
+  it('matches scheduler eligibility when a healthy artifact has only a retired-generation attempt', async () => {
+    const blocked = await repository.register({
+      ...artifactFixture(), sourceIdentity: 'blocked-due',
+      relativePath: '2026/08/16/blocked.mp4', sourceFingerprint: '1'.repeat(64),
+    });
+    await repository.recordMotionAdmissionPath(blocked.id, 0, '2026/08/16', 10);
+    const stale = await repository.register({
+      ...artifactFixture(), sourceIdentity: 'stale-attempt',
+      relativePath: '2026/08/17/stale.mp4', sourceFingerprint: '2'.repeat(64),
+    });
+    await repository.recordMotionAdmissionPath(stale.id, 0, '2026/08/17', 11);
+    await repository.createAttempt(
+      stale.id, 'generation-retired', 'retired-file', 'retired-folder', 12,
+    );
+    await seedBlockedPath(
+      folderReservations, 'generation-active', '2026/08/16', 'detached',
+    );
+
+    await expect(repository.readQueueStatus('generation-active', 100)).resolves.toMatchObject({
+      queuedVideos: 2,
+      branchBlocked: true,
+    });
+  });
+
   it('filters terminal restoration candidates before applying the limit', async () => {
     vi.spyOn(Date, 'now')
       .mockReturnValueOnce(1)

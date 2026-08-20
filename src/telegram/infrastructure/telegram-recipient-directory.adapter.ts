@@ -31,6 +31,7 @@ export class TelegramRecipientDirectoryAdapter implements RecipientDirectoryPort
     const users = await this.users.listRecipients();
     return users.map((user) => ({
       telegramId: user.telegramId,
+      locale: user.locale,
       muted: user.muted,
       nonCriticalPausedUntil: user.nonCriticalPausedUntil,
       quietStart: user.quietStart,
@@ -42,6 +43,7 @@ export class TelegramRecipientDirectoryAdapter implements RecipientDirectoryPort
     const users = await this.users.listRecipients();
     return users.filter((user) => user.role === 'admin').map((user) => ({
       telegramId: user.telegramId,
+      locale: user.locale,
       muted: user.muted,
       nonCriticalPausedUntil: user.nonCriticalPausedUntil,
       quietStart: user.quietStart,

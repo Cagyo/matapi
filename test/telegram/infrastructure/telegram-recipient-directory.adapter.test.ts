@@ -41,8 +41,8 @@ describe('TelegramRecipientDirectoryAdapter', () => {
     const recipients = await adapter.listRecipients();
 
     expect(recipients).toEqual([
-      { telegramId: 1, muted: false, nonCriticalPausedUntil: deadline, quietStart: null, quietEnd: null },
-      { telegramId: 2, muted: false, nonCriticalPausedUntil: null, quietStart: null, quietEnd: null },
+      { telegramId: 1, locale: 'en', muted: false, nonCriticalPausedUntil: deadline, quietStart: null, quietEnd: null },
+      { telegramId: 2, locale: 'en', muted: false, nonCriticalPausedUntil: null, quietStart: null, quietEnd: null },
     ]);
   });
 

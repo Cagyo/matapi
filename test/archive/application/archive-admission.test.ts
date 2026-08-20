@@ -200,6 +200,24 @@ describe('archive artifact admission', () => {
       branchBlocked: true,
     });
   });
+
+  it('does not treat an artifact attempted by a retired generation as unattempted active-generation work', async () => {
+    const blocked = await repository.register(artifactInput('blocked-due', 'b', '2026/08/16'));
+    await repository.recordMotionAdmissionPath(blocked.id, 0, '2026/08/16', 10);
+    const stale = await repository.register(artifactInput('stale-attempt', 'c', '2026/08/17'));
+    await repository.recordMotionAdmissionPath(stale.id, 0, '2026/08/17', 11);
+    await repository.createAttempt(
+      stale.id, 'generation-retired', 'retired-file', 'retired-folder', 12,
+    );
+    await folderReservations.seedBlockedPath(
+      'generation-active', '2026/08/16', 'detached',
+    );
+
+    await expect(repository.readQueueStatus('generation-active', 100)).resolves.toMatchObject({
+      queuedVideos: 2,
+      branchBlocked: true,
+    });
+  });
 });
 
 function artifactInput(

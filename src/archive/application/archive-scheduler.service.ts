@@ -20,11 +20,21 @@ import type {
   ArchiveProviderGateService,
 } from './archive-provider-gate.service';
 import type { DriveCredentialRepositoryPort } from './ports/drive-credential-repository.port';
+import type { ArchiveAdminAlertKind, ArchiveAdminAlertPort } from './ports/archive-admin-alert.port';
+import type {
+  ArchiveProviderState,
+  ArchiveProviderStateRepositoryPort,
+} from './ports/archive-provider-state-repository.port';
+import type { LocalStoragePort } from '../../camera/domain/ports/local-storage.port';
+import type { ArchiveSchedulerActivitySnapshot } from './use-cases/report-drive-status.use-case';
 
 const DEFAULT_INTERVAL_MS = 2 * 60 * 1_000;
 const DEFAULT_LEASE_MS = 5 * 60 * 1_000;
 const DEFAULT_NEWER_VIDEO_BATCH = 3;
 const DEFAULT_SHUTDOWN_WAIT_MS = 1_000;
+const PROLONGED_PROVIDER_COOLDOWN_MS = 15 * 60 * 1_000;
+const PROLONGED_BACKLOG_AGE_MS = 24 * 60 * 60 * 1_000;
+const LOCAL_DISK_PRESSURE_PERCENT = 70;
 
 export interface ArchiveCameraSchedulerHooks {
   reconcileMotion(signal: AbortSignal): Promise<void>;
@@ -93,12 +103,13 @@ export class ArchiveSchedulerService {
   private activeTick: Promise<void> | null = null;
   private activePump: Promise<void> | null = null;
   private activeUpload: Promise<void> | null = null;
+  private activity: ArchiveSchedulerActivitySnapshot | null = null;
   private consecutiveFreshVideos = 0;
 
   constructor(
     private readonly repository: Pick<ArchiveArtifactRepositoryPort,
       'claimNextAttempt' | 'listUnattemptedArtifacts' | 'readSchedulerState' |
-      'compareAndSetSchedulerState' | 'markRetryable' | 'readNextDeadline'>,
+      'compareAndSetSchedulerState' | 'markRetryable' | 'readNextDeadline' | 'readQueueStatus'>,
     private readonly backups: Pick<CreateDatabaseBackupUseCase, 'execute'>,
     private readonly uploads: Pick<UploadDriveObjectAttemptUseCase, 'execute' | 'executeClaimed'>,
     private readonly hooks: ArchiveSchedulerHooksService,
@@ -109,12 +120,19 @@ export class ArchiveSchedulerService {
     private readonly wake: ArchiveWakeService = DEFAULT_ARCHIVE_WAKE_SERVICE,
     private readonly providerGate?: Pick<ArchiveProviderGateService, 'inspect' | 'recordQuotaOutcome'>,
     private readonly credentials?: Pick<DriveCredentialRepositoryPort, 'loadActive'>,
+    private readonly providerState?: Pick<ArchiveProviderStateRepositoryPort, 'load'>,
+    private readonly alerts?: ArchiveAdminAlertPort,
+    private readonly localDisk?: Pick<LocalStoragePort, 'usagePercent'>,
   ) {
     this.intervalMs = positive(options.intervalMs ?? DEFAULT_INTERVAL_MS, 'interval');
     this.leaseMs = positive(options.leaseMs ?? DEFAULT_LEASE_MS, 'lease');
     this.newerVideoBatch = positive(options.newerVideoBatch ?? DEFAULT_NEWER_VIDEO_BATCH, 'fairness batch');
     this.shutdownWaitMs = positive(options.shutdownWaitMs ?? DEFAULT_SHUTDOWN_WAIT_MS, 'shutdown wait');
     this.owner = options.owner ?? randomUUID;
+  }
+
+  readActivitySnapshot(): ArchiveSchedulerActivitySnapshot | null {
+    return this.activity === null ? null : { ...this.activity };
   }
 
   startTimers(): void {
@@ -172,6 +190,7 @@ export class ArchiveSchedulerService {
       this.runJob('remote maintenance', () =>
         this.hooks.runRemoteMaintenance(this.remoteMutationLock, signal)),
     ]);
+    await this.runJob('archive health alerts', () => this.evaluateOperationalAlerts(nowMs));
   }
 
   async shutdown(): Promise<void> {
@@ -321,6 +340,7 @@ export class ArchiveSchedulerService {
         signal,
         newBackup.size,
         () => selectedGenerationId,
+        { generationId, artifactKind: 'database_backup', startedAtMs: nowMs },
       );
       return true;
     }
@@ -353,6 +373,7 @@ export class ArchiveSchedulerService {
         signal,
         newVideo.size,
         () => selectedGenerationId,
+        { generationId, artifactKind: 'motion_video', startedAtMs: nowMs },
       );
       return true;
     }
@@ -397,6 +418,11 @@ export class ArchiveSchedulerService {
       signal,
       claimed.artifact.size,
       () => selectedGenerationId,
+      {
+        generationId: claimed.attempt.generationId,
+        artifactKind: claimed.artifact.kind,
+        startedAtMs: nowMs,
+      },
     );
   }
 
@@ -405,7 +431,9 @@ export class ArchiveSchedulerService {
     signal: AbortSignal,
     pendingArtifactBytes: number,
     selectedGenerationId: () => string | null,
+    activity: ArchiveSchedulerActivitySnapshot,
   ): Promise<void> {
+    this.activity = activity;
     const transfer = transferOperation
       .then(async () => { await this.recordSchedulerSuccess({ lastUploadSuccessMs: this.clock.now().getTime() }); })
       .catch(async (error: unknown) => {
@@ -430,10 +458,34 @@ export class ArchiveSchedulerService {
       });
     const tracked = transfer.finally(() => {
       if (this.activeUpload === tracked) this.activeUpload = null;
+      if (this.activity === activity) this.activity = null;
       this.wake.wake();
     });
     this.activeUpload = tracked;
     await tracked;
+  }
+
+  private async evaluateOperationalAlerts(nowMs: number): Promise<void> {
+    if (this.credentials === undefined || this.providerState === undefined || this.alerts === undefined) return;
+    const active = await this.credentials.loadActive();
+    if (active === null) return;
+    const [provider, queue, localDiskUsagePercent] = await Promise.all([
+      this.providerState.load(),
+      this.repository.readQueueStatus(active.id, nowMs),
+      this.localDisk?.usagePercent().catch(() => null) ?? Promise.resolve(null),
+    ]);
+    const kinds = deriveArchiveOperationalAlertKinds({
+      nowMs,
+      generationId: active.id,
+      reauthorizationRequired: active.status === 'reauth_required',
+      provider,
+      oldestQueuedVideoAtMs: queue.oldestQueuedVideoAtMs,
+      queuedVideos: queue.queuedVideos,
+      localDiskUsagePercent,
+    });
+    for (const kind of kinds) {
+      await this.alerts.alert(kind, { generationId: active.id }).catch(() => undefined);
+    }
   }
 
   private noteAdmission(claimed: ClaimedAttempt): void {
@@ -458,6 +510,48 @@ export class ArchiveSchedulerService {
       if (!this.controller.signal.aborted) this.logger.warn(`${name} failed: ${message(error)}`);
     }
   }
+}
+
+export function deriveArchiveOperationalAlertKinds(input: {
+  nowMs: number;
+  generationId: string;
+  reauthorizationRequired: boolean;
+  provider: ArchiveProviderState;
+  queuedVideos: number;
+  oldestQueuedVideoAtMs: number | null;
+  localDiskUsagePercent: number | null;
+}): readonly ArchiveAdminAlertKind[] {
+  const kinds = new Set<ArchiveAdminAlertKind>();
+  const providerMatches = input.provider.generationId === input.generationId;
+  if (input.reauthorizationRequired
+    || (providerMatches && input.provider.blockReason === 'reauthorization_required')) {
+    kinds.add('reauthorization-required');
+  }
+  if (providerMatches && (input.provider.failureClass === 'capacity'
+    || input.provider.blockReason === 'account_creation_limit')) {
+    kinds.add('provider-capacity-blocked');
+  }
+  if (providerMatches && input.provider.blockReason === 'quota_exhausted') {
+    kinds.add('quota-reclamation-required');
+  }
+  if (providerMatches
+    && input.provider.operationClass === 'upload'
+    && input.provider.cooldownUntilMs !== null
+    && input.provider.cooldownUntilMs > input.nowMs
+    && input.nowMs - input.provider.updatedAtMs >= PROLONGED_PROVIDER_COOLDOWN_MS) {
+    kinds.add('provider-cooldown-prolonged');
+  }
+  if (input.queuedVideos > 0
+    && input.oldestQueuedVideoAtMs !== null
+    && input.nowMs - input.oldestQueuedVideoAtMs >= PROLONGED_BACKLOG_AGE_MS) {
+    kinds.add('backlog-age-prolonged');
+  }
+  if (input.localDiskUsagePercent !== null
+    && Number.isFinite(input.localDiskUsagePercent)
+    && input.localDiskUsagePercent >= LOCAL_DISK_PRESSURE_PERCENT) {
+    kinds.add('local-disk-pressure');
+  }
+  return [...kinds];
 }
 
 function boundedPendingBytes(value: number): number {

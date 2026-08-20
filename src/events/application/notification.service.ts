@@ -4,6 +4,7 @@ import {
   SensorQueryPort,
 } from '../../sensors/domain/ports/sensor-query.port';
 import { en } from '../../locales/en';
+import { catalogFor } from '../../locales/catalog';
 import { SensorSeverity } from '../../sensors/domain/sensor';
 import { isInQuietHours } from '../domain/quiet-hours';
 import {
@@ -151,14 +152,19 @@ export class NotificationService {
   }
 
   private async notifyAdmins(event: QueuedEvent): Promise<void> {
-    const message = (event.payload as { message?: unknown } | null)?.message;
-    if (typeof message !== 'string' || message.length === 0) return;
+    const payload = event.payload as { kind?: unknown; message?: unknown } | null;
+    const kind = archiveAlertKind(payload?.kind);
+    const legacyMessage = payload?.message;
+    if (kind === null && (typeof legacyMessage !== 'string' || legacyMessage.length === 0)) return;
     const admins = await this.recipients.listAdmins();
     if (admins.length === 0) return;
     let failed = false;
     await forEachWithConcurrency(admins, SEND_CONCURRENCY, async (admin) => {
       try {
-        await this.notifier.notifyUser(admin.telegramId, { text: message, asFile: false });
+        const text = kind === null
+          ? legacyMessage as string
+          : catalogFor(admin.locale).gdrive.alerts[kind];
+        await this.notifier.notifyUser(admin.telegramId, { text, asFile: false });
       } catch (error) {
         failed = true;
         this.logger.warn(
@@ -306,6 +312,14 @@ export class NotificationService {
   private async markSent(event: QueuedEvent): Promise<void> {
     await this.events.markSent([event.id], this.clock.now());
   }
+}
+
+type ArchiveAlertCatalogKey = keyof typeof en.gdrive.alerts;
+
+function archiveAlertKind(value: unknown): ArchiveAlertCatalogKey | null {
+  return typeof value === 'string' && Object.prototype.hasOwnProperty.call(en.gdrive.alerts, value)
+    ? value as ArchiveAlertCatalogKey
+    : null;
 }
 
 function readSeverity(event: QueuedEvent): SensorSeverity | null {

@@ -3,6 +3,8 @@ export const RECIPIENT_DIRECTORY = Symbol('RECIPIENT_DIRECTORY');
 /** A notification recipient with the fields needed to filter delivery. */
 export interface NotificationRecipient {
   telegramId: number;
+  /** Persisted locale used for per-recipient operational alert rendering. */
+  locale?: string;
   /** Legacy indefinite global mute (`/mute` with no sensor — spec 12). */
   muted: boolean;
   /** Timed non-critical pause deadline (1/4/8h) or `null` when none is set. */

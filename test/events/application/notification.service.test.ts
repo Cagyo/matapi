@@ -184,6 +184,41 @@ describe('NotificationService', () => {
     expect(repo.sentAtFor(event.id)).toBe(FIXED_NOW);
   });
 
+  it('localizes a durable semantic archive alert for each administrator', async () => {
+    const { repo, notifier, service } = await setup({
+      admins: [
+        { ...recipient({ telegramId: 7 }), locale: 'en' },
+        { ...recipient({ telegramId: 8 }), locale: 'uk' },
+      ],
+    });
+    const event = await repo.enqueue({
+      sensorId: null,
+      type: 'archive_admin_alert',
+      payload: { kind: 'provider-capacity-blocked' },
+      createdAt: FIXED_NOW,
+    });
+
+    await service.process(event);
+
+    expect(notifier.userSends).toEqual([
+      {
+        telegramId: 7,
+        message: {
+          text: '⚠️ Google Drive capacity requires administrator action.',
+          asFile: false,
+        },
+      },
+      {
+        telegramId: 8,
+        message: {
+          text: '⚠️ Місткість Google Drive потребує дії адміністратора.',
+          asFile: false,
+        },
+      },
+    ]);
+    expect(repo.sentAtFor(event.id)).toBe(FIXED_NOW);
+  });
+
   it('delivers to every eligible recipient and marks the event sent', async () => {
     const { repo, notifier, service } = await setup({
       recipients: [recipient({ telegramId: 1 }), recipient({ telegramId: 2 })],

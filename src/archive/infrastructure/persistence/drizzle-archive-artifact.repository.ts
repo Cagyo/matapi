@@ -761,21 +761,21 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
       )).limit(1).get();
     const healthyDue = nowMs === undefined ? undefined : this.db.select({ id: archiveArtifacts.id })
       .from(archiveArtifacts)
-      .leftJoin(driveObjectAttempts, and(
-        eq(driveObjectAttempts.artifactId, archiveArtifacts.id),
-        eq(driveObjectAttempts.generationId, generationId),
-      ))
       .where(and(
         queueCondition,
         or(
           and(
-            isNull(driveObjectAttempts.id),
+            notExists(this.db.select({ value: sql`1` }).from(driveObjectAttempts)
+              .where(eq(driveObjectAttempts.artifactId, archiveArtifacts.id))),
             lte(archiveArtifacts.admissionNextAt, nowMs),
           ),
-          and(
-            inArray(driveObjectAttempts.state, ['pending', 'retryable']),
-            lte(driveObjectAttempts.nextAttemptAt, nowMs),
-          ),
+          exists(this.db.select({ value: sql`1` }).from(driveObjectAttempts)
+            .where(and(
+              eq(driveObjectAttempts.artifactId, archiveArtifacts.id),
+              eq(driveObjectAttempts.generationId, generationId),
+              inArray(driveObjectAttempts.state, ['pending', 'retryable']),
+              lte(driveObjectAttempts.nextAttemptAt, nowMs),
+            ))),
         ),
         or(
           isNull(archiveArtifacts.motionDayPath),

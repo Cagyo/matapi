@@ -13,6 +13,7 @@ import {
 } from '../database/application/ports/database-backup-snapshot.port';
 import { EventModule } from '../events/event.module';
 import { EventQueueService } from '../events/application/event-queue.service';
+import { NotificationService } from '../events/application/notification.service';
 import { CLOCK, type ClockPort } from '../events/domain/ports/clock.port';
 import { SystemModule } from '../system/system.module';
 import { BootRecoveryService } from '../system/application/boot-recovery.service';
@@ -153,8 +154,9 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         queue: EventQueueService,
         alerts: ArchiveAdminAlertService,
         clock: ClockPort,
-      ) => new DurableArchiveAdminAlertAdapter(queue, alerts, clock),
-      inject: [EventQueueService, ArchiveAdminAlertService, CLOCK],
+        notifications: NotificationService,
+      ) => new DurableArchiveAdminAlertAdapter(queue, alerts, clock, notifications),
+      inject: [EventQueueService, ArchiveAdminAlertService, CLOCK, NotificationService],
     },
     { provide: ARCHIVE_ADMIN_ALERT, useExisting: DurableArchiveAdminAlertAdapter },
     {

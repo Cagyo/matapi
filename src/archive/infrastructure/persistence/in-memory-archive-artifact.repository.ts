@@ -548,11 +548,13 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
     const hasHealthyDueCandidate = nowMs === undefined ? false : queued.some((artifact) => {
       if (blockedByArtifact.get(artifact.id) === true) return false;
       const attempts = [...this.attempts.values()].filter(({ attempt }) => (
-        attempt.artifactId === artifact.id && attempt.generationId === generationId
+        attempt.artifactId === artifact.id
       ));
       if (attempts.length === 0) return artifact.admission.nextAttemptMs <= nowMs;
       return attempts.some(({ attempt, nextAttemptMs }) => (
-        ['pending', 'retryable'].includes(attempt.state) && nextAttemptMs <= nowMs
+        attempt.generationId === generationId
+        && ['pending', 'retryable'].includes(attempt.state)
+        && nextAttemptMs <= nowMs
       ));
     });
     return {

@@ -44,22 +44,36 @@ export class ArchiveAdminAlertService implements ArchiveAdminAlertPort {
     kind: ArchiveAdminAlertKind,
     context: Omit<ArchiveAdminAlert, 'kind'>,
   ): Promise<void> {
+    const alert = await this.claim(kind, context);
+    if (alert === null) return;
+    await this.deliver(alert);
+  }
+
+  /** Accepts one sanitized alert only after winning its durable cooldown CAS. */
+  async claim(
+    kind: ArchiveAdminAlertKind,
+    context: Omit<ArchiveAdminAlert, 'kind'>,
+  ): Promise<ArchiveAdminAlert | null> {
     const suppliedGenerationId = sanitizedIdentifier(context.generationId);
     const generationId = suppliedGenerationId
       ?? sanitizedIdentifier((await this.repository.loadActive())?.id);
-    if (!generationId) return;
+    if (!generationId) return null;
     const nowMs = this.clock.now().getTime();
     const persisted = await this.persistCooldown(generationId, kind, nowMs);
-    if (!persisted || this.delivery === null) return;
+    if (!persisted) return null;
 
     const artifactId = sanitizedIdentifier(context.artifactId);
-    const errorCode = sanitizedIdentifier(context.errorCode);
-    const alert: ArchiveAdminAlert = {
+    const errorCode = sanitizedErrorCode(context.errorCode);
+    return {
       generationId,
       kind,
       ...(artifactId === null ? {} : { artifactId }),
       ...(errorCode === null ? {} : { errorCode }),
     };
+  }
+
+  async deliver(alert: ArchiveAdminAlert): Promise<void> {
+    if (this.delivery === null) return;
     await this.delivery.send(alert).catch(() => {
       // The cooldown is already durable. Do not leak recipient or provider data in logs.
       this.logger.warn('Archive administrator alert delivery failed');
@@ -89,4 +103,9 @@ export class ArchiveAdminAlertService implements ArchiveAdminAlertPort {
 function sanitizedIdentifier(value: string | null | undefined): string | null {
   if (value === undefined || value === null) return null;
   return /^[A-Za-z0-9._-]{1,128}$/.test(value) ? value : null;
+}
+
+function sanitizedErrorCode(value: string | null | undefined): string | null {
+  if (value === undefined || value === null) return null;
+  return /^[A-Za-z0-9_]{1,64}$/.test(value) ? value : null;
 }
