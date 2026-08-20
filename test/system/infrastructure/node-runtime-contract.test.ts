@@ -59,6 +59,11 @@ describe('supported runtime contract', () => {
   });
 
   it('counts a start as successful only if it outlives the OTA health check', async () => {
+    // The useful direction of this ordering is the inverse of how it reads:
+    // because min_uptime is the *longer* window, a start the 30 s OTA check
+    // waves through but that dies before 60 s is still counted `unstable` by
+    // PM2. The crash-loop cap is therefore a backstop for the health check's
+    // blind spot, not a restatement of it.
     const updater = readFileSync('scripts/update.sh', 'utf8');
     const healthCheckSeconds = Number(
       /HEALTH_CHECK_SEC="\$\{UPDATE_HEALTH_CHECK_SEC:-(\d+)\}"/.exec(updater)?.[1],
@@ -66,8 +71,26 @@ describe('supported runtime contract', () => {
 
     const app = await pm2App();
 
-    expect(healthCheckSeconds).toBeGreaterThan(0);
+    expect(
+      healthCheckSeconds,
+      'scripts/update.sh no longer declares UPDATE_HEALTH_CHECK_SEC in the expected form',
+    ).toBeGreaterThan(0);
     expect(Number(app.min_uptime)).toBeGreaterThanOrEqual(healthCheckSeconds * 1000);
+  });
+
+  it('ignores a malformed PM2_* override instead of handing PM2 a NaN', async () => {
+    // `parseInt('60s')` yields NaN, and PM2 evaluates `Date.now() - created_at
+    // < NaN` as false forever: no restart is ever counted unstable and the cap
+    // silently stops existing — the 615-restart bug, reinstated by a typo.
+    const app = await pm2App({
+      PM2_MIN_UPTIME: '60s',
+      PM2_RESTART_DELAY: 'ten seconds',
+      PM2_MAX_RESTARTS: '0',
+    });
+
+    expect(app.min_uptime).toBe(60000);
+    expect(app.restart_delay).toBe(10000);
+    expect(app.max_restarts).toBe(10);
   });
 
   it('lets an operator retune the restart policy via exported PM2_* env vars', async () => {

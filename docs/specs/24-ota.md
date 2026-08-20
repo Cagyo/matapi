@@ -167,15 +167,30 @@ main
 0 * * * * homeworker /opt/home-worker/scripts/update.sh >> /var/log/home-worker-update.log 2>&1
 ```
 
+## Restart Step
+
+`update.sh` restarts through `restart_worker()`, which runs `pm2 startOrRestart
+"$INSTALL_DIR/ecosystem.config.js" --update-env --only "$APP_NAME"` under a scrubbed environment, and
+`pm2 save` once the health check has passed. Restarting from the config file rather than by name is what lets
+an update change the PM2 restart policy at all; the environment scrub keeps update.sh's own variables
+(`DATABASE_PATH`, `HOME_WORKER_*`) out of the app's persisted `pm2_env`, where they would shadow `.env`. See
+[23-reliability.md](23-reliability.md) → *How these values reach a running device*, including the one-release
+lag that applies to any change to `update.sh` itself.
+
 ## Health Check Details
 
-After pm2 restart, the script waits 30 seconds and checks if the process is still online. This catches:
+After the restart, the script waits `UPDATE_HEALTH_CHECK_SEC` (30 s) and then requires two things of the
+worker: PM2 status `online`, **and** a PM2 `restart_time` that has advanced by no more than one from the
+reading taken immediately *before* the restart — that one increment being the update's own restart. The second
+condition exists because a crash-looping build reads `online` for most of each `restart_delay` cycle; only the
+restart counter distinguishes "up" from "up again". Together they catch:
 - Syntax errors in new code
 - Missing dependencies
 - Incompatible native modules after Node update
 - Failed DB migrations that crash on startup
+- A build that starts, crashes, and is restarted by PM2 inside the check window
 
-If the check fails, rollback is automatic.
+If either check fails — or if the restart command itself fails — rollback is automatic.
 
 ## Node.js Major Version Policy
 

@@ -189,7 +189,31 @@ Worker catches ENOSPC on every write, degrades gracefully.
 
 The `PM2_*` vars are read when PM2 evaluates `ecosystem.config.js`, so they must be **exported in the shell
 that invokes PM2** — e.g. `PM2_MIN_UPTIME=30000 pm2 restart ecosystem.config.js --update-env`. Nothing sources
-`.env` into the PM2 CLI (`setup_pm2`, `scripts/install.sh`), so a value set only in `.env` has no effect.
+`.env` into the PM2 CLI (`setup_pm2`, `scripts/install.sh`), so a value set only in `.env` has no effect. A
+value that is not a positive integer is ignored and the default applies: `parseInt('60s')` is `NaN`, PM2
+evaluates `Date.now() - created_at < NaN` as false forever, and the cap would silently stop existing again.
+
+### How these values reach a running device
+
+Only a restart that **re-evaluates the config file** applies them. `pm2 restart <name>` replays the process's
+stored `pm2_env`, and `pm2 resurrect` on boot replays `dump.pm2`, which is the same stale snapshot — neither
+re-reads `ecosystem.config.js`. Two paths do re-read it:
+
+- `setup_pm2` (`scripts/install.sh`) — `pm2 restart ecosystem.config.js --update-env`, i.e. re-running the
+  root installer.
+- `restart_worker` (`scripts/update.sh`) — `pm2 startOrRestart "$INSTALL_DIR/ecosystem.config.js"
+  --update-env --only "$APP_NAME"`, followed by `pm2 save` once the health check passes so the next boot's
+  `pm2 resurrect` replays the new policy rather than the pre-update one. It falls back to `pm2 restart
+  "$APP_NAME"` when the config file declares no app by that name, because `--only` with an undeclared name
+  restarts nothing and still exits 0. The restart runs under a scrubbed environment (`env -i` with `PATH` and
+  `HOME`): the config-file path bakes the caller's environment into the stored `pm2_env`, and update.sh's own
+  environment carries `DATABASE_PATH`, `HOME_WORKER_*` and `UPDATE_HEALTH_CHECK_SEC`, which `dotenv` would then
+  never be able to override from `.env`. The scrub keeps `PATH`, `HOME` and `PM2_HOME`, so the restart reaches
+  the same PM2 daemon the health check queries.
+
+> **One-release lag.** The release that ships a change to `update.sh` is applied by the **old** `update.sh`
+> already running in memory. A restart-policy change therefore engages on the update *after* the one that
+> delivers it. To apply it immediately on a given device, re-run the root installer there.
 
 `max_restarts` only counts restarts that PM2 classified as *unstable*, i.e. the process exited before
 `min_uptime`. **`min_uptime` is what makes the cap engage at all.** Without it PM2 applies a 1000 ms default:
@@ -206,14 +230,34 @@ tolerant of a fast crash loop, not less. Together with `restart_delay` it sets t
 `max_restarts × (time-to-crash + restart_delay)` ≈ 2-3 minutes of retrying before PM2 gives up.
 
 **Accepted consequence:** a genuinely broken deploy now exhausts the cap in ~2-3 minutes and the worker stays
-**down** in `errored` rather than crash-looping — no alerts until someone intervenes. That is deliberate:
-`errored` is visible (`pm2 list`, external heartbeat) and recoverable (`pm2 restart`, OTA rollback, or
-`pm2 resurrect` on the next boot), whereas an invisible loop is neither. `restart_delay` also helps the OTA
-path: a crash-looping deploy now spends most of each cycle in `waiting restart`, so `update.sh`'s single
-post-restart status sample is likely — though not guaranteed — to see something other than `online` and roll
-back. `min_uptime` must stay at or above `UPDATE_HEALTH_CHECK_SEC` so that a start PM2
-calls successful is at least one the OTA health check would also accept — asserted in
-`test/system/infrastructure/node-runtime-contract.test.ts`.
+**down** in `errored` rather than crash-looping. That is deliberate — `errored` is recoverable (`pm2 restart`,
+OTA rollback, or `pm2 resurrect` on the next boot) whereas an invisible loop is neither — but whether it is
+also *visible* depends entirely on configuration:
+
+> ⚠️ **On a stock install nothing raises an alarm.** The worker *is* the Telegram bot, and it is also what
+> pings `HEARTBEAT_URL` — `HeartbeatSchedulerService` runs inside the worker process
+> (`src/network/application/heartbeat-scheduler.service.ts`). Once the worker is `errored` there are no
+> Telegram messages, no heartbeat pings and no alerts of any kind, and `pm2 list` requires SSH.
+> `.env.example` ships `HEARTBEAT_URL` empty, so the ~2-3 minute stay-down operating point is only defensible
+> on a device where it has been **set to a dead-man's-switch monitor** — one that alerts on *missing* pings
+> (healthchecks.io and similar). That, not `pm2 list`, is what makes `errored` observable. On a device with no
+> heartbeat configured, the tradeoff is a silent stop instead of a noisy loop; accept it knowingly.
+
+`min_uptime` must stay at or above `UPDATE_HEALTH_CHECK_SEC` (30 s) — asserted in
+`test/system/infrastructure/node-runtime-contract.test.ts`. Mind which direction that ordering buys something:
+`min_uptime` is the *longer* window, so PM2 has **not** yet declared a start stable when `update.sh` takes its
+post-restart sample — the ordering does not make PM2's verdict a subset of the health check's. What it
+guarantees is the inverse and more useful property: **a start the 30 s OTA check waves through but that dies
+before 60 s is still counted `unstable` by PM2**, so the crash-loop cap is a proper backstop for the health
+check's blind spot rather than a restatement of it.
+
+The OTA health check does not rely on that window alone. A crash-looping deploy can still read `online` at the
+instant `update.sh` samples it — `restart_delay` keeps most of each cycle in `waiting restart`, but a build
+that survives ~25 s is `online` most of the time. So `update.sh` also records PM2's `restart_time` immediately
+*before* the restart and compares it after the sleep. One increment is the update's own restart; anything
+beyond that means PM2 brought the worker back at least once inside the window, and the update rolls back.
+Taking the baseline before the restart keeps the reading out of a race with PM2's own bookkeeping, and both
+readings degrade to a non-numeric sentinel, so a failed `pm2 jlist` can never trigger a rollback on its own.
 
 ## Single Instance Constraint
 

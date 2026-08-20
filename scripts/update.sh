@@ -147,6 +147,59 @@ build_dist() {
   install_production_deps
 }
 
+# True when ecosystem.config.js declares an app called "$1".
+ecosystem_declares_app() {
+  local answer
+  answer="$(
+    node -e 'const apps=require(process.argv[1]).apps||[];process.stdout.write(apps.some((app)=>app&&app.name===process.argv[2])?"yes":"no")' \
+      "$INSTALL_DIR/ecosystem.config.js" "$1" 2>/dev/null || true
+  )"
+  [[ "$answer" == "yes" ]]
+}
+
+# Restart the worker so that ecosystem.config.js is re-evaluated.
+#
+# `pm2 restart <name>` replays the process's stored pm2_env and never re-reads
+# the config file, and `pm2 resurrect` on boot replays dump.pm2, which is the
+# same stale snapshot. Restart-policy changes shipped by an update (min_uptime,
+# restart_delay, max_restarts — spec 23) would therefore never reach a device
+# through OTA. Restarting from the config file applies them to the live process.
+restart_worker() {
+  if ! ecosystem_declares_app "$APP_NAME"; then
+    # `--only` with a name the file does not declare restarts nothing and still
+    # exits 0, which would hand the health check a stale-but-online process and
+    # call the update a success. Fall back to the by-name restart instead.
+    pm2 restart "$APP_NAME"
+    return
+  fi
+
+  # `pm2 <cmd> <config file>` always updates the app's environment (the JSON
+  # path forces it; there is no opt-out) by baking in the *caller's* environment
+  # — and `pm2 save` below then persists that across reboots. This script's
+  # environment carries the OTA control knobs (DATABASE_PATH, HOME_WORKER_*,
+  # UPDATE_HEALTH_CHECK_SEC) plus the build-time NODE_OPTIONS/JOBS exports, and
+  # `dotenv` never overrides an already-set variable, so baking them in would
+  # silently shadow .env forever. Restart under a scrubbed environment holding
+  # only what PM2 itself needs: PATH, and HOME/PM2_HOME so the CLI reaches the
+  # same daemon the health check below queries — scrubbing those would let the
+  # restart address a different daemon, where `--only` matches nothing.
+  local -a scrubbed=(env -i "PATH=$PATH")
+  local passthrough
+  for passthrough in HOME PM2_HOME; do
+    if [[ -n "${!passthrough:-}" ]]; then
+      scrubbed+=("$passthrough=${!passthrough}")
+    fi
+  done
+  # Absolute path so the config's `cwd: ... || __dirname` resolves to
+  # "$INSTALL_DIR" exactly as it does during a fresh install.
+  "${scrubbed[@]}" pm2 startOrRestart "$INSTALL_DIR/ecosystem.config.js" --update-env --only "$APP_NAME"
+}
+
+# Prints "<status> <restart_time>" for $APP_NAME, or "unknown unknown".
+pm2_app_state() {
+  pm2 jlist 2>/dev/null | APP_NAME="$APP_NAME" node -e "let s='';process.stdin.on('data',c=>s+=c);process.stdin.on('end',()=>{try{const apps=JSON.parse(s);const app=apps.find(a=>a.name===process.env.APP_NAME);process.stdout.write(app?app.pm2_env.status+' '+app.pm2_env.restart_time:'missing unknown');}catch(_){process.stdout.write('unknown unknown');}});" || echo "unknown unknown"
+}
+
 rollback_to_snapshot() {
   local identifier="$1"
   local git_ref="${2:-}"
@@ -168,6 +221,10 @@ rollback_to_snapshot() {
   install_production_deps || true
   write_meta "restart_reason" "ota_update_failed"
   write_meta "update_status" "failed"
+  # By name, not from the config file: this is the get-the-service-back-up path,
+  # and the ecosystem.config.js on disk has just been reverted to the previous
+  # release's. Reusing the loaded pm2_env keeps the restart policy that is
+  # already in force and keeps this path to its single moving part.
   pm2 restart "$APP_NAME" || true
 }
 
@@ -282,18 +339,48 @@ if ! corepack yarn db:migrate; then
 fi
 
 write_meta "update_status" "pending"
-pm2 restart "$APP_NAME"
+# Baseline taken *before* the restart on purpose: the reading then cannot race
+# PM2's own bookkeeping for the restart we are about to ask for, whichever side
+# of the CLI ack that counter happens to move on.
+RESTART_BASELINE="$(pm2_app_state | cut -d' ' -f2)"
+if ! restart_worker; then
+  echo "restart failed, rolling back" >&2
+  rollback_to_snapshot "$ROLLBACK_SNAPSHOT" "${ROLLBACK_TAG:-$CURRENT_COMMIT}"
+  exit 1
+fi
 
-# Post-restart health check. pm2 restart returns immediately; give the
-# worker HEALTH_CHECK_SEC seconds to come back online.
+# Post-restart health check. The restart returns as soon as PM2 has launched the
+# process; give the worker HEALTH_CHECK_SEC seconds to come back online.
 sleep "$HEALTH_CHECK_SEC"
-STATUS="$(pm2 jlist 2>/dev/null | APP_NAME="$APP_NAME" node -e "let s='';process.stdin.on('data',c=>s+=c);process.stdin.on('end',()=>{try{const apps=JSON.parse(s);const app=apps.find(a=>a.name===process.env.APP_NAME);process.stdout.write(app?app.pm2_env.status:'missing');}catch(_){process.stdout.write('unknown');}});" || echo unknown)"
+APP_STATE="$(pm2_app_state)"
+STATUS="${APP_STATE%% *}"
+RESTART_COUNT="${APP_STATE##* }"
 
 if [[ "$STATUS" != "online" ]]; then
   echo "Health check failed (pm2 status=$STATUS), rolling back" >&2
   rollback_to_snapshot "$ROLLBACK_SNAPSHOT" "${ROLLBACK_TAG:-$CURRENT_COMMIT}"
   exit 1
 fi
+
+# A crash-looping deploy can still read `online` at the instant we sample it:
+# restart_delay keeps most of each cycle in `waiting restart`, but a worker that
+# survives ~25 s is `online` most of the time. PM2's restart counter is the
+# deterministic signal. One increment is the restart we asked for; anything
+# beyond that is the new build dying and PM2 bringing it back. The check is
+# skipped whenever either reading is non-numeric, so a `pm2 jlist` hiccup can
+# never trigger a rollback on its own.
+if [[ "$RESTART_BASELINE" =~ ^[0-9]+$ && "$RESTART_COUNT" =~ ^[0-9]+$ ]] &&
+   (( RESTART_COUNT > RESTART_BASELINE + 1 )); then
+  echo "Health check failed (worker restarted $((RESTART_COUNT - RESTART_BASELINE - 1))x after the update restart), rolling back" >&2
+  rollback_to_snapshot "$ROLLBACK_SNAPSHOT" "${ROLLBACK_TAG:-$CURRENT_COMMIT}"
+  exit 1
+fi
+
+# Persist the freshly evaluated pm2_env so the next boot's `pm2 resurrect`
+# replays this restart policy and not the pre-update one. Deliberately after the
+# health check: a failed update must never be written into dump.pm2.
+pm2 save >/dev/null 2>&1 ||
+  echo "warning: pm2 save failed; the restart policy will not survive a reboot" >&2
 
 write_meta "update_status" "success"
 echo "Update complete: $NEW_COMMIT"
