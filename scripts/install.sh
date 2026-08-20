@@ -785,22 +785,25 @@ EOF
 }
 
 ensure_motion_video_storage_permissions() {
-  local motion_home="/home/pi"
+  # "$pi_home" is the *human* pi account's home directory, not the Motion
+  # daemon's — the daemon runs as the separate "motion" system user the camera
+  # feature installer creates (see the `id motion` branch below).
+  local pi_home="/home/pi"
   if [ "${HOME_WORKER_INSTALL_LIBRARY:-0}" = "1" ]; then
-    motion_home="${HOME_WORKER_MOTION_HOME:?HOME_WORKER_MOTION_HOME is required for installer tests}"
+    pi_home="${HOME_WORKER_PI_HOME:?HOME_WORKER_PI_HOME is required for installer tests}"
   fi
-  local motion_root="$motion_home/motion"
+  local motion_root="$pi_home/motion"
   local motion_dir="$motion_root/videos"
   local thumbnails_dir="$motion_root/thumbnails"
 
   # Nothing to repair on a device whose install user is not "pi" and that has no
   # /home/pi at all; chmod on a missing directory would abort the install.
-  if [ ! -d "$motion_home" ]; then
+  if [ ! -d "$pi_home" ]; then
     return
   fi
 
-  # `sudo chmod 755 "$motion_home"` runs in BOTH branches on purpose. The worker
-  # scans MOTION_LOCAL_DIR (default "$motion_home/motion/videos") on every boot
+  # `sudo chmod 711 "$pi_home"` runs in BOTH branches on purpose. The worker
+  # scans MOTION_LOCAL_DIR (default "$pi_home/motion/videos") on every boot
   # whether or not the camera feature is installed, and Raspbian ships /home/pi
   # as mode 700. Without the traversal bit that scan fails with EACCES — an
   # operational error the archive treats as a real fault — instead of ENOENT,
@@ -808,20 +811,33 @@ ensure_motion_video_storage_permissions() {
   # absent crash-looped a camera-less device (615 restarts; Telegram and GPIO
   # sensors down for hours).
   #
-  # Deliberate, plan-sanctioned tradeoff: on a device without the camera feature
-  # this makes /home/pi world-readable when it otherwise would not be. Accepted
-  # because the worker runs as "$USER" out of "$INSTALL_DIR" and stores nothing
-  # under /home/pi, and because install-feature.sh applies the very same mode as
-  # soon as the camera feature is installed.
+  # 711 rather than 755 because the scan never lists /home/pi: it lstat()s its
+  # root ("$motion_dir") and readdir()s from there down — see `scanBatch` in
+  # src/camera/infrastructure/fs-completed-motion-video.adapter.ts — so it needs
+  # only the search bit on the path above the root, never the read bit. The
+  # exposure being minimised is the human pi account's home, which on a stock
+  # Raspbian image holds that user's dotfiles and data; 711 keeps it unlistable.
+  # It does not reduce the exposure to zero — a local user who already knows a
+  # filename can still traverse to it — but nothing here needs more than 711.
+  # install-feature.sh still applies 755 to the same directory when the camera
+  # feature installs; it is the root-owned, version-pinned helper, so aligning it
+  # needs a feature-installer version bump and is deliberately left out of scope.
   if [ ! -d "$motion_dir" ]; then
-    echo "No Motion media yet; keeping $motion_home traversable for the video scan..."
-    sudo chmod 755 "$motion_home"
+    echo "No Motion media yet; keeping $pi_home traversable for the video scan..."
+    sudo chmod 711 "$pi_home"
+    # A half-installed camera feature can leave "$motion_root" present without
+    # "$motion_dir"; without this the scan just hits EACCES one level deeper.
+    # Guarded as a full `if` — a false `[ -d ]` as the branch's last command
+    # would return non-zero under `set -euo pipefail`.
+    if [ -d "$motion_root" ]; then
+      sudo chmod 755 "$motion_root"
+    fi
     return
   fi
 
   echo "Ensuring Motion media storage permissions..."
   sudo mkdir -p "$thumbnails_dir"
-  sudo chmod 755 "$motion_home"
+  sudo chmod 711 "$pi_home"
   if id motion &>/dev/null; then
     sudo chown -R motion:motion "$motion_root"
   else

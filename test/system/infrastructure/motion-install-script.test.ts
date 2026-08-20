@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -10,7 +11,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 function motionCase(script: string): string {
@@ -27,22 +28,49 @@ function mode(path: string): number {
   return statSync(path).mode & 0o777;
 }
 
+interface InstallFunctionRun {
+  stdout: string;
+  /** Every command the fake `sudo` was asked to run, in order. */
+  sudoCommands: string[];
+}
+
 /** Sources scripts/install.sh as a library and runs one installer function. */
 function runInstallFunction(
   tempDir: string,
   functionName: string,
   env: Record<string, string>,
-): string {
+): InstallFunctionRun {
+  // Safety fence: the function under test chmods $HOME_WORKER_PI_HOME. If the
+  // library seam ever stops engaging, that is the real /home/pi on a Linux dev
+  // host or a Pi. Never run unless the target is inside this test's temp dir.
+  const piHome = env.HOME_WORKER_PI_HOME ?? '';
+  if (!piHome || !resolve(piHome).startsWith(resolve(tempDir) + sep)) {
+    throw new Error(
+      `refusing to run ${functionName}: HOME_WORKER_PI_HOME=${JSON.stringify(piHome)} must resolve inside ${tempDir}`,
+    );
+  }
+
   const harnessDir = join(tempDir, 'harness');
   const fakeBin = join(harnessDir, 'bin');
-  execFileSync('mkdir', ['-p', fakeBin]);
+  mkdirSync(fakeBin, { recursive: true });
+  const sudoLog = join(harnessDir, 'sudo.log');
   // Privileged commands run unprivileged here; `chown` to a foreign owner is the
   // one step an unprivileged test user cannot perform, so it becomes a no-op.
+  // Every invocation is recorded first, so a no-op'd command is still observable
+  // — otherwise repointing a `chown` at the wrong directory would pass silently.
   writeFileSync(
     join(fakeBin, 'sudo'),
-    '#!/bin/sh\nif [ "$1" = "-u" ]; then shift 2; fi\nif [ "$1" = "chown" ]; then exit 0; fi\nexec "$@"\n',
+    [
+      '#!/bin/sh',
+      'if [ "$1" = "-u" ]; then shift 2; fi',
+      'printf \'%s\\n\' "$*" >> "$HOME_WORKER_SUDO_LOG"',
+      'if [ "$1" = "chown" ]; then exit 0; fi',
+      'exec "$@"',
+      '',
+    ].join('\n'),
   );
   chmodSync(join(fakeBin, 'sudo'), 0o755);
+  writeFileSync(sudoLog, '');
 
   const harness = join(harnessDir, 'run.sh');
   writeFileSync(
@@ -52,6 +80,7 @@ function runInstallFunction(
       'set -euo pipefail',
       `export PATH=${shQuote(fakeBin)}:"$PATH"`,
       'export HOME_WORKER_INSTALL_LIBRARY=1',
+      `export HOME_WORKER_SUDO_LOG=${shQuote(sudoLog)}`,
       `. ${shQuote(resolve('scripts/install.sh'))}`,
       functionName,
       '',
@@ -59,10 +88,15 @@ function runInstallFunction(
   );
   chmodSync(harness, 0o755);
 
-  return execFileSync('bash', [harness], {
+  const stdout = execFileSync('bash', [harness], {
     encoding: 'utf8',
     env: { ...process.env, ...env },
   });
+
+  return {
+    stdout,
+    sudoCommands: readFileSync(sudoLog, 'utf8').split('\n').filter(Boolean),
+  };
 }
 
 describe('motion install scripts', () => {
@@ -112,21 +146,38 @@ describe('motion install scripts', () => {
 
     const tempDir = mkdtempSync(join(tmpdir(), 'home-worker-motion-perms-'));
     try {
-      const motionHome = join(tempDir, 'home', 'pi');
-      const motionDir = join(motionHome, 'motion', 'videos');
-      execFileSync('mkdir', ['-p', motionDir]);
+      const piHome = join(tempDir, 'home', 'pi');
+      const motionRoot = join(piHome, 'motion');
+      const motionDir = join(motionRoot, 'videos');
+      mkdirSync(motionDir, { recursive: true });
       writeFileSync(join(motionDir, 'clip.mp4'), 'video');
-      chmodSync(motionHome, 0o700);
+      // Both directories start restrictive so every mode asserted below has to
+      // be the installer's doing — the process umask would otherwise hand the
+      // media root 0755 before install.sh ran a single chmod.
+      chmodSync(motionRoot, 0o700);
+      chmodSync(piHome, 0o700);
 
-      runInstallFunction(tempDir, 'ensure_motion_video_storage_permissions', {
-        HOME_WORKER_MOTION_HOME: motionHome,
+      const run = runInstallFunction(tempDir, 'ensure_motion_video_storage_permissions', {
+        HOME_WORKER_PI_HOME: piHome,
       });
 
-      expect(mode(motionHome)).toBe(0o755);
-      expect(mode(join(motionHome, 'motion'))).toBe(0o755);
+      // Traversal only on the human pi account's home; the media tree below it
+      // is the part that has to be readable and writable.
+      expect(mode(piHome)).toBe(0o711);
+      expect(mode(motionRoot)).toBe(0o755);
       expect(mode(motionDir)).toBe(0o775);
       expect(mode(join(motionDir, 'clip.mp4'))).toBe(0o775);
-      expect(mode(join(motionHome, 'motion', 'thumbnails'))).toBe(0o775);
+      expect(mode(join(motionRoot, 'thumbnails'))).toBe(0o775);
+
+      // `chown` is a no-op under the fake sudo, so its target is only provable
+      // from the recorded command line. Ownership must land on the media root,
+      // never on /home/pi and never on the videos directory alone.
+      const chowns = run.sudoCommands.filter((command) => command.startsWith('chown '));
+      expect(chowns).toHaveLength(1);
+      expect(chowns[0]).toContain('chown -R ');
+      expect(chowns[0].split(' ').at(-1)).toBe(motionRoot);
+      expect(run.sudoCommands).toContain(`chmod 711 ${piHome}`);
+      expect(run.sudoCommands).toContain(`chmod 755 ${motionRoot}`);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
@@ -134,37 +185,77 @@ describe('motion install scripts', () => {
 
   it('keeps the home directory traversable when the camera feature was never installed', () => {
     // Regression: the worker scans MOTION_LOCAL_DIR on every boot regardless of
-    // the camera feature. Skipping `chmod 755 /home/pi` because the media
+    // the camera feature. Skipping the traversal chmod because the media
     // directory is absent left the scan hitting EACCES instead of ENOENT, which
     // crash-looped a camera-less device.
     const tempDir = mkdtempSync(join(tmpdir(), 'home-worker-motion-perms-bare-'));
     try {
-      const motionHome = join(tempDir, 'home', 'pi');
-      execFileSync('mkdir', ['-p', motionHome]);
-      chmodSync(motionHome, 0o700);
+      const piHome = join(tempDir, 'home', 'pi');
+      mkdirSync(piHome, { recursive: true });
+      chmodSync(piHome, 0o700);
 
-      runInstallFunction(tempDir, 'ensure_motion_video_storage_permissions', {
-        HOME_WORKER_MOTION_HOME: motionHome,
+      const run = runInstallFunction(tempDir, 'ensure_motion_video_storage_permissions', {
+        HOME_WORKER_PI_HOME: piHome,
       });
 
-      expect(mode(motionHome)).toBe(0o755);
-      expect(existsSync(join(motionHome, 'motion'))).toBe(false);
+      expect(mode(piHome)).toBe(0o711);
+      expect(existsSync(join(piHome, 'motion'))).toBe(false);
+      // Nothing else to repair: no media tree means no chown and no second chmod.
+      expect(run.sudoCommands).toEqual([`chmod 711 ${piHome}`]);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
 
-  it('does nothing when the Motion home directory does not exist at all', () => {
+  it('keeps a half-installed media root traversable when the videos directory is missing', () => {
+    // The early return exists to guarantee the whole scan path is traversable.
+    // A media root left behind without its videos directory would otherwise put
+    // the EACCES one level deeper instead of removing it.
+    const tempDir = mkdtempSync(join(tmpdir(), 'home-worker-motion-perms-partial-'));
+    try {
+      const piHome = join(tempDir, 'home', 'pi');
+      const motionRoot = join(piHome, 'motion');
+      mkdirSync(motionRoot, { recursive: true });
+      chmodSync(motionRoot, 0o700);
+      chmodSync(piHome, 0o700);
+
+      runInstallFunction(tempDir, 'ensure_motion_video_storage_permissions', {
+        HOME_WORKER_PI_HOME: piHome,
+      });
+
+      expect(mode(piHome)).toBe(0o711);
+      expect(mode(motionRoot)).toBe(0o755);
+      expect(existsSync(join(motionRoot, 'videos'))).toBe(false);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does nothing when the pi home directory does not exist at all', () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'home-worker-motion-perms-missing-'));
     try {
-      const motionHome = join(tempDir, 'home', 'pi');
+      const piHome = join(tempDir, 'home', 'pi');
 
+      const run = runInstallFunction(tempDir, 'ensure_motion_video_storage_permissions', {
+        HOME_WORKER_PI_HOME: piHome,
+      });
+
+      expect(existsSync(piHome)).toBe(false);
+      expect(run.sudoCommands).toEqual([]);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses to run the installer against a home directory outside the test sandbox', () => {
+    // Without this fence a seam failure would chmod the real /home/pi.
+    const tempDir = mkdtempSync(join(tmpdir(), 'home-worker-motion-perms-fence-'));
+    try {
       expect(() =>
         runInstallFunction(tempDir, 'ensure_motion_video_storage_permissions', {
-          HOME_WORKER_MOTION_HOME: motionHome,
+          HOME_WORKER_PI_HOME: '/home/pi',
         }),
-      ).not.toThrow();
-      expect(existsSync(motionHome)).toBe(false);
+      ).toThrow(/must resolve inside/);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
@@ -194,7 +285,8 @@ describe('motion install scripts', () => {
       const fakeBin = join(tempDir, 'bin');
       const installDir = join(tempDir, 'install root');
       const dbPath = join(installDir, 'data', 'worker data.db');
-      execFileSync('mkdir', ['-p', fakeBin, join(installDir, 'data')]);
+      mkdirSync(fakeBin, { recursive: true });
+      mkdirSync(join(installDir, 'data'), { recursive: true });
       writeFileSync(
         join(fakeBin, 'sudo'),
         '#!/bin/sh\nif [ "$1" = "-u" ]; then shift 2; fi\nexec "$@"\n',
@@ -248,7 +340,8 @@ describe('motion install scripts', () => {
       const legacyInstaller = join(scriptsDir, 'legacy-feature.sh');
       const priorBackup = `${legacyInstaller}.bak.serial.1`;
 
-      execFileSync('mkdir', ['-p', fakeBin, scriptsDir]);
+      mkdirSync(fakeBin, { recursive: true });
+      mkdirSync(scriptsDir, { recursive: true });
       writeFileSync(
         join(fakeBin, 'sudo'),
         '#!/bin/sh\nif [ "$1" = "-u" ]; then shift 2; fi\nexec "$@"\n',
@@ -303,7 +396,8 @@ describe('motion install scripts', () => {
       const scriptsDir = join(installDir, 'scripts');
       const installer = join(scriptsDir, 'install.sh');
 
-      execFileSync('mkdir', ['-p', fakeBin, scriptsDir]);
+      mkdirSync(fakeBin, { recursive: true });
+      mkdirSync(scriptsDir, { recursive: true });
       writeFileSync(
         join(fakeBin, 'sudo'),
         '#!/bin/sh\nif [ "$1" = "-u" ]; then shift 2; fi\nexec "$@"\n',

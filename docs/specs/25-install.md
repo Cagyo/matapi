@@ -236,23 +236,37 @@ module.exports = {
 ```
 
 `min_uptime` is what makes `max_restarts` engage; without it PM2's 1000 ms default lets a fast crash loop run
-forever while reporting `online`. See [23-reliability.md](23-reliability.md) → *Crash-Loop Protection* for the
-values and the accepted `errored`-instead-of-looping tradeoff.
+forever while reporting `online`. `setup_pm2` is one of only two paths that re-evaluate this file — `pm2
+restart <name>` and `pm2 resurrect` both replay a stored snapshot — so re-running the installer is how an
+operator forces a changed restart policy onto a device immediately. See [23-reliability.md](23-reliability.md)
+→ *Crash-Loop Protection* for the values, the delivery paths and the accepted `errored`-instead-of-looping
+tradeoff.
 
 ### Motion media permissions
 
-`ensure_motion_video_storage_permissions()` runs after feature installation and applies `chmod 755 /home/pi`
-**whether or not the camera feature is installed** (it still skips everything else when there is no
-`/home/pi/motion/videos`, and does nothing at all when `/home/pi` is absent).
+`ensure_motion_video_storage_permissions()` runs after feature installation and applies `chmod 711 /home/pi`
+**whether or not the camera feature is installed**. It also applies `chmod 755 /home/pi/motion` whenever that
+directory exists, so a half-installed media tree cannot move the failure one level deeper; it does nothing at
+all when `/home/pi` is absent.
 
 The worker scans `MOTION_LOCAL_DIR` (default `/home/pi/motion/videos`) on every boot regardless of the camera
 feature. Raspbian ships `/home/pi` as mode `700`, so without the traversal bit that scan fails with `EACCES` —
 an operational error the archive treats as a real fault — instead of `ENOENT`, which it skips silently.
-Deliberate tradeoff: on a camera-less device this makes `/home/pi` world-readable when it otherwise would not
-be. Accepted because the worker runs as `$USER` out of `$INSTALL_DIR` and keeps nothing under `/home/pi`, and
-because `install-feature.sh` applies the same mode as soon as the camera feature is installed. Do **not**
-"fix" this by repointing `MOTION_LOCAL_DIR`: Motion's own `target_dir` is hardcoded to that path by the
-feature installer and the feature health checks assert it.
+
+`711`, not `755`: the scan `lstat()`s its root and `readdir()`s from there downwards (`scanBatch`,
+`src/camera/infrastructure/fs-completed-motion-video.adapter.ts`), so it needs only the **search** bit on the
+directories above its root — never the read bit. The asset being protected is the *human* `pi` account's home,
+which on a stock image holds that user's dotfiles and data (`~/.ssh` is `700` in its own right, so key material
+is unaffected either way); `711` clears the `EACCES` while keeping `/home/pi` unlistable. It is a narrowing,
+not an elimination: a local user who already knows a filename can still traverse to it.
+
+`scripts/install-feature.sh` still applies `755` to the same directory when the camera feature installs. That
+is a known divergence, not an oversight — the feature installer is the root-owned, version-pinned helper
+bundle, so changing it requires a `config/feature-installer.version` bump and a re-run of the trusted root
+installer on every device. Align it there when that file next changes for another reason.
+
+Do **not** "fix" any of this by repointing `MOTION_LOCAL_DIR`: Motion's own `target_dir` is hardcoded to that
+path by the feature installer and the feature health checks assert it.
 
 ### .gitignore (must include)
 
