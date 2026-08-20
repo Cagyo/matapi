@@ -249,7 +249,7 @@ describe('MotionWatcherService', () => {
     expect(motion.active).toBe(true);
     expect(admin.alerts).toEqual([]);
     expect(warn).toHaveBeenCalledWith(
-      'Failed to read motion desired state; assuming on: meta offline',
+      'Failed to read motion desired state; assuming on: CAMERA_OPERATION_FAILED',
     );
   });
 
@@ -278,7 +278,7 @@ describe('MotionWatcherService', () => {
     expect(admin.alerts).toEqual(['motion-daemon-down']);
     expect(watcher.isDegraded()).toBe(true);
     expect(warn).toHaveBeenCalledWith(
-      'Failed to read motion desired state; assuming on: meta offline',
+      'Failed to read motion desired state; assuming on: CAMERA_OPERATION_FAILED',
     );
   });
 });

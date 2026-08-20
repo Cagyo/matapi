@@ -128,8 +128,8 @@ export class MotionWatcherService
         await this.requireCurrent(generation);
         await this.markDown();
       }
-    } catch (error) {
-      this.logger.warn(`Motion watch tick failed: ${(error as Error).message}`);
+    } catch {
+      this.logger.warn('Motion watch tick failed: CAMERA_OPERATION_FAILED');
     }
   }
 
@@ -152,10 +152,8 @@ export class MotionWatcherService
           this.logger.log(`Motion daemon restarted (attempt ${attempt})`);
           return true;
         }
-      } catch (error) {
-        this.logger.warn(
-          `Motion restart attempt ${attempt} failed: ${(error as Error).message}`,
-        );
+      } catch {
+        this.logger.warn(`Motion restart attempt ${attempt} failed: CAMERA_OPERATION_FAILED`);
       }
       if (attempt < MAX_RESTART_ATTEMPTS) await this.sleep(RESTART_BACKOFF_MS, generation);
     }
@@ -165,10 +163,8 @@ export class MotionWatcherService
   private async isMotionDesiredOff(): Promise<boolean> {
     try {
       return (await this.meta.get(MOTION_DESIRED_STATE_KEY)) === 'off';
-    } catch (error) {
-      this.logger.warn(
-        `Failed to read motion desired state; assuming on: ${(error as Error).message}`,
-      );
+    } catch {
+      this.logger.warn('Failed to read motion desired state; assuming on: CAMERA_OPERATION_FAILED');
       return false;
     }
   }

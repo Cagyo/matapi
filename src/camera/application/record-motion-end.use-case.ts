@@ -58,9 +58,7 @@ export class RecordMotionEndUseCase {
     await this.availability?.requireReady('motion');
     const standalone = await this.writer.closeLatestOpenEvent(camera.id, endedAt, videoPath);
     if (standalone) await this.registerAndWake(standalone.id);
-    this.logger.log(
-      `Motion end for ${camera.name} with no open event — created standalone video event ${videoPath}`,
-    );
+    this.logger.log('Motion end created a standalone video event');
   }
 
   private async registerAndWake(eventId: number): Promise<void> {

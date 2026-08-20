@@ -20,9 +20,7 @@ export class RecordSnapshotUseCase {
     await this.availability?.requireReady('motion');
     const updated = await this.writer.setSnapshotForLatestOpenEvent(snapshotPath);
     if (!updated) {
-      this.logger.warn(
-        `Snapshot ${snapshotPath} saved with no open event — not linked`,
-      );
+      this.logger.warn('Snapshot saved without an open event');
     }
   }
 }

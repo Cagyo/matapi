@@ -74,12 +74,9 @@ export class CleanupCoordinatorService {
         );
       }
       return { executed: true, thresholdUsed };
-    } catch (err) {
-      this.logger.error(
-        `Cleanup (${target}) failed: ${(err as Error).message}`,
-        (err as Error).stack,
-      );
-      throw err;
+    } catch (error) {
+      this.logger.error(`Cleanup (${target}) failed: CAMERA_OPERATION_FAILED`);
+      throw error;
     } finally {
       this.activeTarget = null;
     }

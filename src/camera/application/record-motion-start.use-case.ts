@@ -46,12 +46,8 @@ export class RecordMotionStartUseCase {
     try {
       await this.availability?.requireReady('motion');
       photo = await this.snapshot.grab(camera.id, camera.name);
-    } catch (error) {
-      this.logger.warn(
-        `Snapshot for motion alert failed (${camera.name}): ${
-          (error as Error).message
-        }`,
-      );
+    } catch {
+      this.logger.warn('Motion alert snapshot failed: CAMERA_OPERATION_FAILED');
     }
 
     await this.availability?.requireReady('motion');

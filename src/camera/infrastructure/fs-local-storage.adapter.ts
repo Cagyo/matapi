@@ -23,8 +23,8 @@ export class FsLocalStorageAdapter implements LocalStoragePort {
       const line = stdout.trim().split('\n').at(-1) ?? '';
       const match = /(\d+)%/.exec(line);
       return match ? Number(match[1]) : 0;
-    } catch (err) {
-      this.logger.warn(`df failed: ${(err as Error).message}`);
+    } catch (error) {
+      this.logger.warn(`Local storage usage failed: ${localStorageFailureCode(error)}`);
       return 0;
     }
   }
@@ -33,8 +33,8 @@ export class FsLocalStorageAdapter implements LocalStoragePort {
     try {
       await rm(path, { force: true });
       return true;
-    } catch (err) {
-      this.logger.warn(`Failed to delete ${path}: ${(err as Error).message}`);
+    } catch (error) {
+      this.logger.warn(`Local storage delete failed: ${localStorageFailureCode(error)}`);
       return false;
     }
   }
@@ -42,8 +42,8 @@ export class FsLocalStorageAdapter implements LocalStoragePort {
   async pruneEmptyDirs(): Promise<void> {
     try {
       await this.pruneDir(this.localDir, true);
-    } catch (err) {
-      this.logger.warn(`pruneEmptyDirs failed: ${(err as Error).message}`);
+    } catch (error) {
+      this.logger.warn(`Local storage prune failed: ${localStorageFailureCode(error)}`);
     }
   }
 
@@ -51,8 +51,8 @@ export class FsLocalStorageAdapter implements LocalStoragePort {
     const out: LocalFileInfo[] = [];
     try {
       await this.collectOldFiles(this.localDir, cutoff.getTime(), out);
-    } catch (err) {
-      this.logger.warn(`listFilesOlderThan failed: ${(err as Error).message}`);
+    } catch (error) {
+      this.logger.warn(`Local storage list failed: ${localStorageFailureCode(error)}`);
       return [];
     }
     return out;
@@ -98,4 +98,15 @@ export class FsLocalStorageAdapter implements LocalStoragePort {
       }
     }
   }
+}
+
+function localStorageFailureCode(error: unknown): string {
+  const code = typeof error === 'object' && error !== null && 'code' in error
+    && typeof error.code === 'string'
+    ? error.code
+    : null;
+  if (code === 'ENOENT' || code === 'ENOTDIR') return 'LOCAL_STORAGE_MISSING';
+  if (code === 'EACCES' || code === 'EPERM') return 'LOCAL_STORAGE_ACCESS_DENIED';
+  if (code === 'EIO') return 'LOCAL_STORAGE_IO_FAILURE';
+  return 'LOCAL_STORAGE_OPERATION_FAILED';
 }

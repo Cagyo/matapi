@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FsLocalStorageAdapter } from '../../../src/camera/infrastructure/fs-local-storage.adapter';
 
 let root: string;
@@ -75,11 +75,19 @@ describe('FsLocalStorageAdapter', () => {
   });
 
   it('returns an empty list when the directory is missing', async () => {
-    process.env.MOTION_LOCAL_DIR = '/nonexistent/motion/dir';
+    const secretPath = '/nonexistent/private-motion/secret-dir';
+    process.env.MOTION_LOCAL_DIR = secretPath;
+    const adapter = new FsLocalStorageAdapter();
+    const logger = (adapter as unknown as {
+      logger: { warn(message: string): void };
+    }).logger;
+    const log = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
 
-    const files = await new FsLocalStorageAdapter().listFilesOlderThan(new Date());
+    const files = await adapter.listFilesOlderThan(new Date());
 
     expect(files).toEqual([]);
+    expect(log).toHaveBeenCalledWith('Local storage list failed: LOCAL_STORAGE_MISSING');
+    expect(log.mock.calls.flat().join(' ')).not.toContain(secretPath);
   });
 
   it('returns an empty list when a nested directory cannot be read', async () => {

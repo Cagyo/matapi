@@ -109,6 +109,32 @@ describe('CompletedMotionVideoRecoveryScheduler', () => {
     expect(reconcileBatch).toHaveBeenCalledTimes(2);
   });
 
+  it('never advances durable traversal completion after a later filesystem batch fails', async () => {
+    const cursor = { frames: [{ relativeDirectory: '2026', nextEntry: 64 }] };
+    const failure = Object.assign(new Error('Motion filesystem operation failed'), {
+      name: 'CompletedMotionVideoFilesystemError',
+      code: 'motion_fs_io_failure',
+      operation: 'read-directory',
+    });
+    const reconcileBatch = vi.fn()
+      .mockResolvedValueOnce({ cursor, complete: false })
+      .mockRejectedValueOnce(failure)
+      .mockResolvedValueOnce({ cursor: null, complete: true });
+    const progress = { motionTraversalCompleted: vi.fn(async () => undefined) };
+    const scheduler = new CompletedMotionVideoRecoveryScheduler(
+      'real', { reconcileBatch }, progress, { now: () => 100 },
+    );
+
+    await expect(scheduler.reconcile()).rejects.toBe(failure);
+    expect(progress.motionTraversalCompleted).not.toHaveBeenCalled();
+
+    await scheduler.reconcile();
+    expect(reconcileBatch.mock.calls[0]?.[0]).toBeNull();
+    expect(reconcileBatch.mock.calls[1]?.[0]).toEqual(cursor);
+    expect(reconcileBatch.mock.calls[2]?.[0]).toBeNull();
+    expect(progress.motionTraversalCompleted).toHaveBeenCalledOnce();
+  });
+
   it('logs a sanitized failure for a detached interval pass', async () => {
     const reconcileBatch = vi.fn().mockRejectedValue(new Error('/private/motion/video.avi'));
     const scheduler = schedulerWith(reconcileBatch);

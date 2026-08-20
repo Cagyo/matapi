@@ -47,7 +47,7 @@ export class MotionDaemonAdapter implements MotionControlPort {
       await exec('sudo', ['systemctl', 'start', this.unit], { timeout: 15000 });
     } catch (err) {
       const reason = this.reasonOf(err);
-      this.logger.warn(`motion start failed: ${reason}`);
+      this.logger.warn('Motion start failed: CAMERA_OPERATION_FAILED');
       if (this.looksUninstalled(reason)) throw new MotionNotInstalledError();
       throw new MotionStartFailedError(reason);
     }
@@ -58,7 +58,7 @@ export class MotionDaemonAdapter implements MotionControlPort {
       await exec('sudo', ['systemctl', 'stop', this.unit], { timeout: 15000 });
     } catch (err) {
       const reason = this.reasonOf(err);
-      this.logger.warn(`motion stop failed: ${reason}`);
+      this.logger.warn('Motion stop failed: CAMERA_OPERATION_FAILED');
       throw new MotionStopFailedError(reason);
     }
   }
@@ -68,7 +68,7 @@ export class MotionDaemonAdapter implements MotionControlPort {
       await exec('sudo', ['systemctl', 'restart', this.unit], { timeout: 15000 });
     } catch (err) {
       const reason = this.reasonOf(err);
-      this.logger.warn(`motion restart failed: ${reason}`);
+      this.logger.warn('Motion restart failed: CAMERA_OPERATION_FAILED');
       if (this.looksUninstalled(reason)) throw new MotionNotInstalledError();
       throw new MotionStartFailedError(reason);
     }

@@ -21,7 +21,7 @@ class RecordingAlert implements MotionAlertPort {
 const okSnapshot: SnapshotPort = { grab: async () => Buffer.from('jpeg') };
 const failingSnapshot: SnapshotPort = {
   grab: async () => {
-    throw new Error('no camera');
+    throw new Error('EIO: /private/motion/snapshot.jpg');
   },
 };
 
@@ -50,11 +50,15 @@ describe('RecordMotionStartUseCase', () => {
     const repo = repoWith([camera('front_door')]);
     const alert = new RecordingAlert();
     const useCase = new RecordMotionStartUseCase(repo, repo, failingSnapshot, alert);
+    const logger = (useCase as unknown as { logger: { warn(message: string): void } }).logger;
+    const log = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
 
     await useCase.execute();
 
     expect(await repo.lastEvent()).not.toBeNull();
     expect(alert.calls[0].photo).toBeNull();
+    expect(log).toHaveBeenCalledWith('Motion alert snapshot failed: CAMERA_OPERATION_FAILED');
+    expect(log.mock.calls.flat().join(' ')).not.toContain('/private/motion');
   });
 
   it('does nothing when no cameras are configured', async () => {
@@ -86,6 +90,8 @@ describe('RecordMotionEndUseCase', () => {
   it('creates a closed event when a movie file ends without an open event', async () => {
     const repo = repoWith([camera('front_door')]);
     const useCase = new RecordMotionEndUseCase(repo, repo);
+    const logger = (useCase as unknown as { logger: { log(message: string): void } }).logger;
+    const log = vi.spyOn(logger, 'log').mockImplementation(() => undefined);
 
     await useCase.execute('front_door', '/var/lib/motion/clip.mkv');
 
@@ -94,6 +100,8 @@ describe('RecordMotionEndUseCase', () => {
     expect(last?.videoPath).toBe('/var/lib/motion/clip.mkv');
     expect(last?.startedAt).not.toBeNull();
     expect(last?.endedAt).not.toBeNull();
+    expect(log).toHaveBeenCalledWith('Motion end created a standalone video event');
+    expect(log.mock.calls.flat().join(' ')).not.toContain('/var/lib/motion');
   });
 
   it('uses the Motion filename timestamp for standalone movie events', async () => {
@@ -134,5 +142,17 @@ describe('RecordSnapshotUseCase', () => {
 
     const last = await repo.lastEvent();
     expect(last?.snapshotPath).toBe('/var/lib/motion/snap.jpg');
+  });
+
+  it('does not log a snapshot path when there is no open event', async () => {
+    const repo = repoWith([camera('front_door')]);
+    const useCase = new RecordSnapshotUseCase(repo);
+    const logger = (useCase as unknown as { logger: { warn(message: string): void } }).logger;
+    const log = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+
+    await useCase.execute('/private/motion/secret-snapshot.jpg');
+
+    expect(log).toHaveBeenCalledWith('Snapshot saved without an open event');
+    expect(log.mock.calls.flat().join(' ')).not.toContain('/private/motion');
   });
 });

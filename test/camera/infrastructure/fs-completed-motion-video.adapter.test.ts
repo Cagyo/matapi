@@ -1,4 +1,15 @@
-import { mkdtemp, mkdir, rename, symlink, unlink, utimes, writeFile } from 'node:fs/promises';
+import {
+  lstat,
+  mkdtemp,
+  mkdir,
+  open,
+  readdir,
+  rename,
+  symlink,
+  unlink,
+  utimes,
+  writeFile,
+} from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -313,4 +324,90 @@ describe('FsCompletedMotionVideoAdapter', () => {
     }
     expect(nextTraversal).toContain('2025/01/01/000000-inserted.mp4');
   });
+
+  it.each([
+    ['root inspection', 'inspect', 'EACCES', 'motion_fs_access_denied'],
+    ['root directory read', 'read-directory', 'EIO', 'motion_fs_io_failure'],
+    ['nested inspection', 'inspect', 'EIO', 'motion_fs_io_failure'],
+    ['candidate hashing', 'hash', 'EIO', 'motion_fs_io_failure'],
+  ] as const)(
+    'fails traversal on an operational %s error without exposing its path',
+    async (scenario, operation, nodeCode, expectedCode) => {
+      const { root, file } = await fixture();
+      const native = nodeFilesystem();
+      const secretPath = `${root}/private-video-path`;
+      const filesystem = {
+        ...native,
+        lstat: async (path: string) => {
+          if (scenario === 'root inspection' && path === root) throw filesystemError(nodeCode, secretPath);
+          if (scenario === 'nested inspection' && path === join(root, '2026')) {
+            throw filesystemError(nodeCode, secretPath);
+          }
+          return native.lstat(path);
+        },
+        readdir: async (path: string) => {
+          if (scenario === 'root directory read' && path === root) {
+            throw filesystemError(nodeCode, secretPath);
+          }
+          return native.readdir(path);
+        },
+        open: async (path: string, flags: number) => {
+          if (scenario === 'candidate hashing' && path === file) {
+            throw filesystemError(nodeCode, secretPath);
+          }
+          return native.open(path, flags);
+        },
+      };
+      const adapter = new FsCompletedMotionVideoAdapter({
+        root,
+        now: () => Date.now(),
+        installationId,
+        filesystem,
+      });
+
+      const result = scenario === 'candidate hashing'
+        ? adapter.resolve(file)
+        : adapter.scanBatch({ cursor: null, entryLimit: 64 });
+
+      await expect(result).rejects.toMatchObject({
+        name: 'CompletedMotionVideoFilesystemError',
+        code: expectedCode,
+        operation,
+      });
+      await expect(result).rejects.not.toThrow(secretPath);
+    },
+  );
+
+  it('skips an expected directory-disappearance race', async () => {
+    const { root } = await fixture();
+    const native = nodeFilesystem();
+    const adapter = new FsCompletedMotionVideoAdapter({
+      root,
+      now: () => Date.now(),
+      installationId,
+      filesystem: {
+        ...native,
+        readdir: async () => { throw filesystemError('ENOENT', `${root}/vanished`); },
+      },
+    });
+
+    await expect(adapter.scanBatch({ cursor: null, entryLimit: 64 })).resolves.toEqual({
+      descriptors: [],
+      cursor: null,
+      complete: true,
+      visitedEntries: 0,
+    });
+  });
 });
+
+function nodeFilesystem() {
+  return {
+    lstat: (path: string) => lstat(path, { bigint: true }),
+    readdir: (path: string) => readdir(path, { withFileTypes: true, encoding: 'utf8' }),
+    open: (path: string, flags: number) => open(path, flags),
+  };
+}
+
+function filesystemError(code: string, path: string): NodeJS.ErrnoException {
+  return Object.assign(new Error(`${code}: ${path}`), { code });
+}

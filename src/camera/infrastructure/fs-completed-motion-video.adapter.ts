@@ -1,5 +1,9 @@
 import { constants, type BigIntStats } from 'node:fs';
-import { open, lstat, readdir } from 'node:fs/promises';
+import {
+  open as nodeOpen,
+  lstat as nodeLstat,
+  readdir as nodeReaddir,
+} from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join, relative, resolve, sep } from 'node:path';
 import { Injectable } from '@nestjs/common';
@@ -10,6 +14,11 @@ import type {
   CompletedMotionVideoScanBatch,
   CompletedMotionVideoScanCursor,
 } from '../domain/ports/completed-motion-video.port';
+import {
+  CompletedMotionVideoFilesystemError,
+  type CompletedMotionVideoFilesystemErrorCode,
+  type CompletedMotionVideoFilesystemOperation,
+} from '../domain/errors/completed-motion-video-filesystem.error';
 
 const STABILITY_MS = 60_000;
 const HASH_BUFFER_BYTES = 64 * 1024;
@@ -24,6 +33,13 @@ export interface FsCompletedMotionVideoOptions {
   stabilityMs?: number;
   /** Test seam invoked after the stable descriptor bytes are hashed. */
   afterHash?: () => Promise<void> | void;
+  filesystem?: CompletedMotionVideoFilesystem;
+}
+
+interface CompletedMotionVideoFilesystem {
+  lstat(path: string): ReturnType<typeof filesystemLstat>;
+  readdir(path: string): ReturnType<typeof filesystemReaddir>;
+  open(path: string, flags: number): ReturnType<typeof filesystemOpen>;
 }
 
 interface PathIdentity {
@@ -54,6 +70,7 @@ export class FsCompletedMotionVideoAdapter implements CompletedMotionVideoPort {
   private readonly now: () => number;
   private readonly stabilityMs: number;
   private readonly afterHash?: () => Promise<void> | void;
+  private readonly filesystem: CompletedMotionVideoFilesystem;
 
   constructor(options: FsCompletedMotionVideoOptions = {}) {
     this.root = resolve(options.root ?? process.env.MOTION_LOCAL_DIR ?? '/home/pi/motion/videos');
@@ -61,6 +78,7 @@ export class FsCompletedMotionVideoAdapter implements CompletedMotionVideoPort {
     this.now = options.now ?? Date.now;
     this.stabilityMs = options.stabilityMs ?? STABILITY_MS;
     this.afterHash = options.afterHash;
+    this.filesystem = options.filesystem ?? NODE_FILESYSTEM;
   }
 
   async resolve(candidatePath: string): Promise<CompletedMotionVideoDescriptor | null> {
@@ -136,7 +154,7 @@ export class FsCompletedMotionVideoAdapter implements CompletedMotionVideoPort {
         ? join(this.root, frame.relativeDirectory)
         : this.root;
       try {
-        const entries = await readdir(directory, { withFileTypes: true, encoding: 'utf8' });
+        const entries = await this.filesystem.readdir(directory);
         const ordered = entries.sort((left, right) => String(left.name).localeCompare(String(right.name)));
         let index = frame.nextEntry;
         for (; index < ordered.length && visited < entryLimit; index += 1) {
@@ -157,8 +175,9 @@ export class FsCompletedMotionVideoAdapter implements CompletedMotionVideoPort {
         if (index < ordered.length) {
           frames.unshift({ relativeDirectory: frame.relativeDirectory, nextEntry: index });
         }
-      } catch {
-        continue;
+      } catch (error) {
+        if (isExpectedFilesystemRace(error)) continue;
+        throw filesystemFailure('read-directory', error);
       }
     }
     const complete = frames.length === 0;
@@ -186,9 +205,10 @@ export class FsCompletedMotionVideoAdapter implements CompletedMotionVideoPort {
       if (index >= 0) current = join(current, parts[index]);
       let stat: BigIntStats;
       try {
-        stat = await lstat(current, { bigint: true });
-      } catch {
-        return null;
+        stat = await this.filesystem.lstat(current);
+      } catch (error) {
+        if (isExpectedFilesystemRace(error)) return null;
+        throw filesystemFailure('inspect', error);
       }
       if (stat.isSymbolicLink()) return null;
       if (index < parts.length - 1 && !stat.isDirectory()) return null;
@@ -201,10 +221,11 @@ export class FsCompletedMotionVideoAdapter implements CompletedMotionVideoPort {
   private async inspectDirectory(relativePath: string): Promise<boolean> {
     if (!relativePath) {
       try {
-        const root = await lstat(this.root, { bigint: true });
+        const root = await this.filesystem.lstat(this.root);
         return root.isDirectory() && !root.isSymbolicLink();
-      } catch {
-        return false;
+      } catch (error) {
+        if (isExpectedFilesystemRace(error)) return false;
+        throw filesystemFailure('inspect', error);
       }
     }
     const inspected = await this.inspectNoFollow(relativePath);
@@ -212,29 +233,86 @@ export class FsCompletedMotionVideoAdapter implements CompletedMotionVideoPort {
   }
 
   private async hashIfSameFile(filePath: string, expected: BigIntStats): Promise<string | null> {
-    let handle: Awaited<ReturnType<typeof open>> | undefined;
     try {
-      handle = await open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
-      const opened = await handle.stat({ bigint: true });
-      if (!opened.isFile() || !sameFile(expected, opened)) return null;
-      const expectedSize = Number(expected.size);
-      const hash = createHash('sha256');
-      const buffer = Buffer.allocUnsafe(HASH_BUFFER_BYTES);
-      let position = 0;
-      while (position < expectedSize) {
-        const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, expectedSize - position), position);
-        if (bytesRead === 0) return null;
-        hash.update(buffer.subarray(0, bytesRead));
-        position += bytesRead;
-      }
-      const final = await handle.stat({ bigint: true });
-      return sameFile(expected, final) ? hash.digest('hex') : null;
-    } catch {
-      return null;
-    } finally {
-      await handle?.close();
+      const handle = await this.filesystem.open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+      return await closeAfter(handle, async () => {
+        const opened = await handle.stat({ bigint: true });
+        if (!opened.isFile() || !sameFile(expected, opened)) return null;
+        const expectedSize = Number(expected.size);
+        const hash = createHash('sha256');
+        const buffer = Buffer.allocUnsafe(HASH_BUFFER_BYTES);
+        let position = 0;
+        while (position < expectedSize) {
+          const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, expectedSize - position), position);
+          if (bytesRead === 0) return null;
+          hash.update(buffer.subarray(0, bytesRead));
+          position += bytesRead;
+        }
+        const final = await handle.stat({ bigint: true });
+        return sameFile(expected, final) ? hash.digest('hex') : null;
+      });
+    } catch (error) {
+      if (isExpectedFilesystemRace(error)) return null;
+      throw filesystemFailure('hash', error);
     }
   }
+}
+
+async function closeAfter<T>(
+  handle: Awaited<ReturnType<typeof filesystemOpen>>,
+  operation: () => Promise<T>,
+): Promise<T> {
+  try {
+    const result = await operation();
+    await handle.close();
+    return result;
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    throw error;
+  }
+}
+
+const NODE_FILESYSTEM: CompletedMotionVideoFilesystem = {
+  lstat: filesystemLstat,
+  readdir: filesystemReaddir,
+  open: filesystemOpen,
+};
+
+function filesystemLstat(path: string) {
+  return nodeLstat(path, { bigint: true });
+}
+
+function filesystemReaddir(path: string) {
+  return nodeReaddir(path, { withFileTypes: true, encoding: 'utf8' });
+}
+
+function filesystemOpen(path: string, flags: number) {
+  return nodeOpen(path, flags);
+}
+
+function isExpectedFilesystemRace(error: unknown): boolean {
+  const code = nodeErrorCode(error);
+  return code === 'ENOENT' || code === 'ENOTDIR' || code === 'ELOOP' || code === 'ESTALE';
+}
+
+function filesystemFailure(
+  operation: CompletedMotionVideoFilesystemOperation,
+  error: unknown,
+): CompletedMotionVideoFilesystemError {
+  const code = nodeErrorCode(error);
+  const safeCode: CompletedMotionVideoFilesystemErrorCode = code === 'EACCES' || code === 'EPERM'
+    ? 'motion_fs_access_denied'
+    : code === 'EIO'
+      ? 'motion_fs_io_failure'
+      : 'motion_fs_unavailable';
+  return new CompletedMotionVideoFilesystemError(safeCode, operation);
+}
+
+function nodeErrorCode(error: unknown): string | null {
+  return typeof error === 'object' && error !== null && 'code' in error
+    && typeof error.code === 'string'
+    ? error.code
+    : null;
 }
 
 function identity(stat: BigIntStats): PathIdentity {

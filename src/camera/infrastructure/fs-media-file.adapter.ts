@@ -49,8 +49,8 @@ export class FsMediaFileAdapter implements MediaFilePort {
       });
       const kb = Number(stdout.trim().split(/\s+/)[0]);
       return Number.isFinite(kb) ? kb * 1024 : null;
-    } catch (err) {
-      this.logger.warn(`du failed: ${(err as Error).message}`);
+    } catch {
+      this.logger.warn('Media storage usage failed: CAMERA_OPERATION_FAILED');
       return null;
     }
   }

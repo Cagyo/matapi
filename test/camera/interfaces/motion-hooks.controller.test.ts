@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { RecordMotionEndUseCase } from '../../../src/camera/application/record-motion-end.use-case';
 import { RecordMotionStartUseCase } from '../../../src/camera/application/record-motion-start.use-case';
 import { RecordSnapshotUseCase } from '../../../src/camera/application/record-snapshot.use-case';
@@ -74,5 +74,23 @@ describe('MotionHooksController', () => {
     );
 
     expect(await controller.eventStart('ghost')).toEqual({ ok: true });
+  });
+
+  it('logs a fixed hook code instead of a path-bearing registration failure', async () => {
+    const controller = new MotionHooksController(
+      { execute: vi.fn(async () => undefined) } as never,
+      { execute: vi.fn(async () => { throw new Error('EIO: /private/motion/secret.avi'); }) } as never,
+      { execute: vi.fn(async () => undefined) } as never,
+    );
+    const logger = (controller as unknown as {
+      logger: { warn(message: string): void };
+    }).logger;
+    const log = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+
+    await expect(controller.movieEnd('front_door', '/private/motion/secret.avi'))
+      .resolves.toEqual({ ok: true });
+
+    expect(log).toHaveBeenCalledWith('movie-end hook failed: CAMERA_OPERATION_FAILED');
+    expect(log.mock.calls.flat().join(' ')).not.toContain('/private/motion');
   });
 });

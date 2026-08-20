@@ -72,7 +72,7 @@ describe('FfmpegSnapshotAdapter source fallback', () => {
     expect(adapter.attempts).toHaveLength(1);
   });
 
-  it('redacts credentials from snapshot failure warnings', async () => {
+  it('uses a fixed code for snapshot failure warnings', async () => {
     const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
     process.env.MOTION_SNAPSHOT_SOURCE = 'rtsp://user:pass@cam.local/stream';
     const adapter = new TestAdapter();
@@ -83,7 +83,8 @@ describe('FfmpegSnapshotAdapter source fallback', () => {
     );
 
     const warning = warn.mock.calls.at(-1)?.[0];
-    expect(warning).toContain('rtsp://cam.local/stream');
+    expect(warning).toBe('Snapshot capture failed: CAMERA_OPERATION_FAILED');
+    expect(warning).not.toContain('cam.local');
     expect(warning).not.toContain('user:pass');
   });
 });

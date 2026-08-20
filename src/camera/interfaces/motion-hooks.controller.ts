@@ -29,8 +29,8 @@ export class MotionHooksController {
   async eventStart(@Query('camera') camera?: string): Promise<HookAck> {
     try {
       await this.recordStart.execute(camera);
-    } catch (error) {
-      this.logger.warn(`event-start hook failed: ${(error as Error).message}`);
+    } catch {
+      this.logger.warn('event-start hook failed: CAMERA_OPERATION_FAILED');
     }
     return { ok: true };
   }
@@ -62,8 +62,8 @@ export class MotionHooksController {
       } else {
         await this.recordEnd.execute(camera, file);
       }
-    } catch (error) {
-      this.logger.warn(`${hook} hook failed: ${(error as Error).message}`);
+    } catch {
+      this.logger.warn(`${hook} hook failed: CAMERA_OPERATION_FAILED`);
     }
     return { ok: true };
   }
@@ -76,8 +76,8 @@ export class MotionHooksController {
       } else {
         await this.recordSnapshot.execute(file);
       }
-    } catch (error) {
-      this.logger.warn(`snapshot hook failed: ${(error as Error).message}`);
+    } catch {
+      this.logger.warn('snapshot hook failed: CAMERA_OPERATION_FAILED');
     }
     return { ok: true };
   }

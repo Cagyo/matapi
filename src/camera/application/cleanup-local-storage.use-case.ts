@@ -180,18 +180,16 @@ export class CleanupLocalStorageUseCase {
     try {
       await this.meta.set(MOTION_DESIRED_STATE_KEY, 'off');
       throwIfAborted(signal);
-    } catch (err) {
+    } catch {
       if (signal?.aborted) throw abortReason(signal);
-      this.logger.warn(
-        `Failed to record desired motion state during emergency: ${(err as Error).message}`,
-      );
+      this.logger.warn('Failed to record desired motion state during emergency: CAMERA_OPERATION_FAILED');
     }
     try {
       await this.motion.stop();
       throwIfAborted(signal);
-    } catch (err) {
+    } catch {
       if (signal?.aborted) throw abortReason(signal);
-      this.logger.warn(`Failed to stop motion during emergency: ${(err as Error).message}`);
+      this.logger.warn('Failed to stop motion during emergency: CAMERA_OPERATION_FAILED');
     }
     await this.sendCooldownAlert(
       EMERGENCY_ALERT_KEY,
@@ -217,17 +215,17 @@ export class CleanupLocalStorageUseCase {
     try {
       await this.adminAlert.alert(kind);
       throwIfAborted(signal);
-    } catch (err) {
+    } catch {
       if (signal?.aborted) throw abortReason(signal);
-      this.logger.warn(`Failed to send ${kind} alert: ${(err as Error).message}`);
+      this.logger.warn(`Failed to send ${kind} alert: CAMERA_OPERATION_FAILED`);
       return;
     }
     try {
       await this.meta.set(key, String(Date.now()));
       throwIfAborted(signal);
-    } catch (err) {
+    } catch {
       if (signal?.aborted) throw abortReason(signal);
-      this.logger.warn(`Failed to record ${kind} alert cooldown: ${(err as Error).message}`);
+      this.logger.warn(`Failed to record ${kind} alert cooldown: CAMERA_OPERATION_FAILED`);
     }
   }
 
@@ -242,9 +240,9 @@ export class CleanupLocalStorageUseCase {
       throwIfAborted(signal);
       const last = raw === null ? NaN : Number(raw);
       return !(Number.isFinite(last) && Date.now() - last < cooldownMs);
-    } catch (err) {
+    } catch {
       if (signal?.aborted) throw abortReason(signal);
-      this.logger.warn(`Failed to read ${key} cooldown: ${(err as Error).message}`);
+      this.logger.warn(`Failed to read ${key} cooldown: CAMERA_OPERATION_FAILED`);
       return true;
     }
   }
