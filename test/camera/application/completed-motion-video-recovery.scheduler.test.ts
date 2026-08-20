@@ -155,6 +155,21 @@ describe('CompletedMotionVideoRecoveryScheduler', () => {
     expect(log).toHaveBeenCalledWith('Completed Motion recovery failed: CAMERA_OPERATION_FAILED');
   });
 
+  it('names the sanitized filesystem code in the detached failure log', async () => {
+    const reconcileBatch = vi.fn().mockRejectedValue(scanFailure());
+    const scheduler = schedulerWith(reconcileBatch);
+    const logger = (scheduler as unknown as {
+      logger: { error(message: string): void };
+    }).logger;
+    const log = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+
+    scheduler.reconcileTick();
+
+    await vi.waitFor(() => expect(log).toHaveBeenCalledOnce());
+    expect(log).toHaveBeenCalledWith('Completed Motion recovery failed: motion_fs_access_denied');
+    expect(log.mock.calls.flat().join(' ')).not.toContain('/home/pi');
+  });
+
   it('performs no reconciliation in stub mode', async () => {
     const reconcileBatch = vi.fn(async () => ({ cursor: null, complete: true }));
     const scheduler = new CompletedMotionVideoRecoveryScheduler(
@@ -579,6 +594,27 @@ describe('CompletedMotionVideoRecoveryScheduler scan-failure alerting', () => {
     expect(delegate.alert).toHaveBeenCalledWith('motion-scan-failing', 'motion_fs_access_denied');
   });
 
+  it('timestamps the sanitized code in the log once when the alert latch trips', async () => {
+    const alerts = alertRecorder();
+    const clock = mutableClock();
+    const reconcileBatch = vi.fn().mockRejectedValue(scanFailure());
+    const scheduler = schedulerWith(reconcileBatch, alerts, clock);
+    const logger = (scheduler as unknown as { logger: { error(message: string): void } }).logger;
+    const log = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+
+    await failTraversals(scheduler, 3);
+
+    expect(log).toHaveBeenCalledOnce();
+    expect(log).toHaveBeenCalledWith(
+      'Completed Motion scan failed 3 traversals in a row, alerting admins: motion_fs_access_denied',
+    );
+    expect(log.mock.calls.flat().join(' ')).not.toContain('/home/pi');
+
+    await failTraversals(scheduler, 10);
+
+    expect(log).toHaveBeenCalledOnce();
+  });
+
   it('never alerts in stub mode', async () => {
     const alerts = alertRecorder();
     const reconcileBatch = vi.fn().mockRejectedValue(scanFailure());
@@ -621,11 +657,15 @@ describe('CompletedMotionVideoRecoveryScheduler scan-failure alerting', () => {
     const logger = (scheduler as unknown as { logger: { error(message: string): void } }).logger;
     const log = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
 
+    const finishedTicks = () => log.mock.calls
+      .filter(([line]) => String(line).startsWith('Completed Motion recovery failed'))
+      .length;
     for (let tick = 0; tick < 3; tick += 1) {
       scheduler.reconcileTick();
       // The detached failure log runs after the traversal releases its slot,
-      // so waiting on it is the observable "tick finished" signal.
-      await vi.waitFor(() => expect(log).toHaveBeenCalledTimes(tick + 1));
+      // so waiting on it is the observable "tick finished" signal. The latch
+      // adds its own line on the third tick, so count only the per-tick one.
+      await vi.waitFor(() => expect(finishedTicks()).toBe(tick + 1));
     }
 
     expect(alerts.alert).toHaveBeenCalledOnce();
@@ -645,13 +685,27 @@ function schedulerWith(
   alerts?: AdminAlertPort,
   clock: { now(): number } = { now: () => 100 },
 ) {
-  return new CompletedMotionVideoRecoveryScheduler(
+  const scheduler = new CompletedMotionVideoRecoveryScheduler(
     'real',
     { reconcileBatch },
     { motionTraversalCompleted: vi.fn(async () => undefined) },
     clock,
     alerts,
   );
+  // Failure paths log by design. Silence them here so the suite output stays
+  // clean; a test that asserts on a line installs its own spy over this one.
+  vi.spyOn(loggerOf(scheduler), 'error').mockImplementation(() => undefined);
+  vi.spyOn(loggerOf(scheduler), 'warn').mockImplementation(() => undefined);
+  return scheduler;
+}
+
+function loggerOf(scheduler: CompletedMotionVideoRecoveryScheduler): {
+  warn(message: string): void;
+  error(message: string): void;
+} {
+  return (scheduler as unknown as {
+    logger: { warn(message: string): void; error(message: string): void };
+  }).logger;
 }
 
 function alertRecorder(behaviour?: () => Promise<void>) {

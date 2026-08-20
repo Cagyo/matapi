@@ -286,6 +286,39 @@ describe('ArchiveRuntimeLifecycleService', () => {
     expect(fixture.warn.mock.calls.flat().join(' ')).not.toContain('/home/pi');
   });
 
+  it('names the sanitized code when a boot job failure carries one', async () => {
+    // The Motion scan reports `motion_fs_access_denied` for a scan root the
+    // worker cannot traverse — the token that separates a permission problem
+    // from an I/O error, and the only evidence a device with no claimed admin
+    // ever gets.
+    const fixture = bootFixture({
+      reconcileMotion: async () => {
+        throw Object.assign(
+          new Error("EACCES: permission denied, scandir '/home/pi/motion/videos'"),
+          { code: 'motion_fs_access_denied' },
+        );
+      },
+    });
+
+    await fixture.lifecycle.start();
+
+    expect(fixture.warn).toHaveBeenCalledWith('Motion reconciliation failed: motion_fs_access_denied');
+    expect(fixture.warn.mock.calls.flat().join(' ')).not.toContain('/home/pi');
+  });
+
+  it('falls back to the fixed code when a boot job failure code could carry a path', async () => {
+    const fixture = bootFixture({
+      reconcileMotion: async () => {
+        throw Object.assign(new Error('scan failed'), { code: "EACCES: '/home/pi/motion/videos'" });
+      },
+    });
+
+    await fixture.lifecycle.start();
+
+    expect(fixture.warn).toHaveBeenCalledWith('Motion reconciliation failed: ARCHIVE_OPERATION_FAILED');
+    expect(fixture.warn.mock.calls.flat().join(' ')).not.toContain('/home/pi');
+  });
+
   it('starts scheduling when boot remote maintenance fails', async () => {
     const fixture = bootFixture({
       remoteMaintenance: async () => { throw new Error('drive unreachable'); },

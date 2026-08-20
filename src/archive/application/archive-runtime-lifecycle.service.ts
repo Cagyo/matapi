@@ -131,9 +131,13 @@ implements OnApplicationBootstrap, OnModuleDestroy {
   private async runBootJob(name: string, job: () => Promise<void>): Promise<void> {
     try {
       await job();
-    } catch {
+    } catch (error) {
       if (!this.controller.signal.aborted) {
-        this.logger.warn(`${name} failed: ${ARCHIVE_OPERATION_FAILED}`);
+        // `bootFailureCode` is the same character-guarded discriminator the
+        // critical chain uses, so the Motion scan's own sanitized token
+        // (`motion_fs_access_denied`) reaches the journal from here too —
+        // the boot line an operator reads before any DM can be delivered.
+        this.logger.warn(`${name} failed: ${bootFailureCode(error)}`);
       }
     }
   }
@@ -164,11 +168,12 @@ function compareMaintenance(
 }
 
 /**
- * Path-free discriminator for a boot failure. Nothing retries the critical
- * chain, so the single log line it produces is the only evidence an operator
- * gets. Node errno codes (`EACCES`, `SQLITE_BUSY`) and domain error codes are
- * safe by construction; the character guard rejects anything else, which is
- * how a code carrying a filesystem path degrades to the fixed token.
+ * Path-free discriminator for a boot failure, shared by the critical chain and
+ * by the contained best-effort jobs. Nothing retries the critical chain, so the
+ * single log line it produces is the only evidence an operator gets. Node errno
+ * codes (`EACCES`, `SQLITE_BUSY`) and domain error codes are safe by
+ * construction; the character guard rejects anything else, which is how a code
+ * carrying a filesystem path degrades to the fixed token.
  */
 function bootFailureCode(error: unknown): string {
   const code = typeof error === 'object' && error !== null && 'code' in error

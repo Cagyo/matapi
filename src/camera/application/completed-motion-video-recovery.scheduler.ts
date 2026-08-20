@@ -10,6 +10,13 @@ import { RegisterCompletedMotionVideosUseCase } from './register-completed-motio
 const RECOVERY_INTERVAL_MS = 2 * 60 * 1000;
 
 /**
+ * Marker for a failure that carries no Camera-owned code. Only
+ * `CompletedMotionVideoFilesystemError.code` is provably path-free — it is a
+ * three-value union built in one place — so everything else degrades to this.
+ */
+const CAMERA_OPERATION_FAILED = 'CAMERA_OPERATION_FAILED';
+
+/**
  * Consecutive failed traversals before admins are alerted. At the two-minute
  * safety tick a persistently unreadable scan root reaches this within roughly
  * four minutes, while a one-off transient filesystem error is ridden out.
@@ -204,10 +211,17 @@ export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBoots
     if (this.consecutiveFailures < SCAN_FAILURE_ALERT_THRESHOLD) return;
     this.scanAlertAtMs = nowMs;
     const code = scanFailureCode(error);
+    // The one line an operator wants timestamped: the moment a run of failures
+    // became an outage. The DM carries the same code but needs a claimed admin
+    // and a live bot, neither of which a fresh or unclaimed device has.
+    this.logger.error(
+      `Completed Motion scan failed ${this.consecutiveFailures} traversals in a row, `
+      + `alerting admins: ${code ?? CAMERA_OPERATION_FAILED}`,
+    );
     void Promise.resolve()
       .then(() => this.alerts.alert('motion-scan-failing', code))
       .catch(() => {
-        this.logger.warn('Completed Motion recovery alert failed: CAMERA_OPERATION_FAILED');
+        this.logger.warn(`Completed Motion recovery alert failed: ${CAMERA_OPERATION_FAILED}`);
       });
   }
 
@@ -219,7 +233,9 @@ export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBoots
   private dispatchBestEffort(): void {
     void this.reconcile().catch((error: unknown) => {
       if (isAbortError(error)) return;
-      this.logger.error('Completed Motion recovery failed: CAMERA_OPERATION_FAILED');
+      this.logger.error(
+        `Completed Motion recovery failed: ${scanFailureCode(error) ?? CAMERA_OPERATION_FAILED}`,
+      );
     });
   }
 }
