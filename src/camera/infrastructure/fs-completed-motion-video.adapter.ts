@@ -153,31 +153,32 @@ export class FsCompletedMotionVideoAdapter implements CompletedMotionVideoPort {
       const directory = frame.relativeDirectory
         ? join(this.root, frame.relativeDirectory)
         : this.root;
+      let entries: Awaited<ReturnType<typeof filesystemReaddir>>;
       try {
-        const entries = await this.filesystem.readdir(directory);
-        const ordered = entries.sort((left, right) => String(left.name).localeCompare(String(right.name)));
-        let index = frame.nextEntry;
-        for (; index < ordered.length && visited < entryLimit; index += 1) {
-          const entry = ordered[index];
-          visited += 1;
-          if (entry.isSymbolicLink()) continue;
-          const child = frame.relativeDirectory
-            ? `${frame.relativeDirectory}/${entry.name}`
-            : String(entry.name);
-          if (entry.isDirectory()) {
-            frames.push({ relativeDirectory: child, nextEntry: 0 });
-            continue;
-          }
-          if (!entry.isFile()) continue;
-          const descriptor = await this.resolve(join(this.root, child));
-          if (descriptor) descriptors.push(descriptor);
-        }
-        if (index < ordered.length) {
-          frames.unshift({ relativeDirectory: frame.relativeDirectory, nextEntry: index });
-        }
+        entries = await this.filesystem.readdir(directory);
       } catch (error) {
         if (isExpectedFilesystemRace(error)) continue;
         throw filesystemFailure('read-directory', error);
+      }
+      const ordered = entries.sort((left, right) => String(left.name).localeCompare(String(right.name)));
+      let index = frame.nextEntry;
+      for (; index < ordered.length && visited < entryLimit; index += 1) {
+        const entry = ordered[index];
+        visited += 1;
+        if (entry.isSymbolicLink()) continue;
+        const child = frame.relativeDirectory
+          ? `${frame.relativeDirectory}/${entry.name}`
+          : String(entry.name);
+        if (entry.isDirectory()) {
+          frames.push({ relativeDirectory: child, nextEntry: 0 });
+          continue;
+        }
+        if (!entry.isFile()) continue;
+        const descriptor = await this.resolve(join(this.root, child));
+        if (descriptor) descriptors.push(descriptor);
+      }
+      if (index < ordered.length) {
+        frames.unshift({ relativeDirectory: frame.relativeDirectory, nextEntry: index });
       }
     }
     const complete = frames.length === 0;

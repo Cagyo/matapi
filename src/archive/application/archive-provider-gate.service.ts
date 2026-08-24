@@ -215,11 +215,11 @@ export class ArchiveProviderGateService {
       const current = await this.loadGeneration(generationId);
       if (current === null) return false;
       if (current.blockReason !== null
-        || current.operationClass !== operationClass
         || current.cooldownUntilMs === null
         || current.cooldownUntilMs > this.nowMs()) return false;
       const next = {
         ...withoutRevision(current),
+        operationClass,
         cooldownUntilMs: this.nowMs() + this.maximumSleepMs,
         updatedAtMs: this.nowMs(),
       };

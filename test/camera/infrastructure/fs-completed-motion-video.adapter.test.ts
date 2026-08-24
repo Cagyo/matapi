@@ -378,6 +378,29 @@ describe('FsCompletedMotionVideoAdapter', () => {
     },
   );
 
+  it('preserves a candidate hash filesystem error while scanning a stable file', async () => {
+    const { root, file } = await fixture();
+    const native = nodeFilesystem();
+    const adapter = new FsCompletedMotionVideoAdapter({
+      root,
+      now: () => Date.now(),
+      installationId,
+      filesystem: {
+        ...native,
+        open: async (path: string, flags: number) => {
+          if (path === file) throw filesystemError('EIO', `${root}/private-video-path`);
+          return native.open(path, flags);
+        },
+      },
+    });
+
+    await expect(adapter.scanBatch({ cursor: null, entryLimit: 64 })).rejects.toMatchObject({
+      name: 'CompletedMotionVideoFilesystemError',
+      code: 'motion_fs_io_failure',
+      operation: 'hash',
+    });
+  });
+
   it('skips an expected directory-disappearance race', async () => {
     const { root } = await fixture();
     const native = nodeFilesystem();

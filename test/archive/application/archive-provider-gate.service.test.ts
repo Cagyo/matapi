@@ -86,6 +86,54 @@ describe('ArchiveProviderGateService', () => {
     await expect(gate.inspect('generation-1', 'upload')).resolves.toEqual({ kind: 'allowed' });
   });
 
+  it('denies a foreign operation that does not explicitly request an upload-owned recovery probe', async () => {
+    const { gate, clock } = await fixture();
+    await gate.recordFailure('generation-1', 'upload', new DriveRateLimitedError({
+      retryAfterMs: 1_000, sessionUsable: true, operationPhase: 'metadata',
+    }));
+    clock.value += 1_001;
+
+    await expect(gate.run({
+      generationId: 'generation-1', operationClass: 'folder', operation: async () => 'folder-ok',
+    })).rejects.toBeInstanceOf(DriveTemporaryUnavailableError);
+  });
+
+  it('lets an explicit foreign recovery probe claim an expired upload cooldown and clear it on success', async () => {
+    const { repository, gate, clock } = await fixture();
+    await gate.recordFailure('generation-1', 'upload', new DriveRateLimitedError({
+      retryAfterMs: 1_000, sessionUsable: true, operationPhase: 'metadata',
+    }));
+    clock.value += 1_001;
+
+    await expect(gate.run({
+      generationId: 'generation-1', operationClass: 'folder', probe: true, operation: async () => 'folder-ok',
+    })).resolves.toBe('folder-ok');
+    await expect(repository.load()).resolves.toMatchObject({
+      operationClass: null, failureClass: null, cooldownUntilMs: null,
+    });
+  });
+
+  it('attributes a failed foreign recovery probe to its winning operation and renews its cooldown', async () => {
+    const { repository, gate, clock } = await fixture();
+    await gate.recordFailure('generation-1', 'upload', new DriveRateLimitedError({
+      retryAfterMs: 1_000, sessionUsable: false, operationPhase: 'metadata',
+    }));
+    clock.value += 1_001;
+
+    await expect(gate.run({
+      generationId: 'generation-1',
+      operationClass: 'folder',
+      probe: true,
+      operation: async () => { throw new DriveProviderCapacityBlockedError('temporary'); },
+    })).rejects.toBeInstanceOf(DriveProviderCapacityBlockedError);
+    await expect(repository.load()).resolves.toMatchObject({
+      operationClass: 'folder',
+      failureClass: 'capacity',
+      failureStreak: 2,
+      cooldownUntilMs: clock.value + 60 * 60 * 1_000,
+    });
+  });
+
   it('does not replace an upload cooldown when another operation fails retryably', async () => {
     const { gate } = await fixture();
     await gate.recordFailure('generation-1', 'upload', new DriveRateLimitedError({

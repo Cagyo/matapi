@@ -39,6 +39,8 @@ import { VerifyArchiveArtifactUseCase } from '../../src/archive/application/use-
 import { ARCHIVE_RETENTION } from '../../src/archive/application/ports/archive-retention.port';
 import { DRIVE_ACCOUNT } from '../../src/archive/application/ports/drive-account.port';
 import { DriveClockUnhealthyError } from '../../src/archive/domain/errors/drive-clock-unhealthy.error';
+import { DriveRateLimitedError } from '../../src/archive/domain/errors/drive-rate-limited.error';
+import { InMemoryArchiveProviderStateRepository } from '../../src/archive/infrastructure/persistence/in-memory-archive-provider-state.repository';
 import { NestFactory } from '@nestjs/core';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -279,6 +281,42 @@ describe('ArchiveModule composition', () => {
       { alert: vi.fn(async () => undefined) },
       { loadActive: vi.fn(async () => null) },
       { run: vi.fn(async ({ operation }: { operation(): Promise<unknown> }) => operation()) },
+      new ArchiveRemoteMutationLockService(),
+    );
+
+    await hooks.runRemoteMaintenance(
+      new ArchiveRemoteMutationLockService(),
+      new AbortController().signal,
+    );
+
+    expect(order).toEqual(['reconcile', 'retention']);
+  });
+
+  it('runs reconcile then retention after a delete-owned cooldown expires', async () => {
+    const order: string[] = [];
+    const clock = { value: 1_000 };
+    const repository = new InMemoryArchiveProviderStateRepository();
+    const gate = new ArchiveProviderGateService(
+      repository,
+      { now: () => new Date(clock.value) },
+      { sleep: async () => undefined },
+      { random: () => 0 },
+    );
+    await gate.ensureGeneration('generation-1');
+    await gate.recordFailure('generation-1', 'delete', new DriveRateLimitedError({
+      retryAfterMs: 1_000, sessionUsable: false, operationPhase: 'metadata',
+    }));
+    clock.value += 1_001;
+
+    const hooks = new ArchiveSchedulerHooksService();
+    const provider = remoteMaintenanceProvider();
+    provider.useFactory(
+      hooks,
+      { execute: vi.fn(async () => { order.push('reconcile'); }) },
+      { execute: vi.fn(async () => { order.push('retention'); }) },
+      { alert: vi.fn(async () => undefined) },
+      { loadActive: vi.fn(async () => ({ id: 'generation-1', status: 'active' })) },
+      gate,
       new ArchiveRemoteMutationLockService(),
     );
 
