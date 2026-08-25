@@ -26,7 +26,7 @@ LOCK_PATH = '/run/lock/homeworker-feature-install.lock'
 ROUTINES_PATH = '/usr/lib/home-worker/install-feature-routines'
 VERSION_PATH = '/usr/lib/home-worker/feature-installer.version'
 MANIFEST_PATH = '/usr/lib/home-worker/feature-installer.manifest'
-INSTALLER_VERSION = '2'
+INSTALLER_VERSION = '3'
 WORKER_NAME = 'homeworker'
 MAX_BYTES = 4096
 TIMEOUT_SECONDS = 30 * 60
@@ -52,6 +52,7 @@ ROOT_BUNDLE_FILES = {
     '/usr/lib/home-worker/install-feature-routines': 0o755,
     '/usr/lib/home-worker/live-stream-net-helper': 0o755,
     '/usr/lib/home-worker/live-stream-ffmpeg-runner': 0o755,
+    '/usr/lib/home-worker/live-stream-policy-inspector': 0o755,
     '/usr/lib/home-worker/systemd/homeworker-feature-install.service': 0o644,
     '/usr/lib/home-worker/systemd/homeworker-feature-supervisor-restart.service': 0o644,
     '/usr/lib/home-worker/systemd/homeworker-feature-host-reboot.service': 0o644,

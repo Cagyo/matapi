@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 
 const run = promisify(execFile);
 
@@ -19,6 +20,17 @@ describe('supported runtime contract', () => {
     expect(pkg.dependencies).toHaveProperty('@googleapis/drive');
     expect(pkg.dependencies).toHaveProperty('google-auth-library');
     expect(deps).toMatch(/^node: "22"$/m);
+  });
+
+  it('carries iproute2 in the core dependency set so route discovery always exists', () => {
+    // The RTSP policy inspector shells out to the absolute /usr/sbin/ip. It is a
+    // core prerequisite, not an rtsp-feature package: the root bundle that ships
+    // the inspector is published long before any RTSP feature install runs.
+    const core = (parse(deps) as { core: { apt: string[] } }).core.apt;
+    expect(core).toContain('iproute2');
+
+    const systemDeps = /install_system_deps\(\) \{([\s\S]*?)\n\}/.exec(installer)?.[1] ?? '';
+    expect(systemDeps).toContain('iproute2');
   });
 
   it('allows bounded upload cancellation before PM2 kills the process', () => {

@@ -6,6 +6,9 @@
 # instructions (spec 18 / spec 24).
 node: "22"
 
+# `iproute2` is core rather than rtsp-only: the root-owned live-stream policy
+# inspector discovers local networks through /usr/sbin/ip, and it ships in the
+# root bundle that is published before any RTSP feature install can run.
 core:
   apt:
     - git
@@ -14,6 +17,7 @@ core:
     - build-essential
     - python3
     - python3-setuptools
+    - iproute2
 
 digital:
   apt:

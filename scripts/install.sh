@@ -228,6 +228,7 @@ install_system_deps() {
   apt_get update
   apt_get install -y \
     git sqlite3 libsqlite3-dev build-essential python3 python3-setuptools \
+    iproute2 \
     ffmpeg \
     usb-modeswitch
 }
@@ -715,6 +716,23 @@ write_verified_feature_config() {
   ' "$INSTALL_DIR/features.json" "$csv"
 }
 
+# The root bundle ships live-stream-policy-inspector, which discovers local
+# networks through the absolute /usr/sbin/ip. Publishing that bundle onto a host
+# without iproute2 would turn every later RTSP install into a misleading package
+# failure, so the prerequisite is installed and proven executable first.
+require_route_inspection_prerequisite() {
+  echo "Verifying route inspection prerequisite (iproute2)..."
+  if [ ! -x /usr/sbin/ip ]; then
+    # No second `apt_get update` here: install_system_deps already refreshed the
+    # index earlier in main(), and a redundant refresh costs 30-60s on a Pi 3.
+    apt_get install -y iproute2
+  fi
+  if [ ! -x /usr/sbin/ip ]; then
+    echo "ERROR: iproute2 did not provide an executable /usr/sbin/ip" >&2
+    exit 1
+  fi
+}
+
 install_feature_management_artifacts() {
   local bundle="/usr/lib/home-worker"
   local source_version="$INSTALL_DIR/config/feature-installer.version"
@@ -725,12 +743,15 @@ install_feature_management_artifacts() {
     exit 1
   fi
 
+  require_route_inspection_prerequisite
+
   echo "Installing root-owned feature-management boundary..."
   sudo install -d -m 0755 -o root -g root "$bundle" "$bundle/systemd"
   install_root_bundle_file "$INSTALL_DIR/scripts/feature-installer.py" "$bundle/feature-installer" 0755
   install_root_bundle_file "$INSTALL_DIR/scripts/install-feature.sh" "$bundle/install-feature-routines" 0755
   install_root_bundle_file "$INSTALL_DIR/scripts/live-stream-net-helper" "$bundle/live-stream-net-helper" 0755
   install_root_bundle_file "$INSTALL_DIR/scripts/live-stream-ffmpeg-runner" "$bundle/live-stream-ffmpeg-runner" 0755
+  install_root_bundle_file "$INSTALL_DIR/scripts/live-stream-policy-inspector" "$bundle/live-stream-policy-inspector" 0755
   for unit in homeworker-feature-install.service homeworker-feature-supervisor-restart.service homeworker-feature-host-reboot.service homeworker-ffmpeg-stream@.service homeworker-stream-net.service homeworker-stream-systemd.rules; do
     install_root_bundle_file "$INSTALL_DIR/systemd/$unit" "$bundle/systemd/$unit" 0644
   done
@@ -741,6 +762,7 @@ install_feature_management_artifacts() {
   {
     printf 'version %s\n' "$version"
     for path in "$bundle/feature-installer" "$bundle/install-feature-routines" "$bundle/live-stream-net-helper" "$bundle/live-stream-ffmpeg-runner" \
+      "$bundle/live-stream-policy-inspector" \
       "$bundle/systemd/homeworker-feature-install.service" "$bundle/systemd/homeworker-feature-supervisor-restart.service" "$bundle/systemd/homeworker-feature-host-reboot.service" \
       "$bundle/systemd/homeworker-ffmpeg-stream@.service" "$bundle/systemd/homeworker-stream-net.service" "$bundle/systemd/homeworker-stream-systemd.rules"; do
       mode=$(printf '%04o' "0$(stat -c '%a' "$path")")

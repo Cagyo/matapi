@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { promisify } from 'node:util';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -18,6 +19,53 @@ with tempfile.TemporaryDirectory() as root:
   open(m.MANIFEST_PATH, 'w').write('version 999\\n')
   os.chmod(m.VERSION_PATH, 0o644); os.chmod(m.MANIFEST_PATH, 0o644)
   try: m.validate_root_bundle(); raise AssertionError('stale version accepted')
+  except RuntimeError as error: assert str(error) == 'helper-version-mismatch'
+`;
+    await expect(run('python3', ['-c', program])).resolves.toMatchObject({ stderr: '' });
+  });
+
+  it('refuses a root bundle that omits the RTSP policy inspector', async () => {
+    const expectedVersion = readFileSync(
+      resolve(__dirname, '../../../config/feature-installer.version'),
+      'utf8',
+    ).trim();
+    const program = String.raw`
+import importlib.util, os, tempfile
+from types import SimpleNamespace
+spec = importlib.util.spec_from_file_location('helper', ${JSON.stringify(helper)})
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+assert m.INSTALLER_VERSION == ${JSON.stringify(expectedVersion)}, m.INSTALLER_VERSION
+assert m.ROOT_BUNDLE_FILES['/usr/lib/home-worker/live-stream-policy-inspector'] == 0o755
+# root_owned_file demands uid/gid 0, which this non-root test user cannot
+# create, so the manifest walk below stubs it out. Prove first that the real
+# check rejects a file this user owns, and that -- with ownership neutralized
+# the same way the claim tests neutralize it -- the regular-file, link-count,
+# and exact-mode clauses all still bite.
+with tempfile.TemporaryDirectory() as probe_root:
+  probe = probe_root + '/asset'
+  open(probe, 'w').close(); os.chmod(probe, 0o755)
+  assert m.root_owned_file(probe, 0o755) is False
+  real_stat = m.os.stat
+  m.os.stat = lambda path, follow_symlinks=True: (lambda v: SimpleNamespace(
+    st_mode=v.st_mode, st_nlink=v.st_nlink, st_uid=0, st_gid=0))(real_stat(path, follow_symlinks=follow_symlinks))
+  assert m.root_owned_file(probe, 0o755) is True
+  assert m.root_owned_file(probe, 0o644) is False
+  assert m.root_owned_file(probe_root, 0o700) is False
+  os.link(probe, probe_root + '/hardlink')
+  assert m.root_owned_file(probe, 0o755) is False
+  m.os.stat = real_stat
+m.root_owned_file = lambda path, mode: True
+m.file_digest = lambda path: '0' * 64
+with tempfile.TemporaryDirectory() as root:
+  m.VERSION_PATH = root + '/version'; m.MANIFEST_PATH = root + '/manifest'
+  open(m.VERSION_PATH, 'w').write(m.INSTALLER_VERSION + '\n')
+  lines = ['version ' + m.INSTALLER_VERSION]
+  lines += ['0' * 64 + ' ' + format(mode, '04o') + ' ' + path for path, mode in m.ROOT_BUNDLE_FILES.items()]
+  open(m.MANIFEST_PATH, 'w').write('\n'.join(lines) + '\n')
+  m.validate_root_bundle()
+  short = [line for line in lines if not line.endswith('/live-stream-policy-inspector')]
+  open(m.MANIFEST_PATH, 'w').write('\n'.join(short) + '\n')
+  try: m.validate_root_bundle(); raise AssertionError('bundle without the policy inspector accepted')
   except RuntimeError as error: assert str(error) == 'helper-version-mismatch'
 `;
     await expect(run('python3', ['-c', program])).resolves.toMatchObject({ stderr: '' });
