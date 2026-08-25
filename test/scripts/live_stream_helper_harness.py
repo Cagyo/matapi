@@ -275,7 +275,7 @@ def run(helper, inspector, name):
             source = Path(inspector.__file__ or sys.argv[2]).read_text(encoding="utf-8")
             results = {}
             stale = Path(root) / "stale-inspector"
-            stale.write_text(source.replace("def valid_uid(", "def unused_uid("), encoding="utf-8")
+            stale.write_text(source.replace("def parse_policy_document(", "def unused_parse("), encoding="utf-8")
             helper.POLICY_INSPECTOR_PATH = str(stale)
             try:
                 helper.load_policy_inspector()

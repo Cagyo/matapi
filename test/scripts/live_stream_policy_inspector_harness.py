@@ -157,6 +157,56 @@ def run(module, mode, fixture):
             "maxOutputBytes": module.MAX_OUTPUT_BYTES,
             "commands": sorted(module.VALID_COMMANDS),
         }
+    if mode == "contract":
+        entries = [module.EligibleNetwork(4, "192.168.1.0/24", "eth0")]
+        valid = {
+            "version": module.POLICY_VERSION,
+            "workerUid": 1001,
+            "streamUid": 1002,
+            "networks": module.projection(entries),
+            "udpPortFirst": 24000,
+            "udpPortLast": 24001,
+            "digest": module.policy_digest(module.POLICY_VERSION, 1001, 1002, entries, 24000, 24001),
+        }
+        result = {"policyFields": list(module.POLICY_FIELDS), "policyKeys": sorted(module.POLICY_KEYS)}
+        parsed = module.parse_policy_document(valid)
+        result["parsed"] = {"digest": parsed[6], "networks": module.projection(parsed[3])}
+        try:
+            module.parse_policy_document({**valid, "streamGid": 1002})
+            result["unknownField"] = "accepted"
+        except module.PolicyDocumentInvalid as error:
+            result["unknownField"] = str(error)
+        # The drift the shared parser exists to prevent: a field admitted to the
+        # contract every verifier accepts, but forgotten in the digest payload
+        # those verifiers compare. It must fail loudly rather than silently stop
+        # being covered.
+        module.POLICY_FIELDS = module.POLICY_FIELDS + ("streamGid",)
+        module.POLICY_KEYS = frozenset(module.POLICY_FIELDS) | {"digest"}
+        try:
+            module.policy_digest(module.POLICY_VERSION, 1001, 1002, entries, 24000, 24001)
+            result["forgottenField"] = "digested"
+        except KeyError as error:
+            result["forgottenField"] = "refused:" + str(error.args[0])
+        # The positive half: a field added to both the list and the payload
+        # changes the digest and is accepted, so the guard above catches drift
+        # rather than freezing the contract.
+        module.policy_payload = lambda version, worker_uid, stream_uid, networks, first, last: {
+            "version": version,
+            "workerUid": worker_uid,
+            "streamUid": stream_uid,
+            "networks": module.projection(networks),
+            "udpPortFirst": first,
+            "udpPortLast": last,
+            "streamGid": 4242,
+        }
+        extended_digest = module.policy_digest(module.POLICY_VERSION, 1001, 1002, entries, 24000, 24001)
+        result["extendedDigestChanged"] = extended_digest != valid["digest"]
+        extended = {**valid, "streamGid": 4242, "digest": extended_digest}
+        try:
+            result["extendedAccepted"] = module.parse_policy_document(extended)[6] == extended_digest
+        except module.PolicyDocumentInvalid as error:
+            result["extendedAccepted"] = str(error)
+        return result
     if mode == "ip":
         result = {}
         try:

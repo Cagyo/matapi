@@ -177,6 +177,16 @@ function routineHarness(networks: Network[]) {
   return { root, bin, bundle, app, etc, log, run: () => execFileSync('bash', [script], { stdio: 'pipe' }) };
 }
 
+/** The commit program's own refusal message, so a test can name the gate it hit. */
+function commitFailure(harness: Harness): string {
+  try {
+    harness.commit();
+  } catch (error) {
+    return String((error as { stderr?: Buffer }).stderr ?? '');
+  }
+  throw new Error('the commit program accepted a tampered staged policy');
+}
+
 /** Runs the real root verification with only its fixed paths and account lookups redirected. */
 function privilegedVerification(harness: Harness, overrides = ''): boolean {
   const program = [
@@ -659,6 +669,30 @@ describe('restricted RTSP runtime installation', () => {
     } finally {
       disagree.cleanup();
       exposed.cleanup();
+    }
+  });
+
+  it.each([
+    ['a digest that covers nothing', (staged: Record<string, unknown>) => { staged.digest = '0'.repeat(64); }],
+    ['a network the inspector would never discover', (staged: Record<string, unknown>) => { (staged.networks as Record<string, unknown>[])[0].cidr = '8.8.8.0/24'; }],
+    ['an unknown field', (staged: Record<string, unknown>) => { staged.streamGid = 1002; }],
+  ])('refuses a staged policy carrying %s', (_label, tamper) => {
+    const harness = policyHarness();
+    try {
+      harness.stage();
+      // Both staged files carry identical bytes, so the pair check passes and
+      // only the shared document parser stands between this and a commit.
+      for (const path of [`${harness.policyPath}.staged`, `${harness.summaryPath}.staged`]) {
+        const staged = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+        tamper(staged);
+        writeFileSync(path, `${JSON.stringify(staged)}\n`);
+      }
+      // Name the gate, not merely the failure: a later check refusing this for
+      // its own reasons would otherwise hide a parser that stopped enforcing.
+      expect(commitFailure(harness)).toContain('staged policy is not canonical');
+      expect(existsSync(harness.policyPath)).toBe(false);
+    } finally {
+      harness.cleanup();
     }
   });
 

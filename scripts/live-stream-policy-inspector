@@ -33,6 +33,11 @@ SYS_CLASS_NET = Path("/sys/class/net")
 SUMMARY_PATH = Path("/etc/home-worker/live-stream-policy.summary.json")
 VALID_COMMANDS = {"discover", "verify-installed"}
 POLICY_VERSION = 2
+# Every security-relevant policy field, named exactly once. The accepted key set
+# and the digest payload are both projected through this tuple, so a field can
+# only enter the contract and the digest together.
+POLICY_FIELDS = ("version", "workerUid", "streamUid", "networks", "udpPortFirst", "udpPortLast")
+POLICY_KEYS = frozenset(POLICY_FIELDS) | {"digest"}
 MAX_OUTPUT_BYTES = 64 * 1024
 EXPECTED_SUMMARY_OWNER_UID = 0
 EXPECTED_SUMMARY_MODE = 0o644
@@ -62,6 +67,10 @@ class Unavailable(Exception):
 
 class SummaryInvalid(Exception):
     """The installed public summary is missing or untrustworthy."""
+
+
+class PolicyDocumentInvalid(Exception):
+    """The document is not one canonical, self-consistent policy version 2 object."""
 
 
 @dataclass(frozen=True)
@@ -205,25 +214,77 @@ def network_key(entry):
     return (entry.family, network.network_address.packed, network.prefixlen, entry.interface)
 
 
+def policy_payload(version, worker_uid, stream_uid, networks, udp_first, udp_last):
+    """The digest payload, projected through the one field list.
+
+    A field added to POLICY_FIELDS -- and so to the document every verifier
+    accepts -- but not named below raises here, instead of quietly dropping out
+    of the digest those verifiers compare with each other.
+    """
+    values = {
+        "version": version,
+        "workerUid": worker_uid,
+        "streamUid": stream_uid,
+        "networks": projection(networks),
+        "udpPortFirst": udp_first,
+        "udpPortLast": udp_last,
+    }
+    return {key: values[key] for key in POLICY_FIELDS}
+
+
 def policy_digest(version, worker_uid, stream_uid, networks, udp_first, udp_last):
     """SHA-256 over the canonical encoding of every security-relevant field.
 
     The canonical encoding is compact UTF-8 JSON with sorted object keys, so the
     installer and every verifier derive the same digest from the same policy.
     """
-    payload = {
-        "version": version,
-        "workerUid": worker_uid,
-        "streamUid": stream_uid,
-        "networks": [
-            {"family": network.family, "cidr": network.cidr, "interface": network.interface}
-            for network in networks
-        ],
-        "udpPortFirst": udp_first,
-        "udpPortLast": udp_last,
-    }
+    payload = policy_payload(version, worker_uid, stream_uid, networks, udp_first, udp_last)
     encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def parse_policy_document(raw):
+    """Validate one policy document and return its canonical fields.
+
+    The private policy, the public summary, and the runtime network helper all
+    describe the same object, so the accepted key set, the per-entry rules, the
+    canonical order, and the digest that covers them are defined here once. Two
+    validators that drift apart would silently stop covering a field the digest
+    equality check is trusted to prove.
+    """
+    if not isinstance(raw, dict) or set(raw) != POLICY_KEYS or raw["version"] != POLICY_VERSION:
+        raise PolicyDocumentInvalid("shape")
+    if not valid_uid(raw["workerUid"]) or not valid_uid(raw["streamUid"]) or raw["workerUid"] == raw["streamUid"]:
+        raise PolicyDocumentInvalid("identity")
+    if not valid_udp_port(raw["udpPortFirst"]) or not valid_udp_port(raw["udpPortLast"]):
+        raise PolicyDocumentInvalid("udp-range")
+    if raw["udpPortFirst"] > raw["udpPortLast"]:
+        raise PolicyDocumentInvalid("udp-range")
+    if not isinstance(raw["networks"], list) or not raw["networks"]:
+        raise PolicyDocumentInvalid("networks")
+    networks = []
+    for entry in raw["networks"]:
+        if not isinstance(entry, dict) or set(entry) != {"family", "cidr", "interface"}:
+            raise PolicyDocumentInvalid("networks")
+        network = parse_network(entry["cidr"])
+        if network is None or entry["family"] != network.version or not valid_interface(entry["interface"]):
+            raise PolicyDocumentInvalid("networks")
+        networks.append(EligibleNetwork(family=network.version, cidr=str(network), interface=entry["interface"]))
+    order = [network_key(entry) for entry in networks]
+    if order != sorted(order) or len(set(order)) != len(order):
+        raise PolicyDocumentInvalid("order")
+    digest = raw["digest"]
+    if not isinstance(digest, str) or not DIGEST_RE.fullmatch(digest):
+        raise PolicyDocumentInvalid("digest")
+    expected = policy_digest(
+        raw["version"], raw["workerUid"], raw["streamUid"], networks, raw["udpPortFirst"], raw["udpPortLast"]
+    )
+    if digest != expected:
+        raise PolicyDocumentInvalid("digest")
+    return (
+        raw["version"], raw["workerUid"], raw["streamUid"], networks,
+        raw["udpPortFirst"], raw["udpPortLast"], digest,
+    )
 
 
 def run_ip(arguments, optional=False):
@@ -365,36 +426,10 @@ def load_summary():
         raw = strict_json_loads(open_summary())
     except ValueError:
         raise SummaryInvalid("json")
-    keys = {"version", "workerUid", "streamUid", "networks", "udpPortFirst", "udpPortLast", "digest"}
-    if not isinstance(raw, dict) or set(raw) != keys or raw["version"] != POLICY_VERSION:
-        raise SummaryInvalid("shape")
-    if not valid_uid(raw["workerUid"]) or not valid_uid(raw["streamUid"]) or raw["workerUid"] == raw["streamUid"]:
-        raise SummaryInvalid("identity")
-    if not valid_udp_port(raw["udpPortFirst"]) or not valid_udp_port(raw["udpPortLast"]):
-        raise SummaryInvalid("udp-range")
-    if raw["udpPortFirst"] > raw["udpPortLast"]:
-        raise SummaryInvalid("udp-range")
-    if not isinstance(raw["networks"], list) or not raw["networks"]:
-        raise SummaryInvalid("networks")
-    networks = []
-    for entry in raw["networks"]:
-        if not isinstance(entry, dict) or set(entry) != {"family", "cidr", "interface"}:
-            raise SummaryInvalid("networks")
-        network = parse_network(entry["cidr"])
-        if network is None or entry["family"] != network.version or not valid_interface(entry["interface"]):
-            raise SummaryInvalid("networks")
-        networks.append(EligibleNetwork(family=network.version, cidr=str(network), interface=entry["interface"]))
-    order = [network_key(entry) for entry in networks]
-    if order != sorted(order) or len(set(order)) != len(order):
-        raise SummaryInvalid("order")
-    digest = raw["digest"]
-    if not isinstance(digest, str) or not DIGEST_RE.fullmatch(digest):
-        raise SummaryInvalid("digest")
-    expected = policy_digest(
-        raw["version"], raw["workerUid"], raw["streamUid"], networks, raw["udpPortFirst"], raw["udpPortLast"]
-    )
-    if digest != expected:
-        raise SummaryInvalid("digest")
+    try:
+        _version, _worker_uid, _stream_uid, networks, _first, _last, digest = parse_policy_document(raw)
+    except PolicyDocumentInvalid as error:
+        raise SummaryInvalid(str(error))
     return digest, networks
 
 

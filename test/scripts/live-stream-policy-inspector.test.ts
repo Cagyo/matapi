@@ -327,6 +327,18 @@ const ROUTE4_ARGV = ['/usr/sbin/ip', '-j', '-4', 'route', 'show', 'table', 'main
 const ROUTE6_ARGV = ['/usr/sbin/ip', '-j', '-6', 'route', 'show', 'table', 'main'];
 
 describe('live-stream policy inspector production invocation', () => {
+
+  it('derives the accepted key set and the digest payload from one field list', () => {
+    const contract = invoke('contract', {}) as unknown as Record<string, unknown>;
+    expect(contract.policyFields).toEqual(['version', 'workerUid', 'streamUid', 'networks', 'udpPortFirst', 'udpPortLast']);
+    expect(contract.policyKeys).toEqual(['digest', 'networks', 'streamUid', 'udpPortFirst', 'udpPortLast', 'version', 'workerUid']);
+    expect(contract.parsed).toEqual({ digest: expect.stringMatching(/^[0-9a-f]{64}$/u), networks: [ETH0] });
+    expect(contract.unknownField).toBe('shape');
+    expect(contract.forgottenField).toBe('refused:streamGid');
+    expect(contract.extendedDigestChanged).toBe(true);
+    expect(contract.extendedAccepted).toBe(true);
+  });
+
   it('pins the fixed root paths, identities, and closed command set', () => {
     const constants = invoke('constants', {}) as unknown as Record<string, unknown>;
     expect(constants).toEqual({

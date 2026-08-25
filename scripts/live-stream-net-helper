@@ -38,10 +38,7 @@ IP_ENVIRONMENT = {"LANG": "C", "LC_ALL": "C", "PATH": "/usr/sbin:/usr/bin:/sbin:
 # route get is a local netlink round trip; one second is already generous.
 ROUTE_TIMEOUT_SECONDS = 1
 MAX_ROUTE_BYTES = 64 * 1024
-INSPECTOR_SYMBOLS = (
-    "POLICY_VERSION", "EligibleNetwork", "valid_uid", "valid_interface", "valid_udp_port",
-    "parse_network", "network_key", "policy_digest", "load_summary",
-)
+INSPECTOR_SYMBOLS = ("PolicyDocumentInvalid", "parse_policy_document", "load_summary")
 
 
 class Reject(Exception):
@@ -104,42 +101,20 @@ class Policy:
     """The installed policy version 2: private networks bound to physical links."""
 
     def __init__(self, raw, inspector):
-        keys = {"version", "workerUid", "streamUid", "networks", "udpPortFirst", "udpPortLast", "digest"}
-        if not isinstance(raw, dict) or set(raw) != keys or raw["version"] != inspector.POLICY_VERSION:
+        # The document contract -- accepted keys, per-entry rules, canonical
+        # order, and the digest covering them -- belongs to the inspector both
+        # verifiers already share. A second copy here is what would let the
+        # startup cross-check quietly stop covering a field.
+        try:
+            (_version, self.worker_uid, self.stream_uid, entries,
+             self.udp_first, self.udp_last, self.digest) = inspector.parse_policy_document(raw)
+        except inspector.PolicyDocumentInvalid:
             raise Reject("policy")
-        if not all(inspector.valid_uid(raw[key]) for key in ("workerUid", "streamUid")):
+        # A runtime bound the installer also enforces, but the durable policy is
+        # hand-editable, so the process that renders the ruleset re-checks it.
+        if self.udp_last - self.udp_first + 1 > MAX_UDP_PORTS:
             raise Reject("policy")
-        if not isinstance(raw["networks"], list) or not raw["networks"]:
-            raise Reject("policy")
-        entries = []
-        self.networks = []
-        for entry in raw["networks"]:
-            if not isinstance(entry, dict) or set(entry) != {"family", "cidr", "interface"}:
-                raise Reject("policy")
-            network = inspector.parse_network(entry["cidr"])
-            if network is None or entry["family"] != network.version or not inspector.valid_interface(entry["interface"]):
-                raise Reject("policy")
-            entries.append(inspector.EligibleNetwork(family=network.version, cidr=str(network), interface=entry["interface"]))
-            self.networks.append((network, entry["interface"]))
-        order = [inspector.network_key(entry) for entry in entries]
-        if order != sorted(order) or len(set(order)) != len(order):
-            raise Reject("policy")
-        self.worker_uid = raw["workerUid"]
-        self.stream_uid = raw["streamUid"]
-        if self.worker_uid == self.stream_uid:
-            raise Reject("policy")
-        if not inspector.valid_udp_port(raw["udpPortFirst"]) or not inspector.valid_udp_port(raw["udpPortLast"]):
-            raise Reject("policy")
-        self.udp_first = raw["udpPortFirst"]
-        self.udp_last = raw["udpPortLast"]
-        if self.udp_first > self.udp_last or self.udp_last - self.udp_first + 1 > MAX_UDP_PORTS:
-            raise Reject("policy")
-        if not isinstance(raw["digest"], str) or not HEX64_RE.fullmatch(raw["digest"]):
-            raise Reject("policy")
-        self.digest = inspector.policy_digest(
-            raw["version"], self.worker_uid, self.stream_uid, entries, self.udp_first, self.udp_last)
-        if raw["digest"] != self.digest:
-            raise Reject("policy")
+        self.networks = [(ipaddress.ip_network(entry.cidr), entry.interface) for entry in entries]
 
     def address(self, text):
         if not isinstance(text, str):

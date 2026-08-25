@@ -430,37 +430,17 @@ try:
     document = inspector.strict_json_loads(policy_body.decode("utf-8"))
 except (UnicodeDecodeError, ValueError):
     raise SystemExit("staged policy is not canonical")
-keys = {"version", "workerUid", "streamUid", "networks", "udpPortFirst", "udpPortLast", "digest"}
-if not isinstance(document, dict) or set(document) != keys or document["version"] != inspector.POLICY_VERSION:
+# The whole document contract -- accepted keys, per-entry rules, canonical
+# order, and the digest over them -- belongs to the one shared parser, so this
+# revalidation cannot drift from the summary validator or the runtime helper.
+try:
+    (_version, staged_worker_uid, _stream_uid, networks,
+     _udp_first, _udp_last, digest) = inspector.parse_policy_document(document)
+except inspector.PolicyDocumentInvalid:
     raise SystemExit("staged policy is not canonical")
-if not inspector.valid_uid(document["workerUid"]) or not inspector.valid_uid(document["streamUid"]):
-    raise SystemExit("staged policy is not canonical")
-if document["workerUid"] != worker_uid or document["workerUid"] == document["streamUid"]:
-    raise SystemExit("staged policy is not canonical")
-if not inspector.valid_udp_port(document["udpPortFirst"]) or not inspector.valid_udp_port(document["udpPortLast"]):
-    raise SystemExit("staged policy is not canonical")
-if document["udpPortFirst"] > document["udpPortLast"]:
-    raise SystemExit("staged policy is not canonical")
-if not isinstance(document["networks"], list) or not document["networks"]:
-    raise SystemExit("staged policy is not canonical")
-networks = []
-for entry in document["networks"]:
-    if not isinstance(entry, dict) or set(entry) != {"family", "cidr", "interface"}:
-        raise SystemExit("staged policy is not canonical")
-    network = inspector.parse_network(entry["cidr"])
-    if network is None or entry["family"] != network.version or not inspector.valid_interface(entry["interface"]):
-        raise SystemExit("staged policy is not canonical")
-    networks.append(inspector.EligibleNetwork(
-        family=network.version, cidr=str(network), interface=entry["interface"]))
-order = [inspector.network_key(entry) for entry in networks]
-if order != sorted(order) or len(set(order)) != len(order):
-    raise SystemExit("staged policy is not canonical")
-digest = document["digest"]
-if not isinstance(digest, str) or not inspector.DIGEST_RE.fullmatch(digest):
-    raise SystemExit("staged policy is not canonical")
-if digest != inspector.policy_digest(
-        document["version"], document["workerUid"], document["streamUid"], networks,
-        document["udpPortFirst"], document["udpPortLast"]):
+# The one check the shared parser deliberately cannot make: this policy must
+# name the worker account this install is actually running for.
+if staged_worker_uid != worker_uid:
     raise SystemExit("staged policy is not canonical")
 
 try:
