@@ -2,20 +2,25 @@
 """Root-only, authenticated RTSP egress lease helper.
 
 The protocol accepts grant/revoke records only. It never accepts URLs, hostnames,
-commands, unit names, or nft syntax. Errors intentionally expose one short code.
+commands, unit names, interface names, or nft syntax. Every granted destination is
+additionally bound to the link the kernel would actually use, which must be the
+link its policy network was discovered on. Errors intentionally expose one short
+code.
 """
 
 import copy
 import grp
+import importlib.machinery
+import importlib.util
 import ipaddress
 import json
 import os
-import pwd
 import secrets
 import socket
 import struct
 import subprocess
 import sys
+import syslog
 import tempfile
 import time
 from pathlib import Path
@@ -26,9 +31,28 @@ HEX64_RE = __import__("re").compile(r"^[0-9a-f]{64}$", __import__("re").I)
 LEASE_RE = __import__("re").compile(r"^[0-9a-f]{32}$")
 MAX_LEASE_MS = 300_000
 MAX_UDP_PORTS = 64
+POLICY_INSPECTOR_PATH = "/usr/lib/home-worker/live-stream-policy-inspector"
+IP_BINARY = "/usr/sbin/ip"
+IP_ENVIRONMENT = {"LANG": "C", "LC_ALL": "C", "PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}
+# `serve()` is serial, so a hung `ip` stalls every queued grant behind it. A
+# route get is a local netlink round trip; one second is already generous.
+ROUTE_TIMEOUT_SECONDS = 1
+MAX_ROUTE_BYTES = 64 * 1024
+INSPECTOR_SYMBOLS = (
+    "POLICY_VERSION", "EligibleNetwork", "valid_uid", "valid_interface", "valid_udp_port",
+    "parse_network", "network_key", "policy_digest", "load_summary",
+)
 
 
 class Reject(Exception):
+    """One short code, never a diagnostic.
+
+    Two vocabularies for two audiences. `inspector`, `policy`, `summary`, and
+    `state` are startup refusals an operator reads in the root journal; the rest
+    -- `address`, `port`, `udp-range`, `route`, `interface`, `replay`, and the
+    protocol codes -- answer one authenticated grant back over the socket.
+    """
+
     def __init__(self, reason):
         super().__init__(reason)
         self.reason = reason
@@ -45,31 +69,76 @@ def strict_json_loads(raw):
     return json.loads(raw, object_pairs_hook=unique_object)
 
 
+def journal(label, raw):
+    """Raw route output belongs to the root journal only, never to the worker."""
+    try:
+        syslog.openlog("live-stream-net-helper", syslog.LOG_PID, syslog.LOG_DAEMON)
+        syslog.syslog(syslog.LOG_ERR, "{}: {}".format(label, raw[:MAX_ROUTE_BYTES]))
+    except Exception:
+        return
+
+
+def load_policy_inspector():
+    """Load the root bundle inspector so canonical order and the digest exist once.
+
+    Reimplementing either here is the drift that would silently disagree with the
+    installer and permanently break readiness, so the helper reuses the same
+    root-owned executable the installer and both verifiers already load.
+    """
+    try:
+        loader = importlib.machinery.SourceFileLoader("live_stream_policy_inspector", POLICY_INSPECTOR_PATH)
+        module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(module)
+    except Exception:
+        raise Reject("inspector")
+    # A stale bundle -- the helper updated, the root asset not republished --
+    # executes cleanly and only fails later, as an AttributeError raised deep in
+    # policy parsing where no caller turns it into a code. The daemon starts at
+    # boot without validate_root_bundle(), so the surface is checked here.
+    if not all(hasattr(module, name) for name in INSPECTOR_SYMBOLS):
+        raise Reject("inspector")
+    return module
+
+
 class Policy:
-    def __init__(self, raw):
-        if not isinstance(raw, dict) or set(raw) != {"version", "workerUid", "streamUid", "allowedCidrs", "udpPortFirst", "udpPortLast"}:
+    """The installed policy version 2: private networks bound to physical links."""
+
+    def __init__(self, raw, inspector):
+        keys = {"version", "workerUid", "streamUid", "networks", "udpPortFirst", "udpPortLast", "digest"}
+        if not isinstance(raw, dict) or set(raw) != keys or raw["version"] != inspector.POLICY_VERSION:
             raise Reject("policy")
-        if raw["version"] != 1 or not all(isinstance(raw[key], int) and not isinstance(raw[key], bool) and raw[key] >= 0 for key in ("workerUid", "streamUid")):
+        if not all(inspector.valid_uid(raw[key]) for key in ("workerUid", "streamUid")):
             raise Reject("policy")
-        if not isinstance(raw["allowedCidrs"], list) or not raw["allowedCidrs"]:
+        if not isinstance(raw["networks"], list) or not raw["networks"]:
             raise Reject("policy")
+        entries = []
         self.networks = []
-        for text in raw["allowedCidrs"]:
-            try:
-                network = ipaddress.ip_network(text, strict=True)
-            except (TypeError, ValueError):
+        for entry in raw["networks"]:
+            if not isinstance(entry, dict) or set(entry) != {"family", "cidr", "interface"}:
                 raise Reject("policy")
-            minimum = 8
-            if network.prefixlen < minimum or network.is_global or network.is_multicast or network.is_unspecified:
+            network = inspector.parse_network(entry["cidr"])
+            if network is None or entry["family"] != network.version or not inspector.valid_interface(entry["interface"]):
                 raise Reject("policy")
-            self.networks.append(network)
+            entries.append(inspector.EligibleNetwork(family=network.version, cidr=str(network), interface=entry["interface"]))
+            self.networks.append((network, entry["interface"]))
+        order = [inspector.network_key(entry) for entry in entries]
+        if order != sorted(order) or len(set(order)) != len(order):
+            raise Reject("policy")
         self.worker_uid = raw["workerUid"]
         self.stream_uid = raw["streamUid"]
         if self.worker_uid == self.stream_uid:
             raise Reject("policy")
-        self.udp_first = valid_port(raw["udpPortFirst"])
-        self.udp_last = valid_port(raw["udpPortLast"])
+        if not inspector.valid_udp_port(raw["udpPortFirst"]) or not inspector.valid_udp_port(raw["udpPortLast"]):
+            raise Reject("policy")
+        self.udp_first = raw["udpPortFirst"]
+        self.udp_last = raw["udpPortLast"]
         if self.udp_first > self.udp_last or self.udp_last - self.udp_first + 1 > MAX_UDP_PORTS:
+            raise Reject("policy")
+        if not isinstance(raw["digest"], str) or not HEX64_RE.fullmatch(raw["digest"]):
+            raise Reject("policy")
+        self.digest = inspector.policy_digest(
+            raw["version"], self.worker_uid, self.stream_uid, entries, self.udp_first, self.udp_last)
+        if raw["digest"] != self.digest:
             raise Reject("policy")
 
     def address(self, text):
@@ -81,9 +150,19 @@ class Policy:
             raise Reject("address")
         if str(address) != text.lower() or address.is_global or address.is_multicast or address.is_unspecified:
             raise Reject("address")
-        if not any(address.version == network.version and address in network for network in self.networks):
+        if not self._interfaces(address):
             raise Reject("address")
         return str(address)
+
+    def interfaces(self, text):
+        """Every policy link that already contains this validated address."""
+        return self._interfaces(ipaddress.ip_address(text))
+
+    def _interfaces(self, address):
+        return frozenset(
+            interface for network, interface in self.networks
+            if address.version == network.version and address in network
+        )
 
 
 class StateStore:
@@ -133,11 +212,68 @@ class NftBackend:
         )
 
 
+class RouteBackend:
+    """Asks the kernel which link one already-validated policy address leaves by.
+
+    The address is re-rendered from `ipaddress`, passed as argv to the absolute
+    allowlisted executable, and never reaches a shell. Answer semantics: the
+    device name for an on-link destination, None when the kernel would route it
+    somewhere the policy cannot describe, and Reject("route") when no answer
+    could be established at all.
+    """
+
+    def interface(self, address):
+        value = ipaddress.ip_address(address)
+        argv = [IP_BINARY, "-4" if value.version == 4 else "-6", "-j", "route", "get", str(value)]
+        try:
+            completed = subprocess.run(
+                argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                env=IP_ENVIRONMENT, timeout=ROUTE_TIMEOUT_SECONDS, check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            # The worker only ever sees "route"; these breadcrumbs are what tells
+            # an operator whether `ip` is missing, hung, or answering an error.
+            journal("route", "ip failed: " + type(error).__name__)
+            raise Reject("route")
+        if completed.returncode != 0:
+            journal("route", "ip exited {}".format(completed.returncode))
+            raise Reject("route")
+        if len(completed.stdout) > MAX_ROUTE_BYTES:
+            journal("route", "ip returned {} bytes".format(len(completed.stdout)))
+            raise Reject("route")
+        try:
+            raw = completed.stdout.decode("utf-8")
+        except UnicodeDecodeError:
+            journal("route", "ip returned undecodable output")
+            raise Reject("route")
+        try:
+            parsed = strict_json_loads(raw)
+        except (Reject, ValueError):
+            journal("route", raw)
+            raise Reject("route")
+        if not isinstance(parsed, list) or len(parsed) != 1 or not isinstance(parsed[0], dict):
+            journal("route", raw)
+            raise Reject("route")
+        record = parsed[0]
+        device = record.get("dev")
+        if not isinstance(device, str):
+            journal("route", raw)
+            raise Reject("route")
+        # A gateway, a multipath answer, or a non-unicast type all mean the
+        # destination is not on-link, so no policy network can vouch for it.
+        if record.get("gateway") is not None or record.get("via") is not None or record.get("nexthops") is not None:
+            return None
+        if record.get("type") not in (None, "unicast"):
+            return None
+        return device
+
+
 class Engine:
-    def __init__(self, policy, store, nft, now_ms=None, lease_id=None):
+    def __init__(self, policy, store, nft, routes, now_ms=None, lease_id=None):
         self.policy = policy
         self.store = store
         self.nft = nft
+        self.routes = routes
         self.now_ms = now_ms or (lambda: int(time.time() * 1000))
         self.lease_id = lease_id or (lambda: secrets.token_hex(16))
         self.state = store.load()
@@ -177,8 +313,12 @@ class Engine:
         addresses = value["addresses"]
         if not isinstance(addresses, list) or not 1 <= len(addresses) <= 2:
             raise Reject("state")
-        addresses = [self.policy.address(address) for address in addresses]
-        if len(addresses) != len(set(addresses)):
+        # A restored lease is re-checked against the current policy rather than
+        # against a fresh route lookup: the binding was proven when the lease was
+        # granted, every lease expires within MAX_LEASE_MS, and startup must not
+        # depend on a live query whose transient failure would drop live rules.
+        addresses = [self._restore_address(entry) for entry in addresses]
+        if len({entry["address"] for entry in addresses}) != len(addresses):
             raise Reject("state")
         ports = value["rtspControlPorts"]
         if not isinstance(ports, list) or not 1 <= len(ports) <= 2:
@@ -202,6 +342,21 @@ class Engine:
         else:
             raise Reject("state")
         return {"sessionId": session, "addresses": addresses, "rtspControlPorts": ports, "transport": transport, "udpMediaPorts": udp, "expiresAtUnixMs": expiry}
+
+    def _restore_address(self, entry):
+        if not isinstance(entry, dict) or set(entry) != {"address", "interface"}:
+            raise Reject("state")
+        address = self.policy.address(entry["address"])
+        if entry["interface"] not in self.policy.interfaces(address):
+            raise Reject("state")
+        return {"address": address, "interface": entry["interface"]}
+
+    def _bind(self, address):
+        """The kernel must agree that this address leaves through its policy link."""
+        device = self.routes.interface(address)
+        if device is None or device not in self.policy.interfaces(address):
+            raise Reject("interface")
+        return {"address": address, "interface": device}
 
     def handle(self, request):
         self._prune()
@@ -264,6 +419,8 @@ class Engine:
             raise Reject("transport")
         if nonce in self.state["usedNonces"]:
             raise Reject("replay")
+        # Last, so a malformed or replayed request never reaches the kernel.
+        addresses = [self._bind(value) for value in addresses]
         lease = self.lease_id()
         if not LEASE_RE.fullmatch(lease) or lease in self.state["leases"]:
             raise Reject("lease")
@@ -315,20 +472,26 @@ def render_nft(stream_uid, leases, now_ms):
         if remaining < 1:
             continue
         suffix = lease_id
-        for version, nft_type, prefix in ((4, "ipv4_addr", "ip"), (6, "ipv6_addr", "ip6")):
-            addresses = [value for value in lease["addresses"] if ipaddress.ip_address(value).version == version]
-            if not addresses:
-                continue
-            tcp_name = "l_{}_{}_tcp".format(suffix, version)
-            elements = ["{} . {} timeout {}s".format(address, port, remaining) for address in addresses for port in lease["rtspControlPorts"]]
-            lines.append(" set {} {{ type {} . inet_service; flags timeout; elements = {{ {} }}; }}".format(tcp_name, nft_type, ", ".join(elements)))
-            rules.append("  meta skuid {} {} daddr . tcp dport @{} accept".format(stream_uid, prefix, tcp_name))
-            if lease["transport"] in ("udp", "auto"):
-                udp_name = "l_{}_{}_udp".format(suffix, version)
-                udp_elements = ["{} timeout {}s".format(address, remaining) for address in addresses]
-                lines.append(" set {} {{ type {}; flags timeout; elements = {{ {} }}; }}".format(udp_name, nft_type, ", ".join(udp_elements)))
-                udp = lease["udpMediaPorts"]
-                rules.append("  meta skuid {} {} daddr @{} udp sport {}-{} accept".format(stream_uid, prefix, udp_name, udp["first"], udp["last"]))
+        # Set names index the lease's sorted distinct devices rather than naming
+        # them: an interface name may legally hold `.` or `-`, which are not safe
+        # in an nft identifier, so no kernel-chosen name ever reaches the script.
+        devices = sorted({entry["interface"] for entry in lease["addresses"]})
+        for index, device in enumerate(devices):
+            bound = [entry["address"] for entry in lease["addresses"] if entry["interface"] == device]
+            for version, nft_type, prefix in ((4, "ipv4_addr", "ip"), (6, "ipv6_addr", "ip6")):
+                addresses = [value for value in bound if ipaddress.ip_address(value).version == version]
+                if not addresses:
+                    continue
+                tcp_name = "l_{}_{}_{}_tcp".format(suffix, index, version)
+                elements = ["{} . {} timeout {}s".format(address, port, remaining) for address in addresses for port in lease["rtspControlPorts"]]
+                lines.append(" set {} {{ type {} . inet_service; flags timeout; elements = {{ {} }}; }}".format(tcp_name, nft_type, ", ".join(elements)))
+                rules.append('  meta skuid {} oifname "{}" {} daddr . tcp dport @{} accept'.format(stream_uid, device, prefix, tcp_name))
+                if lease["transport"] in ("udp", "auto"):
+                    udp_name = "l_{}_{}_{}_udp".format(suffix, index, version)
+                    udp_elements = ["{} timeout {}s".format(address, remaining) for address in addresses]
+                    lines.append(" set {} {{ type {}; flags timeout; elements = {{ {} }}; }}".format(udp_name, nft_type, ", ".join(udp_elements)))
+                    udp = lease["udpMediaPorts"]
+                    rules.append('  meta skuid {} oifname "{}" {} daddr @{} udp sport {}-{} accept'.format(stream_uid, device, prefix, udp_name, udp["first"], udp["last"]))
     lines.extend([
         " chain output {",
         "  type filter hook output priority filter; policy accept;",
@@ -352,16 +515,35 @@ def valid_session(value):
     return value.lower()
 
 
-def load_policy(path):
+def load_verified_policy(path, inspector):
+    """Load the private policy and require the public summary to describe it.
+
+    The two artifacts are renamed one after the other, so a crash can leave a new
+    private policy beside an old public summary. When the change implied no route
+    change -- a recreated stream account, an edited UDP range -- nothing else in
+    the system notices, because application readiness only ever compares the
+    environment with the summary. This is that cross-check. `load_summary`
+    re-derives the summary digest from the summary's own fields, so digest
+    equality proves every security-relevant field of the two agrees.
+    """
     try:
-        return Policy(strict_json_loads(Path(path).read_text(encoding="utf-8")))
-    except (OSError, ValueError):
+        raw = strict_json_loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, Reject):
         raise Reject("policy")
+    policy = Policy(raw, inspector)
+    try:
+        digest, _networks = inspector.load_summary()
+    except Exception:
+        raise Reject("summary")
+    if digest != policy.digest:
+        raise Reject("summary")
+    return policy
 
 
 def serve(policy_path, state_path, socket_path, group_name):
-    policy = load_policy(policy_path)
-    engine = Engine(policy, StateStore(state_path), NftBackend())
+    inspector = load_policy_inspector()
+    policy = load_verified_policy(policy_path, inspector)
+    engine = Engine(policy, StateStore(state_path), NftBackend(), RouteBackend())
     group_id = grp.getgrnam(group_name).gr_gid
     path = Path(socket_path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
@@ -425,12 +607,17 @@ def main():
     if os.geteuid() != 0:
         print("live-stream-net-helper must run as root", file=sys.stderr)
         return 1
-    serve(
-        os.environ.get("HOMEWORKER_STREAM_POLICY", "/etc/home-worker/live-stream-policy.json"),
-        os.environ.get("HOMEWORKER_STREAM_STATE", "/run/home-worker-stream-net/state.json"),
-        os.environ.get("HOMEWORKER_STREAM_SOCKET", "/run/home-worker-stream-net/helper.sock"),
-        os.environ.get("HOMEWORKER_STREAM_GROUP", "homeworker-stream"),
-    )
+    try:
+        serve(
+            os.environ.get("HOMEWORKER_STREAM_POLICY", "/etc/home-worker/live-stream-policy.json"),
+            os.environ.get("HOMEWORKER_STREAM_STATE", "/run/home-worker-stream-net/state.json"),
+            os.environ.get("HOMEWORKER_STREAM_SOCKET", "/run/home-worker-stream-net/helper.sock"),
+            os.environ.get("HOMEWORKER_STREAM_GROUP", "homeworker-stream"),
+        )
+    except Reject as error:
+        # One short code, never a traceback that would quote the policy itself.
+        print("live-stream-net-helper refused to start: " + error.reason, file=sys.stderr)
+        return 1
     return 0
 
 

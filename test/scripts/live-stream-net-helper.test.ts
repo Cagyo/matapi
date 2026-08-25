@@ -6,6 +6,7 @@ function scenario(name: string): unknown {
   const output = execFileSync('python3', [
     resolve('test/scripts/live_stream_helper_harness.py'),
     resolve('scripts/live-stream-net-helper'),
+    resolve('scripts/live-stream-policy-inspector'),
     name,
   ], { encoding: 'utf8' });
   return JSON.parse(output);
@@ -33,7 +34,7 @@ describe('live-stream net helper security behavior', () => {
   });
 
   it('removes expired leases but preserves live leases during crash recovery', () => {
-    expect(scenario('stale-recovery')).toEqual({ expiredPresent: false, livePresent: true, kernelTimeouts: true });
+    expect(scenario('stale-recovery')).toEqual({ expiredPresent: false, livePresent: true, kernelTimeouts: true, routeQueries: 0 });
   });
 
   it('renders a UID-scoped allowlist followed by default deny', () => {
@@ -48,12 +49,16 @@ describe('live-stream net helper security behavior', () => {
     expect(scenario('same-uid-policy')).toEqual({ ok: false, reason: 'policy' });
   });
 
+  it('refuses the superseded version 1 policy shape', () => {
+    expect(scenario('version-one-policy')).toEqual({ ok: false, reason: 'policy' });
+  });
+
   it('never rounds an nft timeout beyond lease expiry', () => {
     expect(scenario('subsecond-timeout')).toEqual({ subsecondAllowed: false, oneSecond: true });
   });
 
-  it('allows loopback only through an exact grant-derived address and port', () => {
-    expect(scenario('loopback-exact')).toEqual({ exact: true, blanket: false });
+  it('allows egress only through an exact grant-derived address and port', () => {
+    expect(scenario('exact-address-port')).toEqual({ exact: true, blanket: false });
   });
 
   it('uses collision-free set names for leases sharing the old prefix', () => {
@@ -62,6 +67,22 @@ describe('live-stream net helper security behavior', () => {
 
   it('drops persisted access excluded by a narrowed policy', () => {
     expect(scenario('policy-narrowing')).toEqual({ leases: 0, staleRule: false });
+  });
+
+  it('drops a persisted lease whose interface left the policy', () => {
+    expect(scenario('interface-narrowing')).toEqual({ leases: 0, staleRule: false });
+  });
+
+  it('drops the pre-upgrade lease shape while keeping its replay evidence', () => {
+    expect(scenario('legacy-state')).toEqual({ leases: 0, staleRule: false, replayReason: 'replay' });
+  });
+
+  it('refuses a stale or missing root bundle inspector with one short code', () => {
+    expect(scenario('stale-inspector')).toEqual({ stale: 'inspector', missing: 'inspector' });
+  });
+
+  it('refuses a policy network the inspector would never have discovered', () => {
+    expect(scenario('loopback-policy')).toEqual({ ok: false, reason: 'policy' });
   });
 
   it('refuses startup when malformed live nonce state destroys replay evidence', () => {
@@ -76,8 +97,8 @@ describe('live-stream net helper security behavior', () => {
     expect(scenario('expired-next-grant')).toEqual({ expiredRendered: false, newRendered: true });
   });
 
-  it('accepts the configured IPv6 ULA /8 used by the worker policy', () => {
-    expect(scenario('ipv6-ula-policy')).toEqual({ address: 'fd12::20' });
+  it('accepts the configured IPv6 ULA prefix used by the worker policy', () => {
+    expect(scenario('ipv6-ula-policy')).toEqual({ address: 'fd00::20' });
   });
 
   it('rejects a trickling authenticated request at one absolute read deadline', () => {
@@ -91,4 +112,96 @@ describe('live-stream net helper security behavior', () => {
   it('rejects duplicate JSON keys instead of accepting the last value', () => {
     expect(scenario('duplicate-key')).toEqual({ ok: false, reason: 'request' });
   });
+});
+
+describe('live-stream net helper interface binding', () => {
+  it('resolves the destination through the absolute allowlisted ip executable', () => {
+    expect(scenario('constants')).toEqual({
+      inspectorPath: '/usr/lib/home-worker/live-stream-policy-inspector',
+      ipBinary: '/usr/sbin/ip',
+      ipEnvironment: { LANG: 'C', LC_ALL: 'C', PATH: '/usr/sbin:/usr/bin:/sbin:/bin' },
+      routeTimeoutSeconds: 1,
+    });
+  });
+
+  it('grants and binds oifname when the route leaves through the policy interface', () => {
+    expect(scenario('route-match')).toEqual({
+      ok: true,
+      oifname: true,
+      call: {
+        argv: ['/usr/sbin/ip', '-4', '-j', 'route', 'get', '192.168.1.20'],
+        env: { LANG: 'C', LC_ALL: 'C', PATH: '/usr/sbin:/usr/bin:/sbin:/bin' },
+        timeout: 1,
+        check: false,
+        stdin: true,
+        stderr: true,
+      },
+    });
+  });
+
+  it('queries the matching address family for an IPv6 destination', () => {
+    expect(scenario('route-family')).toEqual({
+      argv: ['/usr/sbin/ip', '-6', '-j', 'route', 'get', 'fd00::20'],
+      oifname: true,
+    });
+  });
+
+  it.each([
+    ['route-other-interface', 'interface'],
+    ['route-vpn', 'interface'],
+    ['route-bridge', 'interface'],
+    ['route-gateway', 'interface'],
+    ['route-malformed', 'route'],
+    ['route-unavailable', 'route'],
+  ])('refuses %s without rendering a rule', (name, reason) => {
+    expect(scenario(name)).toMatchObject({ ok: false, reason, rendered: false });
+  });
+
+  it('keeps raw route output out of the stderr the worker can observe', () => {
+    const result = scenario('route-malformed') as { stderr: string };
+    expect(result.stderr).toBe('');
+  });
+
+  it('renders oifname with the destination address and port for both families', () => {
+    expect(scenario('dual-family-render')).toEqual({
+      v4Rule: true, v6Rule: true, v4Udp: true, v6Udp: true, v4Element: true, v6Element: true,
+    });
+  });
+
+  it('binds each address of one lease to its own resolved interface', () => {
+    expect(scenario('multi-interface-render')).toEqual({
+      eth0Rule: true, wlan0Rule: true, eth0Element: true, wlan0Element: true,
+    });
+  });
+});
+
+describe('live-stream net helper policy and summary agreement', () => {
+  it('accepts a private policy that matches the public summary', () => {
+    const result = scenario('summary-match') as { digest: string; streamUid: number };
+    expect(result.streamUid).toBe(997);
+    expect(result.digest).toMatch(/^[0-9a-f]{64}$/u);
+  });
+
+  it('refuses a summary that disagrees on an identity change implying no route change', () => {
+    expect(scenario('summary-uid-mismatch')).toEqual({ ok: false, reason: 'summary', subprocessCalls: 0 });
+  });
+
+  it('refuses a summary that disagrees on the UDP media range', () => {
+    expect(scenario('summary-udp-mismatch')).toEqual({ ok: false, reason: 'summary' });
+  });
+
+  it('refuses to start without the public summary', () => {
+    expect(scenario('summary-missing')).toEqual({ ok: false, reason: 'summary' });
+  });
+
+  it('refuses a private policy whose own digest does not cover its fields', () => {
+    expect(scenario('corrupt-digest-policy')).toEqual({ ok: false, reason: 'policy' });
+  });
+});
+
+it('never renders an interface-free accept rule', () => {
+  const result = scenario('nft-policy') as { text: string };
+  const accepts = result.text.split('\n').filter((line) => line.endsWith(' accept'));
+  expect(accepts.length).toBeGreaterThan(0);
+  expect(accepts.every((line) => line.includes('oifname "eth0"'))).toBe(true);
 });

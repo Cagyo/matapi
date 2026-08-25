@@ -26,6 +26,26 @@ describe('NftStreamEgressAdapter', () => {
     expect(helper.request).toHaveBeenNthCalledWith(2, { op: 'revoke', sessionId, leaseId: lease.leaseId });
   });
 
+  it('never asks the helper for an interface: the root policy resolves egress itself', async () => {
+    const helper = { request: vi.fn(async () => ({ ok: true, leaseId: '6d0c4099f4df24314a6f6d17c8d39b59' })) };
+    const adapter = new NftStreamEgressAdapter(helper);
+    const grant = StreamEgressGrant.create({ sessionId, nonceHash: 'ab'.repeat(32), addresses: ['192.168.1.20'], rtspControlPorts: [554], transport: 'tcp', expiresAtUnixMs: now + 30_000 }, now);
+
+    await adapter.grant(grant);
+
+    const sent = helper.request.mock.calls[0][0] as Record<string, unknown>;
+    expect(Object.keys(sent).sort()).toEqual(['addresses', 'expiresAtUnixMs', 'nonceHash', 'op', 'rtspControlPorts', 'sessionId', 'transport']);
+    expect(JSON.stringify(sent)).not.toMatch(/oifname|interface|eth0/u);
+  });
+
+  it.each(['interface', 'route'])('maps the closed %s refusal to a sanitized error', async (reason) => {
+    const helper = { request: vi.fn(async () => ({ ok: false, reason })) };
+    const adapter = new NftStreamEgressAdapter(helper);
+    const grant = StreamEgressGrant.create({ sessionId, nonceHash: 'ab'.repeat(32), addresses: ['192.168.1.20'], rtspControlPorts: [554], transport: 'tcp', expiresAtUnixMs: now + 30_000 }, now);
+
+    await expect(adapter.grant(grant)).rejects.toThrow('stream egress unavailable');
+  });
+
   it('maps malformed or secret-bearing helper failures to a sanitized error', async () => {
     const helper = { request: vi.fn(async () => { throw new Error('rtsp://user:pass@camera'); }) };
     const adapter = new NftStreamEgressAdapter(helper);
