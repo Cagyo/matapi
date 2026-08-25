@@ -164,6 +164,48 @@ describe('experimental live-stream installation', () => {
     expect(featureScript).toContain('trap - EXIT');
   });
 
+  it('proves an eligible local network before any repository or package mutation', () => {
+    // The routine-body slice below cannot see this: the Cloudflare keyring, the
+    // apt source, `apt-get update`, and cloudflared all live in the case body,
+    // ahead of install_rtsp_runtime. Discovery has to gate them too.
+    const rtspCase = featureScript.slice(
+      featureScript.indexOf('\n  rtsp)'),
+      featureScript.indexOf('\n  digital)'),
+    );
+    expect(rtspCase).not.toBe('');
+    const gate = rtspCase.indexOf('require_eligible_local_network');
+    expect(gate).toBeGreaterThan(-1);
+    for (const mutation of [
+      'CLOUDFLARE_KEYRING_DIR=',
+      'curl -fsSL -o "$CLOUDFLARE_KEY_TMP"',
+      'apt_get update',
+      'apt_get install -y cloudflared',
+      'install_rtsp_runtime',
+    ]) {
+      expect(rtspCase.indexOf(mutation), mutation).toBeGreaterThan(gate);
+    }
+    // The gate runs under the same test seam as the runtime install, so the
+    // legacy cloudflared harness still exercises repository behaviour alone,
+    // and stale staged files are reaped before anything new is staged.
+    expect(rtspCase).toMatch(
+      /if ! rtsp_runtime_install_skipped; then\n\s*reap_stale_rtsp_staging\n\s*require_eligible_local_network/,
+    );
+    expect(featureScript).toMatch(/HOME_WORKER_RTSP_SKIP_RUNTIME_INSTALL[^\n]*VITEST/);
+    // The gate itself asks the fixed inspector and refuses an empty projection.
+    const guard = featureScript.slice(
+      featureScript.indexOf('require_eligible_local_network() {'),
+      featureScript.indexOf('install_rtsp_runtime() {'),
+    );
+    expect(guard).toContain('"$SCRIPT_DIR/live-stream-policy-inspector"');
+    expect(guard).toContain('inspector_path, "discover"');
+    expect(guard).toContain('raise SystemExit("no eligible local network")');
+    // The gate reuses the inspector's own strict parser and version constant
+    // rather than carrying a second, weaker copy of the discovery rules.
+    expect(guard).toContain('inspector.strict_json_loads');
+    expect(guard).toContain('inspector.POLICY_VERSION');
+    expect(guard).not.toContain('json.loads(');
+  });
+
   it('keeps apt operations bounded by the shared lock timeout', () => {
     expect(featureScript).toContain('APT_LOCK_TIMEOUT_SECONDS=300');
     expect(featureScript).toContain('DPkg::Lock::Timeout=${APT_LOCK_TIMEOUT_SECONDS}');

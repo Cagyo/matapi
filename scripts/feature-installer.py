@@ -8,6 +8,8 @@ environment overrides.
 import fcntl
 import grp
 import hashlib
+import importlib.machinery
+import importlib.util
 import json
 import os
 import pwd
@@ -16,6 +18,7 @@ import signal
 import stat
 import subprocess
 import sys
+import syslog
 import uuid
 
 INSTALL_ROOT = '/var/lib/home-worker'
@@ -26,9 +29,22 @@ LOCK_PATH = '/run/lock/homeworker-feature-install.lock'
 ROUTINES_PATH = '/usr/lib/home-worker/install-feature-routines'
 VERSION_PATH = '/usr/lib/home-worker/feature-installer.version'
 MANIFEST_PATH = '/usr/lib/home-worker/feature-installer.manifest'
-INSTALLER_VERSION = '3'
+INSTALLER_VERSION = '4'
 WORKER_NAME = 'homeworker'
+STREAM_NAME = 'homeworker-stream'
+STREAM_GROUP = 'homeworker-stream'
+POLICY_INSPECTOR_PATH = '/usr/lib/home-worker/live-stream-policy-inspector'
+POLICY_OWNER_UID = 0
+POLICY_OWNER_GID = 0
+LIVE_STREAM_POLICY_PATH = '/etc/home-worker/live-stream-policy.json'
+# The summary path is spelled here, in the inspector's SUMMARY_PATH, and in the
+# routine that writes it. Production agrees by construction and the test harness
+# overrides each independently, so nothing proves they stay in step -- keep them
+# together when any one of them moves.
+LIVE_STREAM_SUMMARY_PATH = '/etc/home-worker/live-stream-policy.summary.json'
+WORKER_ENV_PATH = '/opt/home-worker/.env'
 MAX_BYTES = 4096
+MAX_POLICY_BYTES = 64 * 1024
 TIMEOUT_SECONDS = 30 * 60
 CHECK_TIMEOUT_SECONDS = 15
 JOB_ID = re.compile(r'^[A-Za-z0-9_-]{16}$')
@@ -376,7 +392,7 @@ def verify_feature(feature):
         'uart': (('/usr/bin/test', '-e', '/dev/serial0'),),
         'zigbee': (('/usr/bin/which', 'mosquitto'), ('/bin/systemctl', 'is-active', '--quiet', 'mosquitto.service')),
         'motion': (('/usr/bin/which', 'motion'), ('/usr/bin/which', 'ffmpeg'), ('/usr/bin/test', '-f', '/etc/motion/motion.conf'), ('/usr/bin/test', '-d', '/home/pi/motion/videos'), ('/bin/systemctl', 'is-active', '--quiet', 'motion.service')),
-        'rtsp': (('/usr/bin/which', 'ffmpeg'), ('/usr/bin/which', 'cloudflared'), ('/usr/bin/test', '-f', '/etc/home-worker/live-stream-policy.json'), ('/usr/bin/test', '-f', '/etc/systemd/system/homeworker-stream-net.service'), ('/bin/systemctl', 'is-active', '--quiet', 'homeworker-stream-net.service')),
+        'rtsp': (('/usr/bin/which', 'ffmpeg'), ('/usr/bin/which', 'cloudflared'), ('/usr/bin/test', '-f', LIVE_STREAM_POLICY_PATH), ('/usr/bin/test', '-f', LIVE_STREAM_SUMMARY_PATH), ('/usr/bin/test', '-f', '/etc/systemd/system/homeworker-stream-net.service'), ('/bin/systemctl', 'is-active', '--quiet', 'homeworker-stream-net.service')),
     }[feature]
     try:
         commands_ok = all(subprocess.run(command, cwd='/', env=SAFE_ENV, shell=False,
@@ -391,8 +407,8 @@ def verify_feature(feature):
             return (owned_regular('/etc/motion/motion.conf', 0, 0, 0o644)
                     and owned_directory('/home/pi/motion/videos', motion_uid, motion_gid, 0o775))
         if feature == 'rtsp':
-            return (owned_regular('/etc/home-worker/live-stream-policy.json', 0, 0, 0o600)
-                    and owned_regular('/etc/systemd/system/homeworker-stream-net.service', 0, 0, 0o644))
+            return (owned_regular('/etc/systemd/system/homeworker-stream-net.service', 0, 0, 0o644)
+                    and rtsp_policy_installed())
         return True
     except (OSError, subprocess.TimeoutExpired):
         return False
@@ -402,6 +418,158 @@ def owned_regular(path, uid, gid, mode):
     value = os.stat(path, follow_symlinks=False)
     return (stat.S_ISREG(value.st_mode) and value.st_nlink == 1 and value.st_uid == uid
             and value.st_gid == gid and stat.S_IMODE(value.st_mode) == mode)
+
+
+def read_owned_regular(path, uid, gid, mode, limit):
+    """Bounded contents of a no-follow, single-link file with the exact owner and mode."""
+    try:
+        fd = os.open(path, os.O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        value = os.fstat(fd)
+        if (not stat.S_ISREG(value.st_mode) or value.st_nlink != 1 or value.st_uid != uid
+                or (gid is not None and value.st_gid != gid)
+                or stat.S_IMODE(value.st_mode) != mode):
+            return None
+        raw = os.read(fd, limit + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    return None if len(raw) > limit else raw
+
+
+def load_policy_inspector():
+    """Load the verified root bundle inspector so the digest is defined once."""
+    loader = importlib.machinery.SourceFileLoader('live_stream_policy_inspector', POLICY_INSPECTOR_PATH)
+    module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+    loader.exec_module(module)
+    return module
+
+
+def environment_settings(raw):
+    """Parse the private worker environment, rejecting any duplicated key."""
+    values = {}
+    for line in raw.decode('utf-8').splitlines():
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        key, value = line.split('=', 1)
+        if key in values:
+            return None
+        values[key] = value.strip().strip('"').strip("'")
+    return values
+
+
+def journal_rtsp_rejection(reason):
+    """One closed token per refusal, so a misconfiguration is not mistaken for tampering."""
+    try:
+        syslog.openlog('home-worker-feature-installer', syslog.LOG_PID, syslog.LOG_DAEMON)
+        syslog.syslog(syslog.LOG_ERR, 'rtsp-policy-rejected: ' + reason)
+    except Exception:
+        return
+
+
+def artifact_reason(path, uid, gid, mode, prefix):
+    """Diagnostic only: name the clause that made read_owned_regular refuse.
+
+    The verdict is already decided by read_owned_regular; drift here can only
+    mislabel a log line, never change whether the policy is accepted.
+    """
+    try:
+        value = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        return prefix + '-missing'
+    except OSError:
+        return prefix + '-unreadable'
+    if not stat.S_ISREG(value.st_mode):
+        return prefix + '-not-regular'
+    if value.st_nlink != 1:
+        return prefix + '-linked'
+    if value.st_uid != uid or (gid is not None and value.st_gid != gid):
+        return prefix + '-owner'
+    if stat.S_IMODE(value.st_mode) != mode:
+        return prefix + '-mode'
+    return prefix + '-size'
+
+
+def rtsp_policy_rejection():
+    """Return a closed reason token, or None when one canonical policy is installed.
+
+    The three durable renames cannot be globally atomic, so a crash between them
+    leaves a mixed tuple. Every refusal below is fail closed until an idempotent
+    reinstall reconciles the private policy, the public summary, and the private
+    worker environment.
+    """
+    try:
+        inspector = load_policy_inspector()
+    except (OSError, SyntaxError, ValueError):
+        return 'inspector-unavailable'
+    policy_raw = read_owned_regular(
+        LIVE_STREAM_POLICY_PATH, POLICY_OWNER_UID, POLICY_OWNER_GID, 0o600, MAX_POLICY_BYTES)
+    if policy_raw is None:
+        return artifact_reason(LIVE_STREAM_POLICY_PATH, POLICY_OWNER_UID, POLICY_OWNER_GID, 0o600, 'policy')
+    summary_raw = read_owned_regular(
+        LIVE_STREAM_SUMMARY_PATH, POLICY_OWNER_UID, POLICY_OWNER_GID, 0o644, MAX_POLICY_BYTES)
+    if summary_raw is None:
+        return artifact_reason(LIVE_STREAM_SUMMARY_PATH, POLICY_OWNER_UID, POLICY_OWNER_GID, 0o644, 'summary')
+    # load_summary re-opens the fixed public summary itself and rejects a wrong
+    # version, a non-canonical order, a UDP port outside 1024..65535, a
+    # duplicated key, or a digest that does not match its own fields.
+    try:
+        digest, networks = inspector.load_summary()
+    except Exception:
+        return 'summary-invalid'
+    try:
+        document = inspector.strict_json_loads(policy_raw.decode('utf-8'))
+        public = inspector.strict_json_loads(summary_raw.decode('utf-8'))
+    except (UnicodeDecodeError, ValueError):
+        return 'policy-invalid'
+    if document != public:
+        return 'policy-summary-disagreement'
+    try:
+        worker_uid = pwd.getpwnam(WORKER_NAME).pw_uid
+    except KeyError:
+        return 'worker-account-missing'
+    if document['workerUid'] != worker_uid:
+        return 'worker-uid-mismatch'
+    try:
+        stream_uid = pwd.getpwnam(STREAM_NAME).pw_uid
+    except KeyError:
+        return 'stream-account-missing'
+    if document['streamUid'] != stream_uid:
+        return 'stream-uid-mismatch'
+    try:
+        grp.getgrnam(STREAM_GROUP)
+    except KeyError:
+        return 'stream-group-missing'
+    environment_raw = read_owned_regular(WORKER_ENV_PATH, worker_uid, None, 0o600, MAX_POLICY_BYTES)
+    if environment_raw is None:
+        return artifact_reason(WORKER_ENV_PATH, worker_uid, None, 0o600, 'environment')
+    settings = environment_settings(environment_raw)
+    if settings is None:
+        return 'environment-invalid'
+    if settings.get('RTSP_POLICY_DIGEST') != digest:
+        return 'digest-mismatch'
+    cidrs = []
+    for entry in networks:
+        if entry.cidr not in cidrs:
+            cidrs.append(entry.cidr)
+    if settings.get('RTSP_ALLOWED_CIDRS') != ','.join(cidrs):
+        return 'environment-disagreement'
+    return None
+
+
+def rtsp_policy_installed():
+    """Fail closed, but never silently: the operator needs to know which clause refused."""
+    try:
+        reason = rtsp_policy_rejection()
+    except Exception:
+        reason = 'unexpected'
+    if reason is None:
+        return True
+    journal_rtsp_rejection(reason)
+    return False
 
 
 def owned_directory(path, uid, gid, mode):

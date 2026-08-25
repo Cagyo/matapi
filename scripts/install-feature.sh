@@ -33,6 +33,14 @@ else
   run_as_worker() { sudo -H -u "$USER" "$@"; }
 fi
 
+# The RTSP durable tuple, spelled once. Staging, the commit, and the stale-file
+# reaper all address exactly these three paths, and the private worker
+# environment has no second location.
+RTSP_POLICY_DIR="/etc/home-worker"
+RTSP_POLICY_FILE="$RTSP_POLICY_DIR/live-stream-policy.json"
+RTSP_SUMMARY_FILE="$RTSP_POLICY_DIR/live-stream-policy.summary.json"
+RTSP_ENV_FILE="$INSTALL_DIR/.env"
+
 apt_get() {
   sudo apt-get -o "DPkg::Lock::Timeout=${APT_LOCK_TIMEOUT_SECONDS}" "$@"
 }
@@ -45,20 +53,84 @@ install_root_asset_if_distinct() {
   sudo install -m "$mode" -o root -g root "$source" "$target"
 }
 
+discard_staged_rtsp_policy() {
+  # Staged files are the only mutation the pre-package phase performs, so a
+  # failed staging attempt leaves the previously installed tuple untouched.
+  local target
+  for target in "$@"; do
+    sudo rm -f "$target.staged"
+  done
+}
+
+rtsp_runtime_install_skipped() {
+  [ "${HOME_WORKER_RTSP_SKIP_RUNTIME_INSTALL:-0}" = "1" ] && [ "${VITEST:-}" = "true" ]
+}
+
+require_eligible_local_network() {
+  # Runs before the Cloudflare keyring, the apt source, `apt-get update`, and
+  # every package: a host with no eligible local network must fail closed
+  # before any repository or package mutation, never after one.
+  #
+  # This gate answers one narrow question -- is anything eligible at all -- and
+  # deliberately does not re-validate entries. The staging program re-runs
+  # discovery and validates every field authoritatively before it writes a
+  # single durable byte, so this must never become a second policy parser.
+  if ! sudo python3 - "$SCRIPT_DIR/live-stream-policy-inspector" <<'PY'
+import importlib.machinery, importlib.util, subprocess, sys
+inspector_path = sys.argv[1]
+MAX_BYTES = 64 * 1024
+loader = importlib.machinery.SourceFileLoader("live_stream_policy_inspector", inspector_path)
+inspector = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(inspector)
+try:
+    completed = subprocess.run(
+        [inspector_path, "discover"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL, timeout=30, check=False)
+except (OSError, subprocess.SubprocessError):
+    raise SystemExit("local network discovery failed")
+if completed.returncode != 0 or len(completed.stdout) > MAX_BYTES:
+    raise SystemExit("local network discovery failed")
+try:
+    payload = inspector.strict_json_loads(completed.stdout.decode("utf-8"))
+except (UnicodeDecodeError, ValueError):
+    raise SystemExit("local network discovery failed")
+if not isinstance(payload, dict) or payload.get("version") != inspector.POLICY_VERSION:
+    raise SystemExit("local network discovery failed")
+if not isinstance(payload.get("networks"), list):
+    raise SystemExit("local network discovery failed")
+if not payload["networks"]:
+    raise SystemExit("no eligible local network")
+PY
+  then
+    echo "ERROR: no eligible local network for the RTSP runtime" >&2
+    return 1
+  fi
+}
+
+reap_stale_rtsp_staging() {
+  # A crash during staging leaves staged files behind, one of which holds a
+  # credential key that was never committed. Reap them at branch entry so no
+  # secret-shaped artifact outlives the install that produced it.
+  discard_staged_rtsp_policy "$RTSP_POLICY_FILE" "$RTSP_SUMMARY_FILE" "$RTSP_ENV_FILE"
+}
+
 install_rtsp_runtime() {
   local stream_user="homeworker-stream"
   local stream_group="homeworker-stream"
-  local env_file="$INSTALL_DIR/.env"
-  local policy_dir="/etc/home-worker"
-  local policy_file="$policy_dir/live-stream-policy.json"
+  local env_file="$RTSP_ENV_FILE"
+  local policy_dir="$RTSP_POLICY_DIR"
+  local policy_file="$RTSP_POLICY_FILE"
+  local summary_file="$RTSP_SUMMARY_FILE"
+  local inspector="$SCRIPT_DIR/live-stream-policy-inspector"
+  local root_uid=0 root_gid=0
 
   if ! [[ "$USER" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
     echo "ERROR: unsafe worker account name" >&2
     return 1
   fi
-  # Debian 13 removed the legacy policykit-1 package name. Install the
-  # concrete daemon and client packages used by the systemd authorization flow.
-  apt_get install -y ffmpeg nftables polkitd pkexec
+
+  # The staged policy binds both runtime UIDs, so the accounts exist before
+  # staging.  Account creation installs no package and is reconciliation safe.
   if ! getent group "$stream_group" >/dev/null; then
     sudo groupadd --system "$stream_group"
   fi
@@ -74,102 +146,391 @@ install_rtsp_runtime() {
     echo "ERROR: $env_file is required before RTSP runtime installation" >&2
     return 1
   fi
-  # Generate the key only when absent/blank. Existing non-empty keys are never
-  # printed or replaced; malformed non-empty values fail closed.
-  sudo python3 - "$env_file" "$(id -u "$USER")" <<'PY'
-import os, re, secrets, stat, sys, tempfile
-path, expected_uid_text = sys.argv[1:]
-if not re.fullmatch(r"\d+", expected_uid_text):
-    raise SystemExit("unsafe worker uid")
-expected_uid = int(expected_uid_text)
-try:
-    source_fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0))
-except OSError:
-    raise SystemExit("unsafe env file")
-st = os.fstat(source_fd)
-if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_uid != expected_uid or stat.S_IMODE(st.st_mode) != 0o600:
-    os.close(source_fd)
-    raise SystemExit("unsafe env file")
-with os.fdopen(source_fd, encoding="utf-8") as stream:
-    lines = stream.read().splitlines()
-indexes = [i for i, line in enumerate(lines) if line.startswith("RTSP_CREDENTIALS_KEY=")]
-if len(indexes) > 1:
-    raise SystemExit("duplicate RTSP credential key")
-if indexes:
-    value = lines[indexes[0]].split("=", 1)[1]
-    if value and not re.fullmatch(r"[0-9a-fA-F]{64}", value):
-        raise SystemExit("malformed RTSP credential key")
-    if value:
-        raise SystemExit(0)
-    lines[indexes[0]] = "RTSP_CREDENTIALS_KEY=" + secrets.token_hex(32)
-else:
-    lines.append("RTSP_CREDENTIALS_KEY=" + secrets.token_hex(32))
-directory = os.path.dirname(path)
-fd, temporary = tempfile.mkstemp(prefix=".env.rtsp.", dir=directory)
-try:
-    os.fchmod(fd, 0o600)
-    os.fchown(fd, expected_uid, st.st_gid)
-    with os.fdopen(fd, "w", encoding="utf-8") as stream:
-        stream.write("\n".join(lines) + "\n")
-        stream.flush(); os.fsync(stream.fileno())
-    current = os.lstat(path)
-    if current.st_dev != st.st_dev or current.st_ino != st.st_ino:
-        raise SystemExit("env file changed during update")
-    os.replace(temporary, path)
-finally:
-    try: os.unlink(temporary)
-    except FileNotFoundError: pass
-PY
 
-  local policy_tmp
-  policy_tmp="$(mktemp)"
-  if ! sudo python3 - "$env_file" "$policy_tmp" "$(id -u "$USER")" "$(id -u "$stream_user")" <<'PY'
-import ipaddress, json, os, re, stat, sys
-env_path, output, worker_uid, stream_uid = sys.argv[1:]
-if not re.fullmatch(r"\d+", worker_uid) or not re.fullmatch(r"\d+", stream_uid) or worker_uid == stream_uid:
+  sudo install -d -m 0755 -o root -g root "$policy_dir" /etc/home-worker/ca /usr/lib/home-worker /etc/polkit-1/rules.d /etc/tmpfiles.d
+
+  # Stage the whole durable tuple before any RTSP package mutation: discovery,
+  # the private policy, the public summary, and the private environment are all
+  # written to same-directory staged files and flushed, so a failure here can
+  # only leave staged files behind.  Credential keys are generated only when
+  # absent/blank; existing non-empty keys are never printed or replaced and
+  # malformed non-empty values fail closed.
+  local env_identity
+  if ! env_identity="$(sudo python3 - "$inspector" "$env_file" "$policy_file" "$summary_file" "$root_uid" "$root_gid" "$(id -u "$USER")" "$(id -u "$stream_user")" <<'PY'
+import importlib.machinery, importlib.util, json, os, re, secrets, stat, subprocess, sys
+
+(inspector_path, env_path, policy_path, summary_path,
+ root_uid_text, root_gid_text, worker_uid_text, stream_uid_text) = sys.argv[1:]
+DIGITS = re.compile(r"\d+")
+HEX_KEY = re.compile(r"[0-9a-fA-F]{64}")
+O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+MAX_BYTES = 64 * 1024
+DISCOVERY_TIMEOUT_SECONDS = 30
+if not all(DIGITS.fullmatch(text) for text in (root_uid_text, root_gid_text, worker_uid_text, stream_uid_text)):
+    raise SystemExit("unsafe runtime identity")
+root_uid, root_gid = int(root_uid_text), int(root_gid_text)
+worker_uid, stream_uid = int(worker_uid_text), int(stream_uid_text)
+if worker_uid == stream_uid:
     raise SystemExit("unsafe runtime uid policy")
-values = {}
+
+# Root code loading root code from its fixed bundle path: the digest and every
+# canonical rule stay defined exactly once, in the inspector both verifiers use.
+loader = importlib.machinery.SourceFileLoader("live_stream_policy_inspector", inspector_path)
+inspector = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(inspector)
+
+
+def discovered_networks():
+    try:
+        completed = subprocess.run(
+            [inspector_path, "discover"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, timeout=DISCOVERY_TIMEOUT_SECONDS, check=False)
+    except (OSError, subprocess.SubprocessError):
+        raise SystemExit("local network discovery failed")
+    if completed.returncode != 0 or len(completed.stdout) > MAX_BYTES:
+        raise SystemExit("local network discovery failed")
+    try:
+        payload = inspector.strict_json_loads(completed.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise SystemExit("local network discovery failed")
+    if not isinstance(payload, dict) or set(payload) != {"version", "networks"}:
+        raise SystemExit("local network discovery failed")
+    if payload["version"] != inspector.POLICY_VERSION or not isinstance(payload["networks"], list):
+        raise SystemExit("local network discovery failed")
+    networks = []
+    for entry in payload["networks"]:
+        if not isinstance(entry, dict) or set(entry) != {"family", "cidr", "interface"}:
+            raise SystemExit("local network discovery failed")
+        network = inspector.parse_network(entry["cidr"])
+        if network is None or entry["family"] != network.version or not inspector.valid_interface(entry["interface"]):
+            raise SystemExit("local network discovery failed")
+        networks.append(inspector.EligibleNetwork(
+            family=network.version, cidr=str(network), interface=entry["interface"]))
+    order = [inspector.network_key(entry) for entry in networks]
+    if order != sorted(order) or len(set(order)) != len(order):
+        raise SystemExit("local network discovery failed")
+    # `discover` reports "nothing eligible" as a successful empty projection.
+    # Refusing to stage it here is what keeps an unbound policy off the device.
+    if not networks:
+        raise SystemExit("no eligible local network")
+    return networks
+
+
+networks = discovered_networks()
 try:
-    env_fd = os.open(env_path, os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0))
+    env_fd = os.open(env_path, os.O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
 except OSError:
     raise SystemExit("unsafe env file")
 env_stat = os.fstat(env_fd)
-if not stat.S_ISREG(env_stat.st_mode) or env_stat.st_nlink != 1 or env_stat.st_uid != int(worker_uid) or stat.S_IMODE(env_stat.st_mode) != 0o600:
+if (not stat.S_ISREG(env_stat.st_mode) or env_stat.st_nlink != 1
+        or env_stat.st_uid != worker_uid or stat.S_IMODE(env_stat.st_mode) != 0o600):
     os.close(env_fd)
     raise SystemExit("unsafe env file")
-with os.fdopen(env_fd, encoding="utf-8") as stream:
-    for raw in stream:
-        line = raw.rstrip("\r\n")
-        if not line or line.startswith("#") or "=" not in line: continue
-        key, value = line.split("=", 1)
-        if key in values: raise SystemExit("duplicate policy setting")
-        values[key] = value.strip().strip('"').strip("'")
-cidr_text = values.get("RTSP_ALLOWED_CIDRS", "")
-cidrs = [part.strip() for part in cidr_text.split(",") if part.strip()]
-if not cidrs: raise SystemExit("RTSP_ALLOWED_CIDRS is required")
-canonical = []
-for text in cidrs:
-    network = ipaddress.ip_network(text, strict=True)
-    minimum = 8
-    if network.prefixlen < minimum or network.is_global or network.is_multicast or network.is_unspecified:
-        raise SystemExit("unsafe RTSP CIDR")
-    canonical.append(str(network))
-first = int(values.get("RTSP_UDP_PORT_FIRST", "24000"))
-last = int(values.get("RTSP_UDP_PORT_LAST", "24001"))
-if not (1 <= first <= last <= 65535 and last - first + 1 <= 64):
+try:
+    with os.fdopen(env_fd, "rb") as stream:
+        env_raw = stream.read(MAX_BYTES + 1)
+except OSError:
+    raise SystemExit("unsafe env file")
+if len(env_raw) > MAX_BYTES:
+    raise SystemExit("unsafe env file")
+try:
+    lines = env_raw.decode("utf-8").splitlines()
+except UnicodeDecodeError:
+    # Never re-raise: the decoder embeds the offending bytes in its message.
+    raise SystemExit("unsafe env file")
+positions = {}
+for index, line in enumerate(lines):
+    if not line or line.startswith("#") or "=" not in line:
+        continue
+    key = line.split("=", 1)[0]
+    if key in positions:
+        raise SystemExit("duplicate policy setting")
+    positions[key] = index
+
+
+def setting(key, default=""):
+    # A present-but-blank setting means "unset": the installer supplies its own
+    # default and regenerates a blank credential key, rather than hard-blocking
+    # an install until somebody hand-edits the private environment.
+    if key not in positions:
+        return default
+    value = lines[positions[key]].split("=", 1)[1].strip().strip('"').strip("'")
+    return value if value else default
+
+
+def assign(key, value):
+    if key in positions:
+        lines[positions[key]] = key + "=" + value
+    else:
+        positions[key] = len(lines)
+        lines.append(key + "=" + value)
+
+
+def udp_port(key, default):
+    text = setting(key, default)
+    if not DIGITS.fullmatch(text):
+        raise SystemExit("unsafe RTSP UDP range")
+    return int(text)
+
+
+udp_first = udp_port("RTSP_UDP_PORT_FIRST", "24000")
+udp_last = udp_port("RTSP_UDP_PORT_LAST", "24001")
+if not inspector.valid_udp_port(udp_first) or not inspector.valid_udp_port(udp_last):
+    # Policy version 2 refuses privileged ports outright. Name the bound so an
+    # operator who pinned a low port knows exactly what to change.
+    raise SystemExit(
+        "RTSP_UDP_PORT_FIRST/RTSP_UDP_PORT_LAST must be within 1024..65535")
+if udp_first > udp_last or udp_last - udp_first + 1 > 64:
     raise SystemExit("unsafe RTSP UDP range")
-with open(output, "w", encoding="utf-8") as stream:
-    json.dump({"version": 1, "workerUid": int(worker_uid), "streamUid": int(stream_uid), "allowedCidrs": canonical, "udpPortFirst": first, "udpPortLast": last}, stream, separators=(",", ":"), sort_keys=True)
-    stream.write("\n")
+credential_key = setting("RTSP_CREDENTIALS_KEY")
+if credential_key and not HEX_KEY.fullmatch(credential_key):
+    raise SystemExit("malformed RTSP credential key")
+if not credential_key:
+    assign("RTSP_CREDENTIALS_KEY", secrets.token_hex(32))
+
+digest = inspector.policy_digest(
+    inspector.POLICY_VERSION, worker_uid, stream_uid, networks, udp_first, udp_last)
+cidrs = []
+for entry in networks:
+    if entry.cidr not in cidrs:
+        cidrs.append(entry.cidr)
+assign("RTSP_ALLOWED_CIDRS", ",".join(cidrs))
+assign("RTSP_POLICY_DIGEST", digest)
+document = {
+    "version": inspector.POLICY_VERSION,
+    "workerUid": worker_uid,
+    "streamUid": stream_uid,
+    "networks": inspector.projection(networks),
+    "udpPortFirst": udp_first,
+    "udpPortLast": udp_last,
+    "digest": digest,
+}
+policy_body = (json.dumps(document, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
+env_body = ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def fsync_directory(path):
+    fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY | O_CLOEXEC)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def stage(path, body, uid, gid, mode):
+    # Deterministic name, but created exclusively: `.env.staged` sits in a
+    # worker-writable directory, so root must never adopt a file it did not
+    # create.  A racing creation between the unlink and the open fails closed.
+    staged = path + ".staged"
+    try:
+        try:
+            os.unlink(staged)
+        except FileNotFoundError:
+            pass
+        fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_CLOEXEC | O_NOFOLLOW, mode)
+        try:
+            os.fchmod(fd, mode)
+            os.fchown(fd, uid, gid)
+            os.write(fd, body)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        fsync_directory(staged)
+        # Re-read what actually landed: this catches a short write and refuses a
+        # staged path that turned into a link between the two opens.
+        check = os.open(staged, os.O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        try:
+            if os.read(check, MAX_BYTES + 1) != body:
+                raise SystemExit("staged policy did not persist")
+        finally:
+            os.close(check)
+    except OSError:
+        # A worker that plants a directory (or anything else) under the staged
+        # name gets the short refusal, never a traceback on the root stderr.
+        # NOTE: this program is fed through $( ... ), where a stray apostrophe
+        # would break the command substitution -- keep this heredoc free of them.
+        raise SystemExit("staged policy could not be written")
+
+
+stage(policy_path, policy_body, root_uid, root_gid, 0o600)
+stage(summary_path, policy_body, root_uid, root_gid, 0o644)
+stage(env_path, env_body, worker_uid, env_stat.st_gid, 0o600)
+# The only output: the identity of the environment file these settings were
+# read from, so the commit refuses to overwrite a file replaced since staging.
+sys.stdout.write("{}:{}\n".format(env_stat.st_dev, env_stat.st_ino))
 PY
-  then
-    rm -f "$policy_tmp"
+  )"; then
+    discard_staged_rtsp_policy "$policy_file" "$summary_file" "$env_file"
     return 1
   fi
 
-  sudo install -d -m 0755 -o root -g root "$policy_dir" /etc/home-worker/ca /usr/lib/home-worker /etc/polkit-1/rules.d /etc/tmpfiles.d
-  sudo install -m 0600 -o root -g root "$policy_tmp" "$policy_file"
-  rm -f "$policy_tmp"
+  # Debian 13 removed the legacy policykit-1 package name. Install the
+  # concrete daemon and client packages used by the systemd authorization flow.
+  if ! apt_get install -y ffmpeg nftables polkitd pkexec; then
+    discard_staged_rtsp_policy "$policy_file" "$summary_file" "$env_file"
+    return 1
+  fi
+
+  # Revalidate the staged tuple and commit it in the fixed order: private
+  # policy, public summary, environment.  The three renames cannot be globally
+  # atomic; a crash between them leaves a mixed tuple that both privileged and
+  # application readiness reject until an idempotent reinstall reconciles it.
+  if ! sudo python3 - "$inspector" "$policy_file" "$summary_file" "$env_file" "$root_uid" "$root_gid" "$(id -u "$USER")" "$env_identity" <<'PY'
+import importlib.machinery, importlib.util, os, re, stat, sys
+
+(inspector_path, policy_path, summary_path, env_path,
+ root_uid_text, root_gid_text, worker_uid_text, env_identity_text) = sys.argv[1:]
+DIGITS = re.compile(r"\d+")
+IDENTITY = re.compile(r"(\d+):(\d+)")
+HEX_KEY = re.compile(r"[0-9a-fA-F]{64}")
+O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+MAX_BYTES = 64 * 1024
+if not all(DIGITS.fullmatch(text) for text in (root_uid_text, root_gid_text, worker_uid_text)):
+    raise SystemExit("unsafe runtime identity")
+root_uid, root_gid, worker_uid = int(root_uid_text), int(root_gid_text), int(worker_uid_text)
+identity = IDENTITY.fullmatch(env_identity_text.strip())
+if identity is None:
+    raise SystemExit("unsafe runtime identity")
+env_device, env_inode = int(identity.group(1)), int(identity.group(2))
+
+loader = importlib.machinery.SourceFileLoader("live_stream_policy_inspector", inspector_path)
+inspector = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(inspector)
+
+
+def read_private(path, uid, gid, mode):
+    try:
+        fd = os.open(path, os.O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+    except OSError:
+        raise SystemExit("unsafe staged policy")
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != uid
+                or (gid is not None and info.st_gid != gid)
+                or stat.S_IMODE(info.st_mode) != mode):
+            raise SystemExit("unsafe staged policy")
+        body = os.read(fd, MAX_BYTES + 1)
+    except OSError:
+        raise SystemExit("unsafe staged policy")
+    finally:
+        os.close(fd)
+    if len(body) > MAX_BYTES:
+        raise SystemExit("unsafe staged policy")
+    return body
+
+
+policy_body = read_private(policy_path + ".staged", root_uid, root_gid, 0o600)
+summary_body = read_private(summary_path + ".staged", root_uid, root_gid, 0o644)
+env_body = read_private(env_path + ".staged", worker_uid, None, 0o600)
+if policy_body != summary_body:
+    raise SystemExit("staged policy disagreement")
+try:
+    document = inspector.strict_json_loads(policy_body.decode("utf-8"))
+except (UnicodeDecodeError, ValueError):
+    raise SystemExit("staged policy is not canonical")
+keys = {"version", "workerUid", "streamUid", "networks", "udpPortFirst", "udpPortLast", "digest"}
+if not isinstance(document, dict) or set(document) != keys or document["version"] != inspector.POLICY_VERSION:
+    raise SystemExit("staged policy is not canonical")
+if not inspector.valid_uid(document["workerUid"]) or not inspector.valid_uid(document["streamUid"]):
+    raise SystemExit("staged policy is not canonical")
+if document["workerUid"] != worker_uid or document["workerUid"] == document["streamUid"]:
+    raise SystemExit("staged policy is not canonical")
+if not inspector.valid_udp_port(document["udpPortFirst"]) or not inspector.valid_udp_port(document["udpPortLast"]):
+    raise SystemExit("staged policy is not canonical")
+if document["udpPortFirst"] > document["udpPortLast"]:
+    raise SystemExit("staged policy is not canonical")
+if not isinstance(document["networks"], list) or not document["networks"]:
+    raise SystemExit("staged policy is not canonical")
+networks = []
+for entry in document["networks"]:
+    if not isinstance(entry, dict) or set(entry) != {"family", "cidr", "interface"}:
+        raise SystemExit("staged policy is not canonical")
+    network = inspector.parse_network(entry["cidr"])
+    if network is None or entry["family"] != network.version or not inspector.valid_interface(entry["interface"]):
+        raise SystemExit("staged policy is not canonical")
+    networks.append(inspector.EligibleNetwork(
+        family=network.version, cidr=str(network), interface=entry["interface"]))
+order = [inspector.network_key(entry) for entry in networks]
+if order != sorted(order) or len(set(order)) != len(order):
+    raise SystemExit("staged policy is not canonical")
+digest = document["digest"]
+if not isinstance(digest, str) or not inspector.DIGEST_RE.fullmatch(digest):
+    raise SystemExit("staged policy is not canonical")
+if digest != inspector.policy_digest(
+        document["version"], document["workerUid"], document["streamUid"], networks,
+        document["udpPortFirst"], document["udpPortLast"]):
+    raise SystemExit("staged policy is not canonical")
+
+try:
+    env_text = env_body.decode("utf-8")
+except UnicodeDecodeError:
+    # Never re-raise: the decoder embeds the offending bytes in its message.
+    raise SystemExit("staged environment is not readable")
+values = {}
+for raw in env_text.splitlines():
+    if not raw or raw.startswith("#") or "=" not in raw:
+        continue
+    key, value = raw.split("=", 1)
+    if key in values:
+        raise SystemExit("duplicate policy setting")
+    values[key] = value.strip().strip('"').strip("'")
+cidrs = []
+for entry in networks:
+    if entry.cidr not in cidrs:
+        cidrs.append(entry.cidr)
+if values.get("RTSP_ALLOWED_CIDRS") != ",".join(cidrs) or values.get("RTSP_POLICY_DIGEST") != digest:
+    raise SystemExit("staged environment disagreement")
+if not HEX_KEY.fullmatch(values.get("RTSP_CREDENTIALS_KEY", "")):
+    raise SystemExit("staged environment disagreement")
+try:
+    env_fd = os.open(env_path, os.O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+except OSError:
+    raise SystemExit("unsafe env file")
+try:
+    info = os.fstat(env_fd)
+    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != worker_uid
+            or stat.S_IMODE(info.st_mode) != 0o600):
+        raise SystemExit("unsafe env file")
+    # The staged settings were derived from one specific file. If anything
+    # replaced it since, committing would silently discard those edits.
+    if info.st_dev != env_device or info.st_ino != env_inode:
+        raise SystemExit("env file changed during update")
+finally:
+    os.close(env_fd)
+
+
+def commit(path):
+    # read_private already validated this staged file, and os.replace re-resolves
+    # the name in a directory the worker can write. That window is benign: the
+    # worker already owns the environment file this commit installs, protected
+    # hardlinks block a cross-owner link, and everything renamed here was checked
+    # for canonical shape, digest, CIDRs, and a hex credential key above.
+    try:
+        os.replace(path + ".staged", path)
+        fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY | O_CLOEXEC)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        raise SystemExit("policy commit failed")
+
+
+commit(policy_path)
+commit(summary_path)
+commit(env_path)
+PY
+  then
+    # A commit failure before the first rename leaves the previous tuple whole;
+    # one after a rename leaves a mixed tuple that readiness rejects. Either
+    # way the stale staged files -- including a freshly generated credential
+    # key -- are removed, and the reconciling reinstall stages the tuple again.
+    discard_staged_rtsp_policy "$policy_file" "$summary_file" "$env_file"
+    return 1
+  fi
+
   install_root_asset_if_distinct "$SCRIPT_DIR/live-stream-net-helper" /usr/lib/home-worker/live-stream-net-helper 0755
   install_root_asset_if_distinct "$SCRIPT_DIR/live-stream-ffmpeg-runner" /usr/lib/home-worker/live-stream-ffmpeg-runner 0755
   sudo install -m 0644 -o root -g root "$ROOT_BUNDLE_DIR/systemd/homeworker-ffmpeg-stream@.service" /etc/systemd/system/homeworker-ffmpeg-stream@.service
@@ -310,6 +671,14 @@ EOF
         ;;
     esac
 
+    # Discovery gates every mutation in this branch, not just the runtime
+    # packages: without an eligible local network the install must fail before
+    # the Cloudflare keyring, the apt source, and cloudflared itself.
+    if ! rtsp_runtime_install_skipped; then
+      reap_stale_rtsp_staging
+      require_eligible_local_network
+    fi
+
     if ! command -v cloudflared >/dev/null 2>&1; then
       CLOUDFLARE_KEYRING_DIR="${CLOUDFLARE_KEYRING_DIR:-/usr/share/keyrings}"
       CLOUDFLARE_SOURCE_LIST_DIR="${CLOUDFLARE_SOURCE_LIST_DIR:-/etc/apt/sources.list.d}"
@@ -383,7 +752,7 @@ EOF
     fi
     cleanup_cloudflared_diagnostics
     trap - EXIT
-    if [ "${HOME_WORKER_RTSP_SKIP_RUNTIME_INSTALL:-0}" = "1" ] && [ "${VITEST:-}" = "true" ]; then
+    if rtsp_runtime_install_skipped; then
       : # Legacy cloudflared harness exercises only repository/diagnostic behavior.
     else
       install_rtsp_runtime
