@@ -33,6 +33,20 @@ else
   run_as_worker() { sudo -H -u "$USER" "$@"; }
 fi
 
+# Exit statuses 20-23 are reserved process-wide for the routines this script
+# runs, and the root helper honours them for the rtsp routine alone: one
+# operator-visible cause each, with every other nonzero status collapsing to an
+# ordinary dependency failure. A routine for another feature must never exit in
+# this range -- it would be told a cause that has nothing to do with it. Raw
+# discovery, package, and policy diagnostics stay on this stderr, which belongs
+# to the root journal alone.
+RTSP_EXIT_NO_LOCAL_NETWORK=20
+RTSP_EXIT_POLICY_GENERATION=21
+RTSP_EXIT_DEPENDENCY=22
+RTSP_EXIT_PRIVILEGED=23
+# Armed only once the durable tuple is installed; see the trap below.
+RTSP_TUPLE_COMMITTED=0
+
 # The RTSP durable tuple, spelled once. Staging, the commit, and the stale-file
 # reaper all address exactly these three paths, and the private worker
 # environment has no second location.
@@ -75,10 +89,21 @@ require_eligible_local_network() {
   # deliberately does not re-validate entries. The staging program re-runs
   # discovery and validates every field authoritatively before it writes a
   # single durable byte, so this must never become a second policy parser.
-  if ! sudo python3 - "$SCRIPT_DIR/live-stream-policy-inspector" <<'PY'
+  local status=0
+  sudo python3 - "$SCRIPT_DIR/live-stream-policy-inspector" <<'PY' || status=$?
 import importlib.machinery, importlib.util, subprocess, sys
 inspector_path = sys.argv[1]
 MAX_BYTES = 64 * 1024
+NO_LOCAL_NETWORK_STATUS = 20
+
+
+def no_eligible_local_network():
+    # A reserved status, so the shell can tell "nothing eligible" apart from
+    # every other refusal without parsing this message.
+    sys.stderr.write("no eligible local network\n")
+    raise SystemExit(NO_LOCAL_NETWORK_STATUS)
+
+
 loader = importlib.machinery.SourceFileLoader("live_stream_policy_inspector", inspector_path)
 inspector = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
 loader.exec_module(inspector)
@@ -99,12 +124,19 @@ if not isinstance(payload, dict) or payload.get("version") != inspector.POLICY_V
 if not isinstance(payload.get("networks"), list):
     raise SystemExit("local network discovery failed")
 if not payload["networks"]:
-    raise SystemExit("no eligible local network")
+    no_eligible_local_network()
 PY
-  then
-    echo "ERROR: no eligible local network for the RTSP runtime" >&2
-    return 1
+  if [ "$status" -eq 0 ]; then
+    return 0
   fi
+  if [ "$status" -eq "$RTSP_EXIT_NO_LOCAL_NETWORK" ]; then
+    echo "ERROR: no eligible local network for the RTSP runtime" >&2
+    return "$RTSP_EXIT_NO_LOCAL_NETWORK"
+  fi
+  # Discovery that failed is not discovery that found nothing: an operator told
+  # "no local network" would go looking for the wrong problem.
+  echo "ERROR: local network discovery for the RTSP runtime failed" >&2
+  return "$RTSP_EXIT_POLICY_GENERATION"
 }
 
 reap_stale_rtsp_staging() {
@@ -112,6 +144,13 @@ reap_stale_rtsp_staging() {
   # credential key that was never committed. Reap them at branch entry so no
   # secret-shaped artifact outlives the install that produced it.
   discard_staged_rtsp_policy "$RTSP_POLICY_FILE" "$RTSP_SUMMARY_FILE" "$RTSP_ENV_FILE"
+}
+
+rtsp_privileged_failure_after_commit() {
+  local status=$?
+  if [ "$status" -ne 0 ] && [ "${RTSP_TUPLE_COMMITTED:-0}" = "1" ]; then
+    exit "$RTSP_EXIT_PRIVILEGED"
+  fi
 }
 
 install_rtsp_runtime() {
@@ -155,8 +194,8 @@ install_rtsp_runtime() {
   # only leave staged files behind.  Credential keys are generated only when
   # absent/blank; existing non-empty keys are never printed or replaced and
   # malformed non-empty values fail closed.
-  local env_identity
-  if ! env_identity="$(sudo python3 - "$inspector" "$env_file" "$policy_file" "$summary_file" "$root_uid" "$root_gid" "$(id -u "$USER")" "$(id -u "$stream_user")" <<'PY'
+  local env_identity stage_status=0
+  env_identity="$(sudo python3 - "$inspector" "$env_file" "$policy_file" "$summary_file" "$root_uid" "$root_gid" "$(id -u "$USER")" "$(id -u "$stream_user")" <<'PY'
 import importlib.machinery, importlib.util, json, os, re, secrets, stat, subprocess, sys
 
 (inspector_path, env_path, policy_path, summary_path,
@@ -167,6 +206,16 @@ O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 MAX_BYTES = 64 * 1024
 DISCOVERY_TIMEOUT_SECONDS = 30
+NO_LOCAL_NETWORK_STATUS = 20
+
+
+def no_eligible_local_network():
+    # The one staging refusal with its own reserved status: every other failure
+    # below is a policy-generation failure, and both are pre-mutation.
+    sys.stderr.write("no eligible local network\n")
+    raise SystemExit(NO_LOCAL_NETWORK_STATUS)
+
+
 if not all(DIGITS.fullmatch(text) for text in (root_uid_text, root_gid_text, worker_uid_text, stream_uid_text)):
     raise SystemExit("unsafe runtime identity")
 root_uid, root_gid = int(root_uid_text), int(root_gid_text)
@@ -213,7 +262,7 @@ def discovered_networks():
     # `discover` reports "nothing eligible" as a successful empty projection.
     # Refusing to stage it here is what keeps an unbound policy off the device.
     if not networks:
-        raise SystemExit("no eligible local network")
+        no_eligible_local_network()
     return networks
 
 
@@ -360,16 +409,20 @@ stage(env_path, env_body, worker_uid, env_stat.st_gid, 0o600)
 # read from, so the commit refuses to overwrite a file replaced since staging.
 sys.stdout.write("{}:{}\n".format(env_stat.st_dev, env_stat.st_ino))
 PY
-  )"; then
+  )" || stage_status=$?
+  if [ "$stage_status" -ne 0 ]; then
     discard_staged_rtsp_policy "$policy_file" "$summary_file" "$env_file"
-    return 1
+    if [ "$stage_status" -eq "$RTSP_EXIT_NO_LOCAL_NETWORK" ]; then
+      return "$RTSP_EXIT_NO_LOCAL_NETWORK"
+    fi
+    return "$RTSP_EXIT_POLICY_GENERATION"
   fi
 
   # Debian 13 removed the legacy policykit-1 package name. Install the
   # concrete daemon and client packages used by the systemd authorization flow.
   if ! apt_get install -y ffmpeg nftables polkitd pkexec; then
     discard_staged_rtsp_policy "$policy_file" "$summary_file" "$env_file"
-    return 1
+    return "$RTSP_EXIT_DEPENDENCY"
   fi
 
   # Revalidate the staged tuple and commit it in the fixed order: private
@@ -387,6 +440,7 @@ HEX_KEY = re.compile(r"[0-9a-fA-F]{64}")
 O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 MAX_BYTES = 64 * 1024
+PRIVILEGED_FAILURE_STATUS = 23
 if not all(DIGITS.fullmatch(text) for text in (root_uid_text, root_gid_text, worker_uid_text)):
     raise SystemExit("unsafe runtime identity")
 root_uid, root_gid, worker_uid = int(root_uid_text), int(root_gid_text), int(worker_uid_text)
@@ -524,19 +578,43 @@ def stop_stream_helper():
         raise SystemExit("stream helper could not be stopped")
 
 
-stop_stream_helper()
-commit(policy_path)
-commit(summary_path)
-commit(env_path)
+try:
+    # From the stop attempt onward the helper may be down and the three renames
+    # may have landed in part. The shell never reaches the restart, so no
+    # failure in this region is an ordinary retry: it needs the reserved
+    # privileged status and a reconciling reinstall.
+    stop_stream_helper()
+    commit(policy_path)
+    commit(summary_path)
+    commit(env_path)
+except BaseException:
+    # One fixed token, never the raised message. Both policy_path and env_path
+    # are in scope here, so passing a SystemExit string through would let one
+    # future f-string leak a path into a log; the status carries the meaning.
+    sys.stderr.write("policy commit failed\n")
+    raise SystemExit(PRIVILEGED_FAILURE_STATUS) from None
 PY
   then
     # A commit failure before the first rename leaves the previous tuple whole;
     # one after a rename leaves a mixed tuple that readiness rejects. Either
     # way the stale staged files -- including a freshly generated credential
     # key -- are removed, and the reconciling reinstall stages the tuple again.
+    #
+    # Every refusal here is deliberately reported as a privileged failure, the
+    # staged-tuple revalidation that runs before the stop included. It is
+    # broader than "after the first rename" on purpose: this branch runs after
+    # the package step, so recovery must keep it gated instead of treating it
+    # as reconciliation-safe. Do not narrow it to a policy-generation failure.
     discard_staged_rtsp_policy "$policy_file" "$summary_file" "$env_file"
-    return 1
+    return "$RTSP_EXIT_PRIVILEGED"
   fi
+
+  # Past this point the tuple is installed and the stream helper is stopped, so
+  # every remaining failure needs privileged reconciliation rather than a plain
+  # retry. Arm it as a trap, not per command, so a later addition to the
+  # activation tail cannot quietly escape the classification.
+  RTSP_TUPLE_COMMITTED=1
+  trap rtsp_privileged_failure_after_commit EXIT
 
   install_root_asset_if_distinct "$SCRIPT_DIR/live-stream-net-helper" /usr/lib/home-worker/live-stream-net-helper 0755
   install_root_asset_if_distinct "$SCRIPT_DIR/live-stream-ffmpeg-runner" /usr/lib/home-worker/live-stream-ffmpeg-runner 0755
@@ -674,7 +752,7 @@ EOF
       amd64|i386|armhf|arm64) ;;
       *)
         echo "ERROR: cloudflared is not supported on Debian architecture: $CLOUDFLARED_ARCH" >&2
-        exit 1
+        exit "$RTSP_EXIT_DEPENDENCY"
         ;;
     esac
 
@@ -700,7 +778,7 @@ EOF
         if ! curl -fsSL -o "$CLOUDFLARE_KEY_TMP" https://pkg.cloudflare.com/cloudflare-main.gpg; then
           rm -f "$CLOUDFLARE_KEY_TMP"
           echo "ERROR: failed to download the Cloudflare apt signing key." >&2
-          exit 1
+          exit "$RTSP_EXIT_DEPENDENCY"
         fi
         sudo install -m 0644 "$CLOUDFLARE_KEY_TMP" "$CLOUDFLARE_KEYRING"
         rm -f "$CLOUDFLARE_KEY_TMP"
@@ -713,8 +791,8 @@ EOF
       fi
       rm -f "$CLOUDFLARE_SOURCE_TMP"
 
-      apt_get update
-      apt_get install -y cloudflared
+      apt_get update || exit "$RTSP_EXIT_DEPENDENCY"
+      apt_get install -y cloudflared || exit "$RTSP_EXIT_DEPENDENCY"
     fi
 
     CLOUDFLARED_BIN="$(command -v cloudflared)"
@@ -752,7 +830,7 @@ EOF
     set -e
     if [ "$DIAG_STATUS" -eq 1 ]; then
       echo "ERROR: cloudflared was installed but its version check failed." >&2
-      exit 1
+      exit "$RTSP_EXIT_DEPENDENCY"
     fi
     if [ "$DIAG_STATUS" -ne 0 ]; then
       echo "WARNING: cloudflared diagnostics failed. Check DNS resolution and outbound port 7844 (QUIC/HTTP2) before using live view." >&2

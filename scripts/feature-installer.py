@@ -29,7 +29,7 @@ LOCK_PATH = '/run/lock/homeworker-feature-install.lock'
 ROUTINES_PATH = '/usr/lib/home-worker/install-feature-routines'
 VERSION_PATH = '/usr/lib/home-worker/feature-installer.version'
 MANIFEST_PATH = '/usr/lib/home-worker/feature-installer.manifest'
-INSTALLER_VERSION = '5'
+INSTALLER_VERSION = '6'
 WORKER_NAME = 'homeworker'
 STREAM_NAME = 'homeworker-stream'
 STREAM_GROUP = 'homeworker-stream'
@@ -55,6 +55,27 @@ RESTART_SCOPES = {
     'motion': 'supervisor', 'rtsp': 'supervisor',
 }
 SAFE_ENV = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C', 'HOME_WORKER_PRIVILEGED': '1'}
+# The closed contract with the rtsp routine: one reserved exit status per
+# operator-visible cause. Every other nonzero status is an ordinary dependency
+# failure. Routine stdout/stderr stay attached to the root journal, so the
+# status is the only thing that ever crosses into a worker-readable result.
+#
+# Honoured for rtsp alone. The statuses are reserved across the whole routines
+# script, but no other feature has a cause to express, and an unrelated command
+# that happens to exit 20 under `set -e` must not tell an operator that a
+# feature with no network policy found no eligible local network.
+ROUTINE_EXIT_STATUS_FEATURE = 'rtsp'
+ROUTINE_EXIT_CODES = {
+    20: 'local-network-unavailable',
+    21: 'network-policy-generation-failed',
+    22: 'dependency-install-failed',
+    23: 'privileged-verification-failed',
+}
+ROUTINE_FAILURE_CODES = frozenset(ROUTINE_EXIT_CODES.values())
+# Causes a root-owned result may carry: the reserved routine causes plus the
+# three the helper itself decides. Worker-side causes never reach this wire.
+RESULT_FAILURE_CODES = ROUTINE_FAILURE_CODES | frozenset(
+    ('request-invalid', 'helper-version-mismatch', 'interrupted'))
 O_CLOEXEC = getattr(os, 'O_CLOEXEC', 0)
 O_NOFOLLOW = getattr(os, 'O_NOFOLLOW', 0)
 
@@ -316,7 +337,7 @@ def parse_result(data, request):
         if value['failureCode'] is not None or not value['privilegedReady'] or value['restartScope'] not in ('worker', 'supervisor', 'host'):
             raise InvalidRequest('result success')
     elif value['outcome'] == 'failed':
-        if (value['failureCode'] not in ('request-invalid', 'dependency-install-failed', 'privileged-verification-failed', 'helper-version-mismatch', 'interrupted')
+        if (value['failureCode'] not in RESULT_FAILURE_CODES
                 or value['privilegedReady'] is not False or value['restartScope'] is not None):
             raise InvalidRequest('result failure')
     else:
@@ -374,13 +395,18 @@ def run_routine(feature):
         process = subprocess.Popen([ROUTINES_PATH, feature], cwd='/', env=SAFE_ENV, shell=False,
                                    stdin=subprocess.DEVNULL, stdout=None, stderr=None, start_new_session=True)
     except OSError:
-        return 'failed'
+        return 'dependency-install-failed'
     try:
-        return 'ok' if process.wait(timeout=TIMEOUT_SECONDS) == 0 else 'failed'
+        status = process.wait(timeout=TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
         os.killpg(process.pid, signal.SIGKILL)
         process.wait()
         return 'interrupted'
+    if status == 0:
+        return 'ok'
+    if feature != ROUTINE_EXIT_STATUS_FEATURE:
+        return 'dependency-install-failed'
+    return ROUTINE_EXIT_CODES.get(status, 'dependency-install-failed')
 
 
 def verify_feature(feature):
@@ -633,14 +659,17 @@ def process_one():
             remove_entry(result_fd, request['jobId'] + '.running')
             return True
         write_marker(result_fd, request, worker_gid)
-        routine_status = run_routine(request['feature'])
+        routine_outcome = run_routine(request['feature'])
         verification_ok = verify_feature(request['feature'])
-        if routine_status == 'ok' and verification_ok:
+        if routine_outcome == 'ok' and verification_ok:
             payload = result_payload(request, 'succeeded')
-        elif routine_status == 'interrupted':
+        elif routine_outcome == 'interrupted':
             payload = result_payload(request, 'failed', 'interrupted')
-        elif routine_status != 'ok':
-            payload = result_payload(request, 'failed', 'dependency-install-failed')
+        elif routine_outcome != 'ok':
+            # Only the reserved causes survive; anything else is a dependency failure.
+            payload = result_payload(request, 'failed', routine_outcome
+                                     if routine_outcome in ROUTINE_FAILURE_CODES
+                                     else 'dependency-install-failed')
         else:
             payload = result_payload(request, 'failed', 'privileged-verification-failed')
         # Commit barrier ordering: terminal -> claim -> marker, each durable.

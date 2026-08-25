@@ -149,6 +149,29 @@ describe('manageable feature domain', () => {
     ).toThrow(RangeError);
   });
 
+  it('accepts the reserved RTSP install causes and still refuses anything outside the union', () => {
+    const result = (failureCode: string) => JSON.stringify({
+      version: 1, jobId: 'abcdefghijklmnop', feature: 'rtsp', outcome: 'failed',
+      failureCode, privilegedReady: false, restartScope: null,
+    });
+    for (const code of [
+      'local-network-unavailable',
+      'network-policy-generation-failed',
+      'dependency-install-failed',
+      'privileged-verification-failed',
+    ] as const) {
+      expect(parseFeatureInstallResult(result(code))).toMatchObject({
+        outcome: 'failed', failureCode: code, privilegedReady: false, restartScope: null,
+      });
+    }
+    // Root-journal rejection tokens describe why privileged verification
+    // refused; they are diagnostics, never operator-facing failure causes.
+    for (const token of ['policy-mode', 'summary-owner', 'digest-mismatch', 'stream-uid-mismatch']) {
+      expect(() => parseFeatureInstallResult(result(token))).toThrow(RangeError);
+    }
+    expect(() => parseFeatureInstallResult(result('local-network-unavailable '))).toThrow(RangeError);
+  });
+
   it('rejects a success result without privileged readiness and restart scope', () => {
     for (const result of [
       { privilegedReady: false, restartScope: 'worker' },

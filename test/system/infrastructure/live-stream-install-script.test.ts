@@ -198,7 +198,10 @@ describe('experimental live-stream installation', () => {
     );
     expect(guard).toContain('"$SCRIPT_DIR/live-stream-policy-inspector"');
     expect(guard).toContain('inspector_path, "discover"');
-    expect(guard).toContain('raise SystemExit("no eligible local network")');
+    // "Nothing eligible" leaves through its own reserved exit status, so the
+    // shell never has to parse this message to tell it from a failed discovery.
+    expect(guard).toContain('no eligible local network');
+    expect(guard).toContain('NO_LOCAL_NETWORK_STATUS = 20');
     // The gate reuses the inspector's own strict parser and version constant
     // rather than carrying a second, weaker copy of the discovery rules.
     expect(guard).toContain('inspector.strict_json_loads');

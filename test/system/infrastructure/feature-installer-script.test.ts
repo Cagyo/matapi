@@ -104,6 +104,100 @@ assert any('gpiomon' in c for c in digital_argv), digital_argv
     await expect(run('python3', ['-c', program])).resolves.toMatchObject({ stderr: '' });
   });
 
+  it('preserves the reserved routine exit codes and collapses every other status', async () => {
+    const program = String.raw`
+import importlib.util, json, os, tempfile
+spec = importlib.util.spec_from_file_location('helper', ${JSON.stringify(helper)})
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+assert m.ROUTINE_EXIT_CODES == {
+    20: 'local-network-unavailable', 21: 'network-policy-generation-failed',
+    22: 'dependency-install-failed', 23: 'privileged-verification-failed'}, m.ROUTINE_EXIT_CODES
+seen = {}
+class Fixed:
+    pid = 7
+    def __init__(self, status): self.status = status
+    def wait(self, timeout=None): return self.status
+def popen(status):
+    def build(argv, **kw):
+        seen['argv'] = argv; seen['kw'] = kw
+        return Fixed(status)
+    return build
+for status, expected in ((0, 'ok'), (20, 'local-network-unavailable'), (21, 'network-policy-generation-failed'),
+                         (22, 'dependency-install-failed'), (23, 'privileged-verification-failed'),
+                         (1, 'dependency-install-failed'), (2, 'dependency-install-failed'),
+                         (19, 'dependency-install-failed'), (24, 'dependency-install-failed'),
+                         (137, 'dependency-install-failed')):
+    m.subprocess.Popen = popen(status)
+    assert m.run_routine('rtsp') == expected, (status, expected)
+# The reservation is honoured for rtsp alone: another feature whose routine (or
+# any command under its errexit) happens to exit in the range must not be told
+# a cause it has no policy for.
+for feature in ('digital', 'uart', 'zigbee', 'motion'):
+    for status in sorted(m.ROUTINE_EXIT_CODES):
+        m.subprocess.Popen = popen(status)
+        assert m.run_routine(feature) == 'dependency-install-failed', (feature, status)
+    m.subprocess.Popen = popen(0)
+    assert m.run_routine(feature) == 'ok', feature
+# Routine stdout/stderr stay attached to the root journal: nothing is captured,
+# so no apt, route, or policy diagnostic can reach a worker-readable result.
+assert seen['kw']['stdout'] is None and seen['kw']['stderr'] is None, seen['kw']
+assert seen['kw']['stdin'] == m.subprocess.DEVNULL and seen['kw']['env'] == m.SAFE_ENV
+def unavailable(argv, **kw): raise OSError('routine missing')
+m.subprocess.Popen = unavailable
+assert m.run_routine('rtsp') == 'dependency-install-failed'
+request = {'version': 1, 'jobId': 'abcdefghijklmnop', 'feature': 'rtsp'}
+schema = {'version', 'jobId', 'feature', 'outcome', 'failureCode', 'privilegedReady', 'restartScope'}
+for code in m.ROUTINE_EXIT_CODES.values():
+    payload = m.result_payload(request, 'failed', code)
+    value = json.loads(payload)
+    assert set(value) == schema, value
+    assert value['failureCode'] == code and value['privilegedReady'] is False and value['restartScope'] is None
+    assert m.parse_result(payload, request) == value
+# Closed rejection tokens belong to the root journal, never to the wire format.
+for token in ('policy-mode', 'summary-owner', 'stream-uid-mismatch', 'failed', 'inspector-unavailable'):
+    bad = json.loads(m.result_payload(request, 'failed', 'dependency-install-failed'))
+    bad['failureCode'] = token
+    try:
+        m.parse_result(json.dumps(bad).encode(), request)
+        raise AssertionError('journal token accepted: ' + token)
+    except m.InvalidRequest:
+        pass
+
+
+def terminal_result(routine, verified):
+    with tempfile.TemporaryDirectory() as root:
+        m.INSTALL_ROOT = root; m.REQUEST_DIRECTORY = root + '/requests'
+        m.CLAIM_DIRECTORY = root + '/claims'; m.RESULT_DIRECTORY = root + '/results'
+        for path in (m.REQUEST_DIRECTORY, m.CLAIM_DIRECTORY, m.RESULT_DIRECTORY): os.mkdir(path)
+        os.write(os.open(m.REQUEST_DIRECTORY + '/abcdefghijklmnop.json', os.O_WRONLY | os.O_CREAT, 0o600),
+                 m.canonical_request(request))
+        uid, gid = os.getuid(), os.getgid()
+        m.worker_ids = lambda: (uid, gid); m.validate_layout = lambda *_: None
+        m.validate_root_bundle = lambda: None
+        m.directory_fd = lambda path, *_: os.open(path, os.O_RDONLY)
+        m.open_claim = lambda *_: m.canonical_request(request); m.os.fchown = lambda *_: None
+        m.run_routine = lambda _: routine; m.verify_feature = lambda _: verified
+        assert m.process_one() is True
+        return json.load(open(m.RESULT_DIRECTORY + '/abcdefghijklmnop.json'))
+
+
+def failed_with(code):
+    return {'version': 1, 'jobId': request['jobId'], 'feature': 'rtsp', 'outcome': 'failed',
+            'failureCode': code, 'privilegedReady': False, 'restartScope': None}
+
+
+for routine in m.ROUTINE_EXIT_CODES.values():
+    assert terminal_result(routine, False) == failed_with(routine), routine
+    assert terminal_result(routine, True) == failed_with(routine), routine
+# A zero routine status with a failed root verification is a privileged failure.
+assert terminal_result('ok', False) == failed_with('privileged-verification-failed')
+# Anything outside the closed mapping collapses at the write site as well.
+assert terminal_result('route-unavailable', False) == failed_with('dependency-install-failed')
+assert terminal_result('interrupted', False) == failed_with('interrupted')
+`;
+    await expect(run('python3', ['-c', program])).resolves.toMatchObject({ stderr: '' });
+  });
+
   it('loads privileged routines with a sudo wrapper that preserves literal argv', async () => {
     const { stdout } = await run('bash', ['-c', `
       temp_dir="$(mktemp -d)"

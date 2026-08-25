@@ -8,18 +8,19 @@ import { describe, expect, it } from 'vitest';
 
 const installFeature = readFileSync(resolve('scripts/install-feature.sh'), 'utf8');
 
+/** The program body a marker line introduces, whatever follows the redirection. */
 const heredoc = (marker: string): string => {
   const start = installFeature.indexOf(marker);
   if (start < 0) throw new Error(`RTSP program not found: ${marker}`);
-  const body = start + marker.length;
+  const body = installFeature.indexOf('\n', start + marker.length) + 1;
   return installFeature.slice(body, installFeature.indexOf('\nPY', body));
 };
 
-const GATE_MARKER = 'sudo python3 - "$SCRIPT_DIR/live-stream-policy-inspector" <<\'PY\'\n';
+const GATE_MARKER = 'sudo python3 - "$SCRIPT_DIR/live-stream-policy-inspector" <<\'PY\'';
 const STAGE_MARKER =
-  'env_identity="$(sudo python3 - "$inspector" "$env_file" "$policy_file" "$summary_file" "$root_uid" "$root_gid" "$(id -u "$USER")" "$(id -u "$stream_user")" <<\'PY\'\n';
+  'env_identity="$(sudo python3 - "$inspector" "$env_file" "$policy_file" "$summary_file" "$root_uid" "$root_gid" "$(id -u "$USER")" "$(id -u "$stream_user")" <<\'PY\'';
 const COMMIT_MARKER =
-  'sudo python3 - "$inspector" "$policy_file" "$summary_file" "$env_file" /etc/systemd/system/homeworker-stream-net.service "$root_uid" "$root_gid" "$(id -u "$USER")" "$env_identity" <<\'PY\'\n';
+  'sudo python3 - "$inspector" "$policy_file" "$summary_file" "$env_file" /etc/systemd/system/homeworker-stream-net.service "$root_uid" "$root_gid" "$(id -u "$USER")" "$env_identity" <<\'PY\'';
 
 const PYTHON = execFileSync('python3', ['-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' }).trim();
 const OWNER_UID = process.getuid?.() ?? 0;
@@ -157,7 +158,7 @@ function policyHarness(options: { env?: string; networks?: Network[] } = {}) {
 type Harness = ReturnType<typeof policyHarness>;
 
 /** Runs the real privileged routine against stubbed sudo/id/getent and a fixture inspector. */
-function routineHarness(networks: Network[]) {
+function routineHarness(networks: Network[], options: { entry?: string; aptStatus?: number } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'rtsp-privileged-routine-'));
   const bin = join(root, 'bin');
   const bundle = join(root, 'bundle');
@@ -180,8 +181,8 @@ function routineHarness(networks: Network[]) {
   }
   writeFileSync(join(bin, 'getent'), '#!/bin/sh\nexit 0\n');
   writeFileSync(join(bin, 'id'), '#!/bin/sh\nif [ "$1" = "-u" ]; then /usr/bin/id -u; else exit 1; fi\n');
-  writeFileSync(join(bin, 'sudo'), `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(log)}\ncase "$1" in python3) shift; exec python3 "$@";; rm) shift; exec /bin/rm "$@";; *) exit 0;; esac\n`);
-  writeFileSync(join(bin, 'apt-get'), `#!/bin/sh\nprintf 'apt-get %s\\n' "$*" >> ${JSON.stringify(log)}\n`);
+  writeFileSync(join(bin, 'sudo'), `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(log)}\ncase "$1" in python3) shift; exec python3 "$@";; rm) shift; exec /bin/rm "$@";; apt-get) shift; exec apt-get "$@";; *) exit 0;; esac\n`);
+  writeFileSync(join(bin, 'apt-get'), `#!/bin/sh\nprintf 'apt-get %s\\n' "$*" >> ${JSON.stringify(log)}\nexit ${options.aptStatus ?? 0}\n`);
   for (const name of ['getent', 'id', 'sudo', 'apt-get']) chmodSync(join(bin, name), 0o755);
   const prelude = installFeature.split(/^case "\$FEATURE" in/m)[0]
     .replaceAll('/usr/bin/sudo', join(bin, 'sudo'))
@@ -191,9 +192,23 @@ function routineHarness(networks: Network[]) {
     .replace('local root_uid=0 root_gid=0', `local root_uid=${OWNER_UID} root_gid=${OWNER_GID}`)
     .replace('"$(id -u "$stream_user")"', `"${STREAM_UID}"`);
   const script = join(root, 'run.sh');
-  writeFileSync(script, `#!/bin/bash\nset -euo pipefail\nexport PATH=${JSON.stringify(bin)}:$PATH\nHOME_WORKER_PRIVILEGED=1\n${prelude}\ninstall_rtsp_runtime\n`);
+  writeFileSync(script, `#!/bin/bash\nset -euo pipefail\nexport PATH=${JSON.stringify(bin)}:$PATH\nHOME_WORKER_PRIVILEGED=1\n${prelude}\n${options.entry ?? 'install_rtsp_runtime'}\n`);
   chmodSync(script, 0o755);
-  return { root, bin, bundle, app, etc, log, run: () => execFileSync('bash', [script], { stdio: 'pipe' }) };
+  return { root, bin, bundle, app, etc, log, configPath, run: () => execFileSync('bash', [script], { stdio: 'pipe' }) };
+}
+
+/**
+ * The reserved routine exit status the privileged helper turns into one closed
+ * failure cause. A routine that merely "threw" would prove nothing about which
+ * cause the operator is told, so every test names the status it expects.
+ */
+function routineExitStatus(run: () => unknown): number {
+  try {
+    run();
+  } catch (error) {
+    return (error as { status?: number }).status ?? -1;
+  }
+  throw new Error('the privileged routine unexpectedly succeeded');
 }
 
 /** The commit program's own refusal message, so a test can name the gate it hit. */
@@ -306,12 +321,24 @@ describe('restricted RTSP runtime installation', () => {
     };
     try {
       let rejection = '';
+      let status = 0;
       try {
         runGate(empty);
       } catch (error) {
         rejection = String((error as { stderr?: Buffer }).stderr ?? '');
+        status = (error as { status?: number }).status ?? -1;
       }
       expect(rejection).toContain('no eligible local network');
+      // "Nothing eligible" is its own reserved status; a discovery that fails
+      // instead must not borrow it.
+      expect(status).toBe(20);
+      writeFileSync(empty.inspector, [
+        `#!${PYTHON}`, 'import sys', 'POLICY_VERSION = 2',
+        'def strict_json_loads(text): raise ValueError("unused")',
+        'if __name__ == "__main__": sys.exit(9)', '',
+      ].join('\n'));
+      chmodSync(empty.inspector, 0o755);
+      expect(routineExitStatus(() => runGate(empty))).not.toBe(20);
       expect(() => runGate(present)).not.toThrow();
     } finally {
       empty.cleanup();
@@ -929,7 +956,7 @@ describe('restricted RTSP runtime installation', () => {
     const { root, app, etc, log, run } = routineHarness([]);
     try {
       const before = readFileSync(join(app, '.env'), 'utf8');
-      expect(() => run()).toThrow();
+      expect(routineExitStatus(run)).toBe(20);
       // Neither the durable tuple nor a staged file nor a package appeared.
       expect(existsSync(join(etc, 'live-stream-policy.json'))).toBe(false);
       expect(existsSync(join(etc, 'live-stream-policy.summary.json'))).toBe(false);
@@ -939,6 +966,98 @@ describe('restricted RTSP runtime installation', () => {
       expect(readFileSync(log, 'utf8')).not.toContain('apt-get');
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('reserves one exit status per RTSP install cause, from the gate to the activation tail', () => {
+    // 20 -- the pre-package gate found nothing eligible.
+    const gate = routineHarness([], { entry: 'require_eligible_local_network' });
+    try {
+      expect(routineExitStatus(gate.run)).toBe(20);
+      expect(readFileSync(gate.log, 'utf8')).not.toContain('apt-get');
+    } finally {
+      rmSync(gate.root, { recursive: true, force: true });
+    }
+
+    // 21 -- discovery itself failed, which is not the same as "nothing eligible".
+    const broken = routineHarness([ETH0], { entry: 'require_eligible_local_network' });
+    try {
+      writeFileSync(broken.configPath, 'not json');
+      expect(routineExitStatus(broken.run)).toBe(21);
+      expect(readFileSync(broken.log, 'utf8')).not.toContain('apt-get');
+    } finally {
+      rmSync(broken.root, { recursive: true, force: true });
+    }
+
+    // 21 -- staging refused before any package or durable mutation.
+    const staging = routineHarness([ETH0]);
+    try {
+      chmodSync(join(staging.app, '.env'), 0o644);
+      expect(routineExitStatus(staging.run)).toBe(21);
+      expect(readFileSync(staging.log, 'utf8')).not.toContain('apt-get');
+      expect(existsSync(join(staging.etc, 'live-stream-policy.json'))).toBe(false);
+      expect(existsSync(join(staging.app, '.env.staged'))).toBe(false);
+    } finally {
+      rmSync(staging.root, { recursive: true, force: true });
+    }
+
+    // 22 -- the package command failed, with the durable tuple still untouched.
+    const packages = routineHarness([ETH0], { aptStatus: 100 });
+    try {
+      expect(routineExitStatus(packages.run)).toBe(22);
+      expect(readFileSync(packages.log, 'utf8')).toContain('apt-get');
+      expect(existsSync(join(packages.etc, 'live-stream-policy.json'))).toBe(false);
+      expect(existsSync(join(packages.etc, 'live-stream-policy.json.staged'))).toBe(false);
+      expect(existsSync(join(packages.app, '.env.staged'))).toBe(false);
+    } finally {
+      rmSync(packages.root, { recursive: true, force: true });
+    }
+
+    // 23 -- the commit program refused, which the shell reports as a privileged
+    // failure whether or not a rename had already landed. A durable target that
+    // is a directory makes the first rename fail inside the commit region.
+    const commitFail = routineHarness([ETH0]);
+    try {
+      mkdirSync(join(commitFail.etc, 'live-stream-policy.json'));
+      expect(routineExitStatus(commitFail.run)).toBe(23);
+      expect(existsSync(join(commitFail.app, '.env.staged'))).toBe(false);
+    } finally {
+      rmSync(commitFail.root, { recursive: true, force: true });
+    }
+
+    // 23 -- the tuple is committed and the activation tail failed, so the
+    // helper may be stopped and only a privileged reinstall can reconcile it.
+    const activation = routineHarness([ETH0]);
+    try {
+      rmSync(join(activation.bundle, 'systemd', 'homeworker-stream-systemd.rules'));
+      expect(routineExitStatus(activation.run)).toBe(23);
+      expect(existsSync(join(activation.etc, 'live-stream-policy.json'))).toBe(true);
+    } finally {
+      rmSync(activation.root, { recursive: true, force: true });
+    }
+  });
+
+  it('reserves the privileged failure status from the stop attempt onward', () => {
+    const beforeRename = policyHarness();
+    try {
+      beforeRename.install();
+      beforeRename.setNetworks([{ family: 4, cidr: '10.4.0.0/24', interface: 'eth1' }]);
+      beforeRename.stage();
+      // Stopped but never restarted: the stop succeeded and the first rename
+      // never happened, so the durable tuple survives but the helper is down.
+      expect(routineExitStatus(() => beforeRename.commit(0, undefined, { unit: true }))).toBe(23);
+      // A stop that refuses aborts in the same region and reports the same cause.
+      expect(routineExitStatus(() => beforeRename.commit(3, undefined, { unit: true, stopStatus: 1 }))).toBe(23);
+    } finally {
+      beforeRename.cleanup();
+    }
+
+    const afterRename = policyHarness();
+    try {
+      afterRename.stage();
+      expect(routineExitStatus(() => afterRename.commit(1))).toBe(23);
+    } finally {
+      afterRename.cleanup();
     }
   });
 

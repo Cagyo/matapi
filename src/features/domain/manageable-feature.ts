@@ -18,16 +18,28 @@ export type FeatureAttentionReason =
   | 'partial-state-uncertain'
   | 'restart-required'
   | 'helper-update-required';
-export type FeatureInstallFailureCode =
-  | 'request-invalid'
-  | 'request-publish-failed'
-  | 'dependency-install-failed'
-  | 'privileged-verification-failed'
-  | 'application-verification-failed'
-  | 'partial-state-uncertain'
-  | 'helper-version-mismatch'
-  | 'result-invalid'
-  | 'interrupted';
+/**
+ * Every cause an install can end with, spelled once. The privileged routine
+ * reserves one exit status per RTSP-specific cause and the helper collapses
+ * anything else to `dependency-install-failed`, so this union stays closed and
+ * carries no diagnostics: raw route output and package errors belong to the
+ * root journal only.
+ */
+export const FEATURE_INSTALL_FAILURE_CODES = [
+  'request-invalid',
+  'request-publish-failed',
+  'local-network-unavailable',
+  'network-policy-generation-failed',
+  'dependency-install-failed',
+  'privileged-verification-failed',
+  'application-verification-failed',
+  'partial-state-uncertain',
+  'helper-version-mismatch',
+  'result-invalid',
+  'interrupted',
+] as const;
+
+export type FeatureInstallFailureCode = (typeof FEATURE_INSTALL_FAILURE_CODES)[number];
 
 export interface FeatureInstallRequestV1 {
   version: 1;
@@ -82,17 +94,7 @@ export interface CreateFeatureInstallJob {
 }
 
 const JOB_ID = /^[A-Za-z0-9_-]{16}$/;
-const FAILURE_CODES = new Set<FeatureInstallFailureCode>([
-  'request-invalid',
-  'request-publish-failed',
-  'dependency-install-failed',
-  'privileged-verification-failed',
-  'application-verification-failed',
-  'partial-state-uncertain',
-  'helper-version-mismatch',
-  'result-invalid',
-  'interrupted',
-]);
+const FAILURE_CODES = new Set<FeatureInstallFailureCode>(FEATURE_INSTALL_FAILURE_CODES);
 
 export function isManageableFeature(
   value: unknown,
