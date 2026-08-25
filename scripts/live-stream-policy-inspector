@@ -1,0 +1,462 @@
+#!/usr/bin/python3
+"""Root-only physical local-network policy inspector.
+
+The protocol accepts two fixed commands and nothing else. It never accepts
+paths, interface names, CIDRs, executables, or environment overrides, so an
+unprivileged caller cannot widen or redirect what root inspects.
+
+  discover          emit the canonical eligible-network projection
+  verify-installed  compare the installed public summary with current routes
+
+Exit codes: 0 emitted a verdict, 1 the network state is unusable, 2 the command
+is not one of the two fixed commands. Raw route and link records stay in the
+root journal; stdout and stderr carry only canonical projections and one short
+code.
+"""
+
+import hashlib
+import ipaddress
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+import syslog
+from dataclasses import dataclass
+from pathlib import Path
+
+IP_BINARY = "/usr/sbin/ip"
+IP_ENVIRONMENT = {"LANG": "C", "LC_ALL": "C", "PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}
+IP_TIMEOUT_SECONDS = 5
+SYS_CLASS_NET = Path("/sys/class/net")
+SUMMARY_PATH = Path("/etc/home-worker/live-stream-policy.summary.json")
+VALID_COMMANDS = {"discover", "verify-installed"}
+POLICY_VERSION = 2
+MAX_OUTPUT_BYTES = 64 * 1024
+EXPECTED_SUMMARY_OWNER_UID = 0
+EXPECTED_SUMMARY_MODE = 0o644
+MIN_UDP_PORT = 1024
+MAX_UDP_PORT = 65535
+ARPHRD_ETHER = 1
+INTERFACE_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._-]{0,14}$")
+DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+PRIVATE_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("fc00::/7"),
+)
+UNAVAILABLE = "local-network-unavailable"
+STALE = "policy-stale"
+SUMMARY_INVALID = "policy-summary-invalid"
+
+
+class Malformed(Exception):
+    """The kernel state itself is unreadable, so the whole answer fails closed."""
+
+
+class Unavailable(Exception):
+    """Current network state could not be established."""
+
+
+class SummaryInvalid(Exception):
+    """The installed public summary is missing or untrustworthy."""
+
+
+@dataclass(frozen=True)
+class EligibleNetwork:
+    family: int
+    cidr: str
+    interface: str
+
+
+def journal(label, raw):
+    """Raw `ip` output belongs to the root journal only, never to the worker."""
+    syslog.openlog("live-stream-policy-inspector", syslog.LOG_PID, syslog.LOG_DAEMON)
+    syslog.syslog(syslog.LOG_ERR, "{}: {}".format(label, raw[:MAX_OUTPUT_BYTES]))
+
+
+def strict_json_loads(raw):
+    def unique_object(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate key")
+            value[key] = item
+        return value
+    return json.loads(raw, object_pairs_hook=unique_object)
+
+
+def valid_interface(value):
+    return (
+        isinstance(value, str)
+        and len(value.encode("utf-8")) <= 15
+        and INTERFACE_RE.fullmatch(value) is not None
+        and value not in (".", "..", "lo")
+    )
+
+
+def valid_uid(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def valid_udp_port(value):
+    return isinstance(value, int) and not isinstance(value, bool) and MIN_UDP_PORT <= value <= MAX_UDP_PORT
+
+
+def parse_network(text):
+    """Return a canonical private network, or None when the prefix is not eligible."""
+    if not isinstance(text, str) or "/" not in text:
+        return None
+    try:
+        network = ipaddress.ip_network(text, strict=True)
+    except ValueError:
+        return None
+    if str(network) != text:
+        return None
+    if network.prefixlen == 0 or network.is_loopback or network.is_link_local:
+        return None
+    if network.is_multicast or network.is_unspecified or network.is_global:
+        return None
+    if not any(network.version == private.version and network.subnet_of(private) for private in PRIVATE_NETWORKS):
+        return None
+    return network
+
+
+def string_field(record, key):
+    value = record.get(key)
+    if value is not None and not isinstance(value, str):
+        raise Malformed(key)
+    return value
+
+
+def eligible_interfaces(link_json, physical_devices):
+    """Names of administratively up, carrier-up, device-backed Ethernet/Wi-Fi links."""
+    if not isinstance(link_json, list):
+        raise Malformed("link")
+    names = set()
+    seen = set()
+    for record in link_json:
+        if not isinstance(record, dict):
+            raise Malformed("link")
+        name = record.get("ifname")
+        if not isinstance(name, str):
+            raise Malformed("ifname")
+        if name in seen:
+            raise Malformed("ifname")
+        seen.add(name)
+        flags = record.get("flags", [])
+        if not isinstance(flags, list) or not all(isinstance(flag, str) for flag in flags):
+            raise Malformed("flags")
+        linkinfo = record.get("linkinfo")
+        if linkinfo is not None and not isinstance(linkinfo, dict):
+            raise Malformed("linkinfo")
+        if not valid_interface(name) or name not in physical_devices:
+            continue
+        if string_field(record, "link_type") != "ether":
+            continue
+        if record.get("master") is not None or (linkinfo or {}).get("info_kind") is not None:
+            continue
+        if string_field(record, "operstate") != "UP" or "UP" not in flags or "LOWER_UP" not in flags:
+            continue
+        names.add(name)
+    return names
+
+
+def discover_eligible_networks(route_json, link_json, physical_devices):
+    """Canonical directly connected private networks of physical interfaces."""
+    interfaces = eligible_interfaces(link_json, physical_devices)
+    if not isinstance(route_json, list):
+        raise Malformed("route")
+    found = set()
+    for record in route_json:
+        if not isinstance(record, dict):
+            raise Malformed("route")
+        device = string_field(record, "dev")
+        destination = string_field(record, "dst")
+        if device is None or destination is None or device not in interfaces:
+            continue
+        if string_field(record, "table") not in (None, "main"):
+            continue
+        if string_field(record, "type") not in (None, "unicast"):
+            continue
+        if record.get("gateway") is not None or record.get("via") is not None or record.get("nexthops") is not None:
+            continue
+        network = parse_network(destination)
+        if network is None:
+            continue
+        scope = string_field(record, "scope")
+        # iproute2 prints `scope link` for connected IPv4 routes; for IPv6 it
+        # reports the universe scope or omits the field entirely, so on-link
+        # membership there rests on the absent gateway and the physical device.
+        if network.version == 4:
+            if scope != "link":
+                continue
+        elif scope not in (None, "link", "global", "universe"):
+            continue
+        found.add(EligibleNetwork(family=network.version, cidr=str(network), interface=device))
+    return sorted(found, key=network_key)
+
+
+def network_key(entry):
+    """Canonical policy order: family, network bytes, prefix length, interface."""
+    network = ipaddress.ip_network(entry.cidr)
+    return (entry.family, network.network_address.packed, network.prefixlen, entry.interface)
+
+
+def policy_digest(version, worker_uid, stream_uid, networks, udp_first, udp_last):
+    """SHA-256 over the canonical encoding of every security-relevant field.
+
+    The canonical encoding is compact UTF-8 JSON with sorted object keys, so the
+    installer and every verifier derive the same digest from the same policy.
+    """
+    payload = {
+        "version": version,
+        "workerUid": worker_uid,
+        "streamUid": stream_uid,
+        "networks": [
+            {"family": network.family, "cidr": network.cidr, "interface": network.interface}
+            for network in networks
+        ],
+        "udpPortFirst": udp_first,
+        "udpPortLast": udp_last,
+    }
+    encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def run_ip(arguments, optional=False):
+    """Return bounded stdout of one fixed `ip` invocation.
+
+    An optional dump answers None when the kernel refuses the request, which is
+    how a disabled address family reports itself.
+    """
+    try:
+        completed = subprocess.run(
+            [IP_BINARY, *arguments],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=IP_ENVIRONMENT,
+            timeout=IP_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise Unavailable("ip")
+    if completed.returncode != 0:
+        if optional:
+            return None
+        raise Unavailable("ip")
+    if len(completed.stdout) > MAX_OUTPUT_BYTES:
+        raise Unavailable("ip")
+    try:
+        return completed.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        raise Unavailable("ip")
+
+
+def parse_ip_output(label, raw):
+    try:
+        return strict_json_loads(raw)
+    except ValueError:
+        journal(label, raw)
+        raise Unavailable(label)
+
+
+def read_link_state():
+    raw = run_ip(["-d", "-j", "link", "show"])
+    return [("link", raw)], parse_ip_output("link", raw)
+
+
+def read_route_state():
+    """Return labelled raw dumps and the merged main-table route records.
+
+    A kernel booted with `ipv6.disable=1` refuses the IPv6 dump. IPv6 only ever
+    contributes optional unique-local prefixes, so a refused family is an empty
+    route set rather than a dead installer; a refused IPv4 dump stays fatal, and
+    a dump the kernel did answer must still parse. Tolerating the non-zero exit
+    covers every way IPv6 can be absent, which probing one fixed procfs path
+    would not, and it leaves no gap between a probe and the dump itself.
+    """
+    payloads = [("route4", run_ip(["-j", "-4", "route", "show", "table", "main"]))]
+    raw_v6 = run_ip(["-j", "-6", "route", "show", "table", "main"], optional=True)
+    if raw_v6 is not None:
+        payloads.append(("route6", raw_v6))
+    records = []
+    for label, raw in payloads:
+        parsed = parse_ip_output(label, raw)
+        if not isinstance(parsed, list):
+            journal(label, raw)
+            raise Unavailable(label)
+        records.extend(parsed)
+    return payloads, records
+
+
+def collect_physical_devices():
+    """Interfaces the kernel backs with a real Ethernet-class device."""
+    devices = set()
+    try:
+        entries = sorted(os.listdir(SYS_CLASS_NET))
+    except OSError:
+        raise Unavailable("sysfs")
+    for name in entries:
+        if not valid_interface(name):
+            continue
+        entry = SYS_CLASS_NET / name
+        if not (entry / "device").exists():
+            continue
+        try:
+            with open(entry / "type", "rb") as stream:
+                raw = stream.read(16)
+        except OSError:
+            continue
+        try:
+            if int(raw.decode("utf-8").strip()) != ARPHRD_ETHER:
+                continue
+        except ValueError:
+            continue
+        devices.add(name)
+    return devices
+
+
+def current_networks():
+    link_payloads, link_json = read_link_state()
+    route_payloads, route_json = read_route_state()
+    physical_devices = collect_physical_devices()
+    try:
+        return discover_eligible_networks(route_json, link_json, physical_devices)
+    except Malformed:
+        for label, raw in [*link_payloads, *route_payloads]:
+            journal(label, raw)
+        raise Unavailable("state")
+
+
+def open_summary():
+    """Open the fixed public summary with no-follow, single-link, owner, mode, and size checks."""
+    try:
+        descriptor = os.open(SUMMARY_PATH, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        raise SummaryInvalid("open")
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != EXPECTED_SUMMARY_MODE:
+            raise SummaryInvalid("mode")
+        if info.st_uid != EXPECTED_SUMMARY_OWNER_UID or info.st_nlink != 1:
+            raise SummaryInvalid("owner")
+        if info.st_size > MAX_OUTPUT_BYTES:
+            raise SummaryInvalid("size")
+        raw = os.read(descriptor, MAX_OUTPUT_BYTES + 1)
+    except OSError:
+        raise SummaryInvalid("read")
+    finally:
+        os.close(descriptor)
+    if len(raw) > MAX_OUTPUT_BYTES:
+        raise SummaryInvalid("size")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise SummaryInvalid("encoding")
+
+
+def load_summary():
+    """Return the installed digest and canonical network projection."""
+    try:
+        raw = strict_json_loads(open_summary())
+    except ValueError:
+        raise SummaryInvalid("json")
+    keys = {"version", "workerUid", "streamUid", "networks", "udpPortFirst", "udpPortLast", "digest"}
+    if not isinstance(raw, dict) or set(raw) != keys or raw["version"] != POLICY_VERSION:
+        raise SummaryInvalid("shape")
+    if not valid_uid(raw["workerUid"]) or not valid_uid(raw["streamUid"]) or raw["workerUid"] == raw["streamUid"]:
+        raise SummaryInvalid("identity")
+    if not valid_udp_port(raw["udpPortFirst"]) or not valid_udp_port(raw["udpPortLast"]):
+        raise SummaryInvalid("udp-range")
+    if raw["udpPortFirst"] > raw["udpPortLast"]:
+        raise SummaryInvalid("udp-range")
+    if not isinstance(raw["networks"], list) or not raw["networks"]:
+        raise SummaryInvalid("networks")
+    networks = []
+    for entry in raw["networks"]:
+        if not isinstance(entry, dict) or set(entry) != {"family", "cidr", "interface"}:
+            raise SummaryInvalid("networks")
+        network = parse_network(entry["cidr"])
+        if network is None or entry["family"] != network.version or not valid_interface(entry["interface"]):
+            raise SummaryInvalid("networks")
+        networks.append(EligibleNetwork(family=network.version, cidr=str(network), interface=entry["interface"]))
+    order = [network_key(entry) for entry in networks]
+    if order != sorted(order) or len(set(order)) != len(order):
+        raise SummaryInvalid("order")
+    digest = raw["digest"]
+    if not isinstance(digest, str) or not DIGEST_RE.fullmatch(digest):
+        raise SummaryInvalid("digest")
+    expected = policy_digest(
+        raw["version"], raw["workerUid"], raw["streamUid"], networks, raw["udpPortFirst"], raw["udpPortLast"]
+    )
+    if digest != expected:
+        raise SummaryInvalid("digest")
+    return digest, networks
+
+
+def projection(networks):
+    return [
+        {"family": network.family, "cidr": network.cidr, "interface": network.interface}
+        for network in networks
+    ]
+
+
+def emit(payload):
+    sys.stdout.write(json.dumps(payload, separators=(",", ":")) + "\n")
+
+
+def discover():
+    try:
+        networks = current_networks()
+    except Unavailable:
+        print("network-state-unavailable", file=sys.stderr)
+        return 1
+    emit({"version": POLICY_VERSION, "networks": projection(networks)})
+    return 0
+
+
+def verdict(ready, reason, digest, networks):
+    emit({
+        "version": POLICY_VERSION,
+        "ready": ready,
+        "reason": reason,
+        "digest": digest,
+        "networks": projection(networks),
+    })
+    return 0
+
+
+def verify_installed():
+    try:
+        digest, installed = load_summary()
+    except SummaryInvalid:
+        return verdict(False, SUMMARY_INVALID, None, [])
+    try:
+        networks = current_networks()
+    except Unavailable:
+        networks = []
+    if not networks:
+        return verdict(False, UNAVAILABLE, None, [])
+    if projection(installed) != projection(networks):
+        return verdict(False, STALE, digest, networks)
+    return verdict(True, None, digest, networks)
+
+
+def main(argv):
+    if len(argv) != 1 or argv[0] not in VALID_COMMANDS:
+        return 2
+    try:
+        return discover() if argv[0] == "discover" else verify_installed()
+    except Exception:
+        # A future `ip` schema change must never turn into a traceback on the
+        # stderr the unprivileged worker reads.
+        print("network-state-unavailable", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
