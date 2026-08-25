@@ -376,10 +376,10 @@ PY
   # policy, public summary, environment.  The three renames cannot be globally
   # atomic; a crash between them leaves a mixed tuple that both privileged and
   # application readiness reject until an idempotent reinstall reconciles it.
-  if ! sudo python3 - "$inspector" "$policy_file" "$summary_file" "$env_file" "$root_uid" "$root_gid" "$(id -u "$USER")" "$env_identity" <<'PY'
-import importlib.machinery, importlib.util, os, re, stat, sys
+  if ! sudo python3 - "$inspector" "$policy_file" "$summary_file" "$env_file" /etc/systemd/system/homeworker-stream-net.service "$root_uid" "$root_gid" "$(id -u "$USER")" "$env_identity" <<'PY'
+import importlib.machinery, importlib.util, os, re, stat, subprocess, sys
 
-(inspector_path, policy_path, summary_path, env_path,
+(inspector_path, policy_path, summary_path, env_path, unit_path,
  root_uid_text, root_gid_text, worker_uid_text, env_identity_text) = sys.argv[1:]
 DIGITS = re.compile(r"\d+")
 IDENTITY = re.compile(r"(\d+):(\d+)")
@@ -498,6 +498,33 @@ def commit(path):
         raise SystemExit("policy commit failed")
 
 
+def stop_stream_helper():
+    """No helper may be live across the mixed tuple the three renames create.
+
+    A running helper holds the stream UID it read at start, and the trailing
+    catch-all it rendered is keyed to that UID. If the account behind it
+    changed, ffmpeg traffic matches neither the accepts nor that reject and
+    falls through the chain policy. Stopping first means every helper that runs
+    again must pass the policy/summary digest cross-check, which a mixed tuple
+    fails; the unit ExecStopPost drops the table meanwhile, and
+    homeworker-ffmpeg-stream@ requires this unit, so no stream outlives it. The
+    shell restarts it once the tuple is whole. A fresh install has no unit yet.
+    """
+    if not os.path.exists(unit_path):
+        return
+    try:
+        completed = subprocess.run(
+            ["/bin/systemctl", "stop", "homeworker-stream-net.service"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=60, check=False)
+    except (OSError, subprocess.SubprocessError):
+        raise SystemExit("stream helper could not be stopped")
+    if completed.returncode != 0:
+        # Abort before any rename, so the previous tuple survives whole.
+        raise SystemExit("stream helper could not be stopped")
+
+
+stop_stream_helper()
 commit(policy_path)
 commit(summary_path)
 commit(env_path)

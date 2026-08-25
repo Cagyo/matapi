@@ -19,7 +19,7 @@ const GATE_MARKER = 'sudo python3 - "$SCRIPT_DIR/live-stream-policy-inspector" <
 const STAGE_MARKER =
   'env_identity="$(sudo python3 - "$inspector" "$env_file" "$policy_file" "$summary_file" "$root_uid" "$root_gid" "$(id -u "$USER")" "$(id -u "$stream_user")" <<\'PY\'\n';
 const COMMIT_MARKER =
-  'sudo python3 - "$inspector" "$policy_file" "$summary_file" "$env_file" "$root_uid" "$root_gid" "$(id -u "$USER")" "$env_identity" <<\'PY\'\n';
+  'sudo python3 - "$inspector" "$policy_file" "$summary_file" "$env_file" /etc/systemd/system/homeworker-stream-net.service "$root_uid" "$root_gid" "$(id -u "$USER")" "$env_identity" <<\'PY\'\n';
 
 const PYTHON = execFileSync('python3', ['-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' }).trim();
 const OWNER_UID = process.getuid?.() ?? 0;
@@ -57,9 +57,13 @@ const inspectorSource = (configPath: string) => [
   '',
 ].join('\n');
 
-/** Aborts the commit program at a chosen rename so a crash artifact can be inspected. */
+/**
+ * Aborts the commit program at a chosen rename so a crash artifact can be
+ * inspected, and traces unit control and renames in one ordered stream so their
+ * interleaving is observable. No systemctl binary is ever executed.
+ */
 const DRIVER_SOURCE = [
-  'import os, runpy, sys',
+  'import os, runpy, subprocess, sys',
   'limit = int(sys.argv[1])',
   'program = sys.argv[2]',
   'sys.argv = [program] + sys.argv[3:]',
@@ -69,8 +73,13 @@ const DRIVER_SOURCE = [
   '    if len(performed) >= limit:',
   '        raise SystemExit("injected crash")',
   '    performed.append(target)',
+  '    print("rename:" + os.path.basename(target), flush=True)',
   '    return real(source, target, **keywords)',
   'os.replace = replace',
+  'def run(argv, **keywords):',
+  '    print("run:" + " ".join(argv), flush=True)',
+  '    return subprocess.CompletedProcess(argv, int(os.environ.get("STOP_STATUS", "0")), b"", b"")',
+  'subprocess.run = run',
   'runpy.run_path(program, run_name="__main__")',
   '',
 ].join('\n');
@@ -112,11 +121,21 @@ function policyHarness(options: { env?: string; networks?: Network[] } = {}) {
     ], { encoding: 'utf8', stdio: 'pipe' }).trim();
     return envIdentity;
   };
-  const commit = (renames = 3, identity = () => envIdentity) =>
-    execFileSync('python3', [
-      driver, String(renames), commitProgram, inspector, policyPath, summaryPath, envPath,
+  // The commit program stops the helper only when its unit is installed, which
+  // a fresh install has not reached yet; `unit` chooses which case is under test.
+  const unitPath = join(root, 'homeworker-stream-net.service');
+  const commit = (
+    renames = 3,
+    identity = () => envIdentity,
+    options: { unit?: boolean; stopStatus?: number } = {},
+  ) => {
+    if (options.unit) writeFileSync(unitPath, '[Unit]\n');
+    else rmSync(unitPath, { force: true });
+    return execFileSync('python3', [
+      driver, String(renames), commitProgram, inspector, policyPath, summaryPath, envPath, unitPath,
       String(OWNER_UID), String(OWNER_GID), String(OWNER_UID), identity(),
-    ], { encoding: 'utf8', stdio: 'pipe' });
+    ], { encoding: 'utf8', stdio: 'pipe', env: { ...process.env, STOP_STATUS: String(options.stopStatus ?? 0) } });
+  };
   const install = (over?: Parameters<typeof stage>[0]) => { stage(over); commit(); };
   const verifyInstalled = () =>
     JSON.parse(execFileSync(inspector, ['verify-installed'], { encoding: 'utf8' })) as {
@@ -552,6 +571,55 @@ describe('restricted RTSP runtime installation', () => {
     }
   });
 
+  it('stops the running helper before the first durable rename', () => {
+    const harness = policyHarness();
+    try {
+      harness.install();
+      harness.setNetworks([{ family: 4, cidr: '10.4.0.0/24', interface: 'eth1' }]);
+      harness.stage();
+      // A live helper holds the stream UID it read at start, so none may span
+      // the mixed tuple the three renames create.
+      expect(harness.commit(3, undefined, { unit: true }).trim().split('\n')).toEqual([
+        'run:/bin/systemctl stop homeworker-stream-net.service',
+        'rename:live-stream-policy.json',
+        'rename:live-stream-policy.summary.json',
+        'rename:.env',
+      ]);
+    } finally {
+      harness.cleanup();
+    }
+  });
+
+  it('has no helper to stop on a first install that has not reached unit activation', () => {
+    const harness = policyHarness();
+    try {
+      harness.stage();
+      expect(harness.commit(3, undefined, { unit: false }).trim().split('\n')).toEqual([
+        'rename:live-stream-policy.json',
+        'rename:live-stream-policy.summary.json',
+        'rename:.env',
+      ]);
+      expect(harness.verifyInstalled().ready).toBe(true);
+    } finally {
+      harness.cleanup();
+    }
+  });
+
+  it('keeps the previous tuple whole when the running helper refuses to stop', () => {
+    const harness = policyHarness();
+    try {
+      harness.install();
+      const previous = [harness.policyPath, harness.summaryPath, harness.envPath].map((path) => readFileSync(path, 'utf8'));
+      harness.setNetworks([{ family: 4, cidr: '10.4.0.0/24', interface: 'eth1' }]);
+      harness.stage();
+      expect(() => harness.commit(3, undefined, { unit: true, stopStatus: 1 })).toThrow();
+      expect([harness.policyPath, harness.summaryPath, harness.envPath].map((path) => readFileSync(path, 'utf8'))).toEqual(previous);
+      expect(privilegedVerification(harness)).toBe(true);
+    } finally {
+      harness.cleanup();
+    }
+  });
+
   it('rejects the mixed tuple a crash after the private-policy rename leaves behind', () => {
     const harness = policyHarness();
     try {
@@ -815,6 +883,15 @@ describe('restricted RTSP runtime installation', () => {
     expect(unit).not.toMatch(/\.db|\/home\//);
     const helperUnit = readFileSync(resolve('systemd/homeworker-stream-net.service'), 'utf8');
     expect(helperUnit).not.toContain('CAP_DAC_OVERRIDE');
+    // A table outliving its helper still carries the catch-alls of the policy
+    // that helper read at start, under a chain whose policy is accept.
+    expect(helperUnit).toContain('ExecStopPost=-/usr/sbin/nft delete table inet homeworker_stream');
+    // Deleting that table on stop is only safe because readiness is reported
+    // after the rules load, so nothing ordered After= starts into the gap.
+    expect(helperUnit).toContain('Type=notify');
+    expect(helperUnit).toContain('NotifyAccess=main');
+    expect(helperUnit).not.toContain('Type=simple');
+    expect(helperUnit).toMatch(/TimeoutStartSec=(?:[1-9]\d?|[12]\d\d|300)\b/);
   });
 
   it('has syntactically valid shell and Python runtime assets', () => {

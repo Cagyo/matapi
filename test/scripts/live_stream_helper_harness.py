@@ -7,18 +7,24 @@ stdout. The root bundle inspector, the fixed public summary path, nftables, and
 nothing but its closed grant/revoke protocol.
 """
 
+import ast
 import importlib.machinery
 import importlib.util
 import io
 import json
 import os
+import socket
 import sys
 import tempfile
 from contextlib import redirect_stderr
 from pathlib import Path
+from types import SimpleNamespace
 
 WORKER_UID = 501
 STREAM_UID = 997
+# Deliberately distinct from the UID, so a call site that threads one where the
+# other belongs cannot pass.
+STREAM_GID = 998
 NETWORKS = [
     {"family": 4, "cidr": "192.168.1.0/24", "interface": "eth0"},
     {"family": 6, "cidr": "fd00::/64", "interface": "eth0"},
@@ -57,6 +63,9 @@ class RecordingSubprocess:
             "stdin": keywords.get("stdin") == self._real.DEVNULL,
             "stderr": keywords.get("stderr") == self._real.DEVNULL,
         })
+        # Only when present, so a call that passes no stdin keeps its exact shape.
+        if "input" in keywords:
+            self.calls[-1]["input"] = keywords["input"]
         if not self.responses:
             raise UnexpectedSubprocess(list(arguments))
         response = self.responses.pop(0)
@@ -70,6 +79,18 @@ class FakeNft:
 
     def apply(self, script):
         self.scripts.append(script)
+
+
+class FakeGroups:
+    """Stands in for the grp module so a test never depends on host accounts."""
+
+    def __init__(self, groups):
+        self.groups = groups
+
+    def getgrnam(self, name):
+        if name not in self.groups:
+            raise KeyError(name)
+        return SimpleNamespace(gr_gid=self.groups[name])
 
 
 class FakeRoutes:
@@ -160,7 +181,7 @@ def route_reason(helper, inspector, recorder, response, address="192.168.1.20"):
             store = helper.StateStore(Path(root) / "state.json")
             nft = FakeNft()
             engine = helper.Engine(
-                policy(helper, inspector), store, nft, helper.RouteBackend(),
+                policy(helper, inspector), store, nft, helper.RouteBackend(), STREAM_GID,
                 now_ms=lambda: 1_700_000_000_000, lease_id=lambda: "11" * 16,
             )
             result = rejected(helper, engine, request(addresses=[address]))
@@ -180,7 +201,57 @@ def run(helper, inspector, name):
         store = helper.StateStore(Path(root) / "state.json")
         nft = FakeNft()
         routes = FakeRoutes()
-        engine = helper.Engine(policy(helper, inspector), store, nft, routes, now_ms=lambda: now, lease_id=iter(["11" * 16, "22" * 16, "33" * 16]).__next__)
+        engine = helper.Engine(policy(helper, inspector), store, nft, routes, STREAM_GID, now_ms=lambda: now, lease_id=iter(["11" * 16, "22" * 16, "33" * 16]).__next__)
+        if name == "engine-group":
+            # build_engine is the only production path that resolves and threads
+            # the GID, so it is exercised here with the real NftBackend: the
+            # assertion reads the payload that would reach `nft -f -`.
+            helper.grp = FakeGroups({"homeworker-stream": 4242})
+            recorder.responses.extend([{"returncode": 1}, {"returncode": 0}])
+            helper.build_engine(policy(helper, inspector), Path(root) / "state.json", "homeworker-stream")
+            payload = [call for call in recorder.calls if call["argv"] == ["/usr/sbin/nft", "-f", "-"]][-1]["input"].decode("utf-8")
+            return {
+                "groupGid": "meta skgid 4242 reject" in payload,
+                "policyUidAsGid": "meta skgid {} reject".format(STREAM_UID) in payload,
+                "streamUid": "meta skuid {} reject".format(STREAM_UID) in payload,
+            }
+        if name == "missing-group":
+            helper.grp = FakeGroups({"homeworker-stream": 4242})
+            try:
+                helper.build_engine(policy(helper, inspector), Path(root) / "state.json", "absent-group")
+            except helper.Reject as error:
+                return {"ok": False, "reason": error.reason, "subprocessCalls": len(recorder.calls)}
+            raise AssertionError("missing group accepted")
+        if name == "serve-order":
+            # Readiness is a security ordering claim with no other observer: the
+            # unit promises `After=` means "rules in force", so serve() must
+            # answer systemd only once the engine applied them and the socket
+            # accepts. Read the order out of the source rather than trusting it.
+            watched = {"load_verified_policy", "build_engine", "listen", "notify_ready", "accept"}
+            tree = ast.parse(Path(helper.__file__).read_text(encoding="utf-8"))
+            body = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "serve")
+            calls = []
+            for node in ast.walk(body):
+                if not isinstance(node, ast.Call):
+                    continue
+                label = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", None)
+                if label in watched:
+                    calls.append((node.lineno, node.col_offset, label))
+            return {"order": [label for _line, _column, label in sorted(calls)]}
+        if name == "notify-ready":
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            address = str(Path(root) / "notify.sock")
+            listener.bind(address)
+            listener.settimeout(2.0)
+            os.environ["NOTIFY_SOCKET"] = address
+            helper.notify_ready()
+            delivered = listener.recv(64)
+            listener.close()
+            # A second call must be silent: the variable is consumed, so no
+            # child process inherits a socket it could answer for the helper.
+            os.environ.pop("NOTIFY_SOCKET", None)
+            helper.notify_ready()
+            return {"delivered": delivered.decode("utf-8"), "consumed": "NOTIFY_SOCKET" not in os.environ}
         if name == "constants":
             return {
                 "inspectorPath": helper.POLICY_INSPECTOR_PATH,
@@ -204,7 +275,7 @@ def run(helper, inspector, name):
             return rejected(helper, engine, request(sessionId="01901f4c-b7f4-7c6a-a787-3f8a442c85d2;reboot"))
         if name == "replay-restart":
             first = engine.handle(request())
-            restarted = helper.Engine(policy(helper, inspector), store, FakeNft(), FakeRoutes(), now_ms=lambda: now, lease_id=lambda: "22" * 16)
+            restarted = helper.Engine(policy(helper, inspector), store, FakeNft(), FakeRoutes(), STREAM_GID, now_ms=lambda: now, lease_id=lambda: "22" * 16)
             result = rejected(helper, restarted, request())
             result["preservedLease"] = first["leaseId"] in restarted.state["leases"]
             return result
@@ -225,7 +296,7 @@ def run(helper, inspector, name):
             }, "usedNonces": {"ab" * 32: now - 1, "cd" * 32: now + 30_000}}
             store.save(state)
             recovered_nft = FakeNft()
-            recovered = helper.Engine(policy(helper, inspector), store, recovered_nft, FakeRoutes(), now_ms=lambda: now)
+            recovered = helper.Engine(policy(helper, inspector), store, recovered_nft, FakeRoutes(), STREAM_GID, now_ms=lambda: now)
             return {"expiredPresent": "11" * 16 in recovered.state["leases"], "livePresent": "22" * 16 in recovered.state["leases"], "kernelTimeouts": "timeout 30s" in recovered_nft.scripts[-1], "routeQueries": len(recovered.routes.queried)}
         if name == "nft-policy":
             engine.handle(request())
@@ -244,9 +315,9 @@ def run(helper, inspector, name):
             raise AssertionError("version one policy accepted")
         if name == "subsecond-timeout":
             leases = {"aa" * 16: {"sessionId": request()["sessionId"], "addresses": [bound("192.168.1.20")], "rtspControlPorts": [554], "transport": "tcp", "udpMediaPorts": None, "expiresAtUnixMs": now + 999}}
-            at_999 = helper.render_nft(STREAM_UID, leases, now)
+            at_999 = helper.render_nft(STREAM_UID, STREAM_GID, leases, now)
             leases["aa" * 16]["expiresAtUnixMs"] = now + 1000
-            at_1000 = helper.render_nft(STREAM_UID, leases, now)
+            at_1000 = helper.render_nft(STREAM_UID, STREAM_GID, leases, now)
             return {"subsecondAllowed": "192.168.1.20" in at_999, "oneSecond": "timeout 1s" in at_1000}
         if name == "exact-address-port":
             engine.handle(request(rtspControlPorts=[8554]))
@@ -255,7 +326,7 @@ def run(helper, inspector, name):
         if name == "set-name-collision":
             first_id = "abcdefabcdef" + "1" * 20
             second_id = "abcdefabcdef" + "2" * 20
-            collision_engine = helper.Engine(policy(helper, inspector), store, nft, routes, now_ms=lambda: now, lease_id=iter([first_id, second_id]).__next__)
+            collision_engine = helper.Engine(policy(helper, inspector), store, nft, routes, STREAM_GID, now_ms=lambda: now, lease_id=iter([first_id, second_id]).__next__)
             collision_engine.handle(request())
             collision_engine.handle(request(nonceHash="cd" * 32, addresses=["192.168.1.21"]))
             text = nft.scripts[-1]
@@ -263,11 +334,11 @@ def run(helper, inspector, name):
         if name == "policy-narrowing":
             store.save({"version": 1, "leases": {"66" * 16: {"sessionId": request()["sessionId"], "addresses": [bound("192.168.1.20")], "rtspControlPorts": [554], "transport": "tcp", "udpMediaPorts": None, "expiresAtUnixMs": now + 30_000}}, "usedNonces": {"ab" * 32: now + 30_000}})
             narrowed = policy(helper, inspector, networks=[{"family": 4, "cidr": "10.0.0.0/8", "interface": "eth0"}])
-            recovered_nft = FakeNft(); recovered = helper.Engine(narrowed, store, recovered_nft, FakeRoutes(), now_ms=lambda: now)
+            recovered_nft = FakeNft(); recovered = helper.Engine(narrowed, store, recovered_nft, FakeRoutes(), STREAM_GID, now_ms=lambda: now)
             return {"leases": len(recovered.state["leases"]), "staleRule": "192.168.1.20" in recovered_nft.scripts[-1]}
         if name == "interface-narrowing":
             store.save({"version": 1, "leases": {"66" * 16: {"sessionId": request()["sessionId"], "addresses": [bound("192.168.1.20", "wlan0")], "rtspControlPorts": [554], "transport": "tcp", "udpMediaPorts": None, "expiresAtUnixMs": now + 30_000}}, "usedNonces": {"ab" * 32: now + 30_000}})
-            recovered_nft = FakeNft(); recovered = helper.Engine(policy(helper, inspector), store, recovered_nft, FakeRoutes(), now_ms=lambda: now)
+            recovered_nft = FakeNft(); recovered = helper.Engine(policy(helper, inspector), store, recovered_nft, FakeRoutes(), STREAM_GID, now_ms=lambda: now)
             return {"leases": len(recovered.state["leases"]), "staleRule": "192.168.1.20" in recovered_nft.scripts[-1]}
         if name == "stale-inspector":
             # The helper updated while the root bundle asset was not republished:
@@ -293,7 +364,7 @@ def run(helper, inspector, name):
             # The one-time shape every already-installed box carries in /run.
             store.save({"version": 1, "leases": {"66" * 16: {"sessionId": request()["sessionId"], "addresses": ["192.168.1.20"], "rtspControlPorts": [554], "transport": "tcp", "udpMediaPorts": None, "expiresAtUnixMs": now + 30_000}}, "usedNonces": {"ab" * 32: now + 30_000}})
             recovered_nft = FakeNft()
-            recovered = helper.Engine(policy(helper, inspector), store, recovered_nft, FakeRoutes(), now_ms=lambda: now, lease_id=lambda: "77" * 16)
+            recovered = helper.Engine(policy(helper, inspector), store, recovered_nft, FakeRoutes(), STREAM_GID, now_ms=lambda: now, lease_id=lambda: "77" * 16)
             replay = rejected(helper, recovered, request())
             return {"leases": len(recovered.state["leases"]), "staleRule": "192.168.1.20" in recovered_nft.scripts[-1], "replayReason": replay["reason"]}
         if name == "loopback-policy":
@@ -308,7 +379,7 @@ def run(helper, inspector, name):
             store.save({"version": 1, "leases": {"77" * 16: valid, "88" * 16: corrupt, "not-a-lease": valid}, "usedNonces": {"bad": now + 30_000, "ef" * 32: True}})
             recovered_nft = FakeNft()
             try:
-                helper.Engine(policy(helper, inspector), store, recovered_nft, FakeRoutes(), now_ms=lambda: now)
+                helper.Engine(policy(helper, inspector), store, recovered_nft, FakeRoutes(), STREAM_GID, now_ms=lambda: now)
             except helper.Reject as error:
                 return {"ok": False, "reason": error.reason, "nftApplied": bool(recovered_nft.scripts)}
             raise AssertionError("corrupt nonce state accepted")
@@ -316,12 +387,12 @@ def run(helper, inspector, name):
             valid = {"sessionId": request()["sessionId"], "addresses": [bound("192.168.1.21")], "rtspControlPorts": [554], "transport": "tcp", "udpMediaPorts": None, "expiresAtUnixMs": now + 30_000}
             corrupt = {"sessionId": request()["sessionId"], "addresses": "192.168.1.99", "rtspControlPorts": [554], "transport": "tcp", "udpMediaPorts": None, "expiresAtUnixMs": now + 30_000}
             store.save({"version": 1, "leases": {"77" * 16: valid, "88" * 16: corrupt, "not-a-lease": valid}, "usedNonces": {}})
-            recovered_nft = FakeNft(); recovered = helper.Engine(policy(helper, inspector), store, recovered_nft, FakeRoutes(), now_ms=lambda: now)
+            recovered_nft = FakeNft(); recovered = helper.Engine(policy(helper, inspector), store, recovered_nft, FakeRoutes(), STREAM_GID, now_ms=lambda: now)
             return {"leases": list(recovered.state["leases"]), "corruptRule": "192.168.1.99" in recovered_nft.scripts[-1]}
         if name == "expired-next-grant":
             store.save({"version": 1, "leases": {"44" * 16: {"sessionId": request()["sessionId"], "addresses": [bound("192.168.1.99")], "rtspControlPorts": [554], "transport": "tcp", "udpMediaPorts": None, "expiresAtUnixMs": now - 1}}, "usedNonces": {}})
             next_nft = FakeNft()
-            next_engine = helper.Engine(policy(helper, inspector), store, next_nft, FakeRoutes(), now_ms=lambda: now, lease_id=lambda: "55" * 16)
+            next_engine = helper.Engine(policy(helper, inspector), store, next_nft, FakeRoutes(), STREAM_GID, now_ms=lambda: now, lease_id=lambda: "55" * 16)
             next_engine.handle(request())
             return {"expiredRendered": "192.168.1.99" in next_nft.scripts[-1], "newRendered": "192.168.1.20" in next_nft.scripts[-1]}
         if name == "ipv6-ula-policy":
@@ -344,7 +415,7 @@ def run(helper, inspector, name):
             ])
             multi_routes = FakeRoutes({"192.168.1.20": "eth0", "10.0.0.5": "wlan0"})
             multi_nft = FakeNft()
-            multi_engine = helper.Engine(multi, store, multi_nft, multi_routes, now_ms=lambda: now, lease_id=lambda: "11" * 16)
+            multi_engine = helper.Engine(multi, store, multi_nft, multi_routes, STREAM_GID, now_ms=lambda: now, lease_id=lambda: "11" * 16)
             multi_engine.handle(request(addresses=["192.168.1.20", "10.0.0.5"]))
             text = multi_nft.scripts[-1]
             return {
@@ -356,7 +427,7 @@ def run(helper, inspector, name):
         if name == "route-match":
             recorder.responses.append({"stdout": json.dumps([{"dst": "192.168.1.20", "dev": "eth0", "prefsrc": "192.168.1.10", "flags": []}])})
             real_nft = FakeNft()
-            real = helper.Engine(policy(helper, inspector), store, real_nft, helper.RouteBackend(), now_ms=lambda: now, lease_id=lambda: "11" * 16)
+            real = helper.Engine(policy(helper, inspector), store, real_nft, helper.RouteBackend(), STREAM_GID, now_ms=lambda: now, lease_id=lambda: "11" * 16)
             result = real.handle(request())
             return {
                 "ok": result["ok"],
@@ -378,7 +449,7 @@ def run(helper, inspector, name):
         if name == "route-family":
             recorder.responses.append({"stdout": json.dumps([{"dst": "fd00::20", "dev": "eth0", "flags": []}])})
             real_nft = FakeNft()
-            real = helper.Engine(policy(helper, inspector), store, real_nft, helper.RouteBackend(), now_ms=lambda: now, lease_id=lambda: "11" * 16)
+            real = helper.Engine(policy(helper, inspector), store, real_nft, helper.RouteBackend(), STREAM_GID, now_ms=lambda: now, lease_id=lambda: "11" * 16)
             real.handle(request(addresses=["fd00::20"]))
             return {"argv": recorder.calls[-1]["argv"], "oifname": 'oifname "eth0" ip6 daddr . tcp dport' in real_nft.scripts[-1]}
         if name == "summary-match":

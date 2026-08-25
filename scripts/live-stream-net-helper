@@ -44,8 +44,9 @@ INSPECTOR_SYMBOLS = ("PolicyDocumentInvalid", "parse_policy_document", "load_sum
 class Reject(Exception):
     """One short code, never a diagnostic.
 
-    Two vocabularies for two audiences. `inspector`, `policy`, `summary`, and
-    `state` are startup refusals an operator reads in the root journal; the rest
+    Two vocabularies for two audiences. `inspector`, `policy`, `summary`,
+    `group`, and `state` are startup refusals an operator reads in the root
+    journal; the rest
     -- `address`, `port`, `udp-range`, `route`, `interface`, `replay`, and the
     protocol codes -- answer one authenticated grant back over the socket.
     """
@@ -244,11 +245,12 @@ class RouteBackend:
 
 
 class Engine:
-    def __init__(self, policy, store, nft, routes, now_ms=None, lease_id=None):
+    def __init__(self, policy, store, nft, routes, stream_gid, now_ms=None, lease_id=None):
         self.policy = policy
         self.store = store
         self.nft = nft
         self.routes = routes
+        self.stream_gid = stream_gid
         self.now_ms = now_ms or (lambda: int(time.time() * 1000))
         self.lease_id = lease_id or (lambda: secrets.token_hex(16))
         self.state = store.load()
@@ -426,18 +428,18 @@ class Engine:
     def _commit(self, next_state):
         old_state = self.state
         try:
-            self.nft.apply(render_nft(self.policy.stream_uid, next_state["leases"], self.now_ms()))
+            self.nft.apply(render_nft(self.policy.stream_uid, self.stream_gid, next_state["leases"], self.now_ms()))
             self.store.save(next_state)
             self.state = next_state
         except Exception:
             try:
-                self.nft.apply(render_nft(self.policy.stream_uid, old_state["leases"], self.now_ms()))
+                self.nft.apply(render_nft(self.policy.stream_uid, self.stream_gid, old_state["leases"], self.now_ms()))
             except Exception:
                 pass
             raise Reject("backend")
 
 
-def render_nft(stream_uid, leases, now_ms):
+def render_nft(stream_uid, stream_gid, leases, now_ms):
     lines = ["table inet homeworker_stream {"]
     rules = []
     for lease_id, lease in sorted(leases.items()):
@@ -471,7 +473,17 @@ def render_nft(stream_uid, leases, now_ms):
         " chain output {",
         "  type filter hook output priority filter; policy accept;",
         *rules,
+        # Two catch-alls, because the chain policy is accept and the running
+        # helper holds one stream UID in memory for its whole life. If that UID
+        # ever stops being ffmpeg's -- a recreated account, any out-of-band
+        # drift -- traffic would match neither the accepts nor the UID reject
+        # and fall through. The unit pins Group=homeworker-stream, and the group
+        # survives a recreated user because it is that user's primary group, so
+        # the GID is the more stable of the two. `meta skgid` matches the
+        # effective GID only, so the worker's supplementary membership in this
+        # group is untouched.
         "  meta skuid {} reject".format(stream_uid),
+        "  meta skgid {} reject".format(stream_gid),
         " }",
         "}",
     ])
@@ -515,11 +527,56 @@ def load_verified_policy(path, inspector):
     return policy
 
 
+def resolve_group(name):
+    """The numeric identity of one named group, or a short refusal."""
+    try:
+        return grp.getgrnam(name).gr_gid
+    except KeyError:
+        raise Reject("group")
+
+
+def build_engine(policy, state_path, group_name):
+    """Bind the ruleset to the restricted group, resolved by name at every start.
+
+    The second catch-all is keyed on this GID, so it must come from the group
+    the stream processes actually run as -- never from the policy, whose UID is
+    exactly the identity that can drift out from under a long-lived helper.
+
+    One name answers two questions today: which group may open the helper socket
+    and whose egress is rejected. They are the same group by construction, since
+    the ffmpeg unit runs `User=`/`Group=` the same account this helper is
+    grouped as. If they ever have to differ, split the name here and at the
+    socket chown -- and the reject must follow the group ffmpeg runs as.
+    """
+    return Engine(policy, StateStore(state_path), NftBackend(), RouteBackend(), resolve_group(group_name))
+
+
+def notify_ready():
+    """Report readiness only once the ruleset is loaded and the socket accepts.
+
+    With Type=notify, `After=homeworker-stream-net.service` becomes a real
+    ordering guarantee instead of a fork-time one: nothing dependent can be
+    started into the window between the ExecStopPost table delete and the first
+    nft apply. Best effort -- outside systemd there is no socket to answer.
+    """
+    address = os.environ.pop("NOTIFY_SOCKET", None)
+    if not address:
+        return
+    if address.startswith("@"):
+        address = "\0" + address[1:]
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as stream:
+            stream.connect(address)
+            stream.sendall(b"READY=1\n")
+    except OSError:
+        return
+
+
 def serve(policy_path, state_path, socket_path, group_name):
     inspector = load_policy_inspector()
     policy = load_verified_policy(policy_path, inspector)
-    engine = Engine(policy, StateStore(state_path), NftBackend(), RouteBackend())
-    group_id = grp.getgrnam(group_name).gr_gid
+    engine = build_engine(policy, state_path, group_name)
+    group_id = resolve_group(group_name)
     path = Path(socket_path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
     try:
@@ -531,6 +588,9 @@ def serve(policy_path, state_path, socket_path, group_name):
     os.chown(path, 0, group_id)
     os.chmod(path, 0o660)
     server.listen(8)
+    # The ruleset was applied by build_engine and the socket now accepts, so
+    # this is the first moment anything may depend on the helper.
+    notify_ready()
     while True:
         connection, _ = server.accept()
         with connection:

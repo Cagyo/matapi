@@ -45,6 +45,26 @@ describe('live-stream net helper security behavior', () => {
     expect(result.text.indexOf(' accept')).toBeLessThan(result.text.lastIndexOf(' reject'));
   });
 
+  it('backs the UID catch-all with a group-keyed one, since the chain policy is accept', () => {
+    const lines = (scenario('nft-policy') as { text: string }).text.split('\n');
+    expect(lines).toContain('  meta skuid 997 reject');
+    // The GID is threaded separately from the UID and outlives a recreated
+    // stream account, so it catches traffic the stale UID reject would miss.
+    expect(lines).toContain('  meta skgid 998 reject');
+    const lastAccept = lines.reduce((last, line, index) => (line.endsWith(' accept') ? index : last), -1);
+    const skuid = lines.indexOf('  meta skuid 997 reject');
+    const skgid = lines.indexOf('  meta skgid 998 reject');
+    expect(lastAccept).toBeGreaterThan(0);
+    expect(skuid).toBeGreaterThan(lastAccept);
+    // Both catch-alls last, and nothing after them: a rule appended below would
+    // be unreachable, and one inserted above would shadow a reject.
+    expect(skgid).toBe(skuid + 1);
+    expect(lines.slice(skgid + 1).filter((line) => line.trim())).toEqual([' }', '}']);
+    expect(lines.filter((line) => line.trimStart().startsWith('type filter hook output'))).toEqual([
+      '  type filter hook output priority filter; policy accept;',
+    ]);
+  });
+
   it('rejects a policy that collapses worker and stream trust identities', () => {
     expect(scenario('same-uid-policy')).toEqual({ ok: false, reason: 'policy' });
   });
@@ -172,6 +192,27 @@ describe('live-stream net helper interface binding', () => {
     expect(scenario('multi-interface-render')).toEqual({
       eth0Rule: true, wlan0Rule: true, eth0Element: true, wlan0Element: true,
     });
+  });
+});
+
+describe('live-stream net helper runtime identity', () => {
+  it('keys the group catch-all on the resolved group, never on the policy UID', () => {
+    // build_engine is the one production path that resolves and threads the GID.
+    expect(scenario('engine-group')).toEqual({ groupGid: true, policyUidAsGid: false, streamUid: true });
+  });
+
+  it('refuses to build an engine for a group that does not exist', () => {
+    expect(scenario('missing-group')).toEqual({ ok: false, reason: 'group', subprocessCalls: 0 });
+  });
+
+  it('answers systemd only after the ruleset is applied and the socket accepts', () => {
+    expect(scenario('serve-order')).toEqual({
+      order: ['load_verified_policy', 'build_engine', 'listen', 'notify_ready', 'accept'],
+    });
+  });
+
+  it('answers systemd once, and consumes the socket so no child can answer for it', () => {
+    expect(scenario('notify-ready')).toEqual({ delivered: 'READY=1\n', consumed: true });
   });
 });
 

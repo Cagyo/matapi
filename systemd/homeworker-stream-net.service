@@ -4,10 +4,21 @@ After=network-pre.target nftables.service
 Before=homeworker-ffmpeg-stream@.service
 
 [Service]
-Type=simple
+# notify, not simple: the helper answers READY=1 only after it has validated the
+# policy and loaded the ruleset, so `After=` on this unit really does mean "the
+# egress rules are in force" rather than "the process has forked".
+Type=notify
+NotifyAccess=main
+TimeoutStartSec=30
 User=root
 Group=homeworker-stream
 ExecStart=/usr/lib/home-worker/live-stream-net-helper
+# The chain policy is accept, so a table left loaded after the helper is gone
+# still carries the catch-alls of the policy that helper read at start. When the
+# helper refuses to start -- a mixed policy/summary tuple, a missing group --
+# that stale table would be the only thing standing, keyed to identities nobody
+# has re-verified. Drop it on every stop; the next successful start rebuilds it.
+ExecStopPost=-/usr/sbin/nft delete table inet homeworker_stream
 Restart=on-failure
 RestartSec=2
 RuntimeDirectory=home-worker-stream-net
@@ -28,6 +39,10 @@ RestrictNamespaces=yes
 LockPersonality=yes
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_CHOWN
 AmbientCapabilities=CAP_NET_ADMIN CAP_CHOWN
+# AF_UNIX carries the control socket and the systemd notify datagram; AF_NETLINK
+# carries nft and ip. Note the coupling before widening this: the helper's own
+# egid is the group its ruleset rejects, so granting it AF_INET here would give
+# it a socket it is then denied the use of, with no obvious cause.
 RestrictAddressFamilies=AF_UNIX AF_NETLINK
 ReadWritePaths=/run/home-worker-stream-net
 MemoryMax=32M
