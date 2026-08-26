@@ -93,6 +93,16 @@ export class FeatureInstallRecoveryService implements OnModuleInit, OnModuleDest
     const active = await this.jobs.findActive();
     if (!active || this.stopped) return;
 
+    // An awaiting-restart job has already finished its privileged work: it is
+    // reconciled from its durable phase alone, so the root helper stays down
+    // and the unclaimed-request timeout can never reach it.
+    if (active.status === 'awaiting-restart') {
+      this.absentSince.delete(active.id);
+      await this.reconcile.execute(active.id).catch(() => undefined);
+      await this.scheduleNext();
+      return;
+    }
+
     // The root helper may be resuming a durable claim, so every active pass
     // first gives it a chance to run before inspecting spool state.
     try {

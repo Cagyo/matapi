@@ -25,6 +25,7 @@ import type { FeatureInstallControllerPort } from '../../../src/features/domain/
 import type { FeatureInstallOutcomePort } from '../../../src/features/domain/ports/feature-install-outcome.port';
 import type { FeatureInstallRequestPort } from '../../../src/features/domain/ports/feature-install-request.port';
 import type { FeatureInstallResultPort } from '../../../src/features/domain/ports/feature-install-result.port';
+import type { FeatureProcessIdentityPort } from '../../../src/features/domain/ports/feature-process-identity.port';
 import type { FeatureReadinessBarrierPort } from '../../../src/features/domain/ports/feature-readiness-barrier.port';
 import type { FeatureRestartPort } from '../../../src/features/domain/ports/feature-restart.port';
 import type { FeatureRuntimeLifecyclePort } from '../../../src/features/domain/ports/feature-runtime-lifecycle.port';
@@ -77,6 +78,19 @@ class InMemoryInstallResultAdapter implements FeatureInstallResultPort {
 
   async removeTerminal(jobId: string): Promise<void> {
     this.terminal.delete(jobId);
+  }
+}
+
+/** A restart of the worker is the only thing that changes this value. */
+class RestartableProcessIdentity implements FeatureProcessIdentityPort {
+  private starts = 1;
+
+  restart(): void {
+    this.starts += 1;
+  }
+
+  async current(): Promise<string> {
+    return `4f8b2c1d-0e6a-47b3-8d59-2c7e1a0f4b63:${this.starts}00`;
   }
 }
 
@@ -168,6 +182,7 @@ describe('feature management acceptance', () => {
     const delivery = new FailingWorkflowDelivery();
     outcomes.register(delivery);
     const clock = new FixedClock();
+    const identity = new RestartableProcessIdentity();
     const verify = new VerifyFeatureReadinessUseCase(features, readiness);
     const availability = new FeatureAvailabilityService(
       features,
@@ -193,6 +208,7 @@ describe('feature management acceptance', () => {
       features,
       outcomes,
       clock,
+      identity,
     );
     const disable = new DisableFeatureUseCase(features, jobs, lifecycle, restart);
     const enable = new EnableFeatureUseCase(features, jobs, verify, lifecycle, restart);
@@ -232,13 +248,32 @@ describe('feature management acceptance', () => {
     });
     restart.failNext = true;
 
+    // Privileged success is durable but unproven: the job parks, nothing is
+    // installed or announced, and the failed dispatch stays recoverable.
     await expect(reconcile.execute(jobId)).rejects.toBeInstanceOf(FeatureRestartDispatchError);
+    expect(await jobs.findById(jobId)).toMatchObject({ status: 'awaiting-restart', activeSlot: 1 });
+    expect(await jobs.findActive()).toMatchObject({ id: jobId, activeSlot: 1 });
+    expect(await features.findByName('motion')).toMatchObject({
+      installed: false,
+      enabled: false,
+      attentionReason: 'restart-required',
+    });
+    expect(delivery).toMatchObject({ preRestartAttempts: 1, terminalAttempts: 0 });
+    expect(motionRuntime.afterEnableCalls).toBe(0);
+
+    // The same process may not complete it, however often recovery ticks.
+    await reconcile.execute(jobId);
+    expect(await jobs.findById(jobId)).toMatchObject({ status: 'awaiting-restart', activeSlot: 1 });
+    expect(restart.scopes).toEqual(['supervisor']);
+
+    identity.restart();
+    await reconcile.execute(jobId);
     expect(await jobs.findById(jobId)).toMatchObject({ status: 'succeeded', activeSlot: null });
     expect(await jobs.findActive()).toBeNull();
     expect(await features.findByName('motion')).toMatchObject({
       installed: true,
       enabled: true,
-      attentionReason: 'restart-required',
+      attentionReason: null,
     });
     expect(delivery).toMatchObject({ preRestartAttempts: 1, terminalAttempts: 1 });
 

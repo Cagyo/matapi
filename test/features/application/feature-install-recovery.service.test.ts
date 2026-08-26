@@ -56,6 +56,35 @@ describe('FeatureInstallRecoveryService', () => {
     expect(test.jobs.terminalizeFailure).toHaveBeenCalledWith(expect.objectContaining({ failureCode: 'interrupted', attentionReason: 'partial-state-uncertain' }));
   });
 
+  it('reconciles an awaiting-restart job without starting the root helper', async () => {
+    const test = create(job({ status: 'awaiting-restart', restartScope: 'worker', restartDispatchIdentity: 'boot:100' }), { kind: 'absent' });
+
+    await test.service.runPass();
+    await test.service.onModuleDestroy();
+
+    expect(test.reconcile.execute).toHaveBeenCalledWith(id);
+    expect(test.controller.start).not.toHaveBeenCalled();
+    expect(test.results.readState).not.toHaveBeenCalled();
+    expect(test.requests.publish).not.toHaveBeenCalled();
+  });
+
+  it('never timeouts an awaiting-restart job whose dispatched restart has not happened', async () => {
+    const test = create(
+      job({
+        status: 'awaiting-restart', restartScope: 'worker', restartDispatchIdentity: 'boot:100',
+        updatedAt: new Date(base.getTime() - 36 * 60_000),
+      }),
+      { kind: 'absent' },
+    );
+    test.requests.cancelUnclaimed.mockResolvedValue(true);
+
+    await test.service.runPass();
+    await test.service.onModuleDestroy();
+
+    expect(test.requests.cancelUnclaimed).not.toHaveBeenCalled();
+    expect(test.jobs.terminalizeFailure).not.toHaveBeenCalled();
+  });
+
   it('waits through the marker window before republishing a queued absent request', async () => {
     const test = create(job(), { kind: 'absent' });
 
