@@ -5,6 +5,12 @@ import type { ImportSummary } from '../sensors/application/import-sensors.use-ca
 import type { DepUpdate } from '../system/domain/ports/system-deps.port';
 import type { User } from '../telegram/domain/user.entity';
 import type { LiveSourceProbeError } from '../camera/domain/ports/live-source-probe.port';
+import type { RtspSourcePolicyRelationship } from '../camera/domain/ports/live-source-policy-evaluator.port';
+import type { RtspSourceOperationalState } from '../camera/application/get-rtsp-source-overview.use-case';
+import type {
+  CameraSourceFailureKind,
+  CameraSourceRecoveryAction,
+} from '../telegram/interfaces/camera-source-error.presenter';
 import type { ArchiveDrainState } from '../archive/application/use-cases/report-drive-status.use-case';
 import { deepFreeze } from './freeze';
 
@@ -1281,7 +1287,225 @@ const enCatalog = {
       expired: 'ℹ️ This live-view link has expired.',
       adminFailure: '⚠️ Experimental live view failed. Check the worker and tunnel diagnostics.',
     },
+    /*
+     * RTSP source workflow copy.
+     *
+     * Mandatory in every locale — see `LocaleCatalog`. The workflow asks an
+     * administrator to paste an address that usually carries a camera password,
+     * and an administrator who cannot read the warning cannot consent to it, so
+     * there is no English fallback to degrade into.
+     *
+     * Keys are semantic, never positional: screens are named for what they show
+     * (`overview`, `emptyState`, `detail`), and every closed vocabulary the
+     * Camera boundary owns — operational state, policy relationship, failure
+     * kind, recovery action — is a `satisfies Record<…>` map, so a member added
+     * upstream is a build failure here rather than a missing message at runtime.
+     */
     sources: {
+      /* ── Camera Dashboard entry ─────────────────────────────────── */
+      dashboardButton: '📡 RTSP Sources',
+
+      /* ── Status-first overview ──────────────────────────────────── */
+      overview: {
+        title: '📡 RTSP camera sources',
+        page: (page: number, pageCount: number) => `Page ${page} of ${pageCount}`,
+        previous: '‹ Previous',
+        next: 'Next ›',
+        addCamera: '➕ Add RTSP camera',
+      },
+      policy: {
+        scope: 'Local network only',
+        network: (network: { interface: string; cidr: string; family: 4 | 6 }) =>
+          `• ${network.interface} · ${network.cidr} (IPv${network.family})`,
+        noNetworks: 'No camera network is described right now.',
+        state: {
+          ready: 'Cameras can be reached on the networks above, and nowhere else.',
+          stale: '⚠️ The camera network policy no longer describes this network. Reinstall RTSP to refresh it.',
+          unavailable: '⚠️ The camera network policy could not be read. Reinstall RTSP to restore it.',
+        },
+      },
+      emptyState: {
+        title: 'No RTSP cameras are configured yet.',
+        body: 'An RTSP camera streams from its own address on the local network above. Add one to watch it live.',
+        addFirst: '➕ Add first camera',
+      },
+      progress: {
+        testing: '⏳ Testing connection…',
+        saving: '⏳ Saving the camera source…',
+        removing: '⏳ Removing the camera source…',
+      },
+
+      /* ── Status vocabulary, keyed by what the Camera boundary says ─ */
+      statuses: {
+        'configured-verified': '✅ Ready',
+        'credentials-required': '🔑 Address required',
+        'not-ready': '⏳ Not ready',
+        'needs-attention': '⚠️ Needs attention',
+      } satisfies Record<RtspSourceOperationalState, string>,
+      relationships: {
+        allowed: 'inside the camera network',
+        blocked: 'outside the camera network',
+        unresolved: 'at an address that does not resolve',
+      } satisfies Record<RtspSourcePolicyRelationship, string>,
+      row: (input: { cameraName: string; status: string }) => `${input.cameraName} · ${input.status}`,
+
+      /* ── One source in detail. Host only: never the identifier. ──── */
+      detail: (input: {
+        cameraName: string;
+        host: string;
+        status: string;
+        relationship: string;
+      }) => [
+        input.cameraName,
+        `Address: ${input.host}`,
+        `Status: ${input.status}`,
+        `Network: ${input.relationship}`,
+      ].join('\n'),
+      reverificationDue: '⚠️ Not verified under the camera network policy now in force. Test the connection.',
+      detailButtons: {
+        test: '🧪 Test connection',
+        changeAddress: '🔗 Change address',
+        details: 'ℹ️ Details',
+      },
+      details: {
+        title: 'ℹ️ Connection details',
+        body: (input: {
+          security: string;
+          transport: string;
+          profile: string;
+          relationship: string;
+        }) => [input.security, input.transport, input.profile, `Network: ${input.relationship}`].join('\n'),
+        security: {
+          none: 'Security: plain RTSP, not encrypted',
+          strict: 'Security: RTSPS, certificate verified',
+        },
+        transports: {
+          auto: 'Transport: chosen automatically',
+          tcp: 'Transport: TCP',
+          udp: 'Transport: UDP',
+        },
+        profiles: {
+          eco: 'Quality: eco',
+          balanced: 'Quality: balanced',
+          quality: 'Quality: high',
+        },
+      },
+
+      /* ── Create a camera, or attach a source to an existing one ──── */
+      add: {
+        title: 'Add an RTSP camera',
+        choose: 'Create a new camera, or attach a source to a camera you already have.',
+        create: '➕ Create RTSP camera',
+        attach: '🔗 Attach to existing camera',
+        chooseCamera: 'Choose the camera this source belongs to:',
+      },
+
+      /* ── Exact ForceReply prompts ───────────────────────────────── */
+      prompts: {
+        name: 'Reply to this message with a name for the camera.',
+        nameHint: 'Up to 64 characters, and different from every camera you already have.',
+        credential: 'Reply to this message with the camera address.',
+        replyHint: 'Reply to this exact message. A separate new message will not be read.',
+        invalidName: 'That name cannot be used. Reply again with plain text, up to 64 characters.',
+        /*
+         * Prompt lifecycle. These are messages, not controls: `startAgain` and
+         * `cancelButton` are what the administrator presses, and these are what
+         * they read when the exact-reply window closed underneath them.
+         *
+         * The window is a parameter rather than prose. The same ten minutes is
+         * already spelled in `privacyNotice`, in the handler's TTL and in the
+         * prompt row's `expiresAt`; a fourth copy — in three languages — is
+         * where that number goes stale unnoticed.
+         */
+        expired: (minutes: number) =>
+          `⏳ This camera setup expired after ${minutes} minute${minutes === 1 ? '' : 's'}. Open RTSP Sources to start again.`,
+        cancelled: 'Camera setup cancelled. Nothing was changed.',
+        cancelButton: '❌ Cancel',
+      },
+
+      /*
+       * Sent immediately before the credential prompt, and the only place the
+       * administrator learns what they are about to hand Telegram. Six clauses,
+       * each a separate promise: accepted schemes, the networks in force,
+       * possible embedded credentials, Telegram's lack of a secret channel,
+       * best-effort deletion, and the expiry window.
+       */
+      privacyNotice: (input: { networks: string; minutes: number }) => [
+        '🔒 Before you send the camera address',
+        'Only RTSP and strict RTSPS addresses are accepted.',
+        `Cameras can be reached on:\n${input.networks}`,
+        'The address may contain a username and password.',
+        'Telegram has no secret channel — your reply arrives as an ordinary message in this chat.',
+        'It is deleted the moment it arrives, but deletion is best effort and can fail.',
+        `This prompt expires in ${input.minutes} minute${input.minutes === 1 ? '' : 's'}.`,
+      ].join('\n\n'),
+
+      /*
+       * Removal has two readings and they are not interchangeable: a camera
+       * that exists only to carry a source disappears with it, while a camera
+       * that also records keeps everything except its RTSP address.
+       */
+      removal: {
+        confirmCamera: (cameraName: string) =>
+          `Remove RTSP camera ${cameraName}?\nThe camera and its stored address are deleted. Recorded events are kept.`,
+        confirmSource: (cameraName: string) =>
+          `Remove RTSP source from ${cameraName}?\nThe camera stays; only its address and stored credentials are deleted.`,
+        removeCameraButton: '🗑 Remove RTSP camera',
+        removeSourceButton: '🗑 Remove RTSP source',
+        keep: '« Keep it',
+        removedCamera: (cameraName: string) => `✅ RTSP camera ${cameraName} was removed.`,
+        removedSource: (cameraName: string) => `✅ The RTSP source was removed from ${cameraName}.`,
+      },
+
+      outcomes: {
+        created: (cameraName: string) => `✅ ${cameraName} is configured and answering.`,
+        attached: (cameraName: string) => `✅ The RTSP source is attached to ${cameraName} and answering.`,
+        replaced: (cameraName: string) => `✅ The address for ${cameraName} was replaced, and it answered.`,
+        tested: (cameraName: string) => `✅ ${cameraName} answered its stored address. Nothing was changed.`,
+      },
+
+      /*
+       * One message per failure kind the presenter can return, and nothing
+       * else: `CameraSourcesHandler` renders `errors[presented.kind]` and never
+       * interpolates `error.message`, because most of these failures were
+       * produced by a URL that carries the camera password.
+       */
+      errors: {
+        'invalid-address': '❌ That address cannot be used. It must be an RTSP or strict RTSPS address that names a host.',
+        'outside-policy': '❌ The camera address is outside the permitted camera networks. It may be on another subnet, or reachable only over IPv6 while the policy allows IPv4 — or the reverse.',
+        'name-taken': '❌ Another camera already uses that name. Go back and choose a different one.',
+        'host-not-found': '❌ The camera hostname does not resolve. Check the name, or use its address instead.',
+        'host-unreachable': '❌ The camera did not answer. Check that it is powered on and on this network.',
+        'authentication-failed': '❌ The camera refused the request. Check the username and password — and the stream path, which many cameras reject the same way even when the credentials are right.',
+        'tls-verification-failed': '❌ The camera certificate failed verification. Check its hostname and certificate authority.',
+        'unsupported-stream': '❌ The camera answered with a stream this device cannot play. Try its substream, or an H.264 profile.',
+        'timed-out': '❌ The camera took too long to answer. Check the network, then try again.',
+        'feature-unavailable': '❌ RTSP camera support is not available right now, so nothing was changed.',
+        'policy-stale': '❌ The camera network policy is no longer the one in force, so nothing was changed. Reinstall RTSP on the current network.',
+        'source-stale': '❌ This camera source changed while you were working on it. Nothing was changed — open it again to see its current state.',
+        'probe-failed': '❌ The camera could not be verified. Check the address, the credentials and the network.',
+      } satisfies Record<CameraSourceFailureKind, string>,
+      actions: {
+        retry: '↻ Retry',
+        'change-address': '🔗 Change address',
+        back: '« Back',
+        'reinstall-rtsp': '🔁 Reinstall RTSP',
+      } satisfies Record<CameraSourceRecoveryAction, string>,
+
+      /* ── Prompt lifecycle ───────────────────────────────────────── */
+      startAgain: '↻ Start again',
+      credentialDeletionFailed: (cameraName: string) =>
+        `⚠️ Telegram would not delete your reply for ${cameraName}. Please delete it yourself — it still shows the camera address.`,
+      /*
+       * Words a user may type instead of pressing Cancel. Stored already
+       * normalized — trimmed and lowercased — so the handler compares a
+       * normalized reply against them directly rather than re-deriving a rule
+       * per locale. The Latin word stays accepted in every language: a phone
+       * keyboard is not always set to the interface language.
+       */
+      cancelSynonyms: ['cancel', 'stop'],
+
+      /* ── Operation picker (superseded by the overview above) ────── */
       menuTitle: '📡 RTSP camera sources\nChoose an action:',
       degraded: 'Only List and Remove work until RTSP is healthy again — so a camera can still be cleaned up from here.',
       buttons: {
@@ -1293,8 +1517,12 @@ const enCatalog = {
         cancel: '❌ Cancel',
       },
       cameraPrompt: 'Send the configured camera name.',
-      credentialPrompt: 'Send the RTSP or RTSPS source URL. This message will be deleted.',
-      chooseSource: (action: string) => `Choose a source to ${action}:`,
+      credentialPrompt: 'Send the RTSP or RTSPS source address. This message will be deleted.',
+      chooseSource: {
+        replace: 'Choose a source to replace:',
+        test: 'Choose a source to test:',
+        remove: 'Choose a source to remove:',
+      },
       empty: 'No RTSP camera sources are configured.',
       listHeader: '📡 RTSP camera sources',
       sourceLine: (input: {
@@ -1341,7 +1569,7 @@ const enCatalog = {
         LIVE_SOURCE_PROBE_TIMEOUT:
           '❌ The camera took too long to answer. Check the network, or try TCP transport.',
         LIVE_SOURCE_PROBE_FAILED:
-          '❌ The camera could not be verified. Check the URL, credentials and network.',
+          '❌ The camera could not be verified. Check the address, credentials and network.',
       } satisfies Record<LiveSourceProbeError['code'], string>,
       rtspClosed: '❌ RTSP camera support went offline before the change was saved. Nothing changed.',
       stopFailed: '❌ The camera could not be taken off air, so the change was not saved.',
@@ -1350,7 +1578,7 @@ const enCatalog = {
       deletionFailed: '⚠️ Telegram could not delete the credential message. Delete it manually.',
       staleSelection: 'That source selection is stale. Open Camera Sources again.',
       invalidCamera: 'Send a valid camera name.',
-      expired: 'This camera source operation expired. Start again.',
+      expired: 'This camera source setup expired after ten minutes. Start again.',
       cancelled: 'Camera source operation cancelled.',
     },
     adminAlert: {

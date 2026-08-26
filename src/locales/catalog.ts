@@ -4,14 +4,16 @@ import { ru } from './ru';
 import { uk } from './uk';
 import { deepFreeze, type DeepReadonly } from './freeze';
 
-type EnglishCatalog = typeof en;
-
-/** New locale sections may fall back to English until translations land. */
-export type LocaleCatalog = Omit<EnglishCatalog, 'camera'> & {
-  camera: Omit<EnglishCatalog['camera'], 'sources'> & {
-    sources?: EnglishCatalog['camera']['sources'];
-  };
-};
+/**
+ * Every locale carries the whole English shape — nothing is optional.
+ *
+ * `camera.sources` used to be, so a locale without translations could fall back
+ * to English while they landed. It no longer may: that workflow asks an
+ * administrator to paste an address carrying a camera password, and an
+ * administrator who cannot read the warning cannot consent to it. Making the
+ * section required is what turns a missing translation into a build failure.
+ */
+export type LocaleCatalog = typeof en;
 
 export const catalogs: DeepReadonly<Record<Locale, LocaleCatalog>> = deepFreeze({
   en,

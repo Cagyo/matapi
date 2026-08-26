@@ -298,7 +298,9 @@ export class CameraSourcesHandler {
     const keyboard = new InlineKeyboard();
     for (const [selector, source] of choices) keyboard.text(source.cameraName, data(receipt.id, `s:${selector}`)).row();
     keyboard.text(copy.buttons.cancel, data(receipt.id, 'c'));
-    await ctx.reply(copy.chooseSource(action), {
+    // `chooseSource` is a closed record now; `edit` is this screen's older
+    // name for the replace operation the catalog keys on.
+    await ctx.reply(copy.chooseSource[action === 'edit' ? 'replace' : action], {
       reply_markup: this.withHome(ctx, receipt, keyboard),
     });
   }
@@ -461,7 +463,7 @@ export class CameraSourcesHandler {
     return ctx.localeState?.catalog ?? catalogFor('en');
   }
   private copy(ctx: TelegramContext): typeof en.camera.sources {
-    return this.catalog(ctx).camera.sources ?? en.camera.sources;
+    return this.catalog(ctx).camera.sources;
   }
   private withHome(ctx: TelegramContext, receipt: WorkflowReturnReceipt, keyboard: InlineKeyboard): InlineKeyboard {
     const catalog = this.catalog(ctx);

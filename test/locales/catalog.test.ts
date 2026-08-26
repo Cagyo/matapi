@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { format } from 'date-fns';
 import { catalogs, catalogFor } from '../../src/locales/catalog';
+import type { CameraSourceFailureKind } from '../../src/telegram/interfaces/camera-source-error.presenter';
 import { en } from '../../src/locales/en';
 
 describe('catalogFor', () => {
@@ -85,6 +86,24 @@ describe('catalogFor', () => {
         providerResponse: expect.any(String),
       }));
     }
+  });
+
+  /*
+   * `camera.sources` is required on `LocaleCatalog`, not optional. The
+   * assignment below is the real guard and it is a compile-time one: while the
+   * section was optional this expression was `possibly undefined` and `yarn
+   * lint` (type-aware over `test/**`) refused it. Vitest does not typecheck, so
+   * the runtime assertions underneath cover what it can see on its own.
+   */
+  it('requires the RTSP source catalog in every locale rather than falling back to English', () => {
+    for (const locale of ['en', 'ru', 'uk'] as const) {
+      const errors: Record<CameraSourceFailureKind, string> = catalogFor(locale).camera.sources.errors;
+      expect(Object.keys(errors).length).toBeGreaterThan(0);
+      expect(catalogs[locale].camera.sources.dashboardButton).toEqual(expect.any(String));
+    }
+    expect(catalogFor('ru').camera.sources).not.toBe(en.camera.sources);
+    expect(catalogFor('uk').camera.sources).not.toBe(en.camera.sources);
+    expect(catalogFor('invalid').camera.sources).toBe(en.camera.sources);
   });
 
   it('provides the complete Home rendering catalog with equal shapes in every locale', () => {

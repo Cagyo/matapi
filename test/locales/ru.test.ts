@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ru } from '../../src/locales/ru';
+import { en } from '../../src/locales/en';
 import type { ArchiveDrainState } from '../../src/archive/application/use-cases/report-drive-status.use-case';
 
 const date = new Date('2030-01-01T12:00:00Z');
@@ -70,5 +71,24 @@ describe('Russian count-bearing formatters', () => {
     const rendered = gdrive(0, state);
     expect(rendered).toContain(`Состояние очереди: ${label}`);
     if (state !== label) expect(rendered).not.toContain(`Состояние очереди: ${state}`);
+  });
+});
+
+describe('Russian RTSP source copy', () => {
+  it('translates the source workflow rather than echoing English', () => {
+    expect(ru.camera.sources.dashboardButton).toBe('📡 RTSP-источники');
+    expect(ru.camera.sources.policy.scope).toBe('Только локальная сеть');
+    expect(ru.camera.sources.actions.back).toBe('« Назад');
+    expect(ru.camera.sources.errors['authentication-failed'])
+      .not.toBe(en.camera.sources.errors['authentication-failed']);
+    expect(ru.camera.sources.prompts.credential)
+      .not.toBe(en.camera.sources.prompts.credential);
+  });
+
+  it('pluralizes the credential-prompt expiry inside the privacy notice', () => {
+    const networks = '• eth0 · 192.168.1.0/24 (IPv4)';
+    expect(ru.camera.sources.privacyNotice({ networks, minutes: 1 })).toContain('1 минута');
+    expect(ru.camera.sources.privacyNotice({ networks, minutes: 3 })).toContain('3 минуты');
+    expect(ru.camera.sources.privacyNotice({ networks, minutes: 10 })).toContain('10 минут');
   });
 });

@@ -1,4 +1,9 @@
 import { describe, expect, it } from 'vitest';
+import { catalogFor, catalogs } from '../../src/locales/catalog';
+import {
+  CAMERA_SOURCE_FAILURE_KINDS,
+  CAMERA_SOURCE_RECOVERY_ACTIONS,
+} from '../../src/telegram/interfaces/camera-source-error.presenter';
 import { en } from '../../src/locales/en';
 import { ru } from '../../src/locales/ru';
 import { uk } from '../../src/locales/uk';
@@ -213,5 +218,232 @@ describe('en.gdrive', () => {
     });
     expect(body).toContain('Private folders:');
     expect(body).toContain('reauthorize');
+  });
+});
+
+/*
+ * `camera.sources` is the one catalog section with no English fallback: the
+ * RTSP workflow prompts for a URL that carries a camera password, and an
+ * administrator who cannot read the warning cannot consent to it. So parity
+ * here is checked structurally (keys and value kinds) *and* by identity — a
+ * Russian lookup that resolves to the English object would satisfy every shape
+ * assertion ever written.
+ */
+describe('camera.sources catalog', () => {
+  const LOCALES = [['ru', ru], ['uk', uk]] as const;
+
+  function shape(value: unknown): unknown {
+    if (typeof value === 'function') return 'function';
+    // Element kinds, not length: a cancellation-synonym list legitimately
+    // has a different number of words per language.
+    if (Array.isArray(value)) return `array<${[...new Set(value.map(shape))].sort().join('|')}>`;
+    if (value && typeof value === 'object') {
+      return Object.fromEntries(
+        Object.keys(value).sort().map((key) => [key, shape((value as Record<string, unknown>)[key])]),
+      );
+    }
+    return typeof value;
+  }
+
+  /*
+   * Every string leaf, path-tagged.
+   *
+   * `intoArrays` is off for the per-key identity comparison, because a
+   * cancellation-synonym list legitimately holds a different number of words
+   * per language and its first entry is deliberately the same Latin word
+   * everywhere — comparing `cancelSynonyms[0]` across locales would fail on
+   * copy that is correct. It is on for the leak scan, whose whole claim is
+   * that *every* source string is clean.
+   */
+  function stringLeaves(value: unknown, path = '', intoArrays = false): [string, string][] {
+    if (typeof value === 'string') return [[path, value]];
+    if (Array.isArray(value)) {
+      return intoArrays
+        ? value.flatMap((item, index) => stringLeaves(item, `${path}[${index}]`, true))
+        : [];
+    }
+    if (value && typeof value === 'object') {
+      return Object.entries(value).flatMap(([key, child]) =>
+        stringLeaves(child, path ? `${path}.${key}` : key, intoArrays),
+      );
+    }
+    return [];
+  }
+
+  it('is present in every locale, not an optional English fallback', () => {
+    for (const catalog of [catalogs.en, catalogs.ru, catalogs.uk]) {
+      expect(catalog.camera.sources).toEqual(expect.any(Object));
+      expect(Object.keys(catalog.camera.sources).length).toBeGreaterThan(0);
+    }
+  });
+
+  it.each(LOCALES)('keeps every %s source key and value kind identical to English', (_locale, catalog) => {
+    expect(shape(catalog.camera.sources)).toEqual(shape(en.camera.sources));
+  });
+
+  it.each(LOCALES)('never resolves a %s source lookup to the English object', (locale, catalog) => {
+    expect(catalog.camera.sources).not.toBe(en.camera.sources);
+    expect(catalogFor(locale).camera.sources).not.toBe(en.camera.sources);
+
+    const translated = stringLeaves(catalog.camera.sources);
+    const english = new Map(stringLeaves(en.camera.sources));
+    expect(translated.length).toBeGreaterThan(40);
+    for (const [path, value] of translated) {
+      expect(value, `${locale}: ${path}`).not.toBe(english.get(path));
+    }
+    expect(catalog.camera.sources.cancelSynonyms).not.toEqual(en.camera.sources.cancelSynonyms);
+  });
+
+  it('names every failure kind and every recovery action in every locale', () => {
+    for (const [locale, catalog] of [['en', en], ...LOCALES] as const) {
+      const { errors, actions } = catalog.camera.sources;
+      expect(Object.keys(errors).sort(), locale).toEqual([...CAMERA_SOURCE_FAILURE_KINDS].sort());
+      expect(Object.keys(actions).sort(), locale).toEqual([...CAMERA_SOURCE_RECOVERY_ACTIONS].sort());
+      for (const kind of CAMERA_SOURCE_FAILURE_KINDS) {
+        expect(errors[kind].length, `${locale}/${kind}`).toBeGreaterThan(0);
+      }
+      for (const action of CAMERA_SOURCE_RECOVERY_ACTIONS) {
+        expect(actions[action].length, `${locale}/${action}`).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it('names every operational state and policy relationship in every locale', () => {
+    for (const [locale, catalog] of [['en', en], ...LOCALES] as const) {
+      expect(Object.keys(catalog.camera.sources.statuses).sort(), locale)
+        .toEqual(['configured-verified', 'credentials-required', 'needs-attention', 'not-ready']);
+      expect(Object.keys(catalog.camera.sources.relationships).sort(), locale)
+        .toEqual(['allowed', 'blocked', 'unresolved']);
+      expect(Object.keys(catalog.camera.sources.policy.state).sort(), locale)
+        .toEqual(['ready', 'stale', 'unavailable']);
+    }
+  });
+
+  it('replaces the open chooseSource formatter with a closed operation record', () => {
+    for (const [locale, catalog] of [['en', en], ...LOCALES] as const) {
+      const choose = catalog.camera.sources.chooseSource;
+      expect(typeof choose, locale).toBe('object');
+      expect(Object.keys(choose).sort(), locale).toEqual(['remove', 'replace', 'test']);
+      for (const value of Object.values(choose)) expect(typeof value, locale).toBe('string');
+    }
+  });
+
+  /*
+   * Task 5 sends this before the credential ForceReply, and it is the only
+   * place the administrator is told what they are about to hand Telegram.
+   * Every clause below is a separate promise, so each is asserted separately.
+   */
+  it('states accepted schemes, networks, credentials, Telegram, best effort and expiry in every locale', () => {
+    const networks = '• eth0 · 192.168.1.0/24 (IPv4)';
+    for (const [locale, catalog] of [['en', en], ...LOCALES] as const) {
+      const notice = catalog.camera.sources.privacyNotice({ networks, minutes: 10 });
+      expect(notice, locale).toContain('RTSP');
+      expect(notice, locale).toContain('RTSPS');
+      expect(notice, locale).toContain(networks);
+      expect(notice, locale).toContain('Telegram');
+      expect(notice, locale).toContain('10');
+      // Six distinct clauses, so a translation that dropped one is visible.
+      expect(notice.split('\n').filter((line) => line.trim().length > 0).length, locale)
+        .toBeGreaterThanOrEqual(6);
+    }
+    expect(en.camera.sources.privacyNotice({ networks, minutes: 10 }).toLowerCase())
+      .toContain('best effort');
+  });
+
+  it('offers both removal readings, camera and source, in every locale', () => {
+    for (const [locale, catalog] of [['en', en], ...LOCALES] as const) {
+      const removal = catalog.camera.sources.removal;
+      expect(removal.confirmCamera('Front door'), locale).toContain('Front door');
+      expect(removal.confirmSource('Front door'), locale).toContain('Front door');
+      expect(removal.confirmCamera('Front door'), locale).not.toBe(removal.confirmSource('Front door'));
+      expect(removal.removeCameraButton, locale).not.toBe(removal.removeSourceButton);
+    }
+    expect(en.camera.sources.removal.removeCameraButton).toContain('camera');
+    expect(en.camera.sources.removal.removeSourceButton).toContain('source');
+  });
+
+  /*
+   * Task 7 renders all three of these: the expiry message on a late or
+   * boundary reply, the acknowledgement after an authoritative callback
+   * Cancel, and the Cancel control itself. They live beside the prompts they
+   * end rather than in `actions`, which is scoped to failure-screen controls.
+   */
+  it('carries the prompt lifecycle copy in every locale, with the window as a parameter', () => {
+    for (const [locale, catalog] of [['en', en], ...LOCALES] as const) {
+      const { expired, cancelled, cancelButton } = catalog.camera.sources.prompts;
+
+      expect(expired(10), locale).toContain('10');
+      expect(expired(1), locale).toContain('1');
+      // The window is interpolated, never spelled in prose: a changed TTL must
+      // change the message in all three languages without a translation edit.
+      expect(expired(7), locale).toContain('7');
+      expect(expired(7), locale).not.toBe(expired(10));
+      expect(cancelled.length, locale).toBeGreaterThan(0);
+      expect(cancelButton.length, locale).toBeGreaterThan(0);
+    }
+  });
+
+  /*
+   * `relationships` is a closed record, so all three values are contractually
+   * interchangeable in one slot — `detail`'s `Network: …` line and the last
+   * line of `details.body`. A value that is a full clause rather than a
+   * fragment reads as a grammar error in exactly that slot.
+   */
+  it('keeps every policy relationship a fragment that fits one rendered slot', () => {
+    for (const [locale, catalog] of [['en', en], ...LOCALES] as const) {
+      for (const [key, value] of Object.entries(catalog.camera.sources.relationships)) {
+        expect(value, `${locale}/${key}`).not.toMatch(/[.!?]$/u);
+        expect(value.slice(0, 1), `${locale}/${key}`).toBe(value.slice(0, 1).toLowerCase());
+        expect(catalog.camera.sources.detail({
+          cameraName: 'Front door',
+          host: 'front-door.lan',
+          status: catalog.camera.sources.statuses['needs-attention'],
+          relationship: value,
+        }), `${locale}/${key}`).toContain(value);
+      }
+    }
+  });
+
+  it('lists cancellation synonyms already normalized for exact comparison', () => {
+    for (const [locale, catalog] of [['en', en], ...LOCALES] as const) {
+      const synonyms = catalog.camera.sources.cancelSynonyms;
+      expect(synonyms.length, locale).toBeGreaterThan(0);
+      expect(new Set(synonyms).size, locale).toBe(synonyms.length);
+      for (const synonym of synonyms) {
+        expect(synonym, locale).toBe(synonym.trim().toLowerCase());
+        expect(synonym.length, locale).toBeGreaterThan(0);
+        /*
+         * Normalized form too, not just case and whitespace. A decomposed
+         * Cyrillic word is visually identical to its composed twin and passes
+         * both checks above, but a phone keyboard emits NFC — so an NFD entry
+         * would be a dead synonym that nothing could ever match, and nothing
+         * else in this suite can see it.
+         */
+        expect(synonym, locale).toBe(synonym.normalize('NFC'));
+      }
+    }
+    // The Latin word stays accepted everywhere: an administrator on a phone
+    // keyboard that is not set to the interface language still needs a way out.
+    for (const [locale, catalog] of [['en', en], ...LOCALES] as const) {
+      expect(catalog.camera.sources.cancelSynonyms, locale).toContain('cancel');
+    }
+  });
+
+  /*
+   * The catalog is the last place a credential could be hard-coded into a
+   * message that reaches a chat. Nothing here may look like an address.
+   */
+  it('keeps every source string free of a URL, credential or camera identifier', () => {
+    for (const [locale, catalog] of [['en', en], ...LOCALES] as const) {
+      const leaves = stringLeaves(catalog.camera.sources, '', true);
+      // Proof the array elements are actually in scope: without recursion the
+      // synonym entries below would silently not be scanned at all.
+      expect(leaves.map(([path]) => path), locale).toContain('cancelSynonyms[0]');
+      for (const [path, value] of leaves) {
+        expect(value, `${locale}: ${path}`).not.toMatch(/rtsps?:\/\//iu);
+        expect(value, `${locale}: ${path}`).not.toMatch(/@/u);
+        expect(value, `${locale}: ${path}`).not.toMatch(/\b\d{1,3}(\.\d{1,3}){3}\b/u);
+      }
+    }
   });
 });
