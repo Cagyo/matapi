@@ -1,11 +1,11 @@
 import { Inject, Injectable } from '@nestjs/common';
+import { liveSourceFrom } from '../domain/live-source-factory';
 import type { RedactedLiveSource } from '../domain/ports/live-source-repository.port';
 import {
   RTSP_SOURCE_CONFIGURATION,
   type RtspSourceConfigurationPort,
 } from '../domain/ports/rtsp-source-configuration.port';
 import {
-  liveSourceFrom,
   RtspSourceMutationService,
   type RtspSourceInput,
 } from './rtsp-source-mutation.service';

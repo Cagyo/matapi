@@ -43,7 +43,9 @@ describe('Telegram role-use-case dependency metadata', () => {
   it('injects the camera-source handler clock through the CLOCK token', () => {
     const emitted = emittedParamTypes('src/telegram/interfaces/camera-sources.handler.ts');
 
-    expect(emitted).toMatch(/__param\(3,.*CLOCK/);
+    // Position-agnostic on purpose: the guard is that the clock arrives through
+    // the token rather than as a concrete class, not where it sits in the list.
+    expect(emitted).toMatch(/__param\(\d+,.*CLOCK/);
   });
 
   it('keeps Home on port-based dependencies and TelegramModule free of forwardRef wiring', () => {

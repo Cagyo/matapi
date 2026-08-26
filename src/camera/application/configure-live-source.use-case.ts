@@ -16,6 +16,7 @@ import {
   type MediaRepositoryPort,
 } from '../domain/ports/media-repository.port';
 import { AttachRtspSourceUseCase } from './attach-rtsp-source.use-case';
+import { RtspSourceMutationService } from './rtsp-source-mutation.service';
 import { ReplaceRtspSourceUseCase } from './replace-rtsp-source.use-case';
 
 export interface ConfigureLiveSourceInput {
@@ -41,6 +42,7 @@ export interface ConfigureLiveSourceInput {
 @Injectable()
 export class ConfigureLiveSourceUseCase {
   constructor(
+    private readonly mutations: RtspSourceMutationService,
     @Inject(MEDIA_REPOSITORY) private readonly media: MediaRepositoryPort,
     @Inject(LIVE_SOURCE_REPOSITORY)
     private readonly repository: LiveSourceRepositoryPort,
@@ -49,6 +51,9 @@ export class ConfigureLiveSourceUseCase {
   ) {}
 
   async execute(input: ConfigureLiveSourceInput): Promise<RedactedLiveSource> {
+    // Before any lookup: `CameraNotFoundError` vs `CameraSourceAdminRequiredError`
+    // would otherwise answer "does a camera by this name exist?" for anyone.
+    this.mutations.requireAdmin(input.actorUserId);
     if ('certificateFingerprint' in input) {
       throw new InvalidLiveSourceError('certificate fingerprint is unsupported');
     }

@@ -15,6 +15,7 @@ import { CameraSourceUnavailableError } from '../../../src/camera/domain/errors/
 import { InvalidLiveSourceError } from '../../../src/camera/domain/errors/invalid-live-source.error';
 import { LiveSourceAuthenticationRejectedError } from '../../../src/camera/domain/errors/live-source-authentication-rejected.error';
 import { LiveSourceStateChangedError } from '../../../src/camera/domain/errors/live-source-state-changed.error';
+import { liveSourceFrom } from '../../../src/camera/domain/live-source-factory';
 import { LiveSource } from '../../../src/camera/domain/live-source.entity';
 import type { CameraIdGeneratorPort } from '../../../src/camera/domain/ports/camera-id-generator.port';
 import type { CameraSourceAuthorizationPort } from '../../../src/camera/domain/ports/camera-source-authorization.port';
@@ -26,6 +27,7 @@ import { InMemoryMediaRepository } from '../../../src/camera/infrastructure/in-m
 import { InMemoryRtspSourceConfigurationAdapter } from '../../../src/camera/infrastructure/in-memory-rtsp-source-configuration.adapter';
 import { FeatureUnavailableError } from '../../../src/features/domain/errors/feature-unavailable.error';
 import { RtspPolicyDigestMismatchError } from '../../../src/features/domain/errors/rtsp-policy-digest-mismatch.error';
+import { RtspPolicyUnavailableError } from '../../../src/features/domain/errors/rtsp-policy-unavailable.error';
 import type { FeatureAvailabilityPort } from '../../../src/features/domain/ports/feature-availability.port';
 import type { RtspPolicyStatusPort } from '../../../src/features/domain/ports/rtsp-policy-status.port';
 
@@ -104,6 +106,7 @@ async function fixture() {
     gate,
     ids,
     media,
+    mutations,
     policyStatus,
     probe,
     repository,
@@ -130,6 +133,10 @@ async function seedSource(subject: Fixture, cameraId: string): Promise<void> {
   await subject.attach.execute({ ...sourceInput(), cameraId });
   vi.mocked(subject.probe.run).mockClear();
   vi.mocked(subject.sessions.stopCamera).mockClear();
+  vi.mocked(subject.availability.requireReady).mockClear();
+  vi.mocked(subject.policyStatus.requireCurrent).mockClear();
+  vi.mocked(subject.policyStatus.assertDigest).mockClear();
+  vi.mocked(subject.authorization.requireAdmin).mockClear();
 }
 
 describe('RTSP source mutations', () => {
@@ -256,6 +263,16 @@ describe('RTSP source mutations', () => {
       vi.mocked(subject.sessions.stopCamera).mockImplementation(async (cameraId) => {
         order.push(`stop:${cameraId}`);
       });
+      vi.mocked(subject.probe.run).mockImplementation(async () => {
+        order.push('probe');
+      });
+      vi.mocked(subject.availability.requireReady).mockImplementation(async () => {
+        order.push('ready');
+      });
+      vi.mocked(subject.policyStatus.requireCurrent).mockImplementation(async () => {
+        order.push('policy');
+        return { digest: DIGEST, networks: [] };
+      });
       const commit = InMemoryRtspSourceConfigurationAdapter.prototype.replace;
       vi.spyOn(subject.configuration, 'replace').mockImplementation((input) => {
         order.push('commit');
@@ -268,7 +285,18 @@ describe('RTSP source mutations', () => {
         expectedRevision: 0,
       });
 
-      expect(order).toEqual(['stop:legacy-1', 'commit']);
+      // The stop is the LAST await before the fence. Any await after it is a
+      // window in which a user-initiated open can start a converter on the old
+      // URL — a start that moves no gate epoch, so no fence below would see it.
+      expect(order).toEqual([
+        'ready',
+        'policy',
+        'probe',
+        'ready',
+        'policy',
+        'stop:legacy-1',
+        'commit',
+      ]);
       expect(result).toMatchObject({ revision: 1, cameraName: 'Hallway' });
       expect(result.summary.host).toBe('replacement.local');
       // The other camera was never stopped and still holds its own source.
@@ -421,6 +449,44 @@ describe('RTSP source mutations', () => {
       expect(snapshot(subject)).toBe(before);
     });
 
+    it('refuses a camera whose stored source carries no credential', async () => {
+      // The config-import case: metadata occupies the row, nothing to probe.
+      await subject.repository.save(
+        LiveSource.create({ cameraId: 'legacy-1', url: 'rtsp://cam.local/live', ready: false }),
+        null,
+      );
+      const before = snapshot(subject);
+
+      await expect(
+        subject.test.execute({ actorUserId: 7, cameraId: 'legacy-1' }),
+      ).rejects.toMatchObject({ code: 'LIVE_SOURCE_CREDENTIAL_UNAVAILABLE' });
+      expect(subject.probe.run).not.toHaveBeenCalled();
+      expect(snapshot(subject)).toBe(before);
+    });
+
+    // `test` is absent from the fence table because it commits nothing; it is
+    // still gated on the actor and on RTSP before it puts a probe on the wire.
+    it('refuses a non-admin and a disabled feature before probing', async () => {
+      await seedSource(subject, 'legacy-1');
+      vi.mocked(subject.authorization.requireAdmin).mockImplementationOnce(() => {
+        throw new CameraSourceAdminRequiredError();
+      });
+
+      await expect(
+        subject.test.execute({ actorUserId: 7, cameraId: 'legacy-1' }),
+      ).rejects.toBeInstanceOf(CameraSourceAdminRequiredError);
+      expect(subject.probe.run).not.toHaveBeenCalled();
+
+      vi.mocked(subject.availability.requireReady).mockRejectedValueOnce(
+        new FeatureUnavailableError('rtsp', 'installed-off'),
+      );
+
+      await expect(
+        subject.test.execute({ actorUserId: 7, cameraId: 'legacy-1' }),
+      ).rejects.toBeInstanceOf(FeatureUnavailableError);
+      expect(subject.probe.run).not.toHaveBeenCalled();
+    });
+
     it('refuses a camera with no stored source', async () => {
       await expect(
         subject.test.execute({ actorUserId: 7, cameraId: 'legacy-1' }),
@@ -460,6 +526,9 @@ describe('RTSP source mutations', () => {
       },
     ] as const;
 
+    /** Removal carries a deliberately smaller fence; see the carve-out below. */
+    const installOperations = operations.filter((operation) => operation.name !== 'remove');
+
     async function armed(operation: (typeof operations)[number]): Promise<string> {
       if (operation.seed) await seedSource(subject, operation.seed);
       return snapshot(subject);
@@ -484,7 +553,7 @@ describe('RTSP source mutations', () => {
       },
     );
 
-    it.each(operations)('$name aborts when RTSP is disabled mid-flight', async (operation) => {
+    it.each(installOperations)('$name aborts when RTSP is disabled mid-flight', async (operation) => {
       const before = await armed(operation);
       vi.mocked(subject.availability.requireReady)
         .mockResolvedValueOnce(undefined)
@@ -494,7 +563,7 @@ describe('RTSP source mutations', () => {
       expect(snapshot(subject)).toBe(before);
     });
 
-    it.each(operations)(
+    it.each(installOperations)(
       '$name aborts when the policy digest is no longer current',
       async (operation) => {
         const before = await armed(operation);
@@ -507,7 +576,7 @@ describe('RTSP source mutations', () => {
       },
     );
 
-    it.each(operations)(
+    it.each(installOperations)(
       '$name aborts when the policy is reinstalled mid-flight',
       async (operation) => {
         const before = await armed(operation);
@@ -520,7 +589,7 @@ describe('RTSP source mutations', () => {
       },
     );
 
-    it.each(operations)('$name aborts when the start gate closes mid-flight', async (operation) => {
+    it.each(installOperations)('$name aborts when the start gate closes mid-flight', async (operation) => {
       const before = await armed(operation);
       const close = async (): Promise<void> => {
         subject.gate.close();
@@ -561,7 +630,7 @@ describe('RTSP source mutations', () => {
       expect(subject.sessions.stopCamera).not.toHaveBeenCalled();
     });
 
-    it.each(operations.filter((operation) => operation.name !== 'remove'))(
+    it.each(installOperations)(
       '$name aborts on a probe failure and on an encryption failure',
       async (operation) => {
         const before = await armed(operation);
@@ -584,6 +653,105 @@ describe('RTSP source mutations', () => {
         expect(subject.sessions.stopCamera).not.toHaveBeenCalled();
       },
     );
+  });
+
+  /**
+   * Removal probes nothing, encrypts nothing and stores no digest, so gating it
+   * on RTSP would lock an admin out of cleaning up on exactly the network that
+   * broke the policy. These are the positive counterparts of the fence table.
+   */
+  // The service owns this, rather than leaning on the adapter to catch it at
+  // commit: the fences would already have stopped and CAS'd the wrong camera.
+  it('refuses a plan whose source addresses a camera other than the fenced one', async () => {
+    const before = snapshot(subject);
+    const commit = vi.fn(() => ({ committed: true }));
+
+    await expect(
+      subject.mutations.install(
+        {
+          actorUserId: 7,
+          cameraId: 'legacy-1',
+          source: liveSourceFrom('legacy-2', sourceInput()),
+          expectedRevision: null,
+          stopSessions: true,
+        },
+        commit,
+      ),
+    ).rejects.toBeInstanceOf(InvalidLiveSourceError);
+
+    expect(commit).not.toHaveBeenCalled();
+    expect(subject.probe.run).not.toHaveBeenCalled();
+    expect(subject.sessions.stopCamera).not.toHaveBeenCalled();
+
+    expect(snapshot(subject)).toBe(before);
+  });
+
+  describe('the removal carve-out', () => {
+    const conditions = [
+      {
+        name: 'RTSP readiness is unavailable',
+        arm: (s: Fixture) =>
+          vi.mocked(s.availability.requireReady).mockRejectedValue(
+            new FeatureUnavailableError('rtsp', 'installed-off'),
+          ),
+      },
+      {
+        name: 'the installed policy is not current',
+        arm: (s: Fixture) =>
+          vi.mocked(s.policyStatus.requireCurrent).mockRejectedValue(
+            new RtspPolicyUnavailableError('unavailable'),
+          ),
+      },
+      {
+        name: 'the policy digest no longer matches',
+        arm: (s: Fixture) =>
+          vi.mocked(s.policyStatus.assertDigest).mockImplementation(() => {
+            throw new RtspPolicyDigestMismatchError(DIGEST);
+          }),
+      },
+      { name: 'the start gate is shut', arm: (s: Fixture) => s.gate.close() },
+    ] as const;
+
+    it.each(conditions)('removes a source while $name', async (condition) => {
+      await seedSource(subject, 'legacy-1');
+      condition.arm(subject);
+
+      await expect(
+        subject.remove.execute({ actorUserId: 7, cameraId: 'legacy-1', expectedRevision: 0 }),
+      ).resolves.toEqual({ removed: 'source' });
+      expect(subject.repository.listStoredSources()).toEqual([]);
+      // Not merely tolerated: never consulted at all.
+      expect(subject.availability.requireReady).not.toHaveBeenCalled();
+      expect(subject.policyStatus.requireCurrent).not.toHaveBeenCalled();
+      expect(subject.policyStatus.assertDigest).not.toHaveBeenCalled();
+    });
+
+    it('removes with every RTSP gate shut at once', async () => {
+      await seedSource(subject, 'legacy-1');
+      for (const condition of conditions) condition.arm(subject);
+
+      await expect(
+        subject.remove.execute({ actorUserId: 7, cameraId: 'legacy-1', expectedRevision: 0 }),
+      ).resolves.toEqual({ removed: 'source' });
+      expect(subject.repository.listStoredSources()).toEqual([]);
+    });
+
+    // What the carve-out must NOT have dropped.
+    it('still stops the camera, still authorizes twice and still enforces the CAS', async () => {
+      await seedSource(subject, 'legacy-1');
+      for (const condition of conditions) condition.arm(subject);
+      const before = snapshot(subject);
+
+      await expect(
+        subject.remove.execute({ actorUserId: 7, cameraId: 'legacy-1', expectedRevision: 3 }),
+      ).rejects.toBeInstanceOf(LiveSourceStateChangedError);
+      expect(snapshot(subject)).toBe(before);
+      expect(subject.sessions.stopCamera).not.toHaveBeenCalled();
+
+      await subject.remove.execute({ actorUserId: 7, cameraId: 'legacy-1', expectedRevision: 0 });
+      expect(subject.sessions.stopCamera).toHaveBeenCalledWith('legacy-1');
+      expect(subject.authorization.requireAdmin).toHaveBeenCalledTimes(3);
+    });
   });
 
   describe('the commit fence', () => {

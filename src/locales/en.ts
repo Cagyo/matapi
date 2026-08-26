@@ -1311,9 +1311,30 @@ const enCatalog = {
         input.ready ? 'ready · compatible' : 'not ready · compatibility unknown',
       ].join('\n'),
       configured: (cameraName: string) => `✅ RTSP source configured and tested for ${cameraName}.`,
-      tested: (cameraName: string) => `✅ RTSP source tested and updated for ${cameraName}.`,
+      verified: (cameraName: string) =>
+        `✅ ${cameraName} answered its stored source. Nothing was changed.`,
       removed: (cameraName: string) => `✅ RTSP source removed for ${cameraName}.`,
       configureFailed: '❌ The RTSP source could not be configured or tested.',
+      testFailed: '❌ The RTSP source could not be tested.',
+      /* Advice keyed by probe error code. Never mentions the URL or the host. */
+      probe: {
+        LIVE_SOURCE_HOST_NOT_FOUND:
+          '❌ The camera hostname does not resolve. Check the name, or use its IP address.',
+        LIVE_SOURCE_HOST_UNREACHABLE:
+          '❌ The camera did not answer. Check that it is powered on and on this network.',
+        LIVE_SOURCE_ADDRESS_OUTSIDE_POLICY:
+          '❌ The camera address is outside the permitted camera networks. It may be on another subnet, or reachable only over IPv6 while the policy allows IPv4 (or the reverse).',
+        LIVE_SOURCE_AUTHENTICATION_REJECTED:
+          '❌ The camera refused the request. Check the username and password — and the stream path, which many cameras reject the same way even when the credentials are right.',
+        LIVE_SOURCE_TLS_VERIFICATION:
+          '❌ The camera certificate failed verification. Check its hostname and certificate authority.',
+        LIVE_SOURCE_UNSUPPORTED_STREAM:
+          '❌ The camera answered with a stream this device cannot play. Try its substream or an H.264 profile.',
+        LIVE_SOURCE_PROBE_TIMEOUT:
+          '❌ The camera took too long to answer. Check the network, or try TCP transport.',
+        LIVE_SOURCE_PROBE_FAILED:
+          '❌ The camera could not be verified. Check the URL, credentials and network.',
+      },
       rtspClosed: '❌ RTSP camera support went offline before the change was saved. Nothing changed.',
       stopFailed: '❌ The camera could not be taken off air, so the change was not saved.',
       listFailed: '❌ RTSP sources are unavailable right now.',

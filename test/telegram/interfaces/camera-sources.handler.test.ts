@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { LiveSourceAuthenticationRejectedError } from '../../../src/camera/domain/errors/live-source-authentication-rejected.error';
 import { catalogFor } from '../../../src/locales';
 import type { WorkflowReturnReceipt } from '../../../src/telegram/domain/workflow-return';
 import { CameraSourcesHandler } from '../../../src/telegram/interfaces/camera-sources.handler';
@@ -45,7 +46,8 @@ const source = {
 function setup() {
   const configure = { execute: vi.fn().mockResolvedValue(source) };
   const list = { execute: vi.fn().mockResolvedValue([source]) };
-  const remove = { execute: vi.fn().mockResolvedValue(undefined) };
+  const remove = { execute: vi.fn().mockResolvedValue({ removed: 'source' }) };
+  const test = { execute: vi.fn().mockResolvedValue(source) };
   const workflows = {
     begin: vi.fn().mockResolvedValue(receipt),
     validateCurrent: vi.fn().mockResolvedValue(true),
@@ -60,11 +62,12 @@ function setup() {
     configure as never,
     list as never,
     remove as never,
+    test as never,
     { now: () => new Date('2026-07-17') },
     workflows as unknown as WorkflowEntryCoordinator,
     navigation as unknown as WorkflowNavigationHandler,
   );
-  return { configure, handler, list, navigation, remove, workflows };
+  return { configure, handler, list, navigation, remove, test, workflows };
 }
 
 function context(input: { text?: string; role?: 'admin' | 'user'; messageId?: number } = {}) {
@@ -170,6 +173,41 @@ describe('CameraSourcesHandler contextual state', () => {
       cameraId: 'camera-with-private-id',
       expectedRevision: 4,
     });
+  });
+
+  it('tests a stored source without prompting for credentials or mutating it', async () => {
+    const { configure, handler, test } = setup();
+    const ctx = context();
+    await handler.handleCallback(ctx as never, 't', receipt);
+    const selector = keyboardData(ctx).find((value) => value.includes(':src:s:'));
+
+    await handler.handleCallback(ctx as never, selector!.split(':src:')[1], receipt);
+
+    expect(test.execute).toHaveBeenCalledWith({
+      actorUserId: 100,
+      cameraId: 'camera-with-private-id',
+    });
+    expect(configure.execute).not.toHaveBeenCalled();
+    const replies = JSON.stringify(ctx.reply.mock.calls);
+    expect(replies).toContain(catalogFor('en').camera.sources.verified('Front door'));
+    expect(replies).not.toContain(catalogFor('en').camera.sources.credentialPrompt);
+  });
+
+  it('renders a probe failure as advice covering credentials and stream path', async () => {
+    const { handler, test } = setup();
+    test.execute.mockRejectedValueOnce(new LiveSourceAuthenticationRejectedError());
+    const ctx = context();
+    await handler.handleCallback(ctx as never, 't', receipt);
+    const selector = keyboardData(ctx).find((value) => value.includes(':src:s:'));
+
+    await handler.handleCallback(ctx as never, selector!.split(':src:')[1], receipt);
+
+    const advice = catalogFor('en').camera.sources.probe.LIVE_SOURCE_AUTHENTICATION_REJECTED;
+    expect(JSON.stringify(ctx.reply.mock.calls)).toContain(advice);
+    expect(advice).toMatch(/password/iu);
+    expect(advice).toMatch(/path/iu);
+    expect(catalogFor('en').camera.sources.probe.LIVE_SOURCE_ADDRESS_OUTSIDE_POLICY)
+      .toMatch(/IPv6/u);
   });
 
   it('marks configuration running before using and deleting the credential text', async () => {

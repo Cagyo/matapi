@@ -1,14 +1,11 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { CameraSourceUnavailableError } from '../domain/errors/camera-source-unavailable.error';
+import { InvalidLiveSourceError } from '../domain/errors/invalid-live-source.error';
 import { LiveSourceCredentialUnavailableError } from '../domain/errors/live-source-credential-unavailable.error';
 import { LiveSourceStateChangedError } from '../domain/errors/live-source-state-changed.error';
 import { LiveStreamUnavailableError } from '../domain/errors/live-stream-unavailable.error';
-import {
-  LiveSource,
-  type LiveSourceProfileSettings,
-  type LiveSourceSecuritySettings,
-  type LiveSourceTransportSettings,
-} from '../domain/live-source.entity';
+import type { LiveSourceEndpointInput } from '../domain/live-source-factory';
+import type { LiveSource } from '../domain/live-source.entity';
 import { CAMERA_CLOCK, type CameraClockPort } from '../domain/ports/camera-clock.port';
 import {
   CAMERA_SOURCE_AUTHORIZATION,
@@ -43,15 +40,18 @@ import {
 } from '../../features/domain/ports/rtsp-policy-status.port';
 import { RtspSourceStartGate } from './rtsp-source-start-gate.service';
 
-/** The endpoint half of every source mutation, before it is bound to a camera. */
-export interface RtspSourceInput {
+/** The endpoint half of every source mutation, plus the actor performing it. */
+export interface RtspSourceInput extends LiveSourceEndpointInput {
   actorUserId: number;
-  url: string;
-  transport: LiveSourceTransportSettings['transport'];
-  tlsMode: LiveSourceSecuritySettings['tlsMode'];
-  profile: LiveSourceProfileSettings['profile'];
-  substream?: string | null;
 }
+
+/**
+ * A commit callback the fence can trust. `then?: never` makes an `async`
+ * callback fail to compile: an operation class that returned a promise here
+ * would reopen the async boundary the whole fence exists to close, and the
+ * source-text test alone could not see it from another file.
+ */
+type SyncCommit<T> = T & { then?: never };
 
 /** A source that installs a credential: create, attach, replace. */
 interface InstallPlan {
@@ -74,12 +74,15 @@ interface RetirePlan {
  * The orchestration every RTSP source mutation shares, so the ordering that
  * makes those mutations safe is written once.
  *
- * Each flow captures the policy digest, the start-gate epoch and the stored
- * revision before it probes, and re-checks all of them — plus the actor's role —
- * immediately before handing a finished, encrypted result to the synchronous
- * configuration transaction. The final checks and the commit share one
- * uninterruptible turn: the operation classes supply `commit` as a synchronous
- * callback precisely so no `await` can be introduced between them.
+ * An **install** flow — create, attach, replace — captures the policy digest,
+ * the start-gate epoch and the stored revision before it probes, and re-checks
+ * all of them, plus the actor's role, immediately before handing a finished,
+ * encrypted result to the synchronous configuration transaction. A **retire**
+ * flow carries far fewer fences on purpose; see `retire`.
+ *
+ * The final checks and the commit share one uninterruptible turn: the operation
+ * classes supply `commit` as a synchronous callback precisely so no `await` can
+ * be introduced between them.
  *
  * Plaintext lives only in the `LiveSource` this service probes and encrypts;
  * nothing it returns or throws carries a URL.
@@ -106,7 +109,7 @@ export class RtspSourceMutationService {
 
   /**
    * The first fence, for work an operation must do before it can describe the
-   * mutation at all — minting an identifier, or validating a display name.
+   * mutation at all — minting an identifier, or resolving a display name.
    */
   requireAdmin(actorUserId: number): void {
     this.authorization.requireAdmin(actorUserId);
@@ -115,8 +118,14 @@ export class RtspSourceMutationService {
   /** Verifies a source end to end, then commits it in one synchronous turn. */
   async install<T>(
     plan: InstallPlan,
-    commit: (verified: PersistVerifiedSource) => T,
+    commit: (verified: PersistVerifiedSource) => SyncCommit<T>,
   ): Promise<T> {
+    // This service owns the identity invariant rather than leaving it to the
+    // adapter: fencing the revision and the session against one camera while
+    // encrypting for another would validate the wrong camera entirely.
+    if (plan.source.cameraId !== plan.cameraId) {
+      throw new InvalidLiveSourceError('source addresses another camera');
+    }
     this.authorization.requireAdmin(plan.actorUserId);
     await this.availability.requireReady('rtsp');
     const policy = await this.policyStatus.requireCurrent();
@@ -127,9 +136,14 @@ export class RtspSourceMutationService {
       plan.source.cameraId,
       plan.source.credentialPayload(),
     );
-    if (plan.stopSessions) await this.stopCamera(plan.cameraId);
     await this.availability.requireReady('rtsp');
     const current = await this.policyStatus.requireCurrent();
+    // Last of the awaits, deliberately: an `await` between the stop and the
+    // commit is a window in which a user-initiated `OpenLiveStreamUseCase` can
+    // start a converter for this camera. That start moves no gate epoch, so no
+    // fence below would see it, and the swap would land while a converter still
+    // streamed the old URL.
+    if (plan.stopSessions) await this.stopCamera(plan.cameraId);
 
     // FENCE: no await below this line. Everything from here to the synchronous
     // configuration transaction runs in one uninterruptible turn.
@@ -145,23 +159,39 @@ export class RtspSourceMutationService {
     });
   }
 
-  /** The same fences for a retirement, which probes and encrypts nothing. */
-  async retire<T>(plan: RetirePlan, commit: () => T): Promise<T> {
+  /**
+   * Retires a source. Deliberately far less fenced than `install`.
+   *
+   * Removal probes nothing, encrypts nothing and persists no digest — Task 5's
+   * `remove({ cameraId, expectedRevision })` signature says as much — and the
+   * policy installer never touches `cameras` or `camera_live_sources`. Gating
+   * removal on RTSP readiness and a current policy therefore protects nothing,
+   * while creating an indefinite lock-out: on a network where the inspector
+   * finds no eligible interface the reinstall can never complete, so the admin
+   * could never remove the source. A policy that goes stale mid-run is the
+   * common case — the stored ready flag is untouched, so `requireReady` passes
+   * and only `requireCurrent` would block. `assertGateOpen` is dropped for the
+   * same reason and one more: nothing replays sessions when the gate reopens,
+   * so there is no restart for the epoch fence to protect against.
+   *
+   * What remains is what actually makes a removal safe: the compare-and-swap,
+   * and authorization on both sides of the stop, because `stopCamera` awaits and
+   * an actor demoted in that window must not complete a destructive write.
+   *
+   * The stop stays fenced by choice, not oversight. A converter wedged in
+   * `cleanupBlocked` whose `retryBlockedCleanup()` keeps failing refuses removal
+   * with `session-stop-failed` after a 30 s wait, indefinitely. That lock-out
+   * needs a wedged FFmpeg rather than a merely hostile network, and deleting the
+   * row out from under a converter that is still streaming it is worse.
+   */
+  async retire<T>(plan: RetirePlan, commit: () => SyncCommit<T>): Promise<T> {
     this.authorization.requireAdmin(plan.actorUserId);
-    await this.availability.requireReady('rtsp');
-    const policy = await this.policyStatus.requireCurrent();
-    const epoch = this.gate.snapshot();
     await this.requireStoredRevision(plan.cameraId, plan.expectedRevision);
     await this.stopCamera(plan.cameraId);
-    await this.availability.requireReady('rtsp');
-    const current = await this.policyStatus.requireCurrent();
 
     // FENCE: no await below this line. Everything from here to the synchronous
     // configuration transaction runs in one uninterruptible turn.
     this.authorization.requireAdmin(plan.actorUserId);
-    this.assertGateOpen(epoch);
-    this.policyStatus.assertDigest(policy.digest);
-    this.assertSameDigest(current.digest, policy.digest);
     return commit();
   }
 
@@ -169,6 +199,9 @@ export class RtspSourceMutationService {
    * Re-probes a stored source. Writes nothing: the revision, attestation,
    * readiness, credential and timestamps a caller reads back are the ones
    * already on disk, so a failed test never demotes a working camera.
+   *
+   * Fully gated, unlike `retire`: this runs a real probe, and probe egress is
+   * exactly what the RTSP network policy governs.
    */
   async verifyStored(input: {
     actorUserId: number;
@@ -219,17 +252,4 @@ export class RtspSourceMutationService {
   private assertSameDigest(current: string, captured: string): void {
     if (current !== captured) throw new RtspPolicyDigestMismatchError(captured);
   }
-}
-
-/** Builds the probe-ready source every mutation shares, credentials included. */
-export function liveSourceFrom(cameraId: string, input: RtspSourceInput): LiveSource {
-  return LiveSource.create({
-    cameraId,
-    url: input.url,
-    transport: input.transport,
-    tlsMode: input.tlsMode,
-    profile: input.profile,
-    substream: input.substream,
-    ready: true,
-  });
 }

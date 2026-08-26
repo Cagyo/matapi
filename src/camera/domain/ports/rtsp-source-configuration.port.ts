@@ -30,11 +30,16 @@ export interface PersistVerifiedSource {
 /**
  * Every camera-source mutation, each as one synchronous transaction.
  *
- * Synchronous on purpose: authorization, gate epoch, and policy digest are
- * rechecked immediately before the swap, and no `await` may sit between those
+ * Synchronous on purpose: the caller's final checks — authorization always, and
+ * for the three methods that install a source the gate epoch and policy digest
+ * too — run immediately before the swap, and no `await` may sit between those
  * checks and the write. better-sqlite3 transactions are synchronous, so the
  * whole commit fits in one uninterruptible turn. Do not make any method
  * `async` or have it return a promise.
+ *
+ * `remove` is fenced by authorization and the compare-and-swap alone: it probes
+ * nothing and stores no digest, so gating it on RTSP readiness would only lock
+ * an admin out of cleaning up on a network the policy cannot describe.
  *
  * The adapter performs no encryption, probing, DNS, or authorization; callers
  * do that first and hand over the finished result.

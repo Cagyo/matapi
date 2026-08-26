@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { AttachRtspSourceUseCase } from '../../../src/camera/application/attach-rtsp-source.use-case';
+import type { RtspSourceMutationService } from '../../../src/camera/application/rtsp-source-mutation.service';
 import { ConfigureLiveSourceUseCase } from '../../../src/camera/application/configure-live-source.use-case';
 import type { ReplaceRtspSourceUseCase } from '../../../src/camera/application/replace-rtsp-source.use-case';
+import { CameraSourceAdminRequiredError } from '../../../src/camera/domain/errors/camera-source-admin-required.error';
 import { CameraNotFoundError } from '../../../src/camera/domain/errors/camera-not-found.error';
 import type {
   LiveSourceRepositoryPort,
@@ -45,6 +47,7 @@ const request = {
 } as const;
 
 function fixture(existing: RedactedLiveSource | null) {
+  const mutations = { requireAdmin: vi.fn() } as unknown as RtspSourceMutationService;
   const media = {
     findCameraByName: vi.fn().mockResolvedValue(camera),
   } as unknown as MediaRepositoryPort;
@@ -58,9 +61,10 @@ function fixture(existing: RedactedLiveSource | null) {
   return {
     attach,
     media,
+    mutations,
     replace,
     repository,
-    useCase: new ConfigureLiveSourceUseCase(media, repository, attach, replace),
+    useCase: new ConfigureLiveSourceUseCase(mutations, media, repository, attach, replace),
   };
 }
 
@@ -95,6 +99,19 @@ describe('ConfigureLiveSourceUseCase', () => {
     );
     expect(attach.execute).not.toHaveBeenCalled();
     expect(repository.save).not.toHaveBeenCalled();
+  });
+
+  it('authorizes before it looks anything up, so a denial is not a name oracle', async () => {
+    const { useCase, media, repository, mutations } = fixture(null);
+    vi.mocked(mutations.requireAdmin).mockImplementation(() => {
+      throw new CameraSourceAdminRequiredError();
+    });
+
+    await expect(useCase.execute({ ...request })).rejects.toBeInstanceOf(
+      CameraSourceAdminRequiredError,
+    );
+    expect(media.findCameraByName).not.toHaveBeenCalled();
+    expect(repository.findRedacted).not.toHaveBeenCalled();
   });
 
   it('rejects an unknown camera and a compatibility fingerprint without delegating', async () => {

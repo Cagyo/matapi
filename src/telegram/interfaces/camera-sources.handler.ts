@@ -4,7 +4,9 @@ import { InlineKeyboard } from 'grammy';
 import { ConfigureLiveSourceUseCase } from '../../camera/application/configure-live-source.use-case';
 import { ListLiveSourcesUseCase } from '../../camera/application/list-live-sources.use-case';
 import { RemoveRtspSourceUseCase } from '../../camera/application/remove-rtsp-source.use-case';
+import { TestRtspSourceUseCase } from '../../camera/application/test-rtsp-source.use-case';
 import { CameraSourceUnavailableError } from '../../camera/domain/errors/camera-source-unavailable.error';
+import { LiveSourceProbeBaseError } from '../../camera/domain/errors/live-source-probe-base.error';
 import type { RedactedLiveSource } from '../../camera/domain/ports/live-source-repository.port';
 import { CLOCK, type ClockPort } from '../../events/domain/ports/clock.port';
 import { catalogFor, type LocaleCatalog } from '../../locales';
@@ -26,7 +28,7 @@ type SourceState =
   | {
       kind: 'credential';
       receipt: WorkflowReturnReceipt;
-      action: 'add' | 'edit' | 'test';
+      action: 'add' | 'edit';
       cameraName: string;
       createdAtMs: number;
     }
@@ -47,6 +49,7 @@ export class CameraSourcesHandler {
     private readonly configure: ConfigureLiveSourceUseCase,
     private readonly list: ListLiveSourcesUseCase,
     private readonly remove: RemoveRtspSourceUseCase,
+    private readonly test: TestRtspSourceUseCase,
     @Inject(CLOCK) private readonly clock: ClockPort,
     private readonly workflows: WorkflowEntryCoordinator,
     @Optional() private readonly navigation?: WorkflowNavigationHandler,
@@ -146,6 +149,23 @@ export class CameraSourcesHandler {
       }
       return;
     }
+    if (state.action === 'test') {
+      // Testing re-probes what is already stored: no credential prompt, no
+      // re-encryption, no revision bump, no session stop.
+      if (!(await this.workflows.markRunning(ctx, receipt))) return;
+      this.clear(ctx, receipt.id);
+      try {
+        const verified = await this.test.execute({
+          actorUserId: receipt.userId,
+          cameraId: source.cameraId,
+        });
+        await this.complete(ctx, receipt, () => ctx.reply(copy.verified(verified.cameraName)));
+      } catch (error) {
+        if (await this.replyUnavailable(ctx, receipt, error)) return;
+        await this.complete(ctx, receipt, () => ctx.reply(this.probeAdvice(ctx, error)));
+      }
+      return;
+    }
     this.set(ctx, {
       kind: 'credential',
       receipt,
@@ -229,11 +249,7 @@ export class CameraSourcesHandler {
     }
     await this.complete(ctx, state.receipt, async () => {
       await ctx.reply(
-        configured
-          ? state.action === 'test'
-            ? copy.tested(configured.cameraName)
-            : copy.configured(configured.cameraName)
-          : copy.configureFailed,
+        configured ? copy.configured(configured.cameraName) : copy.configureFailed,
       );
       if (!deleted) await ctx.reply(copy.deletionFailed);
     });
@@ -295,6 +311,15 @@ export class CameraSourcesHandler {
     await ctx.reply(`${copy.listHeader}\n\n${lines.join('\n\n')}`);
   }
 
+  /** Renders a probe failure as advice, keyed by its code — never its host. */
+  private probeAdvice(ctx: TelegramContext, error: unknown): string {
+    const copy = this.copy(ctx);
+    if (error instanceof LiveSourceProbeBaseError) {
+      const advice = (copy.probe as Record<string, string | undefined>)[error.code];
+      if (advice) return advice;
+    }
+    return copy.testFailed;
+  }
   private async requireAdmin(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<boolean> {
     if (ctx.localeState?.user.role === 'admin') return true;
     this.clear(ctx, receipt.id);
