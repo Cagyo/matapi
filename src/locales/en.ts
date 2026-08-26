@@ -1283,6 +1283,7 @@ const enCatalog = {
     },
     sources: {
       menuTitle: '📡 RTSP camera sources\nChoose an action:',
+      degraded: 'Only List and Remove work until RTSP is healthy again — so a camera can still be cleaned up from here.',
       buttons: {
         add: '➕ Add',
         edit: '✏️ Edit',

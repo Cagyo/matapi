@@ -80,7 +80,10 @@ export class CameraSourcesHandler {
   async handleEntry(ctx: TelegramContext, launch?: WorkflowLaunch): Promise<void> {
     const receipt = launch?.receipt ?? (await this.workflows.begin(ctx, 'camera', { source: 'natural-parent' }));
     if (!receipt || !(await this.requireAdmin(ctx, receipt))) return;
-    if (!(await this.requireRtsp(ctx, receipt))) return;
+    // Rendered even when RTSP is unhealthy: List and Remove must stay reachable
+    // precisely then, and refusing the menu outright is what strands an admin on
+    // a network the policy cannot describe. Each action gates itself below.
+    const notice = await this.rtspNotice(ctx);
     this.clear(ctx, receipt.id);
     const copy = this.copy(ctx);
     const keyboard = new InlineKeyboard()
@@ -92,7 +95,7 @@ export class CameraSourcesHandler {
       .row()
       .text(copy.buttons.remove, data(receipt.id, 'r'))
       .text(copy.buttons.cancel, data(receipt.id, 'c'));
-    await ctx.reply(copy.menuTitle, {
+    await ctx.reply(notice ? `${notice}\n\n${copy.degraded}\n\n${copy.menuTitle}` : copy.menuTitle, {
       reply_markup: this.withHome(ctx, receipt, keyboard),
     });
   }
@@ -106,7 +109,11 @@ export class CameraSourcesHandler {
       await this.complete(ctx, receipt, () => ctx.reply(copy.cancelled));
       return;
     }
-    if (!(await this.requireRtsp(ctx, receipt))) return;
+    // 'l' and 'r' are exempt: listing reads stored metadata and removal starts no
+    // converter, and they are the only way to clean up while RTSP is unhealthy.
+    if (action !== 'l' && action !== 'r' && !action.startsWith('s:')) {
+      if (!(await this.requireRtsp(ctx, receipt))) return;
+    }
     if (action === 'a') {
       this.set(ctx, { kind: 'camera', receipt, createdAtMs: this.now() });
       await ctx.reply(copy.cameraPrompt, {
@@ -150,6 +157,9 @@ export class CameraSourcesHandler {
       }
       return;
     }
+    // Everything past removal starts a probe or a converter, so the selection is
+    // re-gated here rather than only when it was offered ten minutes ago.
+    if (!(await this.requireRtsp(ctx, receipt))) return;
     if (state.action === 'test') {
       // Testing re-probes what is already stored: no credential prompt, no
       // re-encryption, no revision bump, no session stop.
@@ -163,7 +173,7 @@ export class CameraSourcesHandler {
         await this.complete(ctx, receipt, () => ctx.reply(copy.verified(verified.cameraName)));
       } catch (error) {
         if (await this.replyUnavailable(ctx, receipt, error)) return;
-        await this.complete(ctx, receipt, () => ctx.reply(this.probeAdvice(ctx, error)));
+        await this.complete(ctx, receipt, () => ctx.reply(this.probeAdvice(ctx, error, copy.testFailed)));
       }
       return;
     }
@@ -226,6 +236,7 @@ export class CameraSourcesHandler {
     const messageId = ctx.message?.message_id;
     let deleted = false;
     let configured: RedactedLiveSource | undefined;
+    let failure: string | undefined;
     try {
       configured = await this.configure.execute({
         actorUserId: state.receipt.userId,
@@ -237,7 +248,8 @@ export class CameraSourcesHandler {
       });
     } catch (error) {
       if (await this.replyUnavailable(ctx, state.receipt, error)) return true;
-      /* map every credential failure to safe localized copy */
+      // The moment advice is worth most: the admin has just typed a URL.
+      failure = this.probeAdvice(ctx, error, copy.configureFailed);
     } finally {
       if (messageId !== undefined) {
         try {
@@ -250,7 +262,7 @@ export class CameraSourcesHandler {
     }
     await this.complete(ctx, state.receipt, async () => {
       await ctx.reply(
-        configured ? copy.configured(configured.cameraName) : copy.configureFailed,
+        configured ? copy.configured(configured.cameraName) : failure ?? copy.configureFailed,
       );
       if (!deleted) await ctx.reply(copy.deletionFailed);
     });
@@ -321,12 +333,12 @@ export class CameraSourcesHandler {
    * function. The map's keys are typed against the probe union, so an unhandled
    * code is a build failure, not a silent fall-through to the generic message.
    */
-  private probeAdvice(ctx: TelegramContext, error: unknown): string {
+  private probeAdvice(ctx: TelegramContext, error: unknown, fallback: string): string {
     const copy = this.copy(ctx);
     if (error instanceof LiveSourceProbeBaseError && Object.hasOwn(copy.probe, error.code)) {
       return copy.probe[error.code as LiveSourceProbeError['code']];
     }
-    return copy.testFailed;
+    return fallback;
   }
   private async requireAdmin(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<boolean> {
     if (ctx.localeState?.user.role === 'admin') return true;
@@ -334,20 +346,31 @@ export class CameraSourcesHandler {
     await this.complete(ctx, receipt, () => ctx.reply(this.catalog(ctx).common.adminRequired));
     return false;
   }
-  private async replyUnavailable(ctx: TelegramContext, receipt: WorkflowReturnReceipt, error: unknown): Promise<boolean> {
+  private unavailableMessage(ctx: TelegramContext, error: unknown): string | null {
     if (error instanceof CameraSourceUnavailableError) {
       const copy = this.copy(ctx);
-      const message = error.reason === 'rtsp-closed' ? copy.rtspClosed : copy.stopFailed;
-      await this.complete(ctx, receipt, () => ctx.reply(message));
-      return true;
+      return error.reason === 'rtsp-closed' ? copy.rtspClosed : copy.stopFailed;
     }
-    if (!(error instanceof FeatureUnavailableError)) return false;
+    if (!(error instanceof FeatureUnavailableError)) return null;
     const feature = this.catalog(ctx).feature;
     const stale = feature.stale;
     const name = feature.names.rtsp;
-    const message = error.state === 'installed-off' ? stale.disabled(name)
+    return error.state === 'installed-off' ? stale.disabled(name)
       : error.state === 'needs-attention' ? stale.attention(name)
         : error.state === 'installing' ? stale.installing(name) : stale.unavailable(name);
+  }
+  /** The notice the menu carries when RTSP is unhealthy, or null when it is not. */
+  private async rtspNotice(ctx: TelegramContext): Promise<string | null> {
+    try {
+      await this.availability?.requireReady('rtsp');
+      return null;
+    } catch (error) {
+      return this.unavailableMessage(ctx, error);
+    }
+  }
+  private async replyUnavailable(ctx: TelegramContext, receipt: WorkflowReturnReceipt, error: unknown): Promise<boolean> {
+    const message = this.unavailableMessage(ctx, error);
+    if (message === null) return false;
     await this.complete(ctx, receipt, () => ctx.reply(message));
     return true;
   }

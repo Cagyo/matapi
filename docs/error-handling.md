@@ -251,6 +251,22 @@ probe-timeout (our own deadline) · probe-failed (everything else)
 closed-vocabulary diagnostics token emitted by the sandboxed unit — a fixed
 enum, never free text.
 
+**Where the advice renders.** Whichever kinds a probe *can* classify, all eight
+reach the administrator as advice rather than a generic failure. The
+`camera.sources.probe` copy map is keyed by the error `code` and typed
+`satisfies Record<LiveSourceProbeError['code'], string>`, so a missing or
+mistyped key is a build error — the copy-side counterpart of the
+`ProbeErrorsShareTheBase` assertion in `live-source-probe.port.ts`.
+`CameraSourcesHandler.probeAdvice` renders it on both paths that probe: adding
+or editing a source, and testing a stored one, each falling back to its own
+generic message for a non-probe failure. Map from the `code`, never from
+`DIAGNOSTIC_MARKERS` in `live-source-probe-diagnostics.ts` — that table is
+infrastructure, exported only so a fixture-coverage guard can walk it.
+
+So the reduction on a sandboxed Pi is in *classification*, not in rendering: the
+kinds that survive are rendered as well as they can be, and the remaining four
+render correctly the moment the follow-up makes them classifiable.
+
 ## Crash policy
 
 - **Do not** add top-level `try/catch` to suppress crashes "just in case". PM2 restarts on crash; that is the contract.

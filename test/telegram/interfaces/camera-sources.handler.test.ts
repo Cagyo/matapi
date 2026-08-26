@@ -8,6 +8,10 @@ import { LiveSourceProbeTimeoutError } from '../../../src/camera/domain/errors/l
 import { LiveSourceTlsVerificationError } from '../../../src/camera/domain/errors/live-source-tls-verification.error';
 import { LiveSourceUnsupportedStreamError } from '../../../src/camera/domain/errors/live-source-unsupported-stream.error';
 import type { LiveSourceProbeError } from '../../../src/camera/domain/ports/live-source-probe.port';
+import { ListLiveSourcesUseCase } from '../../../src/camera/application/list-live-sources.use-case';
+import type { LiveSourceRepositoryPort } from '../../../src/camera/domain/ports/live-source-repository.port';
+import { FeatureUnavailableError } from '../../../src/features/domain/errors/feature-unavailable.error';
+import type { FeatureAvailabilityPort } from '../../../src/features/domain/ports/feature-availability.port';
 import { catalogFor } from '../../../src/locales';
 import type { WorkflowReturnReceipt } from '../../../src/telegram/domain/workflow-return';
 import { CameraSourcesHandler } from '../../../src/telegram/interfaces/camera-sources.handler';
@@ -51,9 +55,9 @@ const source = {
   policyDigest: null,
 };
 
-function setup() {
+function setup(options: { availability?: FeatureAvailabilityPort; list?: unknown } = {}) {
   const configure = { execute: vi.fn().mockResolvedValue(source) };
-  const list = { execute: vi.fn().mockResolvedValue([source]) };
+  const list = options.list ?? { execute: vi.fn().mockResolvedValue([source]) };
   const remove = { execute: vi.fn().mockResolvedValue({ removed: 'source' }) };
   const test = { execute: vi.fn().mockResolvedValue(source) };
   const workflows = {
@@ -74,6 +78,7 @@ function setup() {
     { now: () => new Date('2026-07-17') },
     workflows as unknown as WorkflowEntryCoordinator,
     navigation as unknown as WorkflowNavigationHandler,
+    options.availability,
   );
   return { configure, handler, list, navigation, remove, test, workflows };
 }
@@ -265,6 +270,106 @@ describe('CameraSourcesHandler contextual state', () => {
     const replies = ctx.reply.mock.calls.flat();
     expect(replies).toContain(catalogFor('en').camera.sources.testFailed);
     expect(replies.every((reply) => typeof reply !== 'function')).toBe(true);
+  });
+
+  /**
+   * The lock-out this plan's removal carve-out exists to prevent, exercised end
+   * to end: a reinstall closed the start gate and never reopened it, and the
+   * policy the inspector needs is gone. The admin must still be able to list
+   * and remove — the carve-out in the use case is worthless if the menu, the
+   * listing, or the selection refuses one layer up.
+   */
+  describe('with RTSP unhealthy', () => {
+    function degraded() {
+      const availability: FeatureAvailabilityPort = {
+        awaitInitialVerification: vi.fn(),
+        inspect: vi.fn(),
+        requireReady: vi.fn().mockRejectedValue(
+          new FeatureUnavailableError('rtsp', 'needs-attention'),
+        ),
+      };
+      // The real listing use case, not a stub: re-adding a readiness check or a
+      // start-gate assertion to it must break this test.
+      const repository = {
+        listRedacted: vi.fn().mockResolvedValue([source]),
+      } as unknown as LiveSourceRepositoryPort;
+      return setup({ availability, list: new ListLiveSourcesUseCase(repository) });
+    }
+
+    it('still renders the menu, with a notice saying what still works', async () => {
+      const { handler } = degraded();
+      const ctx = context();
+
+      await handler.handleEntry(ctx as never, { receipt });
+
+      const replies = JSON.stringify(ctx.reply.mock.calls);
+      expect(replies).toContain(catalogFor('en').camera.sources.degraded);
+      expect(keyboardData(ctx)).toEqual(
+        expect.arrayContaining(['cam:abcdefghijklmnop:src:r', 'cam:abcdefghijklmnop:src:l']),
+      );
+    });
+
+    it('still lists sources', async () => {
+      const { handler } = degraded();
+      const ctx = context();
+
+      await handler.handleCallback(ctx as never, 'l', receipt);
+
+      expect(JSON.stringify(ctx.reply.mock.calls)).toContain('Front door');
+    });
+
+    it('still removes a source, under the revision the listing showed', async () => {
+      const { handler, remove } = degraded();
+      const ctx = context();
+      await handler.handleCallback(ctx as never, 'r', receipt);
+      const selector = keyboardData(ctx).find((value) => value.includes(':src:s:'));
+      expect(selector).toBeDefined();
+
+      await handler.handleCallback(ctx as never, selector!.split(':src:')[1], receipt);
+
+      expect(remove.execute).toHaveBeenCalledWith({
+        actorUserId: 100,
+        cameraId: 'camera-with-private-id',
+        expectedRevision: 4,
+      });
+      expect(JSON.stringify(ctx.reply.mock.calls)).toContain(
+        catalogFor('en').camera.sources.removed('Front door'),
+      );
+    });
+
+    it('still refuses to add, edit or test a source', async () => {
+      const { configure, handler, test } = degraded();
+      const ctx = context();
+
+      for (const action of ['a', 'e', 't']) {
+        await handler.handleCallback(ctx as never, action, receipt);
+      }
+
+      expect(configure.execute).not.toHaveBeenCalled();
+      expect(test.execute).not.toHaveBeenCalled();
+      expect(JSON.stringify(ctx.reply.mock.calls)).not.toContain(
+        catalogFor('en').camera.sources.credentialPrompt,
+      );
+    });
+  });
+
+  it('renders typed probe advice after a credential is submitted, not generic failure', async () => {
+    const { configure, handler } = setup();
+    configure.execute.mockRejectedValueOnce(new LiveSourceAuthenticationRejectedError());
+    await handler.handleCallback(context() as never, 'a', receipt);
+    await handler.handleText(context({ text: 'Front door' }) as never);
+    const credential = context({ text: 'rtsp://user:pass@camera.local/live', messageId: 91 });
+
+    await handler.handleText(credential as never);
+
+    const replies = JSON.stringify(credential.reply.mock.calls);
+    expect(replies).toContain(
+      catalogFor('en').camera.sources.probe.LIVE_SOURCE_AUTHENTICATION_REJECTED,
+    );
+    expect(replies).not.toContain(catalogFor('en').camera.sources.configureFailed);
+    expect(replies).not.toContain('user:pass');
+    // The credential message is still deleted on the failure path.
+    expect(credential.api.deleteMessage).toHaveBeenCalledWith(42, 91);
   });
 
   it('marks configuration running before using and deleting the credential text', async () => {
