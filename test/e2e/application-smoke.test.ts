@@ -5,9 +5,14 @@ import { resolve } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { AppModule } from '../../src/app.module';
 import { GetSnapshotUseCase } from '../../src/camera/application/get-snapshot.use-case';
+import {
+  CAMERA_SOURCE_AUTHORIZATION,
+  CameraSourceAuthorizationPort,
+} from '../../src/camera/domain/ports/camera-source-authorization.port';
 import { MEDIA_REPOSITORY } from '../../src/camera/domain/ports/media-repository.port';
 import { InMemoryMediaRepository } from '../../src/camera/infrastructure/in-memory-media.repository';
 import { DB } from '../../src/database/database.tokens';
+import { users } from '../../src/database/schema';
 import { EventNotifierService } from '../../src/events/application/event-notifier.service';
 import { EventProcessorService } from '../../src/events/application/event-processor.service';
 import { FEATURE_READINESS } from '../../src/features/domain/ports/feature-readiness.port';
@@ -168,6 +173,21 @@ describe('Application E2E Smoke Integration Tests (Dev/Test Mode)', () => {
     expect(result).toBeDefined();
     expect(result.buffer).toBeInstanceOf(Buffer);
     expect(result.cameraName).toBe('front_door_cam');
+  });
+
+  it('binds the Telegram role authority into the camera authorization registry', () => {
+    // The registry is fail-closed, so only a registered adapter can produce a
+    // success: this passing proves the late-binding registration actually ran.
+    const db = app.get(DB);
+    db.insert(users).values({
+      telegramId: 424_242,
+      name: 'smoke_admin',
+      role: 'admin',
+    }).run();
+
+    const authorization = app.get<CameraSourceAuthorizationPort>(CAMERA_SOURCE_AUTHORIZATION);
+
+    expect(() => authorization.requireAdmin(424_242)).not.toThrow();
   });
 
   it('executes graceful shutdown coordinator without errors', async () => {

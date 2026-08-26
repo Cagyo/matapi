@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import { ArchiveSchedulerHooksService } from '../../src/archive/application/archive-scheduler.service';
 import { ARCHIVE_RUNTIME_SIGNAL } from '../../src/archive/application/ports/archive-runtime-signal.port';
@@ -160,18 +159,45 @@ describe('CameraModule mutation-guard composition', () => {
     expect(exports).toContain(CameraSourceAuthorizationRegistry);
   });
 
+  interface ModuleClass {
+    readonly name: string;
+  }
+
+  /** Every module reachable from `root` through the Nest `imports` metadata. */
+  function importGraph(root: unknown): Set<ModuleClass> {
+    const seen = new Set<ModuleClass>();
+    const pending: unknown[] = [root];
+    while (pending.length > 0) {
+      const candidate = pending.pop();
+      const module = typeof candidate === 'object' && candidate !== null && 'module' in candidate
+        ? (candidate).module
+        : candidate;
+      if (typeof module !== 'function' || seen.has(module)) continue;
+      seen.add(module);
+      pending.push(...((Reflect.getMetadata('imports', module) as unknown[] | undefined) ?? []));
+    }
+    return seen;
+  }
+
+  it('never reaches the Telegram context, at any import depth', () => {
+    const names = [...importGraph(CameraModule)].map((module) => module.name);
+
+    expect(names).toContain('CameraModule');
+    expect(names).toContain('FeatureModule');
+    expect(names).not.toContain('TelegramModule');
+  });
+
   it('reaches the verified RTSP policy through the Features port alone', () => {
-    const imports = Reflect.getMetadata('imports', CameraModule) as unknown[];
+    expect(Reflect.getMetadata('imports', CameraModule) as unknown[]).toContain(FeatureModule);
+    expect(Reflect.getMetadata('exports', FeatureModule) as unknown[]).toContain(RTSP_POLICY_STATUS);
 
-    expect(imports).toContain(FeatureModule);
-    expect(Reflect.getMetadata('exports', FeatureModule) as unknown[])
-      .toContain(RTSP_POLICY_STATUS);
-
-    const source = readFileSync(
-      new URL('../../src/camera/camera.module.ts', import.meta.url),
-      'utf8',
+    // Camera consumes the exported token; it never binds the Features adapter.
+    const bindsPolicyStatus = cameraProviders().some(
+      (candidate) => typeof candidate === 'object'
+        && candidate !== null
+        && 'provide' in candidate
+        && (candidate as ProviderMetadata).provide === RTSP_POLICY_STATUS,
     );
-    expect(source).not.toContain('telegram');
-    expect(source).not.toContain('InstalledRtspPolicyStatusAdapter');
+    expect(bindsPolicyStatus).toBe(false);
   });
 });

@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Logger } from '@nestjs/common';
 import { eq } from 'drizzle-orm';
 import { users } from '../../../src/database/schema';
 import { CameraSourceAdminRequiredError } from '../../../src/camera/domain/errors/camera-source-admin-required.error';
@@ -40,13 +41,29 @@ describe('TelegramCameraSourceAuthorizationAdapter', () => {
     expect(() => adapter.requireAdmin(7)).toThrow(CameraSourceAdminRequiredError);
   });
 
-  it('keeps the actor identity out of the denial', () => {
-    try {
-      adapter.requireAdmin(9);
-      expect.unreachable('the denial should have been thrown');
-    } catch (error) {
-      expect(error).toBeInstanceOf(CameraSourceAdminRequiredError);
-      expect((error as Error).message).not.toContain('9');
-    }
+  it('carries no actor identity in the denial', () => {
+    const denials = [9, 404].map((userId) => {
+      try {
+        adapter.requireAdmin(userId);
+        return expect.unreachable('the denial should have been thrown');
+      } catch (error) {
+        expect(error).toBeInstanceOf(CameraSourceAdminRequiredError);
+        return error as CameraSourceAdminRequiredError;
+      }
+    });
+
+    // Two different actors, one indistinguishable denial.
+    expect(denials[0].message).toBe(denials[1].message);
+    expect(Object.keys(denials[0]).sort()).toEqual(['code', 'name']);
+  });
+
+  it('denies rather than leaking a driver failure when the database cannot answer', () => {
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    context.close();
+
+    expect(() => adapter.requireAdmin(7)).toThrow(CameraSourceAdminRequiredError);
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn.mock.calls[0]?.[0]).not.toContain('7');
+    warn.mockRestore();
   });
 });
