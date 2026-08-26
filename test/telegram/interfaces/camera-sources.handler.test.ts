@@ -1,5 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
+import { LiveSourceAddressOutsidePolicyError } from '../../../src/camera/domain/errors/live-source-address-outside-policy.error';
 import { LiveSourceAuthenticationRejectedError } from '../../../src/camera/domain/errors/live-source-authentication-rejected.error';
+import { LiveSourceHostNotFoundError } from '../../../src/camera/domain/errors/live-source-host-not-found.error';
+import { LiveSourceHostUnreachableError } from '../../../src/camera/domain/errors/live-source-host-unreachable.error';
+import { LiveSourceProbeFailedError } from '../../../src/camera/domain/errors/live-source-probe-failed.error';
+import { LiveSourceProbeTimeoutError } from '../../../src/camera/domain/errors/live-source-probe-timeout.error';
+import { LiveSourceTlsVerificationError } from '../../../src/camera/domain/errors/live-source-tls-verification.error';
+import { LiveSourceUnsupportedStreamError } from '../../../src/camera/domain/errors/live-source-unsupported-stream.error';
+import type { LiveSourceProbeError } from '../../../src/camera/domain/ports/live-source-probe.port';
 import { catalogFor } from '../../../src/locales';
 import type { WorkflowReturnReceipt } from '../../../src/telegram/domain/workflow-return';
 import { CameraSourcesHandler } from '../../../src/telegram/interfaces/camera-sources.handler';
@@ -193,21 +201,70 @@ describe('CameraSourcesHandler contextual state', () => {
     expect(replies).not.toContain(catalogFor('en').camera.sources.credentialPrompt);
   });
 
-  it('renders a probe failure as advice covering credentials and stream path', async () => {
+  /**
+   * Keyed by code so a missing member is a compile error, not a missing case:
+   * the TLS key once read `LIVE_SOURCE_TLS_VERIFICATION` while the error throws
+   * `..._FAILED`, and only that one code silently fell back to generic copy.
+   */
+  const probeErrors: Record<LiveSourceProbeError['code'], LiveSourceProbeError> = {
+    LIVE_SOURCE_HOST_NOT_FOUND: new LiveSourceHostNotFoundError(),
+    LIVE_SOURCE_HOST_UNREACHABLE: new LiveSourceHostUnreachableError(),
+    LIVE_SOURCE_ADDRESS_OUTSIDE_POLICY: new LiveSourceAddressOutsidePolicyError(),
+    LIVE_SOURCE_AUTHENTICATION_REJECTED: new LiveSourceAuthenticationRejectedError(),
+    LIVE_SOURCE_TLS_VERIFICATION_FAILED: new LiveSourceTlsVerificationError(),
+    LIVE_SOURCE_UNSUPPORTED_STREAM: new LiveSourceUnsupportedStreamError(),
+    LIVE_SOURCE_PROBE_TIMEOUT: new LiveSourceProbeTimeoutError(),
+    LIVE_SOURCE_PROBE_FAILED: new LiveSourceProbeFailedError(),
+  };
+
+  it.each(Object.values(probeErrors))(
+    'renders $code as its own advice rather than the generic failure',
+    async (probeError) => {
+      const { handler, test } = setup();
+      test.execute.mockRejectedValueOnce(probeError);
+      const ctx = context();
+      await handler.handleCallback(ctx as never, 't', receipt);
+      const selector = keyboardData(ctx).find((value) => value.includes(':src:s:'));
+
+      await handler.handleCallback(ctx as never, selector!.split(':src:')[1], receipt);
+
+      const copy = catalogFor('en').camera.sources;
+      const replies = JSON.stringify(ctx.reply.mock.calls);
+      expect(replies).toContain(copy.probe[probeError.code]);
+      expect(replies).not.toContain(copy.testFailed);
+      // Nothing derived from the credentialed URL may reach the chat.
+      expect(replies).not.toMatch(/rtsps?:\/\/|camera\.local/iu);
+    },
+  );
+
+  it('gives every probe failure a distinct, non-empty message', () => {
+    const copy = catalogFor('en').camera.sources;
+    const advice = Object.values(probeErrors).map((probeError) => copy.probe[probeError.code]);
+
+    expect(advice.every((line) => line.trim().length > 0)).toBe(true);
+    expect(new Set(advice).size).toBe(advice.length);
+    // The two copy requirements recorded when these kinds were classified.
+    expect(copy.probe.LIVE_SOURCE_AUTHENTICATION_REJECTED).toMatch(/password/iu);
+    expect(copy.probe.LIVE_SOURCE_AUTHENTICATION_REJECTED).toMatch(/path/iu);
+    expect(copy.probe.LIVE_SOURCE_ADDRESS_OUTSIDE_POLICY).toMatch(/subnet/iu);
+    expect(copy.probe.LIVE_SOURCE_ADDRESS_OUTSIDE_POLICY).toMatch(/IPv6/u);
+  });
+
+  // A code reaching the prototype chain must not hand a Function to ctx.reply.
+  it('falls back to the generic message for a code that is not its own key', async () => {
     const { handler, test } = setup();
-    test.execute.mockRejectedValueOnce(new LiveSourceAuthenticationRejectedError());
+    const impostor = new LiveSourceProbeFailedError();
+    Object.defineProperty(impostor, 'code', { value: 'toString' });
+    test.execute.mockRejectedValueOnce(impostor);
     const ctx = context();
     await handler.handleCallback(ctx as never, 't', receipt);
     const selector = keyboardData(ctx).find((value) => value.includes(':src:s:'));
 
     await handler.handleCallback(ctx as never, selector!.split(':src:')[1], receipt);
 
-    const advice = catalogFor('en').camera.sources.probe.LIVE_SOURCE_AUTHENTICATION_REJECTED;
-    expect(JSON.stringify(ctx.reply.mock.calls)).toContain(advice);
-    expect(advice).toMatch(/password/iu);
-    expect(advice).toMatch(/path/iu);
-    expect(catalogFor('en').camera.sources.probe.LIVE_SOURCE_ADDRESS_OUTSIDE_POLICY)
-      .toMatch(/IPv6/u);
+    const replies = ctx.reply.mock.calls.flat();
+    expect(replies).toContain(catalogFor('en').camera.sources.testFailed);
+    expect(replies.every((reply) => typeof reply !== 'function')).toBe(true);
   });
 
   it('marks configuration running before using and deleting the credential text', async () => {

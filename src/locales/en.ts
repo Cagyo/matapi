@@ -4,6 +4,7 @@ import type { SensorSeverity, SensorType } from '../sensors/domain/sensor';
 import type { ImportSummary } from '../sensors/application/import-sensors.use-case';
 import type { DepUpdate } from '../system/domain/ports/system-deps.port';
 import type { User } from '../telegram/domain/user.entity';
+import type { LiveSourceProbeError } from '../camera/domain/ports/live-source-probe.port';
 import type { ArchiveDrainState } from '../archive/application/use-cases/report-drive-status.use-case';
 import { deepFreeze } from './freeze';
 
@@ -1316,7 +1317,13 @@ const enCatalog = {
       removed: (cameraName: string) => `✅ RTSP source removed for ${cameraName}.`,
       configureFailed: '❌ The RTSP source could not be configured or tested.',
       testFailed: '❌ The RTSP source could not be tested.',
-      /* Advice keyed by probe error code. Never mentions the URL or the host. */
+      /*
+       * Advice keyed by probe error code. Never mentions the URL or the host.
+       * `satisfies` makes the keys exhaustive against the probe error union, so
+       * a mistyped or newly added code is a build failure rather than a silent
+       * fall-through to the generic message — the copy-side counterpart of the
+       * `ProbeErrorsShareTheBase` assertion in `live-source-probe.port.ts`.
+       */
       probe: {
         LIVE_SOURCE_HOST_NOT_FOUND:
           '❌ The camera hostname does not resolve. Check the name, or use its IP address.',
@@ -1326,7 +1333,7 @@ const enCatalog = {
           '❌ The camera address is outside the permitted camera networks. It may be on another subnet, or reachable only over IPv6 while the policy allows IPv4 (or the reverse).',
         LIVE_SOURCE_AUTHENTICATION_REJECTED:
           '❌ The camera refused the request. Check the username and password — and the stream path, which many cameras reject the same way even when the credentials are right.',
-        LIVE_SOURCE_TLS_VERIFICATION:
+        LIVE_SOURCE_TLS_VERIFICATION_FAILED:
           '❌ The camera certificate failed verification. Check its hostname and certificate authority.',
         LIVE_SOURCE_UNSUPPORTED_STREAM:
           '❌ The camera answered with a stream this device cannot play. Try its substream or an H.264 profile.',
@@ -1334,7 +1341,7 @@ const enCatalog = {
           '❌ The camera took too long to answer. Check the network, or try TCP transport.',
         LIVE_SOURCE_PROBE_FAILED:
           '❌ The camera could not be verified. Check the URL, credentials and network.',
-      },
+      } satisfies Record<LiveSourceProbeError['code'], string>,
       rtspClosed: '❌ RTSP camera support went offline before the change was saved. Nothing changed.',
       stopFailed: '❌ The camera could not be taken off air, so the change was not saved.',
       listFailed: '❌ RTSP sources are unavailable right now.',

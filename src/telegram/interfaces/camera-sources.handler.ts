@@ -7,6 +7,7 @@ import { RemoveRtspSourceUseCase } from '../../camera/application/remove-rtsp-so
 import { TestRtspSourceUseCase } from '../../camera/application/test-rtsp-source.use-case';
 import { CameraSourceUnavailableError } from '../../camera/domain/errors/camera-source-unavailable.error';
 import { LiveSourceProbeBaseError } from '../../camera/domain/errors/live-source-probe-base.error';
+import type { LiveSourceProbeError } from '../../camera/domain/ports/live-source-probe.port';
 import type { RedactedLiveSource } from '../../camera/domain/ports/live-source-repository.port';
 import { CLOCK, type ClockPort } from '../../events/domain/ports/clock.port';
 import { catalogFor, type LocaleCatalog } from '../../locales';
@@ -311,12 +312,19 @@ export class CameraSourcesHandler {
     await ctx.reply(`${copy.listHeader}\n\n${lines.join('\n\n')}`);
   }
 
-  /** Renders a probe failure as advice, keyed by its code — never its host. */
+  /**
+   * Renders a probe failure as advice, keyed by its code — never its host.
+   *
+   * `Object.hasOwn` rather than a bare lookup: `error.code` is a plain string at
+   * this boundary, and indexing an object literal with an unvetted key reaches
+   * the prototype, so a code of `toString` would otherwise hand `ctx.reply` a
+   * function. The map's keys are typed against the probe union, so an unhandled
+   * code is a build failure, not a silent fall-through to the generic message.
+   */
   private probeAdvice(ctx: TelegramContext, error: unknown): string {
     const copy = this.copy(ctx);
-    if (error instanceof LiveSourceProbeBaseError) {
-      const advice = (copy.probe as Record<string, string | undefined>)[error.code];
-      if (advice) return advice;
+    if (error instanceof LiveSourceProbeBaseError && Object.hasOwn(copy.probe, error.code)) {
+      return copy.probe[error.code as LiveSourceProbeError['code']];
     }
     return copy.testFailed;
   }
