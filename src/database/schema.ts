@@ -215,10 +215,19 @@ export const cameraLiveSources = sqliteTable('camera_live_sources', {
   ready: integer('ready', { mode: 'boolean' }).notNull().default(false),
   createdAt: integer('created_at').notNull(),
   updatedAt: integer('updated_at').notNull(),
-  /** Bumped by every state write; the compare-and-swap authority for edits. */
+  /**
+   * Compare-and-swap authority for source edits, written only by the
+   * source-configuration transaction that owns it. Ordinary source writes
+   * deliberately leave it alone, so a reader holding a revision must re-read it
+   * inside the transaction that swaps it.
+   */
   revision: integer('revision').notNull().default(0),
-  /** When the stored source last passed a probe, or null when unverified. */
-  verifiedAt: integer('verified_at', { mode: 'timestamp' }),
+  /**
+   * Unix epoch **milliseconds** when the stored source last passed a probe, or
+   * null when unverified — same unit as `createdAt`/`updatedAt` above, so
+   * `verified_at < updated_at` compares two like quantities.
+   */
+  verifiedAt: integer('verified_at'),
   /** Digest of the RTSP network policy in force at that verification. */
   policyDigest: text('policy_digest'),
 });

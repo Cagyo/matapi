@@ -82,7 +82,7 @@ export class ConfigureLiveSourceUseCase {
       cameraId: source.cameraId,
       cameraName: camera.name,
       summary: source.summary(),
-      hasCredential: true,
+      hasCredential: stored?.hasCredential ?? true,
       revision: stored?.revision ?? 0,
       verifiedAt: stored?.verifiedAt ?? null,
       policyDigest: stored?.policyDigest ?? null,

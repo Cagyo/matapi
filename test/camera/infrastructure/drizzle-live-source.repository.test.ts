@@ -229,7 +229,7 @@ describe('DrizzleLiveSourceRepository', () => {
     const verifiedAt = new Date('2026-08-20T10:00:00.000Z');
     sqlite
       .prepare('update camera_live_sources set revision = ?, verified_at = ?, policy_digest = ? where camera_id = ?')
-      .run(3, Math.floor(verifiedAt.getTime() / 1000), 'sha256:0f0f', 'camera-1');
+      .run(3, verifiedAt.getTime(), 'sha256:0f0f', 'camera-1');
 
     const stored = await repository.findRedacted('camera-1');
     expect(stored).toMatchObject({
@@ -260,7 +260,7 @@ describe('DrizzleLiveSourceRepository', () => {
     await repository.save(source, credentials.encrypt(source.cameraId, source.credentialPayload()));
     sqlite
       .prepare('update camera_live_sources set revision = ?, verified_at = ?, policy_digest = ? where camera_id = ?')
-      .run(3, 1_800_000_000, 'sha256:0f0f', 'camera-1');
+      .run(3, 1_800_000_000_000, 'sha256:0f0f', 'camera-1');
 
     await repository.saveMetadataBatch([
       LiveSource.create({ cameraId: 'camera-1', url: 'rtsp://cam.local/imported', ready: false }),

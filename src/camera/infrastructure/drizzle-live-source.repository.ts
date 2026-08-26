@@ -213,7 +213,8 @@ export class DrizzleLiveSourceRepository implements LiveSourceRepositoryPort {
       cameraName: row.cameraName,
       hasCredential: row.credentialCameraId !== null,
       revision: row.revision,
-      verifiedAt: row.verifiedAt,
+      // Stored as epoch milliseconds alongside `createdAt`/`updatedAt`.
+      verifiedAt: row.verifiedAt === null ? null : new Date(row.verifiedAt),
       policyDigest: row.policyDigest,
       summary: {
         scheme: row.settings.scheme,

@@ -14,7 +14,7 @@ import {
   users,
   userSensorMutes,
 } from '../../database/schema';
-import { cameraNameKey } from '../../camera/domain/camera-name-key';
+import { cameraNameKey } from '@/camera/domain/camera-name-key';
 import { SensorRegistryService } from './sensor-registry.service';
 
 export interface DevStateYaml {

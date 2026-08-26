@@ -113,6 +113,10 @@ export class DrizzleMediaRepository implements MediaRepositoryPort, MediaWriterP
 
   async findCameraByName(name: string): Promise<Camera | null> {
     const target = cameraNameKey(name);
+    // TODO(task-5): once `backfillNameKeys` runs before the first mutation, no
+    // row can still be keyless — replace this scan with
+    // `.where(eq(cameras.nameKey, target)).get()` so the unique index serves
+    // reads too. The fallback exists only for rows the backfill has not claimed.
     const row = this.db
       .select()
       .from(cameras)
