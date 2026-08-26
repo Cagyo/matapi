@@ -71,7 +71,7 @@ describe('EnableFeatureUseCase', () => {
 
   it('writes readiness attention and makes no other change when verification fails', async () => {
     const { useCase, features, readiness, lifecycle, restart } = setup();
-    readiness.set('digital', { ready: false, failureCode: 'application-verification-failed' });
+    readiness.set('digital', { ready: false, failureCode: 'application-verification-failed', reason: 'runtime-invalid' });
 
     await expect(useCase.execute({ name: 'digital', expected })).rejects.toBeInstanceOf(FeatureVerificationError);
     expect(await features.findByName('digital')).toMatchObject({ enabled: false, attentionReason: 'readiness-failed' });

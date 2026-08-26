@@ -14,11 +14,35 @@ export const READINESS_COMMAND_OPTIONS = {
   maxBuffer: 64 * 1024,
 } as const;
 
+/** The one bound on anything a privileged helper or its artifacts can hand back. */
+export const READINESS_MAX_OUTPUT_BYTES = READINESS_COMMAND_OPTIONS.maxBuffer;
+
 export type FixedExecFile = (
   executable: string,
   arguments_: readonly string[],
   options: typeof READINESS_COMMAND_OPTIONS,
 ) => Promise<{ stdout: string; stderr: string }>;
+
+/**
+ * One descriptor's own metadata plus the bytes read through it.
+ *
+ * The checks and the read share a single descriptor on purpose: a caller that
+ * stats a path, then opens it, validates a file that a rename may already have
+ * replaced.
+ */
+export interface SealedFile {
+  uid: number;
+  gid: number;
+  /** Permission bits only. */
+  mode: number;
+  size: number;
+  nlink: number;
+  isFile: boolean;
+  /** At most `maxBytes + 1` bytes, so an oversized file is detectable. */
+  content: string;
+}
+
+export type ReadSealedFile = (path: string, maxBytes: number) => Promise<SealedFile>;
 
 export interface FileStat {
   uid: number;
@@ -40,6 +64,34 @@ export async function openTcp(host: string, port: number): Promise<void> {
   });
 }
 
+/** Open a fixed path without following a symlink and read it under a cap. */
+export async function readSealedFile(path: string, maxBytes: number): Promise<SealedFile> {
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const info = await handle.stat();
+    const buffer = Buffer.alloc(maxBytes + 1);
+    let filled = 0;
+    // Read to EOF or to one byte past the cap, so a short read cannot present a
+    // truncated artifact as a complete one.
+    for (;;) {
+      const { bytesRead } = await handle.read(buffer, filled, buffer.length - filled, filled);
+      filled += bytesRead;
+      if (bytesRead === 0 || filled === buffer.length) break;
+    }
+    return {
+      uid: info.uid,
+      gid: info.gid,
+      mode: info.mode & 0o7777,
+      size: info.size,
+      nlink: info.nlink,
+      isFile: info.isFile(),
+      content: buffer.subarray(0, filled).toString('utf8'),
+    };
+  } finally {
+    await handle.close();
+  }
+}
+
 export const nodeReadinessFiles = {
   readFile: (path: string) => readFile(path, 'utf8'),
   access: (path: string, mode: number) => access(path, mode),
@@ -48,6 +100,7 @@ export const nodeReadinessFiles = {
     const handle = await open(path, 'r+');
     await handle.close();
   },
+  readSealed: readSealedFile,
 };
 
 export const READINESS_MEDIA_DIRECTORY_ACCESS = constants.W_OK | constants.X_OK;

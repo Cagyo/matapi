@@ -50,7 +50,7 @@ export class UartReadinessAdapter implements FeatureReadinessPort {
       return { ready: true, restartScope: 'worker' };
     } catch {
       this.logger.warn(`Feature readiness failed: uart ${check}`);
-      return { ready: false, failureCode: 'application-verification-failed' };
+      return { ready: false, failureCode: 'application-verification-failed', reason: 'runtime-invalid' };
     }
   }
 

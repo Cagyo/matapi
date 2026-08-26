@@ -39,7 +39,7 @@ export class MotionReadinessAdapter implements FeatureReadinessPort {
       return { ready: true, restartScope: 'worker' };
     } catch {
       this.logger.warn(`Feature readiness failed: motion ${check}`);
-      return { ready: false, failureCode: 'application-verification-failed' };
+      return { ready: false, failureCode: 'application-verification-failed', reason: 'runtime-invalid' };
     }
   }
 }

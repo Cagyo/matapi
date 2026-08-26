@@ -64,7 +64,7 @@ describe('FeatureReadinessBootService', () => {
       { name: 'motion', installed: true, enabled: true, config: null, attentionReason: null },
     ]);
     const readiness = new InMemoryFeatureReadinessAdapter();
-    readiness.set('motion', { ready: false, failureCode: 'application-verification-failed' });
+    readiness.set('motion', { ready: false, failureCode: 'application-verification-failed', reason: 'runtime-invalid' });
     const verify = new VerifyFeatureReadinessUseCase(features, readiness);
     const boot = new FeatureReadinessBootService(new InMemoryFeatureQuery([
       { name: 'digital', installed: true, enabled: true, config: null, attentionReason: null },

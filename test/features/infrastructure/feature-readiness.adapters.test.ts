@@ -6,6 +6,40 @@ import { MotionReadinessAdapter } from '../../../src/features/infrastructure/rea
 import { RtspReadinessAdapter } from '../../../src/features/infrastructure/readiness/rtsp-readiness.adapter';
 import { UartReadinessAdapter } from '../../../src/features/infrastructure/readiness/uart-readiness.adapter';
 import { ZigbeeReadinessAdapter } from '../../../src/features/infrastructure/readiness/zigbee-readiness.adapter';
+import type { RtspPolicyStatus, RtspPolicyStatusPort } from '../../../src/features/domain/ports/rtsp-policy-status.port';
+
+const POLICY_DIGEST = 'a'.repeat(64);
+const POLICY_NETWORKS = [{ family: 4 as const, cidr: '192.168.1.0/24', interface: 'eth0' }];
+
+function policyStatus(status: RtspPolicyStatus): RtspPolicyStatusPort {
+  return {
+    inspect: vi.fn().mockResolvedValue(status),
+    requireCurrent: vi.fn().mockResolvedValue({ digest: POLICY_DIGEST, networks: POLICY_NETWORKS }),
+    assertDigest: vi.fn(),
+  };
+}
+
+/** Every RTSP root artifact and runtime directory as the installer leaves it. */
+function installedRtspArtifacts(streamGroupId: number) {
+  return vi.fn((path: string) => Promise.resolve({
+    uid: 0,
+    gid: path.startsWith('/run/') ? streamGroupId : 0,
+    mode: path === '/run/home-worker' ? 0o40750
+      : path.endsWith('live-stream-config') ? 0o42730
+        : path.endsWith('live-stream-output') ? 0o43770
+          : path.startsWith('/usr/lib/') ? 0o100755
+            : 0o100644,
+    isDirectory: () => path.startsWith('/run/'),
+  }));
+}
+
+function installedRtspCommands() {
+  return vi.fn((_executable: string, arguments_: readonly string[]) => {
+    if (arguments_[0] === 'group') return Promise.resolve({ stdout: 'homeworker-stream:x:987:\n', stderr: '' });
+    if (arguments_[0] === '-nG') return Promise.resolve({ stdout: 'homeworker homeworker-stream\n', stderr: '' });
+    return Promise.resolve({ stdout: '', stderr: '' });
+  });
+}
 
 describe('feature readiness adapters', () => {
   beforeEach(() => {
@@ -50,6 +84,7 @@ describe('feature readiness adapters', () => {
     await expect(adapter.verify('digital')).resolves.toEqual({
       ready: false,
       failureCode: 'application-verification-failed',
+      reason: 'runtime-invalid',
     });
     expect(openReadWrite).not.toHaveBeenCalled(); // group check short-circuits before the open
   });
@@ -71,6 +106,7 @@ describe('feature readiness adapters', () => {
     await expect(adapter.verify('digital')).resolves.toEqual({
       ready: false,
       failureCode: 'application-verification-failed',
+      reason: 'runtime-invalid',
     });
     expect(openReadWrite).toHaveBeenCalledWith('/dev/gpiochip0');
   });
@@ -94,6 +130,7 @@ describe('feature readiness adapters', () => {
     await expect(adapter.verify('digital')).resolves.toEqual({
       ready: false,
       failureCode: 'application-verification-failed',
+      reason: 'runtime-invalid',
     });
     expect(openReadWrite).toHaveBeenCalledWith('/dev/gpiochip0');
   });
@@ -165,6 +202,7 @@ describe('feature readiness adapters', () => {
     await expect(adapter.verify('digital')).resolves.toEqual({
       ready: false,
       failureCode: 'application-verification-failed',
+      reason: 'runtime-invalid',
     });
     // No silent fallback to the known label — resolveChip() throws here, so readiness fails here.
     expect(openReadWrite).not.toHaveBeenCalled();
@@ -174,7 +212,7 @@ describe('feature readiness adapters', () => {
     vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     const adapter = new ZigbeeReadinessAdapter({ execFile: vi.fn().mockRejectedValue(new Error('not installed')) });
 
-    await expect(adapter.verify('zigbee')).resolves.toEqual({ ready: false, failureCode: 'application-verification-failed' });
+    await expect(adapter.verify('zigbee')).resolves.toEqual({ ready: false, failureCode: 'application-verification-failed', reason: 'runtime-invalid' });
   });
 
   it('checks UART boot configuration, inactive disabled console, and worker device access through seams', async () => {
@@ -211,7 +249,7 @@ describe('feature readiness adapters', () => {
       files: { readFile: vi.fn((path: string) => Promise.resolve(path.endsWith('config.txt') ? 'enable_uart=1\n' : 'quiet\n')), openReadWrite: vi.fn() },
     });
 
-    await expect(adapter.verify('uart')).resolves.toEqual({ ready: false, failureCode: 'application-verification-failed' });
+    await expect(adapter.verify('uart')).resolves.toEqual({ ready: false, failureCode: 'application-verification-failed', reason: 'runtime-invalid' });
   });
 
   it('rejects UART readiness when the next-boot cmdline retains a serial console alias', async () => {
@@ -228,7 +266,7 @@ describe('feature readiness adapters', () => {
       },
     });
 
-    await expect(adapter.verify('uart')).resolves.toEqual({ ready: false, failureCode: 'application-verification-failed' });
+    await expect(adapter.verify('uart')).resolves.toEqual({ ready: false, failureCode: 'application-verification-failed', reason: 'runtime-invalid' });
   });
 
   it('rejects UART readiness when the active kernel cmdline retains a serial console alias', async () => {
@@ -245,7 +283,7 @@ describe('feature readiness adapters', () => {
       },
     });
 
-    await expect(adapter.verify('uart')).resolves.toEqual({ ready: false, failureCode: 'application-verification-failed' });
+    await expect(adapter.verify('uart')).resolves.toEqual({ ready: false, failureCode: 'application-verification-failed', reason: 'runtime-invalid' });
   });
 
   it('rejects UART readiness when a disabled serial getty remains active', async () => {
@@ -261,7 +299,7 @@ describe('feature readiness adapters', () => {
       files: { readFile: vi.fn((path: string) => Promise.resolve(path.endsWith('config.txt') ? 'enable_uart=1\n' : 'quiet\n')), openReadWrite: vi.fn() },
     });
 
-    await expect(adapter.verify('uart')).resolves.toEqual({ ready: false, failureCode: 'application-verification-failed' });
+    await expect(adapter.verify('uart')).resolves.toEqual({ ready: false, failureCode: 'application-verification-failed', reason: 'runtime-invalid' });
   });
 
   it('rejects UART readiness when serial console state cannot be checked', async () => {
@@ -271,7 +309,7 @@ describe('feature readiness adapters', () => {
       files: { readFile: vi.fn().mockResolvedValue('enable_uart=1\n'), openReadWrite: vi.fn() },
     });
 
-    await expect(adapter.verify('uart')).resolves.toEqual({ ready: false, failureCode: 'application-verification-failed' });
+    await expect(adapter.verify('uart')).resolves.toEqual({ ready: false, failureCode: 'application-verification-failed', reason: 'runtime-invalid' });
   });
 
   it('requires Motion configuration, storage, service, and groups through fixed seams', async () => {
@@ -304,7 +342,7 @@ describe('feature readiness adapters', () => {
       },
     });
 
-    await expect(adapter.verify('motion')).resolves.toEqual({ ready: false, failureCode: 'application-verification-failed' });
+    await expect(adapter.verify('motion')).resolves.toEqual({ ready: false, failureCode: 'application-verification-failed', reason: 'runtime-invalid' });
   });
 
   it('rejects Motion readiness when media storage is not writable and traversable', async () => {
@@ -318,7 +356,7 @@ describe('feature readiness adapters', () => {
       },
     });
 
-    await expect(adapter.verify('motion')).resolves.toEqual({ ready: false, failureCode: 'application-verification-failed' });
+    await expect(adapter.verify('motion')).resolves.toEqual({ ready: false, failureCode: 'application-verification-failed', reason: 'runtime-invalid' });
     expect(access).toHaveBeenCalledWith('/home/pi/motion/videos', constants.W_OK | constants.X_OK);
   });
 
@@ -328,7 +366,7 @@ describe('feature readiness adapters', () => {
     const stat = vi.fn().mockResolvedValue({ uid: 0, gid: 0, mode: 0o100755, isDirectory: () => false });
     const adapter = new RtspReadinessAdapter({ execFile, files: { stat } });
 
-    await expect(adapter.verify('rtsp')).resolves.toEqual({ ready: false, failureCode: 'application-verification-failed' });
+    await expect(adapter.verify('rtsp')).resolves.toEqual({ ready: false, failureCode: 'application-verification-failed', reason: 'runtime-invalid' });
     expect(execFile).toHaveBeenCalledWith('/usr/bin/which', ['cloudflared'], expect.anything());
     expect(stat).toHaveBeenCalled();
   });
@@ -353,7 +391,65 @@ describe('feature readiness adapters', () => {
     }));
     const adapter = new RtspReadinessAdapter({ execFile, files: { stat } });
 
-    await expect(adapter.verify('rtsp')).resolves.toEqual({ ready: false, failureCode: 'application-verification-failed' });
+    await expect(adapter.verify('rtsp')).resolves.toEqual({ ready: false, failureCode: 'application-verification-failed', reason: 'runtime-invalid' });
     expect(execFile).toHaveBeenCalledWith('/usr/bin/getent', ['group', 'homeworker-stream'], expect.anything());
+  });
+
+  it('passes RTSP readiness on the shared policy projection and reports its digest', async () => {
+    const stat = installedRtspArtifacts(987);
+    const adapter = new RtspReadinessAdapter({
+      execFile: installedRtspCommands(),
+      files: { stat },
+      policyStatus: policyStatus({ state: 'ready', digest: POLICY_DIGEST, networks: POLICY_NETWORKS }),
+    });
+
+    await expect(adapter.verify('rtsp')).resolves.toEqual({
+      ready: true,
+      restartScope: 'worker',
+      policyDigest: POLICY_DIGEST,
+    });
+    // The private policy is no longer stat-ed here: readiness and Camera would
+    // otherwise judge a half-renamed tuple from two different files.
+    expect(stat).not.toHaveBeenCalledWith('/etc/home-worker/live-stream-policy.json');
+  });
+
+  it('asks for another restart when the worker process still lacks the stream group', async () => {
+    vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const status = policyStatus({ state: 'ready', digest: POLICY_DIGEST, networks: POLICY_NETWORKS });
+    const execFile = vi.fn((_executable: string, arguments_: readonly string[]) => {
+      if (arguments_[0] === 'group') return Promise.resolve({ stdout: 'homeworker-stream:x:987:\n', stderr: '' });
+      if (arguments_[0] === '-nG') return Promise.resolve({ stdout: 'homeworker video\n', stderr: '' });
+      return Promise.resolve({ stdout: '', stderr: '' });
+    });
+    const adapter = new RtspReadinessAdapter({
+      execFile,
+      files: { stat: installedRtspArtifacts(987) },
+      policyStatus: status,
+    });
+
+    await expect(adapter.verify('rtsp')).resolves.toEqual({
+      ready: false,
+      failureCode: 'application-verification-failed',
+      reason: 'runtime-group-incomplete',
+    });
+    expect(status.inspect).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['stale', { state: 'stale' as const, digest: POLICY_DIGEST, networks: POLICY_NETWORKS }, 'policy-stale'],
+    ['unavailable', { state: 'unavailable' as const, digest: null, networks: [] as const }, 'runtime-invalid'],
+  ])('reports a %s installed policy as its own readiness reason', async (_label, status, reason) => {
+    vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const adapter = new RtspReadinessAdapter({
+      execFile: installedRtspCommands(),
+      files: { stat: installedRtspArtifacts(987) },
+      policyStatus: policyStatus(status),
+    });
+
+    await expect(adapter.verify('rtsp')).resolves.toEqual({
+      ready: false,
+      failureCode: 'application-verification-failed',
+      reason,
+    });
   });
 });

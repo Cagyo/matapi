@@ -58,6 +58,9 @@ describe('Telegram role-use-case dependency metadata', () => {
   it('exports only FeatureModule ports and use cases consumed across context boundaries', () => {
     expect(moduleExports('src/features/feature.module.ts')).toEqual([
       'FEATURE_QUERY',
+      // Camera grants and install recovery must judge the installed policy from
+      // the same verified projection, so the port crosses the context boundary.
+      'RTSP_POLICY_STATUS',
       'FEATURE_AVAILABILITY',
       'FEATURE_RUNTIME_LIFECYCLE',
       'FEATURE_INSTALL_OUTCOME_REGISTRY',

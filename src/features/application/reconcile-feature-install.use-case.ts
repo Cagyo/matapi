@@ -174,7 +174,11 @@ export class ReconcileFeatureInstallUseCase {
     try {
       return await this.verify.execute({ name: feature, source: 'post-install' });
     } catch {
-      return { ready: false as const, failureCode: 'application-verification-failed' as const };
+      return {
+        ready: false as const,
+        failureCode: 'application-verification-failed' as const,
+        reason: 'runtime-invalid' as const,
+      };
     }
   }
 

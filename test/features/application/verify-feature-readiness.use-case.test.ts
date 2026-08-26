@@ -32,7 +32,7 @@ describe('VerifyFeatureReadinessUseCase', () => {
       { name: 'digital', installed: true, enabled: true, config: null, attentionReason: null },
     ]);
     const readiness = new InMemoryFeatureReadinessAdapter();
-    readiness.set('motion', { ready: false, failureCode: 'application-verification-failed' });
+    readiness.set('motion', { ready: false, failureCode: 'application-verification-failed', reason: 'runtime-invalid' });
     const useCase = new VerifyFeatureReadinessUseCase(features, readiness);
 
     await expect(useCase.execute({ name: 'motion', source: 'manual' })).rejects.toBeInstanceOf(FeatureVerificationError);
@@ -43,11 +43,11 @@ describe('VerifyFeatureReadinessUseCase', () => {
   it('does not persist a post-install probe result', async () => {
     const features = new InMemoryFeatureRepository([{ name: 'uart', installed: false, enabled: false, config: null, attentionReason: null }]);
     const readiness = new InMemoryFeatureReadinessAdapter();
-    readiness.set('uart', { ready: false, failureCode: 'application-verification-failed' });
+    readiness.set('uart', { ready: false, failureCode: 'application-verification-failed', reason: 'runtime-invalid' });
 
     const result = await new VerifyFeatureReadinessUseCase(features, readiness).execute({ name: 'uart', source: 'post-install' });
 
-    expect(result).toEqual({ ready: false, failureCode: 'application-verification-failed' });
+    expect(result).toEqual({ ready: false, failureCode: 'application-verification-failed', reason: 'runtime-invalid' });
     expect(await features.findByName('uart')).toMatchObject({ attentionReason: null });
   });
 

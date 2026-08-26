@@ -27,10 +27,12 @@ import { FEATURE_INSTALL_CONTROLLER } from './domain/ports/feature-install-contr
 import { FEATURE_INSTALL_OUTCOME_REGISTRY } from './domain/ports/feature-install-outcome.port';
 import { FEATURE_CLOCK } from './domain/ports/feature-clock.port';
 import { FEATURE_READINESS } from './domain/ports/feature-readiness.port';
+import { RTSP_POLICY_STATUS, type RtspPolicyStatusPort } from './domain/ports/rtsp-policy-status.port';
 import { FEATURE_AVAILABILITY } from './domain/ports/feature-availability.port';
 import { FEATURE_READINESS_BARRIER } from './domain/ports/feature-readiness-barrier.port';
 import { DrizzleFeatureInstallJobRepository } from './infrastructure/drizzle-feature-install-job.repository';
 import { LinuxFeatureProcessIdentityAdapter } from './infrastructure/linux-feature-process-identity.adapter';
+import { InstalledRtspPolicyStatusAdapter } from './infrastructure/installed-rtsp-policy-status.adapter';
 import { DigitalReadinessAdapter } from './infrastructure/readiness/digital-readiness.adapter';
 import { UartReadinessAdapter } from './infrastructure/readiness/uart-readiness.adapter';
 import { ZigbeeReadinessAdapter } from './infrastructure/readiness/zigbee-readiness.adapter';
@@ -67,15 +69,19 @@ const systemMode = resolveSystemMode();
     { provide: FEATURE_INSTALL_CONTROLLER, useClass: SystemdFeatureInstallControllerAdapter },
     { provide: FEATURE_CLOCK, useClass: SystemFeatureClockAdapter },
     { provide: FEATURE_PROCESS_IDENTITY, useClass: LinuxFeatureProcessIdentityAdapter },
+    { provide: RTSP_POLICY_STATUS, useClass: InstalledRtspPolicyStatusAdapter },
     {
       provide: FEATURE_READINESS,
-      useFactory: () => new FeatureReadinessRouter({
+      // One policy-status instance, so readiness and Camera share both the
+      // verified projection and the digest fence it last validated.
+      useFactory: (policyStatus: RtspPolicyStatusPort) => new FeatureReadinessRouter({
         digital: new DigitalReadinessAdapter(),
         uart: new UartReadinessAdapter(),
         zigbee: new ZigbeeReadinessAdapter(),
         motion: new MotionReadinessAdapter(),
-        rtsp: new RtspReadinessAdapter(),
+        rtsp: new RtspReadinessAdapter({ policyStatus }),
       }),
+      inject: [RTSP_POLICY_STATUS],
     },
     FeatureDisableLifecycleRegistry,
     FeatureInstallOutcomeRegistryService,
@@ -109,6 +115,7 @@ const systemMode = resolveSystemMode();
   ],
   exports: [
     FEATURE_QUERY,
+    RTSP_POLICY_STATUS,
     FEATURE_AVAILABILITY,
     FEATURE_RUNTIME_LIFECYCLE,
     FEATURE_INSTALL_OUTCOME_REGISTRY,

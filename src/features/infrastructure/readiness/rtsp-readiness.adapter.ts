@@ -1,10 +1,20 @@
 import type { ManageableFeatureName } from '../../domain/manageable-feature';
-import type { FeatureReadinessPort, FeatureReadinessResult } from '../../domain/ports/feature-readiness.port';
+import type {
+  FeatureReadinessFailureReason,
+  FeatureReadinessPort,
+  FeatureReadinessResult,
+} from '../../domain/ports/feature-readiness.port';
+import type { RtspPolicyStatusPort } from '../../domain/ports/rtsp-policy-status.port';
 import { Logger } from '@nestjs/common';
+import { InstalledRtspPolicyStatusAdapter } from '../installed-rtsp-policy-status.adapter';
 import { defaultExecFile, hasGroups, modeOf, nodeReadinessFiles, READINESS_COMMAND_OPTIONS, type FileStat, type FixedExecFile } from './readiness-seams';
 
 interface RtspFiles { stat(path: string): Promise<FileStat>; }
-export interface RtspReadinessDependencies { execFile?: FixedExecFile; files?: RtspFiles; }
+export interface RtspReadinessDependencies {
+  execFile?: FixedExecFile;
+  files?: RtspFiles;
+  policyStatus?: RtspPolicyStatusPort;
+}
 
 const ROOT_FILES: readonly (readonly [string, number])[] = [
   ['/usr/lib/home-worker/live-stream-net-helper', 0o755],
@@ -13,7 +23,6 @@ const ROOT_FILES: readonly (readonly [string, number])[] = [
   ['/etc/systemd/system/homeworker-ffmpeg-stream@.service', 0o644],
   ['/etc/polkit-1/rules.d/49-homeworker-stream-systemd.rules', 0o644],
   ['/etc/tmpfiles.d/homeworker-stream.conf', 0o644],
-  ['/etc/home-worker/live-stream-policy.json', 0o600],
 ];
 const RUNTIME_DIRECTORIES: readonly (readonly [string, number])[] = [
   ['/run/home-worker', 0o750],
@@ -25,13 +34,18 @@ export class RtspReadinessAdapter implements FeatureReadinessPort {
   private readonly logger = new Logger(RtspReadinessAdapter.name);
   private readonly execFile: FixedExecFile;
   private readonly files: RtspFiles;
+  private readonly policyStatus: RtspPolicyStatusPort;
   constructor(dependencies: RtspReadinessDependencies = {}) {
     this.execFile = dependencies.execFile ?? defaultExecFile();
     this.files = dependencies.files ?? nodeReadinessFiles;
+    this.policyStatus = dependencies.policyStatus ?? new InstalledRtspPolicyStatusAdapter();
   }
 
   async verify(_name: ManageableFeatureName): Promise<FeatureReadinessResult> {
     let check = 'ffmpeg executable';
+    // Only a missing group is worth another restart; everything else is terminal
+    // until an operator reinstalls, so the reason travels with the breadcrumb.
+    let reason: FeatureReadinessFailureReason = 'runtime-invalid';
     try {
       await this.execFile('/usr/bin/which', ['ffmpeg'], READINESS_COMMAND_OPTIONS);
       check = 'cloudflared executable';
@@ -46,11 +60,22 @@ export class RtspReadinessAdapter implements FeatureReadinessPort {
       await this.assertRootFiles(RUNTIME_DIRECTORIES, true, streamGroupId);
       check = 'worker groups';
       const groups = await this.execFile('/usr/bin/id', ['-nG'], READINESS_COMMAND_OPTIONS);
-      if (!hasGroups(groups.stdout, ['homeworker-stream'])) throw new Error('worker group incomplete');
-      return { ready: true, restartScope: 'worker' };
+      if (!hasGroups(groups.stdout, ['homeworker-stream'])) {
+        reason = 'runtime-group-incomplete';
+        throw new Error('worker group incomplete');
+      }
+      check = 'installed network policy';
+      // The same projection Camera grants against: two readers of the policy
+      // files would disagree the moment a reinstall renames one of them.
+      const policy = await this.policyStatus.inspect();
+      if (policy.state !== 'ready') {
+        reason = policy.state === 'stale' ? 'policy-stale' : 'runtime-invalid';
+        throw new Error(`installed policy ${policy.state}`);
+      }
+      return { ready: true, restartScope: 'worker', policyDigest: policy.digest };
     } catch {
-      this.logger.warn(`Feature readiness failed: rtsp ${check}`);
-      return { ready: false, failureCode: 'application-verification-failed' };
+      this.logger.warn(`Feature readiness failed: rtsp ${check} (${reason})`);
+      return { ready: false, failureCode: 'application-verification-failed', reason };
     }
   }
 

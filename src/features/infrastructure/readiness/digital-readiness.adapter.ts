@@ -67,7 +67,7 @@ export class DigitalReadinessAdapter implements FeatureReadinessPort {
       return { ready: true, restartScope: 'worker' };
     } catch (error) {
       this.logger.warn(`Feature readiness failed: digital ${check}: ${error instanceof Error ? error.message : String(error)}`);
-      return { ready: false, failureCode: 'application-verification-failed' };
+      return { ready: false, failureCode: 'application-verification-failed', reason: 'runtime-invalid' };
     }
   }
 }
