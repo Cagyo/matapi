@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CameraModule } from '../camera/camera.module';
+import { CameraSourceAuthorizationRegistry } from '../camera/application/camera-source-authorization-registry.service';
 import { ConfigModule } from '../config/config.module';
 import { EventModule } from '../events/event.module';
 import { FeatureModule } from '../features/feature.module';
@@ -137,6 +138,7 @@ import { WorkflowOperationQueue } from './interfaces/workflow-operation.queue';
 import { WorkflowEntryCoordinator } from './interfaces/workflow-entry.coordinator';
 import { WorkflowNavigationHandler } from './interfaces/workflow-navigation.handler';
 import { WorkflowNavigationPresenter } from './interfaces/workflow-navigation.presenter';
+import { TelegramCameraSourceAuthorizationAdapter } from './infrastructure/telegram-camera-source-authorization.adapter';
 import { TelegramDriveAuthorizationOutcomeAdapter } from './infrastructure/telegram-drive-authorization-outcome.adapter';
 import {
   TELEGRAM_DRIVE_CLIENT_DOCUMENT_READER,
@@ -233,6 +235,20 @@ const mode = resolveBotMode();
     UndoNonCriticalPauseUseCase,
     TelegramDirectMessenger,
     { provide: DIRECT_MESSENGER, useExisting: TelegramDirectMessenger },
+    TelegramCameraSourceAuthorizationAdapter,
+    {
+      // Late binding: Camera owns the registry and never imports Telegram, so
+      // the role authority is supplied here, at composition time.
+      provide: 'TELEGRAM_CAMERA_SOURCE_AUTHORIZATION_REGISTRATION',
+      useFactory: (
+        registry: CameraSourceAuthorizationRegistry,
+        telegram: TelegramCameraSourceAuthorizationAdapter,
+      ) => {
+        registry.register(telegram);
+        return registry;
+      },
+      inject: [CameraSourceAuthorizationRegistry, TelegramCameraSourceAuthorizationAdapter],
+    },
     TelegramDriveAuthorizationOutcomeAdapter,
     {
       provide: 'TELEGRAM_DRIVE_AUTHORIZATION_OUTCOME_REGISTRATION',

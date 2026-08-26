@@ -1,13 +1,18 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import { ArchiveSchedulerHooksService } from '../../src/archive/application/archive-scheduler.service';
 import { ARCHIVE_RUNTIME_SIGNAL } from '../../src/archive/application/ports/archive-runtime-signal.port';
 import { CleanupCoordinatorService } from '../../src/camera/application/cleanup-coordinator.service';
 import { CompletedMotionVideoRecoveryScheduler } from '../../src/camera/application/completed-motion-video-recovery.scheduler';
+import { CameraSourceAuthorizationRegistry } from '../../src/camera/application/camera-source-authorization-registry.service';
 import { CameraModule } from '../../src/camera/camera.module';
+import { CAMERA_SOURCE_AUTHORIZATION } from '../../src/camera/domain/ports/camera-source-authorization.port';
 import {
   liveStreamOptionsFromEnv,
   type LiveStreamOptions,
 } from '../../src/camera/camera.tokens';
+import { FeatureModule } from '../../src/features/feature.module';
+import { RTSP_POLICY_STATUS } from '../../src/features/domain/ports/rtsp-policy-status.port';
 
 describe('CameraModule live-stream composition', () => {
   it('uses the safe live-stream defaults', () => {
@@ -121,5 +126,52 @@ describe('CameraModule archive recovery composition', () => {
     expect(reconcile).toHaveBeenCalledWith(signal);
     expect(runCleanup).toHaveBeenCalledOnce();
     expect(runCleanup).toHaveBeenCalledWith('local', undefined, signal);
+  });
+});
+
+describe('CameraModule mutation-guard composition', () => {
+  interface ProviderMetadata {
+    provide?: unknown;
+    useExisting?: unknown;
+  }
+
+  function cameraProviders(): unknown[] {
+    return Reflect.getMetadata('providers', CameraModule) as unknown[];
+  }
+
+  it('binds the camera authorization port to the late-binding registry', () => {
+    const provider = cameraProviders().find(
+      (candidate): candidate is ProviderMetadata => typeof candidate === 'object'
+        && candidate !== null
+        && 'provide' in candidate
+        && candidate.provide === CAMERA_SOURCE_AUTHORIZATION,
+    );
+
+    expect(provider).toEqual({
+      provide: CAMERA_SOURCE_AUTHORIZATION,
+      useExisting: CameraSourceAuthorizationRegistry,
+    });
+    expect(cameraProviders()).toContain(CameraSourceAuthorizationRegistry);
+  });
+
+  it('exports the registry so the Telegram context can bind late', () => {
+    const exports = Reflect.getMetadata('exports', CameraModule) as unknown[];
+
+    expect(exports).toContain(CameraSourceAuthorizationRegistry);
+  });
+
+  it('reaches the verified RTSP policy through the Features port alone', () => {
+    const imports = Reflect.getMetadata('imports', CameraModule) as unknown[];
+
+    expect(imports).toContain(FeatureModule);
+    expect(Reflect.getMetadata('exports', FeatureModule) as unknown[])
+      .toContain(RTSP_POLICY_STATUS);
+
+    const source = readFileSync(
+      new URL('../../src/camera/camera.module.ts', import.meta.url),
+      'utf8',
+    );
+    expect(source).not.toContain('telegram');
+    expect(source).not.toContain('InstalledRtspPolicyStatusAdapter');
   });
 });

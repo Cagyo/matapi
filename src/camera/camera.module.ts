@@ -25,6 +25,7 @@ import {
 import { SystemModule } from '../system/system.module';
 import { AdminAlertService } from './application/admin-alert.service';
 import { BrowseMotionEventsUseCase } from './application/browse-motion-events.use-case';
+import { CameraSourceAuthorizationRegistry } from './application/camera-source-authorization-registry.service';
 import { CameraStatusUseCase } from './application/camera-status.use-case';
 import { CleanupCoordinatorService } from './application/cleanup-coordinator.service';
 import { CleanupLocalStorageUseCase } from './application/cleanup-local-storage.use-case';
@@ -60,6 +61,7 @@ import {
   type LiveStreamOptions,
 } from './camera.tokens';
 import { ADMIN_ALERT, type AdminAlertPort } from './domain/ports/admin-alert.port';
+import { CAMERA_SOURCE_AUTHORIZATION } from './domain/ports/camera-source-authorization.port';
 import {
   LIVE_STREAM_CAPABILITY,
   type LiveStreamCapabilityPort,
@@ -298,6 +300,11 @@ function isInstallationId(value: string | undefined): value is string {
     },
     AdminAlertService,
     { provide: ADMIN_ALERT, useExisting: AdminAlertService },
+    CameraSourceAuthorizationRegistry,
+    {
+      provide: CAMERA_SOURCE_AUTHORIZATION,
+      useExisting: CameraSourceAuthorizationRegistry,
+    },
     {
       provide: LIVE_STREAM_CAPABILITY,
       ...(mode === 'stub'
@@ -517,6 +524,7 @@ function isInstallationId(value: string | undefined): value is string {
     CameraStatusUseCase,
     ListCamerasUseCase,
     AdminAlertService,
+    CameraSourceAuthorizationRegistry,
     MotionWatcherService,
     CleanupCoordinatorService,
     TriggerCleanUseCase,
