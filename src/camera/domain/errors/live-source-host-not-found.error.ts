@@ -1,3 +1,5 @@
+import { LiveSourceProbeBaseError } from './live-source-probe-base.error';
+
 /**
  * The live-source host name did not resolve to any address.
  *
@@ -5,7 +7,7 @@
  * probed URL holds the camera password, and the message reaches an operator
  * chat. The kind alone is what makes the failure actionable.
  */
-export class LiveSourceHostNotFoundError extends Error {
+export class LiveSourceHostNotFoundError extends LiveSourceProbeBaseError {
   readonly code = 'LIVE_SOURCE_HOST_NOT_FOUND' as const;
 
   constructor() {

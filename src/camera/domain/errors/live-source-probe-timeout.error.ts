@@ -1,5 +1,7 @@
+import { LiveSourceProbeBaseError } from './live-source-probe-base.error';
+
 /** The probe exhausted its own monotonic deadline before the source was verified. */
-export class LiveSourceProbeTimeoutError extends Error {
+export class LiveSourceProbeTimeoutError extends LiveSourceProbeBaseError {
   readonly code = 'LIVE_SOURCE_PROBE_TIMEOUT' as const;
 
   constructor() {

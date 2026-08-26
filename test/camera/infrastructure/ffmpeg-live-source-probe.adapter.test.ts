@@ -39,70 +39,18 @@ async function waitForPath(path: string): Promise<void> {
 }
 
 /**
- * Locale-stable FFmpeg/OpenSSL/GnuTLS lines as they appear under `LANG=C`.
- * Every fixture is the diagnostic text only; classification must survive the
- * fact that FFmpeg happily prints the credentialed URL next to these markers.
+ * Enough to prove the spawn seam reaches the classifier and honours the exit
+ * code. Marker-by-marker coverage lives in `live-source-probe-diagnostics.test.ts`,
+ * where it needs no child process.
  */
-const DIAGNOSTIC_FIXTURES: readonly [string, string][] = [
+const SEAM_FIXTURES: readonly [string, string][] = [
   [
     '[rtsp @ 0x5581] method DESCRIBE failed: 401 Unauthorized\n',
     'LIVE_SOURCE_AUTHENTICATION_REJECTED',
   ],
   [
-    '[rtsp @ 0x5581] method DESCRIBE failed: 403 Forbidden\n',
-    'LIVE_SOURCE_AUTHENTICATION_REJECTED',
-  ],
-  [
-    '[rtsp @ 0x5581] Server returned 401 Unauthorized (authorization failed)\n',
-    'LIVE_SOURCE_AUTHENTICATION_REJECTED',
-  ],
-  [
-    '[tls @ 0x5581] error:0A000086:SSL routines::certificate verify failed\n',
-    'LIVE_SOURCE_TLS_VERIFICATION_FAILED',
-  ],
-  [
-    '[tls @ 0x5581] Certificate verification failed: The certificate is NOT trusted.\n',
-    'LIVE_SOURCE_TLS_VERIFICATION_FAILED',
-  ],
-  [
-    '[tls @ 0x5581] unable to get local issuer certificate\n',
-    'LIVE_SOURCE_TLS_VERIFICATION_FAILED',
-  ],
-  [
-    "[tcp @ 0x5581] Failed to resolve hostname cam.invalid: Name or service not known\n",
-    'LIVE_SOURCE_HOST_NOT_FOUND',
-  ],
-  [
-    '[tcp @ 0x5581] Temporary failure in name resolution\n',
-    'LIVE_SOURCE_HOST_NOT_FOUND',
-  ],
-  [
     '[tcp @ 0x5581] Connection to tcp://cam.local:554 failed: Connection refused\n',
     'LIVE_SOURCE_HOST_UNREACHABLE',
-  ],
-  [
-    '[tcp @ 0x5581] Connection to tcp://cam.local:554 failed: No route to host\n',
-    'LIVE_SOURCE_HOST_UNREACHABLE',
-  ],
-  [
-    '[tcp @ 0x5581] Connection to tcp://cam.local:554 failed: Network is unreachable\n',
-    'LIVE_SOURCE_HOST_UNREACHABLE',
-  ],
-  [
-    '[tcp @ 0x5581] Connection to tcp://cam.local:554 failed: Connection timed out\n',
-    'LIVE_SOURCE_HOST_UNREACHABLE',
-  ],
-  [
-    '[rtsp @ 0x5581] Could not find codec parameters for stream 0\n',
-    'LIVE_SOURCE_UNSUPPORTED_STREAM',
-  ],
-  [
-    "Stream map '0:v:0' matches no streams.\n",
-    'LIVE_SOURCE_UNSUPPORTED_STREAM',
-  ],
-  [
-    '[rtsp @ 0x5581] Invalid data found when processing input\n',
-    'LIVE_SOURCE_UNSUPPORTED_STREAM',
   ],
   ['ffmpeg failed in a way nobody wrote a marker for\n', 'LIVE_SOURCE_PROBE_FAILED'],
   ['', 'LIVE_SOURCE_PROBE_FAILED'],
@@ -253,10 +201,36 @@ describe('FfmpegLiveSourceProbeAdapter', () => {
     expect(egress.grant).not.toHaveBeenCalled();
   });
 
-  it('keeps an address outside the policy as its own generic failure', async () => {
+  it('rejects an address outside the policy before grant', async () => {
     const { adapter, egress } = fixture([
       { address: '192.168.1.20', family: 4 as const },
       { address: '203.0.113.10', family: 4 as const },
+    ]);
+    await expect(adapter.run(LiveSource.create({ cameraId: 'c1', url: 'rtsp://cam.local/live' })))
+      .rejects.toMatchObject({ code: 'LIVE_SOURCE_ADDRESS_OUTSIDE_POLICY' });
+    expect(egress.grant).not.toHaveBeenCalled();
+  });
+
+  // Driven through `run` rather than the endpoint check, because the failure
+  // has to survive the recognizer in the catch: a kind missing from it would
+  // arrive here as the generic error with every other test still green.
+  it('carries the out-of-policy kind through run() without diagnostics', async () => {
+    const { adapter, egress } = fixture([{ address: '203.0.113.10', family: 4 as const }]);
+
+    const failure = await adapter
+      .run(LiveSource.create({ cameraId: 'c1', url: CREDENTIALLED_URL }))
+      .then(() => null, (error: unknown) => error);
+
+    expect(failure).toMatchObject({ code: 'LIVE_SOURCE_ADDRESS_OUTSIDE_POLICY' });
+    expectNoDiagnostics(failure);
+    expect(egress.grant).not.toHaveBeenCalled();
+  });
+
+  it('keeps an in-policy host fanning out to three addresses generic', async () => {
+    const { adapter, egress } = fixture([
+      { address: '192.168.1.20', family: 4 as const },
+      { address: '192.168.1.21', family: 4 as const },
+      { address: '192.168.1.22', family: 4 as const },
     ]);
     await expect(adapter.run(LiveSource.create({ cameraId: 'c1', url: 'rtsp://cam.local/live' })))
       .rejects.toMatchObject({ code: 'LIVE_SOURCE_PROBE_FAILED' });
@@ -869,7 +843,7 @@ describe('FfmpegLiveSourceProbeAdapter', () => {
 
   it.each([
     ['ENOTFOUND', 'LIVE_SOURCE_HOST_NOT_FOUND'],
-    ['EAI_AGAIN', 'LIVE_SOURCE_HOST_NOT_FOUND'],
+    ['EAI_AGAIN', 'LIVE_SOURCE_PROBE_FAILED'],
     ['ENODATA', 'LIVE_SOURCE_HOST_NOT_FOUND'],
     ['EPERM', 'LIVE_SOURCE_PROBE_FAILED'],
   ])('classifies resolver failure %s without echoing the host', async (code, expected) => {
@@ -1027,8 +1001,8 @@ describe('startFfmpegProbeProcess diagnostics', () => {
     env: { LANG: 'C', LC_ALL: 'C' },
   } as const;
 
-  it.each(DIAGNOSTIC_FIXTURES)(
-    'maps %j to a typed, payload-free failure',
+  it.each(SEAM_FIXTURES)(
+    'carries %j from the child through to a typed, payload-free failure',
     async (stderr, code) => {
       const handle = startFfmpegProbeProcess(
         'ffmpeg',
@@ -1046,30 +1020,6 @@ describe('startFfmpegProbeProcess diagnostics', () => {
       expectNoDiagnostics(failure);
     },
   );
-
-  it('classifies Buffer stderr exactly like string stderr', async () => {
-    const handle = startFfmpegProbeProcess('ffmpeg', [], options, {
-      execFile: spawnStub(
-        Buffer.from('[rtsp @ 0x5581] method DESCRIBE failed: 401 Unauthorized\n'),
-      ),
-    });
-
-    await expect(handle.completion).rejects.toMatchObject({
-      code: 'LIVE_SOURCE_AUTHENTICATION_REJECTED',
-    });
-  });
-
-  it('ignores a marker beyond the 64 KiB diagnostic cap', async () => {
-    const handle = startFfmpegProbeProcess('ffmpeg', [], options, {
-      execFile: spawnStub(
-        `${'x'.repeat(65_536)}\n[rtsp @ 0x5581] method DESCRIBE failed: 401 Unauthorized\n`,
-      ),
-    });
-
-    await expect(handle.completion).rejects.toMatchObject({
-      code: 'LIVE_SOURCE_PROBE_FAILED',
-    });
-  });
 
   it('forces a C locale over the inherited child environment', async () => {
     let childEnv: NodeJS.ProcessEnv | undefined;

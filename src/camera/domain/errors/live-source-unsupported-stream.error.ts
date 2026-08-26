@@ -1,5 +1,7 @@
+import { LiveSourceProbeBaseError } from './live-source-probe-base.error';
+
 /** The live source connected but published no usable video stream. */
-export class LiveSourceUnsupportedStreamError extends Error {
+export class LiveSourceUnsupportedStreamError extends LiveSourceProbeBaseError {
   readonly code = 'LIVE_SOURCE_UNSUPPORTED_STREAM' as const;
 
   constructor() {
