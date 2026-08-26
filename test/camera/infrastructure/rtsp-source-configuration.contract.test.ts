@@ -10,7 +10,10 @@ import {
   RTSP_SOURCE_CAMERA_TYPE,
   type RtspSourceConfigurationPort,
 } from '../../../src/camera/domain/ports/rtsp-source-configuration.port';
+import { AesGcmLiveSourceCredentialAdapter } from '../../../src/camera/infrastructure/aes-gcm-live-source-credential.adapter';
 import { DrizzleRtspSourceConfigurationAdapter } from '../../../src/camera/infrastructure/drizzle-rtsp-source-configuration.adapter';
+import { InMemoryLiveSourceRepository } from '../../../src/camera/infrastructure/in-memory-live-source.repository';
+import { InMemoryMediaRepository } from '../../../src/camera/infrastructure/in-memory-media.repository';
 import { InMemoryRtspSourceConfigurationAdapter } from '../../../src/camera/infrastructure/in-memory-rtsp-source-configuration.adapter';
 
 const SECRET_URL = 'rtsp://operator:hunter2@cam.local/stream1?token=abcdef';
@@ -39,6 +42,8 @@ interface Subject {
   cameraType(cameraId: string): string | undefined;
   sourceIds(): string[];
   revision(cameraId: string): number | null;
+  /** What the *store* says, not what the return value claimed; null when unstored. */
+  hasCredential(cameraId: string): boolean | null;
   dispose(): void;
 }
 
@@ -79,12 +84,39 @@ function drizzleSubject(): Subject {
       );
       return row === undefined ? null : Number(row.revision);
     },
+    hasCredential: (cameraId) => {
+      const stored = rows('SELECT camera_id FROM camera_live_sources').some(
+        (r) => r.camera_id === cameraId,
+      );
+      if (!stored) return null;
+      return rows('SELECT camera_id FROM camera_live_credentials').some(
+        (r) => r.camera_id === cameraId,
+      );
+    },
     dispose: () => sqlite.close(),
   };
 }
 
 function inMemorySubject(): Subject {
-  const adapter = new InMemoryRtspSourceConfigurationAdapter();
+  return subjectOver(new InMemoryRtspSourceConfigurationAdapter());
+}
+
+/**
+ * The same twin wired the way stub composition wires it: writing through the
+ * real in-memory repositories rather than its own private stores. The two store
+ * implementations are separate code, so the contract has to reach both — a
+ * Task 6 use-case test asserting on, say, `hasCredential` must not be able to
+ * pass against one and fail against the other.
+ */
+function sharedStoreSubject(): Subject {
+  const media = new InMemoryMediaRepository();
+  const sources = new InMemoryLiveSourceRepository(
+    new AesGcmLiveSourceCredentialAdapter({ currentKey: '11'.repeat(32), currentVersion: 1 }),
+  );
+  return subjectOver(new InMemoryRtspSourceConfigurationAdapter(media, sources));
+}
+
+function subjectOver(adapter: InMemoryRtspSourceConfigurationAdapter): Subject {
   return {
     adapter,
     seedCamera: (camera) => adapter.seedCamera(camera),
@@ -94,6 +126,8 @@ function inMemorySubject(): Subject {
     sourceIds: () => adapter.sources().map((row) => row.cameraId).sort(),
     revision: (cameraId) =>
       adapter.sources().find((row) => row.cameraId === cameraId)?.revision ?? null,
+    hasCredential: (cameraId) =>
+      adapter.sources().find((row) => row.cameraId === cameraId)?.hasCredential ?? null,
     dispose: () => undefined,
   };
 }
@@ -105,7 +139,8 @@ function inMemorySubject(): Subject {
  */
 describe.each([
   ['DrizzleRtspSourceConfigurationAdapter', drizzleSubject],
-  ['InMemoryRtspSourceConfigurationAdapter', inMemorySubject],
+  ['InMemoryRtspSourceConfigurationAdapter (private stores)', inMemorySubject],
+  ['InMemoryRtspSourceConfigurationAdapter (shared stub stores)', sharedStoreSubject],
 ])('%s — source-configuration contract', (_name, makeSubject) => {
   let subject: Subject;
   let adapter: RtspSourceConfigurationPort;
@@ -174,6 +209,7 @@ describe.each([
       expect(subject.cameraIds()).toEqual(['cam-1']);
       expect(subject.sourceIds()).toEqual(['cam-1']);
       expect(subject.cameraType('cam-1')).toBe(RTSP_SOURCE_CAMERA_TYPE);
+      expect(subject.hasCredential('cam-1')).toBe(true);
     });
 
     it('returns synchronously rather than through a promise', () => {
@@ -239,6 +275,7 @@ describe.each([
       });
       expect(JSON.stringify(result)).not.toMatch(/operator|hunter2|abcdef/u);
       expect(subject.cameraType('cam-1')).toBe('motion');
+      expect(subject.hasCredential('cam-1')).toBe(true);
     });
 
     it('rejects a second attach to the same camera as a state change', () => {
@@ -289,6 +326,7 @@ describe.each([
       });
       expect(JSON.stringify(result)).not.toMatch(/operator|hunter2/u);
       expect(subject.revision('cam-1')).toBe(1);
+      expect(subject.hasCredential('cam-1')).toBe(true);
     });
 
     it('rejects a stale revision and leaves the stored source untouched', () => {
@@ -326,6 +364,7 @@ describe.each([
       });
       expect(subject.cameraIds()).toEqual([]);
       expect(subject.sourceIds()).toEqual([]);
+      expect(subject.hasCredential('cam-1')).toBeNull();
     });
 
     it('preserves a camera that predates its source and removes only the source', () => {
@@ -337,6 +376,7 @@ describe.each([
       });
       expect(subject.cameraIds()).toEqual(['cam-1']);
       expect(subject.sourceIds()).toEqual([]);
+      expect(subject.hasCredential('cam-1')).toBeNull();
     });
 
     it('preserves a hand-written rtsp-backend camera, which is not the reserved type', () => {

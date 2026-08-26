@@ -206,15 +206,34 @@ class StandaloneCameraStore implements InMemoryCameraStore {
 }
 
 /**
- * Private source rows for the same case. Only credential-free derived fields
- * are kept: a `LiveSource` carries the plaintext URL in its credential payload,
- * which has no business sitting in a long-lived map this port owns.
+ * Private source rows for the same case. The `LiveSource` entity is
+ * deliberately not retained — it carries the plaintext URL in its credential
+ * payload, which has no business sitting in a long-lived map this port owns —
+ * so only its credential-free projection is kept.
+ *
+ * The ciphertext credential *is* retained, mirroring what the live-source
+ * repository holds, so `hasCredential` is derived from what was actually
+ * written rather than assumed from the fact that this port always writes one.
+ *
+ * One state this store cannot reach: the shared repository's map is also
+ * written by `save`/`saveMetadataBatch`, so a camera there can already hold an
+ * imported, credential-free source before this port is ever called — which is
+ * what SQLite does too. Tests that depend on that pre-state must use the
+ * shared-store wiring, not this one.
  */
 class StandaloneLiveSourceStore implements InMemoryLiveSourceStore {
-  readonly #sources = new Map<string, InMemorySourceRow>();
+  readonly #sources = new Map<
+    string,
+    Omit<InMemorySourceRow, 'hasCredential'> & {
+      credential: EncryptedLiveSourceCredential | null;
+    }
+  >();
 
   listStoredSources(): readonly InMemorySourceRow[] {
-    return [...this.#sources.values()];
+    return [...this.#sources.values()].map(({ credential, ...row }) => ({
+      ...row,
+      hasCredential: credential !== null,
+    }));
   }
 
   storedRevision(cameraId: string): number | null {
@@ -228,7 +247,7 @@ class StandaloneLiveSourceStore implements InMemoryLiveSourceStore {
       revision: input.revision,
       verifiedAt: new Date(input.verifiedAt.getTime()),
       policyDigest: input.policyDigest,
-      hasCredential: true,
+      credential: { ...input.credential },
     });
   }
 

@@ -236,6 +236,23 @@ describe('DrizzleRtspSourceConfigurationAdapter', () => {
     });
   });
 
+  describe('sources imported outside this port', () => {
+    it('refuses to attach over a credential-free imported source row', () => {
+      insertCamera('cam-1', 'Hallway', 'motion');
+      sqlite
+        .prepare(
+          'INSERT INTO camera_live_sources (camera_id, normalized_url, settings, ready, created_at, updated_at) VALUES (?, ?, ?, 0, ?, ?)',
+        )
+        .run('cam-1', 'rtsp://cam.local', JSON.stringify(source('cam-1').settings), 1, 1);
+
+      expect(() => adapter.attach(attachment('cam-1'))).toThrow(
+        expect.objectContaining({ code: 'LIVE_SOURCE_STATE_CHANGED' }),
+      );
+      expect(rows('camera_live_sources')[0]).toMatchObject({ ready: 0 });
+      expect(rows('camera_live_credentials')).toEqual([]);
+    });
+  });
+
   describe('removal of a camera with recorded media', () => {
     function insertMotionEvent(cameraId: string): void {
       sqlite

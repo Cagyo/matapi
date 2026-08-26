@@ -147,6 +147,32 @@ describe('InMemoryRtspSourceConfigurationAdapter', () => {
       ).toThrow(expect.objectContaining({ code: 'LIVE_SOURCE_STATE_CHANGED' }));
     });
 
+    it('sees an imported, credential-free source the repository stored', async () => {
+      // Only the shared wiring can reach this pre-state: `save`/`saveMetadataBatch`
+      // write the same map. SQLite behaves the same way, so a use case that
+      // attaches to a camera holding imported metadata must be blocked here too.
+      media.seedCameras([
+        { id: 'cam-1', name: 'Hallway', type: 'motion', config: null, enabled: true },
+      ]);
+      await sources.save(
+        LiveSource.create({ cameraId: 'cam-1', url: 'rtsp://cam.local', ready: false }),
+        null,
+      );
+
+      expect(adapter.sources()).toEqual([
+        expect.objectContaining({ cameraId: 'cam-1', hasCredential: false, revision: 0 }),
+      ]);
+      expect(() =>
+        adapter.attach({
+          source: source('cam-1'),
+          credential: credential(),
+          policyDigest: 'digest-1',
+          verifiedAt,
+          cameraId: 'cam-1',
+        }),
+      ).toThrow(expect.objectContaining({ code: 'LIVE_SOURCE_STATE_CHANGED' }));
+    });
+
     it('de-attributes recorded media when it removes the camera it created', async () => {
       adapter.createCamera(newCamera('cam-1', 'Front Door'));
       await media.createEvent('cam-1', new Date('2026-08-20T11:00:00.000Z'));
