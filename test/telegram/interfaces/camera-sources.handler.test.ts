@@ -1,3 +1,10 @@
+import { Logger } from '@nestjs/common';
+import Database from 'better-sqlite3';
+import { drizzle } from 'drizzle-orm/better-sqlite3';
+import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type {
   RtspSourceOverview,
@@ -5,13 +12,34 @@ import type {
 } from '../../../src/camera/application/get-rtsp-source-overview.use-case';
 import { RTSP_SOURCE_CAMERA_TYPE } from '../../../src/camera/domain/ports/rtsp-source-configuration.port';
 import { CameraSourceUnavailableError } from '../../../src/camera/domain/errors/camera-source-unavailable.error';
+import { CameraNameTakenError } from '../../../src/camera/domain/errors/camera-name-taken.error';
+import { InvalidLiveSourceError } from '../../../src/camera/domain/errors/invalid-live-source.error';
+import { LiveSourceProbeTimeoutError } from '../../../src/camera/domain/errors/live-source-probe-timeout.error';
+import type { RedactedLiveSource } from '../../../src/camera/domain/ports/live-source-repository.port';
+import * as schema from '../../../src/database/schema';
 import { FeatureUnavailableError } from '../../../src/features/domain/errors/feature-unavailable.error';
+import { RtspPolicyDigestMismatchError } from '../../../src/features/domain/errors/rtsp-policy-digest-mismatch.error';
 import type { FeatureAvailabilityPort } from '../../../src/features/domain/ports/feature-availability.port';
 import { catalogFor } from '../../../src/locales';
+import { CameraSourceMessageDeletionError } from '../../../src/telegram/application/ports/camera-source-message.port';
+import type { CameraSourcePromptRepositoryPort } from '../../../src/telegram/application/ports/camera-source-prompt-repository.port';
+import {
+  CAMERA_SOURCE_PROMPT_TTL_MS,
+  type CameraSourcePrompt,
+} from '../../../src/telegram/domain/camera-source-prompt';
 import type { WorkflowReturnReceipt } from '../../../src/telegram/domain/workflow-return';
+import { DrizzleCameraSourcePromptRepository } from '../../../src/telegram/infrastructure/drizzle-camera-source-prompt.repository';
+import { InMemoryCameraSourcePromptRepository } from '../../../src/telegram/infrastructure/in-memory-camera-source-prompt.repository';
 import { CameraSourcesHandler } from '../../../src/telegram/interfaces/camera-sources.handler';
 import type { WorkflowEntryCoordinator } from '../../../src/telegram/interfaces/workflow-entry.coordinator';
 import type { WorkflowNavigationHandler } from '../../../src/telegram/interfaces/workflow-navigation.handler';
+
+/**
+ * The one value that must never survive a credential reply, in the two shapes a
+ * leak would take: the whole address, and the password on its own.
+ */
+const SECRET_URL = 'rtsp://operator:hunter2@camera.local:554/stream1';
+const SECRET_PASSWORD = 'hunter2';
 
 const copy = catalogFor('en').camera.sources;
 const home = catalogFor('en').home.common;
@@ -70,6 +98,38 @@ function overviewPage(overrides: Partial<RtspSourcesOverviewPage> = {}): RtspSou
   };
 }
 
+/** What `CreateRtspCameraUseCase`/`AttachRtspSourceUseCase` hand back. */
+function installedSource(overrides: Partial<RedactedLiveSource> = {}): RedactedLiveSource {
+  const { relationship: _r, operationalState: _o, currentPolicyDigest: _c, needsReverification: _n, ...base } =
+    overviewSource();
+  return { ...base, ...overrides };
+}
+
+/**
+ * The real in-memory port implementation, with every call recorded.
+ *
+ * The recording matters more than the spying: `created` is every value this
+ * handler ever asked the repository to persist, so a plaintext address that
+ * reached a durable row would be visible here even if it never reached SQLite.
+ */
+function promptStore(inner: CameraSourcePromptRepositoryPort = new InMemoryCameraSourcePromptRepository()) {
+  const created: CameraSourcePrompt[] = [];
+  return {
+    created,
+    inner,
+    createPending: vi.fn(async (prompt: CameraSourcePrompt) => {
+      created.push(prompt);
+      await inner.createPending(prompt);
+    }),
+    claimReply: vi.fn((input: Parameters<CameraSourcePromptRepositoryPort['claimReply']>[0]) =>
+      inner.claimReply(input)),
+    consume: vi.fn((input: Parameters<CameraSourcePromptRepositoryPort['consume']>[0]) => inner.consume(input)),
+    expire: vi.fn((input: Parameters<CameraSourcePromptRepositoryPort['expire']>[0]) => inner.expire(input)),
+    listRunning: vi.fn((limit: number) => inner.listRunning(limit)),
+    prune: vi.fn((now: Date) => inner.prune(now)),
+  };
+}
+
 /** Distinctly named sources, so paging and per-row identity stay visible. */
 function manySources(count: number): RtspSourceOverview[] {
   return Array.from({ length: count }, (_, index) =>
@@ -100,6 +160,8 @@ function setup(
     pages?: RtspSourcesOverviewPage[];
     sources?: RtspSourceOverview[];
     cameras?: CameraRow[];
+    attachCandidates?: { cameraId: string; cameraName: string }[];
+    prompts?: ReturnType<typeof promptStore>;
   } = {},
 ) {
   const all = options.sources ?? [];
@@ -111,11 +173,16 @@ function setup(
       const page = Math.min(Math.max(request.page ?? 1, 1), pageCount);
       return overviewPage({
         sources: all.slice((page - 1) * size, page * size),
+        attachCandidates: options.attachCandidates ?? [],
         page,
         pageCount,
       });
     }),
   };
+  const prompts = options.prompts ?? promptStore();
+  const messages = { delete: vi.fn().mockResolvedValue(undefined) };
+  const createRtspCamera = { execute: vi.fn().mockResolvedValue(installedSource()) };
+  const attachRtspSource = { execute: vi.fn().mockResolvedValue(installedSource()) };
   const cameras = {
     execute: vi.fn().mockResolvedValue(
       options.cameras ?? [
@@ -149,27 +216,171 @@ function setup(
   const handler = new CameraSourcesHandler(
     overview as never,
     cameras as never,
+    createRtspCamera as never,
+    attachRtspSource as never,
+    prompts,
+    messages,
     { now: () => new Date(nowMs) },
     workflows as unknown as WorkflowEntryCoordinator,
     navigation as unknown as WorkflowNavigationHandler,
     options.availability,
   );
-  return { advance, cameras, handler, navigation, overview, workflows };
+  return {
+    advance,
+    attachRtspSource,
+    cameras,
+    createRtspCamera,
+    handler,
+    messages,
+    navigation,
+    overview,
+    prompts,
+    workflows,
+  };
 }
 
-function context(input: { text?: string; role?: 'admin' | 'user'; messageId?: number } = {}) {
+/**
+ * Prompt messages get real, distinct identifiers.
+ *
+ * A constant `message_id` would make every exact-reply assertion in this file
+ * vacuous: a handler that bound a reply to *any* prompt rather than to the one
+ * it answers would still pass, because every prompt would carry the same
+ * number. The counter is module-wide, so no two prompts in a run collide.
+ */
+let nextPromptMessageId = 1000;
+
+function context(
+  input: {
+    text?: string;
+    role?: 'admin' | 'user';
+    messageId?: number;
+    /** `message_id` of the prompt this message replies to. */
+    replyTo?: number;
+    chatType?: string;
+    userId?: number;
+    chatId?: number;
+  } = {},
+) {
+  const sent: number[] = [];
   return {
-    from: { id: 100 },
-    chat: { id: 42, type: 'private' },
-    message: input.text === undefined ? undefined : { message_id: input.messageId ?? 71, text: input.text },
+    sent,
+    from: { id: input.userId ?? 100 },
+    chat: { id: input.chatId ?? 42, type: input.chatType ?? 'private' },
+    message: input.text === undefined
+      ? undefined
+      : {
+          message_id: input.messageId ?? 71,
+          text: input.text,
+          ...(input.replyTo === undefined ? {} : { reply_to_message: { message_id: input.replyTo } }),
+        },
     localeState: {
       locale: 'en',
       catalog: catalogFor('en'),
-      user: { telegramId: 100, role: input.role ?? 'admin' },
+      user: { telegramId: input.userId ?? 100, role: input.role ?? 'admin' },
     },
-    reply: vi.fn().mockResolvedValue({ message_id: 9 }),
+    reply: vi.fn(async () => {
+      const messageId = (nextPromptMessageId += 1);
+      sent.push(messageId);
+      return { message_id: messageId };
+    }),
     api: { deleteMessage: vi.fn().mockResolvedValue(true) },
   };
+}
+
+/**
+ * Everything a log line could carry, at every level either logger offers.
+ *
+ * This file is the one place in the codebase where an added log statement is a
+ * credential disclosure, and nothing else would catch one: the handler has no
+ * logger today, so there is no existing spy for a new line to fall under.
+ * Both Nest levels — instance and static, because `Logger.log()` bypasses a
+ * prototype spy — and the console are captured, and the levels are read off the
+ * objects rather than listed, so a level added by a Nest upgrade is covered
+ * without this list being remembered.
+ */
+function captureLogs(): { lines: unknown[]; restore: () => void } {
+  const lines: unknown[] = [];
+  const record = (...args: unknown[]) => {
+    lines.push(...args);
+  };
+  const spies = [
+    ...['log', 'warn', 'error', 'debug', 'verbose', 'fatal']
+      .filter((level) => typeof (Logger.prototype as never as Record<string, unknown>)[level] === 'function')
+      .map((level) => vi.spyOn(Logger.prototype as never, level as never).mockImplementation(record as never)),
+    ...['log', 'warn', 'error', 'debug', 'verbose', 'fatal']
+      .filter((level) => typeof (Logger as never as Record<string, unknown>)[level] === 'function')
+      .map((level) => vi.spyOn(Logger as never, level as never).mockImplementation(record as never)),
+    ...['log', 'warn', 'error', 'debug', 'info', 'trace']
+      .filter((level) => typeof (console as never as Record<string, unknown>)[level] === 'function')
+      .map((level) => vi.spyOn(console as never, level as never).mockImplementation(record as never)),
+  ];
+  return {
+    lines,
+    restore: () => {
+      for (const spy of spies) spy.mockRestore();
+    },
+  };
+}
+
+/**
+ * Captured log arguments as searchable text. An `Error` is unwrapped rather
+ * than serialized: `JSON.stringify(new Error(url))` is `{}`, so a logged
+ * rejection carrying an address would otherwise scan clean.
+ */
+function transcript(lines: readonly unknown[]): string {
+  return lines
+    .map((line) => {
+      if (line instanceof Error) return `${line.name}: ${line.message}\n${line.stack ?? ''}`;
+      if (typeof line === 'string') return line;
+      return JSON.stringify(line) ?? String(line);
+    })
+    .join('\n');
+}
+
+/** The `message_id` of the last message this context sent. */
+function lastSent(ctx: ReturnType<typeof context>): number {
+  const id = ctx.sent.at(-1);
+  if (id === undefined) throw new Error('the handler sent no message');
+  return id;
+}
+
+/**
+ * Every string still reachable from an object, however it is held.
+ *
+ * `JSON.stringify` is the wrong tool for a retention scan and the reason is
+ * specific: it renders a `Map` as `{}` and a `Set` as `{}`. The view state this
+ * handler keeps is a `Map`, which is exactly where a future "retry with the
+ * same address" feature would stash one — so a `JSON.stringify` scan is blind
+ * to the most likely leak there is. This walks the graph instead.
+ *
+ * Functions are skipped deliberately, and that is what keeps the scan honest
+ * rather than merely broad: `createRtspCamera.execute` is a spy whose recorded
+ * calls contain the address legitimately, and walking into it would make every
+ * assertion below fail for the one reason that is not a leak.
+ */
+function reachableStrings(root: unknown, budget = 8, seen = new WeakSet<object>()): string[] {
+  if (typeof root === 'string') return [root];
+  if (budget <= 0 || typeof root !== 'object' || root === null) return [];
+  if (seen.has(root)) return [];
+  seen.add(root);
+  const children: unknown[] = root instanceof Map
+    ? [...root.keys(), ...root.values()]
+    : root instanceof Set
+      ? [...root.values()]
+      : Array.isArray(root)
+        ? root
+        : Object.values(root);
+  return children.flatMap((child) => reachableStrings(child, budget - 1, seen));
+}
+
+/** Every reply and every button label this context has rendered, as one string. */
+function sentJson(ctx: ReturnType<typeof context>): string {
+  return JSON.stringify(ctx.reply.mock.calls);
+}
+
+function markup(ctx: ReturnType<typeof context>, index: number): unknown {
+  const options = (ctx.reply.mock.calls[index] as unknown[])[1];
+  return isRecord(options) ? options.reply_markup : undefined;
 }
 
 interface RenderedButton {
@@ -663,25 +874,26 @@ describe('CameraSourcesHandler entry gates', () => {
   });
 
   /*
-   * The four actions this task renders but does not execute.
+   * The three actions the Sources screen renders but does not execute.
    *
-   * This test is expected to FAIL the moment Task 5 wires `add` and Task 6
-   * wires `test`/`addr`/`rm` — that is its job. Move an action out of this
-   * list deliberately, in the commit that implements it, rather than
-   * discovering later that one was wired by accident or never wired at all.
+   * `add` left this list in the commit that implemented it — deliberately,
+   * because that is the whole point of the list. This test is expected to FAIL
+   * the moment Task 6 wires `test`/`addr`/`rm`; move an action out of it in the
+   * commit that implements it, rather than discovering later that one was wired
+   * by accident or never wired at all.
    */
-  it('renders the Task 5 and Task 6 actions without executing anything', async () => {
+  it('renders the Task 6 actions without executing anything', async () => {
     const { cameras, handler, overview } = setup({ sources: [overviewSource()] });
     const ctx = context();
     await handler.handleEntry(ctx as never, { receipt });
-    const rendered = ctx.reply.mock.calls.length;
+    const replies = ctx.reply.mock.calls.length;
     const reads = overview.execute.mock.calls.length;
 
-    for (const inert of ['add', 'test', 'addr', 'rm']) {
+    for (const inert of ['test', 'addr', 'rm']) {
       await handler.handleCallback(ctx as never, inert, receipt);
     }
 
-    expect(ctx.reply).toHaveBeenCalledTimes(rendered);
+    expect(ctx.reply).toHaveBeenCalledTimes(replies);
     expect(overview.execute).toHaveBeenCalledTimes(reads);
     expect(cameras.execute).not.toHaveBeenCalled();
   });
@@ -692,5 +904,1188 @@ describe('CameraSourcesHandler entry gates', () => {
     await expect(
       handler.handleText(context({ text: 'rtsp://user:pass@camera.local/live' }) as never),
     ).resolves.toBe(false);
+  });
+});
+
+/*
+ * ─── Exact ForceReply conversations ────────────────────────────────────────
+ *
+ * Everything below turns on one ordering, and it is the reason this file
+ * carries a real prompt repository rather than a stub: a credential reply is
+ * deleted before anything is allowed to decide it was not worth deleting.
+ */
+
+const NOW = new Date('2026-07-17T00:00:00Z');
+/*
+ * The name these conversations propose. Deliberately *not* the fixture
+ * camera's 'Front door': that one is already taken, and proposing it exercises
+ * the advisory uniqueness check rather than the path under test.
+ */
+const NEW_CAMERA = 'Side gate';
+const CANDIDATES = [
+  { cameraId: 'camera-hallway-private-id', cameraName: 'Hallway' },
+  { cameraId: 'camera-yard-private-id', cameraName: 'Back yard' },
+];
+
+type Bench = ReturnType<typeof setup>;
+
+/** Opens Sources and presses Add, which asks for a name when nothing can be attached. */
+async function openNamePrompt(bench: Bench) {
+  const ctx = context();
+  await bench.handler.handleEntry(ctx as never, { receipt });
+  await bench.handler.handleCallback(ctx as never, 'add', receipt);
+  return { ctx, promptMessageId: lastSent(ctx) };
+}
+
+/**
+ * Drives a create as far as the address prompt, and reports that prompt's id.
+ *
+ * `openCredentialPromptOn` is the same thing driven on a context that has
+ * already opened the screen, so the page the administrator was on is the page
+ * the prompt carries — which is what the navigation-state assertions turn on.
+ *
+ * The name half of the conversation claims and consumes a prompt of its own, so
+ * its history is cleared here: a test about the *credential* reply that counted
+ * those calls would be measuring this helper rather than the handler.
+ * `invocationCallOrder` keeps counting across the reset, so ordering assertions
+ * still compare the real sequence.
+ */
+async function openCredentialPromptOn(bench: Bench, opener: ReturnType<typeof context>) {
+  const naming = context({ text: 'Side gate', messageId: 500, replyTo: lastSent(opener) });
+  await bench.handler.handleText(naming as never);
+  bench.prompts.claimReply.mockClear();
+  bench.prompts.consume.mockClear();
+  bench.messages.delete.mockClear();
+  bench.navigation.complete.mockClear();
+  return { ctx: naming, promptMessageId: lastSent(naming) };
+}
+
+async function openCredentialPrompt(bench: Bench, name = 'Side gate') {
+  const opened = await openNamePrompt(bench);
+  const naming = context({ text: name, messageId: 500, replyTo: opened.promptMessageId });
+  await bench.handler.handleText(naming as never);
+  bench.prompts.claimReply.mockClear();
+  bench.prompts.consume.mockClear();
+  bench.messages.delete.mockClear();
+  return { ctx: naming, promptMessageId: lastSent(naming) };
+}
+
+/** Replies to an address prompt with an address, as the administrator by default. */
+async function answerAddress(
+  bench: Bench,
+  promptMessageId: number,
+  options: { text?: string; role?: 'admin' | 'user'; messageId?: number } = {},
+) {
+  const ctx = context({
+    text: options.text ?? SECRET_URL,
+    replyTo: promptMessageId,
+    messageId: options.messageId ?? 600,
+    role: options.role,
+  });
+  const claimed = await bench.handler.handleText(ctx as never);
+  return { ctx, claimed };
+}
+
+describe('CameraSourcesHandler add', () => {
+  it('offers Create and Attach only while some camera could take a source', async () => {
+    const bench = setup({ sources: [overviewSource()], attachCandidates: CANDIDATES });
+    const ctx = context();
+    await bench.handler.handleEntry(ctx as never, { receipt });
+
+    await bench.handler.handleCallback(ctx as never, 'add', receipt);
+
+    expect(body(ctx, 1)).toContain(copy.add.title);
+    expect(body(ctx, 1)).toContain(copy.add.choose);
+    const rendered = screen(ctx, 1);
+    expect(rendered.map((button) => button.text)).toEqual(
+      expect.arrayContaining([copy.add.create, copy.add.attach]),
+    );
+    expect(rendered.map((button) => button.callback_data)).toEqual(
+      expect.arrayContaining([
+        'cam:abcdefghijklmnop:src:add:c',
+        'cam:abcdefghijklmnop:src:add:a',
+        'cam:abcdefghijklmnop:src:over',
+        'wr:abcdefghijklmnop:h',
+      ]),
+    );
+    // The fork is a screen, not a prompt: nothing durable exists yet.
+    expect(bench.prompts.createPending).not.toHaveBeenCalled();
+    expect(bodies(ctx)).not.toContain(copy.prompts.name);
+  });
+
+  it('asks for the display name at once when no camera could be attached to', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+
+    const { ctx, promptMessageId } = await openNamePrompt(bench);
+
+    expect(body(ctx, 1)).toContain(copy.prompts.name);
+    expect(body(ctx, 1)).toContain(copy.prompts.nameHint);
+    expect(body(ctx, 1)).toContain(copy.prompts.replyHint);
+    expect(markup(ctx, 1)).toEqual({ force_reply: true, selective: true });
+    expect(labels(ctx)).not.toContain(copy.add.create);
+    expect(labels(ctx)).not.toContain(copy.add.attach);
+    expect(bench.prompts.created).toEqual([
+      {
+        userId: 100,
+        chatId: 42,
+        receiptId: receipt.id,
+        promptMessageId,
+        replyMessageId: null,
+        phase: 'name',
+        operation: 'create',
+        cameraId: null,
+        displayName: null,
+        expectedRevision: null,
+        status: 'pending',
+        deletionFailed: false,
+        expiresAt: new Date(NOW.getTime() + CAMERA_SOURCE_PROMPT_TTL_MS),
+        retainUntil: null,
+      },
+    ]);
+  });
+
+  it('asks for the display name when Create is chosen at the fork', async () => {
+    const bench = setup({ sources: [overviewSource()], attachCandidates: CANDIDATES });
+    const ctx = context();
+    await bench.handler.handleEntry(ctx as never, { receipt });
+    await bench.handler.handleCallback(ctx as never, 'add', receipt);
+
+    await bench.handler.handleCallback(ctx as never, 'add:c', receipt);
+
+    expect(body(ctx, 2)).toContain(copy.prompts.name);
+    expect(markup(ctx, 2)).toEqual({ force_reply: true, selective: true });
+    expect(bench.prompts.created).toHaveLength(1);
+    expect(bench.prompts.created[0].phase).toBe('name');
+  });
+
+  it('lists attachable cameras by name behind opaque selectors', async () => {
+    const bench = setup({ sources: [overviewSource()], attachCandidates: CANDIDATES });
+    const ctx = context();
+    await bench.handler.handleEntry(ctx as never, { receipt });
+    await bench.handler.handleCallback(ctx as never, 'add', receipt);
+
+    await bench.handler.handleCallback(ctx as never, 'add:a', receipt);
+
+    expect(body(ctx, 2)).toContain(copy.add.chooseCamera);
+    const rendered = screen(ctx, 2);
+    expect(rendered.map((button) => button.text)).toEqual(
+      expect.arrayContaining(['Hallway', 'Back yard']),
+    );
+    expect(rendered.filter((button) => button.callback_data.includes(':src:add:s:'))).toHaveLength(2);
+    expect(sentJson(ctx)).not.toContain('camera-hallway-private-id');
+    expect(sentJson(ctx)).not.toContain('camera-yard-private-id');
+    for (const button of rendered) {
+      expect(Buffer.byteLength(button.callback_data, 'utf8'), button.callback_data).toBeLessThanOrEqual(64);
+    }
+  });
+
+  it('warns about schemes, networks, credentials, Telegram, deletion and the window before asking for an address', async () => {
+    const bench = setup({ sources: [overviewSource()], attachCandidates: CANDIDATES });
+    const ctx = context();
+    await bench.handler.handleEntry(ctx as never, { receipt });
+    await bench.handler.handleCallback(ctx as never, 'add', receipt);
+    await bench.handler.handleCallback(ctx as never, 'add:a', receipt);
+    const chosen = screen(ctx, 2).find((button) => button.callback_data.includes(':src:add:s:'));
+
+    await bench.handler.handleCallback(ctx as never, action(chosen!.callback_data), receipt);
+
+    // The notice is the exact copy, with the networks in force and the window
+    // taken from the model's TTL — not a number written a second time here.
+    expect(body(ctx, 3)).toBe(
+      copy.privacyNotice({
+        networks: copy.policy.network(NETWORK),
+        minutes: CAMERA_SOURCE_PROMPT_TTL_MS / 60_000,
+      }),
+    );
+    // The six promises it makes, each read out of the rendered string.
+    expect(body(ctx, 3)).toContain('RTSP');
+    expect(body(ctx, 3)).toContain('RTSPS');
+    expect(body(ctx, 3)).toContain(copy.policy.network(NETWORK));
+    expect(body(ctx, 3)).toMatch(/username and password/u);
+    expect(body(ctx, 3)).toMatch(/Telegram has no secret channel/u);
+    expect(body(ctx, 3)).toMatch(/best effort/u);
+    expect(body(ctx, 3)).toMatch(/10 minutes/u);
+    // And it arrives before the control that invites the address, not after.
+    expect(body(ctx, 4)).toContain(copy.prompts.credential);
+    expect(markup(ctx, 3)).toBeUndefined();
+    expect(markup(ctx, 4)).toEqual({ force_reply: true, selective: true });
+  });
+
+  it('persists only the chosen camera and its name for an attach', async () => {
+    const bench = setup({ sources: [overviewSource()], attachCandidates: CANDIDATES });
+    const ctx = context();
+    await bench.handler.handleEntry(ctx as never, { receipt });
+    await bench.handler.handleCallback(ctx as never, 'add', receipt);
+    await bench.handler.handleCallback(ctx as never, 'add:a', receipt);
+    const chosen = screen(ctx, 2).find((button) => button.callback_data.includes(':src:add:s:'));
+
+    await bench.handler.handleCallback(ctx as never, action(chosen!.callback_data), receipt);
+
+    expect(bench.prompts.created).toEqual([
+      {
+        userId: 100,
+        chatId: 42,
+        receiptId: receipt.id,
+        promptMessageId: lastSent(ctx),
+        replyMessageId: null,
+        phase: 'credential',
+        operation: 'attach',
+        cameraId: 'camera-hallway-private-id',
+        displayName: 'Hallway',
+        expectedRevision: null,
+        status: 'pending',
+        deletionFailed: false,
+        expiresAt: new Date(NOW.getTime() + CAMERA_SOURCE_PROMPT_TTL_MS),
+        retainUntil: null,
+      },
+    ]);
+  });
+
+  it('reloads the overview instead of attaching when the chosen camera is gone', async () => {
+    const bench = setup({ sources: [overviewSource()], attachCandidates: CANDIDATES });
+    const ctx = context();
+    await bench.handler.handleEntry(ctx as never, { receipt });
+    await bench.handler.handleCallback(ctx as never, 'add', receipt);
+    await bench.handler.handleCallback(ctx as never, 'add:a', receipt);
+
+    await bench.handler.handleCallback(ctx as never, 'add:s:AAAAAAAAAAAA', receipt);
+
+    expect(body(ctx, 3)).toContain(copy.overview.title);
+    expect(bench.prompts.createPending).not.toHaveBeenCalled();
+  });
+});
+
+describe('CameraSourcesHandler name replies', () => {
+  it('advances the conversation on the exact reply, and persists only the proposed name', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const opened = await openNamePrompt(bench);
+
+    const naming = context({ text: '  Side gate  ', messageId: 500, replyTo: opened.promptMessageId });
+    await expect(bench.handler.handleText(naming as never)).resolves.toBe(true);
+
+    expect(body(naming, 0)).toContain(copy.privacyNotice({
+      networks: copy.policy.network(NETWORK),
+      minutes: CAMERA_SOURCE_PROMPT_TTL_MS / 60_000,
+    }));
+    expect(body(naming, 1)).toContain(copy.prompts.credential);
+    expect(markup(naming, 1)).toEqual({ force_reply: true, selective: true });
+    expect(bench.prompts.created[1]).toEqual({
+      userId: 100,
+      chatId: 42,
+      receiptId: receipt.id,
+      promptMessageId: lastSent(naming),
+      replyMessageId: null,
+      phase: 'credential',
+      operation: 'create',
+      cameraId: null,
+      displayName: 'Side gate',
+      expectedRevision: null,
+      status: 'pending',
+      deletionFailed: false,
+      expiresAt: new Date(NOW.getTime() + CAMERA_SOURCE_PROMPT_TTL_MS),
+      retainUntil: null,
+    });
+    // A name is not a secret, so it is not deleted; only credentials are.
+    expect(bench.messages.delete).not.toHaveBeenCalled();
+  });
+
+  /*
+   * The exact-reply binding, one violated field at a time. Every one of these
+   * is a plausible real update — a second administrator in the same chat, a
+   * reply to the wrong message, an ordinary typed line — and none of them may
+   * advance a conversation that was not addressed to it.
+   */
+  it('ignores a reply that names another message', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const opened = await openNamePrompt(bench);
+
+    const naming = context({ text: 'Side gate', messageId: 500, replyTo: opened.promptMessageId + 7 });
+    await expect(bench.handler.handleText(naming as never)).resolves.toBe(false);
+
+    expect(naming.reply).not.toHaveBeenCalled();
+    expect(bench.prompts.claimReply).not.toHaveBeenCalled();
+    expect(bench.prompts.created).toHaveLength(1);
+  });
+
+  it('ignores another administrator replying to the same prompt', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const opened = await openNamePrompt(bench);
+
+    const naming = context({
+      text: 'Side gate',
+      messageId: 500,
+      replyTo: opened.promptMessageId,
+      userId: 101,
+    });
+    await expect(bench.handler.handleText(naming as never)).resolves.toBe(false);
+
+    expect(bench.prompts.claimReply).not.toHaveBeenCalled();
+    expect(naming.reply).not.toHaveBeenCalled();
+  });
+
+  it('ignores the same reply arriving from a group chat', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const opened = await openNamePrompt(bench);
+
+    const naming = context({
+      text: 'Side gate',
+      messageId: 500,
+      replyTo: opened.promptMessageId,
+      chatType: 'group',
+      chatId: -42,
+    });
+    await expect(bench.handler.handleText(naming as never)).resolves.toBe(false);
+
+    expect(bench.prompts.claimReply).not.toHaveBeenCalled();
+  });
+
+  it('ignores a message that replies to nothing', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    await openNamePrompt(bench);
+
+    const naming = context({ text: 'Side gate', messageId: 500 });
+    await expect(bench.handler.handleText(naming as never)).resolves.toBe(false);
+
+    expect(bench.prompts.claimReply).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['empty', '   '],
+    ['control-character', `Front${String.fromCharCode(7)}door`],
+    ['overlength', 'x'.repeat(65)],
+    ['address-shaped', 'rtsp://camera.local/stream'],
+  ])('rejects a %s name with localized copy and a usable exact prompt', async (_label, name) => {
+    const bench = setup({ sources: [overviewSource()] });
+    const opened = await openNamePrompt(bench);
+
+    const naming = context({ text: name, messageId: 500, replyTo: opened.promptMessageId });
+    await expect(bench.handler.handleText(naming as never)).resolves.toBe(true);
+
+    expect(body(naming, 0)).toBe(copy.prompts.invalidName);
+    expect(body(naming, 1)).toContain(copy.prompts.name);
+    expect(markup(naming, 1)).toEqual({ force_reply: true, selective: true });
+    expect(sentJson(naming)).not.toContain(copy.prompts.credential);
+
+    // The replacement prompt is a real one: replying to it advances.
+    const retry = context({ text: 'Side gate', messageId: 501, replyTo: lastSent(naming) });
+    await expect(bench.handler.handleText(retry as never)).resolves.toBe(true);
+    expect(body(retry, 1)).toContain(copy.prompts.credential);
+    expect(bench.prompts.created.at(-1)?.displayName).toBe('Side gate');
+  });
+
+  /*
+   * The rejection copy is static for a reason: a name that looks like an
+   * address is refused, and a refusal that quoted it would put the thing it
+   * refused back into the chat — the one outcome the refusal exists to prevent.
+   */
+  it('never echoes a rejected name back at the administrator', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const opened = await openNamePrompt(bench);
+
+    const naming = context({ text: SECRET_URL, messageId: 500, replyTo: opened.promptMessageId });
+    await bench.handler.handleText(naming as never);
+
+    expect(sentJson(naming)).not.toContain(SECRET_URL);
+    expect(sentJson(naming)).not.toContain(SECRET_PASSWORD);
+    expect(sentJson(naming)).not.toMatch(/rtsps?:\/\//iu);
+    expect(JSON.stringify(bench.prompts.created)).not.toContain(SECRET_PASSWORD);
+  });
+
+  it('will not let an answered prompt be replied to twice', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const opened = await openNamePrompt(bench);
+    const naming = context({ text: 'Side gate', messageId: 500, replyTo: opened.promptMessageId });
+    await bench.handler.handleText(naming as never);
+
+    const again = context({ text: 'Back door', messageId: 502, replyTo: opened.promptMessageId });
+    await expect(bench.handler.handleText(again as never)).resolves.toBe(false);
+
+    expect(again.reply).not.toHaveBeenCalled();
+    expect(bench.prompts.created).toHaveLength(2);
+  });
+
+  it('refuses a name reply from an administrator who has since been demoted', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const opened = await openNamePrompt(bench);
+
+    const naming = context({
+      text: 'Side gate',
+      messageId: 500,
+      replyTo: opened.promptMessageId,
+      role: 'user',
+    });
+    await bench.handler.handleText(naming as never);
+
+    expect(naming.reply).toHaveBeenCalledWith(catalogFor('en').common.adminRequired);
+    expect(bench.prompts.created).toHaveLength(1);
+    expect(sentJson(naming)).not.toContain(copy.prompts.credential);
+  });
+});
+
+describe('CameraSourcesHandler credential replies', () => {
+  it('deletes the reply before it creates anything, then reports progress and the outcome', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { promptMessageId } = await openCredentialPrompt(bench);
+
+    const { ctx, claimed } = await answerAddress(bench, promptMessageId);
+
+    expect(claimed).toBe(true);
+    expect(bench.messages.delete).toHaveBeenCalledWith(42, 600);
+    expect(bench.messages.delete.mock.invocationCallOrder[0])
+      .toBeLessThan(bench.createRtspCamera.execute.mock.invocationCallOrder[0]);
+    expect(bench.createRtspCamera.execute).toHaveBeenCalledWith({
+      url: SECRET_URL,
+      transport: 'tcp',
+      tlsMode: 'none',
+      profile: 'eco',
+      substream: null,
+      actorUserId: 100,
+      displayName: 'Side gate',
+    });
+    expect(body(ctx, 0)).toBe(copy.progress.testing);
+    expect(body(ctx, 1)).toBe(copy.outcomes.created('Side gate'));
+    expect(sentJson(ctx)).not.toContain(copy.credentialDeletionFailed('Side gate'));
+  });
+
+  it('takes the prompt durably to running before the effect, then consumes it cleanly', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { promptMessageId } = await openCredentialPrompt(bench);
+
+    await answerAddress(bench, promptMessageId);
+
+    expect(bench.prompts.claimReply).toHaveBeenCalledWith({
+      userId: 100,
+      chatId: 42,
+      receiptId: receipt.id,
+      promptMessageId,
+      replyMessageId: 600,
+      now: NOW,
+    });
+    // The claim is the CAS that makes the reply actionable, and it precedes
+    // both the deletion and the Camera call.
+    expect(bench.prompts.claimReply.mock.invocationCallOrder[0])
+      .toBeLessThan(bench.messages.delete.mock.invocationCallOrder[0]);
+    expect(bench.prompts.consume).toHaveBeenCalledWith({
+      identity: { userId: 100, chatId: 42, receiptId: receipt.id, promptMessageId },
+      deletionFailed: false,
+      now: NOW,
+    });
+    await expect(bench.prompts.inner.listRunning(10)).resolves.toEqual([]);
+  });
+
+  /*
+   * What a process dying mid-install would leave behind.
+   *
+   * The claim is durable, not a flag in memory: while the Camera boundary is
+   * dialling the camera the row is `running` with the reply recorded on it,
+   * which is precisely the shape startup recovery looks for — and it still
+   * carries no address.
+   */
+  it('leaves the prompt durably running, and secret-free, while the camera work is in flight', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { promptMessageId } = await openCredentialPrompt(bench);
+    let inFlight: readonly CameraSourcePrompt[] = [];
+    bench.createRtspCamera.execute.mockImplementationOnce(async () => {
+      inFlight = await bench.prompts.inner.listRunning(10);
+      return installedSource();
+    });
+
+    await answerAddress(bench, promptMessageId);
+
+    expect(inFlight).toHaveLength(1);
+    expect(inFlight[0]).toMatchObject({
+      status: 'running',
+      phase: 'credential',
+      operation: 'create',
+      displayName: 'Side gate',
+      promptMessageId,
+      replyMessageId: 600,
+    });
+    expect(JSON.stringify(inFlight)).not.toContain(SECRET_URL);
+    expect(JSON.stringify(inFlight)).not.toContain(SECRET_PASSWORD);
+    await expect(bench.prompts.inner.listRunning(10)).resolves.toEqual([]);
+  });
+
+  it('reads strict TLS off an rtsps address rather than assuming plain RTSP', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { promptMessageId } = await openCredentialPrompt(bench);
+
+    await answerAddress(bench, promptMessageId, { text: 'rtsps://operator:hunter2@camera.local:322/s1' });
+
+    expect(bench.createRtspCamera.execute).toHaveBeenCalledWith(
+      expect.objectContaining({ tlsMode: 'strict' }),
+    );
+  });
+
+  it('attaches to the chosen camera, deleting the reply before the attach', async () => {
+    const bench = setup({ sources: [overviewSource()], attachCandidates: CANDIDATES });
+    const ctx = context();
+    await bench.handler.handleEntry(ctx as never, { receipt });
+    await bench.handler.handleCallback(ctx as never, 'add', receipt);
+    await bench.handler.handleCallback(ctx as never, 'add:a', receipt);
+    const chosen = screen(ctx, 2).find((button) => button.callback_data.includes(':src:add:s:'));
+    await bench.handler.handleCallback(ctx as never, action(chosen!.callback_data), receipt);
+
+    const answer = await answerAddress(bench, lastSent(ctx));
+
+    expect(bench.messages.delete.mock.invocationCallOrder[0])
+      .toBeLessThan(bench.attachRtspSource.execute.mock.invocationCallOrder[0]);
+    expect(bench.attachRtspSource.execute).toHaveBeenCalledWith({
+      url: SECRET_URL,
+      transport: 'tcp',
+      tlsMode: 'none',
+      profile: 'eco',
+      substream: null,
+      actorUserId: 100,
+      cameraId: 'camera-hallway-private-id',
+    });
+    expect(bench.createRtspCamera.execute).not.toHaveBeenCalled();
+    expect(body(answer.ctx, 1)).toBe(copy.outcomes.attached('Hallway'));
+  });
+
+  it('never lets the address reach a reply, a durable row, a callback or a log line', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    // Installed before the conversation starts, so the whole exchange — not
+    // just the credential reply — is under it.
+    const logs = captureLogs();
+    try {
+      const { promptMessageId } = await openCredentialPrompt(bench);
+
+      const { ctx } = await answerAddress(bench, promptMessageId);
+
+      const everything = [
+        JSON.stringify({
+          replies: ctx.reply.mock.calls,
+          persisted: bench.prompts.created,
+          consumed: bench.prompts.consume.mock.calls,
+          claimed: bench.prompts.claimReply.mock.calls,
+          deleted: bench.messages.delete.mock.calls,
+        }),
+        transcript(logs.lines),
+      ].join('\n');
+      expect(everything).not.toContain(SECRET_URL);
+      expect(everything).not.toContain(SECRET_PASSWORD);
+      expect(everything).not.toContain('operator');
+      expect(everything).not.toMatch(/rtsps?:\/\//iu);
+      // The one call that is supposed to see it, and the only one. Without this
+      // the scan above would pass just as happily on a handler that never read
+      // the address at all.
+      expect(bench.createRtspCamera.execute).toHaveBeenCalledWith(
+        expect.objectContaining({ url: SECRET_URL }),
+      );
+    } finally {
+      logs.restore();
+    }
+  });
+
+  /*
+   * Every way this can go wrong after the reply has arrived, and the one thing
+   * that must be true of all of them: the deletion was already attempted.
+   *
+   * `role` and `readiness` refuse before the Camera boundary is reached at all,
+   * so for those the assertion is that deletion happened and no use case ran;
+   * the rest reach the use case, and for those the assertion is the ordering.
+   */
+  it('deletes the reply before refusing a demoted administrator', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { promptMessageId } = await openCredentialPrompt(bench);
+
+    const { ctx } = await answerAddress(bench, promptMessageId, { role: 'user' });
+
+    expect(bench.messages.delete).toHaveBeenCalledWith(42, 600);
+    expect(bench.createRtspCamera.execute).not.toHaveBeenCalled();
+    expect(ctx.reply).toHaveBeenCalledWith(catalogFor('en').common.adminRequired);
+    expect(sentJson(ctx)).not.toContain(copy.progress.testing);
+    expect(bench.prompts.consume).toHaveBeenCalledWith(
+      expect.objectContaining({ deletionFailed: false }),
+    );
+  });
+
+  it('deletes the reply before refusing a feature that went unready under it', async () => {
+    const availability: FeatureAvailabilityPort = {
+      awaitInitialVerification: vi.fn(),
+      inspect: vi.fn(),
+      requireReady: vi.fn().mockResolvedValue(undefined),
+    };
+    const bench = setup({ sources: [overviewSource()], availability });
+    const { promptMessageId } = await openCredentialPrompt(bench);
+    availability.requireReady = vi.fn().mockRejectedValue(new FeatureUnavailableError('rtsp', 'needs-attention'));
+
+    const { ctx } = await answerAddress(bench, promptMessageId);
+
+    expect(bench.messages.delete).toHaveBeenCalledWith(42, 600);
+    expect(bench.createRtspCamera.execute).not.toHaveBeenCalled();
+    const feature = catalogFor('en').feature;
+    expect(ctx.reply).toHaveBeenCalledWith(feature.stale.attention(feature.names.rtsp));
+  });
+
+  it.each([
+    ['an unusable address', new InvalidLiveSourceError('URL scheme must be rtsp or rtsps'), 'invalid-address'],
+    ['an address outside the policy', new RtspPolicyDigestMismatchError('digest'), 'policy-stale'],
+    ['a camera that never answered', new LiveSourceProbeTimeoutError(), 'timed-out'],
+  ] as const)('deletes the reply before %s is reported', async (_label, error, kind) => {
+    const bench = setup({ sources: [overviewSource()] });
+    bench.createRtspCamera.execute.mockRejectedValueOnce(error);
+    const { promptMessageId } = await openCredentialPrompt(bench);
+
+    const { ctx } = await answerAddress(bench, promptMessageId);
+
+    expect(bench.messages.delete.mock.invocationCallOrder[0])
+      .toBeLessThan(bench.createRtspCamera.execute.mock.invocationCallOrder[0]);
+    expect(ctx.reply).toHaveBeenCalledWith(copy.errors[kind]);
+    expect(sentJson(ctx)).not.toContain(SECRET_URL);
+    expect(sentJson(ctx)).not.toContain(SECRET_PASSWORD);
+    // The failure is terminal for the prompt whichever way it went.
+    expect(bench.prompts.consume).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries a refused deletion once, and says nothing when the retry succeeds', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { promptMessageId } = await openCredentialPrompt(bench);
+    bench.messages.delete
+      .mockRejectedValueOnce(new CameraSourceMessageDeletionError())
+      .mockResolvedValueOnce(undefined);
+
+    const { ctx } = await answerAddress(bench, promptMessageId);
+
+    expect(bench.messages.delete).toHaveBeenCalledTimes(2);
+    // The retry runs after the Camera work, in the `finally` — not instead of it.
+    expect(bench.messages.delete.mock.invocationCallOrder[1])
+      .toBeGreaterThan(bench.createRtspCamera.execute.mock.invocationCallOrder[0]);
+    expect(sentJson(ctx)).not.toContain(copy.credentialDeletionFailed('Side gate'));
+    expect(bench.prompts.consume).toHaveBeenCalledWith(
+      expect.objectContaining({ deletionFailed: false }),
+    );
+  });
+
+  it('asks the administrator to delete the reply themselves when both attempts fail', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { promptMessageId } = await openCredentialPrompt(bench);
+    bench.messages.delete.mockRejectedValue(new CameraSourceMessageDeletionError());
+
+    const { ctx } = await answerAddress(bench, promptMessageId);
+
+    expect(bench.messages.delete).toHaveBeenCalledTimes(2);
+    expect(ctx.reply).toHaveBeenCalledWith(copy.credentialDeletionFailed('Side gate'));
+    // It names the camera the reply belongs to, and nothing about the address.
+    expect(copy.credentialDeletionFailed('Side gate')).toContain('Side gate');
+    expect(sentJson(ctx)).not.toContain(SECRET_URL);
+    expect(bench.prompts.consume).toHaveBeenCalledWith(
+      expect.objectContaining({ deletionFailed: true }),
+    );
+    // The camera was still created: a deletion Telegram refused is not a reason
+    // to throw away work the administrator asked for.
+    expect(bench.createRtspCamera.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry a deletion that already succeeded', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { promptMessageId } = await openCredentialPrompt(bench);
+
+    await answerAddress(bench, promptMessageId);
+
+    expect(bench.messages.delete).toHaveBeenCalledTimes(1);
+  });
+
+  it('deletes but does not act on a reply that arrives after the window closed', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { promptMessageId } = await openCredentialPrompt(bench);
+    bench.advance(CAMERA_SOURCE_PROMPT_TTL_MS);
+    // A refused first attempt is retried here too: cleanup owes the same
+    // deletion the winning path does.
+    bench.messages.delete
+      .mockRejectedValueOnce(new CameraSourceMessageDeletionError())
+      .mockResolvedValueOnce(undefined);
+
+    const { claimed } = await answerAddress(bench, promptMessageId);
+
+    expect(claimed).toBe(true);
+    expect(bench.messages.delete).toHaveBeenCalledTimes(2);
+    expect(bench.messages.delete).toHaveBeenLastCalledWith(42, 600);
+    expect(bench.createRtspCamera.execute).not.toHaveBeenCalled();
+    expect(bench.attachRtspSource.execute).not.toHaveBeenCalled();
+  });
+});
+
+describe('CameraSourcesHandler claims nothing it was not asked for', () => {
+  it.each([
+    ['an address typed out of the blue', { text: SECRET_URL }],
+    ['a localized cancel word with no prompt open', { text: copy.cancelSynonyms[0] }],
+    ['a reply to some unrelated message', { text: SECRET_URL, replyTo: 4242 }],
+  ])('ignores %s', async (_label, message) => {
+    const bench = setup({ sources: [overviewSource()] });
+    const ctx = context({ ...message, messageId: 700 });
+
+    await expect(bench.handler.handleText(ctx as never)).resolves.toBe(false);
+
+    expect(bench.prompts.claimReply).not.toHaveBeenCalled();
+    expect(bench.messages.delete).not.toHaveBeenCalled();
+    expect(ctx.reply).not.toHaveBeenCalled();
+  });
+
+  it('ignores a late reply to a message that is not this prompt, while a prompt is open', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { promptMessageId } = await openCredentialPrompt(bench);
+
+    const stray = context({ text: SECRET_URL, messageId: 700, replyTo: promptMessageId - 1 });
+    await expect(bench.handler.handleText(stray as never)).resolves.toBe(false);
+
+    expect(bench.prompts.claimReply).not.toHaveBeenCalled();
+    expect(bench.messages.delete).not.toHaveBeenCalled();
+  });
+
+  it('ignores an address replied to the prompt from a group chat', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { promptMessageId } = await openCredentialPrompt(bench);
+
+    const group = context({
+      text: SECRET_URL,
+      messageId: 700,
+      replyTo: promptMessageId,
+      chatType: 'supergroup',
+      chatId: -1001,
+    });
+    await expect(bench.handler.handleText(group as never)).resolves.toBe(false);
+
+    expect(bench.prompts.claimReply).not.toHaveBeenCalled();
+    expect(bench.createRtspCamera.execute).not.toHaveBeenCalled();
+  });
+
+  it('ignores an address replied to the prompt by another user', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { promptMessageId } = await openCredentialPrompt(bench);
+
+    const other = context({ text: SECRET_URL, messageId: 700, replyTo: promptMessageId, userId: 101 });
+    await expect(bench.handler.handleText(other as never)).resolves.toBe(false);
+
+    expect(bench.prompts.claimReply).not.toHaveBeenCalled();
+    expect(bench.createRtspCamera.execute).not.toHaveBeenCalled();
+  });
+});
+
+/*
+ * The same conversation, against the storage that actually ships.
+ *
+ * The in-memory twin above proves the handler never *hands* a secret to the
+ * repository; this proves nothing lands in SQLite by another route — a column
+ * written behind the port, a value that survived encoding, a file the adapter
+ * touched. It is the assertion the design promise is written in.
+ */
+describe('CameraSourcesHandler credential replies against SQLite', () => {
+  it('leaves no address, user or password anywhere in the prompt table', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'camera-source-handler-'));
+    const file = join(directory, 'prompts.db');
+    const sqlite = new Database(file);
+    try {
+      sqlite.pragma('foreign_keys = ON');
+      const db = drizzle(sqlite, { schema });
+      migrate(db, { migrationsFolder: './migrations' });
+      sqlite.prepare('INSERT INTO users (telegram_id, name, role) VALUES (?, ?, ?)')
+        .run(100, 'admin', 'admin');
+      const bench = setup({
+        sources: [overviewSource()],
+        prompts: promptStore(new DrizzleCameraSourcePromptRepository(db)),
+      });
+
+      const { promptMessageId } = await openCredentialPrompt(bench);
+      await answerAddress(bench, promptMessageId);
+
+      expect(bench.createRtspCamera.execute).toHaveBeenCalledWith(
+        expect.objectContaining({ url: SECRET_URL }),
+      );
+      const rows = JSON.stringify(
+        sqlite.prepare('SELECT * FROM telegram_camera_source_prompts').all(),
+      );
+      expect(rows).not.toContain(SECRET_URL);
+      expect(rows).not.toContain(SECRET_PASSWORD);
+      expect(rows).not.toContain('operator');
+      expect(rows).not.toContain('camera.local');
+      expect(rows).not.toMatch(/rtsps?:\/\//iu);
+      // The tombstone that is there carries the non-secret selection and the
+      // one bit a refused deletion is allowed to leave behind.
+      expect(rows).toContain('Side gate');
+      expect(rows).toContain('"status":"consumed"');
+      expect(rows).toContain('"deletion_failed":0');
+    } finally {
+      sqlite.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('records the refused deletion, and still no address, when Telegram will not delete', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'camera-source-handler-'));
+    const sqlite = new Database(join(directory, 'prompts.db'));
+    try {
+      sqlite.pragma('foreign_keys = ON');
+      const db = drizzle(sqlite, { schema });
+      migrate(db, { migrationsFolder: './migrations' });
+      sqlite.prepare('INSERT INTO users (telegram_id, name, role) VALUES (?, ?, ?)')
+        .run(100, 'admin', 'admin');
+      const bench = setup({
+        sources: [overviewSource()],
+        prompts: promptStore(new DrizzleCameraSourcePromptRepository(db)),
+      });
+      const { promptMessageId } = await openCredentialPrompt(bench);
+      bench.messages.delete.mockRejectedValue(new CameraSourceMessageDeletionError());
+
+      await answerAddress(bench, promptMessageId);
+
+      const rows = JSON.stringify(
+        sqlite.prepare('SELECT * FROM telegram_camera_source_prompts').all(),
+      );
+      expect(rows).toContain('"deletion_failed":1');
+      expect(rows).not.toContain(SECRET_URL);
+      expect(rows).not.toContain(SECRET_PASSWORD);
+      // The claimed reply's identity is kept — that is what a later retry needs
+      // — and it is a message number, not its contents.
+      expect(rows).toContain('"reply_message_id":600');
+    } finally {
+      sqlite.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+/*
+ * Two escape routes the ordering tests above cannot see.
+ *
+ * The address is a local in one frame; the ways it could stop being one are
+ * that it is written somewhere that outlives the call, or that a guard which
+ * looks redundant is removed because a *different* guard happened to be
+ * catching the same case.
+ */
+describe('CameraSourcesHandler keeps the address on the stack', () => {
+  /*
+   * The retention scan is only as good as its reach, and its reach is not
+   * self-evident: the assertion it powers is a negative one, so a walk that
+   * quietly stopped at the first `Map` would report "no secret found" in
+   * exactly the same words as a walk that searched everything. These pin the
+   * two containers `JSON.stringify` renders as `{}`.
+   */
+  it('reaches strings held in a Map or a Set, which JSON.stringify cannot', () => {
+    expect(reachableStrings(new Map([['key', 'held-in-a-map']]))).toContain('held-in-a-map');
+    expect(reachableStrings(new Set(['held-in-a-set']))).toContain('held-in-a-set');
+    expect(reachableStrings({ nested: [{ deep: new Map([[1, 'held-deeper']]) }] })).toContain('held-deeper');
+    expect(JSON.stringify(new Map([['key', 'held-in-a-map']]))).toBe('{}');
+  });
+
+  it('leaves nothing behind on the handler once the reply is answered', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { promptMessageId } = await openCredentialPrompt(bench);
+
+    await answerAddress(bench, promptMessageId);
+
+    // Everything this handler still holds — its own fields, the view state it
+    // keeps in a Map, and every value it handed the repository.
+    const retained = reachableStrings(bench.handler).join('\n');
+    expect(retained).not.toContain(SECRET_URL);
+    expect(retained).not.toContain(SECRET_PASSWORD);
+    expect(retained).not.toContain('camera.local');
+    expect(JSON.stringify(bench.prompts.created)).not.toContain(SECRET_PASSWORD);
+    // The scan reaches the view state at all: without this a walk that stopped
+    // short — at a Map it could not expand, or a depth it never got past —
+    // would assert nothing and say so in exactly the same words.
+    expect(retained).toContain('Side gate');
+  });
+
+  /*
+   * The success path clears the screen, which would quietly dispose of a
+   * stashed address along with it. A failure keeps the screen alive on purpose
+   * — Task 6's recovery actions need it — so this is the path where a value
+   * written into the view state genuinely outlives the call, and the one worth
+   * scanning.
+   */
+  it('leaves nothing behind when the install fails and the screen is kept alive', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { promptMessageId } = await openCredentialPrompt(bench);
+    bench.createRtspCamera.execute.mockRejectedValueOnce(new LiveSourceProbeTimeoutError());
+
+    await answerAddress(bench, promptMessageId);
+
+    expect(bench.handler.hasPending(100, 42, receipt.id)).toBe(true);
+    const retained = reachableStrings(bench.handler).join('\n');
+    expect(retained).not.toContain(SECRET_URL);
+    expect(retained).not.toContain(SECRET_PASSWORD);
+    expect(retained).not.toContain('camera.local');
+    // The walk reaches the state that was deliberately kept: without this the
+    // assertions above would hold just as well over an empty store.
+    expect(retained).toContain(receipt.id);
+  });
+
+  /*
+   * A group message is refused for two independent reasons — the chat is not
+   * private, and a group's identifier is negative, which the prompt model will
+   * not accept. Real groups always supply both, so a test that used a real
+   * group identifier would keep passing with the privacy check deleted. This
+   * one supplies a positive identifier on purpose, so the privacy check is the
+   * only thing standing in the way and is measured on its own.
+   */
+  it('refuses a non-private chat even when its identifier would pass every other guard', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { promptMessageId } = await openCredentialPrompt(bench);
+
+    const group = context({
+      text: SECRET_URL,
+      messageId: 700,
+      replyTo: promptMessageId,
+      chatType: 'group',
+      chatId: 42,
+    });
+    await expect(bench.handler.handleText(group as never)).resolves.toBe(false);
+
+    expect(bench.prompts.claimReply).not.toHaveBeenCalled();
+    expect(bench.messages.delete).not.toHaveBeenCalled();
+    expect(bench.createRtspCamera.execute).not.toHaveBeenCalled();
+  });
+});
+
+/*
+ * The row is gone but the message is not.
+ *
+ * A prompt whose durable row has vanished — pruned, or lost with the database
+ * — can authorise nothing: there is no claim to win and no camera selection to
+ * trust. The reply is still a real message sitting in a real chat, so a
+ * credential one is deleted anyway, and a name one is simply not ours.
+ */
+describe('CameraSourcesHandler replies whose durable prompt is gone', () => {
+  it('still deletes a credential reply, and calls no Camera use case', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { promptMessageId } = await openCredentialPrompt(bench);
+    bench.prompts.claimReply.mockResolvedValueOnce({ kind: 'stale' });
+
+    const { ctx, claimed } = await answerAddress(bench, promptMessageId);
+
+    expect(claimed).toBe(true);
+    expect(bench.messages.delete).toHaveBeenCalledWith(42, 600);
+    expect(bench.createRtspCamera.execute).not.toHaveBeenCalled();
+    expect(bench.attachRtspSource.execute).not.toHaveBeenCalled();
+    expect(sentJson(ctx)).not.toContain(SECRET_URL);
+  });
+
+  it('hands a name reply back to the next handler and deletes nothing', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const opened = await openNamePrompt(bench);
+    bench.prompts.claimReply.mockResolvedValueOnce({ kind: 'stale' });
+
+    const naming = context({ text: 'Side gate', messageId: 500, replyTo: opened.promptMessageId });
+    await expect(bench.handler.handleText(naming as never)).resolves.toBe(false);
+
+    expect(bench.messages.delete).not.toHaveBeenCalled();
+    expect(naming.reply).not.toHaveBeenCalled();
+  });
+});
+
+/*
+ * What survives an answer, and what does not.
+ *
+ * Task 6 attaches Retry / Change address / Reinstall RTSP to failure messages,
+ * and both halves of this contract are load-bearing for that: a completed
+ * receipt makes those buttons inert at `validateCurrent`, and a cleared view
+ * state loses the page the administrator was on.
+ */
+describe('CameraSourcesHandler navigation state across outcomes', () => {
+  it('keeps the receipt and the remembered page alive through a failure', async () => {
+    const bench = setup({ sources: manySources(20) });
+    const opener = context();
+    await bench.handler.handleEntry(opener as never, { receipt });
+    await bench.handler.handleCallback(opener as never, 'p:2', receipt);
+    await bench.handler.handleCallback(opener as never, 'add', receipt);
+    const { promptMessageId } = await openCredentialPromptOn(bench, opener);
+    bench.createRtspCamera.execute.mockRejectedValueOnce(new LiveSourceProbeTimeoutError());
+
+    const { ctx } = await answerAddress(bench, promptMessageId);
+
+    expect(ctx.reply).toHaveBeenCalledWith(copy.errors['timed-out']);
+    // The workflow is not over: Task 6's recovery callbacks are gated on
+    // `validateCurrent`, which only accepts a receipt that is still current.
+    expect(bench.navigation.complete).not.toHaveBeenCalled();
+    expect(bench.handler.hasPending(100, 42, receipt.id)).toBe(true);
+    // And the administrator is still on the page they started from.
+    await bench.handler.handleCallback(opener as never, 'over', receipt);
+    expect(bench.overview.execute).toHaveBeenLastCalledWith({ page: 2, pageSize: 8 });
+  });
+
+  it('keeps them alive through a refusal too', async () => {
+    const bench = setup({ sources: manySources(20) });
+    const opener = context();
+    await bench.handler.handleEntry(opener as never, { receipt });
+    await bench.handler.handleCallback(opener as never, 'p:2', receipt);
+    await bench.handler.handleCallback(opener as never, 'add', receipt);
+    const { promptMessageId } = await openCredentialPromptOn(bench, opener);
+
+    const { ctx } = await answerAddress(bench, promptMessageId, { role: 'user' });
+
+    expect(ctx.reply).toHaveBeenCalledWith(catalogFor('en').common.adminRequired);
+    expect(bench.navigation.complete).not.toHaveBeenCalled();
+    expect(bench.handler.hasPending(100, 42, receipt.id)).toBe(true);
+  });
+
+  it('ends the workflow and forgets the screen only on a successful install', async () => {
+    const bench = setup({ sources: manySources(20) });
+    const opener = context();
+    await bench.handler.handleEntry(opener as never, { receipt });
+    await bench.handler.handleCallback(opener as never, 'p:2', receipt);
+    await bench.handler.handleCallback(opener as never, 'add', receipt);
+    const { promptMessageId } = await openCredentialPromptOn(bench, opener);
+
+    const { ctx } = await answerAddress(bench, promptMessageId);
+
+    expect(ctx.reply).toHaveBeenCalledWith(copy.outcomes.created('Side gate'));
+    expect(bench.navigation.complete).toHaveBeenCalledTimes(1);
+    expect(bench.handler.hasPending(100, 42, receipt.id)).toBe(false);
+  });
+});
+
+/*
+ * Uniqueness is the Camera boundary's to decide — it holds the transaction —
+ * but discovering a collision there costs the administrator a pasted
+ * credential, because `name-taken` offers only `back`. So it is *advised* at
+ * name time, when nothing has been pasted yet, and still *decided* at the
+ * boundary.
+ */
+describe('CameraSourcesHandler display-name uniqueness', () => {
+  it('advises against a name a camera already answers to, before any address is asked for', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const opened = await openNamePrompt(bench);
+
+    // Same camera, different case and spacing: `cameraNameKey` is what decides.
+    const naming = context({ text: '  fRoNt DOOR ', messageId: 500, replyTo: opened.promptMessageId });
+    await expect(bench.handler.handleText(naming as never)).resolves.toBe(true);
+
+    expect(body(naming, 0)).toBe(copy.errors['name-taken']);
+    expect(sentJson(naming)).not.toContain(copy.prompts.credential);
+    expect(sentJson(naming)).not.toContain(copy.privacyNotice({
+      networks: copy.policy.network(NETWORK),
+      minutes: CAMERA_SOURCE_PROMPT_TTL_MS / 60_000,
+    }));
+    // Re-prompted, not dead-ended: the replacement prompt is a working one.
+    expect(markup(naming, 1)).toEqual({ force_reply: true, selective: true });
+    const retry = context({ text: NEW_CAMERA, messageId: 501, replyTo: lastSent(naming) });
+    await expect(bench.handler.handleText(retry as never)).resolves.toBe(true);
+    expect(body(retry, 1)).toContain(copy.prompts.credential);
+    expect(bench.prompts.created.at(-1)?.displayName).toBe(NEW_CAMERA);
+  });
+
+  it('still reports a collision the boundary catches, after deleting the address', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { promptMessageId } = await openCredentialPrompt(bench);
+    // The advisory check passed and the camera was created underneath anyway.
+    bench.createRtspCamera.execute.mockRejectedValueOnce(new CameraNameTakenError());
+
+    const { ctx } = await answerAddress(bench, promptMessageId);
+
+    expect(bench.messages.delete.mock.invocationCallOrder[0])
+      .toBeLessThan(bench.createRtspCamera.execute.mock.invocationCallOrder[0]);
+    expect(ctx.reply).toHaveBeenCalledWith(copy.errors['name-taken']);
+    expect(sentJson(ctx)).not.toContain(SECRET_URL);
+  });
+
+  it('advises nothing, and blocks nothing, when the camera list cannot be read', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const opened = await openNamePrompt(bench);
+    bench.cameras.execute.mockRejectedValueOnce(new Error('camera table is locked'));
+
+    const naming = context({ text: 'Front door', messageId: 500, replyTo: opened.promptMessageId });
+    await bench.handler.handleText(naming as never);
+
+    // An advisory check that blocked when it could not answer would make an
+    // unreadable camera list a reason nobody can add a camera at all.
+    expect(body(naming, 1)).toContain(copy.prompts.credential);
+    expect(sentJson(naming)).not.toContain(copy.errors['name-taken']);
+    expect(sentJson(naming)).not.toContain('camera table is locked');
+  });
+});
+
+/*
+ * The candidate list is every enabled non-RTSP camera without a source. The
+ * Camera boundary filters it but does not bound it, so this screen must.
+ */
+describe('CameraSourcesHandler attach candidate paging', () => {
+  function candidates(count: number) {
+    return Array.from({ length: count }, (_, index) => ({
+      cameraId: `camera-candidate-id-${index}`,
+      cameraName: `Candidate ${index}`,
+    }));
+  }
+
+  async function openCandidates(bench: Bench) {
+    const ctx = context();
+    await bench.handler.handleEntry(ctx as never, { receipt });
+    await bench.handler.handleCallback(ctx as never, 'add', receipt);
+    await bench.handler.handleCallback(ctx as never, 'add:a', receipt);
+    return ctx;
+  }
+
+  it('shows eight cameras per page with a way forward, never the whole install', async () => {
+    const bench = setup({ sources: [overviewSource()], attachCandidates: candidates(30) });
+
+    const ctx = await openCandidates(bench);
+
+    const rendered = screen(ctx, 2);
+    expect(rendered.filter((button) => button.callback_data.includes(':src:add:s:'))).toHaveLength(8);
+    expect(rendered.map((button) => button.text)).toContain(copy.overview.next);
+    expect(rendered.map((button) => button.text)).not.toContain(copy.overview.previous);
+    expect(rendered.map((button) => button.callback_data)).toContain('cam:abcdefghijklmnop:src:add:a:2');
+    expect(body(ctx, 2)).toContain(copy.add.chooseCamera);
+    expect(body(ctx, 2)).toContain(copy.overview.page(1, 4));
+    expect(sentJson(ctx)).not.toContain('camera-candidate-id-');
+    for (const button of rendered) {
+      expect(Buffer.byteLength(button.callback_data, 'utf8'), button.callback_data).toBeLessThanOrEqual(64);
+    }
+  });
+
+  it('pages forward and back over the same window, and attaches from a later page', async () => {
+    const bench = setup({ sources: [overviewSource()], attachCandidates: candidates(30) });
+    const ctx = await openCandidates(bench);
+
+    await bench.handler.handleCallback(ctx as never, 'add:a:4', receipt);
+
+    const last = screen(ctx, 3);
+    expect(last.filter((button) => button.callback_data.includes(':src:add:s:'))).toHaveLength(6);
+    expect(last.map((button) => button.text)).toContain(copy.overview.previous);
+    expect(last.map((button) => button.text)).not.toContain(copy.overview.next);
+    expect(body(ctx, 3)).toContain(copy.overview.page(4, 4));
+
+    // A row on the last page resolves to the camera it names, not to page one's.
+    const chosen = last.find((button) => button.callback_data.includes(':src:add:s:'));
+    await bench.handler.handleCallback(ctx as never, action(chosen!.callback_data), receipt);
+    expect(bench.prompts.created.at(-1)).toMatchObject({
+      phase: 'credential',
+      operation: 'attach',
+      cameraId: 'camera-candidate-id-24',
+      displayName: 'Candidate 24',
+    });
+  });
+
+  it('omits the page line and the pager for a list that fits', async () => {
+    const bench = setup({ sources: [overviewSource()], attachCandidates: candidates(8) });
+
+    const ctx = await openCandidates(bench);
+
+    expect(body(ctx, 2)).not.toContain(copy.overview.page(1, 1));
+    expect(screen(ctx, 2).map((button) => button.text)).not.toContain(copy.overview.next);
+  });
+
+  it('clamps a page beyond the end rather than rendering an empty chooser', async () => {
+    const bench = setup({ sources: [overviewSource()], attachCandidates: candidates(10) });
+    const ctx = await openCandidates(bench);
+
+    await bench.handler.handleCallback(ctx as never, 'add:a:99', receipt);
+
+    expect(screen(ctx, 3).filter((button) => button.callback_data.includes(':src:add:s:'))).toHaveLength(2);
+    expect(body(ctx, 3)).toContain(copy.overview.page(2, 2));
+  });
+
+  it('answers rather than throwing when Telegram refuses the chooser', async () => {
+    const bench = setup({ sources: [overviewSource()], attachCandidates: candidates(8) });
+    const ctx = context();
+    await bench.handler.handleEntry(ctx as never, { receipt });
+    await bench.handler.handleCallback(ctx as never, 'add', receipt);
+    ctx.reply.mockRejectedValueOnce(new Error('Bad Request: message reply markup is too long'));
+
+    await expect(bench.handler.handleCallback(ctx as never, 'add:a', receipt)).resolves.toBeUndefined();
+
+    expect(ctx.reply).toHaveBeenLastCalledWith(copy.errors['probe-failed']);
+    expect(sentJson(ctx)).not.toContain('reply markup is too long');
   });
 });

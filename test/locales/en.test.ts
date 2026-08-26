@@ -204,5 +204,13 @@ describe('en.camera.sources', () => {
     expect(warning).toContain('Front door');
     expect(warning).toContain('delete it yourself');
     expect(warning).not.toMatch(/rtsps?:\/\//iu);
+    /*
+     * `deletionFailed` is set from a call that did not succeed, which is
+     * indistinguishable from the message having already been gone — and it is
+     * sticky, so it survives a later clean deletion. The copy therefore names
+     * no culprit and promises no state: it asks the administrator to look.
+     */
+    expect(warning).not.toContain('Telegram');
+    expect(warning).toMatch(/may not have been deleted/u);
   });
 });

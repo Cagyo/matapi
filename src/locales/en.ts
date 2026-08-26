@@ -1493,8 +1493,16 @@ const enCatalog = {
 
       /* ── Prompt lifecycle ───────────────────────────────────────── */
       startAgain: '↻ Start again',
+      /*
+       * Deliberately hedged, twice. The only thing the workflow knows is that a
+       * deletion call did not succeed — which is indistinguishable from the
+       * message having already been gone, and which a later clean deletion never
+       * clears. So this neither blames Telegram for refusing nor promises the
+       * reply is still there; it asks the administrator to look, which is advice
+       * that stays correct in both cases.
+       */
       credentialDeletionFailed: (cameraName: string) =>
-        `⚠️ Telegram would not delete your reply for ${cameraName}. Please delete it yourself — it still shows the camera address.`,
+        `⚠️ Your reply with the address for ${cameraName} may not have been deleted. Please check this chat and delete it yourself if it is still there.`,
       /*
        * Words a user may type instead of pressing Cancel. Stored already
        * normalized — trimmed and lowercased — so the handler compares a
