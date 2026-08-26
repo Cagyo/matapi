@@ -209,13 +209,31 @@ self-restart (a feature-install job resumed on boot) does not refuse a good upda
 - Migrations run before PM2 restart in `update.sh`
 - Migrations must be backward-compatible: old code should work with new schema
 - This matters because rollback restores old code but does NOT rollback the DB migration
-- When writing migrations: only add columns (with defaults), don't remove or rename
+- When writing migrations: only add columns (with defaults), don't remove or rename — a table rebuild is
+  allowed only where every prior column survives it
 
 **Enforced, not just documented.** `test/system/infrastructure/migration-additivity.test.ts` fails on a new
 migration containing `DROP COLUMN`, `DROP TABLE`, `RENAME TO` or `RENAME COLUMN`. Four migrations predating
 that check are grandfathered in an explicit list — the policy was written down but nothing held it, and old
 code meeting a rebuilt table fails every query touching it, which with `min_uptime` in force parks the worker
 in `errored` within minutes and, on a stock install with no `HEARTBEAT_URL`, raises no alarm at all.
+
+**One rebuild is exempt.** SQLite cannot `ALTER` a `CHECK` constraint, so drizzle-kit widens one by rebuilding
+the table: create `__new_<table>`, copy every row across, `DROP TABLE <table>`, then `ALTER TABLE
+__new_<table> RENAME TO <table>`. The check recognises that exact four-statement shape and clears it only when
+it is column-preserving, verified against the previous `migrations/meta/*_snapshot.json` — the authoritative
+schema as it stood before the migration. Every prior column must still be declared, must still be named in the
+copy, and must not have gone from nullable to `NOT NULL`; every added column must be nullable or carry a
+`DEFAULT`, so an `INSERT` from the release a rollback restores still succeeds without knowing about it. Code
+that has been rolled back then meets a table it reads and writes exactly as before — the harm the policy
+guards against does not arise. Anything else matching the four statements still fails: a lone `DROP TABLE`, a
+rebuild whose rows are never copied, a rename dressed up as a rebuild, a dropped or renamed column. Three of
+the four grandfathered migrations would clear the refined rule, but the list stays frozen: it records what the
+original check flagged, not a re-judgement.
+
+The refinement proves the *columns*, not the direction a constraint moved. A rebuild that tightens a `CHECK`
+rather than widening it still lets old reads work but can reject old writes, and the test cannot see that —
+it remains a review judgement, and a narrowing rebuild is still a policy violation.
 
 **Backed by a snapshot.** Because the policy was violable, `update.sh` also takes a database snapshot
 immediately before `db:migrate` (`snapshot_database`) and restores it on rollback (`restore_database`). The
