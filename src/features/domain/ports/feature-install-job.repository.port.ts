@@ -14,6 +14,19 @@ export interface FeatureInstallJobRepositoryPort {
   findActive(): Promise<FeatureInstallJob | null>;
   listRecentTerminal(limit: number): Promise<readonly FeatureInstallJob[]>;
   markRunning(id: string, now: Date): Promise<FeatureInstallJob>;
+  /** Records privileged success and keeps the active slot until a fresh process verifies it. */
+  markAwaitingRestart(input: {
+    id: string;
+    restartScope: RestartScope;
+    dispatchIdentity: string;
+    now: Date;
+  }): Promise<FeatureInstallJob>;
+  /** The only write that replaces the recorded dispatch identity. */
+  recordRestartDispatch(input: {
+    id: string;
+    dispatchIdentity: string;
+    now: Date;
+  }): Promise<FeatureInstallJob>;
   terminalizeSuccess(input: {
     id: string;
     restartScope: RestartScope;

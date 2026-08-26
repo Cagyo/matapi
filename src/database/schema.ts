@@ -481,12 +481,16 @@ export const featureInstallJobs = sqliteTable(
     featureName: text('feature_name').notNull().references(() => features.name),
     status: text('status').notNull(),
     activeSlot: integer('active_slot'),
+    /** Legacy rows predate the reinstall action, so they default to a plain install. */
+    operation: text('operation').notNull().default('install'),
     requestedByUserId: integer('requested_by_user_id').notNull(),
     requestedInChatId: integer('requested_in_chat_id').notNull(),
     workflowReceiptId: text('workflow_receipt_id').notNull(),
     previousInstalled: integer('previous_installed', { mode: 'boolean' }).notNull(),
     previousEnabled: integer('previous_enabled', { mode: 'boolean' }).notNull(),
     restartScope: text('restart_scope'),
+    /** `<linux-boot-id>:<proc-self-start-ticks>` of the process that dispatched the restart. */
+    restartDispatchIdentity: text('restart_dispatch_identity'),
     failureCode: text('failure_code'),
     createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
     updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
@@ -495,9 +499,10 @@ export const featureInstallJobs = sqliteTable(
     uniqueIndex('idx_feature_install_jobs_active_slot').on(table.activeSlot),
     index('idx_feature_install_jobs_feature_time').on(table.featureName, table.createdAt),
     index('idx_feature_install_jobs_receipt').on(table.workflowReceiptId),
-    check('feature_install_jobs_status_check', sql`${table.status} in ('queued', 'running', 'succeeded', 'failed')`),
+    check('feature_install_jobs_status_check', sql`${table.status} in ('queued', 'running', 'awaiting-restart', 'succeeded', 'failed')`),
+    check('feature_install_jobs_operation_check', sql`${table.operation} in ('install', 'reinstall')`),
     check('feature_install_jobs_active_slot_check', sql`(
-      (${table.status} in ('queued', 'running') and ${table.activeSlot} is 1)
+      (${table.status} in ('queued', 'running', 'awaiting-restart') and ${table.activeSlot} is 1)
       or (${table.status} in ('succeeded', 'failed') and ${table.activeSlot} is null)
     )`),
     check('feature_install_jobs_restart_scope_check', sql`${table.restartScope} is null or ${table.restartScope} in ('worker', 'supervisor', 'host')`),

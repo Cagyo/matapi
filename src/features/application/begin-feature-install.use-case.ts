@@ -48,7 +48,7 @@ export class BeginFeatureInstallUseCase {
   ) {}
 
   async execute(input: BeginFeatureInstallInput): Promise<BeginFeatureInstallResult> {
-    const job = await this.jobs.createQueued({ ...input, now: this.clock.now() });
+    const job = await this.jobs.createQueued({ ...input, operation: 'install', now: this.clock.now() });
     const request = { version: 1 as const, jobId: job.id, feature: job.feature };
 
     try {

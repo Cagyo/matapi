@@ -10,6 +10,7 @@ import type {
   FeatureInstallFailureCode,
   FeatureInstallJob,
   FeatureInstallJobStatus,
+  FeatureInstallOperation,
   ManageableFeatureName,
   RestartScope,
 } from '../domain/manageable-feature';
@@ -38,12 +39,14 @@ export class DrizzleFeatureInstallJobRepository implements FeatureInstallJobRepo
           featureName: input.feature,
           status: 'queued',
           activeSlot: 1,
+          operation: input.operation,
           requestedByUserId: input.requestedByUserId,
           requestedInChatId: input.requestedInChatId,
           workflowReceiptId: input.workflowReceiptId,
           previousInstalled: feature.installed ?? false,
           previousEnabled: feature.enabled ?? false,
           restartScope: null,
+          restartDispatchIdentity: null,
           failureCode: null,
           createdAt: input.now,
           updatedAt: input.now,
@@ -92,13 +95,55 @@ export class DrizzleFeatureInstallJobRepository implements FeatureInstallJobRepo
     return toJob(row);
   }
 
+  async markAwaitingRestart(input: {
+    id: string;
+    restartScope: RestartScope;
+    dispatchIdentity: string;
+    now: Date;
+  }): Promise<FeatureInstallJob> {
+    return this.immediate((tx) => {
+      this.requireActiveJob(tx, input.id, ['running']);
+      const [row] = tx.update(featureInstallJobs)
+        .set({
+          status: 'awaiting-restart',
+          activeSlot: 1,
+          restartScope: input.restartScope,
+          restartDispatchIdentity: input.dispatchIdentity,
+          failureCode: null,
+          updatedAt: input.now,
+        })
+        .where(and(eq(featureInstallJobs.id, input.id), eq(featureInstallJobs.status, 'running')))
+        .returning()
+        .all();
+      if (!row) throw new RangeError(`Install job '${input.id}' state changed before awaiting a restart`);
+      return toJob(row);
+    });
+  }
+
+  async recordRestartDispatch(input: {
+    id: string;
+    dispatchIdentity: string;
+    now: Date;
+  }): Promise<FeatureInstallJob> {
+    return this.immediate((tx) => {
+      this.requireActiveJob(tx, input.id, ['awaiting-restart']);
+      const [row] = tx.update(featureInstallJobs)
+        .set({ restartDispatchIdentity: input.dispatchIdentity, updatedAt: input.now })
+        .where(and(eq(featureInstallJobs.id, input.id), eq(featureInstallJobs.status, 'awaiting-restart')))
+        .returning()
+        .all();
+      if (!row) throw new RangeError(`Install job '${input.id}' state changed before restart dispatch`);
+      return toJob(row);
+    });
+  }
+
   async terminalizeSuccess(input: {
     id: string;
     restartScope: RestartScope;
     now: Date;
   }): Promise<FeatureInstallJob> {
     return this.immediate((tx) => {
-      const job = this.requireActiveJob(tx, input.id, false);
+      const job = this.requireActiveJob(tx, input.id, ['running', 'awaiting-restart']);
       const [row] = tx.update(featureInstallJobs)
         .set({
           status: 'succeeded',
@@ -129,7 +174,7 @@ export class DrizzleFeatureInstallJobRepository implements FeatureInstallJobRepo
     now: Date;
   }): Promise<FeatureInstallJob> {
     return this.immediate((tx) => {
-      const job = this.requireActiveJob(tx, input.id, true);
+      const job = this.requireActiveJob(tx, input.id, ['queued', 'running', 'awaiting-restart']);
       const [row] = tx.update(featureInstallJobs)
         .set({
           status: 'failed',
@@ -156,10 +201,13 @@ export class DrizzleFeatureInstallJobRepository implements FeatureInstallJobRepo
     return this.db.transaction((tx) => operation(tx), { behavior: 'immediate' });
   }
 
-  private requireActiveJob(tx: JobWriter, id: string, allowQueued: boolean): JobRow {
+  private requireActiveJob(
+    tx: JobWriter,
+    id: string,
+    allowed: readonly FeatureInstallJobStatus[],
+  ): JobRow {
     const job = tx.select().from(featureInstallJobs).where(eq(featureInstallJobs.id, id)).get();
-    const validStatus = job?.status === 'running' || (allowQueued && job?.status === 'queued');
-    if (job?.activeSlot !== 1 || !validStatus) {
+    if (job?.activeSlot !== 1 || !allowed.includes(job.status as FeatureInstallJobStatus)) {
       throw new RangeError(`Install job '${id}' is not active`);
     }
     return job;
@@ -180,12 +228,14 @@ function toJob(row: JobRow): FeatureInstallJob {
     feature: row.featureName as ManageableFeatureName,
     status: row.status as FeatureInstallJobStatus,
     activeSlot: row.activeSlot === 1 ? 1 : null,
+    operation: row.operation as FeatureInstallOperation,
     requestedByUserId: row.requestedByUserId,
     requestedInChatId: row.requestedInChatId,
     workflowReceiptId: row.workflowReceiptId,
     previousInstalled: row.previousInstalled,
     previousEnabled: row.previousEnabled,
     restartScope: row.restartScope as RestartScope | null,
+    restartDispatchIdentity: row.restartDispatchIdentity,
     failureCode: row.failureCode as FeatureInstallFailureCode | null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,

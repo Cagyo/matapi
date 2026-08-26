@@ -8,9 +8,10 @@ const base = new Date('2030-01-01T00:00:00.000Z');
 
 function job(overrides: Partial<FeatureInstallJob> = {}): FeatureInstallJob {
   return {
-    id, feature: 'digital', status: 'queued', activeSlot: 1,
+    id, feature: 'digital', status: 'queued', activeSlot: 1, operation: 'install',
     requestedByUserId: 1, requestedInChatId: 2, workflowReceiptId: 'ponmlkjihgfedcba',
-    previousInstalled: false, previousEnabled: false, restartScope: null, failureCode: null,
+    previousInstalled: false, previousEnabled: false, restartScope: null,
+    restartDispatchIdentity: null, failureCode: null,
     createdAt: base, updatedAt: base, ...overrides,
   };
 }

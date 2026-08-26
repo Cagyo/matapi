@@ -59,23 +59,35 @@ export type FeatureInstallResultV1 = {
     | { outcome: 'failed'; failureCode: FeatureInstallFailureCode }
   );
 
+/**
+ * `awaiting-restart` sits between privileged success and terminal success: the
+ * install is durable but unverified, so the job keeps the active slot until a
+ * fresh process proves readiness.
+ */
 export type FeatureInstallJobStatus =
   | 'queued'
   | 'running'
+  | 'awaiting-restart'
   | 'succeeded'
   | 'failed';
+
+/** What the user asked for; never inferred from the previous feature state. */
+export type FeatureInstallOperation = 'install' | 'reinstall';
 
 export interface FeatureInstallJob {
   id: string;
   feature: ManageableFeatureName;
   status: FeatureInstallJobStatus;
   activeSlot: 1 | null;
+  operation: FeatureInstallOperation;
   requestedByUserId: number;
   requestedInChatId: number;
   workflowReceiptId: string;
   previousInstalled: boolean;
   previousEnabled: boolean;
   restartScope: RestartScope | null;
+  /** Identity of the process that dispatched the restart, per `FeatureProcessIdentityPort`. */
+  restartDispatchIdentity: string | null;
   failureCode: FeatureInstallFailureCode | null;
   createdAt: Date;
   updatedAt: Date;
@@ -86,6 +98,7 @@ export type ActiveFeatureJob = Pick<FeatureInstallJob, 'id' | 'feature' | 'statu
 export interface CreateFeatureInstallJob {
   id: string;
   feature: ManageableFeatureName;
+  operation: FeatureInstallOperation;
   requestedByUserId: number;
   requestedInChatId: number;
   workflowReceiptId: string;

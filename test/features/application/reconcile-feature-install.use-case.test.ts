@@ -9,7 +9,7 @@ import { VerifyFeatureReadinessUseCase } from '../../../src/features/application
 
 const now = new Date('2030-01-01T00:00:00.000Z');
 const id = 'abcdefghijklmnop';
-const request = { id, feature: 'digital' as const, requestedByUserId: 1, requestedInChatId: 2, workflowReceiptId: 'ponmlkjihgfedcba', expected: { installed: false, enabled: false }, now };
+const request = { id, feature: 'digital' as const, operation: 'install' as const, requestedByUserId: 1, requestedInChatId: 2, workflowReceiptId: 'ponmlkjihgfedcba', expected: { installed: false, enabled: false }, now };
 const success: FeatureInstallResultV1 = { version: 1, jobId: id, feature: 'digital', outcome: 'succeeded', failureCode: null, privilegedReady: true, restartScope: 'worker' };
 
 function create(state: unknown = { kind: 'terminal', result: success }) {

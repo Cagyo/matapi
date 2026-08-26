@@ -20,6 +20,7 @@ import { FeatureDisableLifecycleRegistry } from './application/feature-disable-l
 import { FEATURE_RUNTIME_LIFECYCLE } from './domain/ports/feature-runtime-lifecycle.port';
 import { FEATURE_RESTART } from './domain/ports/feature-restart.port';
 import { FEATURE_INSTALL_JOB_REPOSITORY } from './domain/ports/feature-install-job.repository.port';
+import { FEATURE_PROCESS_IDENTITY } from './domain/ports/feature-process-identity.port';
 import { FEATURE_INSTALL_REQUEST } from './domain/ports/feature-install-request.port';
 import { FEATURE_INSTALL_RESULT } from './domain/ports/feature-install-result.port';
 import { FEATURE_INSTALL_CONTROLLER } from './domain/ports/feature-install-controller.port';
@@ -29,6 +30,7 @@ import { FEATURE_READINESS } from './domain/ports/feature-readiness.port';
 import { FEATURE_AVAILABILITY } from './domain/ports/feature-availability.port';
 import { FEATURE_READINESS_BARRIER } from './domain/ports/feature-readiness-barrier.port';
 import { DrizzleFeatureInstallJobRepository } from './infrastructure/drizzle-feature-install-job.repository';
+import { LinuxFeatureProcessIdentityAdapter } from './infrastructure/linux-feature-process-identity.adapter';
 import { DigitalReadinessAdapter } from './infrastructure/readiness/digital-readiness.adapter';
 import { UartReadinessAdapter } from './infrastructure/readiness/uart-readiness.adapter';
 import { ZigbeeReadinessAdapter } from './infrastructure/readiness/zigbee-readiness.adapter';
@@ -64,6 +66,7 @@ const systemMode = resolveSystemMode();
     { provide: FEATURE_INSTALL_RESULT, useClass: FsFeatureInstallResultAdapter },
     { provide: FEATURE_INSTALL_CONTROLLER, useClass: SystemdFeatureInstallControllerAdapter },
     { provide: FEATURE_CLOCK, useClass: SystemFeatureClockAdapter },
+    { provide: FEATURE_PROCESS_IDENTITY, useClass: LinuxFeatureProcessIdentityAdapter },
     {
       provide: FEATURE_READINESS,
       useFactory: () => new FeatureReadinessRouter({

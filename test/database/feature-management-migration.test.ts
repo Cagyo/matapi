@@ -117,4 +117,69 @@ describe('feature-management migration', () => {
     expect(() => insertJob('job0000000000001', 'digital', 'queued')).toThrow(/CHECK/);
     expect(() => insertJob('job0000000000002', 'uart', 'running')).toThrow(/CHECK/);
   });
+
+  it('preserves existing install jobs when adding the awaiting-restart phase', () => {
+    const migrations = migrationFilenames();
+    const awaitingRestartMigrationIndex = migrations.findIndex((filename) =>
+      readFileSync(resolve(filename), 'utf8').includes('restart_dispatch_identity'),
+    );
+    if (awaitingRestartMigrationIndex === -1) {
+      throw new Error('Generated awaiting-restart migration was not found');
+    }
+
+    executeMigrations(sqlite, migrations.slice(0, awaitingRestartMigrationIndex));
+    sqlite.prepare('INSERT INTO features (name, enabled, installed) VALUES (?, ?, ?)').run('digital', 0, 0);
+    sqlite.prepare(`INSERT INTO feature_install_jobs
+      (id, feature_name, status, active_slot, requested_by_user_id, requested_in_chat_id,
+       workflow_receipt_id, previous_installed, previous_enabled, restart_scope, failure_code, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run('job0000000000001', 'digital', 'running', 1, 1, 2, 'job-receipt', 0, 0, null, null, 1_893_456_000, 1_893_456_000);
+    sqlite.prepare(`INSERT INTO feature_install_jobs
+      (id, feature_name, status, active_slot, requested_by_user_id, requested_in_chat_id,
+       workflow_receipt_id, previous_installed, previous_enabled, restart_scope, failure_code, created_at, updated_at)
+      VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run('job0000000000002', 'digital', 'succeeded', 1, 2, 'old-receipt', 1, 1, 'worker', null, 1_893_455_000, 1_893_455_000);
+
+    executeMigrations(sqlite, migrations.slice(awaitingRestartMigrationIndex));
+
+    expect(sqlite.prepare(`SELECT id, status, active_slot AS activeSlot, operation,
+        restart_dispatch_identity AS restartDispatchIdentity, restart_scope AS restartScope
+      FROM feature_install_jobs ORDER BY id`).all()).toEqual([
+      {
+        id: 'job0000000000001',
+        status: 'running',
+        activeSlot: 1,
+        operation: 'install',
+        restartDispatchIdentity: null,
+        restartScope: null,
+      },
+      {
+        id: 'job0000000000002',
+        status: 'succeeded',
+        activeSlot: null,
+        operation: 'install',
+        restartDispatchIdentity: null,
+        restartScope: 'worker',
+      },
+    ]);
+    expect(sqlite.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+  });
+
+  it('holds the active slot for awaiting-restart jobs and still rejects unknown statuses', () => {
+    executeMigrations(sqlite);
+    sqlite.prepare('INSERT INTO features (name, enabled, installed) VALUES (?, ?, ?)').run('digital', 0, 0);
+    const insertJob = (id: string, status: string, activeSlot: number | null) => sqlite.prepare(
+      `INSERT INTO feature_install_jobs
+       (id, feature_name, status, active_slot, operation, requested_by_user_id, requested_in_chat_id,
+        workflow_receipt_id, previous_installed, previous_enabled, restart_dispatch_identity, created_at, updated_at)
+       VALUES (?, 'digital', ?, ?, 'reinstall', ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(id, status, activeSlot, 1, 2, `${id}-receipt`, 0, 0, 'boot-a:100', 1_893_456_000, 1_893_456_000);
+
+    expect(() => insertJob('job0000000000001', 'awaiting-restart', 1)).not.toThrow();
+    expect(() => insertJob('job0000000000002', 'awaiting-restart', 1)).toThrow(/UNIQUE/);
+    expect(() => insertJob('job0000000000003', 'awaiting-restart', null)).toThrow(/CHECK/);
+    expect(() => insertJob('job0000000000004', 'awaiting-reboot', null)).toThrow(/CHECK/);
+    expect(sqlite.prepare('SELECT operation FROM feature_install_jobs WHERE id = ?')
+      .get('job0000000000001')).toEqual({ operation: 'reinstall' });
+  });
 });

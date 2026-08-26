@@ -6,6 +6,7 @@ import type {
   FeatureAttentionReason,
   FeatureInstallFailureCode,
   FeatureInstallJob,
+  FeatureInstallJobStatus,
   RestartScope,
 } from '../domain/manageable-feature';
 import type { FeatureInstallJobRepositoryPort } from '../domain/ports/feature-install-job.repository.port';
@@ -32,12 +33,14 @@ export class InMemoryFeatureInstallJobRepository implements FeatureInstallJobRep
         feature: input.feature,
         status: 'queued',
         activeSlot: 1,
+        operation: input.operation,
         requestedByUserId: input.requestedByUserId,
         requestedInChatId: input.requestedInChatId,
         workflowReceiptId: input.workflowReceiptId,
         previousInstalled: feature.installed,
         previousEnabled: feature.enabled,
         restartScope: null,
+        restartDispatchIdentity: null,
         failureCode: null,
         createdAt: cloneDate(input.now),
         updatedAt: cloneDate(input.now),
@@ -74,9 +77,39 @@ export class InMemoryFeatureInstallJobRepository implements FeatureInstallJobRep
     });
   }
 
+  async markAwaitingRestart(input: {
+    id: string;
+    restartScope: RestartScope;
+    dispatchIdentity: string;
+    now: Date;
+  }): Promise<FeatureInstallJob> {
+    return this.serialize(async () => {
+      const job = this.requireActive(input.id, ['running']);
+      job.status = 'awaiting-restart';
+      job.restartScope = input.restartScope;
+      job.restartDispatchIdentity = input.dispatchIdentity;
+      job.failureCode = null;
+      job.updatedAt = cloneDate(input.now);
+      return cloneJob(job);
+    });
+  }
+
+  async recordRestartDispatch(input: {
+    id: string;
+    dispatchIdentity: string;
+    now: Date;
+  }): Promise<FeatureInstallJob> {
+    return this.serialize(async () => {
+      const job = this.requireActive(input.id, ['awaiting-restart']);
+      job.restartDispatchIdentity = input.dispatchIdentity;
+      job.updatedAt = cloneDate(input.now);
+      return cloneJob(job);
+    });
+  }
+
   async terminalizeSuccess(input: { id: string; restartScope: RestartScope; now: Date }): Promise<FeatureInstallJob> {
     return this.serialize(async () => {
-      const job = this.requireActive(input.id, false);
+      const job = this.requireActive(input.id, ['running', 'awaiting-restart']);
       const current = await this.requireFeature(job.feature);
       await this.applyFeatureState(job.feature, current, {
         installed: true,
@@ -100,7 +133,7 @@ export class InMemoryFeatureInstallJobRepository implements FeatureInstallJobRep
     now: Date;
   }): Promise<FeatureInstallJob> {
     return this.serialize(async () => {
-      const job = this.requireActive(input.id, true);
+      const job = this.requireActive(input.id, ['queued', 'running', 'awaiting-restart']);
       if (input.preservePreviousState) {
         const current = await this.requireFeature(job.feature);
         await this.applyFeatureState(job.feature, current, {
@@ -123,9 +156,9 @@ export class InMemoryFeatureInstallJobRepository implements FeatureInstallJobRep
     });
   }
 
-  private requireActive(id: string, allowQueued: boolean): FeatureInstallJob {
+  private requireActive(id: string, allowed: readonly FeatureInstallJobStatus[]): FeatureInstallJob {
     const job = this.jobs.get(id);
-    if (job?.activeSlot !== 1 || (job.status !== 'running' && !(allowQueued && job.status === 'queued'))) {
+    if (job?.activeSlot !== 1 || !allowed.includes(job.status)) {
       throw new RangeError(`Install job '${id}' is not active`);
     }
     return job;

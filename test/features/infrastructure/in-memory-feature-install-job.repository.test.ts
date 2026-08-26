@@ -45,6 +45,7 @@ describe('InMemoryFeatureInstallJobRepository', () => {
     const queued = await jobs.createQueued({
       id: 'abcdefghijklmnop',
       feature: 'motion',
+      operation: 'install',
       requestedByUserId: 11,
       requestedInChatId: 22,
       workflowReceiptId: 'receipt-abcdefghijklmnop',
@@ -156,6 +157,147 @@ describe('InMemoryFeatureInstallJobRepository', () => {
       attentionReason: null,
     });
   });
+
+  it('persists the operation discriminator chosen by the caller', async () => {
+    const features = new InMemoryFeatureRepository([feature('motion', true, true)]);
+    const jobs = new InMemoryFeatureInstallJobRepository(features);
+
+    const job = await create(jobs, 'abcdefghijklmnop', 'motion', { installed: true, enabled: true }, 'reinstall');
+
+    expect(job).toMatchObject({ operation: 'reinstall', restartDispatchIdentity: null });
+    await expect(jobs.findById(job.id)).resolves.toMatchObject({ operation: 'reinstall' });
+  });
+
+  it('defaults a plain install to the install operation', async () => {
+    const features = new InMemoryFeatureRepository([feature('motion')]);
+    const jobs = new InMemoryFeatureInstallJobRepository(features);
+
+    await expect(create(jobs, 'abcdefghijklmnop', 'motion')).resolves.toMatchObject({ operation: 'install' });
+  });
+
+  it('keeps an awaiting-restart job holding the active slot against another feature', async () => {
+    const features = new InMemoryFeatureRepository([feature('motion'), feature('uart')]);
+    const jobs = new InMemoryFeatureInstallJobRepository(features);
+
+    const awaiting = await awaitingRestart(jobs, 'abcdefghijklmnop', 'boot-a:100');
+
+    expect(awaiting).toMatchObject({
+      status: 'awaiting-restart',
+      activeSlot: 1,
+      restartScope: 'worker',
+      restartDispatchIdentity: 'boot-a:100',
+    });
+    await expect(jobs.findActive()).resolves.toMatchObject({ id: 'abcdefghijklmnop', status: 'awaiting-restart' });
+    await expect(create(jobs, 'bcdefghijklmnopa', 'uart')).rejects.toMatchObject({ code: 'FEATURE_INSTALL_BUSY' });
+  });
+
+  it('keeps an awaiting-restart job out of the recent terminal history', async () => {
+    const features = new InMemoryFeatureRepository([feature('motion')]);
+    const jobs = new InMemoryFeatureInstallJobRepository(features);
+
+    await awaitingRestart(jobs, 'abcdefghijklmnop', 'boot-a:100');
+
+    await expect(jobs.listRecentTerminal(5)).resolves.toEqual([]);
+  });
+
+  it('replaces the dispatch identity only through recordRestartDispatch', async () => {
+    const features = new InMemoryFeatureRepository([feature('motion')]);
+    const jobs = new InMemoryFeatureInstallJobRepository(features);
+    await awaitingRestart(jobs, 'abcdefghijklmnop', 'boot-a:100');
+    const dispatchedAt = new Date('2030-01-02T03:09:05.000Z');
+
+    const redispatched = await jobs.recordRestartDispatch({
+      id: 'abcdefghijklmnop',
+      dispatchIdentity: 'boot-b:200',
+      now: dispatchedAt,
+    });
+
+    expect(redispatched).toMatchObject({
+      status: 'awaiting-restart',
+      activeSlot: 1,
+      restartScope: 'worker',
+      restartDispatchIdentity: 'boot-b:200',
+      updatedAt: dispatchedAt,
+    });
+
+    const completed = await jobs.terminalizeSuccess({
+      id: 'abcdefghijklmnop',
+      restartScope: 'worker',
+      now: new Date('2030-01-02T03:10:05.000Z'),
+    });
+
+    expect(completed.restartDispatchIdentity).toBe('boot-b:200');
+  });
+
+  it('refuses a restart dispatch for a job that is not awaiting a restart', async () => {
+    const features = new InMemoryFeatureRepository([feature('motion')]);
+    const jobs = new InMemoryFeatureInstallJobRepository(features);
+    await create(jobs, 'abcdefghijklmnop', 'motion');
+    await jobs.markRunning('abcdefghijklmnop', now);
+
+    await expect(jobs.recordRestartDispatch({
+      id: 'abcdefghijklmnop',
+      dispatchIdentity: 'boot-a:100',
+      now,
+    })).rejects.toThrow("Install job 'abcdefghijklmnop' is not active");
+  });
+
+  it('refuses to await a restart from a queued job', async () => {
+    const features = new InMemoryFeatureRepository([feature('motion')]);
+    const jobs = new InMemoryFeatureInstallJobRepository(features);
+    await create(jobs, 'abcdefghijklmnop', 'motion');
+
+    await expect(jobs.markAwaitingRestart({
+      id: 'abcdefghijklmnop',
+      restartScope: 'worker',
+      dispatchIdentity: 'boot-a:100',
+      now,
+    })).rejects.toThrow("Install job 'abcdefghijklmnop' is not active");
+  });
+
+  it('releases the active slot when an awaiting-restart job reaches terminal success', async () => {
+    const features = new InMemoryFeatureRepository([feature('motion')]);
+    const jobs = new InMemoryFeatureInstallJobRepository(features);
+    await awaitingRestart(jobs, 'abcdefghijklmnop', 'boot-a:100');
+
+    const completed = await jobs.terminalizeSuccess({
+      id: 'abcdefghijklmnop',
+      restartScope: 'worker',
+      now: new Date('2030-01-02T03:11:05.000Z'),
+    });
+
+    expect(completed).toMatchObject({ status: 'succeeded', activeSlot: null, failureCode: null });
+    await expect(jobs.findActive()).resolves.toBeNull();
+    await expect(features.findByName('motion')).resolves.toMatchObject({
+      installed: true,
+      enabled: true,
+      attentionReason: null,
+    });
+  });
+
+  it('releases the active slot when an awaiting-restart job reaches terminal failure', async () => {
+    const features = new InMemoryFeatureRepository([feature('motion')]);
+    const jobs = new InMemoryFeatureInstallJobRepository(features);
+    await awaitingRestart(jobs, 'abcdefghijklmnop', 'boot-a:100');
+
+    const failed = await jobs.terminalizeFailure({
+      id: 'abcdefghijklmnop',
+      failureCode: 'application-verification-failed',
+      attentionReason: 'readiness-failed',
+      preservePreviousState: false,
+      now: new Date('2030-01-02T03:12:05.000Z'),
+    });
+
+    expect(failed).toMatchObject({
+      status: 'failed',
+      activeSlot: null,
+      restartScope: null,
+      failureCode: 'application-verification-failed',
+      restartDispatchIdentity: 'boot-a:100',
+    });
+    await expect(jobs.findActive()).resolves.toBeNull();
+    await expect(features.findByName('motion')).resolves.toMatchObject({ attentionReason: 'readiness-failed' });
+  });
 });
 
 function feature(name: 'motion' | 'uart', installed = false, enabled = false): Feature {
@@ -167,16 +309,28 @@ function create(
   id: string,
   featureName: 'motion' | 'uart',
   expected = { installed: false, enabled: false },
+  operation: 'install' | 'reinstall' = 'install',
 ) {
   return jobs.createQueued({
     id,
     feature: featureName,
+    operation,
     requestedByUserId: 11,
     requestedInChatId: 22,
     workflowReceiptId: `receipt-${id}`,
     expected,
     now,
   });
+}
+
+async function awaitingRestart(
+  jobs: InMemoryFeatureInstallJobRepository,
+  id: string,
+  dispatchIdentity: string,
+) {
+  await create(jobs, id, 'motion');
+  await jobs.markRunning(id, now);
+  return jobs.markAwaitingRestart({ id, restartScope: 'worker', dispatchIdentity, now });
 }
 
 class CompareAndSetFailureFeatureRepository implements FeatureRepositoryPort {
