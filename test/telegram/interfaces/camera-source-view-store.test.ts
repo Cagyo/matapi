@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { WorkflowReturnReceipt } from '../../../src/telegram/domain/workflow-return';
 import {
+  CAMERA_SOURCE_PROMPT_ROUTING_TTL_MS,
   CAMERA_SOURCE_VIEW_TTL_MS,
   CameraSourceViewStore,
 } from '../../../src/telegram/interfaces/camera-source-view-store';
@@ -73,22 +74,77 @@ describe('CameraSourceViewStore lifetime', () => {
     expect(store.rememberedPage(contextFor(), receipt.id)).toBe(1);
   });
 
-  it('holds a prompt open for exactly the same window', () => {
-    const { store, advance, now } = storeAt();
+  /*
+   * Routing outlives the prompt window, and this is the assertion that says so.
+   *
+   * It used to say the opposite — that routing died with the screen window, ten
+   * minutes — and that was the defect written down as the contract. The durable
+   * row answers `late` past its deadline, meaning "delete this reply, authorise
+   * nothing", and that answer is only reachable while something still routes
+   * the reply to it. With the two windows equal, and the screen test `>` where
+   * the durable claim test is `>=`, the whole cleanup path was reachable at
+   * exactly one instant: at `expiresAt` it worked, one millisecond later the
+   * routing was gone and a credential-bearing reply went to the next handler
+   * undeleted.
+   */
+  function promptAt(store: CameraSourceViewStore, createdAtMs: number): void {
     store.set(contextFor(), {
       kind: 'prompt',
       receipt,
       promptMessageId: 900,
       phase: 'credential',
       page: 2,
-      createdAtMs: now(),
+      createdAtMs,
     });
+  }
 
+  it('keeps a prompt routable well past the window the prompt itself closes in', () => {
+    const { store, advance, now } = storeAt();
+    promptAt(store, now());
+
+    // The instant the old window died on, and the one that used to be the only
+    // one that worked.
     advance(CAMERA_SOURCE_VIEW_TTL_MS);
+    expect(store.promptFor(ADMIN, CHAT, 900)?.page).toBe(2);
+    advance(1);
+    expect(store.promptFor(ADMIN, CHAT, 900)?.page).toBe(2);
+
+    // And an interior point, so the assertion is not pinned to a boundary that
+    // a single comparison operator can move.
+    advance(60 * 60_000);
+    expect(store.promptFor(ADMIN, CHAT, 900)?.page).toBe(2);
+  });
+
+  it('stops routing a prompt at the abandonment horizon, so nothing is immortal', () => {
+    const { store, advance, now } = storeAt();
+    promptAt(store, now());
+
+    advance(CAMERA_SOURCE_PROMPT_ROUTING_TTL_MS);
     expect(store.promptFor(ADMIN, CHAT, 900)?.page).toBe(2);
 
     advance(1);
     expect(store.promptFor(ADMIN, CHAT, 900)).toBeUndefined();
+  });
+
+  /*
+   * The tell that found the defect: retraction read one window and routing read
+   * another, while the message in the chat obeyed neither. They must agree at
+   * every instant, not merely at the ends.
+   */
+  it.each([
+    ['at the prompt window', CAMERA_SOURCE_VIEW_TTL_MS],
+    ['just past it', CAMERA_SOURCE_VIEW_TTL_MS + 1],
+    ['deep inside the routing horizon', CAMERA_SOURCE_PROMPT_ROUTING_TTL_MS - 1],
+    ['past the routing horizon', CAMERA_SOURCE_PROMPT_ROUTING_TTL_MS + 1],
+  ])('routes and retracts the same prompts %s', (_label, waited) => {
+    const { store, advance, now } = storeAt();
+    promptAt(store, now());
+    advance(waited);
+
+    expect(store.promptsFor(ADMIN, CHAT).length)
+      .toBe(store.promptFor(ADMIN, CHAT, 900) === undefined ? 0 : 1);
+    expect(store.promptsFor(ADMIN, CHAT, receipt.id).length)
+      .toBe(store.promptFor(ADMIN, CHAT, 900) === undefined ? 0 : 1);
   });
 });
 

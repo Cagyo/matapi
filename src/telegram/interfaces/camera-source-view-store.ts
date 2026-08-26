@@ -1,4 +1,7 @@
-import type { CameraSourcePromptPhase } from '../domain/camera-source-prompt';
+import {
+  CAMERA_SOURCE_ABANDONED_TTL_MS,
+  type CameraSourcePromptPhase,
+} from '../domain/camera-source-prompt';
 import type { WorkflowReturnReceipt } from '../domain/workflow-return';
 import type { TelegramContext } from './telegram-context';
 
@@ -13,6 +16,26 @@ import type { TelegramContext } from './telegram-context';
  * costs a conversation.
  */
 export const CAMERA_SOURCE_VIEW_TTL_MS = 10 * 60_000;
+
+/**
+ * How long a prompt's *routing* is kept, which is deliberately **not** the
+ * screen window above and deliberately **not** the prompt window either.
+ *
+ * Routing has to outlive the prompt it routes to. The durable row is the sole
+ * authority on what a reply may do, and past `expiresAt` its answer is `late` —
+ * "delete this message, authorise nothing". That answer is only reachable if
+ * something still routes the reply to it, so a routing entry that expired with
+ * the prompt would take the entire cleanup path with it: `promptFor` finds
+ * nothing, `handleText` hands the message to the next handler, and a
+ * credential-bearing reply is never deleted. Retention keeps credential
+ * tombstones for 24 hours precisely so a late reply is still cleanable; routing
+ * is what makes that reachable, so it is bounded by the same horizon.
+ *
+ * Beyond it the row itself has been pruned as abandoned, and Telegram stops
+ * letting a bot delete a message at roughly 48 hours anyway — so past this
+ * point there is nothing left to route to and nothing left to delete.
+ */
+export const CAMERA_SOURCE_PROMPT_ROUTING_TTL_MS = CAMERA_SOURCE_ABANDONED_TTL_MS;
 
 /**
  * Everything the RTSP source screens remember between two Telegram updates.
@@ -179,7 +202,12 @@ export class CameraSourceViewStore {
   promptsFor(userId: number, chatId: number, receiptId?: string): readonly CameraSourcePromptView[] {
     return this.statesFor(userId, chatId).filter(
       (state): state is CameraSourcePromptView =>
-        state.kind === 'prompt' && (receiptId === undefined || state.receipt.id === receiptId),
+        state.kind === 'prompt'
+        && (receiptId === undefined || state.receipt.id === receiptId)
+        // The same horizon `promptFor` routes on. These two disagreeing is what
+        // let retraction believe a prompt was alive while routing believed it
+        // was dead — with the message alive in the chat either way.
+        && !this.expired(state),
     );
   }
 
@@ -203,15 +231,31 @@ export class CameraSourceViewStore {
    * than reported as pending.
    */
   hasPending(userId: number, chatId: number, receiptId?: string): boolean {
-    const state = receiptId
-      ? this.states.get(`${userId}:${chatId}:${receiptId}`)
-      : this.statesFor(userId, chatId).at(0);
-    if (!state) return false;
-    if (this.expired(state)) {
-      this.states.delete(this.keyFor(state));
-      return false;
+    let pending = false;
+    for (const state of this.statesFor(userId, chatId)) {
+      if (receiptId !== undefined && state.receipt.id !== receiptId) continue;
+      if (this.expired(state)) {
+        this.states.delete(this.keyFor(state));
+        continue;
+      }
+      // Prompts are excluded *deliberately*, and this is the one place that
+      // distinction is worth spelling out. Routing outlives the workflow that
+      // armed it: answering a prompt does not spend its routing, because a
+      // second credential pasted at the same prompt still has to be deleted.
+      // So a surviving routing entry says "a message in this chat may still
+      // need cleaning up", not "this administrator is still mid-workflow" —
+      // and the caller, `CameraHandler.cancelExact`, is asking the second
+      // question. Counting routing here would report a finished install as
+      // pending for another 24 hours.
+      //
+      // This was previously achieved by accident: the lookup built a receipt
+      // key, which a prompt — keyed by its message — could never match. Same
+      // answer, but for no stated reason, and silently wrong the moment
+      // anything else was keyed that way.
+      if (state.kind === 'prompt') continue;
+      pending = true;
     }
-    return true;
+    return pending;
   }
 
   /**
@@ -238,8 +282,21 @@ export class CameraSourceViewStore {
       .sort((left, right) => right.createdAtMs - left.createdAtMs);
   }
 
+  /**
+   * Whether an entry has aged out — on the window that applies to *its kind*.
+   *
+   * A screen and a prompt measure different things. Losing a screen costs a
+   * reload; losing a prompt's routing costs a credential left in the chat. They
+   * were the same ten minutes, and because the screen test is `>` while the
+   * durable claim test is `>=`, the two windows disagreed at exactly one
+   * instant: `now === expiresAt` routed and cleaned up, one millisecond later
+   * the routing was gone and the reply went to the next handler undeleted.
+   */
   private expired(state: CameraSourceViewState): boolean {
-    return this.now() - state.createdAtMs > CAMERA_SOURCE_VIEW_TTL_MS;
+    const window = state.kind === 'prompt'
+      ? CAMERA_SOURCE_PROMPT_ROUTING_TTL_MS
+      : CAMERA_SOURCE_VIEW_TTL_MS;
+    return this.now() - state.createdAtMs > window;
   }
 
   /**

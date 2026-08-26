@@ -959,6 +959,18 @@ const NOW = new Date('2026-07-17T00:00:00Z');
  * the advisory uniqueness check rather than the path under test.
  */
 const NEW_CAMERA = 'Side gate';
+/*
+ * Well past the deadline, and deliberately not *on* it.
+ *
+ * Every test below that means "the window closed" used to advance by exactly
+ * `CAMERA_SOURCE_PROMPT_TTL_MS`, which turned out to be the one instant where
+ * two windows that were supposed to be the same actually agreed: routing died
+ * on `>` and the durable claim died on `>=`, so the entire late-reply cleanup
+ * path was reachable for a single millisecond and nowhere else. A boundary-only
+ * assertion cannot see that. These advance into the interior; the two tests
+ * that are genuinely *about* the boundary still pin it exactly, from both sides.
+ */
+const PAST_THE_WINDOW = CAMERA_SOURCE_PROMPT_TTL_MS + 60_000;
 const CANDIDATES = [
   { cameraId: 'camera-hallway-private-id', cameraName: 'Hallway' },
   { cameraId: 'camera-yard-private-id', cameraName: 'Back yard' },
@@ -1631,7 +1643,7 @@ describe('CameraSourcesHandler credential replies', () => {
   it('deletes but does not act on a reply that arrives after the window closed', async () => {
     const bench = setup({ sources: [overviewSource()] });
     const { promptMessageId } = await openCredentialPrompt(bench);
-    bench.advance(CAMERA_SOURCE_PROMPT_TTL_MS);
+    bench.advance(PAST_THE_WINDOW);
     // A refused first attempt is retried here too: cleanup owes the same
     // deletion the winning path does.
     bench.messages.delete
@@ -3272,7 +3284,7 @@ describe('CameraSourcesHandler exact expiry boundary', () => {
   it('renders the window from the prompt TTL, not from a number written twice', async () => {
     const bench = setup({ sources: [overviewSource()] });
     const { promptMessageId } = await openCredentialPrompt(bench);
-    bench.advance(CAMERA_SOURCE_PROMPT_TTL_MS);
+    bench.advance(PAST_THE_WINDOW);
 
     const { ctx } = await answerAddress(bench, promptMessageId);
 
@@ -3312,10 +3324,50 @@ describe('CameraSourcesHandler exact expiry boundary', () => {
     expect(source).not.toMatch(/prompts\.expired\(\s*\d/u);
   });
 
+  /*
+   * The seventh door, closed.
+   *
+   * The durable row answers `late` at every instant past its deadline — "delete
+   * this reply, authorise nothing" — but that answer is only reachable while
+   * something still routes the reply to it. Routing used to expire on the same
+   * ten minutes, tested with `>` where the durable claim tests `>=`, so the
+   * whole cleanup path lived for exactly one millisecond: at `expiresAt` the
+   * reply was deleted, at `expiresAt + 1` it was handed to the next handler
+   * with the camera password still in it.
+   *
+   * Parameterised over an hour rather than asserted at one point, because a
+   * single instant is exactly what hid this: the boundary agreed, the interior
+   * did not.
+   */
+  it.each([
+    ['one millisecond past the deadline', CAMERA_SOURCE_PROMPT_TTL_MS + 1],
+    ['a minute past it', CAMERA_SOURCE_PROMPT_TTL_MS + 60_000],
+    ['half an hour past it', CAMERA_SOURCE_PROMPT_TTL_MS + 30 * 60_000],
+    ['an hour past it', CAMERA_SOURCE_PROMPT_TTL_MS + 60 * 60_000],
+  ])('still deletes an address that arrives %s', async (_label, waited) => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { promptMessageId } = await openCredentialPrompt(bench);
+    bench.advance(waited);
+
+    const { ctx, claimed } = await answerAddress(bench, promptMessageId);
+
+    // Claimed, so no other handler ever sees the message.
+    expect(claimed).toBe(true);
+    expect(bench.messages.delete).toHaveBeenCalledWith(42, 600);
+    expect(bodies(ctx)).toContain(copy.prompts.expired(MINUTES));
+    // Cleanup only: nothing this late may authorise an install.
+    expect(bench.createRtspCamera.execute).not.toHaveBeenCalled();
+    expect(bench.attachRtspSource.execute).not.toHaveBeenCalled();
+    expect(bench.replaceRtspSource.execute).not.toHaveBeenCalled();
+    // And the address never reaches a reply, a callback or a stored row.
+    expect(sentJson(ctx)).not.toContain(SECRET_PASSWORD);
+    expect(reachableStrings(bench.prompts.created)).not.toContain(SECRET_URL);
+  });
+
   it('offers Start again, pointing at the overview rather than a fresh prompt', async () => {
     const bench = setup({ sources: [overviewSource()] });
     const { promptMessageId } = await openCredentialPrompt(bench);
-    bench.advance(CAMERA_SOURCE_PROMPT_TTL_MS);
+    bench.advance(PAST_THE_WINDOW);
 
     const { ctx } = await answerAddress(bench, promptMessageId);
 
@@ -3329,7 +3381,7 @@ describe('CameraSourcesHandler exact expiry boundary', () => {
   it('says the same to a name reply whose window closed, and arms no new prompt', async () => {
     const bench = setup({ sources: [overviewSource()] });
     const opened = await openNamePrompt(bench);
-    bench.advance(CAMERA_SOURCE_PROMPT_TTL_MS);
+    bench.advance(PAST_THE_WINDOW);
     const ctx = context({ text: NEW_CAMERA, messageId: 500, replyTo: opened.promptMessageId });
 
     expect(await bench.handler.handleText(ctx as never)).toBe(true);
@@ -3367,7 +3419,7 @@ describe('CameraSourcesHandler exact expiry boundary', () => {
   it('warns about a late reply whose deletion was refused twice', async () => {
     const bench = setup({ sources: [overviewSource()] });
     const { promptMessageId } = await openCredentialPrompt(bench);
-    bench.advance(CAMERA_SOURCE_PROMPT_TTL_MS);
+    bench.advance(PAST_THE_WINDOW);
     bench.messages.delete.mockRejectedValue(new CameraSourceMessageDeletionError());
 
     const { ctx } = await answerAddress(bench, promptMessageId);
@@ -3553,7 +3605,7 @@ describe('CameraSourcesHandler cancellation', () => {
   it('does not accept a cancel word replied to a prompt whose window has closed', async () => {
     const bench = setup({ sources: [overviewSource()] });
     const { promptMessageId } = await openCredentialPrompt(bench);
-    bench.advance(CAMERA_SOURCE_PROMPT_TTL_MS);
+    bench.advance(PAST_THE_WINDOW);
 
     const { ctx } = await answerAddress(bench, promptMessageId, { text: 'cancel' });
 
@@ -3712,7 +3764,7 @@ describe('CameraSourcesHandler callback budget', () => {
     await bench.handler.handleCallback(ctx as never, action(candidate!), receipt);
     // And Start again, on a reply that arrived too late.
     const prompt = lastSent(ctx);
-    bench.advance(CAMERA_SOURCE_PROMPT_TTL_MS);
+    bench.advance(PAST_THE_WINDOW);
     const late = await answerAddress(bench, prompt);
 
     const data = [...keyboardData(ctx), ...keyboardData(late.ctx)];

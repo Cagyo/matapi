@@ -186,8 +186,16 @@ rendered, the opaque selector opened, and the revision that detail was read at �
 and every entry is expendable, costing one reload. Screen states are keyed by
 receipt and superseded by the next screen of the same workflow; a **prompt is
 keyed by its own message id**, because it must stay answerable until it is
-retracted or expires, which is a different lifetime from the screen that opened
-it.
+retracted, which is a different lifetime from the screen that opened it.
+
+A prompt's routing deliberately **outlives the prompt window**. Past `expiresAt`
+the durable row answers `late` — delete the reply, authorise nothing — and that
+answer is reachable only while something still routes the reply to it, which is
+also why credential tombstones are retained for 24 hours. So routing is bounded
+by the abandonment horizon (`CAMERA_SOURCE_PROMPT_ROUTING_TTL_MS`), not by the
+ten-minute prompt window; screens keep the ten-minute window, because losing one
+costs a reload while losing routing costs a credential left in the chat. Expiry
+therefore never ends answerability — only retraction and the horizon do.
 
 **Deletion-before-effect is a data dependency, not an ordering convention.**
 `takeAddressAndDelete` produces a `CredentialReply` and `install` is the only

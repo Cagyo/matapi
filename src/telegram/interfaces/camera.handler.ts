@@ -95,24 +95,6 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
     this.drafts.register('camera', this);
   }
 
-  /**
-   * Asynchronous because ending a source prompt is Telegram I/O, not a map
-   * delete: an armed ForceReply whose routing is merely forgotten is answered
-   * with a credential that nothing deletes. Every path below that supersedes a
-   * workflow awaits the retraction before forgetting anything.
-   */
-  async cancelPending(userId: number, chatId: number): Promise<void> {
-    await this.sources.retractPending(userId, chatId);
-    for (const key of this.contextKeys(userId, chatId)) {
-      if (key.startsWith(`${userId}:${chatId}:`)) {
-        this.inputs.delete(key);
-        this.results.delete(key);
-        this.launches.delete(key);
-        this.receiptCatalogs.delete(key);
-      }
-    }
-  }
-
   async cancelExact(input: {
     userId: number;
     chatId: number;
