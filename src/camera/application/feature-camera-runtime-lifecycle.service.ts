@@ -1,8 +1,11 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { MotionWatcherService } from './motion-watcher.service';
 import { RtspSourceStartGate } from './rtsp-source-start-gate.service';
-import { LiveStreamSessionService } from './live-stream-session.service';
 import { MOTION_CONTROL, type MotionControlPort } from '../domain/ports/motion-control.port';
+import {
+  LIVE_SOURCE_SESSION_CONTROL,
+  type LiveSourceSessionControlPort,
+} from '../domain/ports/live-source-session-control.port';
 import type { FeatureRuntimeLifecyclePort } from '../../features/domain/ports/feature-runtime-lifecycle.port';
 
 /** Runtime transitions that must complete around camera feature state changes. */
@@ -15,7 +18,8 @@ export class FeatureCameraRuntimeLifecycleService {
     private readonly watcher: MotionWatcherService,
     @Inject(MOTION_CONTROL) private readonly motionControl: MotionControlPort,
     private readonly gate: RtspSourceStartGate,
-    private readonly sessions: LiveStreamSessionService,
+    @Inject(LIVE_SOURCE_SESSION_CONTROL)
+    private readonly sessions: LiveSourceSessionControlPort,
   ) {
     this.motion = {
       beforeDisable: async () => {

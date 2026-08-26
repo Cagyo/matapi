@@ -24,7 +24,7 @@ export class RemoveLiveSourceUseCase {
   async execute(cameraId: string): Promise<void> {
     await this.availability?.requireReady('rtsp');
     this.gate?.assertCanStart('rtsp');
-    await this.sessions.stopActiveSession();
+    await this.sessions.stopCamera(cameraId);
     await this.availability?.requireReady('rtsp');
     this.gate?.assertCanStart('rtsp');
     await this.repository.remove(cameraId);

@@ -3,6 +3,8 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { RtspSourceStartGate } from '../../../src/camera/application/rtsp-source-start-gate.service';
+import { LiveStreamUnavailableError } from '../../../src/camera/domain/errors/live-stream-unavailable.error';
 
 describe('RtspSourceStartGate DI metadata', () => {
   it('does not expose an unbound constructor dependency', () => {
@@ -32,5 +34,37 @@ describe('RtspSourceStartGate DI metadata', () => {
     } finally {
       rmSync(outputDir, { force: true, recursive: true });
     }
+  });
+});
+
+describe('RtspSourceStartGate mutation epochs', () => {
+  it('keeps the epoch stable across redundant reads', () => {
+    const gate = new RtspSourceStartGate(undefined, true);
+
+    const first = gate.snapshot();
+
+    expect(gate.snapshot()).toBe(first);
+    expect(() => gate.assertEpoch(first)).not.toThrow();
+  });
+
+  it('invalidates a snapshot taken before RTSP closed', () => {
+    const gate = new RtspSourceStartGate(undefined, true);
+    const epoch = gate.snapshot();
+
+    gate.close();
+
+    expect(() => gate.assertEpoch(epoch)).toThrow(LiveStreamUnavailableError);
+    expect(() => gate.assertEpoch(gate.snapshot())).not.toThrow();
+  });
+
+  it('keeps an old snapshot invalid after RTSP closes and reopens', async () => {
+    const gate = new RtspSourceStartGate(undefined, true);
+    const epoch = gate.snapshot();
+
+    gate.close();
+    await gate.open();
+
+    expect(gate.isOpen()).toBe(true);
+    expect(() => gate.assertEpoch(epoch)).toThrow(LiveStreamUnavailableError);
   });
 });

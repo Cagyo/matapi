@@ -16,7 +16,8 @@ describe('live source list/remove use cases', () => {
   it('stops before removing and preserves metadata when stop fails', async () => {
     const order: string[] = [];
     const sessions: LiveSourceSessionControlPort = {
-      stopActiveSession: vi.fn(async () => { order.push('stop'); }),
+      stopCamera: vi.fn(async () => { order.push('stop'); }),
+      stopSourceKind: vi.fn(),
     };
     const repository = {
       remove: vi.fn(async () => { order.push('remove'); }),
@@ -24,14 +25,15 @@ describe('live source list/remove use cases', () => {
     const useCase = new RemoveLiveSourceUseCase(sessions, repository);
     await useCase.execute('c1');
     expect(order).toEqual(['stop', 'remove']);
+    expect(sessions.stopCamera).toHaveBeenCalledWith('c1');
 
-    vi.mocked(sessions.stopActiveSession).mockRejectedValueOnce(new Error('busy'));
+    vi.mocked(sessions.stopCamera).mockRejectedValueOnce(new Error('busy'));
     await expect(useCase.execute('c1')).rejects.toThrow('busy');
     expect(repository.remove).toHaveBeenCalledOnce();
   });
 
   it('does not remove metadata when RTSP becomes unavailable during teardown', async () => {
-    const sessions = { stopActiveSession: vi.fn().mockResolvedValue(undefined) } as unknown as LiveSourceSessionControlPort;
+    const sessions = { stopCamera: vi.fn().mockResolvedValue(undefined) } as unknown as LiveSourceSessionControlPort;
     const repository = { remove: vi.fn() } as unknown as LiveSourceRepositoryPort;
     const availability: FeatureAvailabilityPort = {
       awaitInitialVerification: vi.fn(), inspect: vi.fn(),

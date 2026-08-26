@@ -84,8 +84,13 @@ interface CleanupBlocker {
   teardownInFlight: boolean;
 }
 
-interface SourceKindStopWaiter {
-  kind: LiveStreamSource['kind'];
+/** Which slice of session work a stop caller is waiting to see drained. */
+type SessionStopScope =
+  | { type: 'kind'; kind: LiveStreamSource['kind'] }
+  | { type: 'camera'; cameraId: string };
+
+interface SessionStopWaiter {
+  scope: SessionStopScope;
   resolve(): void;
 }
 
@@ -109,7 +114,7 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
   private leaseMutationsPending = 0;
   private shuttingDown = false;
   private shutdownPromise?: Promise<void>;
-  private readonly sourceKindStopWaiters = new Set<SourceKindStopWaiter>();
+  private readonly stopWaiters = new Set<SessionStopWaiter>();
 
   constructor(
     @Inject(LIVE_STREAM_GATEWAY) private readonly gateway: LiveStreamGatewayPort,
@@ -270,7 +275,45 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
           await this.stopActive();
         }
       });
-      await this.waitForSourceKindToStop(kind);
+      await this.waitForStop({ type: 'kind', kind });
+    } catch {
+      throw new LiveStreamUnavailableError();
+    }
+  }
+
+  /**
+   * Cancels/stops only the work owned by one camera; every other camera keeps
+   * running. Ownership is decided inside a queued transition, so no caller
+   * reads session state outside the serializing queue.
+   */
+  async stopCamera(cameraId: string): Promise<void> {
+    try {
+      await this.enqueue(async () => {
+        const pending = this.pending;
+        if (pending) {
+          if (pending.replacement?.source.cameraId === cameraId) {
+            this.rejectRequests(pending.replacement.requests);
+            pending.replacement = undefined;
+          }
+          // A cancelled pending still tears down through its own callbacks and
+          // then starts any replacement queued for a different camera.
+          if (pending.source.cameraId === cameraId) {
+            pending.cancelled = true;
+            this.rejectPending(pending);
+          }
+        }
+
+        if (this.cleanupBlocked?.active.session.cameraId === cameraId) {
+          if (!(await this.retryBlockedCleanup())) {
+            throw new LiveStreamUnavailableError();
+          }
+        }
+
+        if (this.active?.session.cameraId === cameraId) {
+          await this.stopActive();
+        }
+      });
+      await this.waitForStop({ type: 'camera', cameraId });
     } catch {
       throw new LiveStreamUnavailableError();
     }
@@ -982,7 +1025,7 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
       try {
         return await transition();
       } finally {
-        this.resolveSourceKindStopWaiters();
+        this.resolveStopWaiters();
       }
     };
     const run = this.queue.then(guarded, guarded);
@@ -993,33 +1036,37 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
     return run;
   }
 
-  private async waitForSourceKindToStop(
-    kind: LiveStreamSource['kind'],
-  ): Promise<void> {
-    const waiter: SourceKindStopWaiter = {
-      kind,
+  private async waitForStop(scope: SessionStopScope): Promise<void> {
+    const waiter: SessionStopWaiter = {
+      scope,
       resolve: () => undefined,
     };
     const stopped = new Promise<void>((resolve) => {
       waiter.resolve = resolve;
     });
     await this.enqueue(async () => {
-      if (this.hasSourceKindWork(kind)) this.sourceKindStopWaiters.add(waiter);
+      if (this.hasScopedWork(scope)) this.stopWaiters.add(waiter);
       else waiter.resolve();
     });
     try {
       await this.withOperationTimeout(stopped);
     } finally {
-      this.sourceKindStopWaiters.delete(waiter);
+      this.stopWaiters.delete(waiter);
     }
   }
 
-  private resolveSourceKindStopWaiters(): void {
-    for (const waiter of this.sourceKindStopWaiters) {
-      if (this.hasSourceKindWork(waiter.kind)) continue;
-      this.sourceKindStopWaiters.delete(waiter);
+  private resolveStopWaiters(): void {
+    for (const waiter of this.stopWaiters) {
+      if (this.hasScopedWork(waiter.scope)) continue;
+      this.stopWaiters.delete(waiter);
       waiter.resolve();
     }
+  }
+
+  private hasScopedWork(scope: SessionStopScope): boolean {
+    return scope.type === 'kind'
+      ? this.hasSourceKindWork(scope.kind)
+      : this.hasCameraWork(scope.cameraId);
   }
 
   private hasSourceKindWork(kind: LiveStreamSource['kind']): boolean {
@@ -1028,6 +1075,14 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
       this.pending?.source.kind === kind ||
       this.pending?.replacement?.source.kind === kind ||
       this.pendingStartCleanup?.source.kind === kind;
+  }
+
+  private hasCameraWork(cameraId: string): boolean {
+    return this.active?.session.cameraId === cameraId ||
+      this.cleanupBlocked?.active.session.cameraId === cameraId ||
+      this.pending?.source.cameraId === cameraId ||
+      this.pending?.replacement?.source.cameraId === cameraId ||
+      this.pendingStartCleanup?.source.cameraId === cameraId;
   }
 }
 

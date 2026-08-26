@@ -168,6 +168,101 @@ describe('LiveStreamSessionService', () => {
     });
   });
 
+  it('stops only the targeted camera and leaves other cameras running', async () => {
+    const gateway = new FakeGateway();
+    const service = createService({ gateway });
+    await service.open(source('front_door'), 1);
+
+    await service.stopCamera('garden');
+
+    expect(gateway.stopCalls).toBe(0);
+    await expect(service.open(source('front_door'), 2)).resolves.toBeDefined();
+    expect(gateway.startCalls).toHaveLength(1);
+
+    await service.stopCamera('front_door');
+
+    expect(gateway.stopCalls).toBe(1);
+  });
+
+  it('stops a camera idempotently and tolerates a camera with no session', async () => {
+    const gateway = new FakeGateway();
+    const service = createService({ gateway });
+
+    await expect(service.stopCamera('never_opened')).resolves.toBeUndefined();
+
+    await service.open(source('front_door'), 1);
+    await service.stopCamera('front_door');
+    await expect(service.stopCamera('front_door')).resolves.toBeUndefined();
+
+    expect(gateway.stopCalls).toBe(1);
+    await expect(service.open(source('front_door'), 2)).resolves.toBeDefined();
+  });
+
+  it('leaves another camera pending open untouched', async () => {
+    const gateway = new DeferredGateway();
+    const service = createService({ gateway });
+
+    const opening = service.open(source('front_door'), 1);
+    await vi.waitFor(() => expect(gateway.startCalls).toHaveLength(1));
+
+    await service.stopCamera('garden');
+
+    gateway.resolveStart();
+    await expect(opening).resolves.toMatchObject({ cameraName: 'front_door' });
+    expect(gateway.stopCalls).toBe(0);
+  });
+
+  it('cancels only a matching pending open', async () => {
+    const gateway = new DeferredGateway();
+    const service = createService({ gateway });
+
+    const opening = service.open(source('front_door'), 1);
+    await vi.waitFor(() => expect(gateway.startCalls).toHaveLength(1));
+
+    const stopping = service.stopCamera('front_door');
+    await expect(opening).rejects.toMatchObject({ code: 'LIVE_STREAM_UNAVAILABLE' });
+
+    gateway.resolveStart();
+    await expect(stopping).resolves.toBeUndefined();
+    await vi.waitFor(() => expect(gateway.stopCalls).toBe(1));
+  });
+
+  it('preserves a queued replacement for a different camera', async () => {
+    const gateway = new DeferredGateway();
+    const service = createService({ gateway });
+
+    const first = service.open(source('front_door'), 1);
+    await vi.waitFor(() => expect(gateway.startCalls).toHaveLength(1));
+    const replacement = service.open(source('garden'), 2);
+
+    const stopping = service.stopCamera('front_door');
+    await expect(first).rejects.toMatchObject({ code: 'LIVE_STREAM_UNAVAILABLE' });
+
+    gateway.resolveStart();
+    await expect(stopping).resolves.toBeUndefined();
+    await vi.waitFor(() => expect(gateway.startCalls).toHaveLength(2));
+    expect(gateway.startCalls[1].source.cameraId).toBe('garden');
+    gateway.resolveStart();
+    await expect(replacement).resolves.toMatchObject({ cameraName: 'garden' });
+  });
+
+  it('rejects only the queued replacement when its camera is stopped', async () => {
+    const gateway = new DeferredGateway();
+    const service = createService({ gateway });
+
+    const first = service.open(source('front_door'), 1);
+    await vi.waitFor(() => expect(gateway.startCalls).toHaveLength(1));
+    const replacement = service.open(source('garden'), 2);
+
+    await expect(service.stopCamera('garden')).resolves.toBeUndefined();
+    await expect(replacement).rejects.toMatchObject({ code: 'LIVE_STREAM_UNAVAILABLE' });
+
+    gateway.resolveStart();
+    await expect(first).rejects.toMatchObject({ code: 'LIVE_STREAM_UNAVAILABLE' });
+    await vi.waitFor(() => expect(gateway.stopCalls).toBe(1));
+    expect(gateway.startCalls).toHaveLength(1);
+  });
+
   it('stops only an active RTSP session when RTSP is disabled', async () => {
     const gateway = new FakeGateway();
     const service = createService({ gateway });
