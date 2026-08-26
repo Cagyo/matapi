@@ -31,6 +31,27 @@ Status legend: ✅ canonical · 🚧 in transition · 📝 planned
 
 ### Features context
 
+RTSP install and verification cross the privilege boundary through exactly one
+root-owned executable, `/usr/lib/home-worker/live-stream-policy-inspector`. Its
+contract is closed: `discover` and `verify-installed` only — no paths,
+interfaces, CIDRs, or environment overrides — and any other argv exits `2`
+without spawning anything. `RtspPolicyInspectorGateway` is the worker's only
+channel to it (fixed argv, sanitized environment, five-second timeout, 64 KiB
+output cap); it discards raw stdout and stderr rather than carrying them into a
+log line or an error message. Only the redacted verdict crosses into the
+application: `ready`, one of the closed reasons `local-network-unavailable`,
+`policy-stale`, or `policy-summary-invalid`, the installed digest when it is
+safely available, and the interface/CIDR projection. The private policy file,
+the UID inventory, and the environment never do.
+
+`verify-installed` re-discovers the live interfaces on every call and compares
+them to the installed projection. The digest — SHA-256 over compact sorted-key
+JSON of schema version, worker UID, stream UID, the interface/CIDR pairs, and
+the UDP range, ordered by family, network bytes, prefix length, then interface
+name — proves only that the three durable artifacts still agree with each
+other. It never proves the policy still matches the network, so a digest that
+still compares equal is not evidence of freshness on its own.
+
 | Port | Adapters | Status | Source |
 |---|---|---|---|
 | `FeatureQueryPort` (`FEATURE_QUERY`) | `DrizzleFeatureQuery`, `InMemoryFeatureQuery` (tests/dev) | ✅ canonical read projection for configuration export and Camera's live-stream capability. Exported by `FeatureModule`; consumers import the module rather than either adapter. | [feature-query.port.ts](../src/features/domain/ports/feature-query.port.ts) |
@@ -41,7 +62,9 @@ Status legend: ✅ canonical · 🚧 in transition · 📝 planned
 | `FeatureInstallResultPort` (`FEATURE_INSTALL_RESULT`) | `FsFeatureInstallResultAdapter` | ✅ canonical root-owned result reader. Reconciliation reads bounded, verified state and removes a terminal result only after its database transition commits. | [feature-install-result.port.ts](../src/features/domain/ports/feature-install-result.port.ts) |
 | `FeatureInstallControllerPort` (`FEATURE_INSTALL_CONTROLLER`) | `SystemdFeatureInstallControllerAdapter` | ✅ canonical fixed-unit trigger. It starts the root-owned installer asynchronously and exposes no arbitrary command interface. | [feature-install-controller.port.ts](../src/features/domain/ports/feature-install-controller.port.ts) |
 | `FeatureClockPort` (`FEATURE_CLOCK`) | `SystemFeatureClockAdapter` | ✅ canonical local clock seam for queueing, reconciliation, and recovery; keeps the feature context independent from the events/system clock ports. | [feature-clock.port.ts](../src/features/domain/ports/feature-clock.port.ts) |
-| `FeatureReadinessPort` (`FEATURE_READINESS`) | `FeatureReadinessRouter` over the fixed Digital, UART, Zigbee, Motion, and RTSP adapters; `InMemoryFeatureReadinessAdapter` (tests/dev) | ✅ canonical — each production probe uses fixed executable/argument arrays, a sanitized PATH, a five-second timeout, and a 64 KiB command-output limit. | [feature-readiness.port.ts](../src/features/domain/ports/feature-readiness.port.ts) |
+| `FeatureReadinessPort` (`FEATURE_READINESS`) | `FeatureReadinessRouter` over the fixed Digital, UART, Zigbee, Motion, and RTSP adapters; `InMemoryFeatureReadinessAdapter` (tests/dev) | ✅ canonical — each production probe uses fixed executable/argument arrays, a sanitized PATH, a five-second timeout, and a 64 KiB command-output limit. A refusal carries one reason: `runtime-group-incomplete` (the only one another restart can fix), `policy-stale`, or `runtime-invalid`. `RtspReadinessAdapter` takes its last check from the shared `RTSP_POLICY_STATUS` instance instead of reading the policy artifacts itself. | [feature-readiness.port.ts](../src/features/domain/ports/feature-readiness.port.ts) |
+| `RtspPolicyStatusPort` (`RTSP_POLICY_STATUS`) | `InstalledRtspPolicyStatusAdapter` over `RtspPolicyInspectorGateway` | ✅ canonical single verified projection of the installed RTSP policy, exported by `FeatureModule` so no consumer opens the policy artifacts itself. It reads the public summary through one no-follow single-link root-owned exact-mode descriptor, recomputes the digest field by field, requires the digest, CIDR list, and UDP range this process was started with to agree with it, and only then asks the inspector whether the installed networks are still the live ones. `inspect` degrades to `unavailable`, `requireCurrent` throws, and `assertDigest` is the synchronous fence over the last digest actually proven current. | [rtsp-policy-status.port.ts](../src/features/domain/ports/rtsp-policy-status.port.ts) |
+| `FeatureProcessIdentityPort` (`FEATURE_PROCESS_IDENTITY`) | `LinuxFeatureProcessIdentityAdapter` | ✅ canonical `<linux-boot-id>:<proc-self-start-ticks>` identity, read from bounded fixed `/proc` paths with `/proc/self/stat` parsed from its final `)`. Both halves are required — start ticks repeat across boots, and the boot id survives every restart within one boot. It is what makes an `awaiting-restart` install verifiable only by a genuinely fresh process. | [feature-process-identity.port.ts](../src/features/domain/ports/feature-process-identity.port.ts) |
 | `FeatureReadinessBarrierPort` (`FEATURE_READINESS_BARRIER`) | `FeatureReadinessBootService` | ✅ canonical boot gate. It performs one shared installed-and-enabled verification pass before availability is published. Internal to the feature context. | [feature-readiness-barrier.port.ts](../src/features/domain/ports/feature-readiness-barrier.port.ts) |
 | `FeatureAvailabilityPort` (`FEATURE_AVAILABILITY`) | `FeatureAvailabilityService` | ✅ canonical — published boot-gated state projection. `inspect` and `requireReady` await the shared initial verification pass and derive status from one feature row plus its active install job. | [feature-availability.port.ts](../src/features/domain/ports/feature-availability.port.ts) |
 | `FeatureRuntimeLifecyclePort` (registered value; no token) | Per-feature values from `FeatureSensorRuntimeLifecycleService` and `FeatureCameraRuntimeLifecycleService` | ✅ canonical registered runtime work. Each value owns the teardown before disable and reload after enable for exactly one manageable feature. | [feature-runtime-lifecycle.port.ts](../src/features/domain/ports/feature-runtime-lifecycle.port.ts) |

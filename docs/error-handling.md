@@ -109,6 +109,72 @@ newer draft. Running work continues through restart recovery: terminal output
 is delivered first, then a fresh authorized Home is restored only if the user
 has not already returned.
 
+## Feature install failures across the privilege boundary
+
+The root routine cannot hand the worker a message, only an exit status, so every
+install cause is a reserved status translated once — in
+[feature-installer.py](../scripts/feature-installer.py) — and never re-derived
+downstream.
+
+| Routine exit | `FeatureInstallFailureCode` |
+|---|---|
+| 20 | `local-network-unavailable` |
+| 21 | `network-policy-generation-failed` |
+| 22 | `dependency-install-failed` |
+| 23 | `privileged-verification-failed` |
+| any other non-zero | `dependency-install-failed` |
+
+The RTSP routine reports `23` for root verification **and** for every failure
+after its first durable rename, which is why that code can never prove the
+previously installed policy survived. Raw route output, package errors, and
+helper diagnostics stay in the root journal; the code is the entire payload that
+crosses.
+
+The application side has its own closed vocabulary. The policy-status adapter
+narrows the inspector's verdict to `stale` (reason `policy-stale`) or
+`unavailable` (`local-network-unavailable` and `policy-summary-invalid` alike,
+plus any unreadable answer), and `RtspReadinessAdapter` maps those onto
+`policy-stale` and `runtime-invalid`. Worker group membership is not something
+the inspector can see: `runtime-group-incomplete` is an application-only reason,
+decided before the policy is consulted, and the only one another restart can
+fix by itself.
+
+### Awaiting restart is expected control flow
+
+Privileged success is durable but unproven — this process cannot pick up a group
+it was just granted — so the job parks in `awaiting-restart`, keeping the active
+slot, and is reconciled from its persisted phase alone. The root helper is never
+consulted or started again for such a job.
+
+```
+running + privileged success                        → awaiting-restart(identity) → notify → dispatch
+awaiting-restart + same identity                    → wait
+awaiting-restart + new identity + ready             → terminal success → afterEnable → notify
+awaiting-restart + new identity + group incomplete  → record identity → dispatch once
+awaiting-restart + new identity + stale/invalid     → terminal failure + attention
+```
+
+Two invariants hold the shape together. No install is successful until a fresh
+process passes readiness: nothing is enabled and no success is announced before
+that. And the loop guard is one dispatch per distinct process identity, so a
+recovery tick that fires every two seconds cannot restart the supervisor on
+every pass. A dispatch failure keeps the phase, raises `restart-required`, and
+throws `FeatureRestartDispatchError`; a later process recovers the same job.
+
+### Reinstall restores narrowly
+
+A reinstall re-runs the routine underneath an installation that was already
+working, so letting the previous state simply stand again requires two
+independent proofs: the reported cause is one of the pre-mutation codes
+(`isPreMutationInstallFailure` — the request/publish/helper-version codes plus
+`local-network-unavailable`, `network-policy-generation-failed`, and
+`dependency-install-failed`), so no durable artifact was renamed; **and** the old
+digest passes application readiness *now*, re-verified through the inspector
+rather than trusted from what was stored before the attempt. Anything else —
+`privileged-verification-failed` above all, and any mismatched artifact — stays
+gated as `partial-state-uncertain` until a later reinstall or verification
+reconciles all three files.
+
 ## Crash policy
 
 - **Do not** add top-level `try/catch` to suppress crashes "just in case". PM2 restarts on crash; that is the contract.

@@ -69,6 +69,35 @@ When the choice between adapters depends on environment (dev mock vs production 
 
 If the choice gets more complex (per-sensor type, per-feature flag), encapsulate it in a single `*.factory.ts` file in `infrastructure/` that the module imports. Do not scatter `if (env)` across multiple providers.
 
+## One adapter instance, several consumers
+
+An adapter that carries state consumers must agree on is bound **once** and
+handed to everything that needs it through `inject`, never constructed a second
+time inside a factory. `FeatureModule` binds `RTSP_POLICY_STATUS` to
+`InstalledRtspPolicyStatusAdapter`, then injects that same provider into the
+readiness router:
+
+```ts
+{ provide: RTSP_POLICY_STATUS, useClass: InstalledRtspPolicyStatusAdapter },
+{
+  provide: FEATURE_READINESS,
+  useFactory: (policyStatus: RtspPolicyStatusPort) => new FeatureReadinessRouter({
+    // …fixed per-feature adapters…
+    rtsp: new RtspReadinessAdapter({ policyStatus }),
+  }),
+  inject: [RTSP_POLICY_STATUS],
+}
+```
+
+The adapter remembers the last digest it proved current, and `assertDigest` is a
+synchronous fence over exactly that memory. A second instance would hold a
+second answer, so readiness and the exported cross-context consumers would
+disagree about a half-renamed policy tuple — which is the failure the port
+exists to prevent. `FeatureModule` exports the token, not the class.
+
+`FEATURE_PROCESS_IDENTITY` needs no such care: `LinuxFeatureProcessIdentityAdapter`
+reads `/proc` on every call and is bound with a plain `useClass`.
+
 ## Cross-context wiring
 
 A port owned by context A but implemented by context B is bound in **A's** module, with `useExisting` pointing at B's exported provider:
@@ -89,7 +118,7 @@ The implementing module exports its concrete class; the consuming module rebinds
 
 - **Application services** (`SensorRegistry`, `EventProcessor`) — Nest injects them by class; no token needed.
 - **Domain entities & value objects** — never DI'd. Constructed by use cases / mapped from rows.
-- **Single-implementation gateways** (`PigpioGateway`) — injected by class. Promote to a port only when a second adapter actually exists.
+- **Single-implementation gateways** (`PigpioGateway`, `RtspPolicyInspectorGateway`) — injected by class, or constructed by the one adapter that owns them. Promote to a port only when a second adapter actually exists.
 
 ## DI anti-patterns
 
