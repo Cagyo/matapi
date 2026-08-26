@@ -73,6 +73,7 @@ import { HOME_TOKEN_GENERATOR } from './domain/ports/home-token-generator.port';
 import { HOME_HEALTH_SNAPSHOT } from './application/ports/home-health-snapshot.port';
 import { HOME_MESSAGE_DELIVERY } from './application/ports/home-message-delivery.port';
 import { HOME_ACTION_REPOSITORY } from './application/ports/home-action-repository.port';
+import { CAMERA_SOURCE_PROMPT_REPOSITORY } from './application/ports/camera-source-prompt-repository.port';
 import { ConsoleNotifierAdapter } from './infrastructure/console-notifier.adapter';
 import { EnvAdminClaimCredentialAdapter } from './infrastructure/env-admin-claim-credential.adapter';
 import { TelegramAdminAlertAdapter } from './infrastructure/telegram-admin-alert.adapter';
@@ -83,12 +84,14 @@ import { DrizzleUserRepository } from './infrastructure/drizzle-user.repository'
 import { DrizzleUserSensorMuteRepository } from './infrastructure/drizzle-user-sensor-mute.repository';
 import { DrizzleHomeSessionStore } from './infrastructure/drizzle-home-session.store';
 import { DrizzleHomeActionRepository } from './infrastructure/drizzle-home-action.repository';
+import { DrizzleCameraSourcePromptRepository } from './infrastructure/drizzle-camera-source-prompt.repository';
 import { GrammyBotGateway, BOT_MODE, BotMode } from './infrastructure/grammy-bot.gateway';
 import { InMemoryInviteCodeRepository } from './infrastructure/in-memory-invite-code.repository';
 import { InMemoryUserRepository } from './infrastructure/in-memory-user.repository';
 import { InMemoryUserSensorMuteRepository } from './infrastructure/in-memory-user-sensor-mute.repository';
 import { InMemoryHomeSessionStore } from './infrastructure/in-memory-home-session.store';
 import { InMemoryHomeActionRepository } from './infrastructure/in-memory-home-action.repository';
+import { InMemoryCameraSourcePromptRepository } from './infrastructure/in-memory-camera-source-prompt.repository';
 import { InMemoryHomeHealthSnapshotAdapter } from './infrastructure/in-memory-home-health-snapshot.adapter';
 import { InMemoryHomeMessageDeliveryAdapter } from './infrastructure/in-memory-home-message-delivery.adapter';
 import { TelegramHomeMessageAdapter } from './infrastructure/telegram-home-message.adapter';
@@ -215,6 +218,14 @@ const mode = resolveBotMode();
           inject: [USER_REPOSITORY],
         }
         : { useClass: DrizzleHomeActionRepository }),
+    },
+    {
+      // Prompt state is durable in real mode so an interrupted credential
+      // deletion survives a restart; mock mode keeps it in process.
+      provide: CAMERA_SOURCE_PROMPT_REPOSITORY,
+      useClass: mode === 'mock'
+        ? InMemoryCameraSourcePromptRepository
+        : DrizzleCameraSourcePromptRepository,
     },
     { provide: HOME_TOKEN_GENERATOR, useClass: CryptoHomeTokenGenerator },
     {

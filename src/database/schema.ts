@@ -178,6 +178,80 @@ export const homeActionReceipts = sqliteTable(
   ],
 );
 
+// ─── Telegram Camera Source Prompts ───
+// Durable identity of one exact-reply RTSP prompt. Nothing here is secret: the
+// credential-bearing reply is read from the stack and deleted, never stored, so
+// the table holds only Telegram identities, a non-secret camera selection, and
+// lifecycle bookkeeping. `camera_id` is intentionally not a foreign key — a
+// create prompt names a camera that does not exist yet, and a camera removed
+// mid-workflow must leave the tombstone behind rather than erase it.
+export const telegramCameraSourcePrompts = sqliteTable(
+  'telegram_camera_source_prompts',
+  {
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.telegramId, { onDelete: 'cascade' }),
+    /**
+     * The private chat the prompt lives in. Positive by construction — Telegram
+     * gives groups, supergroups and channels negative identifiers, which
+     * `telegram_camera_source_prompts_identity_check` refuses.
+     *
+     * It deliberately does NOT have to equal `user_id`. Privacy is confirmed at
+     * the handler boundary with `ctx.chat.type`, as everywhere else in this
+     * codebase; do not add a `chat_id = user_id` CHECK here.
+     */
+    chatId: integer('chat_id').notNull(),
+    receiptId: text('receipt_id').notNull(),
+    promptMessageId: integer('prompt_message_id').notNull(),
+    /** Set when the exact reply is claimed, so interrupted deletion can be retried. */
+    replyMessageId: integer('reply_message_id'),
+    phase: text('phase').notNull(),
+    operation: text('operation').notNull(),
+    cameraId: text('camera_id'),
+    displayName: text('display_name'),
+    expectedRevision: integer('expected_revision'),
+    status: text('status').notNull(),
+    /** The only thing a failed credential-message deletion is allowed to record. */
+    deletionFailed: integer('deletion_failed', { mode: 'boolean' }).notNull().default(false),
+    /**
+     * `timestamp_ms`, deliberately unlike every other Date column in this file
+     * — including `home_action_receipts.expires_at` — which use
+     * `mode: 'timestamp'` and therefore store whole seconds.
+     *
+     * Do not "normalize" this to seconds. The in-memory twin holds millisecond
+     * `Date`s, so truncating here would make the two adapters disagree on any
+     * instant that is not a whole second, and the contract table that holds
+     * them to one behaviour would only stay green while its fixtures happened
+     * to use round numbers.
+     */
+    expiresAt: integer('expires_at', { mode: 'timestamp_ms' }).notNull(),
+    /** Tombstone deadline, same unit as `expires_at`; only terminal credential prompts are retained. */
+    retainUntil: integer('retain_until', { mode: 'timestamp_ms' }),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.userId, table.chatId, table.receiptId, table.promptMessageId],
+    }),
+    index('idx_telegram_camera_source_prompts_live').on(table.status, table.expiresAt),
+    index('idx_telegram_camera_source_prompts_retention').on(table.userId, table.retainUntil),
+    check('telegram_camera_source_prompts_identity_check', sql`${table.userId} > 0 and ${table.chatId} > 0`),
+    check('telegram_camera_source_prompts_receipt_check', sql`length(${table.receiptId}) = 16`),
+    check('telegram_camera_source_prompts_prompt_message_check', sql`${table.promptMessageId} > 0`),
+    check('telegram_camera_source_prompts_reply_message_check', sql`${table.replyMessageId} is null or ${table.replyMessageId} > 0`),
+    check('telegram_camera_source_prompts_phase_check', sql`${table.phase} in ('name', 'credential')`),
+    check('telegram_camera_source_prompts_operation_check', sql`${table.operation} in ('create', 'attach', 'replace')`),
+    check('telegram_camera_source_prompts_status_check', sql`${table.status} in ('pending', 'running', 'consumed', 'expired')`),
+    check('telegram_camera_source_prompts_deletion_failed_check', sql`${table.deletionFailed} in (0, 1)`),
+    check('telegram_camera_source_prompts_expected_revision_check', sql`${table.expectedRevision} is null or ${table.expectedRevision} >= 0`),
+    check('telegram_camera_source_prompts_selection_check', sql`${table.phase} != 'credential' or ${table.cameraId} is not null or ${table.displayName} is not null`),
+    check('telegram_camera_source_prompts_retention_check', sql`(
+      (${table.status} in ('pending', 'running') and ${table.retainUntil} is null)
+      or
+      (${table.status} in ('consumed', 'expired') and ${table.phase} = 'credential' and ${table.retainUntil} is not null)
+    )`),
+  ],
+);
+
 // ─── Invite Codes ───
 export const inviteCodes = sqliteTable('invite_codes', {
   code: text('code').primaryKey(),
