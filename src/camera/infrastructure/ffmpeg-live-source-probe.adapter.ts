@@ -943,13 +943,20 @@ export async function openFfmpegProbeUnixSink(
   };
 }
 
-interface ParsedCidr {
+export interface ParsedCidr {
   family: 4 | 6;
   network: bigint;
   prefix: number;
 }
 
-function parseCidrs(raw: string): ParsedCidr[] {
+/**
+ * Exported only so `rtsp-policy-containment.contract.test.ts` can hold this
+ * enforcement copy and the status evaluator's copy against one shared table.
+ * Neither is part of the probe's port, and nothing in `src/` imports them.
+ * They fold into the shared policy value object when the three CIDR
+ * implementations in this tree are unified.
+ */
+export function parseCidrs(raw: string): ParsedCidr[] {
   if (typeof raw !== 'string' || !raw.trim()) {
     throw new LiveSourceNetworkPolicyInvalidError();
   }
@@ -971,7 +978,7 @@ function parseCidrs(raw: string): ParsedCidr[] {
   return cidrs;
 }
 
-function contains(cidr: ParsedCidr, rawAddress: string): boolean {
+export function contains(cidr: ParsedCidr, rawAddress: string): boolean {
   const family = isIP(rawAddress);
   if (family !== cidr.family) return false;
   const bits = family === 4 ? 32 : 128;
@@ -979,7 +986,7 @@ function contains(cidr: ParsedCidr, rawAddress: string): boolean {
   return (addressValue(rawAddress) >> hostBits) << hostBits === cidr.network;
 }
 
-function canonicalAddress(address: string): string {
+export function canonicalAddress(address: string): string {
   const family = isIP(address);
   if (family === 4) return new URL(`http://${address}/`).hostname;
   if (family === 6) return new URL(`http://[${address}]/`).hostname.slice(1, -1);

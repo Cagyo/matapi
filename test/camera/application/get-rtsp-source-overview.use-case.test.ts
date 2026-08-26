@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { GetRtspSourceOverviewUseCase } from '../../../src/camera/application/get-rtsp-source-overview.use-case';
+import {
+  GetRtspSourceOverviewUseCase,
+  RTSP_SOURCE_OVERVIEW_MAX_PAGE_SIZE,
+} from '../../../src/camera/application/get-rtsp-source-overview.use-case';
 import { LiveSource } from '../../../src/camera/domain/live-source.entity';
 import type {
   LiveSourcePolicyEvaluatorPort,
@@ -15,7 +18,8 @@ import type {
 } from '../../../src/features/domain/ports/rtsp-policy-status.port';
 
 const SECRET_URL = 'rtsp://operator:hunter2@192.168.1.9/stream1?token=abcdef';
-const SECRETS = /operator|hunter2|stream1|token|abcdef/iu;
+const SECRET_SUBSTREAM_URL = 'rtsp://operator:hunter2@sub.local/low2?token=abcdef';
+const SECRETS = /operator|hunter2|stream1|low2|token|abcdef/iu;
 const DIGEST = 'digest-1';
 const VERIFIED_AT = new Date('2026-08-26T10:00:00.000Z');
 const NETWORKS = [{ family: 4 as const, cidr: '192.168.1.0/24', interface: 'eth0' }];
@@ -52,7 +56,12 @@ function fixture(
   };
 
   const source = (
-    input: { cameraId: string; url?: string; ready?: boolean } = { cameraId: 'cam-1' },
+    input: {
+      cameraId: string;
+      url?: string;
+      ready?: boolean;
+      substream?: string | null;
+    } = { cameraId: 'cam-1' },
   ) =>
     LiveSource.create({
       cameraId: input.cameraId,
@@ -60,6 +69,7 @@ function fixture(
       transport: 'tcp',
       tlsMode: 'none',
       profile: 'eco',
+      substream: input.substream ?? null,
       ready: input.ready ?? true,
     });
 
@@ -68,6 +78,7 @@ function fixture(
     cameraName: string;
     url?: string;
     ready?: boolean;
+    substream?: string | null;
     verifiedAt?: Date | null;
     policyDigest?: string | null;
   }) => {
@@ -77,7 +88,7 @@ function fixture(
       cameraName: input.cameraName,
       credential: credentials.encrypt(input.cameraId, {
         primaryUrl: input.url ?? SECRET_URL,
-        substreamUrl: null,
+        substreamUrl: input.substream ?? null,
       }),
       revision: 1,
       verifiedAt: (input.verifiedAt === undefined ? VERIFIED_AT : input.verifiedAt)!,
@@ -147,7 +158,7 @@ describe('GetRtspSourceOverviewUseCase', () => {
       currentPolicyDigest: DIGEST,
       needsReverification: false,
     });
-    expect(context.evaluator.evaluate).toHaveBeenCalledWith('192.168.1.9', {
+    expect(context.evaluator.evaluate).toHaveBeenCalledWith(['192.168.1.9'], {
       networks: NETWORKS,
     });
   });
@@ -231,6 +242,45 @@ describe('GetRtspSourceOverviewUseCase', () => {
     });
   });
 
+  it('evaluates the substream authority alongside the primary one', async () => {
+    const context = fixture();
+    context.store({
+      cameraId: 'cam-1',
+      cameraName: 'Hallway',
+      substream: SECRET_SUBSTREAM_URL,
+    });
+
+    const page = await context.useCase.execute();
+
+    expect(context.evaluator.evaluate).toHaveBeenCalledWith(
+      ['192.168.1.9', 'sub.local'],
+      { networks: NETWORKS },
+    );
+    expect(page.sources[0].summary.substreamHost).toBe('sub.local');
+  });
+
+  it('reports the eco substream host, which is the URL actually streamed', async () => {
+    // An `eco` source streams its substream, so a substream that has left the
+    // policy must not be hidden behind an in-policy primary. The evaluator
+    // combines the two worst-first; the use case's duty is to hand it both.
+    const context = fixture({ relationship: 'blocked' });
+    context.store({
+      cameraId: 'cam-1',
+      cameraName: 'Hallway',
+      substream: SECRET_SUBSTREAM_URL,
+    });
+
+    const page = await context.useCase.execute();
+
+    expect(page.sources[0].summary.profile).toBe('eco');
+    expect(vi.mocked(context.evaluator.evaluate).mock.calls[0][0]).toContain('sub.local');
+    expect(page.sources[0]).toMatchObject({
+      relationship: 'blocked',
+      operationalState: 'needs-attention',
+      needsReverification: true,
+    });
+  });
+
   it('offers every enabled, source-free operator camera as an attach candidate', async () => {
     const context = fixture();
     context.media.seedCameras([
@@ -289,6 +339,47 @@ describe('GetRtspSourceOverviewUseCase', () => {
 
     expect(context.loadForStream).not.toHaveBeenCalled();
     expect(context.decrypt).not.toHaveBeenCalled();
+  });
+
+  it('caps a caller-supplied page size rather than fanning out over every source', async () => {
+    const context = fixture();
+    for (const index of [1, 2, 3, 4, 5, 6, 7, 8, 9]) {
+      context.store({ cameraId: `cam-${index}`, cameraName: `Camera ${index}` });
+    }
+
+    const page = await context.useCase.execute({ pageSize: 500 });
+
+    expect(page.sources).toHaveLength(9);
+    expect(context.evaluator.evaluate).toHaveBeenCalledTimes(9);
+    expect(page.pageCount).toBe(1);
+  });
+
+  it('caps the page size at the documented ceiling', async () => {
+    const context = fixture();
+    for (const index of Array.from({ length: 21 }, (_, offset) => offset + 1)) {
+      context.store({
+        cameraId: `cam-${String(index).padStart(2, '0')}`,
+        cameraName: `Camera ${String(index).padStart(2, '0')}`,
+      });
+    }
+
+    const page = await context.useCase.execute({ pageSize: 500 });
+
+    expect(page.sources).toHaveLength(RTSP_SOURCE_OVERVIEW_MAX_PAGE_SIZE);
+    expect(page.pageCount).toBe(2);
+    expect(context.evaluator.evaluate).toHaveBeenCalledTimes(
+      RTSP_SOURCE_OVERVIEW_MAX_PAGE_SIZE,
+    );
+  });
+
+  it('orders pages by canonical name, not by letter case', async () => {
+    const context = fixture();
+    context.store({ cameraId: 'cam-1', cameraName: 'Zebra' });
+    context.store({ cameraId: 'cam-2', cameraName: 'hallway' });
+
+    const page = await context.useCase.execute();
+
+    expect(page.sources.map((source) => source.cameraName)).toEqual(['hallway', 'Zebra']);
   });
 
   it('keeps credentials out of the rendered page and of the evaluator call', async () => {

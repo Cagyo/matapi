@@ -1,4 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
+import { cameraNameKey } from '../domain/camera-name-key';
 import {
   LIVE_SOURCE_POLICY_EVALUATOR,
   type LiveSourcePolicyEvaluatorPort,
@@ -21,6 +22,13 @@ import {
 } from '../../features/domain/ports/rtsp-policy-status.port';
 
 export const RTSP_SOURCE_OVERVIEW_PAGE_SIZE = 5;
+
+/**
+ * Hard ceiling on a caller-supplied page size. Every row on the page costs at
+ * least one DNS resolution, so an unbounded `pageSize` would be the very
+ * whole-table fan-out that paginating exists to prevent.
+ */
+export const RTSP_SOURCE_OVERVIEW_MAX_PAGE_SIZE = RTSP_SOURCE_OVERVIEW_PAGE_SIZE * 4;
 
 /**
  * What an operator has to do about one source, most blocking first.
@@ -135,9 +143,14 @@ export class GetRtspSourceOverviewUseCase {
     networks: readonly RtspSourcePolicyNetwork[],
     currentPolicyDigest: string | null,
   ): Promise<RtspSourceOverview> {
-    const relationship = await this.evaluator.evaluate(source.summary.host, {
-      networks,
-    });
+    // Both authorities, not just the primary: enforcement validates the
+    // substream too, and for the `eco` profile the substream is the URL
+    // actually streamed. Evaluating only `host` would render `allowed` for a
+    // source whose substream has rebound out of policy.
+    const hosts = [source.summary.host, source.summary.substreamHost].filter(
+      (host): host is string => typeof host === 'string' && host.length > 0,
+    );
+    const relationship = await this.evaluator.evaluate(hosts, { networks });
     // Verification is an attestation, never an inference: a probe passed
     // (`verifiedAt`), under a policy that is still the one in force
     // (`policyDigest`), for a host that still resolves inside it. The stored
@@ -174,21 +187,28 @@ function operationalState(
   return 'needs-attention';
 }
 
+/**
+ * Page order decides which rows get resolved, so it is the canonical name key
+ * — not the raw display name — that orders them: sorting on UTF-16 code units
+ * would put every capitalized name ahead of every lowercase one.
+ */
 function compareSources(left: RedactedLiveSource, right: RedactedLiveSource): number {
-  if (left.cameraName !== right.cameraName) {
-    return left.cameraName < right.cameraName ? -1 : 1;
-  }
+  const byName = cameraNameKey(left.cameraName).localeCompare(
+    cameraNameKey(right.cameraName),
+  );
+  if (byName !== 0) return byName;
   if (left.cameraId === right.cameraId) return 0;
   return left.cameraId < right.cameraId ? -1 : 1;
 }
 
 function normalizePageSize(requested: number | undefined): number {
-  return Number.isSafeInteger(requested) && (requested!) > 0
-    ? (requested!)
-    : RTSP_SOURCE_OVERVIEW_PAGE_SIZE;
+  if (typeof requested !== 'number' || !Number.isSafeInteger(requested) || requested < 1) {
+    return RTSP_SOURCE_OVERVIEW_PAGE_SIZE;
+  }
+  return Math.min(requested, RTSP_SOURCE_OVERVIEW_MAX_PAGE_SIZE);
 }
 
 function clampPage(requested: number | undefined, pageCount: number): number {
-  if (!Number.isSafeInteger(requested)) return 1;
-  return Math.min(Math.max(requested!, 1), pageCount);
+  if (typeof requested !== 'number' || !Number.isSafeInteger(requested)) return 1;
+  return Math.min(Math.max(requested, 1), pageCount);
 }

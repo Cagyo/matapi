@@ -7,22 +7,50 @@ import type {
 } from '../domain/ports/live-source-policy-evaluator.port';
 
 /**
- * Upper bound on the answers one host may fan out to before the relationship
- * stops being decidable. A host inside the cap is judged address by address; a
- * host beyond it is `blocked` rather than truncated, because truncating would
- * let a hostile resolver hide an out-of-policy address behind the first few
- * in-policy ones and earn an `allowed` it did not deserve.
+ * Upper bound on the *distinct* addresses one host may fan out to before the
+ * relationship stops being decidable, deliberately equal to the ceiling the
+ * probe enforces on a grant. A host beyond it is `blocked` rather than
+ * truncated: truncating would let a hostile resolver hide an out-of-policy
+ * address behind the first few in-policy ones and earn an `allowed` it did not
+ * deserve, and reporting `allowed` above the probe's ceiling would promise a
+ * stream the probe then refuses.
  */
-const MAX_RESOLVED_ADDRESSES = 8;
+const MAX_RESOLVED_ADDRESSES = 2;
+
+/**
+ * Total budget for one `evaluate` call, shared across every host it resolves.
+ *
+ * `dns.lookup` is `getaddrinfo` on the libuv threadpool: uncancellable, and
+ * bounded only by `/etc/resolv.conf`, which on a stock Pi means up to
+ * `timeout x attempts x nameservers` — tens of seconds. Racing a deadline does
+ * not hand the threadpool slot back, but it does unblock the caller, and this
+ * is a status view rendered behind an operator's keystroke.
+ *
+ * `dns.Resolver` would offer a real timeout and is still the wrong tool: it
+ * talks to nameservers directly, skipping `/etc/hosts` and mDNS, and a camera
+ * addressed as `<name>.local` is entirely plausible here.
+ */
+const DEFAULT_LOOKUP_TIMEOUT_MS = 5_000;
 
 /** Every address in `::ffff:0:0/96` is an IPv4 address wearing an IPv6 shape. */
 const MAPPED_IPV4_PREFIX = 0xffffn;
 
+const TIMED_OUT = Symbol('lookup-timed-out');
+
+/** Worst-first, so one bad host decides the source. */
+const RELATIONSHIP_SEVERITY: Record<RtspSourcePolicyRelationship, number> = {
+  allowed: 0,
+  unresolved: 1,
+  blocked: 2,
+};
+
 export interface SystemLiveSourcePolicyEvaluatorDependencies {
   lookup(hostname: string): Promise<readonly { address: string; family: number }[]>;
+  /** Budget for the whole call, not per host. */
+  timeoutMs: number;
 }
 
-interface ParsedCidr {
+export interface ParsedPolicyCidr {
   family: 4 | 6;
   network: bigint;
   prefix: number;
@@ -34,66 +62,75 @@ interface NormalizedAddress {
 }
 
 /**
- * Resolves the credential-free host of a stored source and places it against
+ * Resolves the credential-free hosts of a stored source and places them against
  * the installed policy networks.
  *
  * This is a read-only status projection: it opens no stream, spawns no child,
- * and is handed a host rather than a URL, so no credential exists on this path
- * to leak. It resolves on every call — the answer describes the network as it
- * is now, not as it was when the source was verified.
+ * and is handed hosts rather than URLs, so no credential exists on this path to
+ * leak. It resolves on every call — the answer describes the network as it is
+ * now, not as it was when the source was verified.
  *
  * The containment arithmetic deliberately mirrors the probe adapter's, which
  * owns the enforcement copy: same prefix floor, same rejection of a CIDR with
- * host bits set, same fail-closed behaviour on a family mismatch. It is a
- * separate implementation because this one must additionally fold IPv4-mapped
- * IPv6 answers down to IPv4, takes the structured installed-network projection
- * instead of the environment's comma-separated string, and must degrade to a
- * status rather than throw a probe error. See the report note attached to the
- * task: extracting one shared value object is the follow-up.
+ * host bits set, same fail-closed behaviour on a family mismatch, same ceiling
+ * on distinct addresses. It is a separate implementation because this one must
+ * additionally fold IPv4-mapped IPv6 answers down to IPv4, takes the structured
+ * installed-network projection instead of the environment's comma-separated
+ * string, and must degrade to a status rather than throw a probe error. The
+ * remaining divergences are pinned row by row in
+ * `test/camera/infrastructure/rtsp-policy-containment.contract.test.ts`, which
+ * fails the moment a new one appears. Unifying all three CIDR implementations
+ * in this tree — this one, the probe's, and the features context's installed
+ * policy adapter — is the deferred follow-up.
  */
 export class SystemLiveSourcePolicyEvaluatorAdapter
   implements LiveSourcePolicyEvaluatorPort
 {
   readonly #lookup: SystemLiveSourcePolicyEvaluatorDependencies['lookup'];
+  readonly #timeoutMs: number;
 
   constructor(dependencies: Partial<SystemLiveSourcePolicyEvaluatorDependencies> = {}) {
     this.#lookup = dependencies.lookup ?? defaultLookup;
+    this.#timeoutMs =
+      typeof dependencies.timeoutMs === 'number' &&
+      Number.isSafeInteger(dependencies.timeoutMs) &&
+      dependencies.timeoutMs > 0
+        ? dependencies.timeoutMs
+        : DEFAULT_LOOKUP_TIMEOUT_MS;
   }
 
   async evaluate(
-    credentialFreeHost: string,
+    credentialFreeHosts: readonly string[],
     policy: { networks: readonly RtspSourcePolicyNetwork[] },
   ): Promise<RtspSourcePolicyRelationship> {
-    const hostname = parseHostname(credentialFreeHost);
-    if (hostname === null) return 'unresolved';
-
     // No policy network can contain anything, so nothing is resolved for it.
-    const cidrs = parseNetworks(policy.networks);
+    const cidrs = parsePolicyNetworks(policy.networks);
     if (cidrs.length === 0) return 'blocked';
 
-    const literalFamily = isIP(hostname);
-    const addresses = literalFamily
-      ? [hostname]
-      : await this.resolveAddresses(hostname);
-    if (addresses === null) return 'unresolved';
-    if (addresses.length === 0) return 'unresolved';
-    if (addresses.length > MAX_RESOLVED_ADDRESSES) return 'blocked';
+    // A source with no host at all is never shown as allowed.
+    const hosts = [...new Set(credentialFreeHosts)];
+    if (hosts.length === 0) return 'blocked';
 
-    for (const address of addresses) {
-      const normalized = normalizeAddress(address);
-      // An answer that cannot be canonicalized — a scoped or malformed address
-      // — is inside no network, so it fails closed like any outside address.
-      if (normalized === null) return 'blocked';
-      if (!cidrs.some((cidr) => contains(cidr, normalized))) return 'blocked';
-    }
-    return 'allowed';
+    const answers = await raceDeadline(
+      Promise.all(hosts.map((host) => this.resolveHost(host))),
+      this.#timeoutMs,
+    );
+    if (answers === TIMED_OUT) return 'unresolved';
+
+    return answers
+      .map((addresses) => classify(addresses, cidrs))
+      .reduce(worst, 'allowed');
   }
 
   /**
-   * `null` marks a resolver failure. The rejection carries the hostname, so it
-   * is discarded here rather than re-thrown or logged.
+   * The addresses one host currently stands for, or `null` when it cannot be
+   * resolved. A literal never reaches the resolver. The rejected lookup carries
+   * the hostname, so it is discarded here rather than re-thrown or logged.
    */
-  private async resolveAddresses(hostname: string): Promise<string[] | null> {
+  private async resolveHost(host: string): Promise<readonly string[] | null> {
+    const hostname = parseHostname(host);
+    if (hostname === null) return null;
+    if (isIP(hostname) !== 0) return [hostname];
     try {
       const answers = await this.#lookup(hostname);
       return answers.map((answer) => answer.address);
@@ -107,9 +144,59 @@ async function defaultLookup(hostname: string) {
   return lookup(hostname, { all: true, verbatim: true });
 }
 
+function classify(
+  addresses: readonly string[] | null,
+  cidrs: readonly ParsedPolicyCidr[],
+): RtspSourcePolicyRelationship {
+  if (addresses === null || addresses.length === 0) return 'unresolved';
+
+  // Deduplicated before the ceiling is applied, so a resolver that repeats an
+  // answer cannot push a single-homed host over it.
+  const distinct = new Map<string, NormalizedAddress>();
+  for (const address of addresses) {
+    const normalized = normalizeAddress(address);
+    // An answer that cannot be canonicalized — scoped, malformed, or not a
+    // string at all — is inside no network, so it fails closed.
+    if (normalized === null) return 'blocked';
+    distinct.set(`${normalized.family}:${normalized.value}`, normalized);
+  }
+  if (distinct.size > MAX_RESOLVED_ADDRESSES) return 'blocked';
+  for (const address of distinct.values()) {
+    if (!cidrs.some((cidr) => contains(cidr, address))) return 'blocked';
+  }
+  return 'allowed';
+}
+
+function worst(
+  left: RtspSourcePolicyRelationship,
+  right: RtspSourcePolicyRelationship,
+): RtspSourcePolicyRelationship {
+  return RELATIONSHIP_SEVERITY[right] > RELATIONSHIP_SEVERITY[left] ? right : left;
+}
+
+function raceDeadline<T>(
+  operation: Promise<T>,
+  timeoutMs: number,
+): Promise<T | typeof TIMED_OUT> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<typeof TIMED_OUT>((resolve) => {
+    timer = setTimeout(() => resolve(TIMED_OUT), timeoutMs);
+  });
+  // `operation` is built from `resolveHost`, which never rejects, so racing it
+  // cannot strand a rejection once the deadline has won.
+  return Promise.race([operation, deadline]).finally(() => clearTimeout(timer));
+}
+
 /**
  * `LiveSourceSummary.host` is a URL authority: it may carry a port and wraps an
  * IPv6 literal in brackets. Only the bare hostname is ever resolved.
+ *
+ * `rtsp:` is a non-special scheme, so WHATWG parses the authority as an opaque
+ * host and percent-encodes non-ASCII instead of applying IDNA. That is safe
+ * only because every stored host has already been through
+ * `canonicalizeHostname` (`live-source.entity.ts`), which runs `domainToASCII`
+ * before persistence — this parser must never become the first one to see a
+ * raw operator-supplied host.
  */
 function parseHostname(credentialFreeHost: string): string | null {
   if (typeof credentialFreeHost !== 'string' || !credentialFreeHost) return null;
@@ -125,16 +212,18 @@ function parseHostname(credentialFreeHost: string): string | null {
 }
 
 /** Unusable entries are dropped rather than rejected: valid siblings still grant. */
-function parseNetworks(networks: readonly RtspSourcePolicyNetwork[]): ParsedCidr[] {
-  const parsed: ParsedCidr[] = [];
-  for (const network of networks) {
-    const cidr = parseCidr(network);
+function parsePolicyNetworks(
+  networks: readonly RtspSourcePolicyNetwork[],
+): ParsedPolicyCidr[] {
+  const parsed: ParsedPolicyCidr[] = [];
+  for (const network of networks ?? []) {
+    const cidr = parsePolicyCidr(network);
     if (cidr !== null) parsed.push(cidr);
   }
   return parsed;
 }
 
-function parseCidr(network: RtspSourcePolicyNetwork): ParsedCidr | null {
+function parsePolicyCidr(network: RtspSourcePolicyNetwork): ParsedPolicyCidr | null {
   if (typeof network?.cidr !== 'string') return null;
   const match = /^([^/]+)\/(\d{1,3})$/u.exec(network.cidr.trim());
   if (!match) return null;
@@ -153,7 +242,7 @@ function parseCidr(network: RtspSourcePolicyNetwork): ParsedCidr | null {
   return { family: address.family, network: masked, prefix };
 }
 
-function contains(cidr: ParsedCidr, address: NormalizedAddress): boolean {
+function contains(cidr: ParsedPolicyCidr, address: NormalizedAddress): boolean {
   if (cidr.family !== address.family) return false;
   const hostBits = BigInt((cidr.family === 4 ? 32 : 128) - cidr.prefix);
   return (address.value >> hostBits) << hostBits === cidr.network;
@@ -166,6 +255,7 @@ function contains(cidr: ParsedCidr, address: NormalizedAddress): boolean {
  * mis-classified.
  */
 function normalizeAddress(raw: string): NormalizedAddress | null {
+  if (typeof raw !== 'string') return null;
   const family = isIP(raw);
   if (family === 4) return { family: 4, value: ipv4Value(raw) };
   if (family !== 6) return null;
