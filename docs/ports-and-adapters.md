@@ -111,6 +111,104 @@ current role and dynamic data. Running work is never cancelled. The one-release
 legacy `rh:<l|c|s|f|i|d|u|a>:<c|r|t>` grammar is acknowledged but non-mutating
 and directs the user to localized `/menu` usage only.
 
+The RTSP camera-source conversation asks an administrator to paste an address
+that carries a camera password, so its durable state is credential-free by
+construction and its Telegram message is deleted before the address is used.
+Two ports own those halves: `CAMERA_SOURCE_PROMPT_REPOSITORY` (what is
+remembered) and `CAMERA_SOURCE_MESSAGE` (what is deleted). A prompt row carries
+identities, a non-secret camera selection and lifecycle bookkeeping — nothing
+else. `assertCameraSourcePrompt` enforces an **exact key set**, so
+`{ ...prompt, url: SECRET }` cannot reach either adapter, and every rejection
+reason is a static string because the value it refused is exactly what might be
+a credential.
+
+The ten-minute window is unforgeable rather than merely enforced.
+`createCameraSourcePrompt` takes `createdAt` and **never** `expiresAt` — there
+is no parameter through which a different window could be expressed — and it
+refuses an input that carries any lifecycle field the model owns.
+
+**Exact-reply CAS.** `claimReply` is the single `pending → running` transition
+on one user/chat/receipt/prompt-message identity, so exactly one reply can ever
+authorise an install. `now === expiresAt` is already late. A `late` answer still
+carries the prompt, because a late credential reply must be *deleted* rather
+than acted on; an identity nothing is stored under answers `stale`. The terminal
+transitions take an **identity, not a whole prompt** — `consume`/`expire` accept
+`{ identity, deletionFailed, now }`, so a caller holding only callback data
+never fabricates a prompt to end one, and the stored row stays the only
+authority on its own contents. Both are idempotent, neither overwrites the first
+terminal status or its retention deadline, and `deletionFailed` is sticky
+(`||`): a standing failure is never cleared by a later clean deletion.
+
+**Tombstones hold no secret.** A terminal *credential* prompt is retained for 24
+hours measured from its **first** terminal transition, so a late reply can still
+be deleted, and only the newest 100 tombstones per administrator survive. A
+*name* prompt is deleted outright — a camera name is not a secret and there is
+nothing to keep. `prune` has three predicated arms: tombstones past retention,
+abandoned `pending` rows, and `running` rows past the abandonment horizon (the
+backstop for rows `listRunning` drops as undecodable). Nothing is exempt from
+every arm, so no row is immortal, and no arm is a full-table sweep.
+`CAMERA_SOURCE_ABANDONED_TTL_MS` is a separate constant from the tombstone TTL:
+both start at 24 hours and measure different things — retention exists so a late
+reply can still be cleaned up, abandonment exists because Telegram stops letting
+a bot delete a message after roughly 48 hours.
+
+`expires_at` and `retain_until` are stored as `timestamp_ms` while every other
+Date column in the schema uses seconds. Deliberate: the window is a promise
+about an instant, and the two adapters must not be able to disagree on
+sub-second precision.
+
+**Startup deletion recovery.** A `running` row means a process died between
+claiming a credential reply and deleting it, so the credential is still sitting
+in the chat. `RecoverCameraSourcePromptsUseCase` finishes that cleanup on boot,
+**before `run(bot)`** opens the update pump — a live reply handler must not
+reach `claimReply` on a row already inside recovery's `listRunning` snapshot —
+and fire-and-forget, so an unreachable Telegram cannot hold the whole worker out
+of service. It `expire`s **every** row `listRunning` returns regardless of
+phase, attempting a deletion only for a credential row with a recorded reply, so
+nothing is left `running` for later boots to skip. Each **row** is isolated, not
+just each deletion: the result is `{ attempted, failed, unfinished }`, where
+`failed` is deletion-scoped and `unfinished` counts rows the repository refused
+to terminalise. Mock mode neither arms the message adapter nor runs recovery.
+
+**A prompt whose workflow ends must be retracted, not merely forgotten.**
+`CameraSourcesHandler.retractPending` is the only supported way to stop a prompt
+being answerable, and the routing is dropped only once the message is provably
+gone. When Telegram refuses the deletion the prompt is still armed in the chat,
+so its routing is deliberately restored: `claimReply` then answers `late`, the
+reply is deleted as cleanup, and nothing is installed. The failure this prevents
+is the opposite order — forgetting the routing while the ForceReply is still
+live, after which a credential answered into it reaches the next handler
+undeleted.
+
+**Screens and routing are keyed differently, on purpose.**
+`CameraSourceViewStore` remembers navigation only — a receipt, the page last
+rendered, the opaque selector opened, and the revision that detail was read at —
+and every entry is expendable, costing one reload. Screen states are keyed by
+receipt and superseded by the next screen of the same workflow; a **prompt is
+keyed by its own message id**, because it must stay answerable until it is
+retracted or expires, which is a different lifetime from the screen that opened
+it.
+
+**Deletion-before-effect is a data dependency, not an ordering convention.**
+`takeAddressAndDelete` produces a `CredentialReply` and `install` is the only
+thing that consumes one, so an address cannot exist in the handler without a
+deletion having been attempted first. A `finally` retries the deletion once, and
+only when the first attempt failed.
+
+**Revision fencing uses two mechanisms deliberately.** Replace stores
+`expectedRevision` on the durable prompt row, because the address arrives in a
+later update and possibly after a restart; remove carries it in the callback
+itself — `rm:y:<selector>:<revision>` — because the confirmation screen is the
+thing being fenced.
+
+**One rule decides what runs ahead of the readiness gate:** an action that
+**ends** or **repairs** the unusable state runs ahead of it; everything that
+reads or mutates a source runs behind it. Today that is reinstall (an
+administrator reaches for it *because* RTSP is unusable) and cancel (RTSP can
+become unusable underneath an armed ForceReply, and behind the gate a cancel
+would render the feature notice and leave the prompt with no control that ends
+it). A third candidate is decided by that sentence, not by those two precedents.
+
 | Port | Adapters | Status | Source |
 |---|---|---|---|
 | `BotGateway` | `GrammyBotGateway` | ✅ single intentional gateway; do not abstract grammY itself further. It acknowledges exact `wr:` and one-release legacy `rh:` callbacks before grammY `sequentialize` constraints for private chat and user, then resolves locale and runs handlers. `WorkflowNavigationHandler` is registered deterministically before broad workflow handlers; `OpenHomeUseCase` remains the only Home-opening authority and always creates fresh Home authority. | [grammy-bot.gateway.ts](../src/telegram/infrastructure/grammy-bot.gateway.ts) |
@@ -124,6 +222,8 @@ and directs the user to localized `/menu` usage only.
 | `HomeTokenGeneratorPort` (`HOME_TOKEN_GENERATOR`) | `CryptoHomeTokenGenerator` | ✅ canonical — creates a 96-bit (12-byte) base64url token, exactly 16 characters, for every new Home authority. | [home-token-generator.port.ts](../src/telegram/domain/ports/home-token-generator.port.ts) |
 | `HomeMessageDeliveryPort` (`HOME_MESSAGE_DELIVERY`) | `TelegramHomeMessageAdapter` (real), `InMemoryHomeMessageDeliveryAdapter` (mock/tests) | ✅ canonical — owns Home send, edit, best-effort deletion of a replaced Home, keyboard stripping for a promotion loser, and transient outcome notices. `BOT_MODE=mock` selects the in-memory adapter; real mode renders through grammY. | [home-message-delivery.port.ts](../src/telegram/application/ports/home-message-delivery.port.ts) |
 | `HomeHealthSnapshotPort` (`HOME_HEALTH_SNAPSHOT`) | `InMemoryHomeHealthSnapshotAdapter` (all modes/tests) | ✅ canonical — bounded process-local cache for reporting-health snapshots only; persisted sensor state is always reread. A complete snapshot is fresh for two minutes, and changing enabled IDs makes it insufficient for a normal verdict. | [home-health-snapshot.port.ts](../src/telegram/application/ports/home-health-snapshot.port.ts) |
+| `CameraSourcePromptRepositoryPort` (`CAMERA_SOURCE_PROMPT_REPOSITORY`) | `DrizzleCameraSourcePromptRepository` (real), `InMemoryCameraSourcePromptRepository` (mock/tests) | ✅ canonical durable state for one exact-reply RTSP credential prompt, and credential-free by construction. `claimReply` is the single `pending → running` compare-and-set on the exact user/chat/receipt/prompt-message identity; `consume`/`expire` are idempotent terminal transitions taking an **identity**, not a prompt; `listRunning` feeds boot recovery oldest-deadline first; `prune` sweeps tombstones and abandoned rows through three predicated arms. Both adapters are held to one `describe.each` contract table (`describeCameraSourcePromptContract`), and both carry dates at millisecond precision. `BOT_MODE=mock` selects the in-memory adapter, otherwise Drizzle. | [camera-source-prompt-repository.port.ts](../src/telegram/application/ports/camera-source-prompt-repository.port.ts) |
+| `CameraSourceMessagePort` (`CAMERA_SOURCE_MESSAGE`) | `TelegramCameraSourceMessageAdapter` (all modes; armed with the bot by `GrammyBotGateway`) | ✅ canonical deletion of one credential-bearing reply, by `(chatId, messageId)` alone — a prompt carries a receipt and a proposed camera name, and none of that has any business reaching a Telegram API call. **Fails closed**, deliberately unlike `LiveStreamMessageCleanupPort`: it rejects rather than resolving when there is no bot, so a caller is never told "deleted" about a credential still sitting in a chat. It never re-throws grammY's error — only the parameterless `CameraSourceMessageDeletionError` leaves the class ([error-handling.md](error-handling.md#camera-source-prompt-deletion)). | [camera-source-message.port.ts](../src/telegram/application/ports/camera-source-message.port.ts) |
 | `RolePort` | `DrizzleRoleRepository` | 📝 | [role.guard.ts](../src/telegram/guards/role.guard.ts) |
 
 ### Archive context
@@ -204,11 +304,15 @@ never the reverse), pinned row by row in
 Extracting one `PolicyNetworkSet` value object over all three is the deferred
 follow-up.
 
-> **Not reachable end to end yet.** `CreateRtspCameraUseCase` is built, exported
-> and tested but unwired: the Telegram Add button still routes through
-> `ConfigureLiveSourceUseCase`, which resolves a camera by name and throws
-> `CameraNotFoundError` for a name that does not exist. Wiring it belongs to
-> `docs/superpowers/plans/2026-08-13-rtsp-telegram-camera-setup.md`.
+> **Reachable end to end.** `CameraSourcesHandler` is the single Telegram
+> consumer of these use cases: Add routes to `CreateRtspCameraUseCase` (create)
+> or `AttachRtspSourceUseCase` (attach to an existing camera), and the detail
+> screen routes to `TestRtspSourceUseCase`, `ReplaceRtspSourceUseCase` and
+> `RemoveRtspSourceUseCase`. `ConfigureLiveSourceUseCase` — which resolved a
+> camera by name and threw `CameraNotFoundError` for a name that did not yet
+> exist — is no longer on that path; it is still provided and exported by
+> `CameraModule`, and covered by its own tests, but nothing in `src/` calls it
+> any more; retiring it is a follow-up.
 
 | Port | Adapters | Status | Source |
 |---|---|---|---|

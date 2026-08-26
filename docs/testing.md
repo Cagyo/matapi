@@ -152,6 +152,36 @@ revert the fix (or mutate the one line it depends on) and confirm the test fails
 for the reason you expect. A regression test that passes against the bug is
 worse than none: it certifies the bug.
 
+## Composition tests and the decorator-metadata blind spot
+
+This applies to the whole repo, not to one module. **Under Vitest, a bare-class
+constructor dependency resolves to `undefined`, silently.**
+
+`tsconfig.json` sets `emitDecoratorMetadata`, so `nest build` emits
+`design:paramtypes` and production Nest can resolve a parameter from its type
+alone. The test build is esbuild, which emits no such metadata at all. Nest then
+resolves *only* parameters carrying an explicit `@Inject(...)` token, and every
+other constructor parameter is injected as `undefined` without an error.
+
+The trap is that this makes the obvious composition test nearly meaningless. A
+test that boots `AppModule`, resolves a class and asserts it exists will pass
+with half that class's collaborators missing — the same graph that would have
+failed loudly in production. So:
+
+- **Pin against an explicit token.** Assert that the instance the container
+  hands the port *is the same object* the consumer holds — `toBe`, not
+  `toBeInstanceOf`, which is what a `useExisting` → `useClass` slip changes and
+  an `instanceof` check cannot see.
+- **Do not conclude that a bare-class dependency is wired** because the
+  container produced an object. It proves nothing under this build.
+- **Carry a bidirectional tripwire.** The blind spot is a property of the
+  toolchain, not a permanent law, so the test that relies on it should also fail
+  when it stops being true. `test/telegram/telegram.module.composition.test.ts`
+  asserts both directions: `design:paramtypes` is `undefined`, the bare-class
+  dependencies are `undefined`, and the tokened ones are defined. If a future
+  build starts emitting metadata, that test fails — which is the notice that the
+  token-only pins can and should be widened to the whole constructor.
+
 ## Test file location & naming
 
 ```
@@ -183,6 +213,43 @@ test/
 - **No network calls.** Period. Integration tests use loopback / in-memory.
 - **No real filesystem outside `test/.tmp/`.** Use `tmpdir()` and clean up.
 
+
+### Fake timers over real I/O
+
+Tests that drive real filesystem or Unix-socket work *underneath*
+`vi.useFakeTimers()` need three things, and the first is not optional.
+
+**Restore the clock in `afterEach`, unconditionally — not only in a `finally`.**
+A test that exceeds its timeout is abandoned *inside its body*, so a `finally`
+at the end of the test never runs and the fake clock leaks into the next test,
+which fails with "Timers are not mocked". One slow run then surfaces as two
+failures, and the second one names innocent code. An unconditional
+`afterEach(() => vi.useRealTimers())` makes a timeout cost exactly one test.
+
+**Wait on a condition, never on a fixed number of microtask hops.** A hop count
+is a guess about how long an async chain is, and it is only ever right on an
+idle machine; under load the chain interleaves with other work and the test
+races for reasons that have nothing to do with the code under test. Wait for the
+state you actually mean, with a high bound so a genuine hang still fails:
+
+```ts
+async function until(condition: () => boolean, hops = 100): Promise<void> {
+  for (let hop = 0; hop < hops; hop += 1) {
+    if (condition()) return;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  expect(condition(), 'the adapter never reached the awaited state').toBe(true);
+}
+```
+
+**Give the file a timeout that reflects a loaded machine**, with
+`vi.setConfig({ testTimeout: … })` at the top of the file rather than a global
+bump. The wall-clock cost of these cases is set by how loaded the box is, not by
+anything they assert, and the default is comfortable when run alone and marginal
+inside a full-suite run — where the failure arrives as a timeout,
+indistinguishable in CI from a real hang in the adapter. See
+[quick-tunnel-rtsp-live-stream.adapter.test.ts](../test/camera/infrastructure/quick-tunnel-rtsp-live-stream.adapter.test.ts).
+
 ## Coverage target
 
 No enforced number. The implicit target is **every public method of every use case** and **every domain-error arm of every interface handler**. Drizzle calls inside an adapter are covered by one integration test of the happy path plus one per translated error; that is enough.
@@ -194,3 +261,25 @@ yarn test            # vitest run, all tiers
 yarn test --watch    # local development
 yarn test path/to/file.test.ts   # single file
 ```
+
+## What the delivery gate proves — and what it does not
+
+The three commands above are the gate, and each one covers a different, partial
+slice of the tree. Read a green gate as exactly this much:
+
+| Command | Covers | Does **not** cover |
+|---|---|---|
+| `yarn test` | every tier, `test/**` and `src/**/*.test.ts` | anything a test does not assert; TS diagnostics (Vitest transpiles, it does not typecheck) |
+| `yarn build` | `nest build` over `src/**` — `tsconfig.json` sets `"include": ["src/**/*"]` | **`test/**` — no test file is typechecked by `tsc`, and never has been** |
+| `yarn lint` | `src`, `test` and `scripts`, with `recommendedTypeChecked` rules against `tsconfig.eslint.json`, which *does* include `test/**` | full assignability checking; a type error in a test that no lint rule happens to flag stays invisible |
+
+So **"typecheck passes" is not an unqualified claim for `test/**`.** Test files
+get type-*aware lint* rules, which catch a real and useful subset — unsafe
+arguments, floating promises, misused promises — but they do not get TS
+diagnostics. A whole-program `npx tsc --noEmit` over `test/**` is not a
+maintained gate here: it currently reports a large backlog of pre-existing
+errors in test files unrelated to any one change, so running it ad hoc tells you
+almost nothing about the change in front of you. If you want a test file
+typechecked, the honest options are to keep its types simple enough that the
+lint rules bite, or to fix the backlog first — not to imply the gate already
+did it.

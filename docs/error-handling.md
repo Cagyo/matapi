@@ -267,6 +267,108 @@ So the reduction on a sandboxed Pi is in *classification*, not in rendering: the
 kinds that survive are rendered as well as they can be, and the remaining four
 render correctly the moment the follow-up makes them classifiable.
 
+## Camera source prompt deletion
+
+`CameraSourceMessagePort.delete` has exactly one way to refuse, and it is
+declared **in the port file** rather than under `domain/errors/`:
+
+```ts
+// src/telegram/application/ports/camera-source-message.port.ts
+export class CameraSourceMessageDeletionError extends Error {
+  readonly code = 'CAMERA_SOURCE_MESSAGE_DELETION_FAILED' as const;
+
+  constructor() {
+    super('camera source message could not be deleted');
+    this.name = 'CameraSourceMessageDeletionError';
+  }
+}
+```
+
+Both departures from the pattern at the top of this document are deliberate, and
+neither generalises.
+
+**Parameterless is the point, not an omission.** This is the same rule the
+live-source probe errors follow, for the same reason: the message this error
+names is a credential-bearing reply in an operator chat, and grammY's own
+rejection quotes the chat and the message it refused. So the kind alone is the
+payload — no `cause`, no chat id, no message id, no Telegram description. The
+constructor captures nothing because there is nothing it could capture that the
+caller is allowed to see. Its one consumer needs one bit (`deletionFailed`), and
+that bit is what the tombstone records.
+
+**Living beside its port is the exception, not a new home for errors.** Four
+error classes in this repo are declared in a port file instead of
+`domain/errors/`, across three ports — `DRIVE_FOLDER` (two), `CSV_TEMP_FILE`,
+and `CAMERA_SOURCE_MESSAGE` — against 112 files under `domain/errors/`. Prefer
+`domain/errors/`; treat that ratio as the rule. The narrow case for co-location
+is a port whose refusal vocabulary is *small, closed, and part of reading the
+interface* — `delete` either resolves or throws this one error, and no other
+context throws or catches it. Once a family grows past that, or a second context
+starts raising a member of it, move it into `domain/errors/` and leave the port
+importing it.
+
+**The port fails closed, which is why the error exists at all.**
+`TelegramLiveStreamMessageCleanupAdapter` swallows a failed deletion; this
+adapter must not, because its caller has to learn whether a credential is
+actually gone in order to record that the deletion is still owed. An adapter
+asked before a bot exists rejects too — "no bot" means the deletion did not
+happen. A caller told "deleted" about a credential still sitting in a chat is
+strictly worse than one told the truth.
+
+**Quiet by design, at every layer above it.**
+`RecoverCameraSourcePromptsUseCase` is a live example of the batched-use-case
+rule above: it returns `{ attempted, failed, unfinished }` and never throws
+mid-batch, isolating each *row* rather than only each deletion. It catches this
+error without binding it, emits one count-only summary line for the whole pass,
+and lets the retention sweep fail into a single warning rather than turning a
+boot that did finish its cleanup into a rejected one.
+
+## Presenting a camera-source failure
+
+Every Camera and Features rejection that can reach the RTSP source screens goes
+through one boundary —
+[camera-source-error.presenter.ts](../src/telegram/interfaces/camera-source-error.presenter.ts)
+— which turns it into an inert `{ kind, actions }`: a closed 13-member
+`CameraSourceFailureKind` and a closed 4-member `CameraSourceRecoveryAction`.
+No message, no `cause`, no URL, host, username, camera identity, policy digest,
+or child diagnostic survives it. Callers render
+`catalog.camera.sources.errors[kind]`, never `error.message`.
+
+This is the same shape as the per-`if (err instanceof ...)` handler mapping
+above, factored out for one reason: two screens classify the same failures, and
+recovery is a property of the *kind* rather than of the error instance — two
+callers that classify one failure must offer the same way out. `retry` appears
+only where the identical request can succeed on a second attempt;
+`change-address` wherever the address or credentials are a plausible cause;
+`reinstall-rtsp` only for `policy-stale`, the one condition nothing inside the
+screen can fix; `back` is last everywhere, so there is always one escape that
+re-reads current state instead of acting on what the screen remembers.
+
+Two rules keep it honest:
+
+1. **Recognition is `instanceof` and closed discriminators only.** Nothing is
+   parsed out of a message. Subclasses are matched *above*
+   `LiveSourceProbeBaseError`, so a specific probe kind is never shadowed by its
+   own base. An error the table does not know becomes the generic
+   `probe-failed` — the least specific answer rather than a leaky one.
+2. **It is deliberately lossy at the top of the table.**
+   `CameraSourceAdminRequiredError` and `CameraSourceUnavailableError` do not
+   round-trip through it; `CameraSourcesHandler` keeps `requireAdmin` and its
+   unavailable reply *ahead* of the presenter, because "you are not an
+   administrator" and "RTSP is not usable right now" are answers about the
+   workflow, not about a source. Do not "complete" the mapping by adding kinds
+   for them — that moves the two answers behind a screen that should never have
+   been reached.
+
+**The copy cannot go missing.** `LocaleCatalog` is `typeof en`, so every locale
+carries the whole English shape; `camera.sources` is mandatory and key-identical
+in English, Russian and Ukrainian, with **no fallback**. It used to be optional
+so translations could land later — it no longer may, because that workflow asks
+an administrator to paste an address carrying a camera password, and an
+administrator who cannot read the warning cannot consent to it. A missing or
+mistyped key is now a build failure rather than a silent English string in a
+Ukrainian chat.
+
 ## Crash policy
 
 - **Do not** add top-level `try/catch` to suppress crashes "just in case". PM2 restarts on crash; that is the contract.
