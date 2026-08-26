@@ -15,8 +15,9 @@ interface StoredLiveSource {
   cameraName: string;
   /**
    * Mirrors the columns the source-configuration transaction owns. Nothing here
-   * writes them, so a source saved through this adapter stays at revision 0 and
-   * unverified.
+   * grants a verification, so a source saved through this adapter stays at
+   * revision 0 and unverified — and a save clears any attestation it inherits,
+   * because it may have replaced the URL that attestation described.
    */
   revision: number;
   verifiedAt: Date | null;
@@ -46,8 +47,8 @@ export class InMemoryLiveSourceRepository implements LiveSourceRepositoryPort {
       credential: credential ? { ...credential } : null,
       cameraName: source.cameraId,
       revision: previous?.revision ?? 0,
-      verifiedAt: previous?.verifiedAt ?? null,
-      policyDigest: previous?.policyDigest ?? null,
+      verifiedAt: null,
+      policyDigest: null,
     });
   }
 
@@ -77,8 +78,8 @@ export class InMemoryLiveSourceRepository implements LiveSourceRepositoryPort {
         credential: null,
         cameraName: source.cameraId,
         revision: previous?.revision ?? 0,
-        verifiedAt: previous?.verifiedAt ?? null,
-        policyDigest: previous?.policyDigest ?? null,
+        verifiedAt: null,
+        policyDigest: null,
       });
     }
     this.#sources.clear();

@@ -113,10 +113,13 @@ export class DrizzleMediaRepository implements MediaRepositoryPort, MediaWriterP
 
   async findCameraByName(name: string): Promise<Camera | null> {
     const target = cameraNameKey(name);
-    // TODO(task-5): once `backfillNameKeys` runs before the first mutation, no
-    // row can still be keyless — replace this scan with
-    // `.where(eq(cameras.nameKey, target)).get()` so the unique index serves
-    // reads too. The fallback exists only for rows the backfill has not claimed.
+    // Deliberately still a scan (task 5). `backfillNameKeys` now runs before
+    // the first camera mutation, but it is allowed to refuse — colliding legacy
+    // names leave every key unclaimed — and that refusal must not take the
+    // worker down. An indexed-only lookup would then miss every legacy camera,
+    // so the canonical fallback stays. The table holds a handful of rows; the
+    // unique index remains the authority for writes, which is what the port
+    // contract actually requires.
     const row = this.db
       .select()
       .from(cameras)

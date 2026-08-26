@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Logger, Module } from '@nestjs/common';
 import { readFileSync } from 'node:fs';
 import { ArchiveModule } from '../archive/archive.module';
 import { ARCHIVE_REGISTRATION, type ArchiveRegistrationPort } from '../archive/application/ports/archive-registration.port';
@@ -7,7 +7,7 @@ import {
   type ArchiveRuntimeSignalPort,
 } from '../archive/application/ports/archive-runtime-signal.port';
 import { ArchiveSchedulerHooksService } from '../archive/application/archive-scheduler.service';
-import { DatabaseModule } from '../database/database.module';
+import { AppDatabase, DB, DatabaseModule } from '../database/database.module';
 import { EventModule } from '../events/event.module';
 import { FeatureModule } from '../features/feature.module';
 import {
@@ -61,6 +61,7 @@ import {
   type LiveStreamOptions,
 } from './camera.tokens';
 import { ADMIN_ALERT, type AdminAlertPort } from './domain/ports/admin-alert.port';
+import { CAMERA_ID_GENERATOR } from './domain/ports/camera-id-generator.port';
 import { CAMERA_SOURCE_AUTHORIZATION } from './domain/ports/camera-source-authorization.port';
 import {
   LIVE_STREAM_CAPABILITY,
@@ -105,6 +106,10 @@ import {
   type MonotonicClockPort,
 } from './domain/ports/monotonic-clock.port';
 import { RETENTION_PRUNE } from './domain/ports/retention-prune.port';
+import {
+  RTSP_SOURCE_CONFIGURATION,
+  type RtspSourceConfigurationPort,
+} from './domain/ports/rtsp-source-configuration.port';
 import { SNAPSHOT } from './domain/ports/snapshot.port';
 import { STREAM_EGRESS, type StreamEgressPort } from './domain/ports/stream-egress.port';
 import { STREAM_SANDBOX, type StreamSandboxPort } from './domain/ports/stream-sandbox.port';
@@ -112,6 +117,9 @@ import { RTSP_RUNTIME_COORDINATOR, type RtspRuntimeCoordinatorPort } from './dom
 import { RTSP_STREAM_RUNTIME, type RtspStreamRuntimePort } from './domain/ports/rtsp-stream-runtime.port';
 import { DrizzleMediaRepository } from './infrastructure/drizzle-media.repository';
 import { DrizzleLiveSourceRepository } from './infrastructure/drizzle-live-source.repository';
+import { CryptoCameraIdGeneratorAdapter } from './infrastructure/crypto-camera-id-generator.adapter';
+import { DrizzleRtspSourceConfigurationAdapter } from './infrastructure/drizzle-rtsp-source-configuration.adapter';
+import { InMemoryRtspSourceConfigurationAdapter } from './infrastructure/in-memory-rtsp-source-configuration.adapter';
 import { InMemoryLiveSourceRepository } from './infrastructure/in-memory-live-source.repository';
 import { liveSourceCredentialFromEnvironment } from './infrastructure/aes-gcm-live-source-credential.adapter';
 import {
@@ -369,6 +377,38 @@ function isInstallationId(value: string | undefined): value is string {
       inject: [LIVE_SOURCE_CREDENTIAL, DrizzleLiveSourceRepository, MEDIA_REPOSITORY],
     },
     DrizzleLiveSourceRepository,
+    { provide: CAMERA_ID_GENERATOR, useClass: CryptoCameraIdGeneratorAdapter },
+    {
+      provide: RTSP_SOURCE_CONFIGURATION,
+      useFactory: async (
+        media: MediaRepositoryPort,
+        db: AppDatabase,
+      ): Promise<RtspSourceConfigurationPort> => {
+        // `backfillNameKeys` has to precede the first camera mutation, and this
+        // port is the only thing that mutates camera rows. Awaiting it inside
+        // the factory means no consumer can hold the port before it has run:
+        // Nest settles every provider factory before any `onModuleInit`, well
+        // before the bot gateway's `onApplicationBootstrap` and `app.listen()`
+        // open the two paths a mutation can arrive on.
+        try {
+          await media.backfillNameKeys();
+        } catch (error) {
+          // Legacy names that already collide leave those rows keyless rather
+          // than taking Telegram and the sensors down with the camera context.
+          // The unique index still guards every keyed row, and
+          // `findCameraByName` still canonicalizes the keyless ones.
+          new Logger('CameraModule').error(
+            `Camera name keys were not backfilled: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+        return mode === 'stub'
+          ? new InMemoryRtspSourceConfigurationAdapter()
+          : new DrizzleRtspSourceConfigurationAdapter(db);
+      },
+      inject: [MEDIA_REPOSITORY, DB],
+    },
     {
       provide: STREAM_EGRESS,
       useFactory: (): StreamEgressPort => mode === 'stub'

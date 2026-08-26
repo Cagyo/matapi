@@ -252,7 +252,7 @@ describe('DrizzleLiveSourceRepository', () => {
     expect(await repository.findRedacted('camera-2')).toBeNull();
   });
 
-  it('leaves stored revisions and verification untouched on a later save', async () => {
+  it('keeps the stored revision but retracts verification on a later save', async () => {
     const credentials = new AesGcmLiveSourceCredentialAdapter({ currentKey: oldKey, currentVersion: 1 });
     const repository = new DrizzleLiveSourceRepository(db, credentials);
     await repository.rotate();
@@ -266,10 +266,34 @@ describe('DrizzleLiveSourceRepository', () => {
       LiveSource.create({ cameraId: 'camera-1', url: 'rtsp://cam.local/imported', ready: false }),
     ]);
 
+    // The import rewrote `normalized_url`, so the stored attestation described a
+    // URL that is no longer there. The revision stays: only the
+    // source-configuration transaction may advance its own compare-and-swap.
     expect(await repository.findRedacted('camera-1')).toMatchObject({
       revision: 3,
-      verifiedAt: new Date(1_800_000_000_000),
-      policyDigest: 'sha256:0f0f',
+      verifiedAt: null,
+      policyDigest: null,
+    });
+  });
+
+  it('retracts verification when a credential-backed save rewrites the url', async () => {
+    const credentials = new AesGcmLiveSourceCredentialAdapter({ currentKey: oldKey, currentVersion: 1 });
+    const repository = new DrizzleLiveSourceRepository(db, credentials);
+    await repository.rotate();
+    const source = LiveSource.create({ cameraId: 'camera-1', url: 'rtsp://cam.local/live', ready: true });
+    await repository.save(source, credentials.encrypt(source.cameraId, source.credentialPayload()));
+    sqlite
+      .prepare('update camera_live_sources set revision = ?, verified_at = ?, policy_digest = ? where camera_id = ?')
+      .run(2, 1_800_000_000_000, 'sha256:0f0f', 'camera-1');
+
+    const rewritten = LiveSource.create({ cameraId: 'camera-1', url: 'rtsp://other.local/live', ready: true });
+    await repository.save(rewritten, credentials.encrypt(rewritten.cameraId, rewritten.credentialPayload()));
+
+    expect(await repository.findRedacted('camera-1')).toMatchObject({
+      revision: 2,
+      verifiedAt: null,
+      policyDigest: null,
+      summary: { host: 'other.local' },
     });
   });
 

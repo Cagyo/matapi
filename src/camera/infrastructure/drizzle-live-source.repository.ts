@@ -52,9 +52,11 @@ export class DrizzleLiveSourceRepository implements LiveSourceRepositoryPort {
     }
     const now = Date.now();
     this.db.transaction((tx) => {
-      // `revision`, `verifiedAt` and `policyDigest` are written by the
-      // source-configuration transaction alone; this write leaves them as they
-      // stand and lets a first insert take the column defaults.
+      // `revision` is written by the source-configuration transaction alone;
+      // this write leaves it as it stands. `verifiedAt`/`policyDigest` attest
+      // to a URL this write may be replacing, so they are cleared: a non-owner
+      // may never grant a verification, but it must retract one it has
+      // invalidated. A first insert takes the null column defaults.
       tx.insert(cameraLiveSources)
         .values({
           cameraId: source.cameraId,
@@ -71,6 +73,8 @@ export class DrizzleLiveSourceRepository implements LiveSourceRepositoryPort {
             settings: source.settings,
             ready: source.ready,
             updatedAt: now,
+            verifiedAt: null,
+            policyDigest: null,
           },
         })
         .run();
@@ -161,6 +165,10 @@ export class DrizzleLiveSourceRepository implements LiveSourceRepositoryPort {
               settings: source.settings,
               ready: false,
               updatedAt: now,
+              // Imported metadata is unverified by construction; a stale
+              // attestation must not survive the URL it described.
+              verifiedAt: null,
+              policyDigest: null,
             },
           })
           .run();
