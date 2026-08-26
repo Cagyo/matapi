@@ -29,6 +29,7 @@ import { ResolveUserTargetUseCase } from './application/resolve-user-target.use-
 import { RegisterUserUseCase } from './application/register-user.use-case';
 import { RestartConfirmationService } from './interfaces/restart-confirmation.service';
 import { SystemOnlineNotifier } from './application/system-online-notifier.service';
+import { RecoverCameraSourcePromptsUseCase } from './application/recover-camera-source-prompts.use-case';
 import { RefreshHomeMonitoringUseCase } from './application/refresh-home-monitoring.use-case';
 import { GetHomeSummaryUseCase } from './application/get-home-summary.use-case';
 import { GetHomeScreenUseCase } from './application/get-home-screen.use-case';
@@ -73,11 +74,13 @@ import { HOME_TOKEN_GENERATOR } from './domain/ports/home-token-generator.port';
 import { HOME_HEALTH_SNAPSHOT } from './application/ports/home-health-snapshot.port';
 import { HOME_MESSAGE_DELIVERY } from './application/ports/home-message-delivery.port';
 import { HOME_ACTION_REPOSITORY } from './application/ports/home-action-repository.port';
+import { CAMERA_SOURCE_MESSAGE } from './application/ports/camera-source-message.port';
 import { CAMERA_SOURCE_PROMPT_REPOSITORY } from './application/ports/camera-source-prompt-repository.port';
 import { ConsoleNotifierAdapter } from './infrastructure/console-notifier.adapter';
 import { EnvAdminClaimCredentialAdapter } from './infrastructure/env-admin-claim-credential.adapter';
 import { TelegramAdminAlertAdapter } from './infrastructure/telegram-admin-alert.adapter';
 import { TelegramArchiveAdminAlertAdapter } from './infrastructure/telegram-archive-admin-alert.adapter';
+import { TelegramCameraSourceMessageAdapter } from './infrastructure/telegram-camera-source-message.adapter';
 import { TelegramLiveStreamMessageCleanupAdapter } from './infrastructure/telegram-live-stream-message-cleanup.adapter';
 import { DrizzleInviteCodeRepository } from './infrastructure/drizzle-invite-code.repository';
 import { DrizzleUserRepository } from './infrastructure/drizzle-user.repository';
@@ -301,6 +304,7 @@ const mode = resolveBotMode();
     RestartSystemUseCase,
     RestartConfirmationService,
     SystemOnlineNotifier,
+    RecoverCameraSourcePromptsUseCase,
     RefreshHomeMonitoringUseCase,
     GetHomeSummaryUseCase,
     GetNotificationScreenUseCase,
@@ -361,6 +365,11 @@ const mode = resolveBotMode();
     TelegramAdminAlertAdapter,
     TelegramArchiveAdminAlertAdapter,
     TelegramLiveStreamMessageCleanupAdapter,
+    // Registered in both modes so the composition is one shape. The adapter
+    // fails closed until `GrammyBotGateway` hands it a bot, which in mock mode
+    // never happens — and recovery is never run there either.
+    TelegramCameraSourceMessageAdapter,
+    { provide: CAMERA_SOURCE_MESSAGE, useExisting: TelegramCameraSourceMessageAdapter },
     TelegramRecipientDirectoryAdapter,
     GrammyBotGateway,
   ],

@@ -33,43 +33,67 @@ vi.mock('@grammyjs/runner', () => ({
   sequentialize: mocks.sequentialize,
 }));
 
+/** Telegram's own wording quotes the chat and the message it refused. */
+const TELEGRAM_TEXT = 'Bad Request: message to delete not found (chat 907001, message 550123)';
+
+/** The gateway with its collaborators replaced by stubs the test can read. */
+type StubbedGateway = GrammyBotGateway & Record<string, any>;
+
+/** A real-mode gateway with every collaborator stubbed, ready to bootstrap. */
+function realGateway(overrides: Record<string, unknown> = {}): StubbedGateway {
+  mocks.botUse.mockClear();
+  mocks.bot.api.config.use.mockClear();
+  // `mocks.run` is module-scoped, so its call order accumulates across tests;
+  // clearing here keeps every ordering assertion local to its own bootstrap.
+  mocks.run.mockClear();
+  const handler = { register: vi.fn() } as TelegramHandler;
+  const gateway = Object.create(GrammyBotGateway.prototype) as StubbedGateway;
+  Object.assign(gateway, {
+    mode: 'real',
+    token: '123456:token',
+    logger: { log: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    lastUpdateAt: null,
+    liveStreamMessageCleanup: { register: vi.fn() },
+    telegramLiveStreamMessageCleanup: { setBot: vi.fn() },
+    telegramCameraSourceMessage: { setBot: vi.fn(), clearBot: vi.fn() },
+    recoverCameraSourcePrompts: {
+      execute: vi.fn().mockResolvedValue({ attempted: 0, failed: 0 }),
+    },
+    homeMessageDelivery: Object.assign(Object.create(TelegramHomeMessageAdapter.prototype), { setBot: vi.fn() }),
+    eventNotifier: { register: vi.fn() },
+    recipientDirectory: { register: vi.fn() },
+    adminAlertService: { register: vi.fn() },
+    archiveAdminAlerts: { register: vi.fn() },
+    telegramArchiveAdminAlert: {},
+    eventProcessor: { drain: vi.fn() },
+    telegramNotifier: { setBot: vi.fn() },
+    directMessenger: { setBot: vi.fn() },
+    botCommandsMenu: { setBot: vi.fn(), syncAllUsers: vi.fn().mockResolvedValue(undefined) },
+    telegramRecipients: {},
+    telegramAdminAlert: {},
+    botRunnerRegistry: { register: vi.fn() },
+    restartConfirmation: { run: vi.fn().mockResolvedValue(undefined) },
+    systemOnline: { run: vi.fn().mockResolvedValue(undefined) },
+    localeMiddleware: { resolveOptional: vi.fn() },
+    claim: handler, mute: handler, unmute: handler, quietHours: handler, update: handler,
+    systemUpdate: handler, rollback: handler, restartHandler: handler, start: handler,
+    status: handler, ping: handler, help: handler, logs: handler, health: handler,
+    config: handler, invite: handler, promote: handler, demote: handler, camera: handler,
+    gdrive: handler, exportConfig: handler, importConfig: handler, feature: handler,
+    csv: handler, home: handler, workflowNavigation: handler, legacyMenu: handler, settings: handler, clean: handler,
+    ...overrides,
+  });
+  return gateway;
+}
+
+/** Lets the fire-and-forget bootstrap follow-ups settle their handlers. */
+async function settle(): Promise<void> {
+  await new Promise((resolve) => setImmediate(resolve));
+}
+
 describe('GrammyBotGateway handler registration', () => {
   it('installs Home acknowledgement and sequentialization before locale resolution', async () => {
-    mocks.botUse.mockClear();
-    mocks.bot.api.config.use.mockClear();
-    const handler = { register: vi.fn() } as TelegramHandler;
-    const resolveOptional = vi.fn();
-    const gateway = Object.create(GrammyBotGateway.prototype);
-    Object.assign(gateway, {
-      mode: 'real',
-      token: '123456:token',
-      logger: { log: vi.fn(), warn: vi.fn(), error: vi.fn() },
-      lastUpdateAt: null,
-      liveStreamMessageCleanup: { register: vi.fn() },
-      telegramLiveStreamMessageCleanup: { setBot: vi.fn() },
-      homeMessageDelivery: Object.assign(Object.create(TelegramHomeMessageAdapter.prototype), { setBot: vi.fn() }),
-      eventNotifier: { register: vi.fn() },
-      recipientDirectory: { register: vi.fn() },
-      adminAlertService: { register: vi.fn() },
-      archiveAdminAlerts: { register: vi.fn() },
-      telegramArchiveAdminAlert: {},
-      eventProcessor: { drain: vi.fn() },
-      telegramNotifier: { setBot: vi.fn() },
-      directMessenger: { setBot: vi.fn() },
-      botCommandsMenu: { setBot: vi.fn(), syncAllUsers: vi.fn().mockResolvedValue(undefined) },
-      telegramRecipients: {},
-      telegramAdminAlert: {},
-      botRunnerRegistry: { register: vi.fn() },
-      restartConfirmation: { run: vi.fn().mockResolvedValue(undefined) },
-      systemOnline: { run: vi.fn().mockResolvedValue(undefined) },
-      localeMiddleware: { resolveOptional },
-      claim: handler, mute: handler, unmute: handler, quietHours: handler, update: handler,
-      systemUpdate: handler, rollback: handler, restartHandler: handler, start: handler,
-      status: handler, ping: handler, help: handler, logs: handler, health: handler,
-      config: handler, invite: handler, promote: handler, demote: handler, camera: handler,
-      gdrive: handler, exportConfig: handler, importConfig: handler, feature: handler,
-      csv: handler, home: handler, workflowNavigation: handler, legacyMenu: handler, settings: handler, clean: handler,
-    });
+    const gateway = realGateway();
 
     await gateway.onApplicationBootstrap();
 
@@ -79,9 +103,46 @@ describe('GrammyBotGateway handler registration', () => {
       expect.any(Function),
       homeCallbackAckMiddleware,
       mocks.sequentializedMiddleware,
-      resolveOptional,
+      gateway.localeMiddleware.resolveOptional,
     ]);
     expect(gateway.homeMessageDelivery.setBot).toHaveBeenCalledWith(mocks.bot);
+  });
+
+  it('arms the camera-source message adapter and recovers prompts before the update pump', async () => {
+    const gateway = realGateway();
+
+    await gateway.onApplicationBootstrap();
+
+    expect(gateway.telegramCameraSourceMessage.setBot).toHaveBeenCalledWith(mocks.bot);
+    expect(gateway.recoverCameraSourcePrompts.execute).toHaveBeenCalledTimes(1);
+    expect(gateway.recoverCameraSourcePrompts.execute.mock.calls[0][0]).toBeInstanceOf(Date);
+    const recovery = gateway.recoverCameraSourcePrompts.execute.mock.invocationCallOrder[0];
+    // The adapter must hold the bot before recovery asks it to delete.
+    expect(gateway.telegramCameraSourceMessage.setBot.mock.invocationCallOrder[0])
+      .toBeLessThan(recovery);
+    // The real hazard is the runner: once it polls, a live reply handler can
+    // reach `claimReply` on a row already inside recovery's snapshot.
+    expect(recovery).toBeLessThan(mocks.run.mock.invocationCallOrder[0]);
+    expect(recovery).toBeLessThan(gateway.botCommandsMenu.syncAllUsers.mock.invocationCallOrder[0]);
+    expect(recovery).toBeLessThan(gateway.eventProcessor.drain.mock.invocationCallOrder[0]);
+  });
+
+  it('completes bootstrap when prompt recovery fails, without echoing Telegram text', async () => {
+    const gateway = realGateway({
+      recoverCameraSourcePrompts: {
+        execute: vi.fn().mockRejectedValue(new Error(TELEGRAM_TEXT)),
+      },
+    });
+
+    await expect(gateway.onApplicationBootstrap()).resolves.toBeUndefined();
+    await settle();
+
+    expect(gateway.botCommandsMenu.syncAllUsers).toHaveBeenCalledTimes(1);
+    const warned = gateway.logger.warn.mock.calls.flat().map((entry: unknown) => String(entry));
+    expect(warned.some((entry: string) => entry.includes('camera source prompt recovery'))).toBe(true);
+    for (const secret of [TELEGRAM_TEXT, 'message to delete not found', '907001', '550123']) {
+      expect(warned.join('\n')).not.toContain(secret);
+    }
   });
 
   it('registers exact workflow navigation before broad workflow callback handlers', () => {
@@ -134,11 +195,17 @@ describe('GrammyBotGateway handler registration', () => {
       telegramAdminAlert: {},
       liveStreamMessageCleanup: { register },
       telegramLiveStreamMessageCleanup: telegramCleanup,
+      telegramCameraSourceMessage: { setBot: vi.fn() },
+      recoverCameraSourcePrompts: { execute: vi.fn() },
     });
 
     await gateway.onApplicationBootstrap();
 
     expect(register).toHaveBeenCalledWith(telegramCleanup);
+    // No bot exists in mock mode, so every deletion would fail closed and
+    // stamp `deletionFailed` on rows nobody ever tried to clean.
+    expect(gateway.telegramCameraSourceMessage.setBot).not.toHaveBeenCalled();
+    expect(gateway.recoverCameraSourcePrompts.execute).not.toHaveBeenCalled();
   });
 
   it('clears the Telegram live-message cleanup seam on shutdown', async () => {
@@ -151,6 +218,7 @@ describe('GrammyBotGateway handler registration', () => {
       directMessenger: { clearBot: vi.fn() },
       botCommandsMenu: { clearBot: vi.fn() },
       telegramLiveStreamMessageCleanup: { clearBot },
+      telegramCameraSourceMessage: { clearBot: vi.fn() },
       homeMessageDelivery: Object.assign(Object.create(TelegramHomeMessageAdapter.prototype), { clearBot: vi.fn() }),
       eventNotifier: { clear: vi.fn() },
       recipientDirectory: { clear: vi.fn() },
@@ -162,6 +230,7 @@ describe('GrammyBotGateway handler registration', () => {
     await gateway.onModuleDestroy();
 
     expect(clearBot).toHaveBeenCalledTimes(1);
+    expect(gateway.telegramCameraSourceMessage.clearBot).toHaveBeenCalledTimes(1);
     expect(gateway.homeMessageDelivery.clearBot).toHaveBeenCalledTimes(1);
     expect(clear).toHaveBeenCalledTimes(1);
   });

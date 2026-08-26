@@ -59,9 +59,11 @@ import {
   HOME_MESSAGE_DELIVERY,
   type HomeMessageDeliveryPort,
 } from '../application/ports/home-message-delivery.port';
+import { RecoverCameraSourcePromptsUseCase } from '../application/recover-camera-source-prompts.use-case';
 import { ConsoleNotifierAdapter } from './console-notifier.adapter';
 import { TelegramAdminAlertAdapter } from './telegram-admin-alert.adapter';
 import { TelegramArchiveAdminAlertAdapter } from './telegram-archive-admin-alert.adapter';
+import { TelegramCameraSourceMessageAdapter } from './telegram-camera-source-message.adapter';
 import { TelegramLiveStreamMessageCleanupAdapter } from './telegram-live-stream-message-cleanup.adapter';
 import { TelegramDirectMessenger } from './telegram-direct-messenger.adapter';
 import { TelegramNotifierAdapter } from './telegram-notifier.adapter';
@@ -122,6 +124,10 @@ export class GrammyBotGateway
     private readonly liveStreamMessageCleanup: LiveStreamMessageCleanupService,
     @Inject(forwardRef(() => TelegramLiveStreamMessageCleanupAdapter))
     private readonly telegramLiveStreamMessageCleanup: TelegramLiveStreamMessageCleanupAdapter,
+    @Inject(forwardRef(() => TelegramCameraSourceMessageAdapter))
+    private readonly telegramCameraSourceMessage: TelegramCameraSourceMessageAdapter,
+    @Inject(forwardRef(() => RecoverCameraSourcePromptsUseCase))
+    private readonly recoverCameraSourcePrompts: RecoverCameraSourcePromptsUseCase,
     @Inject(forwardRef(() => RestartConfirmationService))
     private readonly restartConfirmation: RestartConfirmationService,
     @Inject(forwardRef(() => SystemOnlineNotifier))
@@ -280,6 +286,21 @@ export class GrammyBotGateway
     }
     this.botCommandsMenu.setBot(bot);
     this.telegramLiveStreamMessageCleanup.setBot(bot);
+    this.telegramCameraSourceMessage.setBot(bot);
+
+    // Started before `run(bot)`, not merely before the other follow-ups: the
+    // hazard is the update pump. A `running` row from the dead process sits in
+    // recovery's `listRunning` snapshot while a live reply handler could reach
+    // `claimReply` on the same row, so recovery goes first. `deleteMessage` is
+    // an ordinary API call and needs neither the runner nor `bot.init()`.
+    //
+    // Still not awaited: Nest awaits this hook, and an unreachable Telegram
+    // would otherwise hold the whole worker out of service. The rejection is
+    // dropped unread — a Telegram error names the chat and message it refused.
+    void this.recoverCameraSourcePrompts
+      .execute(new Date())
+      .catch(() => this.logger.warn('camera source prompt recovery failed'));
+
     this.eventNotifier.register(this.telegramNotifier);
     this.recipientDirectory.register(this.telegramRecipients);
     this.adminAlertService.register(this.telegramAdminAlert);
@@ -324,6 +345,7 @@ export class GrammyBotGateway
     }
     this.botCommandsMenu.clearBot();
     this.telegramLiveStreamMessageCleanup.clearBot();
+    this.telegramCameraSourceMessage.clearBot();
     this.eventNotifier.clear();
     this.recipientDirectory.clear();
     this.adminAlertService.clear();
