@@ -1457,74 +1457,8 @@ const ukCatalog = {
       credentialDeletionFailed: (cameraName: string) =>
         `⚠️ Telegram не видалив вашу відповідь для камери ${cameraName}. Видаліть її самі — у ній досі видно адресу камери.`,
       cancelSynonyms: ['cancel', 'скасувати', 'відміна', 'стоп'],
-
-      menuTitle: '📡 RTSP-джерела камер\nВиберіть дію:',
-      degraded: 'Поки RTSP не відновиться, працюють лише «Список» і «Видалити» — щоб камеру все ще можна було прибрати звідси.',
-      buttons: {
-        add: '➕ Додати',
-        edit: '✏️ Змінити',
-        test: '🧪 Перевірити й оновити',
-        list: '📋 Список',
-        remove: '🗑 Видалити',
-        cancel: '❌ Скасувати',
-      },
-      cameraPrompt: 'Надішліть назву налаштованої камери.',
-      credentialPrompt: 'Надішліть адресу джерела RTSP або RTSPS. Це повідомлення буде видалено.',
-      chooseSource: {
-        replace: 'Виберіть джерело для заміни:',
-        test: 'Виберіть джерело для перевірки:',
-        remove: 'Виберіть джерело для видалення:',
-      },
-      empty: 'RTSP-джерела камер не налаштовано.',
-      listHeader: '📡 RTSP-джерела камер',
-      sourceLine: (input: {
-        cameraName: string;
-        cameraId: string;
-        scheme: string;
-        host: string;
-        transport: string;
-        tlsMode: string;
-        profile: string;
-        ready: boolean;
-      }) => [
-        `${input.cameraName} (${input.cameraId})`,
-        `${input.scheme} · ${input.host}`,
-        `${input.transport} · TLS ${input.tlsMode} · ${input.profile}`,
-        input.ready ? 'готово · сумісно' : 'не готово · сумісність невідома',
-      ].join('\n'),
-      configured: (cameraName: string) => `✅ RTSP-джерело налаштовано та перевірено для камери ${cameraName}.`,
-      verified: (cameraName: string) =>
-        `✅ Камера ${cameraName} відповіла за збереженим джерелом. Нічого не змінено.`,
-      removed: (cameraName: string) => `✅ RTSP-джерело видалено для камери ${cameraName}.`,
-      configureFailed: '❌ Не вдалося налаштувати або перевірити RTSP-джерело.',
-      testFailed: '❌ Не вдалося перевірити RTSP-джерело.',
-      probe: {
-        LIVE_SOURCE_HOST_NOT_FOUND:
-          '❌ Ім’я вузла камери не розв’язується. Перевірте ім’я або скористайтеся її IP-адресою.',
-        LIVE_SOURCE_HOST_UNREACHABLE:
-          '❌ Камера не відповіла. Перевірте, чи ввімкнена вона та чи є в цій мережі.',
-        LIVE_SOURCE_ADDRESS_OUTSIDE_POLICY:
-          '❌ Адреса камери поза дозволеними мережами камер. Камера може бути в іншій підмережі або доступна лише через IPv6, тоді як політика дозволяє IPv4 (чи навпаки).',
-        LIVE_SOURCE_AUTHENTICATION_REJECTED:
-          '❌ Камера відхилила запит. Перевірте ім’я користувача та пароль — а також шлях потоку: багато камер відхиляють його так само, навіть коли облікові дані правильні.',
-        LIVE_SOURCE_TLS_VERIFICATION_FAILED:
-          '❌ Сертифікат камери не пройшов перевірку. Перевірте ім’я вузла та центр сертифікації.',
-        LIVE_SOURCE_UNSUPPORTED_STREAM:
-          '❌ Камера відповіла потоком, який цей пристрій не може відтворити. Спробуйте її додатковий потік або профіль H.264.',
-        LIVE_SOURCE_PROBE_TIMEOUT:
-          '❌ Камера відповідала надто довго. Перевірте мережу або спробуйте транспорт TCP.',
-        LIVE_SOURCE_PROBE_FAILED:
-          '❌ Не вдалося перевірити камеру. Перевірте адресу, облікові дані та мережу.',
-      },
       rtspClosed: '❌ Підтримка RTSP-камер вимкнулася до збереження зміни. Нічого не змінено.',
       stopFailed: '❌ Не вдалося зняти камеру з ефіру, тому зміну не збережено.',
-      listFailed: '❌ RTSP-джерела зараз недоступні.',
-      removeFailed: '❌ Не вдалося видалити RTSP-джерело.',
-      deletionFailed: '⚠️ Telegram не зміг видалити повідомлення з обліковими даними. Видаліть його вручну.',
-      staleSelection: 'Цей вибір джерела застарів. Відкрийте джерела камер знову.',
-      invalidCamera: 'Надішліть коректну назву камери.',
-      expired: 'Це налаштування джерела камери минуло через десять хвилин. Почніть заново.',
-      cancelled: 'Налаштування джерела камери скасовано.',
     },
     adminAlert: {
       daemonDown:

@@ -319,15 +319,6 @@ describe('camera.sources catalog', () => {
     }
   });
 
-  it('replaces the open chooseSource formatter with a closed operation record', () => {
-    for (const [locale, catalog] of [['en', en], ...LOCALES] as const) {
-      const choose = catalog.camera.sources.chooseSource;
-      expect(typeof choose, locale).toBe('object');
-      expect(Object.keys(choose).sort(), locale).toEqual(['remove', 'replace', 'test']);
-      for (const value of Object.values(choose)) expect(typeof value, locale).toBe('string');
-    }
-  });
-
   /*
    * Task 5 sends this before the credential ForceReply, and it is the only
    * place the administrator is told what they are about to hand Telegram.

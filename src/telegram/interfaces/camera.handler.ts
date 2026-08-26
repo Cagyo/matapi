@@ -182,6 +182,14 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
     const copy = this.catalog(ctx).camera.dashboardButtons;
     const keyboard = new InlineKeyboard();
     if (motion || rtsp) keyboard.text(copy.live, callback(receipt.id, 'l')).row();
+    // Managing RTSP sources is administrator work, and a screen that cannot
+    // describe the camera network cannot honestly offer to change it — so the
+    // entry appears only for an administrator while RTSP is ready. Both gates
+    // are re-applied in CameraSourcesHandler: hiding the button is the
+    // discoverability half, never the authorization.
+    if (rtsp && ctx.localeState?.user.role === 'admin') {
+      keyboard.text(this.catalog(ctx).camera.sources.dashboardButton, callback(receipt.id, 'src')).row();
+    }
     if (motion) {
       keyboard.text(copy.snapshot, callback(receipt.id, 's'))
         .text(copy.browseEvents, callback(receipt.id, 'b')).row()
@@ -236,6 +244,13 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
   }
 
   private async dispatchCallback(ctx: TelegramContext, receipt: WorkflowReturnReceipt, action: string): Promise<void> {
+    // `src` is the dashboard entry and `src:<action>` is everything inside the
+    // Sources screen; both clear browse state so a stale date prompt cannot
+    // claim the next message typed into a source workflow.
+    if (action === 'src') {
+      this.clearBrowse(ctx, receipt.id);
+      return this.sources.handleEntry(ctx, { receipt });
+    }
     if (action.startsWith('src:')) {
       this.clearBrowse(ctx, receipt.id);
       return this.sources.handleCallback(ctx, action.slice(4), receipt);

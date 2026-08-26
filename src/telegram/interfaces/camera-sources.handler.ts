@@ -1,56 +1,78 @@
 import { Inject, Injectable, Optional } from '@nestjs/common';
-import { createHash } from 'node:crypto';
-import { InlineKeyboard } from 'grammy';
-import { ConfigureLiveSourceUseCase } from '../../camera/application/configure-live-source.use-case';
-import { ListLiveSourcesUseCase } from '../../camera/application/list-live-sources.use-case';
-import { RemoveRtspSourceUseCase } from '../../camera/application/remove-rtsp-source.use-case';
-import { TestRtspSourceUseCase } from '../../camera/application/test-rtsp-source.use-case';
+import {
+  GetRtspSourceOverviewUseCase,
+  type RtspSourceOverview,
+  type RtspSourcesOverviewPage,
+} from '../../camera/application/get-rtsp-source-overview.use-case';
+import { ListCamerasUseCase } from '../../camera/application/list-cameras.use-case';
 import { CameraSourceUnavailableError } from '../../camera/domain/errors/camera-source-unavailable.error';
-import { LiveSourceProbeBaseError } from '../../camera/domain/errors/live-source-probe-base.error';
-import type { LiveSourceProbeError } from '../../camera/domain/ports/live-source-probe.port';
-import type { RedactedLiveSource } from '../../camera/domain/ports/live-source-repository.port';
+import { RTSP_SOURCE_CAMERA_TYPE } from '../../camera/domain/ports/rtsp-source-configuration.port';
 import { CLOCK, type ClockPort } from '../../events/domain/ports/clock.port';
 import { catalogFor, type LocaleCatalog } from '../../locales';
-import { en } from '../../locales/en';
 import type { WorkflowReturnReceipt } from '../domain/workflow-return';
-import { workflowReturnCallback } from '../domain/workflow-return';
+import { presentCameraSourceError } from './camera-source-error.presenter';
+import {
+  detailBody,
+  detailKeyboard,
+  detailsBody,
+  detailsKeyboard,
+  overviewBody,
+  overviewKeyboard,
+  SELECTOR_LENGTH,
+  sourceSelector,
+  type CameraSourceCopy,
+} from './camera-source.presenter';
 import type { TelegramContext } from './telegram-context';
 import { WorkflowEntryCoordinator, type WorkflowLaunch } from './workflow-entry.coordinator';
 import { WorkflowNavigationHandler } from './workflow-navigation.handler';
 import { FeatureUnavailableError } from '../../features/domain/errors/feature-unavailable.error';
 import { FEATURE_AVAILABILITY, type FeatureAvailabilityPort } from '../../features/domain/ports/feature-availability.port';
 
+/**
+ * Rows per rendered page.
+ *
+ * Deliberately distinct from the Camera use case's own
+ * `RTSP_SOURCE_OVERVIEW_PAGE_SIZE`: that constant is the default for callers
+ * that express no preference, while this one is how many rows *this screen*
+ * can show without a Telegram keyboard becoming unreadable. Presentation owns
+ * its page size and passes it explicitly; it stays inside the use case's
+ * `RTSP_SOURCE_OVERVIEW_MAX_PAGE_SIZE` ceiling, which exists to bound the DNS
+ * fan-out one page costs.
+ */
+const SOURCE_PAGE_SIZE = 8;
 const SOURCE_STATE_TTL_MS = 10 * 60_000;
-const SELECTOR_LENGTH = 12;
-const MAX_CALLBACK_BYTES = 64;
+const PAGE_ACTION = /^p:([1-9][0-9]{0,15})$/;
+// Derived from the presenter's selector width rather than restated, so the two
+// cannot drift into a screen that renders selectors its own router rejects.
+const DETAIL_ACTION = new RegExp(`^d:([A-Za-z0-9_-]{${SELECTOR_LENGTH}})$`);
 
-type SourceState =
-  | { kind: 'camera'; receipt: WorkflowReturnReceipt; createdAtMs: number }
+/**
+ * Everything this screen remembers between two Telegram updates.
+ *
+ * Navigation only, and nothing that could not be re-derived: a receipt, which
+ * page was last rendered, which opaque selector was opened, and the revision
+ * that detail was read at. No camera identifier, no display name, no address,
+ * no credential — a lost or expired entry costs a reload, never a wrong write.
+ */
+type CameraSourceViewState =
+  | { kind: 'overview'; receipt: WorkflowReturnReceipt; page: number; createdAtMs: number }
   | {
-      kind: 'credential';
+      kind: 'detail';
       receipt: WorkflowReturnReceipt;
-      action: 'add' | 'edit';
-      cameraName: string;
-      createdAtMs: number;
-    }
-  | {
-      kind: 'selection';
-      receipt: WorkflowReturnReceipt;
-      action: 'edit' | 'test' | 'remove';
-      choices: ReadonlyMap<string, RedactedLiveSource>;
+      selector: string;
+      revision: number;
+      page: number;
       createdAtMs: number;
     };
 
-/** Credential-safe source setup. CameraHandler validates `cam:<receipt>:src:*` before delegating here. */
+/** Status-first RTSP sources. CameraHandler validates `cam:<receipt>:src*` before delegating here. */
 @Injectable()
 export class CameraSourcesHandler {
-  private readonly states = new Map<string, SourceState>();
+  private readonly states = new Map<string, CameraSourceViewState>();
 
   constructor(
-    private readonly configure: ConfigureLiveSourceUseCase,
-    private readonly list: ListLiveSourcesUseCase,
-    private readonly remove: RemoveRtspSourceUseCase,
-    private readonly test: TestRtspSourceUseCase,
+    private readonly overview: GetRtspSourceOverviewUseCase,
+    private readonly cameras: ListCamerasUseCase,
     @Inject(CLOCK) private readonly clock: ClockPort,
     private readonly workflows: WorkflowEntryCoordinator,
     @Optional() private readonly navigation?: WorkflowNavigationHandler,
@@ -77,277 +99,200 @@ export class CameraSourcesHandler {
     return true;
   }
 
+  /**
+   * Opens on current state.
+   *
+   * Administrator and readiness are checked here rather than per action, so the
+   * dashboard button and `/camera sources` cannot drift apart: both arrive at
+   * this one entry point. A screen that cannot describe the camera network
+   * cannot honestly offer to change it, so an unready RTSP renders the feature
+   * notice instead of a menu.
+   */
   async handleEntry(ctx: TelegramContext, launch?: WorkflowLaunch): Promise<void> {
     const receipt = launch?.receipt ?? (await this.workflows.begin(ctx, 'camera', { source: 'natural-parent' }));
     if (!receipt || !(await this.requireAdmin(ctx, receipt))) return;
-    // Rendered even when RTSP is unhealthy: List and Remove must stay reachable
-    // precisely then, and refusing the menu outright is what strands an admin on
-    // a network the policy cannot describe. Each action gates itself below.
-    const notice = await this.rtspNotice(ctx);
+    if (!(await this.requireRtsp(ctx, receipt))) return;
     this.clear(ctx, receipt.id);
-    const copy = this.copy(ctx);
-    const keyboard = new InlineKeyboard()
-      .text(copy.buttons.add, data(receipt.id, 'a'))
-      .text(copy.buttons.edit, data(receipt.id, 'e'))
-      .row()
-      .text(copy.buttons.test, data(receipt.id, 't'))
-      .text(copy.buttons.list, data(receipt.id, 'l'))
-      .row()
-      .text(copy.buttons.remove, data(receipt.id, 'r'))
-      .text(copy.buttons.cancel, data(receipt.id, 'c'));
-    await ctx.reply(notice ? `${notice}\n\n${copy.degraded}\n\n${copy.menuTitle}` : copy.menuTitle, {
-      reply_markup: this.withHome(ctx, receipt, keyboard),
-    });
+    await this.showOverview(ctx, receipt, 1);
   }
 
   async handleCallback(ctx: TelegramContext, action: string, receipt: WorkflowReturnReceipt): Promise<void> {
     if (!(await this.workflows.validateCurrent(ctx, receipt))) return;
     if (!(await this.requireAdmin(ctx, receipt))) return;
-    const copy = this.copy(ctx);
-    if (action === 'c') {
-      this.clear(ctx, receipt.id);
-      await this.complete(ctx, receipt, () => ctx.reply(copy.cancelled));
-      return;
-    }
-    // 'l' and 'r' are exempt: listing reads stored metadata and removal starts no
-    // converter, and they are the only way to clean up while RTSP is unhealthy.
-    if (action !== 'l' && action !== 'r' && !action.startsWith('s:')) {
-      if (!(await this.requireRtsp(ctx, receipt))) return;
-    }
-    if (action === 'a') {
-      this.set(ctx, { kind: 'camera', receipt, createdAtMs: this.now() });
-      await ctx.reply(copy.cameraPrompt, {
-        reply_markup: this.withHome(ctx, receipt, cancelKeyboard(receipt.id, copy)),
-      });
-      return;
-    }
-    if (action === 'l') {
-      try {
-        const sources = await this.list.execute();
-        await this.complete(ctx, receipt, () => this.replyList(ctx, sources));
-      } catch (error) {
-        if (await this.replyUnavailable(ctx, receipt, error)) return;
-        await this.complete(ctx, receipt, () => ctx.reply(copy.listFailed));
-      }
-      return;
-    }
-    if (action === 'e' || action === 't' || action === 'r') {
-      await this.beginSelection(ctx, receipt, action === 'e' ? 'edit' : action === 't' ? 'test' : 'remove');
-      return;
-    }
-    const selected = /^s:([A-Za-z0-9_-]{12})$/.exec(action);
-    if (!selected) return;
-    const state = this.getCurrent(ctx, receipt.id);
-    if (state?.kind !== 'selection') return;
-    const source = state.choices.get(selected[1]);
-    if (!source) return;
-    if (state.action === 'remove') {
-      if (!(await this.workflows.markRunning(ctx, receipt))) return;
-      this.clear(ctx, receipt.id);
-      try {
-        await this.remove.execute({
-          actorUserId: receipt.userId,
-          cameraId: source.cameraId,
-          expectedRevision: source.revision,
-        });
-        await this.complete(ctx, receipt, () => ctx.reply(copy.removed(source.cameraName)));
-      } catch (error) {
-        if (await this.replyUnavailable(ctx, receipt, error)) return;
-        await this.complete(ctx, receipt, () => ctx.reply(copy.removeFailed));
-      }
-      return;
-    }
-    // Everything past removal starts a probe or a converter, so the selection is
-    // re-gated here rather than only when it was offered ten minutes ago.
     if (!(await this.requireRtsp(ctx, receipt))) return;
-    if (state.action === 'test') {
-      // Testing re-probes what is already stored: no credential prompt, no
-      // re-encryption, no revision bump, no session stop.
-      if (!(await this.workflows.markRunning(ctx, receipt))) return;
-      this.clear(ctx, receipt.id);
-      try {
-        const verified = await this.test.execute({
-          actorUserId: receipt.userId,
-          cameraId: source.cameraId,
-        });
-        await this.complete(ctx, receipt, () => ctx.reply(copy.verified(verified.cameraName)));
-      } catch (error) {
-        if (await this.replyUnavailable(ctx, receipt, error)) return;
-        await this.complete(ctx, receipt, () => ctx.reply(this.probeAdvice(ctx, error, copy.testFailed)));
-      }
-      return;
-    }
-    this.set(ctx, {
-      kind: 'credential',
-      receipt,
-      action: state.action,
-      cameraName: source.cameraName,
-      createdAtMs: this.now(),
-    });
-    await ctx.reply(copy.credentialPrompt, {
-      reply_markup: this.withHome(ctx, receipt, cancelKeyboard(receipt.id, copy)),
-    });
-  }
 
-  /** Claims only a current source prompt; stale source state is never consumed. */
-  async handleText(ctx: TelegramContext): Promise<boolean> {
-    const userId = ctx.from?.id;
-    const chatId = ctx.chat?.id;
-    if (userId === undefined || chatId === undefined) return false;
-    const state = await this.activeStateFor(ctx);
-    if (!state) return false;
-    if (!(await this.requireAdmin(ctx, state.receipt))) return true;
-    const copy = this.copy(ctx);
-    if (this.now() - state.createdAtMs > SOURCE_STATE_TTL_MS) {
-      this.states.delete(this.keyFor(state));
-      await this.complete(ctx, state.receipt, () => ctx.reply(copy.expired));
-      return true;
-    }
-    const text = ctx.message?.text?.trim();
-    if (!text) return true;
-    if (text.toLowerCase() === 'cancel') {
-      this.clear(ctx, state.receipt.id);
-      await this.complete(ctx, state.receipt, () => ctx.reply(copy.cancelled));
-      return true;
-    }
-    if (!(await this.requireRtsp(ctx, state.receipt))) return true;
-    if (state.kind === 'camera') {
-      if (text.length > 64 || hasControlCharacter(text)) {
-        await ctx.reply(copy.invalidCamera, {
-          reply_markup: this.withHome(ctx, state.receipt, cancelKeyboard(state.receipt.id, copy)),
-        });
-        return true;
-      }
-      this.set(ctx, {
-        kind: 'credential',
-        receipt: state.receipt,
-        action: 'add',
-        cameraName: text,
-        createdAtMs: this.now(),
-      });
-      await ctx.reply(copy.credentialPrompt, {
-        reply_markup: this.withHome(ctx, state.receipt, cancelKeyboard(state.receipt.id, copy)),
-      });
-      return true;
-    }
-    if (state.kind !== 'credential') return true;
-    if (!(await this.workflows.markRunning(ctx, state.receipt))) return true;
-    this.states.delete(this.keyFor(state));
-    const messageId = ctx.message?.message_id;
-    let deleted = false;
-    let configured: RedactedLiveSource | undefined;
-    let failure: string | undefined;
-    try {
-      configured = await this.configure.execute({
-        actorUserId: state.receipt.userId,
-        cameraName: state.cameraName,
-        url: text,
-        transport: 'tcp',
-        tlsMode: /^rtsps:\/\//iu.test(text) ? 'strict' : 'none',
-        profile: 'eco',
-      });
-    } catch (error) {
-      if (await this.replyUnavailable(ctx, state.receipt, error)) return true;
-      // The moment advice is worth most: the admin has just typed a URL.
-      failure = this.probeAdvice(ctx, error, copy.configureFailed);
-    } finally {
-      if (messageId !== undefined) {
-        try {
-          await ctx.api.deleteMessage(chatId, messageId);
-          deleted = true;
-        } catch {
-          /* safe warning below */
-        }
-      }
-    }
-    await this.complete(ctx, state.receipt, async () => {
-      await ctx.reply(
-        configured ? copy.configured(configured.cameraName) : failure ?? copy.configureFailed,
-      );
-      if (!deleted) await ctx.reply(copy.deletionFailed);
-    });
-    return true;
-  }
-
-  private async beginSelection(
-    ctx: TelegramContext,
-    receipt: WorkflowReturnReceipt,
-    action: 'edit' | 'test' | 'remove',
-  ): Promise<void> {
-    const copy = this.copy(ctx);
-    let sources: RedactedLiveSource[];
-    try {
-      sources = await this.list.execute();
-    } catch (error) {
-      if (await this.replyUnavailable(ctx, receipt, error)) return;
-      await this.complete(ctx, receipt, () => ctx.reply(copy.listFailed));
-      return;
-    }
-    if (sources.length === 0) {
-      await this.complete(ctx, receipt, () => ctx.reply(copy.empty));
-      return;
-    }
-    const choices = new Map(sources.map((source) => [selectorFor(source.cameraId), source]));
-    this.set(ctx, {
-      kind: 'selection',
-      receipt,
-      action,
-      choices,
-      createdAtMs: this.now(),
-    });
-    const keyboard = new InlineKeyboard();
-    for (const [selector, source] of choices) keyboard.text(source.cameraName, data(receipt.id, `s:${selector}`)).row();
-    keyboard.text(copy.buttons.cancel, data(receipt.id, 'c'));
-    // `chooseSource` is a closed record now; `edit` is this screen's older
-    // name for the replace operation the catalog keys on.
-    await ctx.reply(copy.chooseSource[action === 'edit' ? 'replace' : action], {
-      reply_markup: this.withHome(ctx, receipt, keyboard),
-    });
-  }
-
-  private async replyList(ctx: TelegramContext, sources: RedactedLiveSource[]): Promise<void> {
-    const copy = this.copy(ctx);
-    if (sources.length === 0) {
-      await ctx.reply(copy.empty);
-      return;
-    }
-    const lines = sources.map((source) =>
-      copy.sourceLine({
-        cameraId: source.cameraId,
-        cameraName: source.cameraName,
-        scheme: source.summary.scheme,
-        host: source.summary.host,
-        transport: source.summary.transport,
-        tlsMode: source.summary.tlsMode,
-        profile: source.summary.profile,
-        ready: source.summary.ready,
-      }),
-    );
-    await ctx.reply(`${copy.listHeader}\n\n${lines.join('\n\n')}`);
+    const page = PAGE_ACTION.exec(action);
+    if (page) return this.showOverview(ctx, receipt, Number(page[1]));
+    const detail = DETAIL_ACTION.exec(action);
+    if (detail) return this.showDetail(ctx, receipt, detail[1], this.rememberedPage(ctx, receipt.id));
+    if (action === 'over') return this.showOverview(ctx, receipt, this.rememberedPage(ctx, receipt.id));
+    if (action === 'info') return this.showDetails(ctx, receipt);
+    // `add`, `test`, `addr` (change address) and `rm` (remove) are rendered by
+    // this task and executed by Tasks 5 and 6. They are inert on purpose: an
+    // action that mutates a source belongs with the durable prompt and the
+    // revision fencing that arrive with it, not with the screen that offers it.
+    //
+    // None of them reuses a letter from the operation picker this screen
+    // replaced, so a `src:a`/`src:e`/`src:t` button still sitting in an old
+    // chat message resolves to nothing rather than to a different operation.
   }
 
   /**
-   * Renders a probe failure as advice, keyed by its code — never its host.
+   * Claims nothing yet.
    *
-   * `Object.hasOwn` rather than a bare lookup: `error.code` is a plain string at
-   * this boundary, and indexing an object literal with an unvetted key reaches
-   * the prototype, so a code of `toString` would otherwise hand `ctx.reply` a
-   * function. The map's keys are typed against the probe union, so an unhandled
-   * code is a build failure, not a silent fall-through to the generic message.
+   * The exact-reply conversations that read text arrive in Task 5 on the
+   * durable prompt store; this screen keeps no text prompt of its own, so every
+   * message belongs to whoever asked for it. The wiring stays because
+   * `CameraHandler` owns the `message:text` registration and Task 5 does not
+   * touch that file.
    */
-  private probeAdvice(ctx: TelegramContext, error: unknown, fallback: string): string {
-    const copy = this.copy(ctx);
-    if (error instanceof LiveSourceProbeBaseError && Object.hasOwn(copy.probe, error.code)) {
-      return copy.probe[error.code as LiveSourceProbeError['code']];
-    }
-    return fallback;
+  async handleText(_ctx: TelegramContext): Promise<boolean> {
+    return false;
   }
+
+  private async showOverview(ctx: TelegramContext, receipt: WorkflowReturnReceipt, page: number): Promise<void> {
+    let overview: RtspSourcesOverviewPage;
+    try {
+      overview = await this.overview.execute({ page, pageSize: SOURCE_PAGE_SIZE });
+    } catch (error) {
+      await this.replyFailure(ctx, receipt, error);
+      return;
+    }
+    await this.renderOverview(ctx, receipt, overview);
+  }
+
+  /**
+   * Renders one source, read fresh.
+   *
+   * The selector is resolved against the page it was rendered from rather than
+   * against anything remembered, so a source that moved, was renamed or was
+   * removed underneath simply is not found — and an unresolved selector reloads
+   * the overview instead of acting on a stale row.
+   */
+  private async showDetail(
+    ctx: TelegramContext,
+    receipt: WorkflowReturnReceipt,
+    selector: string,
+    page: number,
+  ): Promise<void> {
+    const copy = this.copy(ctx);
+    const resolved = await this.resolveSelected(ctx, receipt, page, selector);
+    if (!resolved) return;
+    const { overview, source } = resolved;
+
+    let removesCamera: boolean;
+    try {
+      removesCamera = await this.removesCamera(source.cameraId);
+    } catch (error) {
+      await this.replyFailure(ctx, receipt, error);
+      return;
+    }
+    this.set(ctx, {
+      kind: 'detail',
+      receipt,
+      selector,
+      revision: source.revision,
+      page: overview.page,
+      createdAtMs: this.now(),
+    });
+
+    await ctx.reply(detailBody(copy, source), {
+      reply_markup: detailKeyboard(copy, this.catalog(ctx).home.common, receipt.id, removesCamera),
+    });
+  }
+
+  /** The transport/quality/security explanation behind the detail's Details button. */
+  private async showDetails(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<void> {
+    const state = this.getCurrent(ctx, receipt.id);
+    if (state?.kind !== 'detail') {
+      await this.showOverview(ctx, receipt, this.rememberedPage(ctx, receipt.id));
+      return;
+    }
+    const copy = this.copy(ctx);
+    const resolved = await this.resolveSelected(ctx, receipt, state.page, state.selector);
+    if (!resolved) return;
+    const { source } = resolved;
+    // Details is a screen an administrator reads, so it keeps the detail alive
+    // rather than letting the ten-minute window run out underneath them and
+    // drop them back to page one of a library they were three pages into.
+    this.set(ctx, { ...state, revision: source.revision, createdAtMs: this.now() });
+    await ctx.reply(detailsBody(copy, source), {
+      reply_markup: detailsKeyboard(copy, this.catalog(ctx).home.common, receipt.id, state.selector),
+    });
+  }
+
+  /**
+   * Re-reads the page a selector was rendered from and resolves it there.
+   *
+   * `null` means the administrator has already been answered — with a failure
+   * notice, or with a reloaded overview when the selector no longer names a
+   * source on that page. Every action that acts on one source goes through
+   * here, so none of them can act on a row this screen merely remembers.
+   */
+  private async resolveSelected(
+    ctx: TelegramContext,
+    receipt: WorkflowReturnReceipt,
+    page: number,
+    selector: string,
+  ): Promise<{ overview: RtspSourcesOverviewPage; source: RtspSourceOverview } | null> {
+    let overview: RtspSourcesOverviewPage;
+    try {
+      overview = await this.overview.execute({ page, pageSize: SOURCE_PAGE_SIZE });
+    } catch (error) {
+      await this.replyFailure(ctx, receipt, error);
+      return null;
+    }
+    const source = overview.sources.find((candidate) => sourceSelector(candidate.cameraId) === selector);
+    if (!source) {
+      await this.renderOverview(ctx, receipt, overview);
+      return null;
+    }
+    return { overview, source };
+  }
+
+  /**
+   * Whether removing this source takes its camera with it.
+   *
+   * Only a camera minted to carry a source disappears with it; a camera that
+   * also records keeps everything except its RTSP address. The Camera boundary
+   * decides that at removal time, so the label is derived from the same camera
+   * type it decides on rather than guessed from the source projection.
+   */
+  private async removesCamera(cameraId: string): Promise<boolean> {
+    const cameras = await this.cameras.execute();
+    return cameras.find((camera) => camera.id === cameraId)?.type === RTSP_SOURCE_CAMERA_TYPE;
+  }
+
+  /** Re-renders an already-loaded page without asking the Camera boundary twice. */
+  private async renderOverview(
+    ctx: TelegramContext,
+    receipt: WorkflowReturnReceipt,
+    overview: RtspSourcesOverviewPage,
+  ): Promise<void> {
+    this.set(ctx, { kind: 'overview', receipt, page: overview.page, createdAtMs: this.now() });
+    const copy = this.copy(ctx);
+    await ctx.reply(overviewBody(copy, overview), {
+      reply_markup: overviewKeyboard(copy, this.catalog(ctx).home.common, receipt.id, overview),
+    });
+  }
+
+  private rememberedPage(ctx: TelegramContext, receiptId: string): number {
+    return this.getCurrent(ctx, receiptId)?.page ?? 1;
+  }
+
   private async requireAdmin(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<boolean> {
     if (ctx.localeState?.user.role === 'admin') return true;
     this.clear(ctx, receipt.id);
     await this.complete(ctx, receipt, () => ctx.reply(this.catalog(ctx).common.adminRequired));
     return false;
   }
+
+  /**
+   * The feature-state copy for an unavailable RTSP, or null when the failure is
+   * not one. Kept ahead of the error presenter deliberately: the presenter maps
+   * every one of these to the single lossy `feature-unavailable`, while these
+   * messages name the state and what to do about it.
+   */
   private unavailableMessage(ctx: TelegramContext, error: unknown): string | null {
     if (error instanceof CameraSourceUnavailableError) {
       const copy = this.copy(ctx);
@@ -361,21 +306,25 @@ export class CameraSourcesHandler {
       : error.state === 'needs-attention' ? stale.attention(name)
         : error.state === 'installing' ? stale.installing(name) : stale.unavailable(name);
   }
-  /** The notice the menu carries when RTSP is unhealthy, or null when it is not. */
-  private async rtspNotice(ctx: TelegramContext): Promise<string | null> {
-    try {
-      await this.availability?.requireReady('rtsp');
-      return null;
-    } catch (error) {
-      return this.unavailableMessage(ctx, error);
-    }
-  }
+
   private async replyUnavailable(ctx: TelegramContext, receipt: WorkflowReturnReceipt, error: unknown): Promise<boolean> {
     const message = this.unavailableMessage(ctx, error);
     if (message === null) return false;
     await this.complete(ctx, receipt, () => ctx.reply(message));
     return true;
   }
+
+  /**
+   * Renders a rejection as copy and nothing else. `error.message` is never
+   * interpolated: most failures on this screen were produced by a URL that
+   * carries the camera password.
+   */
+  private async replyFailure(ctx: TelegramContext, receipt: WorkflowReturnReceipt, error: unknown): Promise<void> {
+    if (await this.replyUnavailable(ctx, receipt, error)) return;
+    const presented = presentCameraSourceError(error);
+    await this.complete(ctx, receipt, () => ctx.reply(this.copy(ctx).errors[presented.kind]));
+  }
+
   private async requireRtsp(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<boolean> {
     try {
       await this.availability?.requireReady('rtsp');
@@ -415,7 +364,7 @@ export class CameraSourcesHandler {
   private now(): number {
     return this.clock.now().getTime();
   }
-  private set(ctx: TelegramContext, state: SourceState): void {
+  private set(ctx: TelegramContext, state: CameraSourceViewState): void {
     for (const [key, existing] of this.states) {
       if (
         existing.receipt.userId === state.receipt.userId
@@ -430,7 +379,7 @@ export class CameraSourcesHandler {
   private clear(ctx: TelegramContext, receiptId: string): void {
     this.states.delete(this.key(ctx, receiptId));
   }
-  private getCurrent(ctx: TelegramContext, receiptId: string): SourceState | undefined {
+  private getCurrent(ctx: TelegramContext, receiptId: string): CameraSourceViewState | undefined {
     const state = this.states.get(this.key(ctx, receiptId));
     if (state && this.now() - state.createdAtMs > SOURCE_STATE_TTL_MS) {
       this.states.delete(this.keyFor(state));
@@ -438,17 +387,7 @@ export class CameraSourcesHandler {
     }
     return state;
   }
-  private async activeStateFor(ctx: TelegramContext): Promise<SourceState | undefined> {
-    const userId = ctx.from?.id;
-    const chatId = ctx.chat?.id;
-    if (userId === undefined || chatId === undefined) return undefined;
-    for (const state of this.statesFor(userId, chatId)) {
-      if (await this.workflows.validateCurrent(ctx, state.receipt)) return state;
-      this.states.delete(this.keyFor(state));
-    }
-    return undefined;
-  }
-  private statesFor(userId: number, chatId: number): SourceState[] {
+  private statesFor(userId: number, chatId: number): CameraSourceViewState[] {
     return [...this.states.values()]
       .filter((state) => state.receipt.userId === userId && state.receipt.chatId === chatId)
       .sort((left, right) => right.createdAtMs - left.createdAtMs);
@@ -456,35 +395,13 @@ export class CameraSourcesHandler {
   private key(ctx: TelegramContext, receiptId: string): string {
     return `${ctx.from?.id ?? 'none'}:${ctx.chat?.id ?? 'none'}:${receiptId}`;
   }
-  private keyFor(state: SourceState): string {
+  private keyFor(state: CameraSourceViewState): string {
     return `${state.receipt.userId}:${state.receipt.chatId}:${state.receipt.id}`;
   }
   private catalog(ctx: TelegramContext): LocaleCatalog {
     return ctx.localeState?.catalog ?? catalogFor('en');
   }
-  private copy(ctx: TelegramContext): typeof en.camera.sources {
+  private copy(ctx: TelegramContext): CameraSourceCopy {
     return this.catalog(ctx).camera.sources;
   }
-  private withHome(ctx: TelegramContext, receipt: WorkflowReturnReceipt, keyboard: InlineKeyboard): InlineKeyboard {
-    const catalog = this.catalog(ctx);
-    return keyboard.row()
-      .text(catalog.home.common.back, workflowReturnCallback(receipt.id, 'origin'))
-      .text(catalog.home.common.home, workflowReturnCallback(receipt.id, 'home'));
-  }
-}
-
-function data(receiptId: string, action: string): string {
-  const callback = `cam:${receiptId}:src:${action}`;
-  if (Buffer.byteLength(callback, 'utf8') > MAX_CALLBACK_BYTES)
-    throw new RangeError('Camera source callback data exceeds Telegram limit');
-  return callback;
-}
-function selectorFor(value: string): string {
-  return createHash('sha256').update(value).digest('base64url').slice(0, SELECTOR_LENGTH);
-}
-function cancelKeyboard(receiptId: string, copy: typeof en.camera.sources): InlineKeyboard {
-  return new InlineKeyboard().text(copy.buttons.cancel, data(receiptId, 'c'));
-}
-function hasControlCharacter(value: string): boolean {
-  return [...value].some((character) => (character.codePointAt(0) ?? 0) <= 31 || character.codePointAt(0) === 127);
 }

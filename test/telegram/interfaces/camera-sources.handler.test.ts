@@ -1,15 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { LiveSourceAddressOutsidePolicyError } from '../../../src/camera/domain/errors/live-source-address-outside-policy.error';
-import { LiveSourceAuthenticationRejectedError } from '../../../src/camera/domain/errors/live-source-authentication-rejected.error';
-import { LiveSourceHostNotFoundError } from '../../../src/camera/domain/errors/live-source-host-not-found.error';
-import { LiveSourceHostUnreachableError } from '../../../src/camera/domain/errors/live-source-host-unreachable.error';
-import { LiveSourceProbeFailedError } from '../../../src/camera/domain/errors/live-source-probe-failed.error';
-import { LiveSourceProbeTimeoutError } from '../../../src/camera/domain/errors/live-source-probe-timeout.error';
-import { LiveSourceTlsVerificationError } from '../../../src/camera/domain/errors/live-source-tls-verification.error';
-import { LiveSourceUnsupportedStreamError } from '../../../src/camera/domain/errors/live-source-unsupported-stream.error';
-import type { LiveSourceProbeError } from '../../../src/camera/domain/ports/live-source-probe.port';
-import { ListLiveSourcesUseCase } from '../../../src/camera/application/list-live-sources.use-case';
-import type { LiveSourceRepositoryPort } from '../../../src/camera/domain/ports/live-source-repository.port';
+import type {
+  RtspSourceOverview,
+  RtspSourcesOverviewPage,
+} from '../../../src/camera/application/get-rtsp-source-overview.use-case';
+import { RTSP_SOURCE_CAMERA_TYPE } from '../../../src/camera/domain/ports/rtsp-source-configuration.port';
+import { CameraSourceUnavailableError } from '../../../src/camera/domain/errors/camera-source-unavailable.error';
 import { FeatureUnavailableError } from '../../../src/features/domain/errors/feature-unavailable.error';
 import type { FeatureAvailabilityPort } from '../../../src/features/domain/ports/feature-availability.port';
 import { catalogFor } from '../../../src/locales';
@@ -17,6 +12,9 @@ import type { WorkflowReturnReceipt } from '../../../src/telegram/domain/workflo
 import { CameraSourcesHandler } from '../../../src/telegram/interfaces/camera-sources.handler';
 import type { WorkflowEntryCoordinator } from '../../../src/telegram/interfaces/workflow-entry.coordinator';
 import type { WorkflowNavigationHandler } from '../../../src/telegram/interfaces/workflow-navigation.handler';
+
+const copy = catalogFor('en').camera.sources;
+const home = catalogFor('en').home.common;
 
 const receipt = {
   id: 'abcdefghijklmnop',
@@ -33,33 +31,104 @@ const receipt = {
     origin: { kind: 'sensors', page: 1 },
   },
 } satisfies WorkflowReturnReceipt;
-const activeReceipt = {
-  ...receipt,
-  id: 'qrstuvwxyzabcdef',
-} satisfies WorkflowReturnReceipt;
-const source = {
-  cameraId: 'camera-with-private-id',
-  cameraName: 'Front door',
-  summary: {
-    scheme: 'rtsp' as const,
-    host: 'camera.local:554',
-    transport: 'tcp' as const,
-    tlsMode: 'none' as const,
-    profile: 'eco' as const,
-    substreamHost: null,
-    ready: true,
-  },
-  hasCredential: true,
-  revision: 4,
-  verifiedAt: null,
-  policyDigest: null,
-};
 
-function setup(options: { availability?: FeatureAvailabilityPort; list?: unknown } = {}) {
-  const configure = { execute: vi.fn().mockResolvedValue(source) };
-  const list = options.list ?? { execute: vi.fn().mockResolvedValue([source]) };
-  const remove = { execute: vi.fn().mockResolvedValue({ removed: 'source' }) };
-  const test = { execute: vi.fn().mockResolvedValue(source) };
+const NETWORK = { family: 4, cidr: '192.168.1.0/24', interface: 'eth0' } as const;
+
+function overviewSource(overrides: Partial<RtspSourceOverview> = {}): RtspSourceOverview {
+  return {
+    cameraId: 'camera-with-private-id',
+    cameraName: 'Front door',
+    summary: {
+      scheme: 'rtsp',
+      host: 'camera.local:554',
+      transport: 'tcp',
+      tlsMode: 'none',
+      profile: 'eco',
+      substreamHost: null,
+      ready: true,
+    },
+    hasCredential: true,
+    revision: 4,
+    verifiedAt: new Date('2026-07-01'),
+    policyDigest: 'digest',
+    relationship: 'allowed',
+    operationalState: 'configured-verified',
+    currentPolicyDigest: 'digest',
+    needsReverification: false,
+    ...overrides,
+  };
+}
+
+function overviewPage(overrides: Partial<RtspSourcesOverviewPage> = {}): RtspSourcesOverviewPage {
+  return {
+    policy: { state: 'ready', networks: [NETWORK] },
+    sources: [],
+    attachCandidates: [],
+    page: 1,
+    pageCount: 1,
+    ...overrides,
+  };
+}
+
+/** Distinctly named sources, so paging and per-row identity stay visible. */
+function manySources(count: number): RtspSourceOverview[] {
+  return Array.from({ length: count }, (_, index) =>
+    overviewSource({
+      cameraId: `camera-private-id-${index}`,
+      cameraName: `Camera ${index}`,
+    }),
+  );
+}
+
+interface CameraRow {
+  id: string;
+  name: string;
+  type: string;
+  enabled: boolean;
+  config: null;
+}
+
+/**
+ * The Camera use case is stubbed by paging `sources` with whatever `pageSize`
+ * the handler actually asks for — so a handler that asked for a different page
+ * size would render a different number of rows, and the row-count assertions
+ * would fail rather than pass on a stub that ignored the request.
+ */
+function setup(
+  options: {
+    availability?: FeatureAvailabilityPort;
+    pages?: RtspSourcesOverviewPage[];
+    sources?: RtspSourceOverview[];
+    cameras?: CameraRow[];
+  } = {},
+) {
+  const all = options.sources ?? [];
+  const overview = {
+    execute: vi.fn(async (request: { page?: number; pageSize?: number } = {}) => {
+      if (options.pages) return options.pages.shift() ?? overviewPage();
+      const size = request.pageSize ?? 5;
+      const pageCount = Math.max(1, Math.ceil(all.length / size));
+      const page = Math.min(Math.max(request.page ?? 1, 1), pageCount);
+      return overviewPage({
+        sources: all.slice((page - 1) * size, page * size),
+        page,
+        pageCount,
+      });
+    }),
+  };
+  const cameras = {
+    execute: vi.fn().mockResolvedValue(
+      options.cameras ?? [
+        {
+          id: 'camera-with-private-id',
+          name: 'Front door',
+          type: RTSP_SOURCE_CAMERA_TYPE,
+          enabled: true,
+          config: null,
+        },
+      ],
+    ),
+  };
   const workflows = {
     begin: vi.fn().mockResolvedValue(receipt),
     validateCurrent: vi.fn().mockResolvedValue(true),
@@ -70,17 +139,22 @@ function setup(options: { availability?: FeatureAvailabilityPort; list?: unknown
       await presentation.deliver();
     }),
   };
+  // A real clock, not a frozen one: the screen's ten-minute window is measured
+  // against `ClockPort`, so a constant `now` would make every expiry branch
+  // unreachable and every TTL assertion vacuous.
+  let nowMs = new Date('2026-07-17T00:00:00Z').getTime();
+  const advance = (ms: number) => {
+    nowMs += ms;
+  };
   const handler = new CameraSourcesHandler(
-    configure as never,
-    list as never,
-    remove as never,
-    test as never,
-    { now: () => new Date('2026-07-17') },
+    overview as never,
+    cameras as never,
+    { now: () => new Date(nowMs) },
     workflows as unknown as WorkflowEntryCoordinator,
     navigation as unknown as WorkflowNavigationHandler,
     options.availability,
   );
-  return { configure, handler, list, navigation, remove, test, workflows };
+  return { advance, cameras, handler, navigation, overview, workflows };
 }
 
 function context(input: { text?: string; role?: 'admin' | 'user'; messageId?: number } = {}) {
@@ -98,296 +172,525 @@ function context(input: { text?: string; role?: 'admin' | 'user'; messageId?: nu
   };
 }
 
-function keyboardData(ctx: ReturnType<typeof context>): string[] {
-  return (ctx.reply.mock.calls as unknown[][]).flatMap((call) => callbackData(call[1]));
+interface RenderedButton {
+  text: string;
+  callback_data: string;
 }
 
-function callbackData(options: unknown): string[] {
+function buttons(options: unknown): RenderedButton[] {
   if (!isRecord(options) || !isRecord(options.reply_markup) || !Array.isArray(options.reply_markup.inline_keyboard))
     return [];
   return options.reply_markup.inline_keyboard.flatMap((row) =>
     Array.isArray(row)
       ? row.flatMap((button) =>
-          isRecord(button) && typeof button.callback_data === 'string' ? [button.callback_data] : [],
+          isRecord(button) && typeof button.callback_data === 'string' && typeof button.text === 'string'
+            ? [{ text: button.text, callback_data: button.callback_data }]
+            : [],
         )
       : [],
   );
+}
+
+/** Buttons of one rendered screen, counted from the first reply of the test. */
+function screen(ctx: ReturnType<typeof context>, index: number): RenderedButton[] {
+  return buttons((ctx.reply.mock.calls[index] as unknown[])[1]);
+}
+
+function body(ctx: ReturnType<typeof context>, index: number): string {
+  return String((ctx.reply.mock.calls[index] as unknown[])[0]);
+}
+
+function bodies(ctx: ReturnType<typeof context>): string {
+  return (ctx.reply.mock.calls as unknown[][]).map((call) => String(call[0])).join('\n');
+}
+
+function keyboardData(ctx: ReturnType<typeof context>): string[] {
+  return (ctx.reply.mock.calls as unknown[][]).flatMap((call) =>
+    buttons(call[1]).map((button) => button.callback_data),
+  );
+}
+
+function labels(ctx: ReturnType<typeof context>): string[] {
+  return (ctx.reply.mock.calls as unknown[][]).flatMap((call) => buttons(call[1]).map((button) => button.text));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-describe('CameraSourcesHandler contextual state', () => {
-  it('renders only receipt-bound source callbacks without camera ids or credentials', async () => {
-    const { handler } = setup();
+/** The action half of a rendered `cam:<receipt>:src:<action>` callback. */
+function action(data: string): string {
+  return data.split(':src:')[1];
+}
+
+describe('CameraSourcesHandler status-first overview', () => {
+  it('opens on the empty state with one primary Add first camera action, Back and Home', async () => {
+    const { handler, overview } = setup({ sources: [] });
+    const ctx = context();
+
+    await handler.handleEntry(ctx as never, { receipt });
+
+    expect(overview.execute).toHaveBeenCalledWith({ page: 1, pageSize: 8 });
+    expect(body(ctx, 0)).toContain(copy.overview.title);
+    expect(body(ctx, 0)).toContain(copy.policy.scope);
+    expect(body(ctx, 0)).toContain(copy.policy.network(NETWORK));
+    expect(body(ctx, 0)).toContain(copy.policy.state.ready);
+    expect(body(ctx, 0)).toContain(copy.emptyState.title);
+    expect(body(ctx, 0)).toContain(copy.emptyState.body);
+
+    const rendered = screen(ctx, 0);
+    expect(rendered.filter((button) => button.text === copy.emptyState.addFirst)).toHaveLength(1);
+    expect(rendered.map((button) => button.text)).not.toContain(copy.overview.addCamera);
+    expect(rendered.map((button) => button.callback_data)).toEqual(
+      expect.arrayContaining(['wr:abcdefghijklmnop:o', 'wr:abcdefghijklmnop:h']),
+    );
+    expect(rendered.map((button) => button.text)).toEqual(
+      expect.arrayContaining([home.back, home.home]),
+    );
+  });
+
+  it('renders no Add/Edit/Test/List/Remove operation picker', async () => {
+    const { handler } = setup({ sources: [overviewSource()] });
+    const ctx = context();
+
+    await handler.handleEntry(ctx as never, { receipt });
+
+    const data = keyboardData(ctx);
+    // The picker's own callbacks, so a button left in an old chat message
+    // resolves to nothing rather than to a different operation.
+    for (const legacy of ['a', 'e', 't', 'l', 'r', 'c', 's:AAAAAAAAAAAA']) {
+      expect(data, legacy).not.toContain(`cam:abcdefghijklmnop:src:${legacy}`);
+    }
+    expect(labels(ctx)).not.toContain('➕ Add');
+    expect(labels(ctx)).not.toContain('✏️ Edit');
+    expect(labels(ctx)).not.toContain('🧪 Test & update');
+    expect(labels(ctx)).not.toContain('📋 List');
+    expect(labels(ctx)).not.toContain('🗑 Remove');
+    expect(bodies(ctx)).not.toContain('Choose an action:');
+  });
+
+  it('renders eight localized source rows per page with a next page control and no camera ids', async () => {
+    const { handler, overview } = setup({ sources: manySources(20) });
+    const ctx = context();
+
+    await handler.handleEntry(ctx as never, { receipt });
+
+    expect(overview.execute).toHaveBeenCalledWith({ page: 1, pageSize: 8 });
+    const rendered = screen(ctx, 0);
+    expect(rendered.filter((button) => button.callback_data.includes(':src:d:'))).toHaveLength(8);
+    expect(rendered.map((button) => button.text)).toContain(
+      copy.row({ cameraName: 'Camera 0', status: copy.statuses['configured-verified'] }),
+    );
+    expect(rendered.map((button) => button.text)).toContain(copy.overview.addCamera);
+    expect(rendered.map((button) => button.text)).toContain(copy.overview.next);
+    expect(rendered.map((button) => button.text)).not.toContain(copy.overview.previous);
+    expect(rendered.map((button) => button.callback_data)).toContain('cam:abcdefghijklmnop:src:p:2');
+    expect(body(ctx, 0)).toContain(copy.overview.page(1, 3));
+
+    expect(JSON.stringify(ctx.reply.mock.calls)).not.toContain('camera-private-id-');
+    expect(keyboardData(ctx).every((value) => Buffer.byteLength(value, 'utf8') <= 64)).toBe(true);
+  });
+
+  it('pages forward and back over the same eight-row window', async () => {
+    const { handler, overview } = setup({ sources: manySources(20) });
     const ctx = context();
     await handler.handleEntry(ctx as never, { receipt });
+
+    await handler.handleCallback(ctx as never, 'p:2', receipt);
+
+    expect(overview.execute).toHaveBeenLastCalledWith({ page: 2, pageSize: 8 });
+    const second = screen(ctx, 1).map((button) => button.callback_data);
+    expect(second.filter((value) => value.includes(':src:d:'))).toHaveLength(8);
+    expect(second).toContain('cam:abcdefghijklmnop:src:p:1');
+    expect(second).toContain('cam:abcdefghijklmnop:src:p:3');
+    expect(screen(ctx, 1).map((button) => button.text)).toContain(copy.overview.previous);
+    expect(body(ctx, 1)).toContain(copy.overview.page(2, 3));
+
+    await handler.handleCallback(ctx as never, 'p:3', receipt);
+    const third = screen(ctx, 2).map((button) => button.callback_data);
+    expect(third.filter((value) => value.includes(':src:d:'))).toHaveLength(4);
+    expect(third).not.toContain('cam:abcdefghijklmnop:src:p:4');
+    expect(screen(ctx, 2).map((button) => button.text)).not.toContain(copy.overview.next);
+  });
+
+  it('renders the policy scope and every installed network on a populated page', async () => {
+    const ipv6 = { family: 6, cidr: 'fd00::/64', interface: 'eth1' } as const;
+    const { handler } = setup({
+      pages: [
+        overviewPage({
+          sources: [overviewSource()],
+          policy: { state: 'stale', networks: [NETWORK, ipv6] },
+        }),
+      ],
+    });
+    const ctx = context();
+
+    await handler.handleEntry(ctx as never, { receipt });
+
+    expect(body(ctx, 0)).toContain(copy.policy.scope);
+    expect(body(ctx, 0)).toContain(copy.policy.network(NETWORK));
+    expect(body(ctx, 0)).toContain(copy.policy.network(ipv6));
+    expect(body(ctx, 0)).toContain(copy.policy.state.stale);
+    expect(body(ctx, 0)).not.toContain(copy.policy.state.ready);
+  });
+
+  it('says so when the policy describes no network at all', async () => {
+    const { handler } = setup({
+      pages: [overviewPage({ policy: { state: 'unavailable', networks: [] } })],
+    });
+    const ctx = context();
+
+    await handler.handleEntry(ctx as never, { receipt });
+
+    expect(body(ctx, 0)).toContain(copy.policy.noNetworks);
+    expect(body(ctx, 0)).toContain(copy.policy.state.unavailable);
+  });
+
+  it('omits the page line for a library that fits on one page', async () => {
+    const { handler } = setup({ sources: manySources(8) });
+    const ctx = context();
+
+    await handler.handleEntry(ctx as never, { receipt });
+
+    expect(body(ctx, 0)).not.toContain(copy.overview.page(1, 1));
+    expect(screen(ctx, 0).map((button) => button.text)).not.toContain(copy.overview.next);
+  });
+
+  it('keeps every rendered callback inside Telegram limits, overview and detail alike', async () => {
+    const { handler } = setup({ sources: manySources(20) });
+    const ctx = context();
+    await handler.handleEntry(ctx as never, { receipt });
+    const opener = screen(ctx, 0).find((button) => button.callback_data.includes(':src:d:'));
+
+    await handler.handleCallback(ctx as never, action(opener!.callback_data), receipt);
+
     const data = keyboardData(ctx);
+    expect(data.length).toBeGreaterThan(10);
+    for (const value of data) {
+      expect(Buffer.byteLength(value, 'utf8'), value).toBeLessThanOrEqual(64);
+    }
+    // The widest page number a callback could ever carry still fits.
+    expect(
+      Buffer.byteLength(`cam:${receipt.id}:src:p:${Number.MAX_SAFE_INTEGER}`, 'utf8'),
+    ).toBeLessThanOrEqual(64);
+  });
+});
 
-    expect(data).toEqual(expect.arrayContaining([
-      'cam:abcdefghijklmnop:src:a',
-      'cam:abcdefghijklmnop:src:e',
-      'wr:abcdefghijklmnop:o',
-      'wr:abcdefghijklmnop:h',
-    ]));
-    expect(data.every((value) => Buffer.byteLength(value, 'utf8') <= 64)).toBe(true);
-    expect(JSON.stringify(data)).not.toContain('camera-with-private-id');
+describe('CameraSourcesHandler source detail', () => {
+  /** Opens the single source's detail and returns the context it rendered into. */
+  async function openDetail(handler: CameraSourcesHandler) {
+    const ctx = context();
+    await handler.handleEntry(ctx as never, { receipt });
+    const opener = screen(ctx, 0).find((button) => button.callback_data.includes(':src:d:'));
+    if (!opener) throw new Error('the overview rendered no source row');
+    await handler.handleCallback(ctx as never, action(opener.callback_data), receipt);
+    return ctx;
+  }
+
+  it('shows the display name, redacted host, status and network, never the camera id', async () => {
+    const { handler } = setup({
+      sources: [
+        overviewSource({
+          operationalState: 'needs-attention',
+          relationship: 'blocked',
+          needsReverification: true,
+        }),
+      ],
+    });
+
+    const ctx = await openDetail(handler);
+
+    expect(body(ctx, 1)).toContain(
+      copy.detail({
+        cameraName: 'Front door',
+        host: 'camera.local:554',
+        status: copy.statuses['needs-attention'],
+        relationship: copy.relationships.blocked,
+      }),
+    );
+    expect(body(ctx, 1)).toContain(copy.reverificationDue);
+    expect(JSON.stringify(ctx.reply.mock.calls)).not.toContain('camera-with-private-id');
   });
 
-  it('does not consume a stale credential prompt or delete its message', async () => {
-    const { configure, handler, workflows } = setup();
-    await handler.handleCallback(context() as never, 'a', receipt);
+  it('omits the reverification notice for a source verified under the policy in force', async () => {
+    const { handler } = setup({ sources: [overviewSource()] });
+
+    const ctx = await openDetail(handler);
+
+    expect(body(ctx, 1)).not.toContain(copy.reverificationDue);
+    expect(body(ctx, 1)).toContain(copy.statuses['configured-verified']);
+  });
+
+  it('offers Test connection, Change address, Details and a way back to the overview', async () => {
+    const { handler } = setup({ sources: [overviewSource()] });
+
+    const ctx = await openDetail(handler);
+
+    const rendered = screen(ctx, 1);
+    const texts = rendered.map((button) => button.text);
+    expect(texts).toContain(copy.detailButtons.test);
+    expect(texts).toContain(copy.detailButtons.changeAddress);
+    expect(texts).toContain(copy.detailButtons.details);
+    expect(texts).toContain(home.home);
+    expect(rendered.map((button) => button.callback_data)).toContain('cam:abcdefghijklmnop:src:over');
+    expect(rendered.map((button) => button.callback_data)).toContain('wr:abcdefghijklmnop:h');
+  });
+
+  it('names the removal after the camera when the camera exists only to carry the source', async () => {
+    const { handler } = setup({ sources: [overviewSource()] });
+
+    const ctx = await openDetail(handler);
+
+    const texts = screen(ctx, 1).map((button) => button.text);
+    expect(texts).toContain(copy.removal.removeCameraButton);
+    expect(texts).not.toContain(copy.removal.removeSourceButton);
+  });
+
+  it('names the removal after the source when the source is attached to a real camera', async () => {
+    const { handler } = setup({
+      sources: [overviewSource()],
+      cameras: [
+        { id: 'camera-with-private-id', name: 'Front door', type: 'motion', enabled: true, config: null },
+      ],
+    });
+
+    const ctx = await openDetail(handler);
+
+    const texts = screen(ctx, 1).map((button) => button.text);
+    expect(texts).toContain(copy.removal.removeSourceButton);
+    expect(texts).not.toContain(copy.removal.removeCameraButton);
+  });
+
+  it('explains transport, quality, security and the policy relationship under Details', async () => {
+    const { handler } = setup({ sources: [overviewSource()] });
+    const ctx = await openDetail(handler);
+
+    await handler.handleCallback(ctx as never, 'info', receipt);
+
+    expect(body(ctx, 2)).toContain(copy.details.title);
+    expect(body(ctx, 2)).toContain(copy.details.transports.tcp);
+    expect(body(ctx, 2)).toContain(copy.details.profiles.eco);
+    expect(body(ctx, 2)).toContain(copy.details.security.none);
+    expect(body(ctx, 2)).toContain(copy.relationships.allowed);
+    expect(JSON.stringify(ctx.reply.mock.calls)).not.toContain('camera-with-private-id');
+  });
+
+  it('returns to the remembered overview page from a detail, inside the ten-minute window', async () => {
+    const { advance, handler, overview } = setup({ sources: manySources(20) });
+    const ctx = context();
+    await handler.handleEntry(ctx as never, { receipt });
+    await handler.handleCallback(ctx as never, 'p:2', receipt);
+    const opener = screen(ctx, 1).find((button) => button.callback_data.includes(':src:d:'));
+    await handler.handleCallback(ctx as never, action(opener!.callback_data), receipt);
+    advance(9 * 60_000);
+
+    await handler.handleCallback(ctx as never, 'over', receipt);
+
+    expect(overview.execute).toHaveBeenLastCalledWith({ page: 2, pageSize: 8 });
+    expect(body(ctx, 3)).toContain(copy.overview.page(2, 3));
+  });
+
+  /*
+   * The other side of the same window. Losing the remembered page costs a
+   * reload and nothing else — which is the whole reason this screen keeps
+   * navigation state rather than anything it would be dangerous to forget.
+   */
+  it('falls back to the first page once the remembered detail has expired', async () => {
+    const { advance, handler, overview } = setup({ sources: manySources(20) });
+    const ctx = context();
+    await handler.handleEntry(ctx as never, { receipt });
+    await handler.handleCallback(ctx as never, 'p:2', receipt);
+    const opener = screen(ctx, 1).find((button) => button.callback_data.includes(':src:d:'));
+    await handler.handleCallback(ctx as never, action(opener!.callback_data), receipt);
+    advance(11 * 60_000);
+
+    await handler.handleCallback(ctx as never, 'over', receipt);
+
+    expect(overview.execute).toHaveBeenLastCalledWith({ page: 1, pageSize: 8 });
+    expect(body(ctx, 3)).toContain(copy.overview.page(1, 3));
+  });
+
+  it('keeps the detail alive while the administrator reads its Details screen', async () => {
+    const { advance, handler, overview } = setup({ sources: manySources(20) });
+    const ctx = context();
+    await handler.handleEntry(ctx as never, { receipt });
+    await handler.handleCallback(ctx as never, 'p:2', receipt);
+    const opener = screen(ctx, 1).find((button) => button.callback_data.includes(':src:d:'));
+    await handler.handleCallback(ctx as never, action(opener!.callback_data), receipt);
+    advance(9 * 60_000);
+    await handler.handleCallback(ctx as never, 'info', receipt);
+    advance(9 * 60_000);
+
+    await handler.handleCallback(ctx as never, 'over', receipt);
+
+    expect(overview.execute).toHaveBeenLastCalledWith({ page: 2, pageSize: 8 });
+  });
+
+  /*
+   * `hasPending` is read across the handler boundary by
+   * `CameraHandler.cancelExact`, whose `'missing'` answer is what raises the
+   * `common.interrupted` notice. Viewing the screen now counts as pending —
+   * the administrator does have a live screen — so both arms are pinned here.
+   */
+  it('reports a viewed screen as pending until its window closes', async () => {
+    const { advance, handler } = setup({ sources: manySources(20) });
+    const ctx = context();
+
+    expect(handler.hasPending(100, 42, receipt.id)).toBe(false);
+
+    await handler.handleEntry(ctx as never, { receipt });
+    expect(handler.hasPending(100, 42, receipt.id)).toBe(true);
+    expect(handler.hasPending(100, 42)).toBe(true);
+
+    advance(9 * 60_000);
+    expect(handler.hasPending(100, 42, receipt.id)).toBe(true);
+
+    advance(2 * 60_000);
+    expect(handler.hasPending(100, 42, receipt.id)).toBe(false);
+    expect(handler.hasPending(100, 42)).toBe(false);
+  });
+
+  it('reloads the overview instead of acting when the selector no longer names a source', async () => {
+    const { cameras, handler } = setup({ sources: [overviewSource()] });
+    const ctx = context();
+    await handler.handleEntry(ctx as never, { receipt });
+
+    await handler.handleCallback(ctx as never, 'd:AAAAAAAAAAAA', receipt);
+
+    expect(body(ctx, 1)).toContain(copy.overview.title);
+    expect(screen(ctx, 1).map((button) => button.text)).not.toContain(copy.detailButtons.test);
+    expect(cameras.execute).not.toHaveBeenCalled();
+  });
+
+  it('reloads the overview when Details is pressed without a remembered detail', async () => {
+    const { handler } = setup({ sources: [overviewSource()] });
+    const ctx = context();
+    await handler.handleEntry(ctx as never, { receipt });
+
+    await handler.handleCallback(ctx as never, 'info', receipt);
+
+    expect(body(ctx, 1)).toContain(copy.overview.title);
+    expect(body(ctx, 1)).not.toContain(copy.details.title);
+  });
+});
+
+describe('CameraSourcesHandler entry gates', () => {
+  function unavailable(state: 'installed-off' | 'needs-attention' = 'needs-attention'): FeatureAvailabilityPort {
+    return {
+      awaitInitialVerification: vi.fn(),
+      inspect: vi.fn(),
+      requireReady: vi.fn().mockRejectedValue(new FeatureUnavailableError('rtsp', state)),
+    };
+  }
+
+  it('refuses a non-administrator and reads no source state at all', async () => {
+    const { cameras, handler, overview } = setup({ sources: [overviewSource()] });
+    const ctx = context({ role: 'user' });
+
+    await handler.handleEntry(ctx as never, { receipt });
+
+    expect(ctx.reply).toHaveBeenCalledWith(catalogFor('en').common.adminRequired);
+    expect(overview.execute).not.toHaveBeenCalled();
+    expect(cameras.execute).not.toHaveBeenCalled();
+  });
+
+  it('renders actionable feature copy instead of the overview when RTSP is not ready', async () => {
+    const { handler, overview } = setup({ availability: unavailable(), sources: [overviewSource()] });
+    const ctx = context();
+
+    await handler.handleEntry(ctx as never, { receipt });
+
+    const feature = catalogFor('en').feature;
+    expect(ctx.reply).toHaveBeenCalledWith(feature.stale.attention(feature.names.rtsp));
+    expect(overview.execute).not.toHaveBeenCalled();
+    expect(bodies(ctx)).not.toContain(copy.overview.title);
+  });
+
+  it('keeps the same readiness gate on every source callback', async () => {
+    const { handler, overview } = setup({
+      availability: unavailable('installed-off'),
+      sources: [overviewSource()],
+    });
+    const ctx = context();
+
+    await handler.handleCallback(ctx as never, 'p:2', receipt);
+
+    const feature = catalogFor('en').feature;
+    expect(ctx.reply).toHaveBeenCalledWith(feature.stale.disabled(feature.names.rtsp));
+    expect(overview.execute).not.toHaveBeenCalled();
+  });
+
+  it('refuses a non-administrator on a callback too', async () => {
+    const { handler, overview } = setup({ sources: [overviewSource()] });
+    const ctx = context({ role: 'user' });
+
+    await handler.handleCallback(ctx as never, 'p:2', receipt);
+
+    expect(ctx.reply).toHaveBeenCalledWith(catalogFor('en').common.adminRequired);
+    expect(overview.execute).not.toHaveBeenCalled();
+  });
+
+  it('does not render the overview for a receipt that is no longer current', async () => {
+    const { handler, overview, workflows } = setup({ sources: [overviewSource()] });
     workflows.validateCurrent.mockResolvedValueOnce(false);
-    const credential = context({ text: 'rtsp://user:pass@camera.local/live' });
 
-    await expect(handler.handleText(credential as never)).resolves.toBe(false);
+    await handler.handleCallback(context() as never, 'p:2', receipt);
 
-    expect(configure.execute).not.toHaveBeenCalled();
-    expect(credential.api.deleteMessage).not.toHaveBeenCalled();
-    expect(JSON.stringify(credential.reply.mock.calls)).not.toContain('user:pass');
+    expect(overview.execute).not.toHaveBeenCalled();
   });
 
-  it('uses the active source prompt after a newer Camera entry replaces stale state', async () => {
-    const { handler, workflows } = setup();
-    await handler.handleCallback(context() as never, 'a', receipt);
-    await handler.handleCallback(context() as never, 'a', activeReceipt);
-    workflows.validateCurrent.mockImplementation(async (_ctx, candidate) => candidate.id === activeReceipt.id);
-    const camera = context({ text: 'Garden' });
-
-    await expect(handler.handleText(camera as never)).resolves.toBe(true);
-
-    expect(workflows.validateCurrent).toHaveBeenLastCalledWith(camera, activeReceipt);
-    expect(camera.reply).toHaveBeenCalledWith(catalogFor('en').camera.sources.credentialPrompt, {
-      reply_markup: expect.anything(),
-    });
-  });
-
-  it('keys selection by receipt and resolves only opaque source selectors', async () => {
-    const { handler } = setup();
+  it('renders the RTSP-closed notice rather than a raw Camera rejection', async () => {
+    const { handler, overview } = setup({ sources: [] });
+    overview.execute.mockRejectedValueOnce(new CameraSourceUnavailableError('rtsp-closed'));
     const ctx = context();
-    await handler.handleCallback(ctx as never, 'e', receipt);
-    const choices = keyboardData(ctx);
 
-    expect(choices.some((value) => /^cam:abcdefghijklmnop:src:s:[A-Za-z0-9_-]{12}$/.test(value))).toBe(true);
-    expect(JSON.stringify(choices)).not.toContain('camera-with-private-id');
+    await handler.handleEntry(ctx as never, { receipt });
+
+    expect(ctx.reply).toHaveBeenCalledWith(copy.rtspClosed);
   });
 
-  it('removes under the revision the listing showed, on behalf of the receipt owner', async () => {
-    const { handler, remove } = setup();
+  it('renders presenter copy for an unclassified overview failure and never its message', async () => {
+    const { handler, overview } = setup({ sources: [] });
+    overview.execute.mockRejectedValueOnce(new Error('rtsp://user:pass@camera.local exploded'));
     const ctx = context();
-    await handler.handleCallback(ctx as never, 'r', receipt);
-    const selector = keyboardData(ctx).find((value) => value.includes(':src:s:'));
 
-    await handler.handleCallback(ctx as never, selector!.split(':src:')[1], receipt);
+    await handler.handleEntry(ctx as never, { receipt });
 
-    expect(remove.execute).toHaveBeenCalledWith({
-      actorUserId: 100,
-      cameraId: 'camera-with-private-id',
-      expectedRevision: 4,
-    });
-  });
-
-  it('tests a stored source without prompting for credentials or mutating it', async () => {
-    const { configure, handler, test } = setup();
-    const ctx = context();
-    await handler.handleCallback(ctx as never, 't', receipt);
-    const selector = keyboardData(ctx).find((value) => value.includes(':src:s:'));
-
-    await handler.handleCallback(ctx as never, selector!.split(':src:')[1], receipt);
-
-    expect(test.execute).toHaveBeenCalledWith({
-      actorUserId: 100,
-      cameraId: 'camera-with-private-id',
-    });
-    expect(configure.execute).not.toHaveBeenCalled();
     const replies = JSON.stringify(ctx.reply.mock.calls);
-    expect(replies).toContain(catalogFor('en').camera.sources.verified('Front door'));
-    expect(replies).not.toContain(catalogFor('en').camera.sources.credentialPrompt);
+    expect(replies).toContain(copy.errors['probe-failed']);
+    expect(replies).not.toContain('user:pass');
+    expect(replies).not.toMatch(/rtsps?:\/\//iu);
   });
 
-  /**
-   * Keyed by code so a missing member is a compile error, not a missing case:
-   * the TLS key once read `LIVE_SOURCE_TLS_VERIFICATION` while the error throws
-   * `..._FAILED`, and only that one code silently fell back to generic copy.
+  /*
+   * The four actions this task renders but does not execute.
+   *
+   * This test is expected to FAIL the moment Task 5 wires `add` and Task 6
+   * wires `test`/`addr`/`rm` — that is its job. Move an action out of this
+   * list deliberately, in the commit that implements it, rather than
+   * discovering later that one was wired by accident or never wired at all.
    */
-  const probeErrors: Record<LiveSourceProbeError['code'], LiveSourceProbeError> = {
-    LIVE_SOURCE_HOST_NOT_FOUND: new LiveSourceHostNotFoundError(),
-    LIVE_SOURCE_HOST_UNREACHABLE: new LiveSourceHostUnreachableError(),
-    LIVE_SOURCE_ADDRESS_OUTSIDE_POLICY: new LiveSourceAddressOutsidePolicyError(),
-    LIVE_SOURCE_AUTHENTICATION_REJECTED: new LiveSourceAuthenticationRejectedError(),
-    LIVE_SOURCE_TLS_VERIFICATION_FAILED: new LiveSourceTlsVerificationError(),
-    LIVE_SOURCE_UNSUPPORTED_STREAM: new LiveSourceUnsupportedStreamError(),
-    LIVE_SOURCE_PROBE_TIMEOUT: new LiveSourceProbeTimeoutError(),
-    LIVE_SOURCE_PROBE_FAILED: new LiveSourceProbeFailedError(),
-  };
-
-  it.each(Object.values(probeErrors))(
-    'renders $code as its own advice rather than the generic failure',
-    async (probeError) => {
-      const { handler, test } = setup();
-      test.execute.mockRejectedValueOnce(probeError);
-      const ctx = context();
-      await handler.handleCallback(ctx as never, 't', receipt);
-      const selector = keyboardData(ctx).find((value) => value.includes(':src:s:'));
-
-      await handler.handleCallback(ctx as never, selector!.split(':src:')[1], receipt);
-
-      const copy = catalogFor('en').camera.sources;
-      const replies = JSON.stringify(ctx.reply.mock.calls);
-      expect(replies).toContain(copy.probe[probeError.code]);
-      expect(replies).not.toContain(copy.testFailed);
-      // Nothing derived from the credentialed URL may reach the chat.
-      expect(replies).not.toMatch(/rtsps?:\/\/|camera\.local/iu);
-    },
-  );
-
-  it('gives every probe failure a distinct, non-empty message', () => {
-    const copy = catalogFor('en').camera.sources;
-    const advice = Object.values(probeErrors).map((probeError) => copy.probe[probeError.code]);
-
-    expect(advice.every((line) => line.trim().length > 0)).toBe(true);
-    expect(new Set(advice).size).toBe(advice.length);
-    // The two copy requirements recorded when these kinds were classified.
-    expect(copy.probe.LIVE_SOURCE_AUTHENTICATION_REJECTED).toMatch(/password/iu);
-    expect(copy.probe.LIVE_SOURCE_AUTHENTICATION_REJECTED).toMatch(/path/iu);
-    expect(copy.probe.LIVE_SOURCE_ADDRESS_OUTSIDE_POLICY).toMatch(/subnet/iu);
-    expect(copy.probe.LIVE_SOURCE_ADDRESS_OUTSIDE_POLICY).toMatch(/IPv6/u);
-  });
-
-  // A code reaching the prototype chain must not hand a Function to ctx.reply.
-  it('falls back to the generic message for a code that is not its own key', async () => {
-    const { handler, test } = setup();
-    const impostor = new LiveSourceProbeFailedError();
-    Object.defineProperty(impostor, 'code', { value: 'toString' });
-    test.execute.mockRejectedValueOnce(impostor);
+  it('renders the Task 5 and Task 6 actions without executing anything', async () => {
+    const { cameras, handler, overview } = setup({ sources: [overviewSource()] });
     const ctx = context();
-    await handler.handleCallback(ctx as never, 't', receipt);
-    const selector = keyboardData(ctx).find((value) => value.includes(':src:s:'));
+    await handler.handleEntry(ctx as never, { receipt });
+    const rendered = ctx.reply.mock.calls.length;
+    const reads = overview.execute.mock.calls.length;
 
-    await handler.handleCallback(ctx as never, selector!.split(':src:')[1], receipt);
-
-    const replies = ctx.reply.mock.calls.flat();
-    expect(replies).toContain(catalogFor('en').camera.sources.testFailed);
-    expect(replies.every((reply) => typeof reply !== 'function')).toBe(true);
-  });
-
-  /**
-   * The lock-out this plan's removal carve-out exists to prevent, exercised end
-   * to end: a reinstall closed the start gate and never reopened it, and the
-   * policy the inspector needs is gone. The admin must still be able to list
-   * and remove — the carve-out in the use case is worthless if the menu, the
-   * listing, or the selection refuses one layer up.
-   */
-  describe('with RTSP unhealthy', () => {
-    function degraded() {
-      const availability: FeatureAvailabilityPort = {
-        awaitInitialVerification: vi.fn(),
-        inspect: vi.fn(),
-        requireReady: vi.fn().mockRejectedValue(
-          new FeatureUnavailableError('rtsp', 'needs-attention'),
-        ),
-      };
-      // The real listing use case, not a stub: re-adding a readiness check or a
-      // start-gate assertion to it must break this test.
-      const repository = {
-        listRedacted: vi.fn().mockResolvedValue([source]),
-      } as unknown as LiveSourceRepositoryPort;
-      return setup({ availability, list: new ListLiveSourcesUseCase(repository) });
+    for (const inert of ['add', 'test', 'addr', 'rm']) {
+      await handler.handleCallback(ctx as never, inert, receipt);
     }
 
-    it('still renders the menu, with a notice saying what still works', async () => {
-      const { handler } = degraded();
-      const ctx = context();
-
-      await handler.handleEntry(ctx as never, { receipt });
-
-      const replies = JSON.stringify(ctx.reply.mock.calls);
-      expect(replies).toContain(catalogFor('en').camera.sources.degraded);
-      expect(keyboardData(ctx)).toEqual(
-        expect.arrayContaining(['cam:abcdefghijklmnop:src:r', 'cam:abcdefghijklmnop:src:l']),
-      );
-    });
-
-    it('still lists sources', async () => {
-      const { handler } = degraded();
-      const ctx = context();
-
-      await handler.handleCallback(ctx as never, 'l', receipt);
-
-      expect(JSON.stringify(ctx.reply.mock.calls)).toContain('Front door');
-    });
-
-    it('still removes a source, under the revision the listing showed', async () => {
-      const { handler, remove } = degraded();
-      const ctx = context();
-      await handler.handleCallback(ctx as never, 'r', receipt);
-      const selector = keyboardData(ctx).find((value) => value.includes(':src:s:'));
-      expect(selector).toBeDefined();
-
-      await handler.handleCallback(ctx as never, selector!.split(':src:')[1], receipt);
-
-      expect(remove.execute).toHaveBeenCalledWith({
-        actorUserId: 100,
-        cameraId: 'camera-with-private-id',
-        expectedRevision: 4,
-      });
-      expect(JSON.stringify(ctx.reply.mock.calls)).toContain(
-        catalogFor('en').camera.sources.removed('Front door'),
-      );
-    });
-
-    it('still refuses to add, edit or test a source', async () => {
-      const { configure, handler, test } = degraded();
-      const ctx = context();
-
-      for (const action of ['a', 'e', 't']) {
-        await handler.handleCallback(ctx as never, action, receipt);
-      }
-
-      expect(configure.execute).not.toHaveBeenCalled();
-      expect(test.execute).not.toHaveBeenCalled();
-      expect(JSON.stringify(ctx.reply.mock.calls)).not.toContain(
-        catalogFor('en').camera.sources.credentialPrompt,
-      );
-    });
+    expect(ctx.reply).toHaveBeenCalledTimes(rendered);
+    expect(overview.execute).toHaveBeenCalledTimes(reads);
+    expect(cameras.execute).not.toHaveBeenCalled();
   });
 
-  it('renders typed probe advice after a credential is submitted, not generic failure', async () => {
-    const { configure, handler } = setup();
-    configure.execute.mockRejectedValueOnce(new LiveSourceAuthenticationRejectedError());
-    await handler.handleCallback(context() as never, 'a', receipt);
-    await handler.handleText(context({ text: 'Front door' }) as never);
-    const credential = context({ text: 'rtsp://user:pass@camera.local/live', messageId: 91 });
+  it('claims no ordinary text message while no prompt exists', async () => {
+    const { handler } = setup({ sources: [overviewSource()] });
 
-    await handler.handleText(credential as never);
-
-    const replies = JSON.stringify(credential.reply.mock.calls);
-    expect(replies).toContain(
-      catalogFor('en').camera.sources.probe.LIVE_SOURCE_AUTHENTICATION_REJECTED,
-    );
-    expect(replies).not.toContain(catalogFor('en').camera.sources.configureFailed);
-    expect(replies).not.toContain('user:pass');
-    // The credential message is still deleted on the failure path.
-    expect(credential.api.deleteMessage).toHaveBeenCalledWith(42, 91);
-  });
-
-  it('marks configuration running before using and deleting the credential text', async () => {
-    const { configure, handler, workflows } = setup();
-    await handler.handleCallback(context() as never, 'a', receipt);
-    await handler.handleText(context({ text: 'Front door' }) as never);
-    const credential = context({
-      text: 'rtsps://user:pass@camera.local/live',
-      messageId: 88,
-    });
-
-    await handler.handleText(credential as never);
-
-    expect(workflows.markRunning).toHaveBeenCalledWith(credential, receipt);
-    expect(configure.execute).toHaveBeenCalledWith(
-      expect.objectContaining({ actorUserId: 100, cameraName: 'Front door', tlsMode: 'strict' }),
-    );
-    expect(credential.api.deleteMessage).toHaveBeenCalledWith(42, 88);
-    expect(JSON.stringify(credential.reply.mock.calls)).not.toContain('user:pass');
+    await expect(
+      handler.handleText(context({ text: 'rtsp://user:pass@camera.local/live' }) as never),
+    ).resolves.toBe(false);
   });
 });

@@ -71,6 +71,7 @@ function setup(availability?: FeatureAvailabilityPort) {
     handleEntry: vi.fn(),
     handleCallback: vi.fn(),
     handleText: vi.fn().mockResolvedValue(false),
+    hasPending: vi.fn().mockReturnValue(false),
   };
   const workflows = {
     begin: vi.fn().mockResolvedValue(receipt),
@@ -128,17 +129,35 @@ function setup(availability?: FeatureAvailabilityPort) {
   };
 }
 
-function context(input: { match?: string; data?: string; text?: string } = {}) {
+/**
+ * Readiness per feature, not one blanket answer: the RTSP Sources entry is
+ * gated on `rtsp` alone, so a port whose `requireReady` ignored its argument
+ * could not tell the visibility matrix apart.
+ */
+function readiness(ready: Partial<Record<'motion' | 'rtsp', boolean>>): FeatureAvailabilityPort {
+  return {
+    awaitInitialVerification: vi.fn(),
+    inspect: vi.fn(),
+    requireReady: vi.fn(async (name: string) => {
+      if (ready[name as 'motion' | 'rtsp']) return;
+      throw new FeatureUnavailableError(name as 'motion' | 'rtsp', 'needs-attention');
+    }),
+  };
+}
+
+function context(
+  input: { match?: string; data?: string; text?: string; role?: 'admin' | 'user'; chatType?: string } = {},
+) {
   return {
     from: { id: 7 },
-    chat: { id: 11, type: 'private' },
+    chat: { id: 11, type: input.chatType ?? 'private' },
     match: input.match ?? '',
     message: { message_id: 20, text: input.text ?? '/camera' },
     callbackQuery: input.data ? { data: input.data } : undefined,
     localeState: {
       locale: 'en',
       catalog: catalogFor('en'),
-      user: { telegramId: 7, role: 'admin' },
+      user: { telegramId: 7, role: input.role ?? 'admin' },
     },
     answerCallbackQuery: vi.fn().mockResolvedValue(true),
     reply: vi.fn().mockResolvedValue({ message_id: 55 }),
@@ -165,9 +184,122 @@ function callbackData(options: unknown): string[] {
   );
 }
 
+function buttonLabels(ctx: ReturnType<typeof context>): string[] {
+  return (ctx.reply.mock.calls as unknown[][]).flatMap((call) => {
+    const options = call[1];
+    if (!isRecord(options) || !isRecord(options.reply_markup) || !Array.isArray(options.reply_markup.inline_keyboard))
+      return [];
+    return options.reply_markup.inline_keyboard.flatMap((row) =>
+      Array.isArray(row)
+        ? row.flatMap((button) => (isRecord(button) && typeof button.text === 'string' ? [button.text] : []))
+        : [],
+    );
+  });
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
+
+/*
+ * RTSP Sources is administrator-only and appears only while RTSP is ready, so
+ * all four cells of that matrix are asserted rather than the one happy path.
+ */
+describe('camera dashboard RTSP Sources visibility', () => {
+  const label = catalogFor('en').camera.sources.dashboardButton;
+  const entry = 'cam:abcdefghijklmnop:src';
+
+  it('offers the entry to an administrator while RTSP is ready, after Live', async () => {
+    const { handler } = setup(readiness({ motion: true, rtsp: true }));
+    const ctx = context();
+
+    await handler.handleDashboard(ctx as never, { receipt });
+
+    expect(buttonLabels(ctx)).toContain(label);
+    expect(callbacks(ctx)).toContain(entry);
+    // Live stays the first camera action.
+    expect(buttonLabels(ctx)[0]).toBe(catalogFor('en').camera.dashboardButtons.live);
+    expect(callbacks(ctx).every((data) => Buffer.byteLength(data, 'utf8') <= 64)).toBe(true);
+  });
+
+  it('hides the entry from an administrator while RTSP is not ready', async () => {
+    const { handler } = setup(readiness({ motion: true, rtsp: false }));
+    const ctx = context();
+
+    await handler.handleDashboard(ctx as never, { receipt });
+
+    expect(buttonLabels(ctx)).not.toContain(label);
+    expect(callbacks(ctx)).not.toContain(entry);
+    expect(buttonLabels(ctx)[0]).toBe(catalogFor('en').camera.dashboardButtons.live);
+  });
+
+  it('hides the entry from a normal user while RTSP is ready', async () => {
+    const { handler } = setup(readiness({ motion: true, rtsp: true }));
+    const ctx = context({ role: 'user' });
+
+    await handler.handleDashboard(ctx as never, { receipt });
+
+    expect(buttonLabels(ctx)).not.toContain(label);
+    expect(callbacks(ctx)).not.toContain(entry);
+  });
+
+  it('hides the entry from a normal user while RTSP is not ready', async () => {
+    const { handler } = setup(readiness({ motion: true, rtsp: false }));
+    const ctx = context({ role: 'user' });
+
+    await handler.handleDashboard(ctx as never, { receipt });
+
+    expect(buttonLabels(ctx)).not.toContain(label);
+    expect(callbacks(ctx)).not.toContain(entry);
+  });
+
+  it('opens the Sources screen from the dashboard entry under the same receipt', async () => {
+    const { callback, handler, sources } = setup(readiness({ motion: true, rtsp: true }));
+    await handler.handleDashboard(context() as never, { receipt });
+
+    await callback(context({ data: entry }));
+
+    expect(sources.handleEntry).toHaveBeenCalledWith(expect.anything(), { receipt });
+    expect(sources.handleCallback).not.toHaveBeenCalled();
+  });
+});
+
+describe('/camera sources direct entry', () => {
+  it('routes a private administrator command to the Sources screen', async () => {
+    const { commands, sources } = setup(readiness({ motion: true, rtsp: true }));
+    const ctx = context({ match: 'sources' });
+
+    await commands.get('camera')!(ctx);
+
+    expect(sources.handleEntry).toHaveBeenCalledWith(ctx, { receipt });
+  });
+
+  it('never opens the Sources screen outside a private chat', async () => {
+    const { commands, sources, workflows } = setup(readiness({ motion: true, rtsp: true }));
+
+    await commands.get('camera')!(context({ match: 'sources', chatType: 'group' }));
+
+    expect(sources.handleEntry).not.toHaveBeenCalled();
+    expect(workflows.begin).not.toHaveBeenCalled();
+  });
+
+  /*
+   * The role and readiness gates live in CameraSourcesHandler, so the command
+   * path reaches exactly the same entry point the dashboard button does —
+   * which is what makes the two paths impossible to gate differently.
+   */
+  it('delegates the administrator and readiness gates to the same entry point as the dashboard', async () => {
+    const { callback, commands, handler, sources } = setup(readiness({ motion: true, rtsp: true }));
+    await handler.handleDashboard(context() as never, { receipt });
+    await callback(context({ data: 'cam:abcdefghijklmnop:src' }));
+    await commands.get('camera')!(context({ match: 'sources', role: 'user' }));
+
+    expect(sources.handleEntry).toHaveBeenCalledTimes(2);
+    for (const call of sources.handleEntry.mock.calls) {
+      expect(call[1]).toEqual({ receipt });
+    }
+  });
+});
 
 describe('camera contextual callbacks', () => {
   it('starts direct camera commands from Home and preserves a captured launch receipt', async () => {
@@ -350,6 +482,29 @@ describe('camera contextual callbacks', () => {
       reply_markup: expect.anything(),
     });
     expect(next).not.toHaveBeenCalled();
+  });
+
+  /*
+   * `CameraSourcesHandler.hasPending` is the only thing that can tell Camera a
+   * draft exists when Camera itself holds none, and the answer decides whether
+   * the workflow's Back raises `common.interrupted`. Both arms are pinned
+   * because the Sources screen widened what "pending" means: viewing the
+   * overview now counts, where only an in-flight prompt used to.
+   */
+  it('treats a live Sources screen as a cancellable Camera draft', async () => {
+    const { handler, sources } = setup();
+    sources.hasPending.mockReturnValue(true);
+
+    await expect(handler.cancelExact({ userId: 7, chatId: 11, receiptId: receipt.id })).resolves.toBe('cancelled');
+
+    expect(sources.hasPending).toHaveBeenCalledWith(7, 11, receipt.id);
+  });
+
+  it('reports a missing draft when neither Camera nor the Sources screen holds one', async () => {
+    const { handler, sources } = setup();
+    sources.hasPending.mockReturnValue(false);
+
+    await expect(handler.cancelExact({ userId: 7, chatId: 11, receiptId: receipt.id })).resolves.toBe('missing');
   });
 
   it('registers an exact Camera draft canceller for returned source and browse state', async () => {
