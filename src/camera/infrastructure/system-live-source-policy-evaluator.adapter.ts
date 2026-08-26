@@ -108,28 +108,40 @@ export class SystemLiveSourcePolicyEvaluatorAdapter
     if (cidrs.length === 0) return 'blocked';
 
     // A source with no host at all is never shown as allowed.
-    const hosts = [...new Set(credentialFreeHosts)];
-    if (hosts.length === 0) return 'blocked';
+    if (credentialFreeHosts.length === 0) return 'blocked';
 
-    const answers = await raceDeadline(
-      Promise.all(hosts.map((host) => this.resolveHost(host))),
-      this.#timeoutMs,
-    );
-    if (answers === TIMED_OUT) return 'unresolved';
+    // Deduplicated on the parsed hostname rather than on the authority it
+    // arrived as: a primary and a substream commonly differ only by port, and
+    // `cam.local:554` / `cam.local:8554` is one hostname, so one lookup.
+    const parsed = credentialFreeHosts.map(parseHostname);
+    const hostnames = [...new Set(parsed.filter((host): host is string => host !== null))];
+    // A host that cannot be parsed stands for no address at all. It is folded
+    // in as one `unresolved` however many such hosts there were, since the
+    // combination below only cares about the worst answer.
+    const results: RtspSourcePolicyRelationship[] = parsed.some((host) => host === null)
+      ? ['unresolved']
+      : [];
 
-    return answers
-      .map((addresses) => classify(addresses, cidrs))
-      .reduce(worst, 'allowed');
+    if (hostnames.length > 0) {
+      const answers = await raceDeadline(
+        Promise.all(hostnames.map((hostname) => this.resolveHostname(hostname))),
+        this.#timeoutMs,
+      );
+      if (answers === TIMED_OUT) return 'unresolved';
+      for (const addresses of answers) results.push(classify(addresses, cidrs));
+    }
+
+    if (results.length === 0) return 'blocked';
+    return results.reduce(worst, 'allowed');
   }
 
   /**
-   * The addresses one host currently stands for, or `null` when it cannot be
-   * resolved. A literal never reaches the resolver. The rejected lookup carries
-   * the hostname, so it is discarded here rather than re-thrown or logged.
+   * The addresses one parsed hostname currently stands for, or `null` when it
+   * cannot be resolved. A literal never reaches the resolver. The rejected
+   * lookup carries the hostname, so it is discarded here rather than re-thrown
+   * or logged.
    */
-  private async resolveHost(host: string): Promise<readonly string[] | null> {
-    const hostname = parseHostname(host);
-    if (hostname === null) return null;
+  private async resolveHostname(hostname: string): Promise<readonly string[] | null> {
     if (isIP(hostname) !== 0) return [hostname];
     try {
       const answers = await this.#lookup(hostname);

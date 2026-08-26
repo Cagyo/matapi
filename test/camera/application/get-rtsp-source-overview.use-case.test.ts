@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   GetRtspSourceOverviewUseCase,
   RTSP_SOURCE_OVERVIEW_MAX_PAGE_SIZE,
+  RTSP_SOURCE_OVERVIEW_RESOLUTION_WAVE,
 } from '../../../src/camera/application/get-rtsp-source-overview.use-case';
 import { LiveSource } from '../../../src/camera/domain/live-source.entity';
 import type {
@@ -370,6 +371,51 @@ describe('GetRtspSourceOverviewUseCase', () => {
     expect(context.evaluator.evaluate).toHaveBeenCalledTimes(
       RTSP_SOURCE_OVERVIEW_MAX_PAGE_SIZE,
     );
+  });
+
+  it('resolves a page in bounded waves rather than all at once', async () => {
+    const context = fixture();
+    for (const index of Array.from({ length: 9 }, (_, offset) => offset + 1)) {
+      context.store({ cameraId: `cam-${index}`, cameraName: `Camera ${index}` });
+    }
+    let inFlight = 0;
+    let peak = 0;
+    const evaluator: LiveSourcePolicyEvaluatorPort = {
+      // Settles on a macrotask, so every row released together overlaps and the
+      // peak reflects the release size rather than scheduling luck.
+      evaluate: vi.fn(async () => {
+        inFlight += 1;
+        peak = Math.max(peak, inFlight);
+        await new Promise((resolve) => {
+          setImmediate(resolve);
+        });
+        inFlight -= 1;
+        return 'allowed' as const;
+      }),
+    };
+    const useCase = new GetRtspSourceOverviewUseCase(
+      context.repository,
+      context.media,
+      context.policyStatus,
+      evaluator,
+    );
+
+    const page = await useCase.execute({ pageSize: 9 });
+
+    expect(peak).toBe(RTSP_SOURCE_OVERVIEW_RESOLUTION_WAVE);
+    expect(evaluator.evaluate).toHaveBeenCalledTimes(9);
+    // Waves must not reorder the page.
+    expect(page.sources.map((source) => source.cameraId)).toEqual([
+      'cam-1',
+      'cam-2',
+      'cam-3',
+      'cam-4',
+      'cam-5',
+      'cam-6',
+      'cam-7',
+      'cam-8',
+      'cam-9',
+    ]);
   });
 
   it('orders pages by canonical name, not by letter case', async () => {

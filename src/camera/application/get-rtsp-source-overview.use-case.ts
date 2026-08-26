@@ -31,6 +31,18 @@ export const RTSP_SOURCE_OVERVIEW_PAGE_SIZE = 5;
 export const RTSP_SOURCE_OVERVIEW_MAX_PAGE_SIZE = RTSP_SOURCE_OVERVIEW_PAGE_SIZE * 4;
 
 /**
+ * How many rows are resolved at once.
+ *
+ * `dns.lookup` is `getaddrinfo` on the libuv threadpool, four slots by default,
+ * while each row's resolver budget starts when its evaluation does. Releasing a
+ * whole page at once would let later rows spend that budget sitting in the
+ * queue and time out without the resolver ever being asked — reporting
+ * `needs-attention` for a camera that is perfectly fine. In waves, the budget
+ * measures resolver latency rather than queue depth.
+ */
+export const RTSP_SOURCE_OVERVIEW_RESOLUTION_WAVE = 4;
+
+/**
  * What an operator has to do about one source, most blocking first.
  *
  * `configured-verified` is the only state that claims the source is usable, and
@@ -114,12 +126,23 @@ export class GetRtspSourceOverviewUseCase {
     const start = (page - 1) * pageSize;
 
     // Only the visible page is resolved: an overview must not fan a DNS query
-    // out across every stored source to render five rows.
-    const sources = await Promise.all(
-      ordered
-        .slice(start, start + pageSize)
-        .map((source) => this.describe(source, networks, currentPolicyDigest)),
-    );
+    // out across every stored source to render five rows. Even that page goes
+    // out in waves, so a slow resolver cannot make later rows expire in a
+    // queue rather than on an answer.
+    const visible = ordered.slice(start, start + pageSize);
+    const sources: RtspSourceOverview[] = [];
+    for (
+      let offset = 0;
+      offset < visible.length;
+      offset += RTSP_SOURCE_OVERVIEW_RESOLUTION_WAVE
+    ) {
+      const wave = await Promise.all(
+        visible
+          .slice(offset, offset + RTSP_SOURCE_OVERVIEW_RESOLUTION_WAVE)
+          .map((source) => this.describe(source, networks, currentPolicyDigest)),
+      );
+      sources.push(...wave);
+    }
 
     const withSource = new Set(stored.map((source) => source.cameraId));
     return {

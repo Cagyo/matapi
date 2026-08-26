@@ -146,4 +146,23 @@ describe('RTSP policy containment contract', () => {
     expect(agreeing.length + diverging.length).toBe(ROWS.length);
     expect(agreeing.length).toBeGreaterThan(20);
   });
+
+  it('agrees on real containment, not on mutual denial', async () => {
+    // Row count alone would not notice both implementations regressing to
+    // always-deny: every row would still "agree", on nothing. So the table has
+    // to keep proving that a healthy number of addresses are actually admitted
+    // by both sides.
+    let admittedByBoth = 0;
+    let refusedByBoth = 0;
+    for (const row of agreeing) {
+      if (probeAllows(row)) {
+        expect(await evaluatorAllows(row)).toBe(true);
+        admittedByBoth += 1;
+      } else {
+        refusedByBoth += 1;
+      }
+    }
+    expect(admittedByBoth).toBeGreaterThanOrEqual(10);
+    expect(refusedByBoth).toBeGreaterThanOrEqual(10);
+  });
 });

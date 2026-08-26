@@ -221,6 +221,27 @@ describe('SystemLiveSourcePolicyEvaluatorAdapter', () => {
       ).resolves.toBe('blocked');
     });
 
+    it('resolves one hostname once however many ports address it', async () => {
+      // The realistic substream shape: same camera, second port. Deduping on
+      // the raw authority would miss it and resolve `cam.local` twice.
+      const lookup = vi.fn().mockResolvedValue(answers('192.168.1.9'));
+      const { adapter } = evaluator(lookup);
+      await expect(
+        adapter.evaluate(['cam.local:554', 'cam.local:8554'], { networks: [LAN] }),
+      ).resolves.toBe('allowed');
+      expect(lookup).toHaveBeenCalledTimes(1);
+      expect(lookup).toHaveBeenCalledWith('cam.local');
+    });
+
+    it('still reports an unparsable host alongside a resolvable one', async () => {
+      const lookup = vi.fn().mockResolvedValue(answers('192.168.1.9'));
+      const { adapter } = evaluator(lookup);
+      await expect(
+        adapter.evaluate(['cam.local', 'not a host'], { networks: [LAN] }),
+      ).resolves.toBe('unresolved');
+      expect(lookup).toHaveBeenCalledTimes(1);
+    });
+
     it('resolves a repeated host only once', async () => {
       const lookup = vi.fn().mockResolvedValue(answers('192.168.1.9'));
       const { adapter } = evaluator(lookup);
