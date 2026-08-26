@@ -106,8 +106,31 @@ export class RecoverCameraSourcePromptsUseCase {
       );
     }
 
-    await this.prompts.prune(now);
+    await this.sweep(now);
     return { attempted, failed, unfinished };
+  }
+
+  /**
+   * Retention's startup half, isolated from the pass that precedes it.
+   *
+   * The sweep is the last thing boot recovery does and the least urgent: every
+   * credential this pass could still remove has already been removed, and the
+   * rows this deletes are tombstones and abandoned prompts that hold no secret
+   * by construction. A store that refuses it must therefore not turn a boot
+   * that *did* finish its cleanup into a rejected one — the caller would see a
+   * failure, the counts would be lost, and the row work that succeeded would be
+   * reported as if it had not happened.
+   *
+   * Retention that did not run is retried on the next terminal transition and
+   * on the next boot, so nothing here is permanent. The rejection is dropped
+   * unread for the usual reason: better-sqlite3 quotes the row it refused.
+   */
+  private async sweep(now: Date): Promise<void> {
+    try {
+      await this.prompts.prune(now);
+    } catch {
+      this.logger.warn('camera source prompt retention sweep was refused');
+    }
   }
 
   /** Isolated so one refused deletion cannot abandon the row's own cleanup. */

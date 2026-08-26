@@ -11,10 +11,25 @@ import type { RtspStreamRuntimePort } from '../../../src/camera/domain/ports/rts
 import { QuickTunnelLiveStreamAdapter, type CloudflaredChild } from '../../../src/camera/infrastructure/quick-tunnel-live-stream.adapter';
 import type { QuickTunnelLiveStreamDependencies } from '../../../src/camera/infrastructure/quick-tunnel-live-stream.adapter';
 
+/*
+ * These cases drive real filesystem and unix-socket work underneath fake
+ * timers, so their wall-clock cost is set by how loaded the machine is rather
+ * than by anything they assert. Five seconds is comfortable on an idle box and
+ * marginal inside a full-suite run, where the failure arrives as a timeout —
+ * indistinguishable, in CI, from a real hang in the adapter.
+ */
+vi.setConfig({ testTimeout: 20_000 });
+
 const SESSION = '01901f4c-b7f4-4c6a-a787-3f8a442c85d2';
 const roots: string[] = [];
 
 afterEach(async () => {
+  // Unconditional, and not merely belt-and-braces: a test that times out is
+  // abandoned *inside* its body, so the `finally` that restores the clock never
+  // runs and every later test in this file fails with "Timers are not mocked" —
+  // one slow run reported as two unrelated failures, the second of which points
+  // at innocent code. Restoring here makes a timeout cost exactly one test.
+  vi.useRealTimers();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -66,6 +81,35 @@ async function fixture(
   return { adapter, runtime, output, session };
 }
 
+/**
+ * Lets the adapter's own await chain make progress until `condition` holds.
+ *
+ * A fixed number of `setImmediate` hops is a guess about how deep that chain
+ * is, and the guess is only ever right on an idle machine: under load the chain
+ * interleaves with other work and needs more hops than it did locally, so a
+ * fixed count races and the test fails for a reason that has nothing to do with
+ * the adapter. Waiting on the condition says what the test is waiting *for*,
+ * and the bound keeps a genuine hang a failure rather than a hang.
+ */
+async function until(condition: () => boolean, hops = 100): Promise<void> {
+  for (let hop = 0; hop < hops; hop += 1) {
+    if (condition()) return;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  expect(condition(), 'the adapter never reached the awaited state').toBe(true);
+}
+
+/**
+ * Hops with no condition to wait on — the chain is being let settle rather than
+ * driven to a named state. Generous for the same reason `until` is bounded
+ * high: hops are cheap, and a starved chain is the whole failure mode.
+ */
+async function settle(hops = 10): Promise<void> {
+  for (let hop = 0; hop < hops; hop += 1) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+}
+
 function connectAndWrite(path: string, chunks: Buffer[]): Promise<Socket> {
   return new Promise((resolve, reject) => {
     const socket = createConnection(path, () => {
@@ -108,7 +152,7 @@ describe('QuickTunnelLiveStreamAdapter RTSP data plane', () => {
       );
 
       await vi.advanceTimersByTimeAsync(200);
-      await new Promise<void>((resolve) => setImmediate(resolve));
+      await until(() => vi.mocked(runtime.start).mock.calls.length === 1);
       await vi.advanceTimersByTimeAsync(300);
       await vi.advanceTimersByTimeAsync(499);
       expect(outcome).toBe('pending');
@@ -129,10 +173,10 @@ describe('QuickTunnelLiveStreamAdapter RTSP data plane', () => {
       expect(runtime.start).toHaveBeenCalledTimes(1);
 
       resolveCleanup();
-      await new Promise<void>((resolve) => setImmediate(resolve));
+      await settle();
       await vi.advanceTimersByTimeAsync(10);
       await vi.advanceTimersByTimeAsync(200);
-      await new Promise<void>((resolve) => setImmediate(resolve));
+      await settle();
       await vi.advanceTimersByTimeAsync(10);
       await nextStart;
       expect(outcome).toBe('rejected');
@@ -158,12 +202,10 @@ describe('QuickTunnelLiveStreamAdapter RTSP data plane', () => {
         () => { outcome = 'resolved'; },
         () => { outcome = 'rejected'; },
       );
-      for (let attempt = 0; attempt < 5 && vi.mocked(runtime.start).mock.calls.length === 0; attempt += 1) {
-        await new Promise<void>((resolve) => setImmediate(resolve));
-      }
+      await until(() => vi.mocked(runtime.start).mock.calls.length > 0);
       expect(runtime.start).toHaveBeenCalledOnce();
       await vi.advanceTimersByTimeAsync(1_000);
-      await new Promise<void>((resolve) => setImmediate(resolve));
+      await settle();
 
       expect(outcome).toBe('pending');
       await expect(access(join(output, `${SESSION}.sock`))).rejects.toMatchObject({ code: 'ENOENT' });
@@ -200,9 +242,7 @@ describe('QuickTunnelLiveStreamAdapter RTSP data plane', () => {
         () => { outcome = 'resolved'; },
         () => { outcome = 'rejected'; },
       );
-      for (let attempt = 0; attempt < 5 && vi.mocked(runtime.start).mock.calls.length === 0; attempt += 1) {
-        await new Promise<void>((resolve) => setImmediate(resolve));
-      }
+      await until(() => vi.mocked(runtime.start).mock.calls.length > 0);
       expect(runtime.start).toHaveBeenCalledOnce();
       await vi.advanceTimersByTimeAsync(1_000);
       void adapter.start({
@@ -212,7 +252,7 @@ describe('QuickTunnelLiveStreamAdapter RTSP data plane', () => {
 
       await vi.advanceTimersByTimeAsync(100);
       await vi.advanceTimersByTimeAsync(10);
-      await new Promise<void>((resolve) => setImmediate(resolve));
+      await settle();
       await vi.advanceTimersByTimeAsync(10);
 
       expect(stop).toHaveBeenCalledTimes(2);

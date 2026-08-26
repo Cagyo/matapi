@@ -67,7 +67,9 @@ function setup(availability?: FeatureAvailabilityPort) {
   const stop = { execute: vi.fn() };
   const sessions = { revokeUser: vi.fn() };
   const sources = {
-    cancelPending: vi.fn(),
+    // Retracting, not merely forgetting: ending a source prompt is Telegram
+    // I/O, so every supersession path awaits it.
+    retractPending: vi.fn().mockResolvedValue(undefined),
     handleEntry: vi.fn(),
     handleCallback: vi.fn(),
     handleText: vi.fn().mockResolvedValue(false),
@@ -381,7 +383,7 @@ describe('camera contextual callbacks', () => {
 
     await callback(context({ data: 'cam:abcdefghijklmnop:b' }));
 
-    expect(sources.cancelPending).toHaveBeenCalledWith(7, 11, receipt.id);
+    expect(sources.retractPending).toHaveBeenCalledWith(7, 11, receipt.id);
   });
 
   it('clears source input before invoking a root camera operation', async () => {
@@ -391,8 +393,8 @@ describe('camera contextual callbacks', () => {
 
     await callback(context({ data: 'cam:abcdefghijklmnop:s' }));
 
-    expect(sources.cancelPending).toHaveBeenCalledWith(7, 11, receipt.id);
-    expect(sources.cancelPending.mock.invocationCallOrder[0]).toBeLessThan(
+    expect(sources.retractPending).toHaveBeenCalledWith(7, 11, receipt.id);
+    expect(sources.retractPending.mock.invocationCallOrder[0]).toBeLessThan(
       snapshot.execute.mock.invocationCallOrder[0],
     );
   });
@@ -514,7 +516,7 @@ describe('camera contextual callbacks', () => {
     await expect(handler.cancelExact({ userId: 7, chatId: 11, receiptId: receipt.id })).resolves.toBe('cancelled');
 
     expect(drafts.register).toHaveBeenCalledWith('camera', handler);
-    expect(sources.cancelPending).toHaveBeenCalledWith(7, 11, receipt.id);
+    expect(sources.retractPending).toHaveBeenCalledWith(7, 11, receipt.id);
   });
 });
 
@@ -542,5 +544,44 @@ describe('camera browse parsers', () => {
       end: new Date(2026, 3, 8, 23),
       rangeLabel: '18:00-23:00',
     });
+  });
+});
+
+/*
+ * ─── Superseding a workflow ends its prompts, it does not forget them ──────
+ *
+ * A fresh receipt evicts the older one's state, and an RTSP source prompt is
+ * part of that state — but a prompt is an armed ForceReply sitting in the chat,
+ * so forgetting its routing strands it: the credential replied into it reaches
+ * the next handler undeleted. Ending one is Telegram I/O, which is why every
+ * path here awaits the retraction rather than calling a synchronous forget.
+ */
+describe('CameraHandler retracts superseded source prompts', () => {
+  it('retracts every open prompt when a new receipt supersedes an older one', async () => {
+    const { commands, sources, workflows } = setup(readiness({ motion: true, rtsp: true }));
+    await commands.get('camera')!(context());
+    sources.retractPending.mockClear();
+    workflows.begin.mockResolvedValue(activeReceipt);
+
+    // `/camera` again: the ordinary way an armed address prompt was orphaned.
+    await commands.get('camera')!(context());
+
+    expect(sources.retractPending).toHaveBeenCalledWith(7, 11, undefined);
+  });
+
+  it('retracts before the superseding screen is rendered, never after', async () => {
+    const { commands, handler, sources, workflows } = setup(readiness({ motion: true, rtsp: true }));
+    await commands.get('camera')!(context());
+    sources.retractPending.mockClear();
+    sources.handleEntry.mockClear();
+    workflows.begin.mockResolvedValue(activeReceipt);
+
+    await handler.handleDashboard(context() as never, { receipt: activeReceipt });
+    await commands.get('camera')!(context({ match: 'sources' }));
+
+    expect(sources.retractPending).toHaveBeenCalled();
+    expect(sources.retractPending.mock.invocationCallOrder[0]).toBeLessThan(
+      sources.handleEntry.mock.invocationCallOrder[0],
+    );
   });
 });

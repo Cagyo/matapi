@@ -95,7 +95,14 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
     this.drafts.register('camera', this);
   }
 
-  cancelPending(userId: number, chatId: number): void {
+  /**
+   * Asynchronous because ending a source prompt is Telegram I/O, not a map
+   * delete: an armed ForceReply whose routing is merely forgotten is answered
+   * with a credential that nothing deletes. Every path below that supersedes a
+   * workflow awaits the retraction before forgetting anything.
+   */
+  async cancelPending(userId: number, chatId: number): Promise<void> {
+    await this.sources.retractPending(userId, chatId);
     for (const key of this.contextKeys(userId, chatId)) {
       if (key.startsWith(`${userId}:${chatId}:`)) {
         this.inputs.delete(key);
@@ -104,7 +111,6 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
         this.receiptCatalogs.delete(key);
       }
     }
-    this.sources.cancelPending(userId, chatId);
   }
 
   async cancelExact(input: {
@@ -121,7 +127,7 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
       return 'superseded';
     }
     if (!exists) return 'missing';
-    this.clearReceiptKey(key, input);
+    await this.clearReceiptKey(key, input);
     return 'cancelled';
   }
 
@@ -132,7 +138,7 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
         source: 'natural-parent',
       });
       if (!receipt) return;
-      this.remember(ctx, receipt);
+      await this.remember(ctx, receipt);
       const [subToken = '', ...rest] = (ctx.match ?? '').toString().trim().split(/\s+/).filter(Boolean);
       const sub = subToken.toLowerCase() as Subcommand | '';
       try {
@@ -150,7 +156,7 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
       const receipt = this.launches.get(this.key(ctx, parsed.receiptId));
       if (!receipt) return;
       if (!(await this.workflows.validateCurrent(ctx, receipt))) {
-        this.clearReceiptState(ctx, parsed.receiptId);
+        await this.clearReceiptState(ctx, parsed.receiptId);
         return;
       }
       try {
@@ -177,7 +183,7 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
   async handleDashboard(ctx: TelegramContext, launch?: WorkflowLaunch): Promise<void> {
     const receipt = launch?.receipt ?? (await this.workflows.begin(ctx, 'camera', { source: 'natural-parent' }));
     if (!receipt) return;
-    this.remember(ctx, receipt);
+    await this.remember(ctx, receipt);
     const [motion, rtsp] = await Promise.all([this.isReady('motion'), this.isReady('rtsp')]);
     const copy = this.catalog(ctx).camera.dashboardButtons;
     const keyboard = new InlineKeyboard();
@@ -211,7 +217,7 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
     if (sub === 'sources') {
       this.clearBrowse(ctx, receipt.id);
     } else {
-      this.clearCompetingState(ctx, receipt);
+      await this.clearCompetingState(ctx, receipt);
     }
     switch (sub) {
       case '':
@@ -258,9 +264,9 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
     if (action.startsWith('b')) {
       // Browse callbacks replace source setup but retain their own receipt-bound
       // input/results cache (for example, `br` needs the cached results).
-      this.sources.cancelPending(receipt.userId, receipt.chatId, receipt.id);
+      await this.sources.retractPending(receipt.userId, receipt.chatId, receipt.id);
     } else {
-      this.clearCompetingState(ctx, receipt);
+      await this.clearCompetingState(ctx, receipt);
     }
     if (action === 'd') return this.handleDashboard(ctx, { receipt });
     if (action === 's') return this.handleSnapshot(ctx, receipt);
@@ -706,7 +712,7 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
       }
       await deliver();
     } finally {
-      this.clearReceiptState(ctx, receipt.id);
+      await this.clearReceiptState(ctx, receipt.id);
     }
   }
   private async handleError(
@@ -752,8 +758,8 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
   private catalog(ctx: TelegramContext): LocaleCatalog {
     return ctx.localeState?.catalog ?? catalogFor('en');
   }
-  private remember(ctx: TelegramContext, receipt: WorkflowReturnReceipt): void {
-    this.pruneContext(ctx, receipt);
+  private async remember(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<void> {
+    await this.pruneContext(ctx, receipt);
     const key = this.key(ctx, receipt.id);
     this.launches.set(key, receipt);
     this.receiptCatalogs.set(key, this.catalog(ctx));
@@ -770,28 +776,28 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
       .sort((left, right) => right.createdAtMs - left.createdAtMs);
     for (const input of inputs) {
       if (await this.workflows.validateCurrent(ctx, input.receipt)) return input;
-      this.clearReceiptState(ctx, input.receipt.id);
+      await this.clearReceiptState(ctx, input.receipt.id);
     }
     return undefined;
   }
-  private clearReceiptState(ctx: TelegramContext, receiptId: string): void {
+  private async clearReceiptState(ctx: TelegramContext, receiptId: string): Promise<void> {
     const key = this.key(ctx, receiptId);
     const receipt = this.launches.get(key) ?? this.inputs.get(key)?.receipt ?? this.results.get(key)?.receipt;
+    if (receipt) await this.sources.retractPending(receipt.userId, receipt.chatId, receipt.id);
     this.inputs.delete(key);
     this.results.delete(key);
     this.launches.delete(key);
     this.receiptCatalogs.delete(key);
-    if (receipt) this.sources.cancelPending(receipt.userId, receipt.chatId, receipt.id);
   }
-  private clearReceiptKey(
+  private async clearReceiptKey(
     key: string,
     input: { userId: number; chatId: number; receiptId: string },
-  ): void {
+  ): Promise<void> {
+    await this.sources.retractPending(input.userId, input.chatId, input.receiptId);
     this.inputs.delete(key);
     this.results.delete(key);
     this.launches.delete(key);
     this.receiptCatalogs.delete(key);
-    this.sources.cancelPending(input.userId, input.chatId, input.receiptId);
   }
   private hasReceiptState(key: string): boolean {
     return this.inputs.has(key) || this.results.has(key) || this.launches.has(key) || this.receiptCatalogs.has(key);
@@ -804,7 +810,7 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
       ),
     );
   }
-  private pruneContext(ctx: TelegramContext, receipt: WorkflowReturnReceipt): void {
+  private async pruneContext(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<void> {
     const currentKey = this.key(ctx, receipt.id);
     const staleKeys = [...this.contextKeys(receipt.userId, receipt.chatId)].filter((key) => key !== currentKey);
     for (const key of staleKeys) {
@@ -813,16 +819,19 @@ export class CameraHandler implements TelegramHandler, WorkflowDraftCanceller {
       this.launches.delete(key);
       this.receiptCatalogs.delete(key);
     }
-    if (staleKeys.length > 0) this.sources.cancelPending(receipt.userId, receipt.chatId);
+    // Every *other* receipt's prompts, ended rather than forgotten. A new
+    // receipt superseding an older one is the ordinary way an armed ForceReply
+    // used to be orphaned: `/camera` again while an address prompt is open.
+    await this.sources.retractPending(receipt.userId, receipt.chatId, undefined);
   }
   private clearBrowse(ctx: TelegramContext, receiptId: string): void {
     const key = this.key(ctx, receiptId);
     this.inputs.delete(key);
     this.results.delete(key);
   }
-  private clearCompetingState(ctx: TelegramContext, receipt: WorkflowReturnReceipt): void {
+  private async clearCompetingState(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<void> {
     this.clearBrowse(ctx, receipt.id);
-    this.sources.cancelPending(receipt.userId, receipt.chatId, receipt.id);
+    await this.sources.retractPending(receipt.userId, receipt.chatId, receipt.id);
   }
   private currentResults(ctx: TelegramContext, receipt: WorkflowReturnReceipt): BrowseResults | undefined {
     const result = this.results.get(this.key(ctx, receipt.id));

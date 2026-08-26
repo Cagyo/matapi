@@ -36,13 +36,15 @@ import {
 } from '../domain/camera-source-prompt';
 import type { WorkflowReturnReceipt } from '../domain/workflow-return';
 import { presentCameraSourceError } from './camera-source-error.presenter';
-import { CameraSourceViewStore } from './camera-source-view-store';
+import { CameraSourceViewStore, type CameraSourcePromptView } from './camera-source-view-store';
 import { FeatureHandler } from './feature.handler';
 import {
   addBody,
   addKeyboard,
   attachBody,
   attachKeyboard,
+  CANCEL_ACTION,
+  cancelKeyboard,
   credentialPromptBody,
   detailBody,
   detailKeyboard,
@@ -60,6 +62,7 @@ import {
   removalKeyboard,
   SELECTOR_LENGTH,
   sourceSelector,
+  startAgainKeyboard,
   type CameraSourceCopy,
   type CameraSourceRecoveryTargets,
 } from './camera-source.presenter';
@@ -201,10 +204,6 @@ export class CameraSourcesHandler {
     @Optional() @Inject(FeatureHandler) private readonly features?: FeatureHandler,
   ) {}
 
-  cancelPending(userId: number, chatId: number, receiptId?: string): void {
-    this.views.cancel(userId, chatId, receiptId);
-  }
-
   hasPending(userId: number, chatId: number, receiptId?: string): boolean {
     return this.views.hasPending(userId, chatId, receiptId);
   }
@@ -222,18 +221,37 @@ export class CameraSourcesHandler {
     const receipt = launch?.receipt ?? (await this.workflows.begin(ctx, 'camera', { source: 'natural-parent' }));
     if (!receipt || !(await this.requireAdmin(ctx))) return;
     if (!(await this.requireRtsp(ctx))) return;
+    // Before the first render, because rendering is what evicts them.
+    const stranded = await this.retractSuperseded(receipt);
     this.views.clear(ctx, receipt.id);
     await this.showOverview(ctx, receipt, 1);
+    // And put back the ones Telegram would not delete — *after* the render,
+    // because the render's own eviction is what would otherwise forget them a
+    // second time. Their rows are already terminal, so the routing that
+    // survives here can only reach the cleanup branch: `claimReply` answers
+    // `late`, the reply is deleted, and no install is authorised by it.
+    for (const state of stranded) this.views.restorePrompt(state);
   }
 
   async handleCallback(ctx: TelegramContext, action: string, receipt: WorkflowReturnReceipt): Promise<void> {
     if (!(await this.workflows.validateCurrent(ctx, receipt))) return;
     if (!(await this.requireAdmin(ctx))) return;
-    // Deliberately ahead of the readiness gate, and the only action that is.
-    // Reinstalling is what an administrator does *because* RTSP is not usable;
-    // refusing the escape hatch for the condition it exists to clear would
-    // leave the workflow with no way forward at all.
+    // Two actions run ahead of the readiness gate, which is where a list stops
+    // being self-evident — so the rule, once, rather than two precedents: an
+    // action that **ends** or **repairs** the unusable state runs ahead of the
+    // gate; everything that reads or mutates a source runs behind it. A third
+    // candidate is decided by that sentence, not by these two.
+    //
+    // Reinstalling repairs it: an administrator reaches for it *because* RTSP
+    // is not usable, and refusing the escape hatch for the condition it exists
+    // to clear would leave the workflow with no way forward at all.
     if (action === REINSTALL_ACTION) return this.handoffToReinstall(ctx, receipt);
+    // Cancel ends it, and that is the stronger case of the two: RTSP can become
+    // unusable **underneath an armed ForceReply**, and behind the gate this
+    // would render the feature notice and return — leaving the prompt in the
+    // chat with no control that ends it, which is the exact residual this
+    // workflow spends three layers preventing.
+    if (action === CANCEL_ACTION) return this.endCancelled(ctx, receipt);
     if (!(await this.requireRtsp(ctx))) return;
 
     const page = PAGE_ACTION.exec(action);
@@ -336,16 +354,93 @@ export class CameraSourcesHandler {
       if (claim.kind === 'late') {
         const deleted = await this.deleteWithRetry(chatId, replyMessageId);
         await this.finishPrompt(identityOf(claim.prompt), !deleted);
+        // The same warning the winning path owes, for the same reason: a
+        // refused deletion means the address is probably still in the chat,
+        // and losing the claim does not make that any less true.
+        if (!deleted) {
+          await this.replyRetaining(() =>
+            ctx.reply(this.copy(ctx).credentialDeletionFailed(promptCameraName(claim.prompt))));
+        }
+        await this.replyWindowClosed(ctx, state.receipt);
         return true;
       }
       await this.runCredentialReply(ctx, state.receipt, claim.prompt, replyMessageId, state.page);
       return true;
     }
-    // A name reply that lost the claim changes nothing and reveals nothing.
     if (claim.kind === 'claimed') {
       await this.runNameReply(ctx, state.receipt, claim.prompt, message.text, state.page);
+      return true;
     }
+    // A name reply that lost the claim authorises nothing and echoes nothing —
+    // but it is still an answer the administrator typed and watched go nowhere.
+    // Silence here reads as a broken bot, which is what sends someone back to
+    // paste the *address* into a prompt that can no longer take it.
+    await this.replyWindowClosed(ctx, state.receipt);
     return true;
+  }
+
+  /**
+   * The answer to a reply the workflow will not act on.
+   *
+   * Deliberately one message for both readings of `late`: a prompt whose ten
+   * minutes ran out, and a prompt that was already spent. The administrator's
+   * next move is identical, and it is the overview rather than a fresh prompt —
+   * re-arming a ForceReply from a message sent to a dead one would start a
+   * workflow nobody asked for, at exactly the moment the last one was lost.
+   *
+   * The window is passed rather than written into the copy, and `PROMPT_TTL_MINUTES`
+   * is derived from `CAMERA_SOURCE_PROMPT_TTL_MS`: the number an administrator
+   * reads here is a claim about `expiresAt`, and a restated ten would agree with
+   * it only until one of them moved. A behavioural test cannot tell those two
+   * apart — both render ten today — so the derivation itself is pinned at
+   * source level, in `camera-sources.handler.test.ts`.
+   */
+  private async replyWindowClosed(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<void> {
+    const copy = this.copy(ctx);
+    await this.replyRetaining(() => ctx.reply(copy.prompts.expired(PROMPT_TTL_MINUTES), {
+      reply_markup: startAgainKeyboard(copy, this.catalog(ctx).home.common, receipt.id),
+    }));
+  }
+
+  /**
+   * Whether this text is the administrator asking to stop, in their language.
+   *
+   * Read from the active catalog rather than from a list here, so a locale's
+   * own words are the ones accepted for that locale — and the synonyms are
+   * stored already normalized, so this normalizes the reply the same way rather
+   * than re-deriving a rule per language.
+   *
+   * The comparison sees plaintext that may be a credential, and that is safe
+   * for exactly one reason: it is a comparison. Nothing is captured, echoed,
+   * stored or logged, and the only value that leaves is a boolean.
+   */
+  private isCancelSynonym(ctx: TelegramContext, text: string): boolean {
+    const normalized = text.trim().toLowerCase();
+    if (normalized === '') return false;
+    return this.copy(ctx).cancelSynonyms.includes(normalized);
+  }
+
+  /**
+   * Ends the workflow as cancelled: every prompt it still has open is retracted
+   * *first*, then the receipt is completed and the outcome rendered.
+   *
+   * The order is the T6 invariant rather than a preference — a prompt whose
+   * workflow ends must have its message retracted, not merely forgotten.
+   * Completing first would forget the screen while an armed ForceReply was
+   * still in the chat, and the credential answered into it would reach the next
+   * handler undeleted. `retractPrompts` also handles Telegram refusing: the
+   * routing is kept when the message is still there, so a reply is claimed
+   * `late` and deleted as cleanup rather than acted on.
+   *
+   * Everything here is scoped to the receipt it is handed and cannot reach a
+   * newer one: `retractPrompts` enumerates only the prompts *that* receipt
+   * armed, and `complete` forgets only its screen. The Cancel control adds no
+   * gate of its own on top of that — `handleCallback` has already established
+   * the administrator and that the receipt is current before it routes here.
+   */
+  private async endCancelled(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<void> {
+    await this.retractPrompts(receipt);
+    await this.complete(ctx, receipt, () => ctx.reply(this.copy(ctx).prompts.cancelled));
   }
 
   /**
@@ -473,7 +568,12 @@ export class CameraSourcesHandler {
   ): Promise<void> {
     if (!(await this.mintable(ctx, receipt, 'credential', selection))) return;
     const copy = this.copy(ctx);
-    await ctx.reply(privacyNoticeBody(copy, overview.policy.networks, PROMPT_TTL_MINUTES));
+    // The notice carries the workflow's only Cancel control, and it has to:
+    // the prompt that follows is a ForceReply, and Telegram lets a message
+    // carry one `reply_markup`, so the prompt itself cannot also hold a button.
+    await ctx.reply(privacyNoticeBody(copy, overview.policy.networks, PROMPT_TTL_MINUTES), {
+      reply_markup: cancelKeyboard(copy, receipt.id),
+    });
     const sent = await ctx.reply(credentialPromptBody(copy), { reply_markup: forceReply() });
     await this.rememberPrompt(ctx, receipt, sent.message_id, 'credential', overview.page, selection);
   }
@@ -496,6 +596,13 @@ export class CameraSourcesHandler {
   ): Promise<void> {
     await this.finishPrompt(identityOf(prompt), false);
     if (!(await this.requireAdmin(ctx))) return;
+    // Checked against the prompt this reply actually claimed, which is what
+    // makes a typed cancel *exact*: the same word sent as an ordinary message,
+    // or replied to a prompt whose window has closed, never reaches here.
+    if (this.isCancelSynonym(ctx, text)) {
+      await this.endCancelled(ctx, receipt);
+      return;
+    }
     const name = usableDisplayName(text);
     if (name === null) {
       await ctx.reply(this.copy(ctx).prompts.invalidName);
@@ -589,10 +696,16 @@ export class CameraSourcesHandler {
     // after the deletion rather than instead of it: a revoked administrator
     // still gets their password taken out of the chat.
     const denied = ctx.localeState?.user.role !== 'admin';
+    // Read from the same already-deleted reply, and deliberately *after* the
+    // deletion rather than before it. A cancel word is not a credential, but
+    // deciding that is a decision — and every decision in this method is
+    // downstream of the deletion, so none of them can be the reason a reply
+    // stayed in the chat. Cancelling therefore costs the message either way.
+    const cancelled = this.isCancelSynonym(ctx, reply.address);
     let installed: RedactedLiveSource | null = null;
     let failure: unknown = null;
     try {
-      if (!denied) {
+      if (!denied && !cancelled) {
         await this.availability?.requireReady('rtsp');
         await ctx.reply(this.copy(ctx).progress.testing);
         installed = await this.install(prompt, reply);
@@ -634,6 +747,10 @@ export class CameraSourcesHandler {
     if (!deleted) await ctx.reply(this.copy(ctx).credentialDeletionFailed(promptCameraName(prompt)));
     if (denied) {
       await this.replyRetaining(() => ctx.reply(this.catalog(ctx).common.adminRequired));
+      return;
+    }
+    if (cancelled) {
+      await this.endCancelled(ctx, receipt);
       return;
     }
     if (failure !== null) {
@@ -769,12 +886,61 @@ export class CameraSourcesHandler {
     deletionFailed: boolean,
     outcome: 'consumed' | 'expired' = 'consumed',
   ): Promise<void> {
+    const now = this.clock.now();
+    if (await this.terminalise(identity, deletionFailed, outcome)) await this.sweep(now);
+  }
+
+  /**
+   * The terminal transition alone, without the sweep that usually follows it.
+   *
+   * Split out so a caller ending *several* prompts at once pays for retention
+   * once rather than once per row: the sweep is bounded, predicated work, but
+   * it is the same work whether one tombstone or five were just minted, and
+   * nothing about a loop makes it more urgent per iteration.
+   *
+   * `false` means the store refused, which is not fatal — the row stays
+   * `running`, which is exactly the shape startup recovery is built to finish —
+   * and is the caller's signal that there is nothing new to sweep for.
+   */
+  private async terminalise(
+    identity: CameraSourcePromptIdentity,
+    deletionFailed: boolean,
+    outcome: 'consumed' | 'expired',
+  ): Promise<boolean> {
     const transition = { identity, deletionFailed, now: this.clock.now() };
     try {
       if (outcome === 'expired') await this.prompts.expire(transition);
       else await this.prompts.consume(transition);
+      return true;
     } catch {
       // Bindingless: a better-sqlite3 rejection can quote the row it refused.
+      return false;
+    }
+  }
+
+  /**
+   * The opportunistic half of retention, run only where a prompt has just
+   * become terminal.
+   *
+   * Terminal transitions are the only events that *create* something to sweep —
+   * a tombstone — and they are rare: at most one per conversation. So this is
+   * where retention is paid for, rather than on a timer, on every update, or on
+   * a scan nobody triggered. The other half runs once at startup, in
+   * `RecoverCameraSourcePromptsUseCase`.
+   *
+   * Every arm of `prune` is predicated — tombstones past their retention
+   * deadline, and non-terminal rows past the abandonment horizon — so this is
+   * bounded work over an index, never a full-table walk. It is also the last
+   * thing the transition does: a refused sweep is retention that has not
+   * happened yet, not an answer the administrator does not get, so the
+   * rejection is swallowed exactly as the transition's own is.
+   */
+  private async sweep(now: Date): Promise<void> {
+    try {
+      await this.prompts.prune(now);
+    } catch {
+      // Bindingless, for the same reason: a better-sqlite3 rejection can quote
+      // the rows it refused, and one of them is a credential prompt's row.
     }
   }
 
@@ -1152,23 +1318,102 @@ export class CameraSourcesHandler {
    * anything.
    */
   private async retractPrompts(receipt: WorkflowReturnReceipt): Promise<void> {
-    const open = this.views.promptMessagesFor(receipt.userId, receipt.chatId, receipt.id);
-    for (const promptMessageId of open) {
-      const deleted = await this.deleteWithRetry(receipt.chatId, promptMessageId);
-      await this.finishPrompt(
+    await this.retractPending(receipt.userId, receipt.chatId, receipt.id);
+  }
+
+  /**
+   * Ends every prompt an administrator has open here — or only one receipt's —
+   * by retracting its message, and it is the **only** supported way to stop a
+   * prompt being answerable.
+   *
+   * This exists because forgetting and ending were two different things, and a
+   * prompt reached the first without the second. `CameraSourceViewStore` drops
+   * a prompt's routing whenever a newer receipt renders, and `cancelPending`
+   * did the same on supersession — in both cases leaving an armed ForceReply in
+   * the chat with nothing able to claim a reply to it. `handleText` then found
+   * no routing, returned `false`, and the credential-bearing message went to
+   * the next handler **undeleted**, while its durable row sat `pending` until
+   * prune. That is the same terminal state as the hole T5 and T6 each closed
+   * from a different direction; this closes it from the direction of
+   * supersession.
+   *
+   * So this is public and asynchronous on purpose: `CameraHandler` owns every
+   * supersession path, and none of them can end a prompt correctly without
+   * doing Telegram I/O first.
+   *
+   * The refused-retraction discipline is the same one `handoffToReinstall`
+   * established: the routing is dropped only once the message is provably gone.
+   * When Telegram refuses, the state goes back — `claimReply` then answers
+   * `late`, and the reply is deleted as cleanup without authorising anything.
+   */
+  async retractPending(userId: number, chatId: number, receiptId?: string): Promise<void> {
+    const stranded = await this.retract(this.views.promptsFor(userId, chatId, receiptId), userId, chatId);
+    // Screens go with the workflow — they are expendable, and a superseded one
+    // must not be reachable. Then the prompts Telegram would not retract are
+    // put back: their messages are still armed in the chat, so their routing
+    // has to outlive the workflow that opened them or a credential answered
+    // into one reaches the next handler undeleted.
+    this.views.cancel(userId, chatId, receiptId);
+    for (const state of stranded) this.views.restorePrompt(state);
+  }
+
+  /**
+   * Ends the prompts of every workflow *except* this one, for this
+   * administrator here.
+   *
+   * Opening Sources on a fresh receipt supersedes whatever was open before, and
+   * `CameraSourceViewStore.set` enforces that by evicting the older receipt's
+   * states — correctly, because a superseded prompt must never be able to
+   * install. But eviction only forgets, and this is what turns it into an
+   * ending. It runs before the first render, so the eviction never reaches a
+   * prompt whose message is still armed.
+   *
+   * The exclusion is load-bearing in the other direction: re-entering Sources
+   * on the *same* receipt is ordinary navigation, and T6 established that it
+   * must leave that receipt's own prompt answerable.
+   */
+  private async retractSuperseded(
+    receipt: WorkflowReturnReceipt,
+  ): Promise<readonly CameraSourcePromptView[]> {
+    const open = this.views
+      .promptsFor(receipt.userId, receipt.chatId)
+      .filter((state) => state.receipt.id !== receipt.id);
+    return this.retract(open, receipt.userId, receipt.chatId);
+  }
+
+  /**
+   * Retracts each prompt's message and makes its row terminal, and hands back
+   * the ones Telegram would not delete — which are the only prompts that must
+   * stay routable, because they are the only ones still in the chat.
+   */
+  private async retract(
+    open: readonly CameraSourcePromptView[],
+    userId: number,
+    chatId: number,
+  ): Promise<readonly CameraSourcePromptView[]> {
+    const stranded: CameraSourcePromptView[] = [];
+    let minted = false;
+    for (const state of open) {
+      const deleted = await this.deleteWithRetry(chatId, state.promptMessageId);
+      minted = await this.terminalise(
         {
-          userId: receipt.userId,
-          chatId: receipt.chatId,
-          receiptId: receipt.id,
-          promptMessageId,
+          userId,
+          chatId,
+          receiptId: state.receipt.id,
+          promptMessageId: state.promptMessageId,
         },
         !deleted,
         // Abandoned, not answered: the window closed on it rather than a reply
         // spending it, which is the same shape startup recovery records.
         'expired',
-      );
-      if (deleted) this.views.clearPrompt(receipt.userId, receipt.chatId, promptMessageId);
+      ) || minted;
+      if (deleted) this.views.clearPrompt(userId, chatId, state.promptMessageId);
+      else stranded.push(state);
     }
+    // Once for the whole batch: retention is the same bounded, predicated work
+    // whether this minted one tombstone or five.
+    if (minted) await this.sweep(this.clock.now());
+    return stranded;
   }
 
   /**

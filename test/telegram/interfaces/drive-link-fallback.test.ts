@@ -107,7 +107,7 @@ function setup(role: 'admin' | 'user') {
     { execute: vi.fn() } as never,
     { revokeUser: vi.fn() } as never,
     { registered: vi.fn() } as unknown as RoleMiddleware,
-    { cancelPending: vi.fn() } as unknown as CameraSourcesHandler,
+    { retractPending: vi.fn().mockResolvedValue(undefined) } as unknown as CameraSourcesHandler,
     workflows as unknown as WorkflowEntryCoordinator,
     { register: vi.fn() } as never,
     navigation as unknown as WorkflowNavigationHandler,

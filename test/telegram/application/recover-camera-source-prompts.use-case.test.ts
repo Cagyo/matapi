@@ -10,6 +10,7 @@ import {
 } from '../../../src/telegram/application/recover-camera-source-prompts.use-case';
 import {
   CAMERA_SOURCE_TOMBSTONE_TTL_MS,
+  CAMERA_SOURCE_TOMBSTONES_PER_ADMIN,
   assertCameraSourcePrompt,
   createCameraSourcePrompt,
   type CameraSourcePrompt,
@@ -120,6 +121,8 @@ class FixedRunningPromptRepository implements CameraSourcePromptRepositoryPort {
   prunedAt: Date | null = null;
   /** Prompt message IDs whose terminal transition the store refuses. */
   refuseExpiryFor = new Set<number>();
+  /** Whether the retention sweep itself is refused. */
+  refusePrune = false;
 
   constructor(private readonly rows: readonly CameraSourcePrompt[]) {}
 
@@ -150,6 +153,7 @@ class FixedRunningPromptRepository implements CameraSourcePromptRepositoryPort {
   }
 
   async prune(now: Date): Promise<void> {
+    if (this.refusePrune) throw new Error(SQLITE_TEXT);
     this.prunedAt = now;
   }
 }
@@ -334,6 +338,84 @@ describe('RecoverCameraSourcePromptsUseCase', () => {
     expect(fixed.prunedAt).toBe(RECOVERED_AT);
     expect(logged.join('\n')).not.toContain(SQLITE_TEXT);
     expect(logged.join('\n')).not.toContain('CHECK constraint failed');
+  });
+
+  /*
+   * The retention deadline, at the edge rather than a day either side of it.
+   * `prune` sweeps a tombstone whose `retainUntil` has *arrived*, and the two
+   * cases already here — one millisecond late and one millisecond early — leave
+   * the instant itself unmeasured, which is the one a `<` written for a `<=`
+   * gets wrong.
+   */
+  it('prunes a tombstone at exactly its retention deadline', async () => {
+    const settled = await running(repository, {}, REPLY_MESSAGE);
+    await repository.expire({ identity: identityOf(settled), deletionFailed: false, now: NOW });
+
+    await useCase.execute(new Date(NOW.getTime() + CAMERA_SOURCE_TOMBSTONE_TTL_MS));
+
+    expect(await reread(repository, settled)).toEqual({ kind: 'stale' });
+  });
+
+  /*
+   * The other retention bound, driven through two boots because one pass is
+   * bounded at a hundred rows: the hundred-and-first interrupted prompt waits
+   * for the next boot, and terminalising it is what pushes this administrator
+   * over the cap. Exactly one tombstone is evicted, and it is the oldest.
+   */
+  it('leaves no more than a hundred credential tombstones for one administrator', async () => {
+    const interrupted: CameraSourcePrompt[] = [];
+    for (let index = 0; index <= CAMERA_SOURCE_TOMBSTONES_PER_ADMIN; index += 1) {
+      interrupted.push(await running(
+        repository,
+        { promptMessageId: PROMPT_MESSAGE + index },
+        REPLY_MESSAGE + index,
+      ));
+    }
+
+    expect(await useCase.execute(RECOVERED_AT))
+      .toEqual({ attempted: CAMERA_SOURCE_RECOVERY_LIMIT, failed: 0, unfinished: 0 });
+    // A hundred tombstones is the cap, not past it: nothing was evicted yet.
+    expect(await reread(repository, interrupted[0])).toMatchObject({ kind: 'late' });
+
+    expect(await useCase.execute(RECOVERED_AT)).toEqual({ attempted: 1, failed: 0, unfinished: 0 });
+
+    expect(await reread(repository, interrupted[0])).toEqual({ kind: 'stale' });
+    expect(await reread(repository, interrupted[1])).toMatchObject({ kind: 'late' });
+    expect(await reread(repository, interrupted[CAMERA_SOURCE_TOMBSTONES_PER_ADMIN]))
+      .toMatchObject({ kind: 'late' });
+  });
+
+  /*
+   * The sweep is the least urgent thing boot recovery does — every credential
+   * it could still remove is already gone, and what it deletes holds no secret.
+   * A store that refuses it must not turn a boot that *did* finish its cleanup
+   * into a rejected one, because the caller would lose the counts for row work
+   * that already succeeded.
+   */
+  it('reports the pass it finished even when the retention sweep is refused', async () => {
+    const recovered = assertCameraSourcePrompt({
+      ...createCameraSourcePrompt(draft()),
+      status: 'running',
+      replyMessageId: REPLY_MESSAGE,
+    });
+    const fixed = new FixedRunningPromptRepository([recovered]);
+    fixed.refusePrune = true;
+    const logged = captureLogs();
+    const subject = new RecoverCameraSourcePromptsUseCase(fixed, messages);
+
+    await expect(subject.execute(RECOVERED_AT))
+      .resolves.toEqual({ attempted: 1, failed: 0, unfinished: 0 });
+
+    expect(fixed.expired).toEqual([
+      { identity: identityOf(recovered), deletionFailed: false, now: RECOVERED_AT },
+    ]);
+    // The refusal is noted, never quoted: better-sqlite3 names the row it
+    // refused, and one of those rows is a credential prompt's.
+    const transcript = logged.map((entry) => String(entry)).join('\n');
+    expect(transcript).not.toContain(SQLITE_TEXT);
+    expect(transcript).not.toContain('CHECK constraint failed');
+    expect(transcript).not.toContain(RECEIPT);
+    expect(transcript).not.toContain(DISPLAY_NAME);
   });
 
   it('lets no prompt payload reach the message adapter or the log', async () => {

@@ -2,7 +2,7 @@ import { Logger } from '@nestjs/common';
 import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -1144,7 +1144,11 @@ describe('CameraSourcesHandler add', () => {
     expect(body(ctx, 3)).toMatch(/10 minutes/u);
     // And it arrives before the control that invites the address, not after.
     expect(body(ctx, 4)).toContain(copy.prompts.credential);
-    expect(markup(ctx, 3)).toBeUndefined();
+    // The notice carries exactly one control — the way out — and the prompt
+    // carries the ForceReply. They cannot be the same message: Telegram allows
+    // one `reply_markup`, so a prompt that also held a button would stop being
+    // an exact prompt.
+    expect(screen(ctx, 3).map((button) => button.text)).toEqual([copy.prompts.cancelButton]);
     expect(markup(ctx, 4)).toEqual({ force_reply: true, selective: true });
   });
 
@@ -3219,5 +3223,634 @@ describe('CameraSourcesHandler second replies', () => {
     await answerAddress(bench, promptMessageId, { messageId: 601 });
 
     expect(bench.messages.delete).toHaveBeenCalledTimes(2);
+  });
+});
+
+/*
+ * ─── The exact-reply window, at both of its edges ──────────────────────────
+ *
+ * `now === expiresAt` is already late — the durable model says so — and a
+ * boundary asserted on one side only would pass for a guard that never lets
+ * anything through at all. Both edges are pinned, one millisecond apart, so a
+ * `<=` written where `<` belongs and a window that closed early are each
+ * visible as a failure rather than as the same green.
+ */
+describe('CameraSourcesHandler exact expiry boundary', () => {
+  const MINUTES = CAMERA_SOURCE_PROMPT_TTL_MS / 60_000;
+
+  it('installs an address that arrives one millisecond before the deadline', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { promptMessageId } = await openCredentialPrompt(bench);
+    bench.advance(CAMERA_SOURCE_PROMPT_TTL_MS - 1);
+
+    const { ctx } = await answerAddress(bench, promptMessageId);
+
+    expect(bench.createRtspCamera.execute).toHaveBeenCalledTimes(1);
+    expect(bodies(ctx)).not.toContain(copy.prompts.expired(MINUTES));
+  });
+
+  it('treats an address that arrives exactly at the deadline as late', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { promptMessageId } = await openCredentialPrompt(bench);
+    bench.advance(CAMERA_SOURCE_PROMPT_TTL_MS);
+
+    const { ctx, claimed } = await answerAddress(bench, promptMessageId);
+
+    expect(claimed).toBe(true);
+    expect(bench.messages.delete).toHaveBeenCalledWith(42, 600);
+    expect(bench.createRtspCamera.execute).not.toHaveBeenCalled();
+    expect(bodies(ctx)).toContain(copy.prompts.expired(MINUTES));
+  });
+
+  /*
+   * The window is a promise about `expiresAt`, so the number the administrator
+   * reads has to be the one the row was minted with. Compared against the
+   * catalog function applied to the derived value rather than against the
+   * sentence: a handler that passed a different number renders a different
+   * sentence, and this fails.
+   */
+  it('renders the window from the prompt TTL, not from a number written twice', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { promptMessageId } = await openCredentialPrompt(bench);
+    bench.advance(CAMERA_SOURCE_PROMPT_TTL_MS);
+
+    const { ctx } = await answerAddress(bench, promptMessageId);
+
+    expect(bodies(ctx)).toContain(copy.prompts.expired(MINUTES));
+    expect(bodies(ctx)).not.toContain(copy.prompts.expired(MINUTES + 1));
+    expect(bodies(ctx)).not.toContain(copy.prompts.expired(MINUTES - 1));
+  });
+
+  /*
+   * The half the assertions above cannot reach.
+   *
+   * They compare the rendered sentence against the catalog applied to the
+   * derived window — so they catch a handler that passes a *different* number,
+   * but not one that passes a restated `10`, because a restated ten and a
+   * derived ten render the same sentence. Only moving the policy would separate
+   * them, and nothing moves the policy in CI.
+   *
+   * So the derivation is pinned where it actually lives, and tolerantly: an
+   * `export` added when the constant is documented must not read as a
+   * regression. It still cannot match inside a comment — after the leading
+   * `\s*` a block-comment line has `*` and a line comment has `/`, neither of
+   * which can begin `export` or `const` — and the call site is matched
+   * whitespace-tolerantly in case Prettier reflows it at commit.
+   */
+  it('derives the rendered window from the prompt TTL rather than restating it', () => {
+    const source = readFileSync(
+      join(process.cwd(), 'src/telegram/interfaces/camera-sources.handler.ts'),
+      'utf8',
+    );
+
+    expect(source).toMatch(
+      /^\s*(export )?const PROMPT_TTL_MINUTES\s*=\s*CAMERA_SOURCE_PROMPT_TTL_MS\s*\/\s*60_000;/mu,
+    );
+    expect(source).toMatch(/copy\.prompts\.expired\(\s*PROMPT_TTL_MINUTES\s*\)/u);
+    // Non-vacuity: the copy is reached through the constant and never through a
+    // literal, at the one call site that renders it.
+    expect(source).not.toMatch(/prompts\.expired\(\s*\d/u);
+  });
+
+  it('offers Start again, pointing at the overview rather than a fresh prompt', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { promptMessageId } = await openCredentialPrompt(bench);
+    bench.advance(CAMERA_SOURCE_PROMPT_TTL_MS);
+
+    const { ctx } = await answerAddress(bench, promptMessageId);
+
+    const control = buttons(ctx.reply.mock.calls.at(-1)?.[1])
+      .find((button) => button.text === copy.startAgain);
+    expect(control, 'no Start again control was rendered').toBeDefined();
+    expect(action(control!.callback_data)).toBe('over');
+    expect(forceReplies(ctx)).toBe(0);
+  });
+
+  it('says the same to a name reply whose window closed, and arms no new prompt', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const opened = await openNamePrompt(bench);
+    bench.advance(CAMERA_SOURCE_PROMPT_TTL_MS);
+    const ctx = context({ text: NEW_CAMERA, messageId: 500, replyTo: opened.promptMessageId });
+
+    expect(await bench.handler.handleText(ctx as never)).toBe(true);
+
+    expect(bodies(ctx)).toContain(copy.prompts.expired(MINUTES));
+    expect(labels(ctx)).toContain(copy.startAgain);
+    expect(forceReplies(ctx)).toBe(0);
+  });
+
+  /*
+   * A tombstone is retained so a *late* reply can still be cleaned up, and that
+   * is a different event from the window closing: this one arrives inside the
+   * window, at a prompt a previous reply already spent.
+   */
+  it('cleans up a second address at a retained prompt, and offers Start again there too', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { promptMessageId } = await openCredentialPrompt(bench);
+    await answerAddress(bench, promptMessageId);
+    bench.messages.delete.mockClear();
+    bench.createRtspCamera.execute.mockClear();
+
+    const again = await answerAddress(bench, promptMessageId, { messageId: 601 });
+
+    expect(again.claimed).toBe(true);
+    expect(bench.messages.delete).toHaveBeenCalledWith(42, 601);
+    expect(bench.createRtspCamera.execute).not.toHaveBeenCalled();
+    expect(labels(again.ctx)).toContain(copy.startAgain);
+  });
+
+  /*
+   * The one thing a late reply must never do quietly. Cleanup that failed
+   * leaves the address in the chat, and losing the claim does not make that
+   * less true — so the same warning the winning path owes is owed here.
+   */
+  it('warns about a late reply whose deletion was refused twice', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { promptMessageId } = await openCredentialPrompt(bench);
+    bench.advance(CAMERA_SOURCE_PROMPT_TTL_MS);
+    bench.messages.delete.mockRejectedValue(new CameraSourceMessageDeletionError());
+
+    const { ctx } = await answerAddress(bench, promptMessageId);
+
+    expect(bench.messages.delete).toHaveBeenCalledTimes(2);
+    expect(bodies(ctx)).toContain(copy.credentialDeletionFailed(NEW_CAMERA));
+    expect(sentJson(ctx)).not.toContain(SECRET_PASSWORD);
+  });
+});
+
+/*
+ * ─── Cancellation ──────────────────────────────────────────────────────────
+ *
+ * Two ways out, and they are not equivalent. The Cancel control is
+ * authoritative: it ends the workflow, and — the T6 invariant — it retracts the
+ * prompt's *message* rather than merely forgetting its routing, because a
+ * ForceReply that outlives its state is answered with a credential nothing
+ * deletes. A typed synonym is the same outcome reached from the keyboard the
+ * administrator already has open, and it is exact: only a reply that wins the
+ * claim on a live prompt counts as one.
+ */
+
+/** The action behind the Cancel control this conversation rendered. */
+function cancelControl(ctx: ReturnType<typeof context>): string {
+  const control = (ctx.reply.mock.calls as unknown[][])
+    .flatMap((call) => buttons(call[1]))
+    .find((button) => button.text === copy.prompts.cancelButton);
+  if (!control) throw new Error('the conversation rendered no Cancel control');
+  return action(control.callback_data);
+}
+
+describe('CameraSourcesHandler cancellation', () => {
+  it('offers Cancel on the privacy notice, before the address prompt is armed', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const opened = await openCredentialPrompt(bench);
+    const ctx = opened.ctx;
+
+    const notice = (ctx.reply.mock.calls as unknown[][]).findIndex((call) =>
+      String(call[0]) === copy.privacyNotice({
+        networks: copy.policy.network(NETWORK),
+        minutes: CAMERA_SOURCE_PROMPT_TTL_MS / 60_000,
+      }));
+    expect(notice, 'no privacy notice was rendered').toBeGreaterThanOrEqual(0);
+    // The notice carries it, and it precedes the prompt it cancels.
+    expect(screen(ctx, notice).map((button) => button.text)).toContain(copy.prompts.cancelButton);
+    expect(ctx.sent[notice]).toBeLessThan(opened.promptMessageId);
+  });
+
+  it('retracts the armed prompt, ends the workflow, and answers nothing afterwards', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const opened = await openCredentialPrompt(bench);
+    const cancel = cancelControl(opened.ctx);
+    bench.messages.delete.mockClear();
+    const ctx = context();
+
+    await bench.handler.handleCallback(ctx as never, cancel, receipt);
+
+    expect(bench.messages.delete).toHaveBeenCalledWith(42, opened.promptMessageId);
+    expect(bodies(ctx)).toContain(copy.prompts.cancelled);
+    expect(bench.navigation.complete).toHaveBeenCalled();
+
+    const answer = await answerAddress(bench, opened.promptMessageId);
+    expect(answer.claimed).toBe(false);
+    expect(bench.createRtspCamera.execute).not.toHaveBeenCalled();
+  });
+
+  /*
+   * The retraction failing is the case the invariant exists for. The message is
+   * still in the chat, so the routing is kept: the row is terminal, the reply
+   * is claimed `late`, and it is deleted as cleanup rather than acted on.
+   */
+  it('keeps a prompt Telegram would not retract routable, for cleanup only', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const opened = await openCredentialPrompt(bench);
+    const cancel = cancelControl(opened.ctx);
+    bench.messages.delete.mockRejectedValue(new CameraSourceMessageDeletionError());
+
+    await bench.handler.handleCallback(context() as never, cancel, receipt);
+
+    bench.messages.delete.mockReset();
+    bench.messages.delete.mockResolvedValue(undefined);
+    const answer = await answerAddress(bench, opened.promptMessageId);
+
+    expect(answer.claimed).toBe(true);
+    expect(bench.messages.delete).toHaveBeenCalledWith(42, 600);
+    expect(bench.createRtspCamera.execute).not.toHaveBeenCalled();
+  });
+
+  /*
+   * Behind the readiness gate this would render the feature notice and return,
+   * leaving an armed ForceReply with no control that ends it.
+   */
+  it('cancels even after RTSP went unready underneath the armed prompt', async () => {
+    const availability = {
+      awaitInitialVerification: vi.fn(),
+      inspect: vi.fn(),
+      requireReady: vi.fn().mockResolvedValue(undefined),
+    };
+    const bench = setup({ sources: [overviewSource()], availability: availability });
+    const opened = await openCredentialPrompt(bench);
+    const cancel = cancelControl(opened.ctx);
+    availability.requireReady.mockRejectedValue(new FeatureUnavailableError('rtsp', 'needs-attention'));
+    bench.messages.delete.mockClear();
+    const ctx = context();
+
+    await bench.handler.handleCallback(ctx as never, cancel, receipt);
+
+    expect(bench.messages.delete).toHaveBeenCalledWith(42, opened.promptMessageId);
+    expect(bodies(ctx)).toContain(copy.prompts.cancelled);
+  });
+
+  it('refuses a Cancel pressed by an administrator who has since been demoted', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const opened = await openCredentialPrompt(bench);
+    const cancel = cancelControl(opened.ctx);
+    bench.messages.delete.mockClear();
+    const ctx = context({ role: 'user' });
+
+    await bench.handler.handleCallback(ctx as never, cancel, receipt);
+
+    expect(bodies(ctx)).toContain(catalogFor('en').common.adminRequired);
+    expect(bench.messages.delete).not.toHaveBeenCalled();
+  });
+
+  /*
+   * The interleaving: a second workflow opens while the first still has a
+   * prompt, and then the *first* one's Cancel is pressed. A cancel that swept
+   * this administrator's chat rather than this receipt's prompts would take the
+   * newer conversation down with it, silently.
+   */
+  it('leaves a newer receipt’s prompt answerable', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const first = await openCredentialPrompt(bench);
+    const cancel = cancelControl(first.ctx);
+
+    const newer = { ...receipt, id: 'ponmlkjihgfedcba' } satisfies WorkflowReturnReceipt;
+    const second = context();
+    await bench.handler.handleEntry(second as never, { receipt: newer });
+    await bench.handler.handleCallback(second as never, 'add', newer);
+    const newerPrompt = lastSent(second);
+    bench.messages.delete.mockClear();
+
+    await bench.handler.handleCallback(context() as never, cancel, receipt);
+
+    expect(bench.messages.delete).not.toHaveBeenCalledWith(42, newerPrompt);
+    const naming = context({ text: NEW_CAMERA, messageId: 700, replyTo: newerPrompt });
+    expect(await bench.handler.handleText(naming as never)).toBe(true);
+    expect(forceReplies(naming)).toBe(1);
+  });
+
+  it('accepts a typed cancel at a live address prompt, deleting it and installing nothing', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { promptMessageId } = await openCredentialPrompt(bench);
+
+    // Trimmed and case-folded, exactly as the catalog stores its synonyms.
+    const { ctx, claimed } = await answerAddress(bench, promptMessageId, { text: '  Cancel  ' });
+
+    expect(claimed).toBe(true);
+    expect(bench.messages.delete).toHaveBeenCalledWith(42, 600);
+    expect(bench.createRtspCamera.execute).not.toHaveBeenCalled();
+    expect(bench.attachRtspSource.execute).not.toHaveBeenCalled();
+    expect(bodies(ctx)).toContain(copy.prompts.cancelled);
+    expect(bodies(ctx)).not.toContain(copy.progress.testing);
+  });
+
+  it('accepts a typed cancel at a live name prompt, and arms no address prompt', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const opened = await openNamePrompt(bench);
+    const ctx = context({ text: copy.cancelSynonyms[1], messageId: 500, replyTo: opened.promptMessageId });
+
+    expect(await bench.handler.handleText(ctx as never)).toBe(true);
+
+    expect(bodies(ctx)).toContain(copy.prompts.cancelled);
+    expect(forceReplies(ctx)).toBe(0);
+    expect(bodies(ctx)).not.toContain(copy.policy.scope);
+  });
+
+  /*
+   * "Only for a current exact text prompt" has two halves, and this is the one
+   * a happy-path test would miss: the word is right, the reply is exact, and
+   * the prompt is spent. Cleanup, not cancellation.
+   */
+  it('does not accept a cancel word replied to a prompt whose window has closed', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { promptMessageId } = await openCredentialPrompt(bench);
+    bench.advance(CAMERA_SOURCE_PROMPT_TTL_MS);
+
+    const { ctx } = await answerAddress(bench, promptMessageId, { text: 'cancel' });
+
+    expect(bodies(ctx)).not.toContain(copy.prompts.cancelled);
+    expect(bodies(ctx)).toContain(copy.prompts.expired(CAMERA_SOURCE_PROMPT_TTL_MS / 60_000));
+    expect(bench.messages.delete).toHaveBeenCalledWith(42, 600);
+  });
+
+  /*
+   * Localized, not universal. A Russian synonym typed by an administrator whose
+   * interface is English is an ordinary reply — here, a camera name — and the
+   * conversation advances rather than ending.
+   */
+  it('reads another locale’s cancel word as an ordinary name', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const opened = await openNamePrompt(bench);
+    const foreign = catalogFor('ru').camera.sources.cancelSynonyms[1];
+    expect(copy.cancelSynonyms).not.toContain(foreign);
+    const ctx = context({ text: foreign, messageId: 500, replyTo: opened.promptMessageId });
+
+    expect(await bench.handler.handleText(ctx as never)).toBe(true);
+
+    expect(bodies(ctx)).not.toContain(copy.prompts.cancelled);
+    expect(forceReplies(ctx)).toBe(1);
+  });
+});
+
+/*
+ * ─── Retention, paid for where it is created ───────────────────────────────
+ *
+ * A terminal transition is the only event that mints a tombstone, so it is the
+ * only event that owes a sweep. Nothing here may become an unbounded scan, and
+ * nothing here may cost the administrator an answer.
+ */
+describe('CameraSourcesHandler retention sweep', () => {
+  it('does not sweep while a prompt is merely open', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    bench.prompts.prune.mockClear();
+
+    await openNamePrompt(bench);
+
+    expect(bench.prompts.prune).not.toHaveBeenCalled();
+  });
+
+  it('sweeps once a prompt becomes terminal, at the clock rather than a fabricated instant', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { promptMessageId } = await openCredentialPrompt(bench);
+    bench.prompts.prune.mockClear();
+    bench.advance(60_000);
+
+    await answerAddress(bench, promptMessageId);
+
+    expect(bench.prompts.prune).toHaveBeenCalled();
+    expect(bench.prompts.prune)
+      .toHaveBeenLastCalledWith(new Date(NOW.getTime() + 60_000));
+  });
+
+  it('answers the administrator even when the sweep is refused', async () => {
+    const prompts = promptStore();
+    const bench = setup({ sources: [overviewSource()], prompts });
+    const { promptMessageId } = await openCredentialPrompt(bench);
+    prompts.prune.mockRejectedValue(new Error('database is locked'));
+
+    const { ctx } = await answerAddress(bench, promptMessageId);
+
+    expect(bench.createRtspCamera.execute).toHaveBeenCalledTimes(1);
+    expect(bodies(ctx)).toContain(copy.outcomes.created(NEW_CAMERA));
+  });
+
+  it('does not sweep at all when the terminal transition itself was refused', async () => {
+    const prompts = promptStore();
+    const bench = setup({ sources: [overviewSource()], prompts });
+    const { promptMessageId } = await openCredentialPrompt(bench);
+    prompts.consume.mockRejectedValue(new Error('database is locked'));
+    prompts.prune.mockClear();
+
+    await answerAddress(bench, promptMessageId);
+
+    // The row is still `running` — exactly the shape startup recovery finishes —
+    // so sweeping now would be retention run against a table mid-transition.
+    expect(prompts.prune).not.toHaveBeenCalled();
+  });
+
+  /*
+   * The unbounded-arm guard, driven rather than asserted on the adapter: a
+   * sweep that deleted anything it could reach would take the *other*
+   * conversation's live prompt with it, and that prompt would then answer
+   * `stale` instead of advancing.
+   */
+  it('leaves another conversation’s live prompt claimable', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const first = await openNamePrompt(bench);
+    const opener = context();
+    await bench.handler.handleCallback(opener as never, 'add:c', receipt);
+    const second = lastSent(opener);
+    bench.prompts.prune.mockClear();
+
+    // Answering the second prompt is a terminal transition, which sweeps.
+    const answering = context({ text: 'Back yard', messageId: 800, replyTo: second });
+    await bench.handler.handleText(answering as never);
+    expect(bench.prompts.prune).toHaveBeenCalled();
+
+    const surviving = context({ text: NEW_CAMERA, messageId: 801, replyTo: first.promptMessageId });
+    expect(await bench.handler.handleText(surviving as never)).toBe(true);
+    expect(forceReplies(surviving)).toBe(1);
+    expect(bodies(surviving)).not.toContain(copy.prompts.expired(CAMERA_SOURCE_PROMPT_TTL_MS / 60_000));
+  });
+});
+
+/*
+ * ─── Every control this workflow can emit, at its widest ───────────────────
+ *
+ * Telegram rejects `callback_data` over 64 bytes outright, and it does so at
+ * send time — so a control that only overflows for the largest selector, the
+ * last page or the highest revision is a screen that works until the install
+ * that needed it. The sweep drives the real screens rather than calling the
+ * presenter, so a callback shape added to a keyboard is covered without this
+ * test being remembered.
+ */
+describe('CameraSourcesHandler callback budget', () => {
+  it('keeps every generated control inside 64 bytes at the widest selector, page and revision', async () => {
+    const widest = manySources(24).map((source) => ({
+      ...source,
+      revision: Number.MAX_SAFE_INTEGER,
+    }));
+    const bench = setup({
+      sources: widest,
+      attachCandidates: Array.from({ length: 24 }, (_, index) => ({
+        cameraId: `camera-attachable-private-id-${index}`,
+        cameraName: `Attachable ${index}`,
+      })),
+    });
+    const ctx = context();
+
+    // Overview, both pager arms, and a row.
+    await bench.handler.handleEntry(ctx as never, { receipt });
+    await bench.handler.handleCallback(ctx as never, 'p:2', receipt);
+    // From the page just rendered: a selector is resolved against the page it
+    // came from, so a row lifted off page one would reload rather than open.
+    const row = screen(ctx, ctx.reply.mock.calls.length - 1)
+      .find((button) => button.callback_data.includes(':src:d:'));
+    await bench.handler.handleCallback(ctx as never, action(row!.callback_data), receipt);
+    // Detail, Details, removal confirmation at the widest revision.
+    await bench.handler.handleCallback(ctx as never, 'info', receipt);
+    await bench.handler.handleCallback(ctx as never, 'rm', receipt);
+    // A failure that renders Retry, Change address and Reinstall RTSP.
+    bench.testRtspSource.execute.mockRejectedValueOnce(new LiveSourceProbeTimeoutError());
+    await bench.handler.handleCallback(ctx as never, 'test', receipt);
+    bench.testRtspSource.execute.mockRejectedValueOnce(new RtspPolicyDigestMismatchError('digest'));
+    await bench.handler.handleCallback(ctx as never, 'test', receipt);
+    // The Add fork, both attach pages, and the credential prompt's Cancel.
+    await bench.handler.handleCallback(ctx as never, 'add', receipt);
+    await bench.handler.handleCallback(ctx as never, 'add:a', receipt);
+    await bench.handler.handleCallback(ctx as never, 'add:a:2', receipt);
+    const candidate = keyboardData(ctx).find((data) => data.includes(':src:add:s:'));
+    await bench.handler.handleCallback(ctx as never, action(candidate!), receipt);
+    // And Start again, on a reply that arrived too late.
+    const prompt = lastSent(ctx);
+    bench.advance(CAMERA_SOURCE_PROMPT_TTL_MS);
+    const late = await answerAddress(bench, prompt);
+
+    const data = [...keyboardData(ctx), ...keyboardData(late.ctx)];
+    expect(data.length).toBeGreaterThan(40);
+    for (const value of data) {
+      expect(Buffer.byteLength(value, 'utf8'), value).toBeLessThanOrEqual(64);
+    }
+
+    // Non-vacuity: the sweep saw every shape this workflow emits, including the
+    // widest one there is.
+    const actions = new Set(data.filter((value) => value.includes(':src:')).map(action));
+    const shapes = [...actions].map((value) => value.replace(/[A-Za-z0-9_-]{12}/, '<sel>').replace(/\d+/, '<n>'));
+    for (const expected of [
+      'over', 'info', 'add', 'add:c', 'add:a', 'rm', 'ri', 'x',
+      'test', 'addr', 'p:<n>', 'd:<sel>', 'add:a:<n>', 'add:s:<sel>',
+    ]) {
+      expect(shapes, expected).toContain(expected);
+    }
+    const removal = data.find((value) => value.includes(`:src:rm:y:`));
+    expect(removal, 'no removal confirm was rendered').toBeDefined();
+    expect(removal).toContain(`:${Number.MAX_SAFE_INTEGER}`);
+    // 59 bytes: `cam:` + a 16-character receipt + `:src:rm:y:` + a 12-character
+    // selector + `:` + sixteen digits. The widest this workflow can emit, with
+    // five bytes to spare — and the bound the confirm arm's `[0-9]{1,16}` keeps.
+    expect(Buffer.byteLength(removal!, 'utf8')).toBe(59);
+  });
+});
+
+/*
+ * ─── Supersession ends a prompt; it does not merely forget it ──────────────
+ *
+ * The store evicts an older receipt's states whenever a newer one renders, and
+ * it must: a superseded prompt that could still be claimed would install from a
+ * workflow the administrator has walked away from. But eviction only *forgets*,
+ * and a forgotten prompt whose ForceReply is still in the chat is the exact
+ * terminal state this workflow spends three layers preventing — `promptFor`
+ * finds nothing, `handleText` hands the message to the next handler, and the
+ * credential is never deleted.
+ *
+ * Reachability is ordinary: open the address prompt, then type `/camera` again,
+ * or enter any other workflow.
+ */
+describe('CameraSourcesHandler supersession', () => {
+  it('retracts an older receipt’s armed prompt when a newer one opens the screen', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const opened = await openCredentialPrompt(bench);
+    bench.messages.delete.mockClear();
+    const newer = { ...receipt, id: 'ponmlkjihgfedcba' } satisfies WorkflowReturnReceipt;
+
+    await bench.handler.handleEntry(context() as never, { receipt: newer });
+
+    // The message is gone, so nothing is left in the chat to answer.
+    expect(bench.messages.delete).toHaveBeenCalledWith(42, opened.promptMessageId);
+    const answer = await answerAddress(bench, opened.promptMessageId);
+    expect(answer.claimed).toBe(false);
+    expect(bench.createRtspCamera.execute).not.toHaveBeenCalled();
+  });
+
+  it('retracts on the supersession path CameraHandler drives', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const opened = await openCredentialPrompt(bench);
+    bench.messages.delete.mockClear();
+
+    // What `pruneContext` does when a fresh receipt is minted: every prompt
+    // this administrator has open here, whichever receipt armed it.
+    await bench.handler.retractPending(100, 42);
+
+    expect(bench.messages.delete).toHaveBeenCalledWith(42, opened.promptMessageId);
+    expect((await answerAddress(bench, opened.promptMessageId)).claimed).toBe(false);
+  });
+
+  it('retracts one receipt’s prompts without touching another’s', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const mine = await openCredentialPrompt(bench);
+    bench.messages.delete.mockClear();
+
+    await bench.handler.retractPending(100, 42, 'ponmlkjihgfedcba');
+
+    expect(bench.messages.delete).not.toHaveBeenCalled();
+    // Untouched means still answerable, not merely still stored.
+    const answer = await answerAddress(bench, mine.promptMessageId);
+    expect(answer.claimed).toBe(true);
+    expect(bench.createRtspCamera.execute).toHaveBeenCalledTimes(1);
+  });
+
+  /*
+   * The residual, and the same discipline `handoffToReinstall` established: if
+   * Telegram will not delete the message it is still armed, so its routing has
+   * to outlive the workflow that opened it — otherwise the reply answered into
+   * it is the undeleted credential all over again.
+   */
+  it('keeps a prompt it could not retract routable, for cleanup only', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const opened = await openCredentialPrompt(bench);
+    bench.messages.delete.mockRejectedValue(new CameraSourceMessageDeletionError());
+    const newer = { ...receipt, id: 'ponmlkjihgfedcba' } satisfies WorkflowReturnReceipt;
+
+    await bench.handler.handleEntry(context() as never, { receipt: newer });
+
+    bench.messages.delete.mockReset();
+    bench.messages.delete.mockResolvedValue(undefined);
+    const answer = await answerAddress(bench, opened.promptMessageId);
+
+    expect(answer.claimed).toBe(true);
+    expect(bench.messages.delete).toHaveBeenCalledWith(42, 600);
+    // Claimed for cleanup, never for an install.
+    expect(bench.createRtspCamera.execute).not.toHaveBeenCalled();
+  });
+
+  /*
+   * The other direction, and it is load-bearing: re-entering Sources on the
+   * *same* receipt is ordinary navigation, which T6 established must leave that
+   * receipt's own prompt answerable.
+   */
+  it('leaves its own receipt’s prompt answerable when the screen is re-entered', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const opened = await openCredentialPrompt(bench);
+    bench.messages.delete.mockClear();
+
+    await bench.handler.handleEntry(context() as never, { receipt });
+
+    expect(bench.messages.delete).not.toHaveBeenCalled();
+    const answer = await answerAddress(bench, opened.promptMessageId);
+    expect(answer.claimed).toBe(true);
+    expect(bench.createRtspCamera.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('sweeps once for a batch of retractions, not once per prompt', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    await openNamePrompt(bench);
+    const second = context();
+    await bench.handler.handleCallback(second as never, 'add:c', receipt);
+    expect(bench.prompts.createPending).toHaveBeenCalledTimes(2);
+    bench.prompts.prune.mockClear();
+
+    await bench.handler.retractPending(100, 42);
+
+    expect(bench.prompts.expire).toHaveBeenCalledTimes(2);
+    expect(bench.prompts.prune).toHaveBeenCalledTimes(1);
   });
 });

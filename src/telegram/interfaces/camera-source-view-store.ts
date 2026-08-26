@@ -163,10 +163,37 @@ export class CameraSourceViewStore {
 
   /** The messages this receipt still has forcing a reply, newest first. */
   promptMessagesFor(userId: number, chatId: number, receiptId: string): number[] {
-    return this.statesFor(userId, chatId)
-      .filter((state): state is CameraSourcePromptView =>
-        state.kind === 'prompt' && state.receipt.id === receiptId)
-      .map((state) => state.promptMessageId);
+    return this.promptsFor(userId, chatId, receiptId).map((state) => state.promptMessageId);
+  }
+
+  /**
+   * Every prompt this administrator has open here, newest first — optionally
+   * narrowed to one receipt.
+   *
+   * Whole states rather than message identifiers, because a caller ending a
+   * prompt needs the receipt it belongs to in order to name its durable row,
+   * and — when Telegram refuses the retraction — the state itself to put back.
+   * Without the receipt a caller sweeping *across* receipts would have to
+   * fabricate one, and a fabricated receipt names the wrong row.
+   */
+  promptsFor(userId: number, chatId: number, receiptId?: string): readonly CameraSourcePromptView[] {
+    return this.statesFor(userId, chatId).filter(
+      (state): state is CameraSourcePromptView =>
+        state.kind === 'prompt' && (receiptId === undefined || state.receipt.id === receiptId),
+    );
+  }
+
+  /**
+   * Re-arms the routing for a prompt whose retraction Telegram refused.
+   *
+   * The message is still in the chat and still answerable, so forgetting it
+   * would strand it — a credential replied to an unroutable prompt reaches the
+   * next handler undeleted, which is the one outcome this workflow exists to
+   * prevent. Deliberately *not* `set`: `set` evicts other receipts' states, and
+   * this runs while a newer workflow's screen is legitimately in the store.
+   */
+  restorePrompt(state: CameraSourcePromptView): void {
+    this.states.set(this.keyFor(state), state);
   }
 
   /**

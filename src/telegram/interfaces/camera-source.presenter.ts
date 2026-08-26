@@ -256,6 +256,52 @@ export function removalConfirmAction(selector: string, revision: number): string
 export const REINSTALL_ACTION = 'ri';
 
 /**
+ * The action the Cancel control carries.
+ *
+ * Receipt-bound like every other, and deliberately *not* selector-bound: cancel
+ * ends the workflow this receipt names, which is the whole of what an open
+ * prompt belongs to. A per-message cancel would have to carry a message
+ * identifier no screen has when the control is rendered — the notice that
+ * offers it is sent *before* the prompt it cancels exists.
+ */
+export const CANCEL_ACTION = 'x';
+
+/**
+ * The one control on the privacy notice.
+ *
+ * It lives there rather than on the prompt itself because Telegram's
+ * `reply_markup` holds exactly one markup: a message cannot be both a
+ * ForceReply and an inline keyboard. The notice is the last message before an
+ * administrator hands over an address that may carry a password, so it is also
+ * the place a way out is worth the most.
+ */
+export function cancelKeyboard(copy: CameraSourceCopy, receiptId: string): InlineKeyboard {
+  return keyboardOf([
+    [{ text: copy.prompts.cancelButton, callback_data: sourceCallback(receiptId, CANCEL_ACTION) }],
+  ]);
+}
+
+/**
+ * What a reply the workflow will not act on is answered with.
+ *
+ * Offered on every late reply — the window closed, or the prompt was already
+ * spent — because the administrator's next move is the same either way, and it
+ * is the overview rather than a new prompt: the conversation that armed the old
+ * prompt is over, and re-arming one from a message the administrator sent to a
+ * dead prompt would be a second workflow they never asked for.
+ */
+export function startAgainKeyboard(
+  copy: CameraSourceCopy,
+  home: WorkflowReturnCopy,
+  receiptId: string,
+): InlineKeyboard {
+  return keyboardOf([
+    [{ text: copy.startAgain, callback_data: sourceCallback(receiptId, 'over') }],
+    returnRow(home, receiptId, { origin: false }),
+  ]);
+}
+
+/**
  * Where each recovery control goes, for the screen that is offering it.
  *
  * `null` means this screen cannot honour that action, and the button is left
