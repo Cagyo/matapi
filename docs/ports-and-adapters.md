@@ -63,7 +63,7 @@ still compares equal is not evidence of freshness on its own.
 | `FeatureInstallControllerPort` (`FEATURE_INSTALL_CONTROLLER`) | `SystemdFeatureInstallControllerAdapter` | ✅ canonical fixed-unit trigger. It starts the root-owned installer asynchronously and exposes no arbitrary command interface. | [feature-install-controller.port.ts](../src/features/domain/ports/feature-install-controller.port.ts) |
 | `FeatureClockPort` (`FEATURE_CLOCK`) | `SystemFeatureClockAdapter` | ✅ canonical local clock seam for queueing, reconciliation, and recovery; keeps the feature context independent from the events/system clock ports. | [feature-clock.port.ts](../src/features/domain/ports/feature-clock.port.ts) |
 | `FeatureReadinessPort` (`FEATURE_READINESS`) | `FeatureReadinessRouter` over the fixed Digital, UART, Zigbee, Motion, and RTSP adapters; `InMemoryFeatureReadinessAdapter` (tests/dev) | ✅ canonical — each production probe uses fixed executable/argument arrays, a sanitized PATH, a five-second timeout, and a 64 KiB command-output limit. A refusal carries one reason: `runtime-group-incomplete` (the only one another restart can fix), `policy-stale`, or `runtime-invalid`. `RtspReadinessAdapter` takes its last check from the shared `RTSP_POLICY_STATUS` instance instead of reading the policy artifacts itself. | [feature-readiness.port.ts](../src/features/domain/ports/feature-readiness.port.ts) |
-| `RtspPolicyStatusPort` (`RTSP_POLICY_STATUS`) | `InstalledRtspPolicyStatusAdapter` over `RtspPolicyInspectorGateway` | ✅ canonical single verified projection of the installed RTSP policy, exported by `FeatureModule` so no consumer opens the policy artifacts itself. It reads the public summary through one no-follow single-link root-owned exact-mode descriptor, recomputes the digest field by field, requires the digest, CIDR list, and UDP range this process was started with to agree with it, and only then asks the inspector whether the installed networks are still the live ones. `inspect` degrades to `unavailable`, `requireCurrent` throws, and `assertDigest` is the synchronous fence over the last digest actually proven current. | [rtsp-policy-status.port.ts](../src/features/domain/ports/rtsp-policy-status.port.ts) |
+| `RtspPolicyStatusPort` (`RTSP_POLICY_STATUS`) | `InstalledRtspPolicyStatusAdapter` over `RtspPolicyInspectorGateway` | ✅ canonical single verified projection of the installed RTSP policy, exported by `FeatureModule` so no consumer opens the policy artifacts itself. It reads the public summary through one no-follow single-link root-owned exact-mode descriptor, recomputes the digest field by field, requires the digest, CIDR list, and UDP range this process was started with to agree with it, and only then asks the inspector whether the installed networks are still the live ones. `inspect` degrades to `unavailable`, `requireCurrent` throws, and `assertDigest` is the synchronous fence over the last digest actually proven current. **Load-bearing for Camera:** `inspect` runs `assertEnvironmentAgrees(installed)` *before* it returns either `ready` or `stale`, and fails closed to `unavailable` on any drift, so a `ready` status's `digest` and `networks` provably describe the same `RTSP_ALLOWED_CIDRS` string the probe parses. That is what bounds the status/enforcement divergence in Camera (below) to two arithmetic rules over one policy vocabulary rather than two unrelated sources. (A `stale` status deliberately returns the inspector's freshly *discovered* networks instead — that difference is the drift being reported — and Camera marks `currentPolicyDigest` null for it, so nothing is ever reported verified against them.) | [rtsp-policy-status.port.ts](../src/features/domain/ports/rtsp-policy-status.port.ts) |
 | `FeatureProcessIdentityPort` (`FEATURE_PROCESS_IDENTITY`) | `LinuxFeatureProcessIdentityAdapter` | ✅ canonical `<linux-boot-id>:<proc-self-start-ticks>` identity, read from bounded fixed `/proc` paths with `/proc/self/stat` parsed from its final `)`. Both halves are required — start ticks repeat across boots, and the boot id survives every restart within one boot. It is what makes an `awaiting-restart` install verifiable only by a genuinely fresh process. | [feature-process-identity.port.ts](../src/features/domain/ports/feature-process-identity.port.ts) |
 | `FeatureReadinessBarrierPort` (`FEATURE_READINESS_BARRIER`) | `FeatureReadinessBootService` | ✅ canonical boot gate. It performs one shared installed-and-enabled verification pass before availability is published. Internal to the feature context. | [feature-readiness-barrier.port.ts](../src/features/domain/ports/feature-readiness-barrier.port.ts) |
 | `FeatureAvailabilityPort` (`FEATURE_AVAILABILITY`) | `FeatureAvailabilityService` | ✅ canonical — published boot-gated state projection. `inspect` and `requireReady` await the shared initial verification pass and derive status from one feature row plus its active install job. | [feature-availability.port.ts](../src/features/domain/ports/feature-availability.port.ts) |
@@ -141,14 +141,88 @@ and directs the user to localized `/menu` usage only.
 
 ### Camera context
 
+Every RTSP camera-source mutation runs through `RtspSourceMutationService`, so
+the ordering that makes it safe is written once. An **install** — create,
+attach, replace — captures the policy digest, the `RtspSourceStartGate` epoch
+and the stored revision before it probes, then re-checks all of them plus the
+actor's role immediately before a synchronous commit:
+
+```
+requireAdmin → requireReady('rtsp') → requireCurrent → snapshot(epoch)
+  → requireStoredRevision → probe → encrypt
+  → requireReady('rtsp') → requireCurrent → stopCamera   (replace only)
+  ──────────── FENCE: no await below this line ────────────
+  → requireAdmin → assertEpoch → assertDigest → assertSameDigest → commit
+```
+
+`stopCamera` is the **last** await rather than an earlier step: a user-initiated
+`OpenLiveStreamUseCase` moves no gate epoch, so a converter started after the
+stop is invisible to every fence below it and the swap would land while the old
+URL was still streaming. Putting the stop last narrows that window from two
+I/O-bound awaits to one microtask boundary, in which only an already-queued
+start can be admitted and none can complete. It does **not** close it — full
+closure needs a per-camera lease, which is a follow-up.
+
+`assertEpoch` is the complete fence: it throws when the epoch moved **and** when
+the gate is closed right now, so a caller needs no separate `assertCanStart`.
+
+**`remove` is deliberately not uniform.** It runs `requireAdmin →
+requireStoredRevision → stopCamera → (sync) requireAdmin → commit`, dropping
+`requireReady` ×2, `requireCurrent` ×2, `assertDigest`, `assertSameDigest` and
+`assertGateOpen`. Removal probes nothing, encrypts nothing and persists no
+digest — its port signature takes only `{ cameraId, expectedRevision }` — and
+the policy installer never touches `cameras` or `camera_live_sources`, so those
+gates protect nothing while creating an indefinite lock-out: on a network where
+the policy inspector finds no eligible physical interface a reinstall can never
+complete, and an admin could then never remove a source. The stop fence is a
+conscious keep, not an oversight: a wedged converter refuses removal with
+`session-stop-failed` after the session service's 30-second operation timeout,
+which beats deleting a row while it is still being streamed. Do not "restore
+consistency" here — that reintroduces the lock-out.
+
+Rows created by `RTSP_SOURCE_CONFIGURATION` carry `cameras.type =
+RTSP_SOURCE_CAMERA_TYPE`, which is `'rtsp-source'` and **not** `'rtsp'`:
+`config/dev-state.yml` already ships a hand-written `type: rtsp` camera, and
+reusing that word would let `remove()` delete an operator's camera outright.
+`camera_live_sources.verified_at` is Unix epoch **milliseconds**, matching its
+`created_at`/`updated_at` siblings — not Drizzle's `{ mode: 'timestamp' }`,
+which stores seconds.
+
+Status is credential-free by construction. `GetRtspSourceOverviewUseCase` reads
+the redacted repository projection plus `RTSP_POLICY_STATUS.inspect()` and hands
+`LIVE_SOURCE_POLICY_EVALUATOR` the source's credential-free *hosts* — never a
+URL — so it never calls `loadForStream` and never decrypts. The `relationship`
+it reports is a **display value and never an authorization input**: enforcement
+is the probe's own containment check plus the installed packet policy, both of
+which run in full regardless. Three CIDR implementations now exist — the probe's
+(enforcement), the evaluator's (status), and `installed-rtsp-policy-status`'s
+own `canonicalNetwork`/`contains`/`addressValue` (different prefix floor, plus a
+private-range allowlist). Two known divergences remain between the first two,
+both fail-safe in the same direction (status more permissive than enforcement,
+never the reverse), pinned row by row in
+[rtsp-policy-containment.contract.test.ts](../test/camera/infrastructure/rtsp-policy-containment.contract.test.ts).
+Extracting one `PolicyNetworkSet` value object over all three is the deferred
+follow-up.
+
+> **Not reachable end to end yet.** `CreateRtspCameraUseCase` is built, exported
+> and tested but unwired: the Telegram Add button still routes through
+> `ConfigureLiveSourceUseCase`, which resolves a camera by name and throws
+> `CameraNotFoundError` for a name that does not exist. Wiring it belongs to
+> `docs/superpowers/plans/2026-08-13-rtsp-telegram-camera-setup.md`.
+
 | Port | Adapters | Status | Source |
 |---|---|---|---|
-| `LiveSourceRepositoryPort` (`LIVE_SOURCE_REPOSITORY`) | `DrizzleLiveSourceRepository`, `InMemoryLiveSourceRepository` | ✅ encrypted persistence, metadata-only read model/import, authenticated startup load, transactional key rotation | [live-source-repository.port.ts](../src/camera/domain/ports/live-source-repository.port.ts) |
+| `LiveSourceRepositoryPort` (`LIVE_SOURCE_REPOSITORY`) | `DrizzleLiveSourceRepository`, `InMemoryLiveSourceRepository` | ✅ encrypted persistence, metadata-only read model/import, authenticated startup load, transactional key rotation. `findRedacted(cameraId)` is the credential-free single-source lookup the mutation fence reads revisions from, and `RedactedLiveSource` carries `hasCredential`, `revision`, `verifiedAt` (epoch ms) and `policyDigest`. There is deliberately **no** `remove(cameraId)`: it was a non-CAS deletion path, and retiring a source is now a fenced compare-and-swap owned by `RTSP_SOURCE_CONFIGURATION`. | [live-source-repository.port.ts](../src/camera/domain/ports/live-source-repository.port.ts) |
 | `LiveSourceCredentialPort` (`LIVE_SOURCE_CREDENTIAL`) | `AesGcmLiveSourceCredentialAdapter`, fail-closed unavailable adapter | ✅ versioned AES-256-GCM with camera/version AAD and transactional repository rotation | [live-source-credential.port.ts](../src/camera/domain/ports/live-source-credential.port.ts) |
 | `LiveSourceProbePort` (`LIVE_SOURCE_PROBE`) | `FfmpegLiveSourceProbeAdapter`, fail-closed unavailable adapter | ✅ DNS-all-answer/CIDR validation, exact temporary egress lease, bounded Unix-socket FFmpeg probe | [live-source-probe.port.ts](../src/camera/domain/ports/live-source-probe.port.ts) |
 | `RtspRuntimeCoordinatorPort` (`RTSP_RUNTIME_COORDINATOR`) | `FfmpegLiveSourceProbeAdapter`, fail-closed unavailable adapter | ✅ shared restricted DNS, egress, sandbox, deadline, and cleanup orchestration for probe and live conversion | [rtsp-runtime-coordinator.port.ts](../src/camera/domain/ports/rtsp-runtime-coordinator.port.ts) |
 | `RtspStreamRuntimePort` (`RTSP_STREAM_RUNTIME`) | `RestrictedRtspStreamRuntimeAdapter`, fail-closed unavailable adapter | ✅ loads RTSP credentials only at converter start and exposes a secret-free opaque lifecycle | [rtsp-stream-runtime.port.ts](../src/camera/domain/ports/rtsp-stream-runtime.port.ts) |
-| `LiveSourceSessionControlPort` (`LIVE_SOURCE_SESSION_CONTROL`) | `LiveStreamSessionControlAdapter` | ✅ conservatively stops the one global live session before source removal | [live-source-session-control.port.ts](../src/camera/domain/ports/live-source-session-control.port.ts) |
+| `LiveSourceSessionControlPort` (`LIVE_SOURCE_SESSION_CONTROL`) | `LiveStreamSessionControlAdapter` over `LiveStreamSessionService` | ✅ scoped stops, not a global one. `stopCamera(cameraId)` stops the active, pending and queued-replacement work of exactly one camera — other cameras keep streaming — and `stopSourceKind(kind)` stops one source kind. Both are idempotent and safe for a camera with no session. This **replaces** the former global `stopActiveSession()`. | [live-source-session-control.port.ts](../src/camera/domain/ports/live-source-session-control.port.ts) |
+| `CameraSourceAuthorizationPort` (`CAMERA_SOURCE_AUTHORIZATION`) | `CameraSourceAuthorizationRegistry` (`useExisting`) ← `TelegramCameraSourceAuthorizationAdapter`, registered by `TelegramModule` | ✅ **synchronous** `requireAdmin(userId): void` — the final fence in front of a synchronous better-sqlite3 transaction, so it cannot await. Late-bound through the registry so `CameraModule` never imports Telegram, and **fail-closed before registration**: every actor is denied until an authority registers, so a composition mistake cannot become a silently unguarded mutation. The adapter re-reads the role from SQLite on *every* call (a member demoted between the pre-probe check and the fence is denied by the second call) and denies on an unreadable table. Only the verdict crosses; a denial carries no actor identity. | [camera-source-authorization.port.ts](../src/camera/domain/ports/camera-source-authorization.port.ts) |
+| `RtspSourceConfigurationPort` (`RTSP_SOURCE_CONFIGURATION`) | `DrizzleRtspSourceConfigurationAdapter`, `InMemoryRtspSourceConfigurationAdapter` (stub/dev/tests, writing through the shared in-memory repositories) | ✅ every camera/source/credential mutation as one **synchronous** `db.transaction` — `createCamera`, `attach`, `replace`, `remove`. Synchronous on purpose: no `await` may sit between the caller's final checks and the write, so do not make a method `async` or return a promise. The provider factory awaits `backfillNameKeys()` before handing the port out, so no mutation can precede the one-time canonical-name backfill. The adapter itself performs no encryption, probing, DNS or authorization. | [rtsp-source-configuration.port.ts](../src/camera/domain/ports/rtsp-source-configuration.port.ts) |
+| `CameraIdGeneratorPort` (`CAMERA_ID_GENERATOR`) | `CryptoCameraIdGeneratorAdapter` | ✅ mints the opaque identifier a new RTSP camera is stored under, never derived from a display name. A port so a caller that hits `CameraIdCollisionError` can retry with a fresh value, and so tests can inject a deterministic sequence. | [camera-id-generator.port.ts](../src/camera/domain/ports/camera-id-generator.port.ts) |
+| `CameraClockPort` (`CAMERA_CLOCK`) | `SystemCameraClockAdapter`, fixed clocks in tests | ✅ **synchronous** wall clock for the `verifiedAt` attestation, stamped inside the fence where no `await` is permitted. Distinct from `MONOTONIC_CLOCK`, which measures elapsed time and cannot be stored. | [camera-clock.port.ts](../src/camera/domain/ports/camera-clock.port.ts) |
+| `LiveSourcePolicyEvaluatorPort` (`LIVE_SOURCE_POLICY_EVALUATOR`) | `SystemLiveSourcePolicyEvaluatorAdapter` | ✅ credential-free status projection: given the source's hosts and the installed networks it answers `allowed` / `blocked` / `unresolved`, worst-first across primary and substream, resolving on every call rather than caching. **Never an authorization input** — see the note above. Cost model: hosts are deduplicated *after* parsing, so a primary/substream pair differing only by port (`cam.local:554` / `cam.local:8554`) costs one lookup; the overview resolves only the visible page, and does so in waves of `RTSP_SOURCE_OVERVIEW_RESOLUTION_WAVE = 4` — the libuv threadpool default — because a full 20-row page × 2 hosts would otherwise queue 40 `dns.lookup` calls against 4 slots and let later rows spend their whole 5-second budget waiting, marking healthy cameras `needs-attention` without the resolver ever being asked. | [live-source-policy-evaluator.port.ts](../src/camera/domain/ports/live-source-policy-evaluator.port.ts) |
 | `StreamSandboxPort` (`STREAM_SANDBOX`) | `SystemdFfmpegStreamAdapter`, fail-closed unavailable adapter | ✅ fixed UUID systemd control, gateway-prepared private Unix-socket output, bounded process identity/status | [stream-sandbox.port.ts](../src/camera/domain/ports/stream-sandbox.port.ts) |
 | `StreamEgressPort` (`STREAM_EGRESS`) | `NftStreamEgressAdapter`, fail-closed unavailable adapter | ✅ authenticated local helper with replay-safe, expiring UID-scoped RTSP/RTP egress leases | [stream-egress.port.ts](../src/camera/domain/ports/stream-egress.port.ts) |
 | `MotionControlPort` (`MOTION_CONTROL`) | `MotionDaemonAdapter` (systemctl, incl. `restart()`), `StubMotionControlAdapter` (dev) | ✅ | [motion-daemon.adapter.ts](../src/camera/infrastructure/motion-daemon.adapter.ts) |

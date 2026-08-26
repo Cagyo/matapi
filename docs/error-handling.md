@@ -175,6 +175,82 @@ rather than trusted from what was stored before the attempt. Anything else —
 gated as `partial-state-uncertain` until a later reinstall or verification
 reconciles all three files.
 
+## Camera source mutations
+
+Five typed errors cover everything a camera-source mutation can refuse with.
+None of them echoes anything back, because all five reach a Telegram chat.
+
+| Error | `code` | Means |
+|---|---|---|
+| `CameraNameTakenError` | `CAMERA_NAME_TAKEN` | Another camera already answers to the canonical key of the attempted name. The name is deliberately absent — echoing it back would confirm a camera the actor may not be allowed to know about. |
+| `CameraIdCollisionError` | `CAMERA_ID_COLLISION` | A generated identifier is already stored. The colliding value is absent because the answer is to mint another one and retry. |
+| `LiveSourceStateChangedError` | `LIVE_SOURCE_STATE_CHANGED` | The stored source moved between the caller's checks and its compare-and-swap: another mutation advanced the revision, an attach won the race, or the camera is gone. The caller re-reads and decides again. |
+| `CameraSourceAdminRequiredError` | `CAMERA_SOURCE_ADMIN_REQUIRED` | The synchronous authorization fence denied. Also what an unregistered authorization registry and an unreadable `users` table both raise — the fence is fail-closed, and a denial carries no actor identity. |
+| `CameraSourceUnavailableError` | `CAMERA_SOURCE_UNAVAILABLE` | RTSP went away mid-mutation. A `reason` discriminator separates the two conditions an admin can actually meet: `rtsp-closed` (feature disabled, policy reinstall, runtime teardown) and `session-stop-failed` (the camera could not be taken off air). |
+
+`CameraSourceUnavailableError` is deliberately **not** `LiveStreamUnavailableError`:
+that error means "the stream you asked to watch cannot start" and renders as
+stream copy, which is the wrong thing to tell an administrator who was editing a
+camera. `RtspSourceMutationService` translates at its own boundary — a
+`LiveStreamUnavailableError` from the start gate becomes `rtsp-closed`, and any
+throw out of `stopCamera` becomes `session-stop-failed` rather than being
+allowed to carry runtime detail (or a `cause`) into a chat.
+
+## Live-source probe failures
+
+Every rejection of `LiveSourceProbePort.run` is one of eight kinds, all
+extending `LiveSourceProbeBaseError`:
+
+```
+host-not-found · host-unreachable · authentication-rejected
+tls-verification-failed · unsupported-stream · probe-timeout
+address-outside-policy · probe-failed
+```
+
+Two rules hold the family together, and both are enforced rather than trusted:
+
+1. **Every kind is parameterless.** No URL, host, address, `cause`, or raw
+   process output. The probed URL carries the camera password and the message
+   reaches an operator chat, so the *kind alone* is the payload.
+2. **The union and the runtime recognizer cannot diverge.**
+   [live-source-probe.port.ts](../src/camera/domain/ports/live-source-probe.port.ts)
+   carries a compile-time assertion that `LiveSourceProbeError extends
+   LiveSourceProbeBaseError`. Without it, a new member that failed to extend the
+   base would silently downgrade to the generic failure at every `instanceof`
+   catch site, and no test could notice. The Telegram advice map is keyed on the
+   union, so an unhandled code is a build failure, not a fall-through.
+
+Classification is a separate, stateless module —
+[live-source-probe-diagnostics.ts](../src/camera/infrastructure/live-source-probe-diagnostics.ts)
+— matching a fixed, ordered marker table against child diagnostics and throwing
+the text away. Order is load-bearing (authentication before transport: a
+rejected DESCRIBE also names the connection it arrived over). Every row owns a
+fixture, and a guard walks the table to prove each fixture reaches its own row
+rather than one an earlier marker shadows. `classifyProbeDiagnostics` is total
+by construction: it runs inside an `execFile` callback, where a throw would cost
+a PM2 restart.
+
+### Known limitation — actionable advice is reduced on the sandboxed path
+
+The marker table only ever sees FFmpeg's stderr, and the production path does
+not have any. `systemd/homeworker-ffmpeg-stream@.service` sets
+`StandardOutput=null` / `StandardError=null` **deliberately**, because ffmpeg
+echoes the credentialed URL verbatim and routing stderr to journald would
+persist camera passwords to disk. So on a sandboxed Pi a probe can only ever
+classify:
+
+```
+host-not-found (resolver code) · address-outside-policy (containment)
+probe-timeout (our own deadline) · probe-failed (everything else)
+```
+
+`authentication-rejected`, `tls-verification-failed`, `host-unreachable` and
+`unsupported-stream` are reachable only on the unsandboxed developer path. The
+"no sensitive diagnostics" half of the requirement is therefore fully met; the
+"actionable" half is not, on the path that matters most. The follow-up is a
+closed-vocabulary diagnostics token emitted by the sandboxed unit — a fixed
+enum, never free text.
+
 ## Crash policy
 
 - **Do not** add top-level `try/catch` to suppress crashes "just in case". PM2 restarts on crash; that is the contract.

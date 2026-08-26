@@ -90,6 +90,68 @@ beforeEach(() => {
 });
 ```
 
+## Patterns for adapters that must not write
+
+Established by the RTSP camera-source lifecycle; reuse them, and prefer them to
+the mock-shaped alternative each one replaces.
+
+**Force a failure with real SQLite, not a production seam.** To prove a
+multi-table write is atomic, install a trigger in the test and let the real
+transaction fail:
+
+```sql
+CREATE TRIGGER reject_credentials BEFORE INSERT ON camera_live_credentials
+BEGIN SELECT RAISE(ABORT, 'injected credential failure'); END;
+```
+
+The alternative — an injectable "fail here" hook in the adapter — proves only
+that the hook works, and leaves a production seam behind whose only caller is a
+test. See [drizzle-rtsp-source-configuration.adapter.test.ts](../test/camera/infrastructure/drizzle-rtsp-source-configuration.adapter.test.ts)
+and [drizzle-home-session.store.test.ts](../test/telegram/infrastructure/drizzle-home-session.store.test.ts).
+
+**Assert "nothing was written" against real state, not mock call counts.**
+Serialize the credential-free store — cameras plus sources — before the
+attempted mutation and compare after:
+
+```ts
+const before = snapshot(subject);
+await expect(subject.replace.execute(input)).rejects.toThrow(LiveSourceStateChangedError);
+expect(snapshot(subject)).toBe(before);
+```
+
+`expect(repo.save).not.toHaveBeenCalled()` proves only that one method was not
+called; the snapshot catches every write, including one through a path the test
+did not think of.
+
+**Run a contract table across every adapter that implements the port.** A port
+with a real adapter and an in-memory twin is only useful while the two answer
+identically, so one `describe.each` table drives both — and both through their
+real entry points, never a reimplementation of the rule under test. Two live
+examples: [rtsp-source-configuration.contract.test.ts](../test/camera/infrastructure/rtsp-source-configuration.contract.test.ts)
+(Drizzle vs. two in-memory wirings) and
+[rtsp-policy-containment.contract.test.ts](../test/camera/infrastructure/rtsp-policy-containment.contract.test.ts)
+(the probe's enforcement CIDR arithmetic vs. the status evaluator's).
+
+> **A contract table that only asserts agreement is satisfied by two
+> implementations that agree on being broken.** If both regress to always-deny,
+> every per-row agreement assertion still passes. So a table over independent
+> implementations must also assert non-vacuity: a floor on the rows both sides
+> *admit* and on the rows both sides *refuse*. Deliberate divergences are listed
+> as rows of their own and the divergence set is pinned exactly, so a third one
+> fails the suite the moment it appears.
+
+**Guard fixture coverage by walking the table.** Where behavior is driven by an
+exported table — the probe's ordered diagnostic markers — a test iterates the
+table itself and fails on a row with no fixture, and on a fixture that only
+reaches its row because an earlier row shadows it. A hand-written list of cases
+silently stops covering the table the day someone appends to it. See
+[live-source-probe-diagnostics.test.ts](../test/camera/infrastructure/live-source-probe-diagnostics.test.ts).
+
+**Prove the test bites before you keep it.** After writing a test for a fix,
+revert the fix (or mutate the one line it depends on) and confirm the test fails
+for the reason you expect. A regression test that passes against the bug is
+worse than none: it certifies the bug.
+
 ## Test file location & naming
 
 ```
