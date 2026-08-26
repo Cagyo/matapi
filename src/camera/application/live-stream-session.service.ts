@@ -1085,6 +1085,10 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
       this.pending?.source,
       this.pending?.replacement?.source,
       this.pendingStartCleanup?.source,
+      // Unreachable today — `failStart(pending, true)` rejects this replacement
+      // before the slot is set — but listed so the enumeration stays uniform
+      // rather than resting on that invariant holding forever.
+      this.pendingStartCleanup?.replacement?.source,
     ];
   }
 
