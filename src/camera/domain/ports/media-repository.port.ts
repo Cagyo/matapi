@@ -23,10 +23,20 @@ export interface BrowseMotionEvent extends MotionEvent {
 export interface MediaRepositoryPort {
   listCameras(): Promise<Camera[]>;
   /**
-   * Case-insensitive name lookup; `null` when absent. Results may be disabled,
-   * so callers that expose a camera externally must check `camera.enabled`.
+   * Canonical-key name lookup (see `cameraNameKey`): whitespace, letter case
+   * and Unicode composition are folded away. `null` when absent. Results may be
+   * disabled, so callers that expose a camera externally must check
+   * `camera.enabled`.
    */
   findCameraByName(name: string): Promise<Camera | null>;
+  /**
+   * Claims a canonical key for every camera stored before the column existed,
+   * in one transaction. Must run before the first camera mutation, so the
+   * unique index — not a scan — decides logical name collisions from then on.
+   * Rejects with `CameraNameTakenError` and writes no key at all when legacy
+   * names already collide; idempotent otherwise.
+   */
+  backfillNameKeys(): Promise<void>;
   findEventById(id: number): Promise<MotionEvent | null>;
   /** Closed videos not yet attached to an archive artifact, oldest first. */
   findUnarchivedCompletedVideos(limit: number): Promise<MotionEvent[]>;

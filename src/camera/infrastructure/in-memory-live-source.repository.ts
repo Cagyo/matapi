@@ -6,6 +6,7 @@ import type {
   EncryptedLiveSourceCredential,
   LiveSourceForStream,
   LiveSourceRepositoryPort,
+  LiveSourceVerification,
   RedactedLiveSource,
 } from '../domain/ports/live-source-repository.port';
 
@@ -13,6 +14,9 @@ interface StoredLiveSource {
   source: LiveSource;
   credential: EncryptedLiveSourceCredential | null;
   cameraName: string;
+  revision: number;
+  verifiedAt: Date | null;
+  policyDigest: string | null;
 }
 
 export class InMemoryLiveSourceRepository implements LiveSourceRepositoryPort {
@@ -28,15 +32,21 @@ export class InMemoryLiveSourceRepository implements LiveSourceRepositoryPort {
   async save(
     source: LiveSource,
     credential: EncryptedLiveSourceCredential | null,
-  ): Promise<void> {
+    verification: LiveSourceVerification | null = null,
+  ): Promise<RedactedLiveSource> {
     if (credential && !this.#credentialWritesEnabled) {
       throw new LiveSourceCredentialUnavailableError();
     }
-    this.#sources.set(source.cameraId, {
+    const stored: StoredLiveSource = {
       source,
       credential: credential ? { ...credential } : null,
       cameraName: source.cameraId,
-    });
+      revision: this.#nextRevision(source.cameraId),
+      verifiedAt: verification?.verifiedAt ?? null,
+      policyDigest: verification?.policyDigest ?? null,
+    };
+    this.#sources.set(source.cameraId, stored);
+    return this.#redact(stored);
   }
 
   async loadForStream(cameraId: string): Promise<LiveSourceForStream | null> {
@@ -63,6 +73,9 @@ export class InMemoryLiveSourceRepository implements LiveSourceRepositoryPort {
         source,
         credential: null,
         cameraName: source.cameraId,
+        revision: this.#nextRevision(source.cameraId),
+        verifiedAt: null,
+        policyDigest: null,
       });
     }
     this.#sources.clear();
@@ -70,16 +83,28 @@ export class InMemoryLiveSourceRepository implements LiveSourceRepositoryPort {
   }
 
   async listRedacted(): Promise<RedactedLiveSource[]> {
-    return Promise.all(
-      [...this.#sources.values()].map(async ({ source, cameraName }) => ({
-        cameraId: source.cameraId,
-        cameraName:
-          cameraName === source.cameraId
-            ? await this.cameraNameForId(source.cameraId)
-            : cameraName,
-        summary: source.summary(),
-      })),
-    );
+    return Promise.all([...this.#sources.values()].map((stored) => this.#redact(stored)));
+  }
+
+  #nextRevision(cameraId: string): number {
+    const previous = this.#sources.get(cameraId);
+    return previous ? previous.revision + 1 : 0;
+  }
+
+  async #redact(stored: StoredLiveSource): Promise<RedactedLiveSource> {
+    const { source, cameraName, credential } = stored;
+    return {
+      cameraId: source.cameraId,
+      cameraName:
+        cameraName === source.cameraId
+          ? await this.cameraNameForId(source.cameraId)
+          : cameraName,
+      summary: source.summary(),
+      hasCredential: credential !== null,
+      revision: stored.revision,
+      verifiedAt: stored.verifiedAt,
+      policyDigest: stored.policyDigest,
+    };
   }
 
   async remove(cameraId: string): Promise<void> {

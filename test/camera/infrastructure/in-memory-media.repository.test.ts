@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { Camera } from '../../../src/camera/domain/camera.entity';
 import { MotionEvent } from '../../../src/camera/domain/motion-event.entity';
 import { InMemoryMediaRepository } from '../../../src/camera/infrastructure/in-memory-media.repository';
 
@@ -116,5 +117,39 @@ describe('InMemoryMediaRepository browse camera names', () => {
     const rows = await repo.listLatestEvents(10);
 
     expect(rows[0].cameraName).toBe('Front Door');
+  });
+});
+
+describe('InMemoryMediaRepository canonical camera names', () => {
+  function camera(id: string, name: string): Camera {
+    return { id, name, type: 'motion', config: null, enabled: true };
+  }
+
+  it('finds a camera through the canonical key', async () => {
+    const repo = new InMemoryMediaRepository();
+    repo.seedCameras([camera('garden', 'Terrassentür')]);
+
+    await expect(repo.findCameraByName('  TERRASSENTÜR ')).resolves.toMatchObject({ id: 'garden' });
+    await expect(repo.findCameraByName('terrassentur')).resolves.toBeNull();
+  });
+
+  it('accepts a backfill of distinct legacy names and stays idempotent', async () => {
+    const repo = new InMemoryMediaRepository();
+    repo.seedCameras([camera('front_door', ' Front Door '), camera('garden', 'Terrassentür')]);
+
+    await expect(repo.backfillNameKeys()).resolves.toBeUndefined();
+    await expect(repo.backfillNameKeys()).resolves.toBeUndefined();
+
+    await expect(repo.findCameraByName('front door')).resolves.toMatchObject({ id: 'front_door' });
+  });
+
+  it('rejects colliding legacy names without naming them', async () => {
+    const repo = new InMemoryMediaRepository();
+    repo.seedCameras([camera('a_front_door', 'Front Door'), camera('b_front_door', 'FRONT DOOR')]);
+
+    const failure = await repo.backfillNameKeys().catch((error: unknown) => error);
+
+    expect(failure).toMatchObject({ code: 'CAMERA_NAME_TAKEN' });
+    expect((failure as Error).message).not.toMatch(/front|door/i);
   });
 });

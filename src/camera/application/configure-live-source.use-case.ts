@@ -74,11 +74,6 @@ export class ConfigureLiveSourceUseCase {
     );
     await this.availability?.requireReady('rtsp');
     this.gate?.assertCanStart('rtsp');
-    await this.repository.save(source, encrypted);
-    return {
-      cameraId: source.cameraId,
-      cameraName: camera.name,
-      summary: source.summary(),
-    };
+    return this.repository.save(source, encrypted);
   }
 }

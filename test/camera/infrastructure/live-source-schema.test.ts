@@ -21,6 +21,9 @@ describe('live source schema contract', () => {
       'ready',
       'created_at',
       'updated_at',
+      'revision',
+      'verified_at',
+      'policy_digest',
     ]);
     expect(cameraId).toMatchObject({ primary: true, notNull: true });
     expect(config.foreignKeys).toHaveLength(1);

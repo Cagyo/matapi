@@ -3,6 +3,8 @@ import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt } from 'drizzle
 import { AppDatabase, DB } from '../../database/database.module';
 import { cameras, motionEvents } from '../../database/schema';
 import { Camera } from '../domain/camera.entity';
+import { cameraNameKey } from '../domain/camera-name-key';
+import { CameraNameTakenError } from '../domain/errors/camera-name-taken.error';
 import { MotionEvent } from '../domain/motion-event.entity';
 import {
   BrowseMotionEvent,
@@ -101,13 +103,36 @@ export class DrizzleMediaRepository implements MediaRepositoryPort, MediaWriterP
   }
 
   async findCameraByName(name: string): Promise<Camera | null> {
-    const target = name.trim().toLowerCase();
+    const target = cameraNameKey(name);
     const row = this.db
       .select()
       .from(cameras)
       .all()
-      .find((c) => c.name.toLowerCase() === target);
+      .find((c) => (c.nameKey ?? cameraNameKey(c.name)) === target);
     return row ? this.toCamera(row) : null;
+  }
+
+  async backfillNameKeys(): Promise<void> {
+    this.db.transaction((tx) => {
+      const rows = tx
+        .select({ id: cameras.id, name: cameras.name, nameKey: cameras.nameKey })
+        .from(cameras)
+        .orderBy(asc(cameras.id))
+        .all();
+      const claimed = new Set(
+        rows.flatMap((row) => (row.nameKey === null ? [] : [row.nameKey])),
+      );
+      for (const row of rows) {
+        if (row.nameKey !== null) continue;
+        const key = cameraNameKey(row.name);
+        // Refusing here keeps the failure a typed domain error rather than a
+        // raw constraint violation; either way the transaction rolls back and
+        // no legacy row is left holding a key.
+        if (claimed.has(key)) throw new CameraNameTakenError();
+        claimed.add(key);
+        tx.update(cameras).set({ nameKey: key }).where(eq(cameras.id, row.id)).run();
+      }
+    });
   }
 
   async findEventById(id: number): Promise<MotionEvent | null> {

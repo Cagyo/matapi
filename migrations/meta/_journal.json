@@ -141,6 +141,13 @@
       "when": 1787721049445,
       "tag": "0019_naive_invaders",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "6",
+      "when": 1787727721954,
+      "tag": "0020_lazy_joystick",
+      "breakpoints": true
     }
   ]
 }

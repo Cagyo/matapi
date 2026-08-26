@@ -6,6 +6,7 @@ import * as schema from '../../../src/database/schema';
 import { motionEvents } from '../../../src/database/schema';
 import { AppDatabase } from '../../../src/database/database.module';
 import { DrizzleMediaRepository } from '../../../src/camera/infrastructure/drizzle-media.repository';
+import { cameraNameKey } from '../../../src/camera/domain/camera-name-key';
 
 describe('DrizzleMediaRepository.listAllMediaPaths', () => {
   let sqlite: Database.Database;
@@ -174,5 +175,107 @@ describe('DrizzleMediaRepository browse camera names', () => {
     const rows = await repo.listLatestEvents(10);
 
     expect(rows[0].cameraName).toBe('Front Door');
+  });
+});
+
+describe('DrizzleMediaRepository canonical camera names', () => {
+  let sqlite: Database.Database;
+  let db: AppDatabase;
+  let repo: DrizzleMediaRepository;
+
+  beforeEach(() => {
+    sqlite = new Database(':memory:');
+    db = drizzle(sqlite, { schema });
+    migrate(db, { migrationsFolder: './migrations' });
+    repo = new DrizzleMediaRepository(db);
+  });
+
+  afterEach(() => {
+    sqlite.close();
+  });
+
+  /** Legacy rows predate the canonical key column, so it starts out null. */
+  function insertLegacyCamera(id: string, name: string): void {
+    sqlite
+      .prepare('INSERT INTO cameras (id, name, type, config, enabled) VALUES (?, ?, ?, NULL, 1)')
+      .run(id, name, 'motion');
+  }
+
+  function storedNameKeys(): { id: string; name_key: string | null }[] {
+    return sqlite.prepare('SELECT id, name_key FROM cameras ORDER BY id').all() as {
+      id: string;
+      name_key: string | null;
+    }[];
+  }
+
+  it('finds a legacy camera through the canonical key', async () => {
+    insertLegacyCamera('front_door', 'Terrassentür');
+
+    await expect(repo.findCameraByName('  TERRASSENTÜR ')).resolves.toMatchObject({
+      id: 'front_door',
+    });
+    await expect(repo.findCameraByName('terrassentur')).resolves.toBeNull();
+  });
+
+  it('backfills every missing name key in one transaction', async () => {
+    insertLegacyCamera('front_door', ' Front Door ');
+    insertLegacyCamera('garden', 'Terrassentür');
+
+    await repo.backfillNameKeys();
+
+    expect(storedNameKeys()).toEqual([
+      { id: 'front_door', name_key: 'front door' },
+      { id: 'garden', name_key: cameraNameKey('Terrassentür') },
+    ]);
+    await expect(repo.findCameraByName('front door')).resolves.toMatchObject({ id: 'front_door' });
+  });
+
+  it('is idempotent and leaves already-keyed rows untouched', async () => {
+    insertLegacyCamera('front_door', 'Front Door');
+    await repo.backfillNameKeys();
+
+    await repo.backfillNameKeys();
+
+    expect(storedNameKeys()).toEqual([{ id: 'front_door', name_key: 'front door' }]);
+  });
+
+  it('rejects colliding legacy names without writing any key', async () => {
+    insertLegacyCamera('a_front_door', 'Front Door');
+    insertLegacyCamera('b_garden', 'Terrassentür');
+    insertLegacyCamera('c_front_door', 'FRONT DOOR');
+
+    const failure = await repo.backfillNameKeys().catch((error: unknown) => error);
+
+    expect(failure).toMatchObject({ code: 'CAMERA_NAME_TAKEN' });
+    expect((failure as Error).message).not.toMatch(/front|door|terrass/i);
+    expect(storedNameKeys()).toEqual([
+      { id: 'a_front_door', name_key: null },
+      { id: 'b_garden', name_key: null },
+      { id: 'c_front_door', name_key: null },
+    ]);
+  });
+
+  it('rejects a legacy name colliding with an already-keyed camera', async () => {
+    insertLegacyCamera('a_front_door', 'Front Door');
+    await repo.backfillNameKeys();
+    insertLegacyCamera('b_front_door', 'front door');
+
+    await expect(repo.backfillNameKeys()).rejects.toMatchObject({ code: 'CAMERA_NAME_TAKEN' });
+
+    expect(storedNameKeys()).toEqual([
+      { id: 'a_front_door', name_key: 'front door' },
+      { id: 'b_front_door', name_key: null },
+    ]);
+  });
+
+  it('refuses a duplicate canonical key at the database level', () => {
+    insertLegacyCamera('a_front_door', 'Front Door');
+    insertLegacyCamera('b_front_door', 'front door');
+
+    sqlite.prepare('UPDATE cameras SET name_key = ? WHERE id = ?').run('front door', 'a_front_door');
+
+    expect(() =>
+      sqlite.prepare('UPDATE cameras SET name_key = ? WHERE id = ?').run('front door', 'b_front_door'),
+    ).toThrow(/UNIQUE/);
   });
 });

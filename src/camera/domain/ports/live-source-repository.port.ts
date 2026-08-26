@@ -15,19 +15,37 @@ export interface LiveSourceForStream {
   credential: LiveSourceCredentialPayload;
 }
 
+/** Outcome of the probe that admitted the stored source, if it was verified. */
+export interface LiveSourceVerification {
+  verifiedAt: Date;
+  /** Digest of the RTSP network policy in force at verification time. */
+  policyDigest: string;
+}
+
 export interface RedactedLiveSource {
   cameraId: string;
   cameraName: string;
   summary: LiveSourceSummary;
+  hasCredential: boolean;
+  /** Bumped by every state write; expected by compare-and-swap edits. */
+  revision: number;
+  verifiedAt: Date | null;
+  policyDigest: string | null;
 }
 
 export interface LiveSourceRepositoryPort {
-  /** Null persists not-ready import metadata without a credential row. */
+  /**
+   * Null credential persists not-ready import metadata without a credential
+   * row. Writing new state bumps the revision — a first write stores revision
+   * 0 — and replaces the verification, so omitting `verification` records the
+   * new state as unverified.
+   */
   save(
     source: LiveSource,
     credential: EncryptedLiveSourceCredential | null,
-  ): Promise<void>;
-  /** Atomically upserts credential-free, not-ready import metadata. */
+    verification?: LiveSourceVerification | null,
+  ): Promise<RedactedLiveSource>;
+  /** Atomically upserts credential-free, not-ready, unverified import metadata. */
   saveMetadataBatch(sources: readonly LiveSource[]): Promise<void>;
   loadForStream(cameraId: string): Promise<LiveSourceForStream | null>;
   /** Credential-free readiness lookup for public live-source resolution. */

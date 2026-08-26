@@ -1,5 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Camera } from '../domain/camera.entity';
+import { cameraNameKey } from '../domain/camera-name-key';
+import { CameraNameTakenError } from '../domain/errors/camera-name-taken.error';
 import { MotionEvent } from '../domain/motion-event.entity';
 import {
   BrowseMotionEvent,
@@ -95,8 +97,22 @@ export class InMemoryMediaRepository implements MediaRepositoryPort, MediaWriter
   }
 
   async findCameraByName(name: string): Promise<Camera | null> {
-    const target = name.trim().toLowerCase();
-    return this.cameras.find((c) => c.name.toLowerCase() === target) ?? null;
+    const target = cameraNameKey(name);
+    return this.cameras.find((c) => cameraNameKey(c.name) === target) ?? null;
+  }
+
+  /**
+   * Seeded cameras carry no stored key — lookups canonicalize `name` on every
+   * read — so the backfill has nothing to write and only has to agree with the
+   * Drizzle adapter on which legacy sets it refuses.
+   */
+  async backfillNameKeys(): Promise<void> {
+    const claimed = new Set<string>();
+    for (const camera of this.cameras) {
+      const key = cameraNameKey(camera.name);
+      if (claimed.has(key)) throw new CameraNameTakenError();
+      claimed.add(key);
+    }
   }
 
   async findEventById(id: number): Promise<MotionEvent | null> {

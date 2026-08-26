@@ -17,6 +17,7 @@ import type {
   EncryptedLiveSourceCredential,
   LiveSourceForStream,
   LiveSourceRepositoryPort,
+  LiveSourceVerification,
   RedactedLiveSource,
 } from '../domain/ports/live-source-repository.port';
 
@@ -33,12 +34,28 @@ export class DrizzleLiveSourceRepository implements LiveSourceRepositoryPort {
   async save(
     source: LiveSource,
     credential: EncryptedLiveSourceCredential | null,
-  ): Promise<void> {
+    verification: LiveSourceVerification | null = null,
+  ): Promise<RedactedLiveSource> {
     if (credential && !this.#credentialWritesEnabled) {
       throw new LiveSourceCredentialUnavailableError();
     }
     const now = Date.now();
-    this.db.transaction((tx) => {
+    const verifiedAt = verification?.verifiedAt ?? null;
+    const policyDigest = verification?.policyDigest ?? null;
+    return this.db.transaction((tx) => {
+      const camera = tx
+        .select({ name: cameras.name })
+        .from(cameras)
+        .where(eq(cameras.id, source.cameraId))
+        .get();
+      if (!camera) throw new InvalidLiveSourceError('unknown camera');
+      const previous = tx
+        .select({ revision: cameraLiveSources.revision })
+        .from(cameraLiveSources)
+        .where(eq(cameraLiveSources.cameraId, source.cameraId))
+        .get();
+      const revision = previous ? previous.revision + 1 : 0;
+
       tx.insert(cameraLiveSources)
         .values({
           cameraId: source.cameraId,
@@ -47,6 +64,9 @@ export class DrizzleLiveSourceRepository implements LiveSourceRepositoryPort {
           ready: source.ready,
           createdAt: now,
           updatedAt: now,
+          revision,
+          verifiedAt,
+          policyDigest,
         })
         .onConflictDoUpdate({
           target: cameraLiveSources.cameraId,
@@ -55,6 +75,9 @@ export class DrizzleLiveSourceRepository implements LiveSourceRepositoryPort {
             settings: source.settings,
             ready: source.ready,
             updatedAt: now,
+            revision,
+            verifiedAt,
+            policyDigest,
           },
         })
         .run();
@@ -63,15 +86,25 @@ export class DrizzleLiveSourceRepository implements LiveSourceRepositoryPort {
         tx.delete(cameraLiveCredentials)
           .where(eq(cameraLiveCredentials.cameraId, source.cameraId))
           .run();
-        return;
+      } else {
+        tx.insert(cameraLiveCredentials)
+          .values({ cameraId: source.cameraId, ...credential })
+          .onConflictDoUpdate({
+            target: cameraLiveCredentials.cameraId,
+            set: credential,
+          })
+          .run();
       }
-      tx.insert(cameraLiveCredentials)
-        .values({ cameraId: source.cameraId, ...credential })
-        .onConflictDoUpdate({
-          target: cameraLiveCredentials.cameraId,
-          set: credential,
-        })
-        .run();
+
+      return {
+        cameraId: source.cameraId,
+        cameraName: camera.name,
+        summary: source.summary(),
+        hasCredential: credential !== null,
+        revision,
+        verifiedAt,
+        policyDigest,
+      };
     });
   }
 
@@ -129,6 +162,12 @@ export class DrizzleLiveSourceRepository implements LiveSourceRepositoryPort {
         if (source.ready) {
           throw new InvalidLiveSourceError('metadata import source must not be ready');
         }
+        const previous = tx
+          .select({ revision: cameraLiveSources.revision })
+          .from(cameraLiveSources)
+          .where(eq(cameraLiveSources.cameraId, source.cameraId))
+          .get();
+        const revision = previous ? previous.revision + 1 : 0;
         tx.insert(cameraLiveSources)
           .values({
             cameraId: source.cameraId,
@@ -137,6 +176,7 @@ export class DrizzleLiveSourceRepository implements LiveSourceRepositoryPort {
             ready: false,
             createdAt: now,
             updatedAt: now,
+            revision,
           })
           .onConflictDoUpdate({
             target: cameraLiveSources.cameraId,
@@ -145,6 +185,9 @@ export class DrizzleLiveSourceRepository implements LiveSourceRepositoryPort {
               settings: source.settings,
               ready: false,
               updatedAt: now,
+              revision,
+              verifiedAt: null,
+              policyDigest: null,
             },
           })
           .run();
@@ -163,14 +206,26 @@ export class DrizzleLiveSourceRepository implements LiveSourceRepositoryPort {
         normalizedUrl: cameraLiveSources.normalizedUrl,
         settings: cameraLiveSources.settings,
         ready: cameraLiveSources.ready,
+        revision: cameraLiveSources.revision,
+        verifiedAt: cameraLiveSources.verifiedAt,
+        policyDigest: cameraLiveSources.policyDigest,
+        credentialCameraId: cameraLiveCredentials.cameraId,
       })
       .from(cameraLiveSources)
       .innerJoin(cameras, eq(cameras.id, cameraLiveSources.cameraId))
+      .leftJoin(
+        cameraLiveCredentials,
+        eq(cameraLiveCredentials.cameraId, cameraLiveSources.cameraId),
+      )
       .orderBy(asc(cameras.name))
       .all()
       .map((row) => ({
         cameraId: row.cameraId,
         cameraName: row.cameraName,
+        hasCredential: row.credentialCameraId !== null,
+        revision: row.revision,
+        verifiedAt: row.verifiedAt,
+        policyDigest: row.policyDigest,
         summary: {
           scheme: row.settings.scheme,
           host: new URL(row.normalizedUrl).host,

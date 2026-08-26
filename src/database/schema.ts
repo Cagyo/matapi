@@ -195,6 +195,12 @@ export const cameras = sqliteTable('cameras', {
   type: text('type').notNull(),
   config: text('config', { mode: 'json' }),
   enabled: integer('enabled', { mode: 'boolean' }).default(true),
+  /**
+   * Canonical form of `name` (see `cameraNameKey`), authoritative for logical
+   * name uniqueness. Nullable only for rows predating the column, until the
+   * one-time transactional backfill claims a key for each of them.
+   */
+  nameKey: text('name_key').unique(),
 });
 
 // ─── Camera Live Sources ───
@@ -209,6 +215,12 @@ export const cameraLiveSources = sqliteTable('camera_live_sources', {
   ready: integer('ready', { mode: 'boolean' }).notNull().default(false),
   createdAt: integer('created_at').notNull(),
   updatedAt: integer('updated_at').notNull(),
+  /** Bumped by every state write; the compare-and-swap authority for edits. */
+  revision: integer('revision').notNull().default(0),
+  /** When the stored source last passed a probe, or null when unverified. */
+  verifiedAt: integer('verified_at', { mode: 'timestamp' }),
+  /** Digest of the RTSP network policy in force at that verification. */
+  policyDigest: text('policy_digest'),
 });
 
 export const cameraLiveCredentials = sqliteTable('camera_live_credentials', {
