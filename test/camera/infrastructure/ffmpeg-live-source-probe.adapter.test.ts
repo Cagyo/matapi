@@ -12,6 +12,8 @@ import {
   FfmpegLiveSourceProbeAdapter,
   openFfmpegProbeUnixSink,
   startFfmpegProbeProcess,
+  type ProbeProcessHandle,
+  type ProbeProcessSpawn,
 } from '../../../src/camera/infrastructure/ffmpeg-live-source-probe.adapter';
 
 const lease = { sessionId: '123e4567-e89b-42d3-a456-426614174000', leaseId: 'lease-1' };
@@ -36,6 +38,112 @@ async function waitForPath(path: string): Promise<void> {
   throw new Error('child readiness marker was not created');
 }
 
+/**
+ * Locale-stable FFmpeg/OpenSSL/GnuTLS lines as they appear under `LANG=C`.
+ * Every fixture is the diagnostic text only; classification must survive the
+ * fact that FFmpeg happily prints the credentialed URL next to these markers.
+ */
+const DIAGNOSTIC_FIXTURES: readonly [string, string][] = [
+  [
+    '[rtsp @ 0x5581] method DESCRIBE failed: 401 Unauthorized\n',
+    'LIVE_SOURCE_AUTHENTICATION_REJECTED',
+  ],
+  [
+    '[rtsp @ 0x5581] method DESCRIBE failed: 403 Forbidden\n',
+    'LIVE_SOURCE_AUTHENTICATION_REJECTED',
+  ],
+  [
+    '[rtsp @ 0x5581] Server returned 401 Unauthorized (authorization failed)\n',
+    'LIVE_SOURCE_AUTHENTICATION_REJECTED',
+  ],
+  [
+    '[tls @ 0x5581] error:0A000086:SSL routines::certificate verify failed\n',
+    'LIVE_SOURCE_TLS_VERIFICATION_FAILED',
+  ],
+  [
+    '[tls @ 0x5581] Certificate verification failed: The certificate is NOT trusted.\n',
+    'LIVE_SOURCE_TLS_VERIFICATION_FAILED',
+  ],
+  [
+    '[tls @ 0x5581] unable to get local issuer certificate\n',
+    'LIVE_SOURCE_TLS_VERIFICATION_FAILED',
+  ],
+  [
+    "[tcp @ 0x5581] Failed to resolve hostname cam.invalid: Name or service not known\n",
+    'LIVE_SOURCE_HOST_NOT_FOUND',
+  ],
+  [
+    '[tcp @ 0x5581] Temporary failure in name resolution\n',
+    'LIVE_SOURCE_HOST_NOT_FOUND',
+  ],
+  [
+    '[tcp @ 0x5581] Connection to tcp://cam.local:554 failed: Connection refused\n',
+    'LIVE_SOURCE_HOST_UNREACHABLE',
+  ],
+  [
+    '[tcp @ 0x5581] Connection to tcp://cam.local:554 failed: No route to host\n',
+    'LIVE_SOURCE_HOST_UNREACHABLE',
+  ],
+  [
+    '[tcp @ 0x5581] Connection to tcp://cam.local:554 failed: Network is unreachable\n',
+    'LIVE_SOURCE_HOST_UNREACHABLE',
+  ],
+  [
+    '[tcp @ 0x5581] Connection to tcp://cam.local:554 failed: Connection timed out\n',
+    'LIVE_SOURCE_HOST_UNREACHABLE',
+  ],
+  [
+    '[rtsp @ 0x5581] Could not find codec parameters for stream 0\n',
+    'LIVE_SOURCE_UNSUPPORTED_STREAM',
+  ],
+  [
+    "Stream map '0:v:0' matches no streams.\n",
+    'LIVE_SOURCE_UNSUPPORTED_STREAM',
+  ],
+  [
+    '[rtsp @ 0x5581] Invalid data found when processing input\n',
+    'LIVE_SOURCE_UNSUPPORTED_STREAM',
+  ],
+  ['ffmpeg failed in a way nobody wrote a marker for\n', 'LIVE_SOURCE_PROBE_FAILED'],
+  ['', 'LIVE_SOURCE_PROBE_FAILED'],
+];
+
+const CREDENTIALLED_URL = 'rtsp://user:pass@cam.local/private?token=secret';
+
+/** A child that exits non-zero after writing `stderr`, without spawning anything. */
+function spawnStub(
+  stderr: string | Buffer,
+  outcome: 'exit-failure' | 'exit-success' = 'exit-failure',
+): ProbeProcessSpawn {
+  return (_file, _args, _options, callback) => {
+    queueMicrotask(() =>
+      callback(
+        outcome === 'exit-failure' ? new Error('Command failed: ffmpeg') : null,
+        '',
+        stderr,
+      ),
+    );
+    return { kill: vi.fn() };
+  };
+}
+
+/** No URL, host, credential, raw output, or cause may survive on a probe error. */
+function expectNoDiagnostics(failure: unknown): void {
+  const error = failure as Error & { cause?: unknown };
+  expect(error).toBeInstanceOf(Error);
+  expect('cause' in error).toBe(false);
+  expect(Object.getOwnPropertyNames(error)).not.toContain('cause');
+  const serialized = [
+    JSON.stringify(error),
+    String(error),
+    error.message,
+    Object.values(error).join(' '),
+  ].join(' ');
+  expect(serialized).not.toMatch(
+    /user|pass|private|token|secret|cam\.local|cam\.invalid|192\.168|401|403|DESCRIBE|stderr|ffmpeg|getaddrinfo/i,
+  );
+}
+
 function fixture(
   addresses = [{ address: '192.168.1.20', family: 4 as const }],
   timeoutMs = 30_000,
@@ -53,7 +161,13 @@ function fixture(
     completion: Promise.resolve(),
     kill: vi.fn(),
   };
-  const startProcess = vi.fn(() => processHandle);
+  const startProcess = vi.fn(
+    (
+      _file: string,
+      _args: readonly string[],
+      _options: { maxBuffer: number; shell: false; env: Record<string, string> },
+    ) => processHandle as ProbeProcessHandle,
+  );
   const openUnixSink = vi.fn().mockResolvedValue({
     confirmFrame: vi.fn().mockResolvedValue(undefined),
     close: vi.fn().mockResolvedValue(undefined),
@@ -124,23 +238,29 @@ describe('FfmpegLiveSourceProbeAdapter', () => {
       '-frames:v', '1', '-flush_packets', '1', '-f', 'image2pipe',
     ]));
     expect(argv.at(-1)).toMatch(/^unix:\/\/\/tmp\/home-worker-live-source-probe\/probe-[0-9a-f-]+\.sock$/u);
-    expect(options).toEqual({ maxBuffer: 65_536, shell: false });
+    expect(options).toEqual({
+      maxBuffer: 65_536,
+      shell: false,
+      env: { LANG: 'C', LC_ALL: 'C' },
+    });
     expect(egress.revoke).toHaveBeenCalledWith(lease);
   });
 
-  it('rejects empty or mixed DNS answers outside the CIDR before grant', async () => {
-    for (const addresses of [
-      [],
-      [
-        { address: '192.168.1.20', family: 4 as const },
-        { address: '203.0.113.10', family: 4 as const },
-      ],
-    ]) {
-      const { adapter, egress } = fixture(addresses);
-      await expect(adapter.run(LiveSource.create({ cameraId: 'c1', url: 'rtsp://cam.local/live' })))
-        .rejects.toMatchObject({ code: 'LIVE_SOURCE_PROBE_FAILED' });
-      expect(egress.grant).not.toHaveBeenCalled();
-    }
+  it('rejects an empty DNS answer as an unresolved host before grant', async () => {
+    const { adapter, egress } = fixture([]);
+    await expect(adapter.run(LiveSource.create({ cameraId: 'c1', url: 'rtsp://cam.local/live' })))
+      .rejects.toMatchObject({ code: 'LIVE_SOURCE_HOST_NOT_FOUND' });
+    expect(egress.grant).not.toHaveBeenCalled();
+  });
+
+  it('keeps an address outside the policy as its own generic failure', async () => {
+    const { adapter, egress } = fixture([
+      { address: '192.168.1.20', family: 4 as const },
+      { address: '203.0.113.10', family: 4 as const },
+    ]);
+    await expect(adapter.run(LiveSource.create({ cameraId: 'c1', url: 'rtsp://cam.local/live' })))
+      .rejects.toMatchObject({ code: 'LIVE_SOURCE_PROBE_FAILED' });
+    expect(egress.grant).not.toHaveBeenCalled();
   });
 
   it('always revokes after spawn failure and redacts the source and child error', async () => {
@@ -699,6 +819,125 @@ describe('FfmpegLiveSourceProbeAdapter', () => {
       })).toThrowError(/network policy is invalid/i);
     },
   );
+
+  it('classifies a child failure through the real process seam and still revokes', async () => {
+    const { adapter, egress, startProcess } = fixture();
+    let childEnv: Record<string, string> | undefined;
+    startProcess.mockImplementationOnce((file, args, options) => {
+      childEnv = options.env;
+      return startFfmpegProbeProcess(file, args, options, {
+        execFile: spawnStub(
+          `[rtsp @ 0x5581] method DESCRIBE failed: 401 Unauthorized\n${CREDENTIALLED_URL}\n`,
+        ),
+      });
+    });
+
+    const failure = await adapter
+      .run(LiveSource.create({ cameraId: 'front_door', url: CREDENTIALLED_URL }))
+      .then(() => null, (error: unknown) => error);
+
+    expect(failure).toMatchObject({ code: 'LIVE_SOURCE_AUTHENTICATION_REJECTED' });
+    expectNoDiagnostics(failure);
+    expect(childEnv).toEqual({ LANG: 'C', LC_ALL: 'C' });
+    expect(egress.revoke).toHaveBeenCalledWith(lease);
+  });
+
+  it('reports the classified probe failure even when cleanup also fails', async () => {
+    const { adapter, egress, startProcess } = fixture();
+    startProcess.mockImplementationOnce((file, args, options) =>
+      startFfmpegProbeProcess(file, args, options, {
+        execFile: spawnStub(
+          '[tcp @ 0x5581] Connection to tcp://cam.local:554 failed: Connection refused\n',
+        ),
+      }),
+    );
+    vi.mocked(egress.revoke).mockRejectedValue(new Error('revoke failed'));
+
+    await expect(
+      adapter.run(LiveSource.create({ cameraId: 'c1', url: 'rtsp://cam.local/live' })),
+    ).rejects.toMatchObject({ code: 'LIVE_SOURCE_HOST_UNREACHABLE' });
+  });
+
+  it('reports the generic failure when only cleanup fails', async () => {
+    const { adapter, egress } = fixture();
+    vi.mocked(egress.revoke).mockRejectedValue(new Error('revoke failed'));
+
+    await expect(
+      adapter.run(LiveSource.create({ cameraId: 'c1', url: 'rtsp://cam.local/live' })),
+    ).rejects.toMatchObject({ code: 'LIVE_SOURCE_PROBE_FAILED' });
+  });
+
+  it.each([
+    ['ENOTFOUND', 'LIVE_SOURCE_HOST_NOT_FOUND'],
+    ['EAI_AGAIN', 'LIVE_SOURCE_HOST_NOT_FOUND'],
+    ['ENODATA', 'LIVE_SOURCE_HOST_NOT_FOUND'],
+    ['EPERM', 'LIVE_SOURCE_PROBE_FAILED'],
+  ])('classifies resolver failure %s without echoing the host', async (code, expected) => {
+    const { adapter, egress, lookup } = fixture();
+    lookup.mockRejectedValueOnce(
+      Object.assign(new Error(`getaddrinfo ${code} cam.local`), {
+        code,
+        hostname: 'cam.local',
+        syscall: 'getaddrinfo',
+      }),
+    );
+
+    const failure = await adapter
+      .run(LiveSource.create({ cameraId: 'c1', url: CREDENTIALLED_URL }))
+      .then(() => null, (error: unknown) => error);
+
+    expect(failure).toMatchObject({ code: expected });
+    expectNoDiagnostics(failure);
+    expect(egress.grant).not.toHaveBeenCalled();
+  });
+
+  it('classifies an unresolved host on the sandboxed path as well', async () => {
+    const sandbox: StreamSandboxPort = {
+      start: vi.fn(),
+      stop: vi.fn().mockResolvedValue(undefined),
+    };
+    const { adapter } = fixture([], 30_000, {}, sandbox);
+
+    await expect(
+      adapter.run(LiveSource.create({ cameraId: 'c1', url: 'rtsp://cam.local/live' })),
+    ).rejects.toMatchObject({ code: 'LIVE_SOURCE_HOST_NOT_FOUND' });
+    expect(sandbox.start).not.toHaveBeenCalled();
+  });
+
+  it('reports its own deadline as a timeout after reaping, closing, and revoking', async () => {
+    vi.useFakeTimers();
+    try {
+      const { adapter, egress, startProcess, openUnixSink } = fixture(undefined, 1_000);
+      const completion = deferred<void>();
+      const signals: NodeJS.Signals[] = [];
+      startProcess.mockReturnValueOnce({
+        completion: completion.promise,
+        kill: (signal: NodeJS.Signals) => {
+          signals.push(signal);
+          if (signal === 'SIGKILL') completion.resolve();
+        },
+      });
+      const close = vi.fn().mockResolvedValue(undefined);
+      openUnixSink.mockResolvedValueOnce({
+        confirmFrame: vi.fn(() => new Promise<void>(() => undefined)),
+        close,
+      });
+      let failure: unknown = 'pending';
+      void adapter
+        .run(LiveSource.create({ cameraId: 'c1', url: CREDENTIALLED_URL }))
+        .then(() => { failure = null; }, (error: unknown) => { failure = error; });
+
+      await vi.advanceTimersByTimeAsync(1_001);
+
+      expect(failure).toMatchObject({ code: 'LIVE_SOURCE_PROBE_TIMEOUT' });
+      expectNoDiagnostics(failure);
+      expect(signals).toEqual(['SIGTERM', 'SIGKILL']);
+      expect(close).toHaveBeenCalledOnce();
+      expect(egress.revoke).toHaveBeenCalledWith(lease);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('BoundedJpegFrameTracker', () => {
@@ -733,7 +972,7 @@ describe('startFfmpegProbeProcess', () => {
     const processHandle = startFfmpegProbeProcess(
       process.execPath,
       ['-e', "process.stdout.write('x'.repeat(70_000))"],
-      { maxBuffer: 65_536, shell: false },
+      { maxBuffer: 65_536, shell: false, env: { LANG: 'C', LC_ALL: 'C' } },
     );
 
     await expect(processHandle.completion).rejects.toMatchObject({
@@ -752,7 +991,7 @@ describe('startFfmpegProbeProcess', () => {
         "const fs=require('node:fs'); process.on('SIGTERM',()=>undefined); fs.writeFileSync(process.argv[1],'ready'); setInterval(()=>undefined,1_000)",
         readyPath,
       ],
-      { maxBuffer: 65_536, shell: false },
+      { maxBuffer: 65_536, shell: false, env: { LANG: 'C', LC_ALL: 'C' } },
     );
     let settled = false;
     void processHandle.completion.then(
@@ -778,6 +1017,87 @@ describe('startFfmpegProbeProcess', () => {
       }
       await rm(directory, { recursive: true, force: true });
     }
+  });
+});
+
+describe('startFfmpegProbeProcess diagnostics', () => {
+  const options = {
+    maxBuffer: 65_536,
+    shell: false,
+    env: { LANG: 'C', LC_ALL: 'C' },
+  } as const;
+
+  it.each(DIAGNOSTIC_FIXTURES)(
+    'maps %j to a typed, payload-free failure',
+    async (stderr, code) => {
+      const handle = startFfmpegProbeProcess(
+        'ffmpeg',
+        ['-i', CREDENTIALLED_URL],
+        options,
+        { execFile: spawnStub(stderr) },
+      );
+
+      const failure = await handle.completion.then(
+        () => null,
+        (error: unknown) => error,
+      );
+
+      expect(failure).toMatchObject({ code });
+      expectNoDiagnostics(failure);
+    },
+  );
+
+  it('classifies Buffer stderr exactly like string stderr', async () => {
+    const handle = startFfmpegProbeProcess('ffmpeg', [], options, {
+      execFile: spawnStub(
+        Buffer.from('[rtsp @ 0x5581] method DESCRIBE failed: 401 Unauthorized\n'),
+      ),
+    });
+
+    await expect(handle.completion).rejects.toMatchObject({
+      code: 'LIVE_SOURCE_AUTHENTICATION_REJECTED',
+    });
+  });
+
+  it('ignores a marker beyond the 64 KiB diagnostic cap', async () => {
+    const handle = startFfmpegProbeProcess('ffmpeg', [], options, {
+      execFile: spawnStub(
+        `${'x'.repeat(65_536)}\n[rtsp @ 0x5581] method DESCRIBE failed: 401 Unauthorized\n`,
+      ),
+    });
+
+    await expect(handle.completion).rejects.toMatchObject({
+      code: 'LIVE_SOURCE_PROBE_FAILED',
+    });
+  });
+
+  it('forces a C locale over the inherited child environment', async () => {
+    let childEnv: NodeJS.ProcessEnv | undefined;
+    let childOptions: { maxBuffer: number; shell: false } | undefined;
+    const handle = startFfmpegProbeProcess('ffmpeg', [], options, {
+      execFile: (_file, _args, spawnOptions, callback) => {
+        childEnv = spawnOptions.env;
+        childOptions = spawnOptions;
+        queueMicrotask(() => callback(null, '', ''));
+        return { kill: vi.fn() };
+      },
+    });
+
+    await expect(handle.completion).resolves.toBeUndefined();
+    expect(childEnv).toMatchObject({ LANG: 'C', LC_ALL: 'C' });
+    expect(childEnv?.PATH).toBe(process.env.PATH);
+    expect(childOptions).toMatchObject({ maxBuffer: 65_536, shell: false });
+  });
+
+  it('never classifies a clean exit that only warned on stderr', async () => {
+    const handle = startFfmpegProbeProcess('ffmpeg', [], options, {
+      execFile: spawnStub(
+        '[rtsp @ 0x5581] method DESCRIBE failed: 401 Unauthorized\n',
+        'exit-success',
+      ),
+    });
+
+    await expect(handle.completion).resolves.toBeUndefined();
   });
 });
 

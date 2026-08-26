@@ -6,10 +6,19 @@ import { isIP } from 'node:net';
 import { createServer, type Socket } from 'node:net';
 import { dirname, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { LiveSourceAuthenticationRejectedError } from '../domain/errors/live-source-authentication-rejected.error';
+import { LiveSourceHostNotFoundError } from '../domain/errors/live-source-host-not-found.error';
+import { LiveSourceHostUnreachableError } from '../domain/errors/live-source-host-unreachable.error';
 import { LiveSourceNetworkPolicyInvalidError } from '../domain/errors/live-source-network-policy-invalid.error';
 import { LiveSourceProbeFailedError } from '../domain/errors/live-source-probe-failed.error';
+import { LiveSourceProbeTimeoutError } from '../domain/errors/live-source-probe-timeout.error';
+import { LiveSourceTlsVerificationError } from '../domain/errors/live-source-tls-verification.error';
+import { LiveSourceUnsupportedStreamError } from '../domain/errors/live-source-unsupported-stream.error';
 import type { LiveSource } from '../domain/live-source.entity';
-import type { LiveSourceProbePort } from '../domain/ports/live-source-probe.port';
+import type {
+  LiveSourceProbeError,
+  LiveSourceProbePort,
+} from '../domain/ports/live-source-probe.port';
 import type {
   StreamEgressLease,
   StreamEgressPort,
@@ -21,6 +30,13 @@ import { StreamEgressGrant } from '../domain/stream-egress-grant.value-object';
 
 const PROTOCOL_WHITELIST = 'rtp,rtsp,tcp,tls,udp,unix';
 const MAX_DIAGNOSTIC_BYTES = 65_536;
+/**
+ * The child is pinned to the C locale so FFmpeg, OpenSSL, and GnuTLS emit the
+ * fixed English markers `classifyProbeDiagnostics` matches. Set explicitly
+ * rather than inherited: a translated `LANG` would silently degrade every
+ * classification back to the generic failure.
+ */
+const PROBE_CHILD_ENV = { LANG: 'C', LC_ALL: 'C' } as const;
 const MAX_PROBE_FRAME_BYTES = 2 * 1024 * 1024;
 const MAX_CLEANUP_RESERVE_MS = 500;
 
@@ -76,7 +92,7 @@ export class BoundedJpegFrameTracker {
         this.#observed,
         new Promise<void>((_, reject) => {
           timer = setTimeout(
-            () => reject(new LiveSourceProbeFailedError()),
+            () => reject(new LiveSourceProbeTimeoutError()),
             timeoutMs,
           );
         }),
@@ -143,7 +159,7 @@ export interface FfmpegLiveSourceProbeDependencies {
   startProcess(
     file: string,
     args: readonly string[],
-    options: { maxBuffer: number; shell: false },
+    options: ProbeProcessOptions,
   ): ProbeProcessHandle;
   openUnixSink(path: string, mode: 0o600 | 0o660): Promise<UnixSink>;
   monotonicNow(): number;
@@ -157,6 +173,25 @@ export interface ProbeProcessHandle {
   readonly completion: Promise<void>;
   kill(signal: NodeJS.Signals): void;
 }
+
+export interface ProbeProcessOptions {
+  maxBuffer: number;
+  shell: false;
+  /** Overrides layered onto the inherited environment; see `PROBE_CHILD_ENV`. */
+  env: Record<string, string>;
+}
+
+/** The single seam through which a probe child is spawned and observed. */
+export type ProbeProcessSpawn = (
+  file: string,
+  args: readonly string[],
+  options: { maxBuffer: number; shell: false; env: NodeJS.ProcessEnv },
+  callback: (
+    error: Error | null,
+    stdout: string | Buffer,
+    stderr: string | Buffer,
+  ) => void,
+) => { kill(signal: NodeJS.Signals): unknown };
 
 export class FfmpegLiveSourceProbeAdapter implements LiveSourceProbePort, RtspRuntimeCoordinatorPort {
   readonly #cidrs: readonly ParsedCidr[];
@@ -215,7 +250,8 @@ export class FfmpegLiveSourceProbeAdapter implements LiveSourceProbePort, RtspRu
     let processSettled = false;
     let sandboxStartAttempted = false;
     let sandboxSessionId: string | undefined;
-    let failed = false;
+    let failure: LiveSourceProbeError | undefined;
+    let cleanupFailed = false;
     try {
       const payload = source.credentialPayload();
       const endpoints = [payload.primaryUrl, payload.substreamUrl].filter(
@@ -301,7 +337,7 @@ export class FfmpegLiveSourceProbeAdapter implements LiveSourceProbePort, RtspRu
         process = this.#dependencies.startProcess(
           'ffmpeg',
           buildArguments(source, selectedUrl, socketPath, this.options),
-          { maxBuffer: MAX_DIAGNOSTIC_BYTES, shell: false },
+          { maxBuffer: MAX_DIAGNOSTIC_BYTES, shell: false, env: PROBE_CHILD_ENV },
         );
         processCompletion = process.completion.then(
           () => { processSettled = true; },
@@ -318,8 +354,8 @@ export class FfmpegLiveSourceProbeAdapter implements LiveSourceProbePort, RtspRu
         workDeadline,
         monotonicNow,
       );
-    } catch {
-      failed = true;
+    } catch (error) {
+      failure = asProbeError(error);
     } finally {
       const cleanupOperations: Promise<boolean>[] = [];
       if (sandboxStartAttempted && sandboxSessionId && this.#dependencies.sandbox) {
@@ -360,9 +396,18 @@ export class FfmpegLiveSourceProbeAdapter implements LiveSourceProbePort, RtspRu
           ),
         );
       }
-      if ((await Promise.all(cleanupOperations)).some((ok) => !ok)) failed = true;
+      if ((await Promise.all(cleanupOperations)).some((ok) => !ok)) {
+        cleanupFailed = true;
+      }
     }
-    if (failed) throw new LiveSourceProbeFailedError();
+    // Precedence: a classified body failure outranks a cleanup failure. The
+    // body failure is the only one an administrator can act on, while a
+    // cleanup failure describes an internal obligation with no actionable
+    // advice. Cleanup failures still fail the probe — they just report the
+    // generic error, so a leaked lease or unreaped child never reads as
+    // success.
+    if (failure) throw failure;
+    if (cleanupFailed) throw new LiveSourceProbeFailedError();
   }
 
   private hasRestrictedSandbox(): boolean {
@@ -454,7 +499,7 @@ export class FfmpegLiveSourceProbeAdapter implements LiveSourceProbePort, RtspRu
           stopped = true;
         },
       };
-    } catch {
+    } catch (error) {
       if (lease || startAttempted) {
         this.#pendingRestrictedCleanup.set(input.sessionId, {
           lease,
@@ -462,7 +507,7 @@ export class FfmpegLiveSourceProbeAdapter implements LiveSourceProbePort, RtspRu
         });
         await this.recoverRestrictedRuntime(input.sessionId, deadline).catch(() => undefined);
       }
-      throw new LiveSourceProbeFailedError();
+      throw asProbeError(error);
     }
   }
 
@@ -503,7 +548,8 @@ export class FfmpegLiveSourceProbeAdapter implements LiveSourceProbePort, RtspRu
     const socketPath = join('/run/home-worker/live-stream-output', `${sessionId}.sock`);
     let sink: UnixSink | undefined;
     let runtime: RtspStreamRuntimeHandle | undefined;
-    let failed = false;
+    let failure: LiveSourceProbeError | undefined;
+    let cleanupFailed = false;
     try {
       sink = await awaitBeforeDeadline(
         this.#dependencies.openUnixSink(socketPath, 0o660),
@@ -518,14 +564,14 @@ export class FfmpegLiveSourceProbeAdapter implements LiveSourceProbePort, RtspRu
         deadlineMonotonicMs: finalDeadline,
       });
       const remainingMs = finalDeadline - monotonicNow();
-      if (remainingMs <= 0) throw new LiveSourceProbeFailedError();
+      if (remainingMs <= 0) throw new LiveSourceProbeTimeoutError();
       await awaitBeforeDeadline(
         sink.confirmFrame(remainingMs),
         finalDeadline,
         monotonicNow,
       );
-    } catch {
-      failed = true;
+    } catch (error) {
+      failure = asProbeError(error);
     } finally {
       const runtimeToStop = runtime;
       const sinkToClose = sink;
@@ -537,9 +583,31 @@ export class FfmpegLiveSourceProbeAdapter implements LiveSourceProbePort, RtspRu
         )] : []),
         ...(sinkToClose ? [cleanupBeforeDeadline(() => sinkToClose.close(), finalDeadline, monotonicNow)] : []),
       ]);
-      if (results.some((ok) => !ok)) failed = true;
+      if (results.some((ok) => !ok)) cleanupFailed = true;
     }
-    if (failed) throw new LiveSourceProbeFailedError();
+    // Same precedence as `run`: the classified failure wins, cleanup failures
+    // still fail the probe generically.
+    if (failure) throw failure;
+    if (cleanupFailed) throw new LiveSourceProbeFailedError();
+  }
+
+  /**
+   * Resolver failures are classified by code alone. The rejected lookup error
+   * carries the hostname and is dropped here rather than re-thrown, so nothing
+   * derived from the URL travels further.
+   */
+  private async resolve(
+    hostname: string,
+  ): Promise<readonly { address: string; family: number }[]> {
+    try {
+      return await this.#dependencies.lookup(hostname);
+    } catch (error) {
+      const code = errorCode(error);
+      if (code !== null && UNRESOLVED_HOST_CODES.has(code)) {
+        throw new LiveSourceHostNotFoundError();
+      }
+      throw new LiveSourceProbeFailedError();
+    }
   }
 
   private async validateEndpoint(
@@ -551,8 +619,8 @@ export class FfmpegLiveSourceProbeAdapter implements LiveSourceProbePort, RtspRu
     const literalFamily = isIP(hostname);
     const answers = literalFamily
       ? [{ address: canonicalAddress(hostname), family: literalFamily }]
-      : await this.#dependencies.lookup(hostname);
-    if (answers.length === 0) throw new LiveSourceProbeFailedError();
+      : await this.resolve(hostname);
+    if (answers.length === 0) throw new LiveSourceHostNotFoundError();
     for (const answer of answers) {
       const address = canonicalAddress(answer.address);
       if (!this.#cidrs.some((cidr) => contains(cidr, address))) {
@@ -574,6 +642,100 @@ export class FfmpegLiveSourceProbeAdapter implements LiveSourceProbePort, RtspRu
           : 554,
     };
   }
+}
+
+/**
+ * Fixed markers, matched in order, first hit wins. Every entry is an ASCII
+ * substring FFmpeg/OpenSSL/GnuTLS print verbatim under `LANG=C`; nothing here
+ * is a pattern over attacker- or camera-controlled text, and the matched text
+ * itself is discarded — only the resulting kind survives. Authentication is
+ * checked before transport because a rejected DESCRIBE also reports the
+ * connection it was carried over.
+ */
+const DIAGNOSTIC_MARKERS: readonly (readonly [
+  string,
+  () => LiveSourceProbeError,
+])[] = [
+  ['401 unauthorized', () => new LiveSourceAuthenticationRejectedError()],
+  ['403 forbidden', () => new LiveSourceAuthenticationRejectedError()],
+  ['authorization failed', () => new LiveSourceAuthenticationRejectedError()],
+  ['certificate verify failed', () => new LiveSourceTlsVerificationError()],
+  ['certificate verification failed', () => new LiveSourceTlsVerificationError()],
+  ['unable to get local issuer certificate', () => new LiveSourceTlsVerificationError()],
+  ['self-signed certificate', () => new LiveSourceTlsVerificationError()],
+  ['self signed certificate', () => new LiveSourceTlsVerificationError()],
+  ['failed to resolve hostname', () => new LiveSourceHostNotFoundError()],
+  ['name or service not known', () => new LiveSourceHostNotFoundError()],
+  ['temporary failure in name resolution', () => new LiveSourceHostNotFoundError()],
+  ['no address associated with hostname', () => new LiveSourceHostNotFoundError()],
+  ['connection refused', () => new LiveSourceHostUnreachableError()],
+  ['no route to host', () => new LiveSourceHostUnreachableError()],
+  ['network is unreachable', () => new LiveSourceHostUnreachableError()],
+  ['host is unreachable', () => new LiveSourceHostUnreachableError()],
+  ['connection timed out', () => new LiveSourceHostUnreachableError()],
+  ['could not find codec parameters', () => new LiveSourceUnsupportedStreamError()],
+  ['matches no streams', () => new LiveSourceUnsupportedStreamError()],
+  ['invalid data found when processing input', () => new LiveSourceUnsupportedStreamError()],
+  ['unsupported codec', () => new LiveSourceUnsupportedStreamError()],
+  ['does not contain any stream', () => new LiveSourceUnsupportedStreamError()],
+];
+
+/**
+ * Turns child diagnostics into one typed kind and throws the text away. The
+ * input holds the probed URL — password included — so it is never logged,
+ * attached as `cause`, or copied onto the returned error.
+ *
+ * Only the first `MAX_DIAGNOSTIC_BYTES` are considered. The spawn seam already
+ * caps the child's stderr at the same size; the markers are ASCII, so the
+ * character bound and the byte bound coincide for anything matchable.
+ */
+function classifyProbeDiagnostics(
+  diagnostics: string | Buffer,
+): LiveSourceProbeError {
+  const text = (typeof diagnostics === 'string'
+    ? diagnostics
+    : diagnostics.toString('utf8')
+  )
+    .slice(0, MAX_DIAGNOSTIC_BYTES)
+    .toLowerCase();
+  for (const [marker, create] of DIAGNOSTIC_MARKERS) {
+    if (text.includes(marker)) return create();
+  }
+  return new LiveSourceProbeFailedError();
+}
+
+/**
+ * Keeps an already-classified probe failure and reduces everything else to the
+ * generic one. Unknown throwables never pass through: their message or `cause`
+ * could carry the credentialed URL.
+ */
+function asProbeError(error: unknown): LiveSourceProbeError {
+  if (error instanceof LiveSourceHostNotFoundError) return error;
+  if (error instanceof LiveSourceHostUnreachableError) return error;
+  if (error instanceof LiveSourceAuthenticationRejectedError) return error;
+  if (error instanceof LiveSourceTlsVerificationError) return error;
+  if (error instanceof LiveSourceUnsupportedStreamError) return error;
+  if (error instanceof LiveSourceProbeTimeoutError) return error;
+  if (error instanceof LiveSourceProbeFailedError) return error;
+  return new LiveSourceProbeFailedError();
+}
+
+/** Resolver codes that all mean the same actionable thing: the name did not resolve. */
+const UNRESOLVED_HOST_CODES: ReadonlySet<string> = new Set([
+  'ENOTFOUND',
+  'ENODATA',
+  'EAI_NODATA',
+  'EAI_NONAME',
+  'EAI_AGAIN',
+  'NOTFOUND',
+]);
+
+function errorCode(error: unknown): string | null {
+  if (typeof error !== 'object' || error === null || !('code' in error)) {
+    return null;
+  }
+  const { code } = error;
+  return typeof code === 'string' ? code : null;
 }
 
 function buildArguments(
@@ -641,21 +803,39 @@ async function defaultLookup(hostname: string) {
   return lookup(hostname, { all: true, verbatim: true });
 }
 
+/**
+ * Spawns the probe child and turns a non-zero exit into a typed failure.
+ *
+ * `maxBuffer` bounds what the child can hand back, the C locale keeps the
+ * markers stable, and the captured stderr is consumed by the classifier and
+ * discarded. Neither the argv (which contains the credentialed URL) nor the
+ * diagnostics are ever logged.
+ */
 export function startFfmpegProbeProcess(
   file: string,
   args: readonly string[],
-  options: { maxBuffer: number; shell: false },
+  options: ProbeProcessOptions,
+  dependencies: { execFile?: ProbeProcessSpawn } = {},
 ): ProbeProcessHandle {
+  const spawn: ProbeProcessSpawn =
+    dependencies.execFile ??
+    ((spawnFile, spawnArgs, spawnOptions, callback) =>
+      execFile(spawnFile, [...spawnArgs], spawnOptions, callback));
   let resolveCompletion!: () => void;
-  let rejectCompletion!: (error: LiveSourceProbeFailedError) => void;
+  let rejectCompletion!: (error: LiveSourceProbeError) => void;
   const completion = new Promise<void>((resolve, reject) => {
     resolveCompletion = resolve;
     rejectCompletion = reject;
   });
-  const child = execFile(file, [...args], options, (error) => {
-    if (error) rejectCompletion(new LiveSourceProbeFailedError());
-    else resolveCompletion();
-  });
+  const child = spawn(
+    file,
+    args,
+    { ...options, env: { ...process.env, ...options.env } },
+    (error, _stdout, stderr) => {
+      if (error) rejectCompletion(classifyProbeDiagnostics(stderr));
+      else resolveCompletion();
+    },
+  );
   return {
     completion,
     kill: (signal) => {
@@ -673,14 +853,14 @@ async function awaitBeforeDeadline<T>(
   const remainingMs = deadline - monotonicNow();
   if (remainingMs <= 0) {
     observeLateResolution(operation, onLateResolution);
-    throw new LiveSourceProbeFailedError();
+    throw new LiveSourceProbeTimeoutError();
   }
   let timedOut = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
       timedOut = true;
-      reject(new LiveSourceProbeFailedError());
+      reject(new LiveSourceProbeTimeoutError());
     }, remainingMs);
   });
   operation.then(

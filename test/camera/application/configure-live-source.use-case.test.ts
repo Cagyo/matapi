@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { ConfigureLiveSourceUseCase } from '../../../src/camera/application/configure-live-source.use-case';
 import { InMemoryLiveSourceRepository } from '../../../src/camera/infrastructure/in-memory-live-source.repository';
 import { AesGcmLiveSourceCredentialAdapter } from '../../../src/camera/infrastructure/aes-gcm-live-source-credential.adapter';
+import { LiveSourceAuthenticationRejectedError } from '../../../src/camera/domain/errors/live-source-authentication-rejected.error';
+import { LiveSourceHostNotFoundError } from '../../../src/camera/domain/errors/live-source-host-not-found.error';
 import type { LiveSourceProbePort } from '../../../src/camera/domain/ports/live-source-probe.port';
 import type { MediaRepositoryPort } from '../../../src/camera/domain/ports/media-repository.port';
 
@@ -87,5 +89,32 @@ describe('ConfigureLiveSourceUseCase', () => {
         profile: 'eco',
       } as never),
     ).rejects.toMatchObject({ code: 'INVALID_LIVE_SOURCE' });
+  });
+
+  // Task 6 renders these kinds as advice to an administrator, so the use case
+  // must hand them through untouched — and still carry no credential payload.
+  it.each([
+    [new LiveSourceAuthenticationRejectedError(), 'LIVE_SOURCE_AUTHENTICATION_REJECTED'],
+    [new LiveSourceHostNotFoundError(), 'LIVE_SOURCE_HOST_NOT_FOUND'],
+  ])('surfaces the typed probe failure %s without saving', async (thrown, code) => {
+    const { useCase, probe, repository } = await fixture();
+    vi.mocked(probe.run).mockRejectedValueOnce(thrown);
+
+    const failure = await useCase
+      .execute({
+        cameraName: 'front_door',
+        url: 'rtsp://user:pass@cam.local/private?token=secret',
+        transport: 'tcp',
+        tlsMode: 'none',
+        profile: 'eco',
+      })
+      .then(() => null, (error: unknown) => error);
+
+    expect(failure).toMatchObject({ code });
+    expect('cause' in (failure as Error)).toBe(false);
+    expect(
+      `${JSON.stringify(failure)} ${String(failure)}`,
+    ).not.toMatch(/user|pass|private|token|secret|cam\.local/i);
+    expect(await repository.listRedacted()).toEqual([]);
   });
 });
