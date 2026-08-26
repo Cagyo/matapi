@@ -39,14 +39,18 @@ export class RtspSourceStartGate implements OnApplicationBootstrap {
   snapshot(): number { return this.epoch; }
 
   /**
-   * Rejects a mutation whose fence token predates an RTSP close. Only
-   * `close()` moves the epoch, so a stale token means the same condition
-   * `assertCanStart` reports — RTSP went away — merely observed across an
-   * await boundary. Reusing `LiveStreamUnavailableError` therefore keeps one
-   * error at the interface boundary instead of splitting one condition in two.
+   * Asserts both halves of the fence: that no `close()` has landed since
+   * `expected` was taken, and that RTSP is open right now. The state check is
+   * not redundant — a snapshot taken while the gate is already closed never
+   * sees the epoch move, which is reachable at boot and permanently if the
+   * bootstrap `open()` never completes.
+   *
+   * Throws `LiveStreamUnavailableError` for both halves: only `close()` moves
+   * the epoch, so a stale token reports the same condition `assertCanStart`
+   * does — RTSP went away — merely observed across an await boundary.
    */
   assertEpoch(expected: number): void {
-    if (expected !== this.epoch) {
+    if (expected !== this.epoch || this.rtspClosed) {
       throw new LiveStreamUnavailableError();
     }
   }

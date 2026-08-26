@@ -54,6 +54,17 @@ describe('RtspSourceStartGate mutation epochs', () => {
     gate.close();
 
     expect(() => gate.assertEpoch(epoch)).toThrow(LiveStreamUnavailableError);
+  });
+
+  it('fences a mutation whose snapshot was taken while RTSP was already closed', async () => {
+    const gate = new RtspSourceStartGate();
+    expect(gate.isOpen()).toBe(false);
+
+    // The epoch never moves here, so a change-detector alone would pass.
+    expect(() => gate.assertEpoch(gate.snapshot())).toThrow(LiveStreamUnavailableError);
+
+    await gate.open();
+
     expect(() => gate.assertEpoch(gate.snapshot())).not.toThrow();
   });
 

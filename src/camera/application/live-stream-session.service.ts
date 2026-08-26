@@ -82,12 +82,24 @@ interface PendingOpen {
 interface CleanupBlocker {
   active: ActiveSession;
   teardownInFlight: boolean;
+  /**
+   * The abandoned preflight whose replacement is replayed once this teardown
+   * finishes. It lives here rather than in the teardown closure so the stop
+   * scopes can see — and settle — a replacement that is still owed a start.
+   */
+  pending?: PendingOpen;
 }
 
 /** Which slice of session work a stop caller is waiting to see drained. */
 type SessionStopScope =
   | { type: 'kind'; kind: LiveStreamSource['kind'] }
   | { type: 'camera'; cameraId: string };
+
+/** The identity every occupied session slot is matched against. */
+interface ScopedWork {
+  kind: LiveStreamSource['kind'];
+  cameraId: string;
+}
 
 interface SessionStopWaiter {
   scope: SessionStopScope;
@@ -250,70 +262,57 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** Cancels/stops only work for one source kind; other live sources continue. */
-  async stopSourceKind(kind: LiveStreamSource['kind']): Promise<void> {
-    try {
-      await this.enqueue(async () => {
-        const pending = this.pending;
-        if (pending) {
-          if (pending.replacement?.source.kind === kind) {
-            this.rejectRequests(pending.replacement.requests);
-            pending.replacement = undefined;
-          }
-          if (pending.source.kind === kind) {
-            pending.cancelled = true;
-            this.rejectPending(pending);
-          }
-        }
-
-        if (this.cleanupBlocked?.active.sourceKind === kind) {
-          if (!(await this.retryBlockedCleanup())) {
-            throw new LiveStreamUnavailableError();
-          }
-        }
-
-        if (this.active?.sourceKind === kind) {
-          await this.stopActive();
-        }
-      });
-      await this.waitForStop({ type: 'kind', kind });
-    } catch {
-      throw new LiveStreamUnavailableError();
-    }
+  stopSourceKind(kind: LiveStreamSource['kind']): Promise<void> {
+    return this.stopScope({ type: 'kind', kind });
   }
 
   /**
    * Cancels/stops only the work owned by one camera; every other camera keeps
-   * running. Ownership is decided inside a queued transition, so no caller
-   * reads session state outside the serializing queue.
+   * running.
    */
-  async stopCamera(cameraId: string): Promise<void> {
+  stopCamera(cameraId: string): Promise<void> {
+    return this.stopScope({ type: 'camera', cameraId });
+  }
+
+  /**
+   * Settles every occupied slot the scope owns and waits for it to drain.
+   * Ownership is decided inside a queued transition, so no caller reads
+   * session state outside the serializing queue.
+   */
+  private async stopScope(scope: SessionStopScope): Promise<void> {
     try {
       await this.enqueue(async () => {
+        // A replacement parked behind a blocked teardown has no other owner:
+        // nothing else settles it before finishBlockedTeardown replays it.
+        const blocked = this.cleanupBlocked?.pending;
+        if (blocked?.replacement && this.scopeOwns(scope, blocked.replacement.source)) {
+          this.rejectReplacement(blocked);
+        }
+
         const pending = this.pending;
         if (pending) {
-          if (pending.replacement?.source.cameraId === cameraId) {
-            this.rejectRequests(pending.replacement.requests);
-            pending.replacement = undefined;
+          if (pending.replacement && this.scopeOwns(scope, pending.replacement.source)) {
+            this.rejectReplacement(pending);
           }
           // A cancelled pending still tears down through its own callbacks and
-          // then starts any replacement queued for a different camera.
-          if (pending.source.cameraId === cameraId) {
+          // then starts any replacement the scope does not own.
+          if (this.scopeOwns(scope, pending.source)) {
             pending.cancelled = true;
             this.rejectPending(pending);
           }
         }
 
-        if (this.cleanupBlocked?.active.session.cameraId === cameraId) {
+        if (this.cleanupBlocked && this.scopeOwns(scope, activeWork(this.cleanupBlocked.active))) {
           if (!(await this.retryBlockedCleanup())) {
             throw new LiveStreamUnavailableError();
           }
         }
 
-        if (this.active?.session.cameraId === cameraId) {
+        if (this.active && this.scopeOwns(scope, activeWork(this.active))) {
           await this.stopActive();
         }
       });
-      await this.waitForStop({ type: 'camera', cameraId });
+      await this.waitForStop(scope);
     } catch {
       throw new LiveStreamUnavailableError();
     }
@@ -474,10 +473,15 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
       } else {
         deferred.reject(new LiveStreamUnavailableError());
       }
+      // beginReplacement calls beginStart unawaited, so this preflight tail can
+      // run outside every queued transition. Drain here or a stop waiting on
+      // the slot it just cleared hangs until its operation timeout.
+      this.resolveStopWaiters();
       return;
     }
     if (pending.cancelled || this.pending !== pending) {
       this.discardPending(pending);
+      this.resolveStopWaiters();
       return;
     }
 
@@ -756,47 +760,48 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
 
   private startBlockedTeardown(active: ActiveSession, pending?: PendingOpen): void {
     const teardown = Promise.resolve().then(() => this.gateway.stop());
-    this.cleanupBlocked = { active, teardownInFlight: true };
+    this.cleanupBlocked = { active, teardownInFlight: true, pending };
 
     void this.withOperationTimeout(teardown).then(
       () => {
-        void this.enqueue(() => this.finishBlockedTeardown(active, pending)).catch(() => {
+        void this.enqueue(() => this.finishBlockedTeardown(active)).catch(() => {
           // A cleanup blocker must not create an unhandled rejection.
         });
       },
       (error: unknown) => {
         if (error instanceof OperationTimeoutError) {
           void this.enqueue(async () => {
-            if (pending) this.rejectReplacement(pending);
+            if (this.cleanupBlocked?.active !== active) return;
+            if (this.cleanupBlocked.pending) {
+              this.rejectReplacement(this.cleanupBlocked.pending);
+            }
           }).catch(() => {
             // A timed-out cleanup cannot leave a replacement caller pending.
           });
           void teardown.then(
             () => {
-              void this.enqueue(() => this.finishBlockedTeardown(active, pending)).catch(() => {
+              void this.enqueue(() => this.finishBlockedTeardown(active)).catch(() => {
                 // A cleanup blocker must not create an unhandled rejection.
               });
             },
             () => {
-              void this.enqueue(() => this.failBlockedTeardown(active, pending)).catch(() => {
+              void this.enqueue(() => this.failBlockedTeardown(active)).catch(() => {
                 // A cleanup blocker must not create an unhandled rejection.
               });
             },
           );
           return;
         }
-        void this.enqueue(() => this.failBlockedTeardown(active, pending)).catch(() => {
+        void this.enqueue(() => this.failBlockedTeardown(active)).catch(() => {
           // A cleanup blocker must not create an unhandled rejection.
         });
       },
     );
   }
 
-  private async finishBlockedTeardown(
-    active: ActiveSession,
-    pending?: PendingOpen,
-  ): Promise<void> {
+  private async finishBlockedTeardown(active: ActiveSession): Promise<void> {
     if (this.cleanupBlocked?.active !== active) return;
+    const pending = this.cleanupBlocked.pending;
     this.cleanupBlocked = undefined;
     if (this.active === active) {
       await this.deleteMessageReferences(active.messageReferences);
@@ -812,13 +817,12 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
     if (pending) this.beginReplacement(pending);
   }
 
-  private async failBlockedTeardown(
-    active: ActiveSession,
-    pending?: PendingOpen,
-  ): Promise<void> {
+  private async failBlockedTeardown(active: ActiveSession): Promise<void> {
     if (this.cleanupBlocked?.active !== active) return;
     this.cleanupBlocked.teardownInFlight = false;
-    if (pending) this.rejectReplacement(pending);
+    if (this.cleanupBlocked.pending) {
+      this.rejectReplacement(this.cleanupBlocked.pending);
+    }
   }
 
   private async stopGateway(
@@ -1064,26 +1068,35 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
   }
 
   private hasScopedWork(scope: SessionStopScope): boolean {
+    return this.occupiedSlots().some((work) => work && this.scopeOwns(scope, work));
+  }
+
+  /**
+   * Every slot that can hold live-stream work, enumerated once. Both stop
+   * scopes and the drain predicate read this list, so a slot can never be
+   * remembered for one projection and forgotten for the other.
+   */
+  private occupiedSlots(): (ScopedWork | undefined)[] {
+    return [
+      this.active && activeWork(this.active),
+      this.cleanupBlocked && activeWork(this.cleanupBlocked.active),
+      this.cleanupBlocked?.pending?.source,
+      this.cleanupBlocked?.pending?.replacement?.source,
+      this.pending?.source,
+      this.pending?.replacement?.source,
+      this.pendingStartCleanup?.source,
+    ];
+  }
+
+  private scopeOwns(scope: SessionStopScope, work: ScopedWork): boolean {
     return scope.type === 'kind'
-      ? this.hasSourceKindWork(scope.kind)
-      : this.hasCameraWork(scope.cameraId);
+      ? work.kind === scope.kind
+      : work.cameraId === scope.cameraId;
   }
+}
 
-  private hasSourceKindWork(kind: LiveStreamSource['kind']): boolean {
-    return this.active?.sourceKind === kind ||
-      this.cleanupBlocked?.active.sourceKind === kind ||
-      this.pending?.source.kind === kind ||
-      this.pending?.replacement?.source.kind === kind ||
-      this.pendingStartCleanup?.source.kind === kind;
-  }
-
-  private hasCameraWork(cameraId: string): boolean {
-    return this.active?.session.cameraId === cameraId ||
-      this.cleanupBlocked?.active.session.cameraId === cameraId ||
-      this.pending?.source.cameraId === cameraId ||
-      this.pending?.replacement?.source.cameraId === cameraId ||
-      this.pendingStartCleanup?.source.cameraId === cameraId;
-  }
+function activeWork(active: ActiveSession): ScopedWork {
+  return { kind: active.sourceKind, cameraId: active.session.cameraId };
 }
 
 function createDeferred<T>(): Deferred<T> {

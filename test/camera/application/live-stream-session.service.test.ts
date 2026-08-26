@@ -216,7 +216,7 @@ describe('LiveStreamSessionService', () => {
     const gateway = new DeferredGateway();
     const service = createService({ gateway });
 
-    const opening = service.open(source('front_door'), 1);
+    const opening = service.open(rtspSource('front_door'), 1);
     await vi.waitFor(() => expect(gateway.startCalls).toHaveLength(1));
 
     const stopping = service.stopCamera('front_door');
@@ -225,6 +225,124 @@ describe('LiveStreamSessionService', () => {
     gateway.resolveStart();
     await expect(stopping).resolves.toBeUndefined();
     await vi.waitFor(() => expect(gateway.stopCalls).toBe(1));
+  });
+
+  it('waits for a cancelled camera teardown before reporting the camera stopped', async () => {
+    const gateway = new DeferredGateway();
+    gateway.deferStop = true;
+    const service = createService({ gateway });
+
+    const opening = service.open(rtspSource('front_door'), 1);
+    await vi.waitFor(() => expect(gateway.startCalls).toHaveLength(1));
+
+    let stopSettled = false;
+    const stopping = service.stopCamera('front_door').finally(() => {
+      stopSettled = true;
+    });
+    await expect(opening).rejects.toMatchObject({ code: 'LIVE_STREAM_UNAVAILABLE' });
+
+    gateway.resolveStart();
+    await vi.waitFor(() => expect(gateway.stopCalls).toBe(1));
+    expect(stopSettled).toBe(false);
+
+    gateway.resolveStop();
+    await expect(stopping).resolves.toBeUndefined();
+  });
+
+  it('fails a camera stop while that camera teardown is still blocked', async () => {
+    const gateway = new DeferredGateway();
+    gateway.deferStop = true;
+    const service = createService({ gateway });
+
+    const opening = service.open(rtspSource('front_door'), 1);
+    await vi.waitFor(() => expect(gateway.startCalls).toHaveLength(1));
+    const stopping = service.stopCamera('front_door');
+    await expect(opening).rejects.toMatchObject({ code: 'LIVE_STREAM_UNAVAILABLE' });
+    gateway.resolveStart();
+    await vi.waitFor(() => expect(gateway.stopCalls).toBe(1));
+
+    await expect(service.stopCamera('front_door')).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    await expect(service.stopCamera('garden')).resolves.toBeUndefined();
+
+    gateway.resolveStop();
+    await expect(stopping).resolves.toBeUndefined();
+  });
+
+  it('fails a camera stop while a late start for it is still owed cleanup', async () => {
+    const gateway = new DeferredGateway();
+    const service = createService({ gateway, operationTimeoutMs: 50 });
+
+    await expect(service.open(rtspSource('front_door'), 1)).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+
+    await expect(service.stopCamera('front_door')).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    await expect(service.stopCamera('garden')).resolves.toBeUndefined();
+
+    gateway.resolveStart();
+    await vi.waitFor(() => expect(gateway.stopCalls).toBe(1));
+  });
+
+  it('settles a replacement parked behind a blocked teardown instead of replaying it', async () => {
+    const gateway = new DeferredGateway();
+    gateway.deferStop = true;
+    const service = createService({ gateway });
+
+    const first = service.open(rtspSource('front_door'), 1);
+    await vi.waitFor(() => expect(gateway.startCalls).toHaveLength(1));
+    const replacement = service.open(rtspSource('garden'), 2);
+    let replacementOutcome: 'pending' | 'resolved' | 'rejected' = 'pending';
+    void replacement.then(
+      () => { replacementOutcome = 'resolved'; },
+      () => { replacementOutcome = 'rejected'; },
+    );
+
+    // front_door's teardown blocks with garden's replacement held behind it.
+    gateway.resolveStart();
+    await expect(first).rejects.toMatchObject({ code: 'LIVE_STREAM_UNAVAILABLE' });
+    await vi.waitFor(() => expect(gateway.stopCalls).toBe(1));
+
+    await service.stopCamera('garden');
+
+    expect(replacementOutcome).toBe('rejected');
+
+    gateway.resolveStop();
+    await service.stopCamera('unrelated');
+    await service.stopCamera('unrelated');
+
+    expect(gateway.startCalls).toHaveLength(1);
+  });
+
+  it('resolves a camera stop when an out-of-queue replacement preflight is discarded', async () => {
+    let release!: () => void;
+    const availability: FeatureAvailabilityPort = {
+      awaitInitialVerification: vi.fn(), inspect: vi.fn(),
+      requireReady: vi.fn()
+        .mockResolvedValueOnce(undefined)
+        .mockImplementationOnce(() => new Promise<void>((resolve) => { release = resolve; }))
+        .mockResolvedValue(undefined),
+    };
+    const gateway = new DeferredGateway();
+    const service = createService({ gateway, availability, operationTimeoutMs: 200 });
+
+    const first = service.open(rtspSource('front_door'), 1);
+    await vi.waitFor(() => expect(gateway.startCalls).toHaveLength(1));
+    const replacement = service.open(rtspSource('garden'), 2);
+    gateway.resolveStart();
+    await expect(first).rejects.toMatchObject({ code: 'LIVE_STREAM_UNAVAILABLE' });
+
+    // garden's preflight is now suspended outside every queued transition.
+    await vi.waitFor(() => expect(availability.requireReady).toHaveBeenCalledTimes(2));
+
+    const stopping = service.stopCamera('garden');
+    await expect(replacement).rejects.toMatchObject({ code: 'LIVE_STREAM_UNAVAILABLE' });
+    release();
+
+    await expect(stopping).resolves.toBeUndefined();
   });
 
   it('preserves a queued replacement for a different camera', async () => {
