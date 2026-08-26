@@ -35,6 +35,7 @@ import { EnableMotionUseCase } from './application/enable-motion.use-case';
 import { GetMotionPhotoUseCase } from './application/get-motion-photo.use-case';
 import { GetMotionVideoUseCase } from './application/get-motion-video.use-case';
 import { GetSnapshotUseCase } from './application/get-snapshot.use-case';
+import { GetRtspSourceOverviewUseCase } from './application/get-rtsp-source-overview.use-case';
 import { ListCamerasUseCase } from './application/list-cameras.use-case';
 import { AttachRtspSourceUseCase } from './application/attach-rtsp-source.use-case';
 import { ConfigureLiveSourceUseCase } from './application/configure-live-source.use-case';
@@ -97,6 +98,7 @@ import {
   LIVE_SOURCE_REPOSITORY,
   type LiveSourceRepositoryPort,
 } from './domain/ports/live-source-repository.port';
+import { LIVE_SOURCE_POLICY_EVALUATOR } from './domain/ports/live-source-policy-evaluator.port';
 import { LIVE_SOURCE_SESSION_CONTROL } from './domain/ports/live-source-session-control.port';
 import { MEDIA_FILE } from './domain/ports/media-file.port';
 import {
@@ -125,6 +127,7 @@ import { DrizzleMediaRepository } from './infrastructure/drizzle-media.repositor
 import { DrizzleLiveSourceRepository } from './infrastructure/drizzle-live-source.repository';
 import { CryptoCameraIdGeneratorAdapter } from './infrastructure/crypto-camera-id-generator.adapter';
 import { SystemCameraClockAdapter } from './infrastructure/system-camera-clock.adapter';
+import { SystemLiveSourcePolicyEvaluatorAdapter } from './infrastructure/system-live-source-policy-evaluator.adapter';
 import { DrizzleRtspSourceConfigurationAdapter } from './infrastructure/drizzle-rtsp-source-configuration.adapter';
 import { InMemoryRtspSourceConfigurationAdapter } from './infrastructure/in-memory-rtsp-source-configuration.adapter';
 import { InMemoryLiveSourceRepository } from './infrastructure/in-memory-live-source.repository';
@@ -468,6 +471,13 @@ function isInstallationId(value: string | undefined): value is string {
     },
     { provide: LIVE_SOURCE_PROBE, useExisting: RTSP_RUNTIME_COORDINATOR },
     {
+      // Credential-free status projection only. It short-circuits to `blocked`
+      // when the policy carries no network, so a stub or policy-less host does
+      // no DNS at all.
+      provide: LIVE_SOURCE_POLICY_EVALUATOR,
+      useFactory: () => new SystemLiveSourcePolicyEvaluatorAdapter(),
+    },
+    {
       provide: RTSP_STREAM_RUNTIME,
       useFactory: (
         sources: LiveSourceRepositoryPort,
@@ -546,6 +556,7 @@ function isInstallationId(value: string | undefined): value is string {
     ConfigureLiveSourceUseCase,
     LiveSourceCredentialRotationCoordinator,
     ListLiveSourcesUseCase,
+    GetRtspSourceOverviewUseCase,
     OpenLiveStreamUseCase,
     StopLiveStreamUseCase,
     GetSnapshotUseCase,
@@ -584,6 +595,7 @@ function isInstallationId(value: string | undefined): value is string {
     RemoveRtspSourceUseCase,
     ConfigureLiveSourceUseCase,
     ListLiveSourcesUseCase,
+    GetRtspSourceOverviewUseCase,
     GetSnapshotUseCase,
     BrowseMotionEventsUseCase,
     ListMotionEventsUseCase,

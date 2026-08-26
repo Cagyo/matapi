@@ -1,0 +1,194 @@
+import { Inject, Injectable } from '@nestjs/common';
+import {
+  LIVE_SOURCE_POLICY_EVALUATOR,
+  type LiveSourcePolicyEvaluatorPort,
+  type RtspSourcePolicyNetwork,
+  type RtspSourcePolicyRelationship,
+} from '../domain/ports/live-source-policy-evaluator.port';
+import {
+  LIVE_SOURCE_REPOSITORY,
+  type LiveSourceRepositoryPort,
+  type RedactedLiveSource,
+} from '../domain/ports/live-source-repository.port';
+import {
+  MEDIA_REPOSITORY,
+  type MediaRepositoryPort,
+} from '../domain/ports/media-repository.port';
+import { RTSP_SOURCE_CAMERA_TYPE } from '../domain/ports/rtsp-source-configuration.port';
+import {
+  RTSP_POLICY_STATUS,
+  type RtspPolicyStatusPort,
+} from '../../features/domain/ports/rtsp-policy-status.port';
+
+export const RTSP_SOURCE_OVERVIEW_PAGE_SIZE = 5;
+
+/**
+ * What an operator has to do about one source, most blocking first.
+ *
+ * `configured-verified` is the only state that claims the source is usable, and
+ * it is never inferred from stored metadata alone.
+ */
+export type RtspSourceOperationalState =
+  | 'configured-verified'
+  | 'credentials-required'
+  | 'not-ready'
+  | 'needs-attention';
+
+export interface RtspSourceOverview extends RedactedLiveSource {
+  /** Where the host resolves *now*, not where it resolved at verification. */
+  relationship: RtspSourcePolicyRelationship;
+  operationalState: RtspSourceOperationalState;
+  /**
+   * The digest currently in force, which is `null` unless the installed policy
+   * is `ready`: a stale or unavailable policy attests to nothing, so no stored
+   * digest may match it.
+   */
+  currentPolicyDigest: string | null;
+  needsReverification: boolean;
+}
+
+export interface RtspSourcesOverviewPage {
+  policy: {
+    state: 'ready' | 'stale' | 'unavailable';
+    networks: readonly RtspSourcePolicyNetwork[];
+  };
+  sources: readonly RtspSourceOverview[];
+  attachCandidates: readonly { cameraId: string; cameraName: string }[];
+  page: number;
+  pageCount: number;
+}
+
+export interface RtspSourcesOverviewRequest {
+  page?: number;
+  pageSize?: number;
+}
+
+/**
+ * The read-only status view behind the source menu.
+ *
+ * Everything here is credential-free by construction: it reads the redacted
+ * repository projection and the redacted policy projection, and hands the
+ * evaluator a host rather than a URL. It never calls `loadForStream`, never
+ * decrypts, and writes nothing — a source whose status is wrong is reported,
+ * not repaired.
+ *
+ * It reads `inspect()` rather than `requireCurrent()` on purpose: an operator
+ * whose policy has gone stale most needs to see the installed networks and the
+ * reverification each source now owes, which a throw would replace with
+ * nothing.
+ */
+@Injectable()
+export class GetRtspSourceOverviewUseCase {
+  constructor(
+    @Inject(LIVE_SOURCE_REPOSITORY)
+    private readonly repository: LiveSourceRepositoryPort,
+    @Inject(MEDIA_REPOSITORY) private readonly media: MediaRepositoryPort,
+    @Inject(RTSP_POLICY_STATUS) private readonly policy: RtspPolicyStatusPort,
+    @Inject(LIVE_SOURCE_POLICY_EVALUATOR)
+    private readonly evaluator: LiveSourcePolicyEvaluatorPort,
+  ) {}
+
+  async execute(
+    request: RtspSourcesOverviewRequest = {},
+  ): Promise<RtspSourcesOverviewPage> {
+    const [status, stored, cameras] = await Promise.all([
+      this.policy.inspect(),
+      this.repository.listRedacted(),
+      this.media.listCameras(),
+    ]);
+    const networks = status.networks;
+    const currentPolicyDigest = status.state === 'ready' ? status.digest : null;
+
+    const ordered = [...stored].sort(compareSources);
+    const pageSize = normalizePageSize(request.pageSize);
+    const pageCount = Math.max(1, Math.ceil(ordered.length / pageSize));
+    const page = clampPage(request.page, pageCount);
+    const start = (page - 1) * pageSize;
+
+    // Only the visible page is resolved: an overview must not fan a DNS query
+    // out across every stored source to render five rows.
+    const sources = await Promise.all(
+      ordered
+        .slice(start, start + pageSize)
+        .map((source) => this.describe(source, networks, currentPolicyDigest)),
+    );
+
+    const withSource = new Set(stored.map((source) => source.cameraId));
+    return {
+      policy: { state: status.state, networks },
+      sources,
+      attachCandidates: cameras
+        .filter(
+          (camera) =>
+            camera.enabled &&
+            camera.type !== RTSP_SOURCE_CAMERA_TYPE &&
+            !withSource.has(camera.id),
+        )
+        .map((camera) => ({ cameraId: camera.id, cameraName: camera.name })),
+      page,
+      pageCount,
+    };
+  }
+
+  private async describe(
+    source: RedactedLiveSource,
+    networks: readonly RtspSourcePolicyNetwork[],
+    currentPolicyDigest: string | null,
+  ): Promise<RtspSourceOverview> {
+    const relationship = await this.evaluator.evaluate(source.summary.host, {
+      networks,
+    });
+    // Verification is an attestation, never an inference: a probe passed
+    // (`verifiedAt`), under a policy that is still the one in force
+    // (`policyDigest`), for a host that still resolves inside it. The stored
+    // `ready` flag is metadata and proves none of the three.
+    const verified =
+      source.verifiedAt !== null &&
+      source.policyDigest !== null &&
+      currentPolicyDigest !== null &&
+      source.policyDigest === currentPolicyDigest;
+    // The stored digest differing is one way to owe a reverification; never
+    // having passed a probe is the other, and a source that no longer resolves
+    // inside the policy owes one whatever its attestation says.
+    const needsReverification = !verified || relationship !== 'allowed';
+    return {
+      ...source,
+      relationship,
+      operationalState: operationalState(source, verified, relationship),
+      currentPolicyDigest,
+      needsReverification,
+    };
+  }
+}
+
+function operationalState(
+  source: RedactedLiveSource,
+  verified: boolean,
+  relationship: RtspSourcePolicyRelationship,
+): RtspSourceOperationalState {
+  // Precedence, most blocking first: without a credential nothing can start, so
+  // that answer outranks the readiness flag it usually travels with.
+  if (!source.hasCredential) return 'credentials-required';
+  if (!source.summary.ready) return 'not-ready';
+  if (verified && relationship === 'allowed') return 'configured-verified';
+  return 'needs-attention';
+}
+
+function compareSources(left: RedactedLiveSource, right: RedactedLiveSource): number {
+  if (left.cameraName !== right.cameraName) {
+    return left.cameraName < right.cameraName ? -1 : 1;
+  }
+  if (left.cameraId === right.cameraId) return 0;
+  return left.cameraId < right.cameraId ? -1 : 1;
+}
+
+function normalizePageSize(requested: number | undefined): number {
+  return Number.isSafeInteger(requested) && (requested!) > 0
+    ? (requested!)
+    : RTSP_SOURCE_OVERVIEW_PAGE_SIZE;
+}
+
+function clampPage(requested: number | undefined, pageCount: number): number {
+  if (!Number.isSafeInteger(requested)) return 1;
+  return Math.min(Math.max(requested!, 1), pageCount);
+}
