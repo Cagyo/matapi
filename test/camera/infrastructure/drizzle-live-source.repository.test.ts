@@ -54,7 +54,7 @@ describe('DrizzleLiveSourceRepository', () => {
     });
   });
 
-  it('saves encrypted material, loads authenticated plaintext, lists metadata only, and cascades remove', async () => {
+  it('saves encrypted material, loads authenticated plaintext, lists metadata only, and cascades credential deletion', async () => {
     const credentials = new AesGcmLiveSourceCredentialAdapter({ currentKey: oldKey, currentVersion: 1 });
     const repository = new DrizzleLiveSourceRepository(db, credentials);
     await repository.rotate();
@@ -75,7 +75,7 @@ describe('DrizzleLiveSourceRepository', () => {
     ]);
     expect(JSON.stringify(listed)).not.toMatch(/user|pass|private|token|cipher|nonce|tag/i);
 
-    await repository.remove('camera-1');
+    sqlite.prepare('delete from camera_live_sources where camera_id = ?').run('camera-1');
     expect(sqlite.prepare('select count(*) count from camera_live_credentials').get()).toEqual({ count: 0 });
   });
 

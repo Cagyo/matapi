@@ -1,10 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { LiveStreamSourceResolverService } from '../../../src/camera/application/live-stream-source-resolver.service';
-import { ConfigureLiveSourceUseCase } from '../../../src/camera/application/configure-live-source.use-case';
 import { LiveStreamSourceUnavailableError } from '../../../src/camera/domain/errors/live-stream-source-unavailable.error';
+import { LiveSource } from '../../../src/camera/domain/live-source.entity';
 import type { LiveSourceRepositoryPort } from '../../../src/camera/domain/ports/live-source-repository.port';
 import type { MediaRepositoryPort } from '../../../src/camera/domain/ports/media-repository.port';
-import type { LiveSourceProbePort } from '../../../src/camera/domain/ports/live-source-probe.port';
 import { AesGcmLiveSourceCredentialAdapter } from '../../../src/camera/infrastructure/aes-gcm-live-source-credential.adapter';
 import { InMemoryLiveSourceRepository } from '../../../src/camera/infrastructure/in-memory-live-source.repository';
 import type { FeatureAvailabilityPort } from '../../../src/features/domain/ports/feature-availability.port';
@@ -76,16 +75,11 @@ describe('live stream source resolver RTSP metadata boundary', () => {
     });
     const repository = new InMemoryLiveSourceRepository(credentials);
     await repository.rotate();
-    const configure = new ConfigureLiveSourceUseCase(
-      mediaPort,
-      repository,
-      credentials,
-      { run: vi.fn().mockResolvedValue(undefined) } satisfies LiveSourceProbePort,
-    );
-    await configure.execute({
-      cameraName: 'Front', url: 'rtsp://user:pass@camera.local/live',
-      transport: 'tcp', tlsMode: 'none', profile: 'balanced',
+    const source = LiveSource.create({
+      cameraId: 'front', url: 'rtsp://user:pass@camera.local/live',
+      transport: 'tcp', tlsMode: 'none', profile: 'balanced', ready: true,
     });
+    await repository.save(source, credentials.encrypt(source.cameraId, source.credentialPayload()));
     const resolver = new LiveStreamSourceResolverService(mediaPort, repository);
 
     const expected = { kind: 'rtsp', cameraId: 'front', cameraName: 'Front' };

@@ -36,6 +36,10 @@ const source = {
     substreamHost: null,
     ready: true,
   },
+  hasCredential: true,
+  revision: 4,
+  verifiedAt: null,
+  policyDigest: null,
 };
 
 function setup() {
@@ -153,6 +157,21 @@ describe('CameraSourcesHandler contextual state', () => {
     expect(JSON.stringify(choices)).not.toContain('camera-with-private-id');
   });
 
+  it('removes under the revision the listing showed, on behalf of the receipt owner', async () => {
+    const { handler, remove } = setup();
+    const ctx = context();
+    await handler.handleCallback(ctx as never, 'r', receipt);
+    const selector = keyboardData(ctx).find((value) => value.includes(':src:s:'));
+
+    await handler.handleCallback(ctx as never, selector!.split(':src:')[1], receipt);
+
+    expect(remove.execute).toHaveBeenCalledWith({
+      actorUserId: 100,
+      cameraId: 'camera-with-private-id',
+      expectedRevision: 4,
+    });
+  });
+
   it('marks configuration running before using and deleting the credential text', async () => {
     const { configure, handler, workflows } = setup();
     await handler.handleCallback(context() as never, 'a', receipt);
@@ -166,7 +185,7 @@ describe('CameraSourcesHandler contextual state', () => {
 
     expect(workflows.markRunning).toHaveBeenCalledWith(credential, receipt);
     expect(configure.execute).toHaveBeenCalledWith(
-      expect.objectContaining({ cameraName: 'Front door', tlsMode: 'strict' }),
+      expect.objectContaining({ actorUserId: 100, cameraName: 'Front door', tlsMode: 'strict' }),
     );
     expect(credential.api.deleteMessage).toHaveBeenCalledWith(42, 88);
     expect(JSON.stringify(credential.reply.mock.calls)).not.toContain('user:pass');

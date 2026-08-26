@@ -238,13 +238,6 @@ export class DrizzleLiveSourceRepository implements LiveSourceRepositoryPort {
     };
   }
 
-  async remove(cameraId: string): Promise<void> {
-    this.db
-      .delete(cameraLiveSources)
-      .where(eq(cameraLiveSources.cameraId, cameraId))
-      .run();
-  }
-
   async rotate(): Promise<void> {
     this.#credentialWritesEnabled = false;
     this.db.transaction((tx) => {

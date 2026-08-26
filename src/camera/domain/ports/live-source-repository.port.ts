@@ -42,6 +42,5 @@ export interface LiveSourceRepositoryPort {
   /** Credential-free lookup of one stored source; `null` when absent. */
   findRedacted(cameraId: string): Promise<RedactedLiveSource | null>;
   listRedacted(): Promise<RedactedLiveSource[]>;
-  remove(cameraId: string): Promise<void>;
   rotate(): Promise<void>;
 }

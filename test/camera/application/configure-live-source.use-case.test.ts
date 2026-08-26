@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { AttachRtspSourceUseCase } from '../../../src/camera/application/attach-rtsp-source.use-case';
 import { ConfigureLiveSourceUseCase } from '../../../src/camera/application/configure-live-source.use-case';
-import { InMemoryLiveSourceRepository } from '../../../src/camera/infrastructure/in-memory-live-source.repository';
-import { AesGcmLiveSourceCredentialAdapter } from '../../../src/camera/infrastructure/aes-gcm-live-source-credential.adapter';
-import { LiveSourceAuthenticationRejectedError } from '../../../src/camera/domain/errors/live-source-authentication-rejected.error';
-import { LiveSourceHostNotFoundError } from '../../../src/camera/domain/errors/live-source-host-not-found.error';
-import type { LiveSourceProbePort } from '../../../src/camera/domain/ports/live-source-probe.port';
+import type { ReplaceRtspSourceUseCase } from '../../../src/camera/application/replace-rtsp-source.use-case';
+import { CameraNotFoundError } from '../../../src/camera/domain/errors/camera-not-found.error';
+import type {
+  LiveSourceRepositoryPort,
+  RedactedLiveSource,
+} from '../../../src/camera/domain/ports/live-source-repository.port';
 import type { MediaRepositoryPort } from '../../../src/camera/domain/ports/media-repository.port';
 
 const camera = {
@@ -15,106 +17,96 @@ const camera = {
   enabled: true,
 };
 
-async function fixture() {
-  const credentials = new AesGcmLiveSourceCredentialAdapter({
-    currentKey: '11'.repeat(32),
-    currentVersion: 1,
-  });
-  const repository = new InMemoryLiveSourceRepository(credentials);
-  await repository.rotate();
-  const probe: LiveSourceProbePort = { run: vi.fn().mockResolvedValue(undefined) };
+const stored: RedactedLiveSource = {
+  cameraId: 'camera-1',
+  cameraName: 'front_door',
+  summary: {
+    scheme: 'rtsp',
+    host: 'cam.local',
+    transport: 'tcp',
+    tlsMode: 'none',
+    profile: 'eco',
+    substreamHost: null,
+    ready: true,
+  },
+  hasCredential: true,
+  revision: 3,
+  verifiedAt: null,
+  policyDigest: null,
+};
+
+const request = {
+  actorUserId: 7,
+  cameraName: 'front_door',
+  url: 'rtsp://user:pass@cam.local/private?token=secret',
+  transport: 'tcp',
+  tlsMode: 'none',
+  profile: 'eco',
+} as const;
+
+function fixture(existing: RedactedLiveSource | null) {
   const media = {
     findCameraByName: vi.fn().mockResolvedValue(camera),
   } as unknown as MediaRepositoryPort;
+  const repository = {
+    findRedacted: vi.fn().mockResolvedValue(existing),
+    save: vi.fn(),
+    saveMetadataBatch: vi.fn(),
+  } as unknown as LiveSourceRepositoryPort;
+  const attach = { execute: vi.fn().mockResolvedValue(stored) } as unknown as AttachRtspSourceUseCase;
+  const replace = { execute: vi.fn().mockResolvedValue(stored) } as unknown as ReplaceRtspSourceUseCase;
   return {
+    attach,
+    media,
+    replace,
     repository,
-    probe,
-    useCase: new ConfigureLiveSourceUseCase(media, repository, credentials, probe),
+    useCase: new ConfigureLiveSourceUseCase(media, repository, attach, replace),
   };
 }
 
 describe('ConfigureLiveSourceUseCase', () => {
-  it('probes, encrypts and saves the same validated source settings', async () => {
-    const { useCase, probe, repository } = await fixture();
+  it('attaches when the resolved camera has no stored source', async () => {
+    const { useCase, attach, replace, repository } = fixture(null);
 
-    const result = await useCase.execute({
-      cameraName: 'front_door',
-      url: 'rtsp://user:pass@cam.local/private?token=secret',
+    await expect(useCase.execute({ ...request })).resolves.toBe(stored);
+
+    expect(attach.execute).toHaveBeenCalledWith({
+      actorUserId: 7,
+      cameraId: 'camera-1',
+      url: request.url,
       transport: 'tcp',
       tlsMode: 'none',
       profile: 'eco',
+      substream: undefined,
     });
-
-    expect(probe.run).toHaveBeenCalledOnce();
-    const probed = vi.mocked(probe.run).mock.calls[0][0];
-    const loaded = await repository.loadForStream('camera-1');
-    expect(loaded?.source).toBe(probed);
-    expect(loaded?.source.settings).toMatchObject({ transport: 'tcp', profile: 'eco' });
-    expect(loaded?.credential.primaryUrl).toContain('/private?token=secret');
-    // The display name comes from the resolved camera, never from whatever the
-    // live-source store happens to know about the id.
-    expect(result).toMatchObject({
-      cameraId: 'camera-1',
-      cameraName: 'front_door',
-      hasCredential: true,
-      revision: 0,
-      verifiedAt: null,
-      policyDigest: null,
-    });
-    expect(JSON.stringify(result)).not.toMatch(/user|pass|private|token|secret/i);
+    expect(replace.execute).not.toHaveBeenCalled();
+    // The wrapper owns no persistence path of its own.
+    expect(repository.save).not.toHaveBeenCalled();
+    expect(repository.saveMetadataBatch).not.toHaveBeenCalled();
   });
 
-  it('never saves when probing fails and rejects compatibility fingerprints', async () => {
-    const { useCase, probe, repository } = await fixture();
-    vi.mocked(probe.run).mockRejectedValueOnce(new Error('probe failed'));
+  it('replaces against the stored revision when a source already exists', async () => {
+    const { useCase, attach, replace, repository } = fixture(stored);
+
+    await useCase.execute({ ...request });
+
+    expect(replace.execute).toHaveBeenCalledWith(
+      expect.objectContaining({ cameraId: 'camera-1', expectedRevision: 3, actorUserId: 7 }),
+    );
+    expect(attach.execute).not.toHaveBeenCalled();
+    expect(repository.save).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unknown camera and a compatibility fingerprint without delegating', async () => {
+    const { useCase, attach, replace, media } = fixture(null);
+    vi.mocked(media.findCameraByName).mockResolvedValueOnce(null);
+
+    await expect(useCase.execute({ ...request })).rejects.toBeInstanceOf(CameraNotFoundError);
 
     await expect(
-      useCase.execute({
-        cameraName: 'front_door',
-        url: 'rtsp://cam.local/live',
-        transport: 'tcp',
-        tlsMode: 'none',
-        profile: 'eco',
-      }),
-    ).rejects.toThrow();
-    expect(await repository.listRedacted()).toEqual([]);
-
-    await expect(
-      useCase.execute({
-        cameraName: 'front_door',
-        url: 'rtsps://cam.local/live',
-        transport: 'tcp',
-        tlsMode: 'strict',
-        certificateFingerprint: 'sha256:legacy',
-        profile: 'eco',
-      } as never),
+      useCase.execute({ ...request, certificateFingerprint: 'sha256:legacy' } as never),
     ).rejects.toMatchObject({ code: 'INVALID_LIVE_SOURCE' });
-  });
-
-  // Task 6 renders these kinds as advice to an administrator, so the use case
-  // must hand them through untouched — and still carry no credential payload.
-  it.each([
-    [new LiveSourceAuthenticationRejectedError(), 'LIVE_SOURCE_AUTHENTICATION_REJECTED'],
-    [new LiveSourceHostNotFoundError(), 'LIVE_SOURCE_HOST_NOT_FOUND'],
-  ])('surfaces the typed probe failure %s without saving', async (thrown, code) => {
-    const { useCase, probe, repository } = await fixture();
-    vi.mocked(probe.run).mockRejectedValueOnce(thrown);
-
-    const failure = await useCase
-      .execute({
-        cameraName: 'front_door',
-        url: 'rtsp://user:pass@cam.local/private?token=secret',
-        transport: 'tcp',
-        tlsMode: 'none',
-        profile: 'eco',
-      })
-      .then(() => null, (error: unknown) => error);
-
-    expect(failure).toMatchObject({ code });
-    expect('cause' in (failure as Error)).toBe(false);
-    expect(
-      `${JSON.stringify(failure)} ${String(failure)}`,
-    ).not.toMatch(/user|pass|private|token|secret|cam\.local/i);
-    expect(await repository.listRedacted()).toEqual([]);
+    expect(attach.execute).not.toHaveBeenCalled();
+    expect(replace.execute).not.toHaveBeenCalled();
   });
 });

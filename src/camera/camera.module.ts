@@ -36,9 +36,14 @@ import { GetMotionPhotoUseCase } from './application/get-motion-photo.use-case';
 import { GetMotionVideoUseCase } from './application/get-motion-video.use-case';
 import { GetSnapshotUseCase } from './application/get-snapshot.use-case';
 import { ListCamerasUseCase } from './application/list-cameras.use-case';
+import { AttachRtspSourceUseCase } from './application/attach-rtsp-source.use-case';
 import { ConfigureLiveSourceUseCase } from './application/configure-live-source.use-case';
+import { CreateRtspCameraUseCase } from './application/create-rtsp-camera.use-case';
 import { ListLiveSourcesUseCase } from './application/list-live-sources.use-case';
-import { RemoveLiveSourceUseCase } from './application/remove-live-source.use-case';
+import { RemoveRtspSourceUseCase } from './application/remove-rtsp-source.use-case';
+import { ReplaceRtspSourceUseCase } from './application/replace-rtsp-source.use-case';
+import { RtspSourceMutationService } from './application/rtsp-source-mutation.service';
+import { TestRtspSourceUseCase } from './application/test-rtsp-source.use-case';
 import { ListMotionEventsUseCase } from './application/list-motion-events.use-case';
 import { LiveStreamMessageCleanupService } from './application/live-stream-message-cleanup.service';
 import { LiveStreamSessionService } from './application/live-stream-session.service';
@@ -61,6 +66,7 @@ import {
   type LiveStreamOptions,
 } from './camera.tokens';
 import { ADMIN_ALERT, type AdminAlertPort } from './domain/ports/admin-alert.port';
+import { CAMERA_CLOCK } from './domain/ports/camera-clock.port';
 import { CAMERA_ID_GENERATOR } from './domain/ports/camera-id-generator.port';
 import { CAMERA_SOURCE_AUTHORIZATION } from './domain/ports/camera-source-authorization.port';
 import {
@@ -118,6 +124,7 @@ import { RTSP_STREAM_RUNTIME, type RtspStreamRuntimePort } from './domain/ports/
 import { DrizzleMediaRepository } from './infrastructure/drizzle-media.repository';
 import { DrizzleLiveSourceRepository } from './infrastructure/drizzle-live-source.repository';
 import { CryptoCameraIdGeneratorAdapter } from './infrastructure/crypto-camera-id-generator.adapter';
+import { SystemCameraClockAdapter } from './infrastructure/system-camera-clock.adapter';
 import { DrizzleRtspSourceConfigurationAdapter } from './infrastructure/drizzle-rtsp-source-configuration.adapter';
 import { InMemoryRtspSourceConfigurationAdapter } from './infrastructure/in-memory-rtsp-source-configuration.adapter';
 import { InMemoryLiveSourceRepository } from './infrastructure/in-memory-live-source.repository';
@@ -378,6 +385,7 @@ function isInstallationId(value: string | undefined): value is string {
     },
     DrizzleLiveSourceRepository,
     { provide: CAMERA_ID_GENERATOR, useClass: CryptoCameraIdGeneratorAdapter },
+    { provide: CAMERA_CLOCK, useClass: SystemCameraClockAdapter },
     {
       provide: RTSP_SOURCE_CONFIGURATION,
       useFactory: async (
@@ -529,10 +537,15 @@ function isInstallationId(value: string | undefined): value is string {
         new LiveStreamSessionControlAdapter(sessions),
       inject: [LiveStreamSessionService],
     },
+    RtspSourceMutationService,
+    CreateRtspCameraUseCase,
+    AttachRtspSourceUseCase,
+    ReplaceRtspSourceUseCase,
+    TestRtspSourceUseCase,
+    RemoveRtspSourceUseCase,
     ConfigureLiveSourceUseCase,
     LiveSourceCredentialRotationCoordinator,
     ListLiveSourcesUseCase,
-    RemoveLiveSourceUseCase,
     OpenLiveStreamUseCase,
     StopLiveStreamUseCase,
     GetSnapshotUseCase,
@@ -564,9 +577,13 @@ function isInstallationId(value: string | undefined): value is string {
   exports: [
     MEDIA_REPOSITORY,
     LIVE_SOURCE_REPOSITORY,
+    CreateRtspCameraUseCase,
+    AttachRtspSourceUseCase,
+    ReplaceRtspSourceUseCase,
+    TestRtspSourceUseCase,
+    RemoveRtspSourceUseCase,
     ConfigureLiveSourceUseCase,
     ListLiveSourcesUseCase,
-    RemoveLiveSourceUseCase,
     GetSnapshotUseCase,
     BrowseMotionEventsUseCase,
     ListMotionEventsUseCase,

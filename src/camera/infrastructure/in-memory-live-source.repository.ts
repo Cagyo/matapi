@@ -158,10 +158,6 @@ export class InMemoryLiveSourceRepository
     this.#sources.delete(cameraId);
   }
 
-  async remove(cameraId: string): Promise<void> {
-    this.#sources.delete(cameraId);
-  }
-
   async rotate(): Promise<void> {
     this.#credentialWritesEnabled = false;
     const replacements: [string, EncryptedLiveSourceCredential][] = [];

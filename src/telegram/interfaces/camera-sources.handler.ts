@@ -3,7 +3,8 @@ import { createHash } from 'node:crypto';
 import { InlineKeyboard } from 'grammy';
 import { ConfigureLiveSourceUseCase } from '../../camera/application/configure-live-source.use-case';
 import { ListLiveSourcesUseCase } from '../../camera/application/list-live-sources.use-case';
-import { RemoveLiveSourceUseCase } from '../../camera/application/remove-live-source.use-case';
+import { RemoveRtspSourceUseCase } from '../../camera/application/remove-rtsp-source.use-case';
+import { CameraSourceUnavailableError } from '../../camera/domain/errors/camera-source-unavailable.error';
 import type { RedactedLiveSource } from '../../camera/domain/ports/live-source-repository.port';
 import { CLOCK, type ClockPort } from '../../events/domain/ports/clock.port';
 import { catalogFor, type LocaleCatalog } from '../../locales';
@@ -45,7 +46,7 @@ export class CameraSourcesHandler {
   constructor(
     private readonly configure: ConfigureLiveSourceUseCase,
     private readonly list: ListLiveSourcesUseCase,
-    private readonly remove: RemoveLiveSourceUseCase,
+    private readonly remove: RemoveRtspSourceUseCase,
     @Inject(CLOCK) private readonly clock: ClockPort,
     private readonly workflows: WorkflowEntryCoordinator,
     @Optional() private readonly navigation?: WorkflowNavigationHandler,
@@ -133,7 +134,11 @@ export class CameraSourcesHandler {
       if (!(await this.workflows.markRunning(ctx, receipt))) return;
       this.clear(ctx, receipt.id);
       try {
-        await this.remove.execute(source.cameraId);
+        await this.remove.execute({
+          actorUserId: receipt.userId,
+          cameraId: source.cameraId,
+          expectedRevision: source.revision,
+        });
         await this.complete(ctx, receipt, () => ctx.reply(copy.removed(source.cameraName)));
       } catch (error) {
         if (await this.replyUnavailable(ctx, receipt, error)) return;
@@ -202,6 +207,7 @@ export class CameraSourcesHandler {
     let configured: RedactedLiveSource | undefined;
     try {
       configured = await this.configure.execute({
+        actorUserId: state.receipt.userId,
         cameraName: state.cameraName,
         url: text,
         transport: 'tcp',
@@ -296,6 +302,12 @@ export class CameraSourcesHandler {
     return false;
   }
   private async replyUnavailable(ctx: TelegramContext, receipt: WorkflowReturnReceipt, error: unknown): Promise<boolean> {
+    if (error instanceof CameraSourceUnavailableError) {
+      const copy = this.copy(ctx);
+      const message = error.reason === 'rtsp-closed' ? copy.rtspClosed : copy.stopFailed;
+      await this.complete(ctx, receipt, () => ctx.reply(message));
+      return true;
+    }
     if (!(error instanceof FeatureUnavailableError)) return false;
     const feature = this.catalog(ctx).feature;
     const stale = feature.stale;

@@ -1314,6 +1314,8 @@ const enCatalog = {
       tested: (cameraName: string) => `✅ RTSP source tested and updated for ${cameraName}.`,
       removed: (cameraName: string) => `✅ RTSP source removed for ${cameraName}.`,
       configureFailed: '❌ The RTSP source could not be configured or tested.',
+      rtspClosed: '❌ RTSP camera support went offline before the change was saved. Nothing changed.',
+      stopFailed: '❌ The camera could not be taken off air, so the change was not saved.',
       listFailed: '❌ RTSP sources are unavailable right now.',
       removeFailed: '❌ The RTSP source could not be removed.',
       deletionFailed: '⚠️ Telegram could not delete the credential message. Delete it manually.',
