@@ -1086,6 +1086,7 @@ const alwaysAvailable: Pick<FeatureAvailabilityPort, 'inspect' | 'requireReady'>
     attentionReason: null,
     display: 'enabled',
     action: 'disable',
+    secondaryAction: null,
   }),
   requireReady: async () => undefined,
 };

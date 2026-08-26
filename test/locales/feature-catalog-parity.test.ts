@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { catalogs } from '../../src/locales/catalog';
-import { FEATURE_INSTALL_FAILURE_CODES } from '../../src/features/domain/manageable-feature';
+import { FEATURE_INSTALL_FAILURE_CODES, type FeatureAction } from '../../src/features/domain/manageable-feature';
+
+const FEATURE_ACTIONS: readonly FeatureAction[] = ['install', 'reinstall', 'enable', 'disable', 'verify'];
 
 function shape(value: unknown): unknown {
   if (typeof value === 'function') return 'function';
@@ -15,6 +17,17 @@ describe('feature locale catalog parity', () => {
   it('keeps all localized feature workflow sections structurally identical', () => {
     expect(shape(catalogs.ru.feature)).toEqual(shape(catalogs.en.feature));
     expect(shape(catalogs.uk.feature)).toEqual(shape(catalogs.en.feature));
+  });
+
+  it('names every offerable action in every locale', () => {
+    for (const [locale, catalog] of Object.entries(catalogs)) {
+      const confirmation = catalog.feature.confirmation as Record<string, unknown>;
+      expect(Object.keys(confirmation).sort(), locale).toEqual([...FEATURE_ACTIONS].sort());
+      expect(catalog.feature.reinstallAction.length, locale).toBeGreaterThan(0);
+      expect(catalog.feature.reinstallNotice.length, locale).toBeGreaterThan(0);
+      expect(catalog.feature.progress.reinstalling('X'), locale).toContain('X');
+      expect(catalog.feature.errors.reinstallUnavailable('X'), locale).toContain('X');
+    }
   });
 
   it('labels every install failure cause in every locale without raw diagnostics', () => {

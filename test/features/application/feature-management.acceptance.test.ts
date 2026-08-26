@@ -196,6 +196,7 @@ describe('feature management acceptance', () => {
       jobs,
       requests,
       controller,
+      lifecycle,
       clock,
       recovery as unknown as FeatureInstallRecoveryService,
     );
@@ -220,6 +221,7 @@ describe('feature management acceptance', () => {
     await install.execute({
       id: jobId,
       feature: 'motion',
+      operation: 'install',
       requestedByUserId: 7,
       requestedInChatId: 11,
       workflowReceiptId: 'ponmlkjihgfedcba',
@@ -230,6 +232,7 @@ describe('feature management acceptance', () => {
     await expect(install.execute({
       id: 'qrstuvwxyzABCDEF',
       feature: 'digital',
+      operation: 'install',
       requestedByUserId: 7,
       requestedInChatId: 11,
       workflowReceiptId: 'fedcbazyxwvutsrq',

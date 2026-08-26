@@ -1,11 +1,12 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { FeatureRestartDispatchError } from '../domain/errors/feature-restart-dispatch.error';
-import type {
-  FeatureInstallFailureCode,
-  FeatureInstallJob,
-  FeatureInstallResultV1,
-  ManageableFeatureName,
-  RestartScope,
+import {
+  isPreMutationInstallFailure,
+  type FeatureInstallFailureCode,
+  type FeatureInstallJob,
+  type FeatureInstallResultV1,
+  type ManageableFeatureName,
+  type RestartScope,
 } from '../domain/manageable-feature';
 import {
   FEATURE_CLOCK,
@@ -219,6 +220,7 @@ export class ReconcileFeatureInstallUseCase {
     job: FeatureInstallJob,
     code: FeatureInstallFailureCode,
   ): Promise<FeatureInstallJob> {
+    if (job.operation === 'reinstall') return this.reconcileReinstallFailure(job, code);
     if (SAFE_FAILURES.has(code)) return this.terminalFailure(job, code, null, true);
 
     const readiness = await this.postInstallReadiness(job.feature);
@@ -232,6 +234,60 @@ export class ReconcileFeatureInstallUseCase {
       return this.terminalFailure(job, code, 'install-failed', true);
     }
     return this.terminalFailure(job, 'partial-state-uncertain', 'partial-state-uncertain', true);
+  }
+
+  /**
+   * A reinstall re-runs the privileged routine underneath an installation that
+   * was already working, so restoring it is narrow on purpose. Two independent
+   * proofs are required before the previous state may simply stand again:
+   *
+   * 1. the reported cause can only be raised before the routine renames its
+   *    first durable policy artifact, so the old tuple is still whole; and
+   * 2. that old tuple still passes application readiness *now* — the digest,
+   *    summary, and live inspector projection are re-verified rather than
+   *    trusted from what was stored before the attempt.
+   *
+   * Anything else — `privileged-verification-failed` above all, which the
+   * routine also reports for every failure after that rename — may have left a
+   * mixed policy tuple behind and stays gated as `partial-state-uncertain`
+   * until a later reinstall or verification reconciles all three files.
+   */
+  private async reconcileReinstallFailure(
+    job: FeatureInstallJob,
+    code: FeatureInstallFailureCode,
+  ): Promise<FeatureInstallJob> {
+    if (!isPreMutationInstallFailure(code)) return this.gateAsUncertain(job);
+    const readiness = await this.postInstallReadiness(job.feature);
+    if (!readiness.ready) return this.gateAsUncertain(job);
+
+    const terminal = await this.jobs.terminalizeFailure({
+      id: job.id,
+      failureCode: code,
+      attentionReason: null,
+      preservePreviousState: true,
+      now: this.clock.now(),
+    });
+    await this.removeResultBestEffort(job.id);
+    // Only now: the active slot is released and no attention is pending, so
+    // the runtime can judge itself ready again.
+    await this.restoreReinstalledRuntime(job);
+    await this.outcomes.notify(terminal);
+    return terminal;
+  }
+
+  private gateAsUncertain(job: FeatureInstallJob): Promise<FeatureInstallJob> {
+    return this.terminalFailure(job, 'partial-state-uncertain', 'partial-state-uncertain', true);
+  }
+
+  private async restoreReinstalledRuntime(job: FeatureInstallJob): Promise<void> {
+    if (!job.previousEnabled) return;
+    try {
+      await this.lifecycle.afterEnable(job.feature);
+    } catch {
+      // The feature is intact but its runtime is not: say so instead of
+      // leaving a silently start-gated feature that reports itself healthy.
+      await this.features.setAttention(job.feature, 'partial-state-uncertain').catch(() => undefined);
+    }
   }
 
   private async postInstallReadiness(feature: ManageableFeatureName) {

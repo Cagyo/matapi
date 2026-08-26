@@ -20,6 +20,13 @@ export interface FeatureStatus {
     | 'needs-attention'
     | 'installing';
   action: FeatureAction | null;
+  /**
+   * An explicit extra action offered next to the primary one. Only an already
+   * installed RTSP feature has one: its network policy is bound to the
+   * interfaces present at install time, so moving the Pi needs a deliberate
+   * reinstall rather than a silent widening of the installed policy.
+   */
+  secondaryAction: Extract<FeatureAction, 'reinstall'> | null;
 }
 
 const LOCAL_GUIDANCE_REASONS = new Set<FeatureAttentionReason>([
@@ -33,6 +40,7 @@ export function deriveFeatureStatus(
   activeJob: ActiveFeatureJob | null,
 ): FeatureStatus {
   const name = feature.name as ManageableFeatureName;
+  const reinstallable = name === 'rtsp' && feature.installed ? ('reinstall' as const) : null;
   if (
     activeJob?.feature === name &&
     (activeJob.status === 'queued' || activeJob.status === 'running')
@@ -46,6 +54,7 @@ export function deriveFeatureStatus(
       attentionReason: feature.attentionReason,
       display: 'installing',
       action: null,
+      secondaryAction: null,
     };
   }
 
@@ -62,6 +71,7 @@ export function deriveFeatureStatus(
       attentionReason,
       display: 'needs-attention',
       action: LOCAL_GUIDANCE_REASONS.has(attentionReason) ? null : 'verify',
+      secondaryAction: reinstallable,
     };
   }
   if (!feature.installed) {
@@ -74,6 +84,7 @@ export function deriveFeatureStatus(
       attentionReason: null,
       display: 'not-installed',
       action: 'install',
+      secondaryAction: null,
     };
   }
   if (!feature.enabled) {
@@ -86,6 +97,7 @@ export function deriveFeatureStatus(
       attentionReason: null,
       display: 'installed-off',
       action: 'enable',
+      secondaryAction: reinstallable,
     };
   }
   return {
@@ -97,5 +109,6 @@ export function deriveFeatureStatus(
     attentionReason: null,
     display: 'enabled',
     action: 'disable',
+    secondaryAction: reinstallable,
   };
 }

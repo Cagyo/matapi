@@ -6,6 +6,7 @@ import {
   FEATURE_AVAILABILITY,
   type FeatureAvailabilityPort,
 } from '../domain/ports/feature-availability.port';
+import { FEATURE_INSTALL_RESTART_SCOPE } from './reconcile-feature-install.use-case';
 
 export interface FeatureImpact {
   dependencies: 'gpiod' | 'uart' | 'mosquitto' | 'motion' | 'rtsp-runtime';
@@ -14,9 +15,16 @@ export interface FeatureImpact {
   restartScope: RestartScope;
 }
 
+/** The explicit extra action a detail view offers, with its own restart cost. */
+export interface FeatureSecondaryAction {
+  action: 'reinstall';
+  restartScope: RestartScope;
+}
+
 export interface FeatureDetail {
   status: FeatureStatus;
   impact: FeatureImpact;
+  secondary: FeatureSecondaryAction | null;
 }
 
 const IMPACT: Record<ManageableFeatureName, Omit<FeatureImpact, 'restartScope'>> = {
@@ -37,8 +45,22 @@ export class GetFeatureDetailUseCase {
   async execute(name: string): Promise<FeatureDetail> {
     if (!isManageableFeature(name)) throw new UnknownFeatureError(name);
     const status = await this.availability.inspect(name);
-    return { status, impact: { ...IMPACT[name], restartScope: restartScopeFor(status) } };
+    return {
+      status,
+      impact: { ...IMPACT[name], restartScope: restartScopeFor(status) },
+      secondary: secondaryFor(status),
+    };
   }
+}
+
+/**
+ * A reinstall re-runs the privileged routine, so it always costs the feature's
+ * full install downtime — never the cheaper restart its current primary action
+ * would need.
+ */
+function secondaryFor(status: FeatureStatus): FeatureSecondaryAction | null {
+  if (status.secondaryAction !== 'reinstall') return null;
+  return { action: 'reinstall', restartScope: FEATURE_INSTALL_RESTART_SCOPE[status.name] };
 }
 
 function restartScopeFor(status: FeatureStatus): RestartScope {

@@ -11,13 +11,17 @@ const receipt = {
 
 function setup() {
   const list = { execute: vi.fn().mockResolvedValue([
-    { name: 'digital', installed: false, enabled: false, ready: false, busy: false, attentionReason: null, display: 'not-installed', action: 'install' },
-    { name: 'uart', installed: true, enabled: false, ready: true, busy: false, attentionReason: null, display: 'installed-off', action: 'enable' },
-    { name: 'zigbee', installed: true, enabled: true, ready: true, busy: false, attentionReason: null, display: 'enabled', action: 'disable' },
-    { name: 'motion', installed: false, enabled: false, ready: false, busy: false, attentionReason: null, display: 'not-installed', action: 'install' },
-    { name: 'rtsp', installed: false, enabled: false, ready: false, busy: false, attentionReason: null, display: 'not-installed', action: 'install' },
+    { name: 'digital', installed: false, enabled: false, ready: false, busy: false, attentionReason: null, display: 'not-installed', action: 'install', secondaryAction: null },
+    { name: 'uart', installed: true, enabled: false, ready: true, busy: false, attentionReason: null, display: 'installed-off', action: 'enable', secondaryAction: null },
+    { name: 'zigbee', installed: true, enabled: true, ready: true, busy: false, attentionReason: null, display: 'enabled', action: 'disable', secondaryAction: null },
+    { name: 'motion', installed: false, enabled: false, ready: false, busy: false, attentionReason: null, display: 'not-installed', action: 'install', secondaryAction: null },
+    { name: 'rtsp', installed: false, enabled: false, ready: false, busy: false, attentionReason: null, display: 'not-installed', action: 'install', secondaryAction: null },
   ]) };
-  const detail = { execute: vi.fn().mockResolvedValue({ status: list.execute.mock.results ? { name: 'digital', installed: false, enabled: false, ready: false, busy: false, attentionReason: null, display: 'not-installed', action: 'install' } : null, impact: { dependencies: 'gpiod', controls: 'digital-sensors', monitoring: 'sensor-work', restartScope: 'worker' } }) };
+  const detail = { execute: vi.fn().mockResolvedValue({
+    status: { name: 'digital', installed: false, enabled: false, ready: false, busy: false, attentionReason: null, display: 'not-installed', action: 'install', secondaryAction: null },
+    impact: { dependencies: 'gpiod', controls: 'digital-sensors', monitoring: 'sensor-work', restartScope: 'worker' },
+    secondary: null,
+  }) };
   const install = { execute: vi.fn().mockResolvedValue({ job: {}, stage: 'running' }) };
   const enable = { execute: vi.fn().mockResolvedValue({}) };
   const disable = { execute: vi.fn().mockResolvedValue({}) };
@@ -106,6 +110,92 @@ describe('FeatureHandler', () => {
     expect(workflows.completeHeadless).not.toHaveBeenCalled();
   });
 
+  describe('reinstall on the current network', () => {
+    it('offers the action only for an installed RTSP feature', async () => {
+      const { handler, ctx, detail } = setup();
+      detail.execute.mockResolvedValue(installedRtsp());
+
+      await (handler as any).openDetail(ctx, receipt, 'rtsp');
+
+      expect(labels(ctx)).toContain(catalogFor('en').feature.reinstallAction);
+      expect(callbacks(ctx)).toContain('ft:r:abcdefghijklmnop:r');
+    });
+
+    it('offers nothing extra for a feature without an interface-bound policy', async () => {
+      const { handler, ctx } = setup();
+
+      await (handler as any).openDetail(ctx, receipt, 'digital');
+
+      expect(labels(ctx)).not.toContain(catalogFor('en').feature.reinstallAction);
+    });
+
+    it('binds the confirmation to the exact rendered state and its full restart cost', async () => {
+      const { handler, ctx, detail, workflows } = setup();
+      detail.execute.mockResolvedValue(installedRtsp());
+
+      await (handler as any).openDetail(ctx, receipt, 'rtsp', 'reinstall');
+
+      expect(workflows.begin).toHaveBeenCalledWith(ctx, 'feature', expect.anything(), {
+        kind: 'feature-mutation', feature: 'rtsp', action: 'reinstall',
+        expectedInstalled: true, expectedEnabled: true, expectedAttentionReason: null,
+      });
+      const catalog = catalogFor('en').feature;
+      expect(labels(ctx)).toContain(catalog.confirmation.reinstall('RTSP camera', catalog.restartScope.supervisor));
+      // The offer is not repeated on the screen that already confirms it.
+      expect(labels(ctx)).not.toContain(catalog.reinstallAction);
+      expect(ctx.reply.mock.calls[0][0]).toContain(catalog.reinstallNotice);
+    });
+
+    it('reports an offer that vanished between the two screens instead of guessing', async () => {
+      const { handler, ctx, workflows } = setup();
+
+      await (handler as any).openDetail(ctx, receipt, 'digital', 'reinstall');
+
+      expect(ctx.reply).toHaveBeenCalledWith(catalogFor('en').feature.errors.reinstallUnavailable('Digital inputs'));
+      expect(workflows.begin).toHaveBeenCalledWith(ctx, 'feature', expect.anything(), expect.objectContaining({ action: 'install' }));
+    });
+
+    it('publishes the claimed reinstall with its captured prior state', async () => {
+      const { handler, ctx, claim, install } = setup();
+      claim.execute.mockResolvedValueOnce({
+        kind: 'claimed', receipt,
+        operation: { kind: 'feature-mutation', feature: 'rtsp', action: 'reinstall', expectedInstalled: true, expectedEnabled: true, expectedAttentionReason: null },
+      });
+
+      await (handler as any).confirm(ctx, receipt.id, false);
+
+      expect(install.execute).toHaveBeenCalledWith({
+        id: receipt.id, feature: 'rtsp', operation: 'reinstall',
+        requestedByUserId: 7, requestedInChatId: 7, workflowReceiptId: receipt.id,
+        expected: { installed: true, enabled: true },
+      });
+      expect(ctx.reply).toHaveBeenCalledWith(catalogFor('en').feature.progress.reinstalling('RTSP camera'));
+    });
+
+    it('keeps every feature control inside Telegram callback-data limits', async () => {
+      const { handler, ctx, detail } = setup();
+      detail.execute.mockResolvedValue(installedRtsp());
+
+      await (handler as any).openDetail(ctx, receipt, 'rtsp');
+
+      for (const data of callbacks(ctx)) {
+        expect(Buffer.byteLength(data, 'utf8'), data).toBeLessThanOrEqual(64);
+      }
+      expect(receipt.id).toHaveLength(16);
+    });
+
+    it('acknowledges a reinstall control that names no feature without opening anything', async () => {
+      const { handler, ctx, workflows } = setup();
+      let callbackHandler: ((ctx: typeof ctx) => Promise<void>) | undefined;
+      handler.register({ command: vi.fn(), callbackQuery: vi.fn((_: RegExp, _guard: unknown, cb: typeof callbackHandler) => { callbackHandler = cb; }) } as never);
+
+      await callbackHandler!({ ...ctx, callbackQuery: { data: `ft:r:${receipt.id}` } });
+
+      expect(workflows.loadCurrent).not.toHaveBeenCalled();
+      expect(ctx.reply).toHaveBeenCalledWith(catalogFor('en').feature.recovery.stale);
+    });
+  });
+
   it('maps expected typed mutation errors to localized copy without treating them as unknown failures', async () => {
     const { handler, ctx, claim, enable, navigation } = setup();
     claim.execute.mockResolvedValueOnce({ kind: 'claimed', receipt, operation: { kind: 'feature-mutation', feature: 'digital', action: 'enable', expectedInstalled: true, expectedEnabled: false, expectedAttentionReason: null } });
@@ -117,3 +207,27 @@ describe('FeatureHandler', () => {
     expect(ctx.reply).toHaveBeenCalledWith(catalogFor('en').feature.errors.alreadyEnabled('Digital inputs'));
   });
 });
+
+function installedRtsp() {
+  return {
+    status: {
+      name: 'rtsp', installed: true, enabled: true, ready: true, busy: false,
+      attentionReason: null, display: 'enabled', action: 'disable', secondaryAction: 'reinstall',
+    },
+    impact: { dependencies: 'rtsp-runtime', controls: 'live-streams', monitoring: 'camera-work', restartScope: 'worker' },
+    secondary: { action: 'reinstall', restartScope: 'supervisor' },
+  };
+}
+
+function rows(ctx: { reply: { mock: { calls: unknown[][] } } }): { text: string; callback_data: string }[] {
+  const last = ctx.reply.mock.calls.at(-1) as [string, { reply_markup: { inline_keyboard: { text: string; callback_data: string }[][] } }];
+  return last[1].reply_markup.inline_keyboard.flat();
+}
+
+function labels(ctx: Parameters<typeof rows>[0]): string[] {
+  return rows(ctx).map((button) => button.text);
+}
+
+function callbacks(ctx: Parameters<typeof rows>[0]): string[] {
+  return rows(ctx).map((button) => button.callback_data);
+}

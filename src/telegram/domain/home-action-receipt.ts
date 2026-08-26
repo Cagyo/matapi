@@ -134,7 +134,8 @@ function isFeatureWorkflowOperation(value: unknown): value is FeatureWorkflowOpe
     && hasKeys(value, ['kind', 'feature', 'action', 'expectedInstalled', 'expectedEnabled', 'expectedAttentionReason'])
     && value.kind === 'feature-mutation'
     && (value.feature === 'digital' || value.feature === 'uart' || value.feature === 'zigbee' || value.feature === 'motion' || value.feature === 'rtsp')
-    && (value.action === 'install' || value.action === 'enable' || value.action === 'disable' || value.action === 'verify')
+    && (value.action === 'install' || value.action === 'reinstall' || value.action === 'enable'
+      || value.action === 'disable' || value.action === 'verify')
     && typeof value.expectedInstalled === 'boolean'
     && typeof value.expectedEnabled === 'boolean'
     && (value.expectedAttentionReason === null || value.expectedAttentionReason === 'install-failed'

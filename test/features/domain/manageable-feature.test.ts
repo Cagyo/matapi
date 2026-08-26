@@ -132,6 +132,40 @@ describe('manageable feature domain', () => {
     },
   );
 
+  it.each([
+    { installed: true, enabled: true, expected: 'reinstall' as const },
+    { installed: true, enabled: false, expected: 'reinstall' as const },
+    { installed: false, enabled: false, expected: null },
+  ])('offers reinstall for installed RTSP only ($installed/$enabled)', ({ installed, enabled, expected }) => {
+    expect(
+      deriveFeatureStatus({ name: 'rtsp', installed, enabled, config: null, attentionReason: null }, null),
+    ).toMatchObject({ secondaryAction: expected });
+  });
+
+  it('offers no reinstall for a feature without an interface-bound policy', () => {
+    expect(
+      deriveFeatureStatus({ name: 'motion', installed: true, enabled: true, config: null, attentionReason: null }, null),
+    ).toMatchObject({ secondaryAction: null });
+  });
+
+  it('withdraws the reinstall offer while RTSP already has an active job', () => {
+    expect(
+      deriveFeatureStatus(
+        { name: 'rtsp', installed: true, enabled: true, config: null, attentionReason: null },
+        { id: 'abcdefghijklmnop', feature: 'rtsp', status: 'running' },
+      ),
+    ).toMatchObject({ action: null, secondaryAction: null, busy: true });
+  });
+
+  it('keeps the reinstall offer as the repair path for a damaged RTSP install', () => {
+    expect(
+      deriveFeatureStatus(
+        { name: 'rtsp', installed: true, enabled: true, config: null, attentionReason: 'partial-state-uncertain' },
+        null,
+      ),
+    ).toMatchObject({ action: 'verify', secondaryAction: 'reinstall' });
+  });
+
   it('rejects unknown result keys and unsafe failure text', () => {
     expect(() =>
       parseFeatureInstallResult(

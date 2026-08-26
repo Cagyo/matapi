@@ -9,7 +9,7 @@ export const MANAGEABLE_FEATURE_NAMES = [
 export const LEGACY_FEATURE_NAMES = ['neobox', '4g'] as const;
 
 export type ManageableFeatureName = (typeof MANAGEABLE_FEATURE_NAMES)[number];
-export type FeatureAction = 'install' | 'enable' | 'disable' | 'verify';
+export type FeatureAction = 'install' | 'reinstall' | 'enable' | 'disable' | 'verify';
 export type RestartScope = 'worker' | 'supervisor' | 'host';
 export type FeatureAttentionReason =
   | 'inconsistent-state'
@@ -40,6 +40,36 @@ export const FEATURE_INSTALL_FAILURE_CODES = [
 ] as const;
 
 export type FeatureInstallFailureCode = (typeof FEATURE_INSTALL_FAILURE_CODES)[number];
+
+/**
+ * Causes that can only be reported before the privileged routine renames its
+ * first durable policy artifact, so the previously installed policy tuple is
+ * still whole. `privileged-verification-failed` is deliberately absent: the
+ * routine reports it for root verification *and* for every failure after that
+ * rename, so it can never prove the old tuple survived. `result-invalid` and
+ * `interrupted` say nothing about how far the routine ran, so they stay out too.
+ */
+export const PRE_MUTATION_INSTALL_FAILURE_CODES = [
+  'request-invalid',
+  'request-publish-failed',
+  'helper-version-mismatch',
+  'local-network-unavailable',
+  'network-policy-generation-failed',
+  'dependency-install-failed',
+] as const;
+
+const PRE_MUTATION_FAILURES = new Set<FeatureInstallFailureCode>(
+  PRE_MUTATION_INSTALL_FAILURE_CODES,
+);
+
+/**
+ * Whether a failed install left every durable policy artifact untouched. It is
+ * a necessary condition for restoring the previous state, never a sufficient
+ * one: the caller must still prove the old policy passes current readiness.
+ */
+export function isPreMutationInstallFailure(code: FeatureInstallFailureCode): boolean {
+  return PRE_MUTATION_FAILURES.has(code);
+}
 
 export interface FeatureInstallRequestV1 {
   version: 1;

@@ -20,14 +20,34 @@ describe('GetFeatureDetailUseCase', () => {
       impact: { restartScope: 'worker' },
     });
   });
+
+  it('offers a reinstall at full install cost next to the cheaper primary action', async () => {
+    const availability = availabilityStub('rtsp', 'reinstall');
+
+    await expect(new GetFeatureDetailUseCase(availability).execute('rtsp')).resolves.toMatchObject({
+      status: { action: 'disable' },
+      impact: { restartScope: 'worker' },
+      secondary: { action: 'reinstall', restartScope: 'supervisor' },
+    });
+  });
+
+  it('offers no reinstall while the feature is not installed', async () => {
+    await expect(new GetFeatureDetailUseCase(availabilityStub()).execute('rtsp')).resolves.toMatchObject({
+      status: { action: 'install' },
+      secondary: null,
+    });
+  });
 });
 
-function availabilityStub(enabledName?: string): FeatureAvailabilityPort {
+function availabilityStub(
+  enabledName?: string,
+  secondaryAction: 'reinstall' | null = null,
+): FeatureAvailabilityPort {
   return {
     awaitInitialVerification: async () => undefined,
     inspect: async (name) => name === enabledName
-      ? { name, installed: true, enabled: true, ready: true, busy: false, attentionReason: null, display: 'enabled', action: 'disable' }
-      : { name, installed: false, enabled: false, ready: false, busy: false, attentionReason: null, display: 'not-installed', action: 'install' },
+      ? { name, installed: true, enabled: true, ready: true, busy: false, attentionReason: null, display: 'enabled', action: 'disable', secondaryAction }
+      : { name, installed: false, enabled: false, ready: false, busy: false, attentionReason: null, display: 'not-installed', action: 'install', secondaryAction: null },
     requireReady: async () => undefined,
   };
 }

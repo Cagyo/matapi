@@ -14,7 +14,7 @@ describe('ListManageableFeaturesUseCase', () => {
 function availabilityStub(): FeatureAvailabilityPort {
   return {
     awaitInitialVerification: async () => undefined,
-    inspect: async (name) => ({ name, installed: false, enabled: false, ready: false, busy: false, attentionReason: null, display: 'not-installed', action: 'install' }),
+    inspect: async (name) => ({ name, installed: false, enabled: false, ready: false, busy: false, attentionReason: null, display: 'not-installed', action: 'install', secondaryAction: null }),
     requireReady: async () => undefined,
   };
 }

@@ -16,7 +16,7 @@ export type FeatureAttentionReason =
 export interface FeatureWorkflowOperation {
   kind: 'feature-mutation';
   feature: 'digital' | 'uart' | 'zigbee' | 'motion' | 'rtsp';
-  action: 'install' | 'enable' | 'disable' | 'verify';
+  action: 'install' | 'reinstall' | 'enable' | 'disable' | 'verify';
   expectedInstalled: boolean;
   expectedEnabled: boolean;
   expectedAttentionReason: FeatureAttentionReason | null;

@@ -35,7 +35,7 @@ import { TelegramContext } from './telegram-context';
 import { currentWorkflowIdentity, type WorkflowLaunch, WorkflowEntryCoordinator } from './workflow-entry.coordinator';
 import { WorkflowNavigationHandler } from './workflow-navigation.handler';
 
-const FEATURE_CALLBACK = /^ft:(l|d|c|v):([A-Za-z0-9_-]{16})(?::([duzmr]))?$/;
+const FEATURE_CALLBACK = /^ft:(l|d|c|v|r):([A-Za-z0-9_-]{16})(?::([duzmr]))?$/;
 const FEATURE_CODES: Record<string, ManageableFeatureName> = {
   d: 'digital', u: 'uart', z: 'zigbee', m: 'motion', r: 'rtsp',
 };
@@ -164,6 +164,11 @@ export class FeatureHandler implements TelegramHandler, FeatureInstallOutcomePor
       if (!current || !parsed.feature) return this.stale(ctx);
       return this.openDetail(ctx, current, parsed.feature);
     }
+    if (parsed.kind === 'r') {
+      const current = await this.workflows.loadCurrent(ctx, parsed.receiptId, 'feature');
+      if (!current || !parsed.feature) return this.stale(ctx);
+      return this.openDetail(ctx, current, parsed.feature, 'reinstall');
+    }
     if (parsed.kind === 'l') {
       const current = await this.workflows.loadCurrent(ctx, parsed.receiptId, 'feature');
       return current ? this.handleList(ctx, { receipt: current }) : this.stale(ctx);
@@ -171,7 +176,12 @@ export class FeatureHandler implements TelegramHandler, FeatureInstallOutcomePor
     return this.confirm(ctx, parsed.receiptId, parsed.kind === 'v');
   }
 
-  private async openDetail(ctx: TelegramContext, listReceipt: WorkflowReturnReceipt, name: string): Promise<void> {
+  private async openDetail(
+    ctx: TelegramContext,
+    listReceipt: WorkflowReturnReceipt,
+    name: string,
+    preferred?: 'reinstall',
+  ): Promise<void> {
     let detail: FeatureDetail;
     try {
       detail = await this.detail.execute(name);
@@ -183,7 +193,14 @@ export class FeatureHandler implements TelegramHandler, FeatureInstallOutcomePor
       await ctx.reply(ctx.localeState!.catalog.feature.listFailed);
       return;
     }
-    const operation = operationFor(detail.status);
+    // The rendered snapshot is what the confirmed operation is bound to, so an
+    // offer that disappeared between the two screens is reported, never guessed.
+    let operation = operationFor(detail.status);
+    if (preferred === 'reinstall') {
+      const reinstall = reinstallOperationFor(detail);
+      if (reinstall) operation = reinstall;
+      else await ctx.reply(ctx.localeState!.catalog.feature.errors.reinstallUnavailable(ctx.localeState!.catalog.feature.names[detail.status.name]));
+    }
     if (!operation) {
       await this.replyDetail(ctx, listReceipt, detail, null);
       return;
@@ -201,6 +218,11 @@ export class FeatureHandler implements TelegramHandler, FeatureInstallOutcomePor
   ): Promise<void> {
     const catalog = ctx.localeState!.catalog.feature;
     const name = catalog.names[detail.status.name];
+    // A reinstall re-runs the whole privileged routine, so the screen discloses
+    // that cost instead of the cheaper restart the primary action would need.
+    const scope = action === 'reinstall' && detail.secondary
+      ? detail.secondary.restartScope
+      : detail.impact.restartScope;
     const text = catalog.detail({
       name,
       description: catalog.description[detail.status.name],
@@ -208,18 +230,21 @@ export class FeatureHandler implements TelegramHandler, FeatureInstallOutcomePor
       dependencies: catalog.impact.dependencies[detail.impact.dependencies],
       controls: catalog.impact.controls[detail.impact.controls],
       monitoring: catalog.impact.monitoring[detail.impact.monitoring],
-      downtime: catalog.downtime[detail.impact.restartScope],
+      downtime: catalog.downtime[scope],
       attention: detail.status.attentionReason ? catalog.attention[detail.status.attentionReason] : null,
     });
     const keyboard = new InlineKeyboard();
     if (action) {
       const button = action === 'verify' ? callback('v', receipt.id) : callback('c', receipt.id);
-      keyboard.text(catalog.confirmation[action](name, catalog.restartScope[detail.impact.restartScope]), button).row();
+      keyboard.text(catalog.confirmation[action](name, catalog.restartScope[scope]), button).row();
+    }
+    if (detail.secondary && action !== 'reinstall') {
+      keyboard.text(catalog.reinstallAction, callback('r', receipt.id, FEATURE_CODE[detail.status.name])).row();
     }
     keyboard.text(catalog.listBack, callback('l', receipt.id)).row();
     keyboard.text(ctx.localeState!.catalog.home.common.back, `wr:${receipt.id}:o`)
       .text(ctx.localeState!.catalog.home.workflow.home, `wr:${receipt.id}:h`);
-    await ctx.reply(text, { reply_markup: keyboard });
+    await ctx.reply(action === 'reinstall' ? `${text}\n${catalog.reinstallNotice}` : text, { reply_markup: keyboard });
   }
 
   private async confirm(ctx: TelegramContext, receiptId: string, verifyOnly: boolean): Promise<void> {
@@ -231,13 +256,16 @@ export class FeatureHandler implements TelegramHandler, FeatureInstallOutcomePor
     const catalog = ctx.localeState!.catalog.feature;
     const name = catalog.names[operation.feature];
     try {
-      if (operation.action === 'install') {
+      if (operation.action === 'install' || operation.action === 'reinstall') {
         await this.install.execute({
-          id: receipt.id, feature: operation.feature, requestedByUserId: receipt.userId,
+          id: receipt.id, feature: operation.feature, operation: operation.action,
+          requestedByUserId: receipt.userId,
           requestedInChatId: receipt.chatId, workflowReceiptId: receipt.id,
-          expected: { installed: false, enabled: false },
+          expected: { installed: operation.expectedInstalled, enabled: operation.expectedEnabled },
         });
-        await ctx.reply(catalog.progress.installing(name));
+        await ctx.reply(operation.action === 'reinstall'
+          ? catalog.progress.reinstalling(name)
+          : catalog.progress.installing(name));
         return;
       }
       if (operation.action === 'enable') {
@@ -299,26 +327,43 @@ export class FeatureHandler implements TelegramHandler, FeatureInstallOutcomePor
   }
 }
 
-function callback(kind: 'l' | 'd' | 'c' | 'v', receiptId: string, code?: string): string {
-  const data = kind === 'd' ? `ft:d:${receiptId}:${code}` : `ft:${kind}:${receiptId}`;
+type FeatureCallbackKind = 'l' | 'd' | 'c' | 'v' | 'r';
+
+/** Kinds that name the feature themselves instead of inheriting it from the receipt. */
+const FEATURE_SCOPED_KINDS = new Set<FeatureCallbackKind>(['d', 'r']);
+
+function callback(kind: FeatureCallbackKind, receiptId: string, code?: string): string {
+  const data = FEATURE_SCOPED_KINDS.has(kind) ? `ft:${kind}:${receiptId}:${code}` : `ft:${kind}:${receiptId}`;
   if (Buffer.byteLength(data, 'utf8') > 64) throw new RangeError('Feature callback exceeds Telegram callback-data limit');
   return data;
 }
 
-function parseCallback(data: string): { kind: 'l' | 'd' | 'c' | 'v'; receiptId: string; feature?: ManageableFeatureName } | null {
+function parseCallback(data: string): { kind: FeatureCallbackKind; receiptId: string; feature?: ManageableFeatureName } | null {
   if (Buffer.byteLength(data, 'utf8') > 64) return null;
   const match = FEATURE_CALLBACK.exec(data);
   if (!match) return null;
-  const kind = match[1] as 'l' | 'd' | 'c' | 'v';
-  if ((kind === 'd') !== Boolean(match[3])) return null;
+  const kind = match[1] as FeatureCallbackKind;
+  if (FEATURE_SCOPED_KINDS.has(kind) !== Boolean(match[3])) return null;
   const feature = match[3] ? FEATURE_CODES[match[3]] : undefined;
-  return kind === 'd' && !feature ? null : { kind, receiptId: match[2], feature };
+  return FEATURE_SCOPED_KINDS.has(kind) && !feature ? null : { kind, receiptId: match[2], feature };
 }
 
 function operationFor(status: FeatureStatus): FeatureWorkflowOperation | null {
   if (!status.action) return null;
+  return mutationFor(status, status.action);
+}
+
+/** The extra offer is bound to the same rendered snapshot as the primary one. */
+function reinstallOperationFor(detail: FeatureDetail): FeatureWorkflowOperation | null {
+  return detail.secondary ? mutationFor(detail.status, detail.secondary.action) : null;
+}
+
+function mutationFor(
+  status: FeatureStatus,
+  action: FeatureWorkflowOperation['action'],
+): FeatureWorkflowOperation {
   return {
-    kind: 'feature-mutation', feature: status.name, action: status.action,
+    kind: 'feature-mutation', feature: status.name, action,
     expectedInstalled: status.installed, expectedEnabled: status.enabled,
     expectedAttentionReason: status.attentionReason as FeatureWorkflowOperation['expectedAttentionReason'],
   };

@@ -6,6 +6,7 @@ import type {
   FeatureAttentionReason,
   FeatureInstallFailureCode,
   FeatureInstallJobStatus,
+  FeatureInstallOperation,
   FeatureInstallResultV1,
   ManageableFeatureName,
 } from '../../../src/features/domain/manageable-feature';
@@ -94,6 +95,10 @@ interface Scenario {
   name: string;
   /** Feature state before the job; `true` starts installed and enabled. */
   installed?: boolean;
+  /** Overrides the enabled half of that state when they must differ. */
+  enabled?: boolean;
+  /** What the administrator asked for; never inferred from `installed`. */
+  operation?: FeatureInstallOperation;
   given?: 'queued' | 'running' | 'awaiting-restart';
   state?: ResultState;
   readiness?: readonly ReadinessStep[];
@@ -107,7 +112,7 @@ interface Scenario {
 function create(scenario: Scenario) {
   const installed = scenario.installed ?? false;
   const features = new InMemoryFeatureRepository([
-    { name: 'digital', installed, enabled: installed, config: null, attentionReason: null },
+    { name: 'digital', installed, enabled: enabledOf(scenario), config: null, attentionReason: null },
   ]);
   const jobs = new InMemoryFeatureInstallJobRepository(features);
   const readiness = new ScriptedReadiness(scenario.readiness ?? [READY]);
@@ -147,11 +152,17 @@ function create(scenario: Scenario) {
 
 type Harness = ReturnType<typeof create>;
 
+function enabledOf(scenario: Scenario): boolean {
+  return scenario.enabled ?? scenario.installed ?? false;
+}
+
 async function arrange(test: Harness, scenario: Scenario): Promise<void> {
   const installed = scenario.installed ?? false;
   await test.jobs.createQueued({
-    id, feature: 'digital', operation: 'install', requestedByUserId: 1, requestedInChatId: 2,
-    workflowReceiptId: 'ponmlkjihgfedcba', expected: { installed, enabled: installed }, now,
+    id, feature: 'digital', operation: scenario.operation ?? 'install',
+    requestedByUserId: 1, requestedInChatId: 2,
+    workflowReceiptId: 'ponmlkjihgfedcba',
+    expected: { installed, enabled: enabledOf(scenario) }, now,
   });
   const given = scenario.given ?? 'running';
   if (given === 'queued') return;
@@ -343,6 +354,106 @@ const scenarios: readonly Scenario[] = [
     expected: summary({
       status: 'failed', activeSlot: null, failureCode: 'request-publish-failed',
       dispatchIdentity: null, notified: 1, resultRemoved: 1,
+    }),
+  },
+  {
+    name: 'restores a reinstall that failed before any policy rename once the old policy still verifies',
+    operation: 'reinstall',
+    installed: true,
+    state: { kind: 'terminal', result: failed('local-network-unavailable') },
+    identities: [first],
+    expected: summary({
+      status: 'failed', activeSlot: null, failureCode: 'local-network-unavailable',
+      dispatchIdentity: null, installed: true, enabled: true, attentionReason: null,
+      readinessProbes: 1, afterEnable: 1, notified: 1, resultRemoved: 1,
+    }),
+  },
+  {
+    name: 'restores a reinstall whose policy could not be generated',
+    operation: 'reinstall',
+    installed: true,
+    state: { kind: 'terminal', result: failed('network-policy-generation-failed') },
+    identities: [first],
+    expected: summary({
+      status: 'failed', activeSlot: null, failureCode: 'network-policy-generation-failed',
+      dispatchIdentity: null, installed: true, enabled: true, attentionReason: null,
+      readinessProbes: 1, afterEnable: 1, notified: 1, resultRemoved: 1,
+    }),
+  },
+  {
+    name: 'restores a reinstall whose dependencies failed before the first rename',
+    operation: 'reinstall',
+    installed: true,
+    state: { kind: 'terminal', result: failed('dependency-install-failed') },
+    identities: [first],
+    expected: summary({
+      status: 'failed', activeSlot: null, failureCode: 'dependency-install-failed',
+      dispatchIdentity: null, installed: true, enabled: true, attentionReason: null,
+      readinessProbes: 1, afterEnable: 1, notified: 1, resultRemoved: 1,
+    }),
+  },
+  {
+    name: 'leaves a restored but disabled reinstall closed',
+    operation: 'reinstall',
+    installed: true,
+    enabled: false,
+    state: { kind: 'terminal', result: failed('local-network-unavailable') },
+    identities: [first],
+    expected: summary({
+      status: 'failed', activeSlot: null, failureCode: 'local-network-unavailable',
+      dispatchIdentity: null, installed: true, enabled: false, attentionReason: null,
+      readinessProbes: 1, notified: 1, resultRemoved: 1,
+    }),
+  },
+  {
+    name: 'keeps a reinstall gated when the routine may already have renamed a policy file',
+    operation: 'reinstall',
+    installed: true,
+    state: { kind: 'terminal', result: failed('privileged-verification-failed') },
+    identities: [first],
+    expected: summary({
+      status: 'failed', activeSlot: null, failureCode: 'partial-state-uncertain',
+      dispatchIdentity: null, installed: true, enabled: true,
+      attentionReason: 'partial-state-uncertain', notified: 1, resultRemoved: 1,
+    }),
+  },
+  {
+    name: 'keeps a reinstall gated when the result itself cannot be trusted',
+    operation: 'reinstall',
+    installed: true,
+    state: { kind: 'terminal', result: { ...failed('interrupted'), jobId: 'zyxwvutsrqponmlk' } },
+    identities: [first],
+    expected: summary({
+      status: 'failed', activeSlot: null, failureCode: 'partial-state-uncertain',
+      dispatchIdentity: null, installed: true, enabled: true,
+      attentionReason: 'partial-state-uncertain', notified: 1, resultRemoved: 1,
+    }),
+  },
+  {
+    name: 'keeps a pre-rename reinstall failure gated when the old policy no longer verifies',
+    operation: 'reinstall',
+    installed: true,
+    state: { kind: 'terminal', result: failed('local-network-unavailable') },
+    readiness: [POLICY_STALE],
+    identities: [first],
+    expected: summary({
+      status: 'failed', activeSlot: null, failureCode: 'partial-state-uncertain',
+      dispatchIdentity: null, installed: true, enabled: true,
+      attentionReason: 'partial-state-uncertain', readinessProbes: 1, notified: 1, resultRemoved: 1,
+    }),
+  },
+  {
+    name: 'records uncertainty when a restored reinstall cannot reopen its runtime',
+    operation: 'reinstall',
+    installed: true,
+    failAfterEnable: true,
+    state: { kind: 'terminal', result: failed('local-network-unavailable') },
+    identities: [first],
+    expected: summary({
+      status: 'failed', activeSlot: null, failureCode: 'local-network-unavailable',
+      dispatchIdentity: null, installed: true, enabled: true,
+      attentionReason: 'partial-state-uncertain',
+      readinessProbes: 1, afterEnable: 1, notified: 1, resultRemoved: 1,
     }),
   },
   {
