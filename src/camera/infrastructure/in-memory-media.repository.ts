@@ -9,10 +9,20 @@ import {
   UploadStats,
 } from '../domain/ports/media-repository.port';
 import { MediaWriterPort } from '../domain/ports/media-writer.port';
+import type {
+  InMemoryCameraRow,
+  InMemoryCameraStore,
+} from './in-memory-rtsp-source-configuration.adapter';
 
-/** In-memory adapter for tests and dev. Serves both read and write ports. */
+/**
+ * In-memory adapter for tests and dev. Serves both read and write ports, and
+ * the synchronous camera store the RTSP source-configuration twin writes
+ * through, so stub composition keeps one set of camera rows rather than two.
+ */
 @Injectable()
-export class InMemoryMediaRepository implements MediaRepositoryPort, MediaWriterPort {
+export class InMemoryMediaRepository
+  implements MediaRepositoryPort, MediaWriterPort, InMemoryCameraStore
+{
   private readonly cameras: Camera[] = [];
   private readonly events: MotionEvent[] = [];
   private nextId = 1;
@@ -94,6 +104,40 @@ export class InMemoryMediaRepository implements MediaRepositoryPort, MediaWriter
 
   async listCameras(): Promise<Camera[]> {
     return this.cameras.filter((c) => c.enabled);
+  }
+
+  /**
+   * Synchronous camera-store surface (`InMemoryCameraStore`). Seeded cameras
+   * carry no stored key, so the canonical one is derived on read exactly as
+   * `findCameraByName` derives it.
+   */
+  allCameras(): readonly InMemoryCameraRow[] {
+    return this.cameras.map((camera) => ({
+      id: camera.id,
+      name: camera.name,
+      nameKey: cameraNameKey(camera.name),
+      type: camera.type,
+      enabled: camera.enabled,
+    }));
+  }
+
+  addCamera(camera: InMemoryCameraRow): void {
+    this.cameras.push({
+      id: camera.id,
+      name: camera.name,
+      type: camera.type,
+      config: null,
+      enabled: camera.enabled,
+    });
+  }
+
+  removeCamera(cameraId: string): void {
+    const index = this.cameras.findIndex((camera) => camera.id === cameraId);
+    if (index >= 0) this.cameras.splice(index, 1);
+    // Mirrors the SQL removal: recorded media survives, attribution does not.
+    for (const event of this.events) {
+      if (event.cameraId === cameraId) event.cameraId = null;
+    }
   }
 
   async findCameraByName(name: string): Promise<Camera | null> {

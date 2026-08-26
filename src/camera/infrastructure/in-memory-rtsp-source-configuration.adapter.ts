@@ -6,9 +6,10 @@ import { InvalidLiveSourceError } from '../domain/errors/invalid-live-source.err
 import { LiveSourceStateChangedError } from '../domain/errors/live-source-state-changed.error';
 import type { EncryptedLiveSourceCredential } from '../domain/ports/live-source-credential.port';
 import type { RedactedLiveSource } from '../domain/ports/live-source-repository.port';
-import type {
-  PersistVerifiedSource,
-  RtspSourceConfigurationPort,
+import {
+  RTSP_SOURCE_CAMERA_TYPE,
+  type PersistVerifiedSource,
+  type RtspSourceConfigurationPort,
 } from '../domain/ports/rtsp-source-configuration.port';
 
 /** Mirrors `cameras`; see the Drizzle adapter for the authoritative semantics. */
@@ -17,6 +18,7 @@ export interface InMemoryCameraRow {
   name: string;
   nameKey: string;
   type: string;
+  enabled: boolean;
 }
 
 /** Credential-free view of a stored source, for assertions and dev listings. */
@@ -24,15 +26,14 @@ export interface InMemorySourceRow {
   cameraId: string;
   summary: LiveSourceSummary;
   revision: number;
-  verifiedAt: Date;
-  policyDigest: string;
+  verifiedAt: Date | null;
+  policyDigest: string | null;
   hasCredential: boolean;
 }
 
-const RTSP_CAMERA_TYPE = 'rtsp';
-
-interface StoredSource {
+export interface InMemoryVerifiedSourceWrite {
   source: LiveSource;
+  cameraName: string;
   credential: EncryptedLiveSourceCredential;
   revision: number;
   verifiedAt: Date;
@@ -40,37 +41,72 @@ interface StoredSource {
 }
 
 /**
+ * The slice of stub camera state this port shares with the in-memory media
+ * repository, so a camera created here is visible to `listCameras()`,
+ * `findCameraByName()` and every status command — and so name uniqueness is
+ * decided against the rows the rest of the app can actually see.
+ *
+ * Synchronous by necessity: the port may not open an async boundary.
+ */
+export interface InMemoryCameraStore {
+  /** Every stored camera, enabled or not. */
+  allCameras(): readonly InMemoryCameraRow[];
+  addCamera(camera: InMemoryCameraRow): void;
+  /** Also de-attributes recorded media, mirroring the SQL removal. */
+  removeCamera(cameraId: string): void;
+}
+
+/** The same arrangement for the in-memory live-source repository. */
+export interface InMemoryLiveSourceStore {
+  listStoredSources(): readonly InMemorySourceRow[];
+  /** Compare-and-swap read; `null` when the camera has no source. */
+  storedRevision(cameraId: string): number | null;
+  putVerifiedSource(input: InMemoryVerifiedSourceWrite): void;
+  dropSource(cameraId: string): void;
+}
+
+/**
  * In-process stand-in for tests and stub composition. Each method validates
- * everything before touching either map, so a rejected call leaves no partial
+ * everything before touching either store, so a rejected call leaves no partial
  * state — the counterpart of the Drizzle adapter's single transaction.
+ *
+ * Constructed bare it owns private stores, which is what a focused unit test
+ * wants. Stub composition passes the real in-memory repositories instead, so
+ * the twin and the rest of the app agree on one set of rows.
  */
 export class InMemoryRtspSourceConfigurationAdapter
   implements RtspSourceConfigurationPort
 {
-  readonly #cameras = new Map<string, InMemoryCameraRow>();
-  readonly #sources = new Map<string, StoredSource>();
+  constructor(
+    private readonly cameraStore: InMemoryCameraStore = new StandaloneCameraStore(),
+    private readonly sourceStore: InMemoryLiveSourceStore = new StandaloneLiveSourceStore(),
+  ) {}
 
   /** Seeds a camera that predates any RTSP source, as `attach` expects. */
-  seedCamera(camera: { id: string; name: string; type: string }): void {
+  seedCamera(camera: {
+    id: string;
+    name: string;
+    type: string;
+    enabled?: boolean;
+  }): void {
     const nameKey = cameraNameKey(camera.name);
-    if (this.#cameras.has(camera.id)) throw new CameraIdCollisionError();
+    if (this.#camera(camera.id)) throw new CameraIdCollisionError();
     if (this.#nameKeyTaken(nameKey)) throw new CameraNameTakenError();
-    this.#cameras.set(camera.id, { ...camera, nameKey });
+    this.cameraStore.addCamera({
+      id: camera.id,
+      name: camera.name,
+      nameKey,
+      type: camera.type,
+      enabled: camera.enabled ?? true,
+    });
   }
 
   cameras(): InMemoryCameraRow[] {
-    return [...this.#cameras.values()].map((camera) => ({ ...camera }));
+    return this.cameraStore.allCameras().map((camera) => ({ ...camera }));
   }
 
   sources(): InMemorySourceRow[] {
-    return [...this.#sources.entries()].map(([cameraId, stored]) => ({
-      cameraId,
-      summary: stored.source.summary(),
-      revision: stored.revision,
-      verifiedAt: stored.verifiedAt,
-      policyDigest: stored.policyDigest,
-      hasCredential: true,
-    }));
+    return this.sourceStore.listStoredSources().map((row) => ({ ...row }));
   }
 
   createCamera(
@@ -83,26 +119,30 @@ export class InMemoryRtspSourceConfigurationAdapter
     if (camera.nameKey !== cameraNameKey(camera.name)) {
       throw new InvalidLiveSourceError('camera name key is not canonical');
     }
-    if (this.#cameras.has(camera.id)) throw new CameraIdCollisionError();
+    if (this.#camera(camera.id)) throw new CameraIdCollisionError();
     if (this.#nameKeyTaken(camera.nameKey)) throw new CameraNameTakenError();
 
-    this.#cameras.set(camera.id, {
+    this.cameraStore.addCamera({
       id: camera.id,
       name: camera.name,
       nameKey: camera.nameKey,
-      type: RTSP_CAMERA_TYPE,
+      type: RTSP_SOURCE_CAMERA_TYPE,
+      enabled: true,
     });
-    this.#sources.set(camera.id, storedFrom(input, 0));
+    this.sourceStore.putVerifiedSource(written(input, camera.name, 0));
     return redacted(input, camera.name, 0);
   }
 
   attach(input: PersistVerifiedSource & { cameraId: string }): RedactedLiveSource {
     assertSourceAddresses(input.source, input.cameraId);
-    const camera = this.#cameras.get(input.cameraId);
-    if (!camera) throw new LiveSourceStateChangedError();
-    if (this.#sources.has(input.cameraId)) throw new LiveSourceStateChangedError();
+    const camera = this.#camera(input.cameraId);
+    // Disabled is a state change, exactly as it is inside the SQL transaction.
+    if (!camera?.enabled) throw new LiveSourceStateChangedError();
+    if (this.sourceStore.storedRevision(input.cameraId) !== null) {
+      throw new LiveSourceStateChangedError();
+    }
 
-    this.#sources.set(input.cameraId, storedFrom(input, 0));
+    this.sourceStore.putVerifiedSource(written(input, camera.name, 0));
     return redacted(input, camera.name, 0);
   }
 
@@ -110,41 +150,101 @@ export class InMemoryRtspSourceConfigurationAdapter
     input: PersistVerifiedSource & { cameraId: string; expectedRevision: number },
   ): RedactedLiveSource {
     assertSourceAddresses(input.source, input.cameraId);
-    const camera = this.#cameras.get(input.cameraId);
-    const stored = this.#sources.get(input.cameraId);
-    if (!camera || stored?.revision !== input.expectedRevision) {
+    const camera = this.#camera(input.cameraId);
+    const stored = this.sourceStore.storedRevision(input.cameraId);
+    if (!camera || stored !== input.expectedRevision) {
       throw new LiveSourceStateChangedError();
     }
     const revision = input.expectedRevision + 1;
 
-    this.#sources.set(input.cameraId, storedFrom(input, revision));
+    this.sourceStore.putVerifiedSource(written(input, camera.name, revision));
     return redacted(input, camera.name, revision);
   }
 
   remove(input: { cameraId: string; expectedRevision: number }): {
     removed: 'camera' | 'source';
   } {
-    const camera = this.#cameras.get(input.cameraId);
-    const stored = this.#sources.get(input.cameraId);
-    if (!camera || stored?.revision !== input.expectedRevision) {
+    const camera = this.#camera(input.cameraId);
+    const stored = this.sourceStore.storedRevision(input.cameraId);
+    if (!camera || stored !== input.expectedRevision) {
       throw new LiveSourceStateChangedError();
     }
 
-    this.#sources.delete(input.cameraId);
+    this.sourceStore.dropSource(input.cameraId);
     // The stored type decides, exactly as the SQL removal does.
-    if (camera.type !== RTSP_CAMERA_TYPE) return { removed: 'source' };
-    this.#cameras.delete(input.cameraId);
+    if (camera.type !== RTSP_SOURCE_CAMERA_TYPE) return { removed: 'source' };
+    this.cameraStore.removeCamera(input.cameraId);
     return { removed: 'camera' };
   }
 
+  #camera(cameraId: string): InMemoryCameraRow | undefined {
+    return this.cameraStore.allCameras().find((camera) => camera.id === cameraId);
+  }
+
   #nameKeyTaken(nameKey: string): boolean {
-    return [...this.#cameras.values()].some((camera) => camera.nameKey === nameKey);
+    return this.cameraStore
+      .allCameras()
+      .some((camera) => camera.nameKey === nameKey);
   }
 }
 
-function storedFrom(input: PersistVerifiedSource, revision: number): StoredSource {
+/** Private camera rows for an adapter constructed without a shared store. */
+class StandaloneCameraStore implements InMemoryCameraStore {
+  readonly #cameras = new Map<string, InMemoryCameraRow>();
+
+  allCameras(): readonly InMemoryCameraRow[] {
+    return [...this.#cameras.values()];
+  }
+
+  addCamera(camera: InMemoryCameraRow): void {
+    this.#cameras.set(camera.id, { ...camera });
+  }
+
+  removeCamera(cameraId: string): void {
+    this.#cameras.delete(cameraId);
+  }
+}
+
+/**
+ * Private source rows for the same case. Only credential-free derived fields
+ * are kept: a `LiveSource` carries the plaintext URL in its credential payload,
+ * which has no business sitting in a long-lived map this port owns.
+ */
+class StandaloneLiveSourceStore implements InMemoryLiveSourceStore {
+  readonly #sources = new Map<string, InMemorySourceRow>();
+
+  listStoredSources(): readonly InMemorySourceRow[] {
+    return [...this.#sources.values()];
+  }
+
+  storedRevision(cameraId: string): number | null {
+    return this.#sources.get(cameraId)?.revision ?? null;
+  }
+
+  putVerifiedSource(input: InMemoryVerifiedSourceWrite): void {
+    this.#sources.set(input.source.cameraId, {
+      cameraId: input.source.cameraId,
+      summary: input.source.summary(),
+      revision: input.revision,
+      verifiedAt: new Date(input.verifiedAt.getTime()),
+      policyDigest: input.policyDigest,
+      hasCredential: true,
+    });
+  }
+
+  dropSource(cameraId: string): void {
+    this.#sources.delete(cameraId);
+  }
+}
+
+function written(
+  input: PersistVerifiedSource,
+  cameraName: string,
+  revision: number,
+): InMemoryVerifiedSourceWrite {
   return {
     source: input.source,
+    cameraName,
     credential: { ...input.credential },
     revision,
     verifiedAt: new Date(input.verifiedAt.getTime()),

@@ -5,7 +5,15 @@ import { CleanupCoordinatorService } from '../../src/camera/application/cleanup-
 import { CompletedMotionVideoRecoveryScheduler } from '../../src/camera/application/completed-motion-video-recovery.scheduler';
 import { CameraSourceAuthorizationRegistry } from '../../src/camera/application/camera-source-authorization-registry.service';
 import { CameraModule } from '../../src/camera/camera.module';
+import { CameraNameTakenError } from '../../src/camera/domain/errors/camera-name-taken.error';
 import { CAMERA_SOURCE_AUTHORIZATION } from '../../src/camera/domain/ports/camera-source-authorization.port';
+import { LIVE_SOURCE_REPOSITORY } from '../../src/camera/domain/ports/live-source-repository.port';
+import { MEDIA_REPOSITORY } from '../../src/camera/domain/ports/media-repository.port';
+import { RTSP_SOURCE_CONFIGURATION } from '../../src/camera/domain/ports/rtsp-source-configuration.port';
+import { AesGcmLiveSourceCredentialAdapter } from '../../src/camera/infrastructure/aes-gcm-live-source-credential.adapter';
+import { InMemoryLiveSourceRepository } from '../../src/camera/infrastructure/in-memory-live-source.repository';
+import { InMemoryMediaRepository } from '../../src/camera/infrastructure/in-memory-media.repository';
+import { DB } from '../../src/database/database.module';
 import {
   liveStreamOptionsFromEnv,
   type LiveStreamOptions,
@@ -199,5 +207,76 @@ describe('CameraModule mutation-guard composition', () => {
         && (candidate as ProviderMetadata).provide === RTSP_POLICY_STATUS,
     );
     expect(bindsPolicyStatus).toBe(false);
+  });
+});
+
+
+describe('CameraModule name-key backfill composition', () => {
+  interface FactoryProvider {
+    provide?: unknown;
+    inject?: unknown[];
+    useFactory?: (...args: unknown[]) => unknown;
+  }
+
+  function configurationProvider(): FactoryProvider {
+    const providers = Reflect.getMetadata('providers', CameraModule) as unknown[];
+    const provider = providers.find(
+      (candidate): candidate is FactoryProvider =>
+        typeof candidate === 'object'
+        && candidate !== null
+        && 'provide' in candidate
+        && (candidate as FactoryProvider).provide === RTSP_SOURCE_CONFIGURATION,
+    );
+    if (!provider) throw new Error('RTSP_SOURCE_CONFIGURATION is not provided');
+    return provider;
+  }
+
+  it('takes the media repository and the source repository as its dependencies', () => {
+    expect(configurationProvider().inject).toEqual([
+      MEDIA_REPOSITORY,
+      LIVE_SOURCE_REPOSITORY,
+      DB,
+    ]);
+  });
+
+  /**
+   * The backfill's ordering guarantee comes from sitting inside this factory,
+   * which is a side effect nothing else would notice if the port were moved or
+   * provided elsewhere. Pin it: the port must not be obtainable before it runs.
+   */
+  it('awaits the name-key backfill before yielding the configuration port', async () => {
+    const media = new InMemoryMediaRepository();
+    const sources = new InMemoryLiveSourceRepository(
+      new AesGcmLiveSourceCredentialAdapter({ currentKey: '11'.repeat(32), currentVersion: 1 }),
+    );
+    const order: string[] = [];
+    vi.spyOn(media, 'backfillNameKeys').mockImplementation(async () => {
+      order.push('backfill');
+    });
+
+    const adapter = await configurationProvider().useFactory?.(media, sources, {});
+    order.push('port resolved');
+
+    expect(order).toEqual(['backfill', 'port resolved']);
+    expect(adapter).toEqual(
+      expect.objectContaining({
+        createCamera: expect.any(Function),
+        attach: expect.any(Function),
+        replace: expect.any(Function),
+        remove: expect.any(Function),
+      }),
+    );
+  });
+
+  it('still yields the port when the backfill refuses, so one bad name cannot stop boot', async () => {
+    const media = new InMemoryMediaRepository();
+    const sources = new InMemoryLiveSourceRepository(
+      new AesGcmLiveSourceCredentialAdapter({ currentKey: '11'.repeat(32), currentVersion: 1 }),
+    );
+    vi.spyOn(media, 'backfillNameKeys').mockRejectedValue(new CameraNameTakenError());
+
+    await expect(
+      configurationProvider().useFactory?.(media, sources, {}),
+    ).resolves.toBeDefined();
   });
 });

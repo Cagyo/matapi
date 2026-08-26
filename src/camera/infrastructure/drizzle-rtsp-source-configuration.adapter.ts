@@ -1,10 +1,11 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../database/database.module';
 import {
   cameraLiveCredentials,
   cameraLiveSources,
   cameras,
+  motionEvents,
 } from '../../database/schema';
 import { cameraNameKey } from '../domain/camera-name-key';
 import type { LiveSource } from '../domain/live-source.entity';
@@ -13,17 +14,11 @@ import { CameraNameTakenError } from '../domain/errors/camera-name-taken.error';
 import { InvalidLiveSourceError } from '../domain/errors/invalid-live-source.error';
 import { LiveSourceStateChangedError } from '../domain/errors/live-source-state-changed.error';
 import type { RedactedLiveSource } from '../domain/ports/live-source-repository.port';
-import type {
-  PersistVerifiedSource,
-  RtspSourceConfigurationPort,
+import {
+  RTSP_SOURCE_CAMERA_TYPE,
+  type PersistVerifiedSource,
+  type RtspSourceConfigurationPort,
 } from '../domain/ports/rtsp-source-configuration.port';
-
-/**
- * `cameras.type` of a row that exists only to carry an RTSP source, and is
- * therefore removed with it. Read inside the removal transaction — never taken
- * from the caller.
- */
-const RTSP_CAMERA_TYPE = 'rtsp';
 
 const CAMERA_ID_CONSTRAINT = 'cameras.id';
 /** Both indexes guard one logical name; an exact clash implies a key clash. */
@@ -58,12 +53,13 @@ export class DrizzleRtspSourceConfigurationAdapter
 
     try {
       return this.db.transaction((tx) => {
+        assertNoKeylessNameClash(tx, camera.nameKey);
         tx.insert(cameras)
           .values({
             id: camera.id,
             name: camera.name,
             nameKey: camera.nameKey,
-            type: RTSP_CAMERA_TYPE,
+            type: RTSP_SOURCE_CAMERA_TYPE,
             config: null,
             enabled: true,
           })
@@ -93,11 +89,15 @@ export class DrizzleRtspSourceConfigurationAdapter
     try {
       return this.db.transaction((tx) => {
         const camera = tx
-          .select({ name: cameras.name })
+          .select({ name: cameras.name, enabled: cameras.enabled })
           .from(cameras)
           .where(eq(cameras.id, input.cameraId))
           .get();
-        if (!camera) throw new LiveSourceStateChangedError();
+        // Enabled is re-read here, not before the call: the fence this port
+        // exists to hold forbids an await between the check and the write.
+        if (camera?.enabled !== true) {
+          throw new LiveSourceStateChangedError();
+        }
         // A plain insert, not an upsert: the source primary key is the
         // attach/attach authority, so the loser of a race is told to re-read.
         tx.insert(cameraLiveSources)
@@ -107,7 +107,7 @@ export class DrizzleRtspSourceConfigurationAdapter
           .values({ cameraId: input.cameraId, ...input.credential })
           .run();
         return redacted(input, camera.name, 0);
-      });
+      }, { behavior: 'immediate' });
     } catch (error) {
       if (violatedConstraint(error) === LIVE_SOURCE_KEY_CONSTRAINT) {
         throw new LiveSourceStateChangedError();
@@ -189,10 +189,43 @@ export class DrizzleRtspSourceConfigurationAdapter
         .where(eq(cameraLiveCredentials.cameraId, input.cameraId))
         .run();
 
-      if (camera.type !== RTSP_CAMERA_TYPE) return { removed: 'source' as const };
+      if (camera.type !== RTSP_SOURCE_CAMERA_TYPE) return { removed: 'source' as const };
+      // `motion_events.camera_id` references `cameras.id` with no ON DELETE
+      // action, so recorded media would abort the delete with a raw
+      // SQLITE_CONSTRAINT_FOREIGNKEY and strand the source forever. The column
+      // is nullable and `BrowseMotionEvent.cameraName` is already documented as
+      // null once the camera row is gone: history survives, attribution does
+      // not. Done here rather than as `onDelete: 'set null'`, which would force
+      // a `motion_events` table rebuild migration on a live device.
+      tx.update(motionEvents)
+        .set({ cameraId: null })
+        .where(eq(motionEvents.cameraId, input.cameraId))
+        .run();
       tx.delete(cameras).where(eq(cameras.id, input.cameraId)).run();
       return { removed: 'camera' as const };
-    });
+    }, { behavior: 'immediate' });
+  }
+}
+
+/**
+ * The name-key backfill is allowed to refuse, and a keyless legacy row does not
+ * collide in the unique index because SQLite lets NULLs repeat. Canonicalizing
+ * the leftovers here — inside the insert's own transaction — keeps writes to
+ * the same rule `findCameraByName` already reads by, without a second source of
+ * truth that would go stale the moment an admin renamed one of them. Costs one
+ * indexed scan of the keyless remainder, which is empty once the backfill wins.
+ */
+function assertNoKeylessNameClash(
+  tx: { select: AppDatabase['select'] },
+  nameKey: string,
+): void {
+  const keyless = tx
+    .select({ name: cameras.name })
+    .from(cameras)
+    .where(isNull(cameras.nameKey))
+    .all();
+  if (keyless.some((row) => cameraNameKey(row.name) === nameKey)) {
+    throw new CameraNameTakenError();
   }
 }
 

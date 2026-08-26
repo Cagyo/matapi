@@ -8,6 +8,11 @@ import type {
   LiveSourceRepositoryPort,
   RedactedLiveSource,
 } from '../domain/ports/live-source-repository.port';
+import type {
+  InMemoryLiveSourceStore,
+  InMemorySourceRow,
+  InMemoryVerifiedSourceWrite,
+} from './in-memory-rtsp-source-configuration.adapter';
 
 interface StoredLiveSource {
   source: LiveSource;
@@ -24,7 +29,14 @@ interface StoredLiveSource {
   policyDigest: string | null;
 }
 
-export class InMemoryLiveSourceRepository implements LiveSourceRepositoryPort {
+/**
+ * Also serves the synchronous source store the RTSP source-configuration twin
+ * writes through, so a source configured in stub mode is visible to
+ * `listRedacted()` and `loadForStream()` like any other.
+ */
+export class InMemoryLiveSourceRepository
+  implements LiveSourceRepositoryPort, InMemoryLiveSourceStore
+{
   readonly #sources = new Map<string, StoredLiveSource>();
   #credentialWritesEnabled = false;
 
@@ -109,6 +121,41 @@ export class InMemoryLiveSourceRepository implements LiveSourceRepositoryPort {
       verifiedAt: stored.verifiedAt,
       policyDigest: stored.policyDigest,
     };
+  }
+
+  /**
+   * Synchronous source-store surface (`InMemoryLiveSourceStore`). Unlike
+   * `save`, these writes come from the source-configuration transaction, which
+   * owns `revision`/`verifiedAt`/`policyDigest` and therefore may set them.
+   */
+  listStoredSources(): readonly InMemorySourceRow[] {
+    return [...this.#sources.values()].map((stored) => ({
+      cameraId: stored.source.cameraId,
+      summary: stored.source.summary(),
+      revision: stored.revision,
+      verifiedAt: stored.verifiedAt,
+      policyDigest: stored.policyDigest,
+      hasCredential: stored.credential !== null,
+    }));
+  }
+
+  storedRevision(cameraId: string): number | null {
+    return this.#sources.get(cameraId)?.revision ?? null;
+  }
+
+  putVerifiedSource(input: InMemoryVerifiedSourceWrite): void {
+    this.#sources.set(input.source.cameraId, {
+      source: input.source,
+      credential: { ...input.credential },
+      cameraName: input.cameraName,
+      revision: input.revision,
+      verifiedAt: input.verifiedAt,
+      policyDigest: input.policyDigest,
+    });
+  }
+
+  dropSource(cameraId: string): void {
+    this.#sources.delete(cameraId);
   }
 
   async remove(cameraId: string): Promise<void> {

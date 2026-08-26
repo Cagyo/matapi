@@ -17,6 +17,10 @@ function credential(keyVersion = 1): EncryptedLiveSourceCredential {
   return { ciphertext: 'ct', nonce: 'nc', authTag: 'at', keyVersion };
 }
 
+/**
+ * Storage-level behaviour only. The semantics both adapters share live in
+ * `rtsp-source-configuration.contract.test.ts`.
+ */
 describe('DrizzleRtspSourceConfigurationAdapter', () => {
   let sqlite: Database.Database;
   let db: AppDatabase;
@@ -47,17 +51,34 @@ describe('DrizzleRtspSourceConfigurationAdapter', () => {
     };
   }
 
+  function attachment(cameraId: string) {
+    return {
+      source: source(cameraId),
+      credential: credential(),
+      policyDigest: 'digest-1',
+      verifiedAt,
+      cameraId,
+    };
+  }
+
   function insertCamera(id: string, name: string, type: string): void {
     sqlite
       .prepare('INSERT INTO cameras (id, name, name_key, type, config, enabled) VALUES (?, ?, ?, ?, NULL, 1)')
       .run(id, name, cameraNameKey(name), type);
   }
 
+  /** Legacy rows predate the canonical key column, so it stays null. */
+  function insertKeylessCamera(id: string, name: string): void {
+    sqlite
+      .prepare('INSERT INTO cameras (id, name, type, config, enabled) VALUES (?, ?, ?, NULL, 1)')
+      .run(id, name, 'motion');
+  }
+
   function rows(table: string): Record<string, unknown>[] {
     return sqlite.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all() as Record<string, unknown>[];
   }
 
-  /** Fails the third write of a create without any production seam. */
+  /** Fails the credential write without any production seam. */
   function failCredentialWrites(): void {
     sqlite.exec(
       `CREATE TRIGGER reject_credentials BEFORE INSERT ON camera_live_credentials
@@ -65,30 +86,12 @@ describe('DrizzleRtspSourceConfigurationAdapter', () => {
     );
   }
 
-  describe('createCamera', () => {
-    it('writes camera, source and credential in one transaction and returns a redacted view', () => {
-      const result = adapter.createCamera(newCamera('cam-1', ' Front Door '));
+  describe('column-level storage', () => {
+    it('writes camera, source and credential rows in full', () => {
+      adapter.createCamera(newCamera('cam-1', ' Front Door '));
 
-      expect(result).toEqual({
-        cameraId: 'cam-1',
-        cameraName: ' Front Door ',
-        summary: {
-          scheme: 'rtsp',
-          host: 'cam.local',
-          transport: 'tcp',
-          tlsMode: 'none',
-          profile: 'eco',
-          substreamHost: null,
-          ready: true,
-        },
-        hasCredential: true,
-        revision: 0,
-        verifiedAt,
-        policyDigest: 'digest-1',
-      });
-      expect(JSON.stringify(result)).not.toMatch(/operator|hunter2|abcdef/u);
       expect(rows('cameras')).toEqual([
-        { id: 'cam-1', name: ' Front Door ', name_key: 'front door', type: 'rtsp', config: null, enabled: 1 },
+        { id: 'cam-1', name: ' Front Door ', name_key: 'front door', type: 'rtsp-source', config: null, enabled: 1 },
       ]);
       expect(rows('camera_live_sources')[0]).toMatchObject({
         camera_id: 'cam-1',
@@ -111,64 +114,30 @@ describe('DrizzleRtspSourceConfigurationAdapter', () => {
       expect(String(row.created_at).length).toBe(String(row.verified_at).length);
     });
 
-    it('returns synchronously rather than through a promise', () => {
-      expect(adapter.createCamera(newCamera('cam-1', 'Front Door'))).not.toBeInstanceOf(Promise);
+    it('rewrites every source column and the credential on a replacement', () => {
+      adapter.createCamera(newCamera('cam-1', 'Front Door'));
+
+      adapter.replace({
+        source: source('cam-1', REPLACEMENT_URL),
+        credential: credential(2),
+        policyDigest: 'digest-2',
+        verifiedAt: new Date('2026-08-21T09:00:00.250Z'),
+        cameraId: 'cam-1',
+        expectedRevision: 0,
+      });
+
+      expect(rows('camera_live_sources')[0]).toMatchObject({
+        normalized_url: 'rtsp://other.local',
+        revision: 1,
+        policy_digest: 'digest-2',
+        verified_at: new Date('2026-08-21T09:00:00.250Z').getTime(),
+      });
+      expect(rows('camera_live_credentials')[0]).toMatchObject({ key_version: 2 });
     });
+  });
 
-    it('rejects a name key that is not the canonical form of the name', () => {
-      const input = newCamera('cam-1', 'Front Door');
-
-      expect(() =>
-        adapter.createCamera({ ...input, camera: { ...input.camera, nameKey: 'Front Door' } }),
-      ).toThrow(expect.objectContaining({ code: 'INVALID_LIVE_SOURCE' }));
-      expect(rows('cameras')).toEqual([]);
-    });
-
-    it('rejects a source addressed to a different camera than the one being created', () => {
-      const input = newCamera('cam-1', 'Front Door');
-
-      expect(() =>
-        adapter.createCamera({ ...input, source: source('cam-2') }),
-      ).toThrow(expect.objectContaining({ code: 'INVALID_LIVE_SOURCE' }));
-      expect(rows('cameras')).toEqual([]);
-    });
-
-    it('maps a camera identifier collision to a typed error and writes nothing', () => {
-      insertCamera('cam-1', 'Garden', 'motion');
-
-      expect(() => adapter.createCamera(newCamera('cam-1', 'Front Door'))).toThrow(
-        expect.objectContaining({ code: 'CAMERA_ID_COLLISION' }),
-      );
-      expect(rows('cameras')).toHaveLength(1);
-      expect(rows('camera_live_sources')).toEqual([]);
-    });
-
-    it('maps a canonical name collision to a name-taken error that names no camera', () => {
-      insertCamera('cam-0', 'front door', 'motion');
-
-      const failure = (() => {
-        try {
-          adapter.createCamera(newCamera('cam-1', ' FRONT DOOR '));
-          return null;
-        } catch (error) {
-          return error as Error;
-        }
-      })();
-
-      expect(failure).toMatchObject({ code: 'CAMERA_NAME_TAKEN' });
-      expect(failure?.message).not.toMatch(/front|door/iu);
-      expect(rows('cameras')).toHaveLength(1);
-    });
-
-    it('maps an exact display-name collision to the same name-taken error', () => {
-      insertCamera('cam-0', 'Front Door', 'motion');
-
-      expect(() => adapter.createCamera(newCamera('cam-1', 'Front Door'))).toThrow(
-        expect.objectContaining({ code: 'CAMERA_NAME_TAKEN' }),
-      );
-    });
-
-    it('rolls camera and source back when the credential write fails', () => {
+  describe('transaction atomicity', () => {
+    it('rolls camera and source back when the credential write fails on create', () => {
       failCredentialWrites();
 
       expect(() => adapter.createCamera(newCamera('cam-1', 'Front Door'))).toThrow(
@@ -179,169 +148,28 @@ describe('DrizzleRtspSourceConfigurationAdapter', () => {
       expect(rows('camera_live_credentials')).toEqual([]);
     });
 
-    it('lets an unrelated constraint failure propagate unmapped', () => {
-      sqlite.exec(
-        `CREATE TRIGGER reject_cameras BEFORE INSERT ON cameras
-         BEGIN SELECT RAISE(ABORT, 'unrelated failure'); END;`,
-      );
-
-      const failure = (() => {
-        try {
-          adapter.createCamera(newCamera('cam-1', 'Front Door'));
-          return null;
-        } catch (error) {
-          return error as { code?: string };
-        }
-      })();
-
-      expect(failure?.code).not.toBe('CAMERA_ID_COLLISION');
-      expect(failure?.code).not.toBe('CAMERA_NAME_TAKEN');
-      expect(failure?.code).toMatch(/^SQLITE_/u);
-    });
-  });
-
-  describe('attach', () => {
-    beforeEach(() => insertCamera('cam-1', 'Hallway', 'motion'));
-
-    it('adds a verified source to an existing camera at revision zero', () => {
-      const result = adapter.attach({
-        source: source('cam-1'),
-        credential: credential(),
-        policyDigest: 'digest-1',
-        verifiedAt,
-        cameraId: 'cam-1',
-      });
-
-      expect(result).toMatchObject({
-        cameraId: 'cam-1',
-        cameraName: 'Hallway',
-        hasCredential: true,
-        revision: 0,
-        verifiedAt,
-        policyDigest: 'digest-1',
-      });
-      expect(JSON.stringify(result)).not.toMatch(/operator|hunter2|abcdef/u);
-      expect(rows('camera_live_sources')).toHaveLength(1);
-      expect(rows('cameras')[0]).toMatchObject({ type: 'motion' });
-    });
-
-    it('rejects a second attach to the same camera as a state change', () => {
-      const input = {
-        source: source('cam-1'),
-        credential: credential(),
-        policyDigest: 'digest-1',
-        verifiedAt,
-        cameraId: 'cam-1',
-      };
-      adapter.attach(input);
-
-      expect(() => adapter.attach(input)).toThrow(
-        expect.objectContaining({ code: 'LIVE_SOURCE_STATE_CHANGED' }),
-      );
-      expect(rows('camera_live_sources')).toHaveLength(1);
-    });
-
-    it('rejects an attach whose camera disappeared', () => {
-      expect(() =>
-        adapter.attach({
-          source: source('cam-gone'),
-          credential: credential(),
-          policyDigest: 'digest-1',
-          verifiedAt,
-          cameraId: 'cam-gone',
-        }),
-      ).toThrow(expect.objectContaining({ code: 'LIVE_SOURCE_STATE_CHANGED' }));
-    });
-
-    it('rejects a source addressed to a different camera', () => {
-      expect(() =>
-        adapter.attach({
-          source: source('cam-2'),
-          credential: credential(),
-          policyDigest: 'digest-1',
-          verifiedAt,
-          cameraId: 'cam-1',
-        }),
-      ).toThrow(expect.objectContaining({ code: 'INVALID_LIVE_SOURCE' }));
-    });
-
-    it('rolls the source back when the credential write fails', () => {
+    it('rolls the source back when the credential write fails on attach', () => {
+      insertCamera('cam-1', 'Hallway', 'motion');
       failCredentialWrites();
 
-      expect(() =>
-        adapter.attach({
-          source: source('cam-1'),
-          credential: credential(),
-          policyDigest: 'digest-1',
-          verifiedAt,
-          cameraId: 'cam-1',
-        }),
-      ).toThrow(/injected credential failure/u);
+      expect(() => adapter.attach(attachment('cam-1'))).toThrow(/injected credential failure/u);
       expect(rows('camera_live_sources')).toEqual([]);
     });
-  });
 
-  describe('replace', () => {
-    beforeEach(() => {
+    it('rolls the source update back when the credential write fails on replace', () => {
       adapter.createCamera(newCamera('cam-1', 'Front Door'));
-    });
-
-    function replacement(expectedRevision: number) {
-      return {
-        source: source('cam-1', REPLACEMENT_URL),
-        credential: credential(2),
-        policyDigest: 'digest-2',
-        verifiedAt: new Date('2026-08-21T09:00:00.250Z'),
-        cameraId: 'cam-1',
-        expectedRevision,
-      };
-    }
-
-    it('swaps the source at the expected revision and advances it by one', () => {
-      const result = adapter.replace(replacement(0));
-
-      expect(result).toMatchObject({
-        cameraId: 'cam-1',
-        cameraName: 'Front Door',
-        revision: 1,
-        policyDigest: 'digest-2',
-        verifiedAt: new Date('2026-08-21T09:00:00.250Z'),
-        summary: expect.objectContaining({ host: 'other.local' }),
-      });
-      expect(JSON.stringify(result)).not.toMatch(/operator|hunter2/u);
-      expect(rows('camera_live_sources')[0]).toMatchObject({
-        normalized_url: 'rtsp://other.local',
-        revision: 1,
-        policy_digest: 'digest-2',
-        verified_at: new Date('2026-08-21T09:00:00.250Z').getTime(),
-      });
-      expect(rows('camera_live_credentials')[0]).toMatchObject({ key_version: 2 });
-    });
-
-    it('rejects a stale revision and leaves the stored source untouched', () => {
-      adapter.replace(replacement(0));
-
-      expect(() => adapter.replace(replacement(0))).toThrow(
-        expect.objectContaining({ code: 'LIVE_SOURCE_STATE_CHANGED' }),
-      );
-      expect(rows('camera_live_sources')[0]).toMatchObject({
-        normalized_url: 'rtsp://other.local',
-        revision: 1,
-      });
-    });
-
-    it('rejects a replacement for a camera with no stored source', () => {
-      insertCamera('cam-2', 'Hallway', 'motion');
-
-      expect(() =>
-        adapter.replace({ ...replacement(0), source: source('cam-2', REPLACEMENT_URL), cameraId: 'cam-2' }),
-      ).toThrow(expect.objectContaining({ code: 'LIVE_SOURCE_STATE_CHANGED' }));
-    });
-
-    it('rolls the source update back when the credential write fails', () => {
       failCredentialWrites();
 
-      expect(() => adapter.replace(replacement(0))).toThrow(/injected credential failure/u);
+      expect(() =>
+        adapter.replace({
+          source: source('cam-1', REPLACEMENT_URL),
+          credential: credential(2),
+          policyDigest: 'digest-2',
+          verifiedAt: new Date('2026-08-21T09:00:00.250Z'),
+          cameraId: 'cam-1',
+          expectedRevision: 0,
+        }),
+      ).toThrow(/injected credential failure/u);
       expect(rows('camera_live_sources')[0]).toMatchObject({
         normalized_url: 'rtsp://cam.local',
         revision: 0,
@@ -350,62 +178,109 @@ describe('DrizzleRtspSourceConfigurationAdapter', () => {
     });
   });
 
-  describe('remove', () => {
-    it('deletes the whole camera when the transaction reads type rtsp', () => {
+  describe('constraint mapping', () => {
+    it('maps an exact display-name collision through the unique index', () => {
+      insertCamera('cam-0', 'Front Door', 'motion');
+
+      expect(() => adapter.createCamera(newCamera('cam-1', 'Front Door'))).toThrow(
+        expect.objectContaining({ code: 'CAMERA_NAME_TAKEN' }),
+      );
+    });
+
+    it('lets an unrelated constraint failure propagate unmapped', () => {
+      sqlite.exec(
+        `CREATE TRIGGER reject_cameras BEFORE INSERT ON cameras
+         BEGIN SELECT RAISE(ABORT, 'unrelated failure'); END;`,
+      );
+
+      let failure: { code?: string } | null = null;
+      try {
+        adapter.createCamera(newCamera('cam-1', 'Front Door'));
+      } catch (error) {
+        failure = error as { code?: string };
+      }
+
+      expect(failure?.code).not.toBe('CAMERA_ID_COLLISION');
+      expect(failure?.code).not.toBe('CAMERA_NAME_TAKEN');
+      expect(failure?.code).toMatch(/^SQLITE_/u);
+    });
+  });
+
+  describe('legacy rows the name-key backfill has not claimed', () => {
+    it('refuses a create whose canonical name matches a keyless row', () => {
+      // Null name keys repeat freely in a unique index, so the index alone
+      // would let both rows coexist under one logical name.
+      insertKeylessCamera('legacy', 'Front Door');
+
+      const failure = (() => {
+        try {
+          adapter.createCamera(newCamera('cam-1', 'front door'));
+          return null;
+        } catch (error) {
+          return error as Error;
+        }
+      })();
+
+      expect(failure).toMatchObject({ code: 'CAMERA_NAME_TAKEN' });
+      expect(failure?.message).not.toMatch(/front|door/iu);
+      expect(rows('cameras')).toHaveLength(1);
+      expect(rows('camera_live_sources')).toEqual([]);
+    });
+
+    it('allows a create whose canonical name differs from every keyless row', () => {
+      insertKeylessCamera('legacy', 'Terrassentür');
+
       adapter.createCamera(newCamera('cam-1', 'Front Door'));
 
-      expect(adapter.remove({ cameraId: 'cam-1', expectedRevision: 0 })).toEqual({ removed: 'camera' });
+      expect(rows('cameras')).toHaveLength(2);
+    });
+  });
+
+  describe('removal of a camera with recorded media', () => {
+    function insertMotionEvent(cameraId: string): void {
+      sqlite
+        .prepare('INSERT INTO motion_events (camera_id, started_at, video_path) VALUES (?, ?, ?)')
+        .run(cameraId, 1_700_000_000, '/motion/clip.mp4');
+    }
+
+    it('de-attributes recorded media instead of failing on the foreign key', () => {
+      // `motion_events.camera_id` references `cameras.id` with no ON DELETE
+      // action, and `RecordMotionStartUseCase` falls back to the first camera
+      // row, so any port-created camera can end up holding events.
+      adapter.createCamera(newCamera('cam-1', 'Front Door'));
+      insertMotionEvent('cam-1');
+
+      expect(adapter.remove({ cameraId: 'cam-1', expectedRevision: 0 })).toEqual({
+        removed: 'camera',
+      });
       expect(rows('cameras')).toEqual([]);
       expect(rows('camera_live_sources')).toEqual([]);
       expect(rows('camera_live_credentials')).toEqual([]);
+      expect(rows('motion_events')).toEqual([
+        expect.objectContaining({ camera_id: null, video_path: '/motion/clip.mp4' }),
+      ]);
     });
 
-    it('preserves a non-rtsp camera and removes only its source', () => {
-      insertCamera('cam-1', 'Hallway', 'motion');
-      adapter.attach({
-        source: source('cam-1'),
-        credential: credential(),
-        policyDigest: 'digest-1',
-        verifiedAt,
-        cameraId: 'cam-1',
-      });
-
-      expect(adapter.remove({ cameraId: 'cam-1', expectedRevision: 0 })).toEqual({ removed: 'source' });
-      expect(rows('cameras')).toHaveLength(1);
-      expect(rows('camera_live_sources')).toEqual([]);
-      expect(rows('camera_live_credentials')).toEqual([]);
-    });
-
-    it('ignores a caller-supplied delete decision and trusts the stored type', () => {
-      insertCamera('cam-1', 'Hallway', 'motion');
-      adapter.attach({
-        source: source('cam-1'),
-        credential: credential(),
-        policyDigest: 'digest-1',
-        verifiedAt,
-        cameraId: 'cam-1',
-      });
-
-      const forced = { cameraId: 'cam-1', expectedRevision: 0, removed: 'camera' as const };
-      expect(adapter.remove(forced)).toEqual({ removed: 'source' });
-      expect(rows('cameras')).toHaveLength(1);
-    });
-
-    it('rejects a stale revision and deletes nothing', () => {
+    it('leaves other cameras’ media attributed', () => {
+      insertCamera('cam-other', 'Garden', 'motion');
       adapter.createCamera(newCamera('cam-1', 'Front Door'));
+      insertMotionEvent('cam-1');
+      insertMotionEvent('cam-other');
 
-      expect(() => adapter.remove({ cameraId: 'cam-1', expectedRevision: 3 })).toThrow(
-        expect.objectContaining({ code: 'LIVE_SOURCE_STATE_CHANGED' }),
-      );
-      expect(rows('cameras')).toHaveLength(1);
-      expect(rows('camera_live_sources')).toHaveLength(1);
-      expect(rows('camera_live_credentials')).toHaveLength(1);
+      adapter.remove({ cameraId: 'cam-1', expectedRevision: 0 });
+
+      expect(rows('motion_events').map((row) => row.camera_id)).toEqual([null, 'cam-other']);
     });
 
-    it('rejects removal for a camera that is already gone', () => {
-      expect(() => adapter.remove({ cameraId: 'cam-gone', expectedRevision: 0 })).toThrow(
-        expect.objectContaining({ code: 'LIVE_SOURCE_STATE_CHANGED' }),
-      );
+    it('keeps media attributed when only the source is retired', () => {
+      insertCamera('cam-1', 'Hallway', 'motion');
+      adapter.attach(attachment('cam-1'));
+      insertMotionEvent('cam-1');
+
+      expect(adapter.remove({ cameraId: 'cam-1', expectedRevision: 0 })).toEqual({
+        removed: 'source',
+      });
+      expect(rows('motion_events')[0]).toMatchObject({ camera_id: 'cam-1' });
     });
   });
 });

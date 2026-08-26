@@ -192,6 +192,13 @@ export const inviteCodes = sqliteTable('invite_codes', {
 export const cameras = sqliteTable('cameras', {
   id: text('id').primaryKey(),
   name: text('name').notNull().unique(),
+  /**
+   * Free-form backend label, written straight from `config/dev-state.yml`
+   * (`rtsp`, `mjpeg`, `motion`, ...). The single value `rtsp-source` is
+   * reserved for rows created by `RtspSourceConfigurationPort`, which exist
+   * only to carry a live source and are deleted with it — never write it by
+   * hand, and never reuse it for a backend label.
+   */
   type: text('type').notNull(),
   config: text('config', { mode: 'json' }),
   enabled: integer('enabled', { mode: 'boolean' }).default(true),
@@ -216,10 +223,16 @@ export const cameraLiveSources = sqliteTable('camera_live_sources', {
   createdAt: integer('created_at').notNull(),
   updatedAt: integer('updated_at').notNull(),
   /**
-   * Compare-and-swap authority for source edits, written only by the
-   * source-configuration transaction that owns it. Ordinary source writes
-   * deliberately leave it alone, so a reader holding a revision must re-read it
-   * inside the transaction that swaps it.
+   * Compare-and-swap authority for the source-configuration transaction, and
+   * only for it. Non-owner writes (`save`, `saveMetadataBatch`) deliberately
+   * leave it alone and instead retract `verified_at`/`policy_digest`, because
+   * they may have replaced the URL those attested to.
+   *
+   * That is safe **only** while every non-owner write is a full overwrite of
+   * the columns `replace` also writes: a stale-revision `replace` then wins
+   * cleanly rather than merging. If a partial writer is ever added — a
+   * readiness toggle that leaves `normalized_url` alone, say — it must bump
+   * `revision` and participate in the compare-and-swap.
    */
   revision: integer('revision').notNull().default(0),
   /**

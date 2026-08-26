@@ -382,6 +382,7 @@ function isInstallationId(value: string | undefined): value is string {
       provide: RTSP_SOURCE_CONFIGURATION,
       useFactory: async (
         media: MediaRepositoryPort,
+        sources: LiveSourceRepositoryPort,
         db: AppDatabase,
       ): Promise<RtspSourceConfigurationPort> => {
         // `backfillNameKeys` has to precede the first camera mutation, and this
@@ -403,11 +404,23 @@ function isInstallationId(value: string | undefined): value is string {
             }`,
           );
         }
-        return mode === 'stub'
-          ? new InMemoryRtspSourceConfigurationAdapter()
-          : new DrizzleRtspSourceConfigurationAdapter(db);
+        if (mode !== 'stub') return new DrizzleRtspSourceConfigurationAdapter(db);
+        // Share the stub repositories' rows rather than keeping a fourth,
+        // private camera store: a camera created through this port has to be
+        // visible to `listCameras`/`findCameraByName`/`listRedacted`, and name
+        // uniqueness has to be decided against the rows the rest of the app
+        // sees. Mirrors the resolver the sibling stub repository takes above.
+        if (
+          !(media instanceof InMemoryMediaRepository) ||
+          !(sources instanceof InMemoryLiveSourceRepository)
+        ) {
+          throw new Error(
+            'stub camera composition must use the in-memory repositories',
+          );
+        }
+        return new InMemoryRtspSourceConfigurationAdapter(media, sources);
       },
-      inject: [MEDIA_REPOSITORY, DB],
+      inject: [MEDIA_REPOSITORY, LIVE_SOURCE_REPOSITORY, DB],
     },
     {
       provide: STREAM_EGRESS,
