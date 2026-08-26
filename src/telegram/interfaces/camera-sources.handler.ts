@@ -7,6 +7,9 @@ import {
   type RtspSourcesOverviewPage,
 } from '../../camera/application/get-rtsp-source-overview.use-case';
 import { ListCamerasUseCase } from '../../camera/application/list-cameras.use-case';
+import { RemoveRtspSourceUseCase } from '../../camera/application/remove-rtsp-source.use-case';
+import { ReplaceRtspSourceUseCase } from '../../camera/application/replace-rtsp-source.use-case';
+import { TestRtspSourceUseCase } from '../../camera/application/test-rtsp-source.use-case';
 import { cameraNameKey } from '../../camera/domain/camera-name-key';
 import { CameraSourceUnavailableError } from '../../camera/domain/errors/camera-source-unavailable.error';
 import { LiveSourceStateChangedError } from '../../camera/domain/errors/live-source-state-changed.error';
@@ -29,10 +32,12 @@ import {
   type CameraSourcePromptIdentity,
   type CameraSourcePromptOperation,
   type CameraSourcePromptPhase,
+  type NewCameraSourcePrompt,
 } from '../domain/camera-source-prompt';
 import type { WorkflowReturnReceipt } from '../domain/workflow-return';
 import { presentCameraSourceError } from './camera-source-error.presenter';
 import { CameraSourceViewStore } from './camera-source-view-store';
+import { FeatureHandler } from './feature.handler';
 import {
   addBody,
   addKeyboard,
@@ -48,9 +53,15 @@ import {
   overviewBody,
   overviewKeyboard,
   privacyNoticeBody,
+  recoveryKeyboard,
+  REINSTALL_ACTION,
+  removalBody,
+  removalConfirmAction,
+  removalKeyboard,
   SELECTOR_LENGTH,
   sourceSelector,
   type CameraSourceCopy,
+  type CameraSourceRecoveryTargets,
 } from './camera-source.presenter';
 import type { TelegramContext } from './telegram-context';
 import { WorkflowEntryCoordinator, type WorkflowLaunch } from './workflow-entry.coordinator';
@@ -76,6 +87,30 @@ const PAGE_ACTION = /^p:([1-9][0-9]{0,15})$/;
 const DETAIL_ACTION = new RegExp(`^d:([A-Za-z0-9_-]{${SELECTOR_LENGTH}})$`);
 const ATTACH_ACTION = new RegExp(`^add:s:([A-Za-z0-9_-]{${SELECTOR_LENGTH}})$`);
 const ATTACH_PAGE_ACTION = /^add:a:([1-9][0-9]{0,15})$/;
+/**
+ * The removal confirm control: a selector and the revision the confirmation
+ * screen was rendered from. Sixteen digits is `Number.MAX_SAFE_INTEGER`'s
+ * width, which is the widest a revision can legitimately be, and the whole
+ * callback still fits Telegram's 64 bytes with room to spare.
+ */
+const REMOVE_CONFIRM_ACTION = new RegExp(
+  `^rm:y:([A-Za-z0-9_-]{${SELECTOR_LENGTH}}):([0-9]{1,16})$`,
+);
+
+/**
+ * Stands in for the message identifier while a prompt's *shape* is checked,
+ * before there is a message to identify. Any positive integer the model accepts
+ * would do; the real identifier is validated when the row is actually minted.
+ */
+const PROMPT_SHAPE_PROBE_MESSAGE_ID = 1;
+
+/** The only selection a name prompt ever carries: a create, nothing chosen yet. */
+const CREATE_SELECTION: CameraSourceSelection = {
+  operation: 'create',
+  cameraId: null,
+  displayName: null,
+  expectedRevision: null,
+};
 
 /**
  * The prompt window, in the unit the copy asks for. Derived from the model's
@@ -115,11 +150,20 @@ interface CredentialReply {
   readonly deleted: boolean;
 }
 
-/** The non-secret selection a credential prompt is minted around. */
+/**
+ * The non-secret selection a credential prompt is minted around.
+ *
+ * `expectedRevision` is the fence, and it lives on the durable row rather than
+ * in memory for the same reason the rest of this does: the address arrives in a
+ * later update, possibly after a restart, and the revision it must be committed
+ * against is the one the administrator was shown — not whatever the source has
+ * moved to by then. A first install has nothing to fence and carries `null`.
+ */
 interface CameraSourceSelection {
   operation: CameraSourcePromptOperation;
   cameraId: string | null;
   displayName: string | null;
+  expectedRevision: number | null;
 }
 
 /** Status-first RTSP sources. CameraHandler validates `cam:<receipt>:src*` before delegating here. */
@@ -132,6 +176,9 @@ export class CameraSourcesHandler {
     private readonly cameras: ListCamerasUseCase,
     private readonly createCamera: CreateRtspCameraUseCase,
     private readonly attachSource: AttachRtspSourceUseCase,
+    private readonly replaceSource: ReplaceRtspSourceUseCase,
+    private readonly testSource: TestRtspSourceUseCase,
+    private readonly removeSource: RemoveRtspSourceUseCase,
     @Inject(CAMERA_SOURCE_PROMPT_REPOSITORY)
     private readonly prompts: CameraSourcePromptRepositoryPort,
     @Inject(CAMERA_SOURCE_MESSAGE) private readonly messages: CameraSourceMessagePort,
@@ -139,6 +186,19 @@ export class CameraSourcesHandler {
     private readonly workflows: WorkflowEntryCoordinator,
     @Optional() private readonly navigation?: WorkflowNavigationHandler,
     @Optional() @Inject(FEATURE_AVAILABILITY) private readonly availability?: FeatureAvailabilityPort,
+    /**
+     * The feature workflow, for the one failure this screen cannot fix. Held
+     * only to hand the conversation over — nothing here calls a feature
+     * mutation, and an unwired handler degrades to copy rather than a throw.
+     *
+     * The token is explicit rather than inferred from the parameter type, and
+     * that is not style: an `@Optional()` dependency Nest cannot resolve is
+     * injected as `undefined` silently, so this one would degrade to "RTSP is
+     * unavailable" copy in production with nothing to notice it by. An explicit
+     * token also survives a transform that emits no `design:paramtypes`, which
+     * is what the test container runs under.
+     */
+    @Optional() @Inject(FeatureHandler) private readonly features?: FeatureHandler,
   ) {}
 
   cancelPending(userId: number, chatId: number, receiptId?: string): void {
@@ -169,6 +229,11 @@ export class CameraSourcesHandler {
   async handleCallback(ctx: TelegramContext, action: string, receipt: WorkflowReturnReceipt): Promise<void> {
     if (!(await this.workflows.validateCurrent(ctx, receipt))) return;
     if (!(await this.requireAdmin(ctx))) return;
+    // Deliberately ahead of the readiness gate, and the only action that is.
+    // Reinstalling is what an administrator does *because* RTSP is not usable;
+    // refusing the escape hatch for the condition it exists to clear would
+    // leave the workflow with no way forward at all.
+    if (action === REINSTALL_ACTION) return this.handoffToReinstall(ctx, receipt);
     if (!(await this.requireRtsp(ctx))) return;
 
     const page = PAGE_ACTION.exec(action);
@@ -184,12 +249,15 @@ export class CameraSourcesHandler {
     if (attachPage) return this.showAttachCandidates(ctx, receipt, Number(attachPage[1]));
     const attach = ATTACH_ACTION.exec(action);
     if (attach) return this.startAttach(ctx, receipt, attach[1]);
-    // `test`, `addr` (change address) and `rm` (remove) are rendered by the
-    // Sources screen and executed by Task 6. They are inert on purpose: an
-    // action that mutates a *stored* source belongs with the revision fencing
-    // that arrives with it, not with the screen that offers it.
-    //
-    // None of them reuses a letter from the operation picker this screen
+    if (action === 'test') return this.runTest(ctx, receipt);
+    if (action === 'addr') return this.startReplace(ctx, receipt);
+    // `rm` asks; only `rm:y:<selector>:<revision>` retires anything, and the
+    // revision it carries is the fence. A confirm whose shape this rejects
+    // matches no arm at all, which is the same answer a stale button gets.
+    if (action === 'rm') return this.showRemoval(ctx, receipt);
+    const confirm = REMOVE_CONFIRM_ACTION.exec(action);
+    if (confirm) return this.confirmRemoval(ctx, receipt, confirm[1], Number(confirm[2]));
+    // No action here reuses a letter from the operation picker this screen
     // replaced, so a `src:a`/`src:e`/`src:t` button still sitting in an old
     // chat message resolves to nothing rather than to a different operation.
   }
@@ -230,10 +298,18 @@ export class CameraSourcesHandler {
     const state = this.views.promptFor(userId, chatId, promptMessageId);
     if (!state) return false;
 
-    // The exact prompt is spent the moment it is answered, however that goes:
-    // the durable row decides what happens next, and a second reply to the same
-    // message must not find a live screen behind it.
-    this.views.clear(ctx, state.receipt.id);
+    // The durable row is the sole authority on what a reply may do, so the
+    // routing is deliberately *not* spent here — it only says which receipt a
+    // reply to this message belongs to, and the answer to that does not change
+    // when the prompt is answered.
+    //
+    // Dropping it would suppress the one thing a repeat reply still needs. The
+    // CAS below refuses to advance anything either way: a spent name prompt is
+    // gone from the store and answers `stale`, and a spent credential prompt
+    // answers `late`. But `late` is what reaches the cleanup branch that
+    // *deletes the second message*, and that branch is unreachable if nothing
+    // routed the reply to it — leaving a second pasted credential sitting in
+    // the chat. The entry costs a page number and expires on its own window.
     const claim = await this.prompts.claimReply({
       userId,
       chatId,
@@ -259,7 +335,7 @@ export class CameraSourcesHandler {
       // no Camera work is authorised by it.
       if (claim.kind === 'late') {
         const deleted = await this.deleteWithRetry(chatId, replyMessageId);
-        await this.finishPrompt(claim.prompt, !deleted);
+        await this.finishPrompt(identityOf(claim.prompt), !deleted);
         return true;
       }
       await this.runCredentialReply(ctx, state.receipt, claim.prompt, replyMessageId, state.page);
@@ -360,7 +436,11 @@ export class CameraSourcesHandler {
     await this.sendCredentialPrompt(ctx, receipt, overview, {
       operation: 'attach',
       cameraId: candidate.cameraId,
-      displayName: candidate.cameraName,
+      // Filtered for the same reason `startReplace` filters: a stored camera
+      // name is validated less strictly than a prompt row accepts, and the row
+      // already names the camera by identifier. Nothing downstream needs it.
+      displayName: usableDisplayName(candidate.cameraName),
+      expectedRevision: null,
     });
   }
 
@@ -370,17 +450,15 @@ export class CameraSourcesHandler {
     receipt: WorkflowReturnReceipt,
     page: number,
   ): Promise<void> {
+    if (!(await this.mintable(ctx, receipt, 'name', CREATE_SELECTION))) return;
     const copy = this.copy(ctx);
     const sent = await ctx.reply(namePromptBody(copy), { reply_markup: forceReply() });
-    await this.rememberPrompt(ctx, receipt, sent.message_id, 'name', page, {
-      operation: 'create',
-      cameraId: null,
-      displayName: null,
-    });
+    await this.rememberPrompt(ctx, receipt, sent.message_id, 'name', page, CREATE_SELECTION);
   }
 
   /**
-   * The privacy notice, then the address prompt — in that order, always.
+   * The privacy notice, then the address prompt — in that order, always, and
+   * only once a durable row is known to be able to back them.
    *
    * The notice is the only place an administrator learns what they are about to
    * hand Telegram, so it is sent *before* the control that invites them to do
@@ -393,6 +471,7 @@ export class CameraSourcesHandler {
     overview: RtspSourcesOverviewPage,
     selection: CameraSourceSelection,
   ): Promise<void> {
+    if (!(await this.mintable(ctx, receipt, 'credential', selection))) return;
     const copy = this.copy(ctx);
     await ctx.reply(privacyNoticeBody(copy, overview.policy.networks, PROMPT_TTL_MINUTES));
     const sent = await ctx.reply(credentialPromptBody(copy), { reply_markup: forceReply() });
@@ -415,7 +494,7 @@ export class CameraSourcesHandler {
     text: string,
     page: number,
   ): Promise<void> {
-    await this.finishPrompt(prompt, false);
+    await this.finishPrompt(identityOf(prompt), false);
     if (!(await this.requireAdmin(ctx))) return;
     const name = usableDisplayName(text);
     if (name === null) {
@@ -437,6 +516,7 @@ export class CameraSourcesHandler {
       operation: 'create',
       cameraId: null,
       displayName: name,
+      expectedRevision: null,
     });
   }
 
@@ -481,12 +561,20 @@ export class CameraSourcesHandler {
    * 5. a single retry in `finally`, and only when the first attempt failed;
    * 6. the prompt is consumed carrying the one non-secret bit that survives.
    *
-   * The plaintext never leaves this frame. It is not returned, not stored on a
-   * field, not written to the prompt row, not interpolated into copy, and not
-   * logged; the only call it is passed to is the Camera use case that has to
-   * dial it. That is why there is no `CredentialReplyContext` struct here: a
-   * record carrying the plaintext across a return boundary is precisely what
-   * "stack-only" forbids.
+   * The plaintext never leaves this frame. It is not stored on a field, not
+   * written to the prompt row, not interpolated into copy, and not logged; the
+   * only call it is passed to is the Camera use case that has to dial it.
+   *
+   * It *is* carried in a record — `CredentialReply` — and that is a deliberate
+   * reversal of the plan's `CredentialReplyContext`, which was rejected for
+   * carrying plaintext across a return boundary. The objection was to a record
+   * that merely transported the address; this one is a token that also proves
+   * something. Its only producer is `takeAddressAndDelete`, which has already
+   * attempted the deletion, and its only consumer is `install`. So step 3
+   * cannot be moved after step 4 by any edit: before the deletion there is no
+   * `CredentialReply` to install. The ordering is a data dependency rather than
+   * a convention about statement order — which is why breaking it fails nine
+   * tests rather than the one or two that were watching call order.
    */
   private async runCredentialReply(
     ctx: TelegramContext,
@@ -517,26 +605,59 @@ export class CameraSourcesHandler {
       if (!reply.deleted) deleted = await this.attemptDeletion(prompt.chatId, replyMessageId);
     }
 
-    await this.finishPrompt(prompt, !deleted);
+    await this.finishPrompt(identityOf(prompt), !deleted);
     // The prompt was spent when it was claimed, so the screen behind it has to
     // be put back before anything is rendered: an administrator who lands on a
-    // failure is still on the page they started from, and `complete` clears
-    // this again on the one path that actually ends the workflow.
-    this.views.set(ctx, { kind: 'overview', receipt, page, createdAtMs: this.now() });
+    // failure is still where they started, and `complete` clears this again on
+    // the one path that actually ends the workflow.
+    //
+    // A replacement goes back to the *detail* rather than the overview, and
+    // that is load-bearing rather than tidy: its recovery controls act on one
+    // source, and the selection they need lived in the prompt row that has just
+    // been consumed. Create and attach have no stored source to return to.
+    const selector = prompt.operation === 'replace' && prompt.cameraId !== null
+      ? sourceSelector(prompt.cameraId)
+      : null;
+    this.views.set(ctx, selector === null
+      ? { kind: 'overview', receipt, page, createdAtMs: this.now() }
+      : {
+          kind: 'detail',
+          receipt,
+          selector,
+          // The revision this conversation was fenced on. Nothing acts on it:
+          // every stored-source action re-reads through `openStoredSource`,
+          // which overwrites this before it fences anything.
+          revision: prompt.expectedRevision ?? 0,
+          page,
+          createdAtMs: this.now(),
+        });
     if (!deleted) await ctx.reply(this.copy(ctx).credentialDeletionFailed(promptCameraName(prompt)));
     if (denied) {
       await this.replyRetaining(() => ctx.reply(this.catalog(ctx).common.adminRequired));
       return;
     }
     if (failure !== null) {
-      await this.replyFailure(ctx, failure);
+      if (selector === null) {
+        await this.replyFailure(ctx, failure);
+        return;
+      }
+      await this.replyRecovery(ctx, receipt, failure, selector, page, {
+        // The address that made this request has already been deleted, so
+        // there is no identical request left to re-run. Asking for another one
+        // is `change-address`, and it is right there.
+        retry: null,
+        'change-address': 'addr',
+        back: `d:${selector}`,
+      });
       return;
     }
     const copy = this.copy(ctx);
     const name = prompt.displayName ?? installed?.cameraName ?? '';
     const outcome = prompt.operation === 'attach'
       ? copy.outcomes.attached(name)
-      : copy.outcomes.created(name);
+      : prompt.operation === 'replace'
+        ? copy.outcomes.replaced(name)
+        : copy.outcomes.created(name);
     await this.complete(ctx, receipt, () => ctx.reply(outcome));
   }
 
@@ -569,8 +690,23 @@ export class CameraSourcesHandler {
     if (prompt.operation === 'create' && prompt.displayName !== null) {
       return this.createCamera.execute({ ...endpoint, displayName: prompt.displayName });
     }
-    // A stored prompt this conversation cannot execute — a `replace`, or a
-    // selection the row lost. Reported as the source having moved, which is the
+    // The fence travels on the row, not in this frame: `expectedRevision` is
+    // the revision the administrator was shown when they asked to change the
+    // address, and it is what the swap is committed against however long the
+    // typing took or how many restarts happened in between.
+    if (
+      prompt.operation === 'replace'
+      && prompt.cameraId !== null
+      && prompt.expectedRevision !== null
+    ) {
+      return this.replaceSource.execute({
+        ...endpoint,
+        cameraId: prompt.cameraId,
+        expectedRevision: prompt.expectedRevision,
+      });
+    }
+    // A stored prompt this conversation cannot execute — a selection or a
+    // revision the row lost. Reported as the source having moved, which is the
     // one answer that offers no way to retry the address just deleted.
     throw new LiveSourceStateChangedError();
   }
@@ -628,13 +764,15 @@ export class CameraSourcesHandler {
    * not fatal here: the row stays `running`, which is exactly the shape startup
    * recovery is built to finish, and the administrator still gets an answer.
    */
-  private async finishPrompt(prompt: CameraSourcePrompt, deletionFailed: boolean): Promise<void> {
+  private async finishPrompt(
+    identity: CameraSourcePromptIdentity,
+    deletionFailed: boolean,
+    outcome: 'consumed' | 'expired' = 'consumed',
+  ): Promise<void> {
+    const transition = { identity, deletionFailed, now: this.clock.now() };
     try {
-      await this.prompts.consume({
-        identity: identityOf(prompt),
-        deletionFailed,
-        now: this.clock.now(),
-      });
+      if (outcome === 'expired') await this.prompts.expire(transition);
+      else await this.prompts.consume(transition);
     } catch {
       // Bindingless: a better-sqlite3 rejection can quote the row it refused.
     }
@@ -651,22 +789,26 @@ export class CameraSourcesHandler {
   ): Promise<void> {
     try {
       await this.prompts.createPending(
-        createCameraSourcePrompt({
-          userId: receipt.userId,
-          chatId: receipt.chatId,
-          receiptId: receipt.id,
-          promptMessageId,
-          phase,
-          operation: selection.operation,
-          cameraId: selection.cameraId,
-          displayName: selection.displayName,
-          expectedRevision: null,
-          createdAt: this.clock.now(),
-        }),
+        createCameraSourcePrompt(this.newPrompt(receipt, promptMessageId, phase, selection)),
       );
     } catch (error) {
-      // Without a durable row the prompt cannot be claimed, so it is not left
-      // sitting in the chat pretending to work.
+      // Without a durable row the prompt cannot be claimed — and a ForceReply
+      // that cannot be claimed is worse than no prompt at all, because
+      // `handleText` would hand the answer to the next handler *undeleted*.
+      // The shape was already checked before anything was sent, so reaching
+      // here means the store refused; the message is therefore retracted.
+      //
+      // A retraction that fails does **not** leave an unanswerable prompt: the
+      // ForceReply is still armed and the administrator can still reply to it.
+      // So the routing is kept rather than dropped, and that is what makes the
+      // residual safe instead of merely rarer. `handleText` finds no durable
+      // row, answers `stale`, and — because the phase is on the state, not the
+      // row — still deletes a credential reply and claims the message. The one
+      // thing that must never happen here is forgetting the prompt while it is
+      // still in the chat.
+      if (!(await this.deleteWithRetry(receipt.chatId, promptMessageId))) {
+        this.views.set(ctx, { kind: 'prompt', receipt, promptMessageId, phase, page, createdAtMs: this.now() });
+      }
       await this.replyFailure(ctx, error);
       return;
     }
@@ -678,6 +820,67 @@ export class CameraSourcesHandler {
       page,
       createdAtMs: this.now(),
     });
+  }
+
+  /**
+   * The row a prompt would be, as the model would build it.
+   *
+   * Written once so the pre-send check and the real mint validate the *same*
+   * object: a guard that constructed its own approximation would drift, and
+   * the drift would show up as a ForceReply no row can back.
+   */
+  private newPrompt(
+    receipt: WorkflowReturnReceipt,
+    promptMessageId: number,
+    phase: CameraSourcePromptPhase,
+    selection: CameraSourceSelection,
+  ): NewCameraSourcePrompt {
+    return {
+      userId: receipt.userId,
+      chatId: receipt.chatId,
+      receiptId: receipt.id,
+      promptMessageId,
+      phase,
+      operation: selection.operation,
+      cameraId: selection.cameraId,
+      displayName: selection.displayName,
+      expectedRevision: selection.expectedRevision,
+      createdAt: this.clock.now(),
+    };
+  }
+
+  /**
+   * Whether this prompt could exist, asked **before** anything is sent.
+   *
+   * This ordering is the fix to a hole, not a tidy-up. `rememberPrompt` used to
+   * be the first thing that could refuse a prompt, and by then the ForceReply
+   * was already armed in the chat: for a camera whose stored name the durable
+   * model rejects, the administrator was shown a generic failure *and* an
+   * active "reply with the camera address" prompt. Answering it — the natural
+   * thing to do — produced a credential-bearing message that `promptFor` could
+   * not match, `handleText` handed back to the next handler, and nothing ever
+   * deleted. That is the one outcome this whole workflow exists to prevent.
+   *
+   * The check is the model itself rather than a restatement of its rules, so a
+   * field added to that guard later is covered here without this site having to
+   * be remembered. The message identifier is a placeholder: it is the one field
+   * that cannot be known before sending, and the real mint validates it.
+   *
+   * `false` means the administrator has already been answered.
+   */
+  private async mintable(
+    ctx: TelegramContext,
+    receipt: WorkflowReturnReceipt,
+    phase: CameraSourcePromptPhase,
+    selection: CameraSourceSelection,
+  ): Promise<boolean> {
+    try {
+      createCameraSourcePrompt(this.newPrompt(receipt, PROMPT_SHAPE_PROBE_MESSAGE_ID, phase, selection));
+      return true;
+    } catch (error) {
+      await this.replyFailure(ctx, error);
+      return false;
+    }
   }
 
   /** One page read, with failures already answered. `null` means answered. */
@@ -763,6 +966,293 @@ export class CameraSourcesHandler {
     await ctx.reply(detailsBody(copy, source), {
       reply_markup: detailsKeyboard(copy, this.catalog(ctx).home.common, receipt.id, state.selector),
     });
+  }
+
+  /*
+   * ── The stored-source actions ───────────────────────────────────────────
+   *
+   * Test, change address and remove all begin the same way and it is not
+   * incidental: each re-reads the page its selector was rendered from, so the
+   * thing it acts on is the thing that is there, and each takes the revision it
+   * needs from that read rather than from what this screen remembers.
+   */
+
+  /**
+   * Re-probes the stored credential and says what came back.
+   *
+   * The one action here that is not a mutation, and the use case guarantees
+   * that: it re-verifies what is on disk and returns the same projection,
+   * leaving revision, `verifiedAt`, policy digest and credential untouched. So
+   * nothing is fenced, nothing is consumed, and the workflow does not end — the
+   * administrator reads the answer and stays where they were.
+   */
+  private async runTest(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<void> {
+    const opened = await this.openStoredSource(ctx, receipt);
+    if (!opened) return;
+    const copy = this.copy(ctx);
+    await ctx.reply(copy.progress.testing);
+    try {
+      const tested = await this.testSource.execute({
+        actorUserId: receipt.userId,
+        cameraId: opened.source.cameraId,
+      });
+      await this.replyRetaining(() => ctx.reply(this.copy(ctx).outcomes.tested(tested.cameraName)));
+    } catch (error) {
+      // A test can be re-run unchanged, so `retry` means what it says here —
+      // unlike on the paths whose request was a credential that is now deleted.
+      await this.replyRecovery(ctx, receipt, error, opened.selector, opened.page, {
+        retry: 'test',
+        'change-address': 'addr',
+        back: `d:${opened.selector}`,
+      });
+    }
+  }
+
+  /**
+   * Opens the address half of a replacement.
+   *
+   * The revision read here is the one the whole replacement is fenced on, and
+   * it is written to the durable prompt row rather than kept in memory: the
+   * address arrives in a later update — possibly after a restart — and the
+   * revision it must be committed against is the one the administrator was
+   * shown, not whatever the source has moved to by the time they finish typing.
+   *
+   * The privacy notice is the same one a first install gets, sent from the page
+   * just read, because the administrator is about to hand Telegram exactly the
+   * same kind of value.
+   */
+  private async startReplace(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<void> {
+    const opened = await this.openStoredSource(ctx, receipt);
+    if (!opened) return;
+    await this.sendCredentialPrompt(ctx, receipt, opened.overview, {
+      operation: 'replace',
+      cameraId: opened.source.cameraId,
+      // A stored camera name is validated less strictly than a prompt row
+      // accepts, so it is filtered rather than trusted; the row still names the
+      // camera by identifier, and the outcome falls back to the boundary's own
+      // name. Nothing here depends on it being present.
+      displayName: usableDisplayName(opened.source.cameraName),
+      expectedRevision: opened.source.revision,
+    });
+  }
+
+  /**
+   * Asks the removal question in whichever of its two readings applies, and
+   * arms the answer with the revision this screen was rendered from.
+   *
+   * The wording is predicted from the camera type — the same fact the Camera
+   * boundary decides on — while the *outcome* is read off what the boundary
+   * reports it retired. Predicting the question and reporting the answer are
+   * different jobs, and only the second one is authoritative.
+   */
+  private async showRemoval(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<void> {
+    const opened = await this.openStoredSource(ctx, receipt);
+    if (!opened) return;
+    let removesCamera: boolean;
+    try {
+      removesCamera = await this.removesCamera(opened.source.cameraId);
+    } catch (error) {
+      await this.replyFailure(ctx, error);
+      return;
+    }
+    const copy = this.copy(ctx);
+    await ctx.reply(removalBody(copy, opened.source.cameraName, removesCamera), {
+      reply_markup: removalKeyboard(
+        copy,
+        this.catalog(ctx).home.common,
+        receipt.id,
+        opened.selector,
+        opened.source.revision,
+        removesCamera,
+      ),
+    });
+  }
+
+  /**
+   * Retires the source, at exactly the revision the confirmation was rendered
+   * from — which arrives in the callback rather than being read again here.
+   *
+   * Reading it again is the mutation this method exists to prevent: it would
+   * always match, and the compare-and-swap would confirm nothing. Nothing on
+   * this path decrypts, loads or renders a credential; the identifier and the
+   * revision are the whole of what removal needs.
+   */
+  private async confirmRemoval(
+    ctx: TelegramContext,
+    receipt: WorkflowReturnReceipt,
+    selector: string,
+    expectedRevision: number,
+  ): Promise<void> {
+    if (!Number.isSafeInteger(expectedRevision)) return;
+    const page = this.views.rememberedPage(ctx, receipt.id);
+    const resolved = await this.resolveSelected(ctx, receipt, page, selector);
+    if (!resolved) return;
+    const { overview, source } = resolved;
+    const copy = this.copy(ctx);
+    await ctx.reply(copy.progress.removing);
+    try {
+      const { removed } = await this.removeSource.execute({
+        actorUserId: receipt.userId,
+        cameraId: source.cameraId,
+        expectedRevision,
+      });
+      const outcome = removed === 'camera'
+        ? copy.removal.removedCamera(source.cameraName)
+        : copy.removal.removedSource(source.cameraName);
+      await this.complete(ctx, receipt, () => ctx.reply(outcome));
+    } catch (error) {
+      await this.replyRecovery(ctx, receipt, error, selector, overview.page, {
+        // The identical request, revision included: a removal that failed for a
+        // transient reason is still the same removal.
+        retry: removalConfirmAction(selector, expectedRevision),
+        // Nothing about an address is wrong when a removal fails, so the
+        // control that would re-open the credential prompt is left out.
+        'change-address': null,
+        back: `d:${selector}`,
+      });
+    }
+  }
+
+  /**
+   * Hands the conversation to the feature workflow's own reinstall
+   * confirmation — the only answer to a network policy that is no longer the
+   * one in force, and deliberately *not* a second mutation path: nothing is
+   * installed by opening it, and this screen calls no feature operation.
+   */
+  private async handoffToReinstall(ctx: TelegramContext, receipt: WorkflowReturnReceipt): Promise<void> {
+    if (!this.features) {
+      await this.replyRetaining(() => ctx.reply(this.copy(ctx).errors['feature-unavailable']));
+      return;
+    }
+    // Beginning a feature workflow supersedes this receipt, so the screen
+    // behind it is forgotten here rather than left pointing at a conversation
+    // that has moved on — and any prompt it armed is *ended*, not merely
+    // forgotten. This is reachable: `ri` is rendered by a test failure, which
+    // consumes nothing, so Change address and then the older Reinstall control
+    // is an ordinary sequence.
+    await this.retractPrompts(receipt);
+    this.views.clear(ctx, receipt.id);
+    await this.features.handleRtspReinstallEntry(ctx);
+  }
+
+  /**
+   * Ends every prompt this workflow still has open, message first.
+   *
+   * Both halves are load-bearing and they fail in opposite directions.
+   * Forgetting the routing while the ForceReply is still in the chat leaves a
+   * prompt nothing can claim, and a credential answered into it is handed to
+   * the next handler undeleted. Keeping the routing while the workflow has
+   * moved on lets a receipt the administrator has left authorise an install
+   * they never confirmed.
+   *
+   * So the message is retracted and the row is made terminal — and the routing
+   * is dropped only once the message is provably gone. When Telegram refuses,
+   * the prompt is still answerable, so its routing stays: `claimReply` then
+   * answers `late`, and the reply is deleted as cleanup without authorising
+   * anything.
+   */
+  private async retractPrompts(receipt: WorkflowReturnReceipt): Promise<void> {
+    const open = this.views.promptMessagesFor(receipt.userId, receipt.chatId, receipt.id);
+    for (const promptMessageId of open) {
+      const deleted = await this.deleteWithRetry(receipt.chatId, promptMessageId);
+      await this.finishPrompt(
+        {
+          userId: receipt.userId,
+          chatId: receipt.chatId,
+          receiptId: receipt.id,
+          promptMessageId,
+        },
+        !deleted,
+        // Abandoned, not answered: the window closed on it rather than a reply
+        // spending it, which is the same shape startup recovery records.
+        'expired',
+      );
+      if (deleted) this.views.clearPrompt(receipt.userId, receipt.chatId, promptMessageId);
+    }
+  }
+
+  /**
+   * The remembered detail, re-read.
+   *
+   * `null` means the administrator has already been answered: with the overview
+   * when this screen remembers no open detail or the selector no longer names a
+   * source, or with a failure notice when the page could not be read. Every
+   * stored-source action starts here, which is what keeps all three fenced on a
+   * revision that was actually read rather than one carried in memory.
+   */
+  private async openStoredSource(
+    ctx: TelegramContext,
+    receipt: WorkflowReturnReceipt,
+  ): Promise<{
+    overview: RtspSourcesOverviewPage;
+    source: RtspSourceOverview;
+    selector: string;
+    page: number;
+  } | null> {
+    const state = this.views.current(ctx, receipt.id);
+    if (state?.kind !== 'detail') {
+      await this.showOverview(ctx, receipt, this.views.rememberedPage(ctx, receipt.id));
+      return null;
+    }
+    const resolved = await this.resolveSelected(ctx, receipt, state.page, state.selector);
+    if (!resolved) return null;
+    this.views.set(ctx, {
+      kind: 'detail',
+      receipt,
+      selector: state.selector,
+      revision: resolved.source.revision,
+      page: resolved.overview.page,
+      createdAtMs: this.now(),
+    });
+    return {
+      overview: resolved.overview,
+      source: resolved.source,
+      selector: state.selector,
+      page: resolved.overview.page,
+    };
+  }
+
+  /**
+   * A failure on a stored source: presenter copy, plus the controls this screen
+   * can actually honour.
+   *
+   * `targets` is the narrowing, and it is per-call-site because the presenter
+   * classifies the *failure* while only the caller knows what it still has: a
+   * test can be re-run, a replacement whose address has already been deleted
+   * cannot, and no removal was ever about an address.
+   *
+   * `source-stale` is answered differently from every other kind, and that is
+   * the whole point of it: the revision this action carried is spent, so the
+   * answer is the current detail, read fresh and re-armed from what is stored.
+   * Offering a control that resent the number which just lost would be offering
+   * the same failure again.
+   */
+  private async replyRecovery(
+    ctx: TelegramContext,
+    receipt: WorkflowReturnReceipt,
+    error: unknown,
+    selector: string,
+    page: number,
+    targets: CameraSourceRecoveryTargets,
+  ): Promise<void> {
+    // Ahead of the presenter, which maps every feature state to one lossy kind.
+    if (await this.replyUnavailable(ctx, error)) return;
+    const presented = presentCameraSourceError(error);
+    const copy = this.copy(ctx);
+    if (presented.kind === 'source-stale') {
+      await this.replyRetaining(() => ctx.reply(copy.errors['source-stale']));
+      await this.showDetail(ctx, receipt, selector, page);
+      return;
+    }
+    await this.replyRetaining(() => ctx.reply(copy.errors[presented.kind], {
+      reply_markup: recoveryKeyboard(
+        copy,
+        this.catalog(ctx).home.common,
+        receipt.id,
+        presented.actions,
+        targets,
+      ),
+    }));
   }
 
   /**

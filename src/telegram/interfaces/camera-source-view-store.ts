@@ -73,6 +73,21 @@ export class CameraSourceViewStore {
    * Remembers one state, evicting whatever this administrator had under a
    * *different* receipt in the same chat: one workflow at a time per chat, so a
    * screen opened from a newer receipt cannot be answered by an older one.
+   *
+   * A prompt is keyed by the message it forces a reply to, **not** by its
+   * receipt, and that is a correctness requirement rather than a convenience.
+   * Routing and screens have different lifetimes: a screen is superseded by the
+   * next screen of the same workflow, while a prompt stays answerable until the
+   * message it names is answered or expires. Sharing a key made every ordinary
+   * render — a stale inline button pressed on an older message, or Sources
+   * re-opened from the dashboard, which calls `clear` outright — silently drop
+   * the routing for a live credential prompt. The durable row survived that and
+   * would have claimed cleanly; nothing looked it up, so `handleText` handed a
+   * credential-bearing message to the next handler and it was never deleted.
+   *
+   * Eviction still reaches prompts, and must: it is keyed on the *receipt*, so
+   * a prompt left over from a superseded workflow is dropped exactly as before
+   * and cannot resume an install the administrator has navigated away from.
    */
   set(ctx: TelegramContext, state: CameraSourceViewState): void {
     for (const [key, existing] of this.states) {
@@ -84,11 +99,23 @@ export class CameraSourceViewStore {
         this.states.delete(key);
       }
     }
-    this.states.set(this.key(ctx, state.receipt.id), state);
+    this.states.set(this.keyFor(state, ctx), state);
   }
 
   clear(ctx: TelegramContext, receiptId: string): void {
     this.states.delete(this.key(ctx, receiptId));
+  }
+
+  /**
+   * Forgets one prompt's routing, by the message it forced a reply to.
+   *
+   * `clear` cannot do this any more and must not: it names a receipt, and a
+   * receipt's screen being replaced is precisely the event that has to leave a
+   * live prompt answerable. Spending a prompt is a different act with a
+   * different key.
+   */
+  clearPrompt(userId: number, chatId: number, promptMessageId: number): void {
+    this.states.delete(promptKey(userId, chatId, promptMessageId));
   }
 
   /** The live state for this receipt, dropping it if the window has closed. */
@@ -116,15 +143,30 @@ export class CameraSourceViewStore {
     );
   }
 
-  /** Forgets one receipt's screen, or every screen this administrator has here. */
+  /**
+   * Forgets one receipt's screens, or every screen this administrator has here
+   * — **including their prompts**.
+   *
+   * Matched on the receipt each state carries rather than on its key, which is
+   * what keeps this correct now that a prompt is keyed by its message: a
+   * cancelled workflow ends its prompts, while a *rendered* screen does not.
+   * That is the whole distinction `clear` and `set` now respect, and cancelling
+   * is the side of it that still sweeps everything.
+   */
   cancel(userId: number, chatId: number, receiptId?: string): void {
-    if (receiptId) {
-      this.states.delete(`${userId}:${chatId}:${receiptId}`);
-      return;
+    for (const [key, state] of this.states) {
+      if (state.receipt.userId !== userId || state.receipt.chatId !== chatId) continue;
+      if (receiptId !== undefined && state.receipt.id !== receiptId) continue;
+      this.states.delete(key);
     }
-    for (const key of this.states.keys()) {
-      if (key.startsWith(`${userId}:${chatId}:`)) this.states.delete(key);
-    }
+  }
+
+  /** The messages this receipt still has forcing a reply, newest first. */
+  promptMessagesFor(userId: number, chatId: number, receiptId: string): number[] {
+    return this.statesFor(userId, chatId)
+      .filter((state): state is CameraSourcePromptView =>
+        state.kind === 'prompt' && state.receipt.id === receiptId)
+      .map((state) => state.promptMessageId);
   }
 
   /**
@@ -182,7 +224,25 @@ export class CameraSourceViewStore {
     return `${ctx.from?.id ?? 'none'}:${ctx.chat?.id ?? 'none'}:${receiptId}`;
   }
 
-  private keyFor(state: CameraSourceViewState): string {
-    return `${state.receipt.userId}:${state.receipt.chatId}:${state.receipt.id}`;
+  /**
+   * The key one state lives under. A prompt is named by its message, every
+   * other screen by its receipt — written once, so a reader cannot store an
+   * entry under one key and delete it under another.
+   */
+  private keyFor(state: CameraSourceViewState, ctx?: TelegramContext): string {
+    if (state.kind === 'prompt') {
+      return promptKey(state.receipt.userId, state.receipt.chatId, state.promptMessageId);
+    }
+    return ctx
+      ? this.key(ctx, state.receipt.id)
+      : `${state.receipt.userId}:${state.receipt.chatId}:${state.receipt.id}`;
   }
+}
+
+/**
+ * A prompt's key. The `p` segment cannot collide with a receipt's, which is
+ * always exactly sixteen characters from `[A-Za-z0-9_-]`.
+ */
+function promptKey(userId: number, chatId: number, promptMessageId: number): string {
+  return `${userId}:${chatId}:p:${promptMessageId}`;
 }

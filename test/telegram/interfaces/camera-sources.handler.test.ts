@@ -13,8 +13,16 @@ import type {
 import { RTSP_SOURCE_CAMERA_TYPE } from '../../../src/camera/domain/ports/rtsp-source-configuration.port';
 import { CameraSourceUnavailableError } from '../../../src/camera/domain/errors/camera-source-unavailable.error';
 import { CameraNameTakenError } from '../../../src/camera/domain/errors/camera-name-taken.error';
+import { CameraNotFoundError } from '../../../src/camera/domain/errors/camera-not-found.error';
 import { InvalidLiveSourceError } from '../../../src/camera/domain/errors/invalid-live-source.error';
+import { LiveSourceAddressOutsidePolicyError } from '../../../src/camera/domain/errors/live-source-address-outside-policy.error';
+import { LiveSourceAuthenticationRejectedError } from '../../../src/camera/domain/errors/live-source-authentication-rejected.error';
+import { LiveSourceHostNotFoundError } from '../../../src/camera/domain/errors/live-source-host-not-found.error';
+import { LiveSourceHostUnreachableError } from '../../../src/camera/domain/errors/live-source-host-unreachable.error';
 import { LiveSourceProbeTimeoutError } from '../../../src/camera/domain/errors/live-source-probe-timeout.error';
+import { LiveSourceStateChangedError } from '../../../src/camera/domain/errors/live-source-state-changed.error';
+import { LiveSourceTlsVerificationError } from '../../../src/camera/domain/errors/live-source-tls-verification.error';
+import { LiveSourceUnsupportedStreamError } from '../../../src/camera/domain/errors/live-source-unsupported-stream.error';
 import type { RedactedLiveSource } from '../../../src/camera/domain/ports/live-source-repository.port';
 import * as schema from '../../../src/database/schema';
 import { FeatureUnavailableError } from '../../../src/features/domain/errors/feature-unavailable.error';
@@ -162,6 +170,10 @@ function setup(
     cameras?: CameraRow[];
     attachCandidates?: { cameraId: string; cameraName: string }[];
     prompts?: ReturnType<typeof promptStore>;
+    /** What the Camera boundary reports it actually retired. */
+    removed?: 'camera' | 'source';
+    /** Omitted to prove the screen survives an unwired feature handoff. */
+    features?: false;
   } = {},
 ) {
   const all = options.sources ?? [];
@@ -183,6 +195,12 @@ function setup(
   const messages = { delete: vi.fn().mockResolvedValue(undefined) };
   const createRtspCamera = { execute: vi.fn().mockResolvedValue(installedSource()) };
   const attachRtspSource = { execute: vi.fn().mockResolvedValue(installedSource()) };
+  const replaceRtspSource = { execute: vi.fn().mockResolvedValue(installedSource()) };
+  const testRtspSource = { execute: vi.fn().mockResolvedValue(installedSource()) };
+  const removeRtspSource = {
+    execute: vi.fn().mockResolvedValue({ removed: options.removed ?? 'camera' }),
+  };
+  const features = { handleRtspReinstallEntry: vi.fn().mockResolvedValue(undefined) };
   const cameras = {
     execute: vi.fn().mockResolvedValue(
       options.cameras ?? [
@@ -218,23 +236,31 @@ function setup(
     cameras as never,
     createRtspCamera as never,
     attachRtspSource as never,
+    replaceRtspSource as never,
+    testRtspSource as never,
+    removeRtspSource as never,
     prompts,
     messages,
     { now: () => new Date(nowMs) },
     workflows as unknown as WorkflowEntryCoordinator,
     navigation as unknown as WorkflowNavigationHandler,
     options.availability,
+    options.features === false ? undefined : (features as never),
   );
   return {
     advance,
     attachRtspSource,
     cameras,
     createRtspCamera,
+    features,
     handler,
     messages,
     navigation,
     overview,
     prompts,
+    removeRtspSource,
+    replaceRtspSource,
+    testRtspSource,
     workflows,
   };
 }
@@ -874,28 +900,39 @@ describe('CameraSourcesHandler entry gates', () => {
   });
 
   /*
-   * The three actions the Sources screen renders but does not execute.
+   * The inert list is now empty: `add` left it in Task 5 and `test`/`addr`/`rm`
+   * leave it here. What replaces it is the same guarantee stated the other way
+   * round — every action the detail screen renders reaches an implementation,
+   * so a control cannot be added to the keyboard and left unrouted.
    *
-   * `add` left this list in the commit that implemented it — deliberately,
-   * because that is the whole point of the list. This test is expected to FAIL
-   * the moment Task 6 wires `test`/`addr`/`rm`; move an action out of it in the
-   * commit that implements it, rather than discovering later that one was wired
-   * by accident or never wired at all.
+   * `rm` is deliberately the confirmation screen rather than the removal: the
+   * only callback that retires anything is `rm:y:<selector>:<revision>`, and it
+   * exists only on a screen that was rendered from a fresh read.
    */
-  it('renders the Task 6 actions without executing anything', async () => {
-    const { cameras, handler, overview } = setup({ sources: [overviewSource()] });
-    const ctx = context();
-    await handler.handleEntry(ctx as never, { receipt });
-    const replies = ctx.reply.mock.calls.length;
-    const reads = overview.execute.mock.calls.length;
+  it('routes every control the detail screen renders', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const opened = context();
+    await bench.handler.handleEntry(opened as never, { receipt });
+    const opener = screen(opened, 0).find((button) => button.callback_data.includes(':src:d:'));
+    await bench.handler.handleCallback(opened as never, action(opener!.callback_data), receipt);
+    const rendered = screen(opened, 1)
+      .map((button) => button.callback_data)
+      .filter((data) => data.includes(':src:'));
+    expect(rendered.length).toBeGreaterThanOrEqual(5);
 
-    for (const inert of ['test', 'addr', 'rm']) {
-      await handler.handleCallback(ctx as never, inert, receipt);
+    for (const data of rendered) {
+      // Each control is pressed from a freshly opened detail, so one that
+      // consumed the screen cannot make the next one look routed.
+      const ctx = context();
+      await bench.handler.handleEntry(ctx as never, { receipt });
+      await bench.handler.handleCallback(ctx as never, action(opener!.callback_data), receipt);
+      const before = ctx.reply.mock.calls.length;
+      await bench.handler.handleCallback(ctx as never, action(data), receipt);
+      expect(ctx.reply.mock.calls.length, data).toBeGreaterThan(before);
     }
-
-    expect(ctx.reply).toHaveBeenCalledTimes(replies);
-    expect(overview.execute).toHaveBeenCalledTimes(reads);
-    expect(cameras.execute).not.toHaveBeenCalled();
+    // Rendering a control is not executing one: reaching the confirmation is
+    // the whole of what `rm` does.
+    expect(bench.removeRtspSource.execute).not.toHaveBeenCalled();
   });
 
   it('claims no ordinary text message while no prompt exists', async () => {
@@ -2087,5 +2124,1100 @@ describe('CameraSourcesHandler attach candidate paging', () => {
 
     expect(ctx.reply).toHaveBeenLastCalledWith(copy.errors['probe-failed']);
     expect(sentJson(ctx)).not.toContain('reply markup is too long');
+  });
+});
+
+/*
+ * ─── Stored-source lifecycle ───────────────────────────────────────────────
+ *
+ * Test, replace and remove all act on a source that already exists, so all
+ * three share one obligation the add conversations do not have: the row they
+ * act on must be the row the administrator was looking at. That is what the
+ * revision fencing below is, and it is why every one of these paths re-reads
+ * the page before it does anything.
+ */
+
+/** Opens Sources, then the one source's detail, and reports its selector. */
+async function openSourceDetail(bench: Bench, ctx = context()) {
+  await bench.handler.handleEntry(ctx as never, { receipt });
+  const opener = screen(ctx, 0).find((button) => button.callback_data.includes(':src:d:'));
+  if (!opener) throw new Error('the overview rendered no source row');
+  const opened = action(opener.callback_data);
+  await bench.handler.handleCallback(ctx as never, opened, receipt);
+  return { ctx, selector: opened.slice(2), opened };
+}
+
+/** The confirm control on a rendered removal confirmation. */
+function removalConfirm(ctx: ReturnType<typeof context>, index: number): string {
+  const control = screen(ctx, index).find((button) => button.callback_data.includes(':src:rm:y:'));
+  if (!control) throw new Error('the confirmation rendered no removal control');
+  return action(control.callback_data);
+}
+
+describe('CameraSourcesHandler test connection', () => {
+  it('reports progress, asks only who and which camera, and renders the transient result', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { ctx } = await openSourceDetail(bench);
+
+    await bench.handler.handleCallback(ctx as never, 'test', receipt);
+
+    expect(bench.testRtspSource.execute).toHaveBeenCalledWith({
+      actorUserId: 100,
+      cameraId: 'camera-with-private-id',
+    });
+    expect(body(ctx, 2)).toBe(copy.progress.testing);
+    expect(body(ctx, 3)).toBe(copy.outcomes.tested('Front door'));
+  });
+
+  /*
+   * The one claim `outcomes.tested` makes — "Nothing was changed" — reduced to
+   * what this layer can actually prove: no mutation use case is reachable from
+   * here, and the projection the screen was handed comes back byte for byte,
+   * revision, `verifiedAt`, digest and credential flag included.
+   */
+  it('changes nothing: no mutation runs and the stored projection is untouched', async () => {
+    const source = overviewSource();
+    const before = structuredClone(source);
+    const bench = setup({ sources: [source] });
+    const { ctx } = await openSourceDetail(bench);
+
+    await bench.handler.handleCallback(ctx as never, 'test', receipt);
+
+    expect(source).toEqual(before);
+    expect(bench.replaceRtspSource.execute).not.toHaveBeenCalled();
+    expect(bench.removeRtspSource.execute).not.toHaveBeenCalled();
+    expect(bench.createRtspCamera.execute).not.toHaveBeenCalled();
+    expect(bench.attachRtspSource.execute).not.toHaveBeenCalled();
+    expect(bench.prompts.createPending).not.toHaveBeenCalled();
+  });
+
+  it('leaves the screen and the workflow exactly where they were', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { ctx } = await openSourceDetail(bench);
+
+    await bench.handler.handleCallback(ctx as never, 'test', receipt);
+
+    expect(bench.navigation.complete).not.toHaveBeenCalled();
+    expect(bench.handler.hasPending(100, 42, receipt.id)).toBe(true);
+  });
+
+  it('reloads the overview rather than testing what it merely remembers', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const ctx = context();
+    await bench.handler.handleEntry(ctx as never, { receipt });
+
+    await bench.handler.handleCallback(ctx as never, 'test', receipt);
+
+    expect(bench.testRtspSource.execute).not.toHaveBeenCalled();
+    expect(body(ctx, 1)).toContain(copy.overview.title);
+  });
+});
+
+describe('CameraSourcesHandler change address', () => {
+  it('captures the current revision onto a durable replace prompt, behind the same privacy notice', async () => {
+    const bench = setup({ sources: [overviewSource({ revision: 4 })] });
+    const { ctx } = await openSourceDetail(bench);
+
+    await bench.handler.handleCallback(ctx as never, 'addr', receipt);
+
+    expect(body(ctx, 2)).toBe(copy.privacyNotice({ networks: copy.policy.network(NETWORK), minutes: 10 }));
+    expect(body(ctx, 3)).toContain(copy.prompts.credential);
+    expect(bench.prompts.created).toHaveLength(1);
+    expect(bench.prompts.created[0]).toMatchObject({
+      phase: 'credential',
+      operation: 'replace',
+      cameraId: 'camera-with-private-id',
+      displayName: 'Front door',
+      expectedRevision: 4,
+      status: 'pending',
+    });
+  });
+
+  /*
+   * The fence, and the only test that can see it fail: the source moves to
+   * revision 9 while the administrator is typing, and the replacement still
+   * carries the 4 they were shown. A handler that re-read the revision at
+   * install time would send 9 and overwrite work it never displayed.
+   */
+  it('deletes the reply before probing and replaces at the revision it captured, not the current one', async () => {
+    const source = overviewSource({ revision: 4 });
+    const bench = setup({ sources: [source] });
+    const { ctx } = await openSourceDetail(bench);
+    await bench.handler.handleCallback(ctx as never, 'addr', receipt);
+    source.revision = 9;
+
+    const answer = await answerAddress(bench, lastSent(ctx));
+
+    expect(bench.messages.delete.mock.invocationCallOrder[0])
+      .toBeLessThan(bench.replaceRtspSource.execute.mock.invocationCallOrder[0]);
+    expect(bench.replaceRtspSource.execute).toHaveBeenCalledWith({
+      url: SECRET_URL,
+      transport: 'tcp',
+      tlsMode: 'none',
+      profile: 'eco',
+      substream: null,
+      actorUserId: 100,
+      cameraId: 'camera-with-private-id',
+      expectedRevision: 4,
+    });
+    expect(bench.createRtspCamera.execute).not.toHaveBeenCalled();
+    expect(bench.attachRtspSource.execute).not.toHaveBeenCalled();
+    expect(body(answer.ctx, 1)).toBe(copy.outcomes.replaced('Front door'));
+  });
+
+  it('ends the workflow on a replacement that answered, as any other install does', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { ctx } = await openSourceDetail(bench);
+    await bench.handler.handleCallback(ctx as never, 'addr', receipt);
+
+    await answerAddress(bench, lastSent(ctx));
+
+    expect(bench.navigation.complete).toHaveBeenCalledTimes(1);
+    expect(bench.handler.hasPending(100, 42, receipt.id)).toBe(false);
+  });
+
+  it('never writes the replacement address to the prompt row', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { ctx } = await openSourceDetail(bench);
+    await bench.handler.handleCallback(ctx as never, 'addr', receipt);
+
+    await answerAddress(bench, lastSent(ctx));
+
+    const persisted = JSON.stringify(bench.prompts.created);
+    expect(persisted).not.toContain(SECRET_URL);
+    expect(persisted).not.toContain(SECRET_PASSWORD);
+    expect(reachableStrings(bench.handler).join('\n')).not.toContain(SECRET_PASSWORD);
+  });
+
+  it('reloads the overview rather than replacing what it merely remembers', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const ctx = context();
+    await bench.handler.handleEntry(ctx as never, { receipt });
+
+    await bench.handler.handleCallback(ctx as never, 'addr', receipt);
+
+    expect(bench.prompts.createPending).not.toHaveBeenCalled();
+    expect(body(ctx, 1)).toContain(copy.overview.title);
+  });
+});
+
+describe('CameraSourcesHandler removal', () => {
+  it('confirms by name, in the camera wording, for a camera that exists only to carry the source', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { ctx } = await openSourceDetail(bench);
+
+    await bench.handler.handleCallback(ctx as never, 'rm', receipt);
+
+    expect(body(ctx, 2)).toBe(copy.removal.confirmCamera('Front door'));
+    const texts = screen(ctx, 2).map((button) => button.text);
+    expect(texts).toContain(copy.removal.removeCameraButton);
+    expect(texts).toContain(copy.removal.keep);
+    expect(texts).not.toContain(copy.removal.removeSourceButton);
+    expect(bench.removeRtspSource.execute).not.toHaveBeenCalled();
+  });
+
+  it('confirms in the source wording when the camera records on its own too', async () => {
+    const bench = setup({
+      sources: [overviewSource()],
+      cameras: [{ id: 'camera-with-private-id', name: 'Front door', type: 'motion', enabled: true, config: null }],
+    });
+    const { ctx } = await openSourceDetail(bench);
+
+    await bench.handler.handleCallback(ctx as never, 'rm', receipt);
+
+    expect(body(ctx, 2)).toBe(copy.removal.confirmSource('Front door'));
+    const texts = screen(ctx, 2).map((button) => button.text);
+    expect(texts).toContain(copy.removal.removeSourceButton);
+    expect(texts).not.toContain(copy.removal.removeCameraButton);
+  });
+
+  /*
+   * The removal's own fence. The confirmation control carries the revision the
+   * confirmation was rendered from, so a source that moved between reading and
+   * confirming loses the compare-and-swap instead of being deleted from under
+   * whoever moved it.
+   */
+  it('carries the rendered revision on the confirm control and retires at exactly that revision', async () => {
+    const source = overviewSource({ revision: 4 });
+    const bench = setup({ sources: [source] });
+    const { ctx, selector } = await openSourceDetail(bench);
+    await bench.handler.handleCallback(ctx as never, 'rm', receipt);
+    const confirm = removalConfirm(ctx, 2);
+    expect(confirm).toBe(`rm:y:${selector}:4`);
+    source.revision = 9;
+
+    await bench.handler.handleCallback(ctx as never, confirm, receipt);
+
+    expect(bench.removeRtspSource.execute).toHaveBeenCalledWith({
+      actorUserId: 100,
+      cameraId: 'camera-with-private-id',
+      expectedRevision: 4,
+    });
+    expect(body(ctx, 3)).toBe(copy.progress.removing);
+  });
+
+  /*
+   * The label is a prediction from the camera type; `{ removed }` is what the
+   * transaction actually did. They are derived from the same fact and normally
+   * agree — so the outcome is read off the boundary, never off the prediction.
+   */
+  it('names the outcome from the boundary even when the predicted label disagrees', async () => {
+    const bench = setup({ sources: [overviewSource()], removed: 'source' });
+    const { ctx } = await openSourceDetail(bench);
+    await bench.handler.handleCallback(ctx as never, 'rm', receipt);
+    expect(body(ctx, 2)).toBe(copy.removal.confirmCamera('Front door'));
+
+    await bench.handler.handleCallback(ctx as never, removalConfirm(ctx, 2), receipt);
+
+    expect(body(ctx, 4)).toBe(copy.removal.removedSource('Front door'));
+    expect(bodies(ctx)).not.toContain(copy.removal.removedCamera('Front door'));
+  });
+
+  it('reports a retired camera as a retired camera', async () => {
+    const bench = setup({ sources: [overviewSource()], removed: 'camera' });
+    const { ctx } = await openSourceDetail(bench);
+    await bench.handler.handleCallback(ctx as never, 'rm', receipt);
+
+    await bench.handler.handleCallback(ctx as never, removalConfirm(ctx, 2), receipt);
+
+    expect(body(ctx, 4)).toBe(copy.removal.removedCamera('Front door'));
+    expect(bench.navigation.complete).toHaveBeenCalledTimes(1);
+  });
+
+  /*
+   * Removal needs the revision and the identifier and nothing else. An exact
+   * argument match is what says so: a handler that had loaded a credential to
+   * remove one would have had to put it somewhere, and there is nowhere here.
+   */
+  it('retires without asking for a credential, an address, or a name', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { ctx } = await openSourceDetail(bench);
+    await bench.handler.handleCallback(ctx as never, 'rm', receipt);
+
+    await bench.handler.handleCallback(ctx as never, removalConfirm(ctx, 2), receipt);
+
+    expect(Object.keys(bench.removeRtspSource.execute.mock.calls[0][0]).sort())
+      .toEqual(['actorUserId', 'cameraId', 'expectedRevision']);
+    expect(bench.prompts.createPending).not.toHaveBeenCalled();
+    expect(bench.messages.delete).not.toHaveBeenCalled();
+  });
+
+  it('keeps the source when Keep is pressed, and returns to its detail', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { ctx, selector } = await openSourceDetail(bench);
+    await bench.handler.handleCallback(ctx as never, 'rm', receipt);
+    const keep = screen(ctx, 2).find((button) => button.text === copy.removal.keep);
+
+    await bench.handler.handleCallback(ctx as never, action(keep!.callback_data), receipt);
+
+    expect(action(keep!.callback_data)).toBe(`d:${selector}`);
+    expect(bench.removeRtspSource.execute).not.toHaveBeenCalled();
+    expect(body(ctx, 3)).toContain(copy.detail({
+      cameraName: 'Front door',
+      host: 'camera.local:554',
+      status: copy.statuses['configured-verified'],
+      relationship: copy.relationships.allowed,
+    }));
+  });
+
+  it('reloads the overview when the confirmed selector no longer names a source', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { ctx } = await openSourceDetail(bench);
+    await bench.handler.handleCallback(ctx as never, 'rm', receipt);
+    const confirm = removalConfirm(ctx, 2);
+    bench.overview.execute.mockResolvedValueOnce(overviewPage({ sources: [] }));
+
+    await bench.handler.handleCallback(ctx as never, confirm, receipt);
+
+    expect(bench.removeRtspSource.execute).not.toHaveBeenCalled();
+    expect(body(ctx, 3)).toContain(copy.emptyState.title);
+  });
+
+  it('removes nothing for a receipt that is no longer current', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { ctx } = await openSourceDetail(bench);
+    await bench.handler.handleCallback(ctx as never, 'rm', receipt);
+    const confirm = removalConfirm(ctx, 2);
+    bench.workflows.validateCurrent.mockResolvedValueOnce(false);
+
+    await bench.handler.handleCallback(ctx as never, confirm, receipt);
+
+    expect(bench.removeRtspSource.execute).not.toHaveBeenCalled();
+  });
+
+  it('refuses an administrator demoted between the confirmation and the confirm', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { ctx } = await openSourceDetail(bench);
+    await bench.handler.handleCallback(ctx as never, 'rm', receipt);
+    const confirm = removalConfirm(ctx, 2);
+    const demoted = context({ role: 'user' });
+
+    await bench.handler.handleCallback(demoted as never, confirm, receipt);
+
+    expect(bench.removeRtspSource.execute).not.toHaveBeenCalled();
+    expect(demoted.reply).toHaveBeenCalledWith(catalogFor('en').common.adminRequired);
+  });
+});
+
+/*
+ * ─── Losing the race ───────────────────────────────────────────────────────
+ *
+ * Every stored-source mutation is fenced on a revision the administrator was
+ * shown. When the fence loses, the answer is never "try again with the same
+ * number": the screen re-reads and the administrator decides again against
+ * what is actually there.
+ */
+describe('CameraSourcesHandler conflicts', () => {
+  it('explains and reloads when a replacement lost the race to another replacement', async () => {
+    const source = overviewSource({ revision: 4 });
+    const bench = setup({ sources: [source] });
+    const { ctx } = await openSourceDetail(bench);
+    await bench.handler.handleCallback(ctx as never, 'addr', receipt);
+    bench.replaceRtspSource.execute.mockRejectedValueOnce(new LiveSourceStateChangedError());
+    source.revision = 9;
+
+    const answer = await answerAddress(bench, lastSent(ctx));
+
+    expect(bodies(answer.ctx)).toContain(copy.errors['source-stale']);
+    // Reloaded, not remembered: the detail below came from a fresh read.
+    expect(bodies(answer.ctx)).toContain(copy.detail({
+      cameraName: 'Front door',
+      host: 'camera.local:554',
+      status: copy.statuses['configured-verified'],
+      relationship: copy.relationships.allowed,
+    }));
+    expect(bench.navigation.complete).not.toHaveBeenCalled();
+  });
+
+  it('re-arms the next removal at the revision it just reloaded, never the one that lost', async () => {
+    const source = overviewSource({ revision: 4 });
+    const bench = setup({ sources: [source] });
+    const { ctx, selector } = await openSourceDetail(bench);
+    await bench.handler.handleCallback(ctx as never, 'addr', receipt);
+    bench.replaceRtspSource.execute.mockRejectedValueOnce(new LiveSourceStateChangedError());
+    source.revision = 9;
+    const answer = await answerAddress(bench, lastSent(ctx));
+
+    await bench.handler.handleCallback(answer.ctx as never, 'rm', receipt);
+
+    const confirm = removalConfirm(answer.ctx, answer.ctx.reply.mock.calls.length - 1);
+    expect(confirm).toBe(`rm:y:${selector}:9`);
+    await bench.handler.handleCallback(answer.ctx as never, confirm, receipt);
+    expect(bench.removeRtspSource.execute).toHaveBeenCalledWith(
+      expect.objectContaining({ expectedRevision: 9 }),
+    );
+  });
+
+  it('explains and reloads when a removal lost the race to a replacement', async () => {
+    const source = overviewSource({ revision: 4 });
+    const bench = setup({ sources: [source] });
+    const { ctx } = await openSourceDetail(bench);
+    await bench.handler.handleCallback(ctx as never, 'rm', receipt);
+    const confirm = removalConfirm(ctx, 2);
+    bench.removeRtspSource.execute.mockRejectedValueOnce(new LiveSourceStateChangedError());
+    source.revision = 9;
+
+    await bench.handler.handleCallback(ctx as never, confirm, receipt);
+
+    expect(bodies(ctx)).toContain(copy.errors['source-stale']);
+    expect(bench.navigation.complete).not.toHaveBeenCalled();
+    // And the way forward is the reloaded detail, not a repeat of the lost bet.
+    await bench.handler.handleCallback(ctx as never, 'rm', receipt);
+    expect(removalConfirm(ctx, ctx.reply.mock.calls.length - 1)).toContain(':9');
+  });
+
+  it('tells the same story when the camera itself is gone', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { ctx } = await openSourceDetail(bench);
+    bench.testRtspSource.execute.mockRejectedValueOnce(new CameraNotFoundError('Front door'));
+
+    await bench.handler.handleCallback(ctx as never, 'test', receipt);
+
+    expect(bodies(ctx)).toContain(copy.errors['source-stale']);
+  });
+});
+
+/*
+ * ─── Categorized failure and recovery ──────────────────────────────────────
+ *
+ * Copy comes from `presentCameraSourceError`; the controls are that answer
+ * intersected with what this screen can actually do. `retry` re-runs an
+ * identical request, so it appears only where one still exists — after a
+ * credential reply the address is already deleted, and re-asking for it is
+ * `change-address`, not `retry`.
+ */
+const TEST_FAILURES: readonly [string, unknown, readonly string[]][] = [
+  ['invalid-address', new InvalidLiveSourceError('bad'), ['change-address', 'back']],
+  ['outside-policy', new LiveSourceAddressOutsidePolicyError(), ['change-address', 'back']],
+  ['name-taken', new CameraNameTakenError(), ['back']],
+  ['host-not-found', new LiveSourceHostNotFoundError(), ['retry', 'change-address', 'back']],
+  ['host-unreachable', new LiveSourceHostUnreachableError(), ['retry', 'change-address', 'back']],
+  ['authentication-failed', new LiveSourceAuthenticationRejectedError(), ['change-address', 'back']],
+  ['tls-verification-failed', new LiveSourceTlsVerificationError(), ['change-address', 'back']],
+  ['unsupported-stream', new LiveSourceUnsupportedStreamError(), ['change-address', 'back']],
+  ['timed-out', new LiveSourceProbeTimeoutError(), ['retry', 'change-address', 'back']],
+  ['probe-failed', new Error('rtsp://operator:hunter2@camera.local exploded'), ['retry', 'change-address', 'back']],
+];
+
+describe('CameraSourcesHandler categorized recovery', () => {
+  for (const [kind, error, expected] of TEST_FAILURES) {
+    it(`offers ${expected.join(', ')} for ${kind}`, async () => {
+      const bench = setup({ sources: [overviewSource()] });
+      const { ctx, selector } = await openSourceDetail(bench);
+      bench.testRtspSource.execute.mockRejectedValueOnce(error);
+
+      await bench.handler.handleCallback(ctx as never, 'test', receipt);
+
+      const last = ctx.reply.mock.calls.length - 1;
+      expect(body(ctx, last)).toBe(copy.errors[kind as keyof typeof copy.errors]);
+      const rendered = screen(ctx, last);
+      expect(rendered.map((button) => button.text).filter((text) =>
+        Object.values(copy.actions).includes(text)))
+        .toEqual(expected.map((name) => copy.actions[name as keyof typeof copy.actions]));
+      const targets: Record<string, string> = {
+        retry: 'test',
+        'change-address': 'addr',
+        back: `d:${selector}`,
+      };
+      for (const name of expected) {
+        const button = rendered.find((candidate) => candidate.text === copy.actions[name as keyof typeof copy.actions]);
+        expect(action(button!.callback_data), name).toBe(targets[name]);
+      }
+      // Recovery is only useful while the receipt still is.
+      expect(bench.navigation.complete).not.toHaveBeenCalled();
+      expect(bench.handler.hasPending(100, 42, receipt.id)).toBe(true);
+      expect(sentJson(ctx)).not.toContain('hunter2');
+    });
+  }
+
+  it('drops Change address from a removal failure, which changing an address cannot fix', async () => {
+    const source = overviewSource({ revision: 4 });
+    const bench = setup({ sources: [source] });
+    const { ctx, selector } = await openSourceDetail(bench);
+    await bench.handler.handleCallback(ctx as never, 'rm', receipt);
+    const confirm = removalConfirm(ctx, 2);
+    bench.removeRtspSource.execute.mockRejectedValueOnce(new LiveSourceProbeTimeoutError());
+    // The source moves while the failed removal is being answered. Retry means
+    // "the identical request", and the identical request is fenced on 4 — a
+    // retry re-armed from this read would launder a change nobody confirmed
+    // into an authorized removal, which is the one thing the fence exists for.
+    source.revision = 9;
+
+    await bench.handler.handleCallback(ctx as never, confirm, receipt);
+
+    const last = ctx.reply.mock.calls.length - 1;
+    const rendered = screen(ctx, last);
+    const offered = rendered.map((button) => button.text);
+    expect(offered).toContain(copy.actions.retry);
+    expect(offered).toContain(copy.actions.back);
+    expect(offered).not.toContain(copy.actions['change-address']);
+    expect(action(rendered.find((button) => button.text === copy.actions.retry)!.callback_data))
+      .toBe(`rm:y:${selector}:4`);
+  });
+
+  it('drops Retry from a failed replacement, whose address is already deleted', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { ctx, selector } = await openSourceDetail(bench);
+    await bench.handler.handleCallback(ctx as never, 'addr', receipt);
+    bench.replaceRtspSource.execute.mockRejectedValueOnce(new LiveSourceProbeTimeoutError());
+
+    const answer = await answerAddress(bench, lastSent(ctx));
+
+    const last = answer.ctx.reply.mock.calls.length - 1;
+    expect(body(answer.ctx, last)).toBe(copy.errors['timed-out']);
+    const offered = screen(answer.ctx, last).map((button) => button.text);
+    expect(offered).not.toContain(copy.actions.retry);
+    expect(offered).toContain(copy.actions['change-address']);
+    expect(offered).toContain(copy.actions.back);
+    // T5's hand-off: a failed replacement restores the detail, so Change
+    // address still knows which source it is about.
+    await bench.handler.handleCallback(answer.ctx as never, 'addr', receipt);
+    expect(bench.prompts.created.at(-1)).toMatchObject({ operation: 'replace' });
+    expect(screen(answer.ctx, last).find((button) => button.text === copy.actions.back)!.callback_data)
+      .toContain(`:src:d:${selector}`);
+  });
+
+  it('still renders the feature-state notice, not a recovery keyboard, for an unavailable RTSP', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { ctx } = await openSourceDetail(bench);
+    bench.testRtspSource.execute.mockRejectedValueOnce(new CameraSourceUnavailableError('rtsp-closed'));
+
+    await bench.handler.handleCallback(ctx as never, 'test', receipt);
+
+    const last = ctx.reply.mock.calls.length - 1;
+    expect(body(ctx, last)).toBe(copy.rtspClosed);
+    expect(screen(ctx, last)).toEqual([]);
+  });
+});
+
+/*
+ * ─── The one failure this screen cannot fix ────────────────────────────────
+ *
+ * A stale network policy is not an address problem, so the only honest control
+ * is the feature workflow's own reinstall — and it is a *handoff*, not a second
+ * mutation path: the existing receipt-bound confirmation screen opens, and
+ * nothing is installed until the administrator confirms there.
+ */
+describe('CameraSourcesHandler policy-stale handoff', () => {
+  async function failWithStalePolicy(bench: Bench) {
+    const opened = await openSourceDetail(bench);
+    bench.testRtspSource.execute.mockRejectedValueOnce(new RtspPolicyDigestMismatchError('digest'));
+    await bench.handler.handleCallback(opened.ctx as never, 'test', receipt);
+    return opened;
+  }
+
+  it('offers Reinstall RTSP, and only for a stale policy', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+
+    const { ctx } = await failWithStalePolicy(bench);
+
+    const last = ctx.reply.mock.calls.length - 1;
+    expect(body(ctx, last)).toBe(copy.errors['policy-stale']);
+    const rendered = screen(ctx, last);
+    const reinstall = rendered.find((button) => button.text === copy.actions['reinstall-rtsp']);
+    expect(reinstall).toBeDefined();
+    expect(action(reinstall!.callback_data)).toBe('ri');
+    expect(rendered.map((button) => button.text)).not.toContain(copy.actions.retry);
+    expect(rendered.map((button) => button.text)).not.toContain(copy.actions['change-address']);
+  });
+
+  it('offers it for no other failure kind', async () => {
+    for (const [, error] of TEST_FAILURES) {
+      const bench = setup({ sources: [overviewSource()] });
+      const { ctx } = await openSourceDetail(bench);
+      bench.testRtspSource.execute.mockRejectedValueOnce(error);
+
+      await bench.handler.handleCallback(ctx as never, 'test', receipt);
+
+      expect(labels(ctx)).not.toContain(copy.actions['reinstall-rtsp']);
+    }
+  });
+
+  it('hands the administrator to the existing confirmation and mutates nothing itself', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { ctx } = await failWithStalePolicy(bench);
+
+    await bench.handler.handleCallback(ctx as never, 'ri', receipt);
+
+    expect(bench.features.handleRtspReinstallEntry).toHaveBeenCalledWith(ctx);
+    expect(bench.replaceRtspSource.execute).not.toHaveBeenCalled();
+    expect(bench.removeRtspSource.execute).not.toHaveBeenCalled();
+    expect(bench.createRtspCamera.execute).not.toHaveBeenCalled();
+    expect(bench.attachRtspSource.execute).not.toHaveBeenCalled();
+    expect(bench.prompts.createPending).not.toHaveBeenCalled();
+    // The sources screen is over for this receipt; the feature workflow owns
+    // the conversation from here.
+    expect(bench.handler.hasPending(100, 42, receipt.id)).toBe(false);
+  });
+
+  it('hands off even while RTSP itself reports unready, which is the point of reinstalling', async () => {
+    const availability: FeatureAvailabilityPort = {
+      awaitInitialVerification: vi.fn(),
+      inspect: vi.fn(),
+      requireReady: vi.fn().mockRejectedValue(new FeatureUnavailableError('rtsp', 'needs-attention')),
+    };
+    const bench = setup({ sources: [overviewSource()], availability });
+    const ctx = context();
+
+    await bench.handler.handleCallback(ctx as never, 'ri', receipt);
+
+    expect(bench.features.handleRtspReinstallEntry).toHaveBeenCalledWith(ctx);
+  });
+
+  it('says so rather than throwing when no feature workflow is wired', async () => {
+    const bench = setup({ sources: [overviewSource()], features: false });
+    const { ctx } = await failWithStalePolicy(bench);
+
+    await bench.handler.handleCallback(ctx as never, 'ri', receipt);
+
+    expect(bodies(ctx)).toContain(copy.errors['feature-unavailable']);
+  });
+
+  it('refuses the handoff to a non-administrator', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+
+    await bench.handler.handleCallback(context({ role: 'user' }) as never, 'ri', receipt);
+
+    expect(bench.features.handleRtspReinstallEntry).not.toHaveBeenCalled();
+  });
+});
+
+describe('CameraSourcesHandler lifecycle callbacks', () => {
+  it('carries no name, camera id, address or credential, and stays inside 64 bytes', async () => {
+    const bench = setup({ sources: [overviewSource({ revision: Number.MAX_SAFE_INTEGER })] });
+    const { ctx } = await openSourceDetail(bench);
+    await bench.handler.handleCallback(ctx as never, 'rm', receipt);
+    bench.testRtspSource.execute.mockRejectedValueOnce(new RtspPolicyDigestMismatchError('digest'));
+    await bench.handler.handleCallback(ctx as never, 'test', receipt);
+
+    const data = keyboardData(ctx);
+    expect(data.some((value) => value.includes(`:src:rm:y:`))).toBe(true);
+    expect(data.some((value) => value.endsWith(':src:ri'))).toBe(true);
+    for (const value of data) {
+      expect(Buffer.byteLength(value, 'utf8'), value).toBeLessThanOrEqual(64);
+      expect(value, value).not.toContain('camera-with-private-id');
+      expect(value, value).not.toContain('Front door');
+      expect(value, value).not.toMatch(/rtsps?:/iu);
+      expect(value, value).not.toContain('@');
+    }
+  });
+
+  /*
+   * The widest revision that can exist, routed rather than merely rendered.
+   * The confirm arm bounds the decimal, and a bound one digit short would
+   * render this control and then refuse to act on it — which looks exactly
+   * like a stale button and would never be reported as a bug.
+   */
+  it('routes a confirmation carrying the widest revision a source can have', async () => {
+    const bench = setup({ sources: [overviewSource({ revision: Number.MAX_SAFE_INTEGER })] });
+    const { ctx } = await openSourceDetail(bench);
+    await bench.handler.handleCallback(ctx as never, 'rm', receipt);
+    const confirm = removalConfirm(ctx, 2);
+    expect(confirm).toContain(`:${Number.MAX_SAFE_INTEGER}`);
+
+    await bench.handler.handleCallback(ctx as never, confirm, receipt);
+
+    expect(bench.removeRtspSource.execute).toHaveBeenCalledWith(
+      expect.objectContaining({ expectedRevision: Number.MAX_SAFE_INTEGER }),
+    );
+  });
+
+  it('acts on no confirmation whose revision could not be a revision', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { ctx, selector } = await openSourceDetail(bench);
+    const replies = ctx.reply.mock.calls.length;
+
+    for (const forged of [
+      `rm:y:${selector}:00000000000000000`,
+      // Sixteen digits, so the shape passes — but larger than any revision
+      // JavaScript can count to, which is the guard behind the regex.
+      `rm:y:${selector}:9999999999999999`,
+      `rm:y:${selector}:-1`,
+      `rm:y:${selector}:1.5`,
+      `rm:y:${selector}:`,
+      'rm:y::4',
+    ]) {
+      await bench.handler.handleCallback(ctx as never, forged, receipt);
+    }
+
+    expect(bench.removeRtspSource.execute).not.toHaveBeenCalled();
+    expect(ctx.reply).toHaveBeenCalledTimes(replies);
+  });
+});
+
+/*
+ * ─── A prompt no row can back must never reach the chat ────────────────────
+ *
+ * The worst outcome this workflow has is not a failed install: it is an armed
+ * ForceReply that nothing will claim. `handleText` matches a reply against a
+ * durable row, so a prompt sent without one is answered with a credential that
+ * `promptFor` cannot find, that the next handler receives, and that nothing
+ * ever deletes — leaving the camera password sitting in the chat.
+ *
+ * Two layers keep that unreachable. A stored camera *name* is filtered before
+ * it is offered to the model, and the whole selection is checked against the
+ * model itself before the first message is sent.
+ */
+
+/** How many rendered messages armed a ForceReply. */
+function forceReplies(ctx: ReturnType<typeof context>): number {
+  return (ctx.reply.mock.calls as unknown[][]).filter((call) => {
+    const options = call[1];
+    return isRecord(options) && isRecord(options.reply_markup) && options.reply_markup.force_reply === true;
+  }).length;
+}
+
+/**
+ * The `message_id` of the ForceReply this context armed.
+ *
+ * Not `lastSent`: a prompt that is retracted is followed by the failure notice,
+ * so the last message sent is the explanation rather than the prompt. Naming
+ * the armed message by its markup is what keeps the retraction assertion about
+ * the prompt and not about whatever was rendered after it.
+ */
+function armedPrompt(ctx: ReturnType<typeof context>): number {
+  const index = (ctx.reply.mock.calls as unknown[][]).findIndex((call) => {
+    const options = call[1];
+    return isRecord(options) && isRecord(options.reply_markup) && options.reply_markup.force_reply === true;
+  });
+  if (index < 0) throw new Error('the handler armed no prompt');
+  return ctx.sent[index];
+}
+
+/** Shapes the durable model refuses outright, one per clause of its guard. */
+const REFUSED_TEXT: readonly [string, string][] = [
+  ['userinfo', 'cam@front'],
+  ['a url', 'cam://front'],
+  ['an rtsp scheme', 'rtsp:front'],
+  ['blank', '   '],
+  ['a control character', 'cam\u0001front'],
+  ['overlong', 'c'.repeat(200)],
+];
+
+describe('CameraSourcesHandler prompts nothing it cannot claim', () => {
+  /*
+   * Layer one. A camera name is chosen by a human and validated more loosely
+   * where cameras are created than the prompt row accepts, so it is filtered
+   * rather than trusted — the row names the camera by identifier anyway.
+   */
+  for (const [label, cameraName] of REFUSED_TEXT) {
+    it(`still opens a claimable attach prompt for a camera named with ${label}`, async () => {
+      const bench = setup({
+        sources: [],
+        attachCandidates: [{ cameraId: 'camera-hallway-private-id', cameraName }],
+      });
+      const ctx = context();
+      await bench.handler.handleEntry(ctx as never, { receipt });
+      await bench.handler.handleCallback(ctx as never, 'add', receipt);
+      await bench.handler.handleCallback(ctx as never, 'add:a', receipt);
+      const chosen = screen(ctx, 2).find((button) => button.callback_data.includes(':src:add:s:'));
+
+      await bench.handler.handleCallback(ctx as never, action(chosen!.callback_data), receipt);
+
+      expect(forceReplies(ctx)).toBe(1);
+      expect(bench.prompts.created).toHaveLength(1);
+      expect(bench.prompts.created[0]).toMatchObject({
+        operation: 'attach',
+        cameraId: 'camera-hallway-private-id',
+        displayName: null,
+      });
+      // And the prompt it armed is claimable, which is the whole point.
+      const answer = await answerAddress(bench, lastSent(ctx));
+      expect(answer.claimed).toBe(true);
+      expect(bench.messages.delete).toHaveBeenCalledWith(42, 600);
+    });
+
+    it(`still opens a claimable replace prompt for a source named with ${label}`, async () => {
+      const bench = setup({ sources: [overviewSource({ cameraName })] });
+      const { ctx } = await openSourceDetail(bench);
+
+      await bench.handler.handleCallback(ctx as never, 'addr', receipt);
+
+      expect(forceReplies(ctx)).toBe(1);
+      expect(bench.prompts.created[0]).toMatchObject({
+        operation: 'replace',
+        cameraId: 'camera-with-private-id',
+        displayName: null,
+        expectedRevision: 4,
+      });
+      const answer = await answerAddress(bench, lastSent(ctx));
+      expect(answer.claimed).toBe(true);
+      expect(bench.replaceRtspSource.execute).toHaveBeenCalledWith(
+        expect.objectContaining({ expectedRevision: 4 }),
+      );
+    });
+  }
+
+  /*
+   * Layer two, and the reason layer one is not enough on its own: a camera
+   * *identifier* cannot be filtered — the row has to name the camera by it —
+   * and identifiers are opaque, with YAML-seeded ones surviving from before
+   * they were minted. So the selection is checked against the model before
+   * anything is sent, and a refusal costs the administrator a message they can
+   * act on rather than a credential they cannot retract.
+   */
+  for (const [label, cameraId] of REFUSED_TEXT) {
+    it(`sends no prompt at all for a camera identified with ${label}`, async () => {
+      const bench = setup({
+        sources: [],
+        attachCandidates: [{ cameraId, cameraName: 'Hallway' }],
+      });
+      const ctx = context();
+      await bench.handler.handleEntry(ctx as never, { receipt });
+      await bench.handler.handleCallback(ctx as never, 'add', receipt);
+      await bench.handler.handleCallback(ctx as never, 'add:a', receipt);
+      const chosen = screen(ctx, 2).find((button) => button.callback_data.includes(':src:add:s:'));
+
+      await bench.handler.handleCallback(ctx as never, action(chosen!.callback_data), receipt);
+
+      expect(forceReplies(ctx)).toBe(0);
+      expect(bench.prompts.createPending).not.toHaveBeenCalled();
+      // Not even the notice: it exists to precede a prompt that is coming.
+      expect(bodies(ctx)).not.toContain(copy.prompts.credential);
+      expect(bodies(ctx)).not.toContain('🔒');
+      expect(bodies(ctx)).toContain(copy.errors['probe-failed']);
+
+      // And an address typed at the failure anyway is claimed by nobody, which
+      // is safe precisely because no prompt was ever armed to invite it.
+      const stray = context({ text: SECRET_URL, messageId: 600, replyTo: lastSent(ctx) });
+      await expect(bench.handler.handleText(stray as never)).resolves.toBe(false);
+      expect(bench.messages.delete).not.toHaveBeenCalled();
+    });
+  }
+
+  /*
+   * The same hole reached through a different door. The shape was already
+   * accepted, so the store itself refused — and a ForceReply is already in the
+   * chat. It is retracted rather than left inviting a credential that no row
+   * could ever claim.
+   */
+  it('retracts the prompt it just sent when the durable row cannot be written', async () => {
+    const prompts = promptStore();
+    prompts.createPending.mockRejectedValueOnce(new Error('database is locked'));
+    const bench = setup({ sources: [overviewSource()], prompts });
+    const { ctx } = await openSourceDetail(bench);
+
+    await bench.handler.handleCallback(ctx as never, 'addr', receipt);
+
+    const armed = armedPrompt(ctx);
+    expect(bench.messages.delete).toHaveBeenCalledWith(42, armed);
+    // Retracted first, explained second: the order the administrator needs.
+    expect(bench.messages.delete.mock.invocationCallOrder[0]).toBeLessThan(
+      (ctx.reply.mock.invocationCallOrder).at(-1)!,
+    );
+    expect(bodies(ctx)).toContain(copy.errors['probe-failed']);
+    const stray = context({ text: SECRET_URL, messageId: 600, replyTo: armed });
+    await expect(bench.handler.handleText(stray as never)).resolves.toBe(false);
+    expect(bench.replaceRtspSource.execute).not.toHaveBeenCalled();
+  });
+
+  it('retries the retraction once when Telegram refuses it', async () => {
+    const prompts = promptStore();
+    prompts.createPending.mockRejectedValueOnce(new Error('database is locked'));
+    const bench = setup({ sources: [overviewSource()], prompts });
+    bench.messages.delete
+      .mockRejectedValueOnce(new CameraSourceMessageDeletionError())
+      .mockResolvedValueOnce(undefined);
+    const { ctx } = await openSourceDetail(bench);
+
+    await bench.handler.handleCallback(ctx as never, 'addr', receipt);
+
+    expect(bench.messages.delete).toHaveBeenCalledTimes(2);
+  });
+});
+
+
+/*
+ * ─── Routing has to outlive the screen ─────────────────────────────────────
+ *
+ * A durable row is not enough on its own. `handleText` learns which receipt a
+ * reply belongs to from `promptFor`, so a prompt whose *routing* entry is gone
+ * lands in exactly the state the pre-send checks exist to prevent: the row is
+ * `pending` and would claim cleanly, but nothing looks it up, the reply is
+ * handed to the next handler, and the credential is never deleted.
+ *
+ * These are interleavings rather than sequences, which is what every other test
+ * in this file is. An address prompt is armed and then something ordinary
+ * happens in the chat before the administrator answers it — Telegram keeps old
+ * inline keyboards live forever, so pressing one is not an edge case.
+ */
+describe('CameraSourcesHandler keeps a prompt routable across other screens', () => {
+  /** Arms an address prompt from the detail of the one source. */
+  async function armReplace(bench: Bench) {
+    const opened = await openSourceDetail(bench);
+    await bench.handler.handleCallback(opened.ctx as never, 'addr', receipt);
+    bench.messages.delete.mockClear();
+    return { ctx: opened.ctx, promptMessageId: lastSent(opened.ctx) };
+  }
+
+  const INTERRUPTIONS: readonly [string, (bench: Bench, ctx: ReturnType<typeof context>) => Promise<void>][] = [
+    ['a stale overview button is pressed', async (bench, ctx) => {
+      await bench.handler.handleCallback(ctx as never, 'over', receipt);
+    }],
+    ['a stale source row is pressed', async (bench, ctx) => {
+      const row = screen(ctx, 0).find((button) => button.callback_data.includes(':src:d:'));
+      await bench.handler.handleCallback(ctx as never, action(row!.callback_data), receipt);
+    }],
+    ['Sources is re-opened from the dashboard', async (bench, ctx) => {
+      await bench.handler.handleEntry(ctx as never, { receipt });
+    }],
+  ];
+
+  for (const [label, interrupt] of INTERRUPTIONS) {
+    it(`still claims and deletes an address answered after ${label}`, async () => {
+      const bench = setup({ sources: [overviewSource()] });
+      const armed = await armReplace(bench);
+
+      await interrupt(bench, armed.ctx);
+      const answer = await answerAddress(bench, armed.promptMessageId);
+
+      expect(answer.claimed).toBe(true);
+      expect(bench.messages.delete).toHaveBeenCalledWith(42, 600);
+      expect(bench.replaceRtspSource.execute).toHaveBeenCalledWith(
+        expect.objectContaining({ expectedRevision: 4 }),
+      );
+    });
+
+    it(`still claims a name answered after ${label}`, async () => {
+      const bench = setup({ sources: [overviewSource()] });
+      const ctx = context();
+      await bench.handler.handleEntry(ctx as never, { receipt });
+      await bench.handler.handleCallback(ctx as never, 'add', receipt);
+      const promptMessageId = lastSent(ctx);
+
+      await interrupt(bench, ctx);
+      const naming = context({ text: 'Side gate', messageId: 500, replyTo: promptMessageId });
+
+      await expect(bench.handler.handleText(naming as never)).resolves.toBe(true);
+      expect(bench.prompts.created.at(-1)).toMatchObject({ phase: 'credential', displayName: 'Side gate' });
+    });
+  }
+
+  /*
+   * The other half of the same rule, and the reason the routing entry cannot
+   * simply be made immortal: one workflow at a time per chat. A prompt left
+   * over from a *superseded* receipt must still find nothing, because resuming
+   * it would run an install the administrator has already navigated away from.
+   */
+  it('still refuses a reply to a prompt whose workflow was superseded', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const armed = await armReplace(bench);
+    const newer = { ...receipt, id: 'zyxwvutsrqponmlk' };
+
+    await bench.handler.handleEntry(context() as never, { receipt: newer });
+    const answer = await answerAddress(bench, armed.promptMessageId);
+
+    expect(answer.claimed).toBe(false);
+    expect(bench.replaceRtspSource.execute).not.toHaveBeenCalled();
+  });
+});
+
+/*
+ * ─── Leaving the workflow ends its prompts ─────────────────────────────────
+ *
+ * A prompt now outlives the screen that armed it, which is the point — but not
+ * the workflow itself. `ri` is reachable while an address prompt is open: a
+ * *test* failure renders it without consuming anything, so pressing Change
+ * address and then the older Reinstall control is an ordinary sequence.
+ *
+ * Forgetting the prompt there would leave a ForceReply nothing can claim;
+ * remembering it would let a workflow the administrator has left run an
+ * install after they left it. So the message is retracted, and the routing is
+ * dropped only once it is provably gone.
+ */
+describe('CameraSourcesHandler retracts prompts it walks away from', () => {
+  async function armAddressThenStalePolicy(bench: Bench) {
+    const opened = await openSourceDetail(bench);
+    bench.testRtspSource.execute.mockRejectedValueOnce(new RtspPolicyDigestMismatchError('digest'));
+    await bench.handler.handleCallback(opened.ctx as never, 'test', receipt);
+    await bench.handler.handleCallback(opened.ctx as never, 'addr', receipt);
+    const promptMessageId = lastSent(opened.ctx);
+    bench.messages.delete.mockClear();
+    return { ctx: opened.ctx, promptMessageId };
+  }
+
+  it('deletes the open address prompt before handing over, and installs nothing afterwards', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const armed = await armAddressThenStalePolicy(bench);
+
+    await bench.handler.handleCallback(armed.ctx as never, 'ri', receipt);
+
+    expect(bench.messages.delete).toHaveBeenCalledWith(42, armed.promptMessageId);
+    expect(bench.features.handleRtspReinstallEntry).toHaveBeenCalledWith(armed.ctx);
+    expect(bench.messages.delete.mock.invocationCallOrder[0]).toBeLessThan(
+      bench.features.handleRtspReinstallEntry.mock.invocationCallOrder[0],
+    );
+
+    // The prompt is gone, so an address answered at it afterwards runs nothing.
+    const answer = await answerAddress(bench, armed.promptMessageId);
+    expect(bench.replaceRtspSource.execute).not.toHaveBeenCalled();
+    expect(answer.claimed).toBe(false);
+  });
+
+  /*
+   * The residual, handled rather than assumed away. If Telegram will not delete
+   * the prompt it is still in the chat and still answerable, so its routing is
+   * kept: the durable row is terminal, `claimReply` answers `late`, and the
+   * reply is deleted as cleanup without authorising anything.
+   */
+  it('keeps the prompt routable for cleanup when the retraction fails', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const armed = await armAddressThenStalePolicy(bench);
+    bench.messages.delete.mockRejectedValue(new CameraSourceMessageDeletionError());
+
+    await bench.handler.handleCallback(armed.ctx as never, 'ri', receipt);
+    bench.messages.delete.mockReset();
+    bench.messages.delete.mockResolvedValue(undefined);
+    const answer = await answerAddress(bench, armed.promptMessageId);
+
+    expect(answer.claimed).toBe(true);
+    expect(bench.messages.delete).toHaveBeenCalledWith(42, 600);
+    expect(bench.replaceRtspSource.execute).not.toHaveBeenCalled();
+  });
+});
+
+/*
+ * The residual of the retraction in `rememberPrompt`, which needs two
+ * independent failures — the store refusing the row *and* both delete attempts
+ * failing — but lands in exactly the state layer three exists to prevent if it
+ * is left alone. The prompt is still armed and still answerable, so its routing
+ * is kept and the reply is claimed for deletion even though no row was written.
+ */
+describe('CameraSourcesHandler when a prompt cannot be retracted', () => {
+  function stuck() {
+    const prompts = promptStore();
+    prompts.createPending.mockRejectedValueOnce(new Error('database is locked'));
+    const bench = setup({ sources: [overviewSource()], prompts });
+    bench.messages.delete.mockRejectedValue(new CameraSourceMessageDeletionError());
+    return bench;
+  }
+
+  it('still deletes an address replied to a prompt that no row backs', async () => {
+    const bench = stuck();
+    const { ctx } = await openSourceDetail(bench);
+    await bench.handler.handleCallback(ctx as never, 'addr', receipt);
+    const armed = armedPrompt(ctx);
+    bench.messages.delete.mockReset();
+    bench.messages.delete.mockResolvedValue(undefined);
+
+    const answer = await answerAddress(bench, armed);
+
+    expect(answer.claimed).toBe(true);
+    expect(bench.messages.delete).toHaveBeenCalledWith(42, 600);
+    // Cleanup only: no row authorised anything.
+    expect(bench.replaceRtspSource.execute).not.toHaveBeenCalled();
+    expect(bench.createRtspCamera.execute).not.toHaveBeenCalled();
+  });
+
+  it('drops the routing when the retraction does succeed, so nothing lingers', async () => {
+    const prompts = promptStore();
+    prompts.createPending.mockRejectedValueOnce(new Error('database is locked'));
+    const bench = setup({ sources: [overviewSource()], prompts });
+    const { ctx } = await openSourceDetail(bench);
+
+    await bench.handler.handleCallback(ctx as never, 'addr', receipt);
+
+    const answer = await answerAddress(bench, armedPrompt(ctx));
+    expect(answer.claimed).toBe(false);
+  });
+});
+
+/*
+ * Answering the same address prompt twice.
+ *
+ * The durable compare-and-swap refuses to install anything a second time, but
+ * the second message is still a pasted credential and still has to leave the
+ * chat. That cleanup is reached only if the reply is routed at all, which is
+ * why answering a prompt does not spend its routing.
+ */
+describe('CameraSourcesHandler second replies', () => {
+  it('deletes an address pasted twice at the same prompt, and installs once', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { promptMessageId } = await openCredentialPrompt(bench);
+    await answerAddress(bench, promptMessageId);
+    bench.messages.delete.mockClear();
+    bench.createRtspCamera.execute.mockClear();
+
+    const again = await answerAddress(bench, promptMessageId, { messageId: 601 });
+
+    expect(again.claimed).toBe(true);
+    expect(bench.messages.delete).toHaveBeenCalledWith(42, 601);
+    expect(bench.createRtspCamera.execute).not.toHaveBeenCalled();
+    expect(bench.attachRtspSource.execute).not.toHaveBeenCalled();
+    expect(bench.replaceRtspSource.execute).not.toHaveBeenCalled();
+  });
+
+  it('retries that deletion once when Telegram refuses it', async () => {
+    const bench = setup({ sources: [overviewSource()] });
+    const { promptMessageId } = await openCredentialPrompt(bench);
+    await answerAddress(bench, promptMessageId);
+    bench.messages.delete.mockClear();
+    bench.messages.delete
+      .mockRejectedValueOnce(new CameraSourceMessageDeletionError())
+      .mockResolvedValueOnce(undefined);
+
+    await answerAddress(bench, promptMessageId, { messageId: 601 });
+
+    expect(bench.messages.delete).toHaveBeenCalledTimes(2);
   });
 });

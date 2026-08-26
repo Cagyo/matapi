@@ -155,6 +155,27 @@ export class FeatureHandler implements TelegramHandler, FeatureInstallOutcomePor
     ));
   }
 
+  /**
+   * The RTSP source screens' one way out of a stale network policy.
+   *
+   * Deliberately an *entry*, not an operation: it opens the same receipt-bound
+   * reinstall confirmation `ft:r:<receipt>:r` opens, bound to a snapshot read
+   * here and now, and installs nothing. The administrator still confirms on
+   * that screen, so the source workflow hands the conversation over rather than
+   * starting a second mutation path of its own.
+   *
+   * Origin is `natural-parent` rather than the camera receipt this was reached
+   * from: `begin` supersedes the caller's receipt, and a feature workflow that
+   * claimed to return into a camera screen would be promising a return the
+   * feature module cannot make.
+   */
+  async handleRtspReinstallEntry(ctx: TelegramContext): Promise<void> {
+    if (currentWorkflowIdentity(ctx)?.role !== 'admin') return this.stale(ctx);
+    const receipt = await this.beginList(ctx);
+    if (!receipt) return this.stale(ctx);
+    await this.openDetail(ctx, receipt, 'rtsp', 'reinstall');
+  }
+
   private async handleCallback(ctx: TelegramContext): Promise<void> {
     const parsed = parseCallback(ctx.callbackQuery?.data ?? '');
     const identity = currentWorkflowIdentity(ctx);

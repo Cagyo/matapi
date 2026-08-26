@@ -7,6 +7,7 @@ import type {
 import type { RtspSourcePolicyNetwork } from '../../camera/domain/ports/live-source-policy-evaluator.port';
 import type { LocaleCatalog } from '../../locales';
 import { workflowReturnCallback } from '../domain/workflow-return';
+import type { CameraSourceRecoveryAction } from './camera-source-error.presenter';
 
 /**
  * Everything the RTSP source screens render, and nothing they decide.
@@ -197,6 +198,101 @@ export function detailsKeyboard(
       ...returnRow(home, receiptId, { origin: false }),
     ],
   ]);
+}
+
+/**
+ * The removal question, in whichever of its two readings applies.
+ *
+ * `removesCamera` is the caller's prediction, derived from the camera type the
+ * Camera boundary itself decides on. It names the *question*; the answer's copy
+ * is chosen from what the boundary reports it actually retired, which is why
+ * nothing here renders an outcome.
+ */
+export function removalBody(
+  copy: CameraSourceCopy,
+  cameraName: string,
+  removesCamera: boolean,
+): string {
+  return removesCamera ? copy.removal.confirmCamera(cameraName) : copy.removal.confirmSource(cameraName);
+}
+
+/**
+ * The confirmation's controls.
+ *
+ * The confirm button carries the revision this screen was rendered from, so
+ * the compare-and-swap is armed by the screen the administrator actually read
+ * rather than by whatever the process happens to remember when they press it.
+ * Keeping it in the callback is also what makes the fence visible: a removal
+ * that re-read the revision at confirm time would be no fence at all.
+ */
+export function removalKeyboard(
+  copy: CameraSourceCopy,
+  home: WorkflowReturnCopy,
+  receiptId: string,
+  selector: string,
+  revision: number,
+  removesCamera: boolean,
+): InlineKeyboard {
+  return keyboardOf([
+    [
+      {
+        text: removesCamera ? copy.removal.removeCameraButton : copy.removal.removeSourceButton,
+        callback_data: sourceCallback(receiptId, removalConfirmAction(selector, revision)),
+      },
+    ],
+    [
+      { text: copy.removal.keep, callback_data: sourceCallback(receiptId, `d:${selector}`) },
+      ...returnRow(home, receiptId, { origin: false }),
+    ],
+  ]);
+}
+
+/** The one action that retires a source, and the only place its shape is written. */
+export function removalConfirmAction(selector: string, revision: number): string {
+  return `rm:y:${selector}:${revision}`;
+}
+
+/** The action a `reinstall-rtsp` control carries. Receipt-bound like every other. */
+export const REINSTALL_ACTION = 'ri';
+
+/**
+ * Where each recovery control goes, for the screen that is offering it.
+ *
+ * `null` means this screen cannot honour that action, and the button is left
+ * out rather than rendered inert: after a credential reply the address has
+ * already been deleted, so there is no identical request left for `retry` to
+ * re-run, and a removal cannot be repaired by changing an address.
+ * `reinstall-rtsp` has no entry because it never varies — it is the feature
+ * workflow's own entry, wherever it is offered from.
+ */
+export interface CameraSourceRecoveryTargets {
+  retry: string | null;
+  'change-address': string | null;
+  back: string;
+}
+
+/**
+ * A failure's controls: the presenter's answer for that failure kind, narrowed
+ * to what this screen can actually do, and then Home.
+ *
+ * It takes a list of action names rather than an error, exactly like every
+ * other function here — classification happened at `presentCameraSourceError`,
+ * and nothing on this side of that boundary may see a rejection.
+ */
+export function recoveryKeyboard(
+  copy: CameraSourceCopy,
+  home: WorkflowReturnCopy,
+  receiptId: string,
+  actions: readonly CameraSourceRecoveryAction[],
+  targets: CameraSourceRecoveryTargets,
+): InlineKeyboard {
+  const row: CallbackButton[] = [];
+  for (const name of actions) {
+    const target = name === 'reinstall-rtsp' ? REINSTALL_ACTION : targets[name];
+    if (target === null) continue;
+    row.push({ text: copy.actions[name], callback_data: sourceCallback(receiptId, target) });
+  }
+  return keyboardOf([row, returnRow(home, receiptId, { origin: false })]);
 }
 
 /** The Add fork, shown only when attaching to an existing camera is possible. */

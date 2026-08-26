@@ -184,6 +184,78 @@ describe('FeatureHandler', () => {
       expect(receipt.id).toHaveLength(16);
     });
 
+    /*
+     * The entry the RTSP source screens hand off to.
+     *
+     * It exists so a stale-policy failure has exactly one way forward, and so
+     * that way is *this* screen: the confirmation the feature workflow already
+     * owns, bound to a freshly read snapshot. Nothing is installed by opening
+     * it — the administrator still has to confirm — which is what keeps the
+     * handoff from being a second mutation path.
+     */
+    describe('entry from the RTSP source screens', () => {
+      it('opens the existing confirmation without installing anything', async () => {
+        const { handler, ctx, detail, install, workflows } = setup();
+        detail.execute.mockResolvedValue(installedRtsp());
+
+        await handler.handleRtspReinstallEntry(ctx as never);
+
+        expect(detail.execute).toHaveBeenLastCalledWith('rtsp');
+        const catalog = catalogFor('en').feature;
+        expect(labels(ctx)).toContain(catalog.confirmation.reinstall('RTSP camera', catalog.restartScope.supervisor));
+        expect(ctx.reply.mock.calls.at(-1)![0]).toContain(catalog.reinstallNotice);
+        expect(workflows.begin).toHaveBeenCalledWith(ctx, 'feature', expect.anything(), expect.objectContaining({
+          feature: 'rtsp', action: 'reinstall',
+        }));
+        // The confirmation is the whole of it: no install, enable, disable or
+        // verification is dispatched by opening the screen.
+        expect(install.execute).not.toHaveBeenCalled();
+      });
+
+      it('binds the confirmation to a snapshot read now, not to anything the caller held', async () => {
+        const { handler, ctx, detail, workflows } = setup();
+        detail.execute.mockResolvedValue({
+          ...installedRtsp(),
+          status: { ...installedRtsp().status, enabled: false, display: 'installed-off' },
+        });
+
+        await handler.handleRtspReinstallEntry(ctx as never);
+
+        expect(workflows.begin).toHaveBeenCalledWith(ctx, 'feature', expect.anything(), expect.objectContaining({
+          expectedInstalled: true, expectedEnabled: false,
+        }));
+      });
+
+      it('reports an RTSP that cannot be reinstalled instead of guessing one', async () => {
+        const { handler, ctx, detail, install } = setup();
+        detail.execute.mockResolvedValue({
+          status: {
+            name: 'rtsp', installed: false, enabled: false, ready: false, busy: false,
+            attentionReason: null, display: 'not-installed', action: 'install', secondaryAction: null,
+          },
+          impact: { dependencies: 'rtsp-runtime', controls: 'live-streams', monitoring: 'camera-work', restartScope: 'worker' },
+          secondary: null,
+        });
+
+        await handler.handleRtspReinstallEntry(ctx as never);
+
+        expect(ctx.reply).toHaveBeenCalledWith(catalogFor('en').feature.errors.reinstallUnavailable('RTSP camera'));
+        expect(install.execute).not.toHaveBeenCalled();
+      });
+
+      it('refuses a caller who is not the current administrator', async () => {
+        const { handler, ctx, detail, workflows } = setup();
+
+        await handler.handleRtspReinstallEntry({
+          ...ctx,
+          localeState: { ...ctx.localeState, user: { telegramId: 7, role: 'user' } },
+        } as never);
+
+        expect(detail.execute).not.toHaveBeenCalled();
+        expect(workflows.begin).not.toHaveBeenCalled();
+      });
+    });
+
     it('acknowledges a reinstall control that names no feature without opening anything', async () => {
       const { handler, ctx, workflows } = setup();
       let callbackHandler: ((ctx: typeof ctx) => Promise<void>) | undefined;

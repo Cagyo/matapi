@@ -1330,7 +1330,6 @@ const enCatalog = {
       },
       progress: {
         testing: '⏳ Testing connection…',
-        saving: '⏳ Saving the camera source…',
         removing: '⏳ Removing the camera source…',
       },
 

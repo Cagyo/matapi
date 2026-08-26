@@ -123,6 +123,56 @@ describe('CameraSourceViewStore identity', () => {
   });
 
   /*
+   * Routing outlives the screen. A prompt is keyed by the message it forces a
+   * reply to, so rendering another screen of the *same* workflow — an overview
+   * reloaded by a stale button, a detail re-opened — cannot displace it. When
+   * these shared a key, every such render silently orphaned a live credential
+   * prompt: the durable row stayed claimable, but nothing looked it up.
+   */
+  it('keeps a prompt while the same workflow renders other screens', () => {
+    const { store, now } = storeAt();
+    store.set(contextFor(), {
+      kind: 'prompt', receipt, promptMessageId: 900, phase: 'credential', page: 3, createdAtMs: now(),
+    });
+
+    store.set(contextFor(), { kind: 'overview', receipt, page: 1, createdAtMs: now() });
+    store.set(contextFor(), {
+      kind: 'detail', receipt, selector: 'AAAAAAAAAAAA', revision: 4, page: 1, createdAtMs: now(),
+    });
+
+    expect(store.promptFor(ADMIN, CHAT, 900)?.page).toBe(3);
+  });
+
+  /* `clear` names a receipt's *screen*; the prompt it armed is not one. */
+  it('keeps a prompt when the screen behind it is cleared', () => {
+    const { store, now } = storeAt();
+    store.set(contextFor(), { kind: 'overview', receipt, page: 1, createdAtMs: now() });
+    store.set(contextFor(), {
+      kind: 'prompt', receipt, promptMessageId: 900, phase: 'credential', page: 1, createdAtMs: now(),
+    });
+
+    store.clear(contextFor(), receipt.id);
+
+    expect(store.promptFor(ADMIN, CHAT, 900)).toBeDefined();
+    expect(store.hasPending(ADMIN, CHAT, receipt.id)).toBe(false);
+  });
+
+  /* Spending a prompt is a different act from replacing a screen. */
+  it('forgets exactly the prompt that was spent', () => {
+    const { store, now } = storeAt();
+    for (const promptMessageId of [900, 901]) {
+      store.set(contextFor(), {
+        kind: 'prompt', receipt, promptMessageId, phase: 'name', page: 1, createdAtMs: now(),
+      });
+    }
+
+    store.clearPrompt(ADMIN, CHAT, 900);
+
+    expect(store.promptFor(ADMIN, CHAT, 900)).toBeUndefined();
+    expect(store.promptFor(ADMIN, CHAT, 901)).toBeDefined();
+  });
+
+  /*
    * One workflow at a time per chat. A screen opened under a newer receipt
    * evicts the older one, so a reply to a prompt from an abandoned workflow
    * finds nothing rather than resuming it.
@@ -169,6 +219,40 @@ describe('CameraSourceViewStore cancellation', () => {
 
     store.cancel(ADMIN, CHAT + 1);
     expect(store.hasPending(ADMIN, CHAT + 1, elsewhere.id)).toBe(false);
+  });
+
+  /*
+   * Cancelling ends a workflow, so it takes the prompts with it — the other
+   * half of the rule that a *render* does not. Without this, keying prompts by
+   * their message would have quietly made cancellation stop reaching them.
+   */
+  it('forgets the prompts of the receipt it cancels', () => {
+    const { store, now } = storeAt();
+    const mine = receiptWith('aaaaaaaaaaaaaaaa');
+    const other = receiptWith('bbbbbbbbbbbbbbbb', ADMIN, CHAT + 1);
+    store.set(contextFor(), {
+      kind: 'prompt', receipt: mine, promptMessageId: 900, phase: 'credential', page: 1, createdAtMs: now(),
+    });
+    store.set(contextFor(ADMIN, CHAT + 1), {
+      kind: 'prompt', receipt: other, promptMessageId: 901, phase: 'credential', page: 1, createdAtMs: now(),
+    });
+
+    store.cancel(ADMIN, CHAT, mine.id);
+
+    expect(store.promptFor(ADMIN, CHAT, 900)).toBeUndefined();
+    expect(store.promptFor(ADMIN, CHAT + 1, 901)).toBeDefined();
+  });
+
+  it('names the messages one receipt still has forcing a reply', () => {
+    const { store, now } = storeAt();
+    const mine = receiptWith('aaaaaaaaaaaaaaaa');
+    store.set(contextFor(), {
+      kind: 'prompt', receipt: mine, promptMessageId: 900, phase: 'credential', page: 1, createdAtMs: now(),
+    });
+    store.set(contextFor(), { kind: 'overview', receipt: mine, page: 1, createdAtMs: now() });
+
+    expect(store.promptMessagesFor(ADMIN, CHAT, mine.id)).toEqual([900]);
+    expect(store.promptMessagesFor(ADMIN, CHAT, 'bbbbbbbbbbbbbbbb')).toEqual([]);
   });
 
   it('reports pending without a receipt from the newest screen in the chat', () => {
