@@ -74,6 +74,18 @@ export class ConfigureLiveSourceUseCase {
     );
     await this.availability?.requireReady('rtsp');
     this.gate?.assertCanStart('rtsp');
-    return this.repository.save(source, encrypted);
+    await this.repository.save(source, encrypted);
+    // The camera resolved above owns the display name; the read-back adds only
+    // the stored version metadata, which this path never writes itself.
+    const stored = await this.repository.findRedacted(source.cameraId);
+    return {
+      cameraId: source.cameraId,
+      cameraName: camera.name,
+      summary: source.summary(),
+      hasCredential: true,
+      revision: stored?.revision ?? 0,
+      verifiedAt: stored?.verifiedAt ?? null,
+      policyDigest: stored?.policyDigest ?? null,
+    };
   }
 }

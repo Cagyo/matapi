@@ -13,6 +13,15 @@ import {
 } from '../domain/ports/media-repository.port';
 import { MediaWriterPort } from '../domain/ports/media-writer.port';
 
+/** better-sqlite3 surfaces a violated unique index under this code. */
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    !!error &&
+    typeof error === 'object' &&
+    (error as { code?: unknown }).code === 'SQLITE_CONSTRAINT_UNIQUE'
+  );
+}
+
 type CameraRow = typeof cameras.$inferSelect;
 type MotionEventRow = typeof motionEvents.$inferSelect;
 
@@ -113,26 +122,27 @@ export class DrizzleMediaRepository implements MediaRepositoryPort, MediaWriterP
   }
 
   async backfillNameKeys(): Promise<void> {
-    this.db.transaction((tx) => {
-      const rows = tx
-        .select({ id: cameras.id, name: cameras.name, nameKey: cameras.nameKey })
-        .from(cameras)
-        .orderBy(asc(cameras.id))
-        .all();
-      const claimed = new Set(
-        rows.flatMap((row) => (row.nameKey === null ? [] : [row.nameKey])),
-      );
-      for (const row of rows) {
-        if (row.nameKey !== null) continue;
-        const key = cameraNameKey(row.name);
-        // Refusing here keeps the failure a typed domain error rather than a
-        // raw constraint violation; either way the transaction rolls back and
-        // no legacy row is left holding a key.
-        if (claimed.has(key)) throw new CameraNameTakenError();
-        claimed.add(key);
-        tx.update(cameras).set({ nameKey: key }).where(eq(cameras.id, row.id)).run();
-      }
-    });
+    try {
+      this.db.transaction((tx) => {
+        const rows = tx
+          .select({ id: cameras.id, name: cameras.name, nameKey: cameras.nameKey })
+          .from(cameras)
+          .orderBy(asc(cameras.id))
+          .all();
+        for (const row of rows) {
+          if (row.nameKey !== null) continue;
+          tx.update(cameras)
+            .set({ nameKey: cameraNameKey(row.name) })
+            .where(eq(cameras.id, row.id))
+            .run();
+        }
+      });
+    } catch (error) {
+      // The unique index — not a scan — decides collisions; the throw rolls the
+      // whole backfill back, and the name never reaches the mapped error.
+      if (isUniqueViolation(error)) throw new CameraNameTakenError();
+      throw error;
+    }
   }
 
   async findEventById(id: number): Promise<MotionEvent | null> {

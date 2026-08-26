@@ -6,7 +6,6 @@ import type {
   EncryptedLiveSourceCredential,
   LiveSourceForStream,
   LiveSourceRepositoryPort,
-  LiveSourceVerification,
   RedactedLiveSource,
 } from '../domain/ports/live-source-repository.port';
 
@@ -14,6 +13,11 @@ interface StoredLiveSource {
   source: LiveSource;
   credential: EncryptedLiveSourceCredential | null;
   cameraName: string;
+  /**
+   * Mirrors the columns the source-configuration transaction owns. Nothing here
+   * writes them, so a source saved through this adapter stays at revision 0 and
+   * unverified.
+   */
   revision: number;
   verifiedAt: Date | null;
   policyDigest: string | null;
@@ -32,21 +36,19 @@ export class InMemoryLiveSourceRepository implements LiveSourceRepositoryPort {
   async save(
     source: LiveSource,
     credential: EncryptedLiveSourceCredential | null,
-    verification: LiveSourceVerification | null = null,
-  ): Promise<RedactedLiveSource> {
+  ): Promise<void> {
     if (credential && !this.#credentialWritesEnabled) {
       throw new LiveSourceCredentialUnavailableError();
     }
-    const stored: StoredLiveSource = {
+    const previous = this.#sources.get(source.cameraId);
+    this.#sources.set(source.cameraId, {
       source,
       credential: credential ? { ...credential } : null,
       cameraName: source.cameraId,
-      revision: this.#nextRevision(source.cameraId),
-      verifiedAt: verification?.verifiedAt ?? null,
-      policyDigest: verification?.policyDigest ?? null,
-    };
-    this.#sources.set(source.cameraId, stored);
-    return this.#redact(stored);
+      revision: previous?.revision ?? 0,
+      verifiedAt: previous?.verifiedAt ?? null,
+      policyDigest: previous?.policyDigest ?? null,
+    });
   }
 
   async loadForStream(cameraId: string): Promise<LiveSourceForStream | null> {
@@ -69,26 +71,27 @@ export class InMemoryLiveSourceRepository implements LiveSourceRepositoryPort {
       if (source.ready) {
         throw new InvalidLiveSourceError('metadata import source must not be ready');
       }
+      const previous = this.#sources.get(source.cameraId);
       replacements.set(source.cameraId, {
         source,
         credential: null,
         cameraName: source.cameraId,
-        revision: this.#nextRevision(source.cameraId),
-        verifiedAt: null,
-        policyDigest: null,
+        revision: previous?.revision ?? 0,
+        verifiedAt: previous?.verifiedAt ?? null,
+        policyDigest: previous?.policyDigest ?? null,
       });
     }
     this.#sources.clear();
     for (const [cameraId, stored] of replacements) this.#sources.set(cameraId, stored);
   }
 
-  async listRedacted(): Promise<RedactedLiveSource[]> {
-    return Promise.all([...this.#sources.values()].map((stored) => this.#redact(stored)));
+  async findRedacted(cameraId: string): Promise<RedactedLiveSource | null> {
+    const stored = this.#sources.get(cameraId);
+    return stored ? this.#redact(stored) : null;
   }
 
-  #nextRevision(cameraId: string): number {
-    const previous = this.#sources.get(cameraId);
-    return previous ? previous.revision + 1 : 0;
+  async listRedacted(): Promise<RedactedLiveSource[]> {
+    return Promise.all([...this.#sources.values()].map((stored) => this.#redact(stored)));
   }
 
   async #redact(stored: StoredLiveSource): Promise<RedactedLiveSource> {

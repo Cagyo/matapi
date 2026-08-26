@@ -17,9 +17,21 @@ import type {
   EncryptedLiveSourceCredential,
   LiveSourceForStream,
   LiveSourceRepositoryPort,
-  LiveSourceVerification,
   RedactedLiveSource,
 } from '../domain/ports/live-source-repository.port';
+
+type LiveSourceRow = typeof cameraLiveSources.$inferSelect;
+
+/** One credential-free row of the redacted projection below. */
+interface RedactedSourceRow
+  extends Pick<
+    LiveSourceRow,
+    'cameraId' | 'normalizedUrl' | 'settings' | 'ready' | 'revision' | 'verifiedAt' | 'policyDigest'
+  > {
+  cameraName: string;
+  /** Non-null only when a ciphertext row exists for the source. */
+  credentialCameraId: string | null;
+}
 
 @Injectable()
 export class DrizzleLiveSourceRepository implements LiveSourceRepositoryPort {
@@ -34,28 +46,15 @@ export class DrizzleLiveSourceRepository implements LiveSourceRepositoryPort {
   async save(
     source: LiveSource,
     credential: EncryptedLiveSourceCredential | null,
-    verification: LiveSourceVerification | null = null,
-  ): Promise<RedactedLiveSource> {
+  ): Promise<void> {
     if (credential && !this.#credentialWritesEnabled) {
       throw new LiveSourceCredentialUnavailableError();
     }
     const now = Date.now();
-    const verifiedAt = verification?.verifiedAt ?? null;
-    const policyDigest = verification?.policyDigest ?? null;
-    return this.db.transaction((tx) => {
-      const camera = tx
-        .select({ name: cameras.name })
-        .from(cameras)
-        .where(eq(cameras.id, source.cameraId))
-        .get();
-      if (!camera) throw new InvalidLiveSourceError('unknown camera');
-      const previous = tx
-        .select({ revision: cameraLiveSources.revision })
-        .from(cameraLiveSources)
-        .where(eq(cameraLiveSources.cameraId, source.cameraId))
-        .get();
-      const revision = previous ? previous.revision + 1 : 0;
-
+    this.db.transaction((tx) => {
+      // `revision`, `verifiedAt` and `policyDigest` are written by the
+      // source-configuration transaction alone; this write leaves them as they
+      // stand and lets a first insert take the column defaults.
       tx.insert(cameraLiveSources)
         .values({
           cameraId: source.cameraId,
@@ -64,9 +63,6 @@ export class DrizzleLiveSourceRepository implements LiveSourceRepositoryPort {
           ready: source.ready,
           createdAt: now,
           updatedAt: now,
-          revision,
-          verifiedAt,
-          policyDigest,
         })
         .onConflictDoUpdate({
           target: cameraLiveSources.cameraId,
@@ -75,9 +71,6 @@ export class DrizzleLiveSourceRepository implements LiveSourceRepositoryPort {
             settings: source.settings,
             ready: source.ready,
             updatedAt: now,
-            revision,
-            verifiedAt,
-            policyDigest,
           },
         })
         .run();
@@ -86,25 +79,15 @@ export class DrizzleLiveSourceRepository implements LiveSourceRepositoryPort {
         tx.delete(cameraLiveCredentials)
           .where(eq(cameraLiveCredentials.cameraId, source.cameraId))
           .run();
-      } else {
-        tx.insert(cameraLiveCredentials)
-          .values({ cameraId: source.cameraId, ...credential })
-          .onConflictDoUpdate({
-            target: cameraLiveCredentials.cameraId,
-            set: credential,
-          })
-          .run();
+        return;
       }
-
-      return {
-        cameraId: source.cameraId,
-        cameraName: camera.name,
-        summary: source.summary(),
-        hasCredential: credential !== null,
-        revision,
-        verifiedAt,
-        policyDigest,
-      };
+      tx.insert(cameraLiveCredentials)
+        .values({ cameraId: source.cameraId, ...credential })
+        .onConflictDoUpdate({
+          target: cameraLiveCredentials.cameraId,
+          set: credential,
+        })
+        .run();
     });
   }
 
@@ -162,12 +145,6 @@ export class DrizzleLiveSourceRepository implements LiveSourceRepositoryPort {
         if (source.ready) {
           throw new InvalidLiveSourceError('metadata import source must not be ready');
         }
-        const previous = tx
-          .select({ revision: cameraLiveSources.revision })
-          .from(cameraLiveSources)
-          .where(eq(cameraLiveSources.cameraId, source.cameraId))
-          .get();
-        const revision = previous ? previous.revision + 1 : 0;
         tx.insert(cameraLiveSources)
           .values({
             cameraId: source.cameraId,
@@ -176,7 +153,6 @@ export class DrizzleLiveSourceRepository implements LiveSourceRepositoryPort {
             ready: false,
             createdAt: now,
             updatedAt: now,
-            revision,
           })
           .onConflictDoUpdate({
             target: cameraLiveSources.cameraId,
@@ -185,9 +161,6 @@ export class DrizzleLiveSourceRepository implements LiveSourceRepositoryPort {
               settings: source.settings,
               ready: false,
               updatedAt: now,
-              revision,
-              verifiedAt: null,
-              policyDigest: null,
             },
           })
           .run();
@@ -198,7 +171,22 @@ export class DrizzleLiveSourceRepository implements LiveSourceRepositoryPort {
     });
   }
 
+  async findRedacted(cameraId: string): Promise<RedactedLiveSource | null> {
+    const row = this.#redactedSelect()
+      .where(eq(cameraLiveSources.cameraId, cameraId))
+      .get();
+    return row ? this.#toRedacted(row) : null;
+  }
+
   async listRedacted(): Promise<RedactedLiveSource[]> {
+    return this.#redactedSelect()
+      .orderBy(asc(cameras.name))
+      .all()
+      .map((row) => this.#toRedacted(row));
+  }
+
+  /** Credential-free projection: the ciphertext row is joined for presence only. */
+  #redactedSelect() {
     return this.db
       .select({
         cameraId: cameraLiveSources.cameraId,
@@ -216,28 +204,29 @@ export class DrizzleLiveSourceRepository implements LiveSourceRepositoryPort {
       .leftJoin(
         cameraLiveCredentials,
         eq(cameraLiveCredentials.cameraId, cameraLiveSources.cameraId),
-      )
-      .orderBy(asc(cameras.name))
-      .all()
-      .map((row) => ({
-        cameraId: row.cameraId,
-        cameraName: row.cameraName,
-        hasCredential: row.credentialCameraId !== null,
-        revision: row.revision,
-        verifiedAt: row.verifiedAt,
-        policyDigest: row.policyDigest,
-        summary: {
-          scheme: row.settings.scheme,
-          host: new URL(row.normalizedUrl).host,
-          transport: row.settings.transport,
-          tlsMode: row.settings.tlsMode,
-          profile: row.settings.profile,
-          substreamHost: row.settings.substream
-            ? new URL(row.settings.substream).host
-            : null,
-          ready: row.ready,
-        },
-      }));
+      );
+  }
+
+  #toRedacted(row: RedactedSourceRow): RedactedLiveSource {
+    return {
+      cameraId: row.cameraId,
+      cameraName: row.cameraName,
+      hasCredential: row.credentialCameraId !== null,
+      revision: row.revision,
+      verifiedAt: row.verifiedAt,
+      policyDigest: row.policyDigest,
+      summary: {
+        scheme: row.settings.scheme,
+        host: new URL(row.normalizedUrl).host,
+        transport: row.settings.transport,
+        tlsMode: row.settings.tlsMode,
+        profile: row.settings.profile,
+        substreamHost: row.settings.substream
+          ? new URL(row.settings.substream).host
+          : null,
+        ready: row.ready,
+      },
+    };
   }
 
   async remove(cameraId: string): Promise<void> {

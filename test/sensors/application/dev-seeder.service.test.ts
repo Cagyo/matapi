@@ -4,6 +4,7 @@ import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as schema from '../../../src/database/schema';
+import { cameraNameKey } from '../../../src/camera/domain/camera-name-key';
 import { DevSeederService } from '../../../src/sensors/application/dev-seeder.service';
 import { SensorRegistryService } from '../../../src/sensors/application/sensor-registry.service';
 
@@ -41,6 +42,13 @@ describe('DevSeederService', () => {
     expect(allSensors.length).toBe(res.sensors);
     expect(allSensors.some((s) => s.id === 'door_1')).toBe(true);
     expect(allSensors.some((s) => s.id === 'co2')).toBe(true);
+
+    // Seeded cameras must carry the canonical key, or the unique index — which
+    // permits any number of NULLs — would constrain nothing.
+    const allCameras = db.select().from(schema.cameras).all();
+    expect(allCameras.length).toBe(res.cameras);
+    expect(allCameras.every((c) => c.nameKey === cameraNameKey(c.name))).toBe(true);
+    expect(allCameras.every((c) => c.nameKey !== null)).toBe(true);
 
     expect(mockRegistry.reload).toHaveBeenCalledTimes(1);
   });

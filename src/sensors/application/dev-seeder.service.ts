@@ -14,6 +14,7 @@ import {
   users,
   userSensorMutes,
 } from '../../database/schema';
+import { cameraNameKey } from '../../camera/domain/camera-name-key';
 import { SensorRegistryService } from './sensor-registry.service';
 
 export interface DevStateYaml {
@@ -169,6 +170,7 @@ export class DevSeederService implements OnModuleInit {
             .values({
               id: c.id,
               name: c.name,
+              nameKey: cameraNameKey(c.name),
               type: c.type,
               config: c.config ?? null,
               enabled: c.enabled !== false,
@@ -177,6 +179,7 @@ export class DevSeederService implements OnModuleInit {
               target: cameras.id,
               set: {
                 name: c.name,
+                nameKey: cameraNameKey(c.name),
                 type: c.type,
                 config: c.config ?? null,
                 enabled: c.enabled !== false,

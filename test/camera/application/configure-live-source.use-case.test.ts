@@ -49,6 +49,16 @@ describe('ConfigureLiveSourceUseCase', () => {
     expect(loaded?.source).toBe(probed);
     expect(loaded?.source.settings).toMatchObject({ transport: 'tcp', profile: 'eco' });
     expect(loaded?.credential.primaryUrl).toContain('/private?token=secret');
+    // The display name comes from the resolved camera, never from whatever the
+    // live-source store happens to know about the id.
+    expect(result).toMatchObject({
+      cameraId: 'camera-1',
+      cameraName: 'front_door',
+      hasCredential: true,
+      revision: 0,
+      verifiedAt: null,
+      policyDigest: null,
+    });
     expect(JSON.stringify(result)).not.toMatch(/user|pass|private|token|secret/i);
   });
 
