@@ -1,7 +1,7 @@
 # Drive Motion Date Folders and Continuous Sync
 
 > **Date:** 2026-08-13
-> **Status:** approved design
+> **Status:** approved design; pressure-test amendments folded 2026-08-27
 > **Scope:** mirror the validated Motion `YYYY/MM/DD` hierarchy in Google
 > Drive and continuously drain every surviving offline video backlog
 
@@ -58,6 +58,10 @@ coverage proving that a backlog converges.
 - Do not add a remote migration command or automatic migration job.
 - Do not rename, move, unshare, restore, or permanently delete user-modified
   Drive folders.
+- Do not automatically mutate a user-modified folder to heal a blocked branch.
+  Exact revalidation after the administrator restores the expected metadata, and
+  a bounded administrator-requested retry, are allowed because neither changes
+  remote state.
 - Do not change the `Home Worker Archive`, `Motion`, or `Backups` managed folder
   IDs or rename those managed folders.
 - Do not parallelize media uploads.
@@ -137,6 +141,17 @@ chain and requires the leaf ID to equal the attempt container ID. The file
 upload then follows the existing exact-ID, bounded-streaming, durable-session,
 and post-upload verification pipeline.
 
+Complete-chain validation is a pre-transfer and post-transfer invariant. After
+the exact object metadata and transferred bytes pass verification, but before
+the attempt and artifact become `verified`, the use case resolves the complete
+year/month/day chain again and requires the resulting leaf to equal the
+attempt's immutable container. This closes the user-mutation window during a
+long upload. If the chain is now missing, detached, or conflicting, the exact
+object remains attached to its historical attempt, the local source remains
+protected, and normal exact-ID reconciliation decides whether a replacement is
+eligible. The upload path never marks the artifact verified merely because the
+object still names the old leaf folder as its immediate parent.
+
 If a missing or trashed folder has been replaced and the resolved leaf no longer
 equals a pending, uploading, or retryable attempt's immutable container, the use
 case does not reuse that attempt under the new folder. It first queries any
@@ -180,8 +195,9 @@ existing attempt model. A reservation records:
   `superseded`;
 - nullable current slot;
 - compare-and-swap revision;
+- revalidation failure streak;
 - sanitized error code; and
-- creation, update, and verification timestamps.
+- creation, update, verification, and next bounded revalidation timestamps.
 
 The reservation table has a partial unique index on
 `(generation, normalized path)` where `currentSlot = 1`, plus a global unique
@@ -195,9 +211,14 @@ inserts the newly pre-generated reservation into the current slot. A verified
 descendant whose expected parent was replaced by worker-controlled missing-folder
 repair becomes `superseded`; a folder observed to have been moved or modified by
 the user becomes `detached` instead. `detached` and `conflict` heads remain
-current, block their branch, and are never automatically replaced. Missing,
+current and block normal admission and creation. Only the separate bounded
+revalidation transition described below may heal or replace them. Missing,
 detached, conflicting, and superseded rows remain immutable history once they
-leave the current slot.
+leave the current slot. A current detached row may return to `verified` only
+through an exact-ID read proving that the administrator restored every expected
+metadata invariant. A conflict head never changes its reserved folder ID; when
+one valid candidate remains, one CAS transaction clears the conflict head and
+adopts the surviving exact ID in a new current reservation.
 
 The database schema is changed through `src/database/schema.ts`, followed by
 `yarn db:generate`. Generated migrations are never hand-edited.
@@ -225,21 +246,45 @@ For each level, beginning with the managed `Motion` folder as parent:
    permission identity, and non-trashed state.
 3. If no usable current reservation exists, paginate a parent-constrained
    search for folders with the exact private properties.
-4. Restart a rejected page token once from the first page. Reject
-   `incompleteSearch` and more than one valid candidate.
+4. Restart a rejected page token once from the first page. A second rejected
+   token, `incompleteSearch`, or the configured page bound is retryable
+   discovery uncertainty and does not create a durable conflict head.
 5. Reuse exactly one unambiguous valid candidate when repository state permits
    adoption.
-6. Otherwise generate a Drive ID and persist its reservation before calling
-   folder creation.
-7. If creation has an ambiguous result, fetch that exact generated ID. Never
+6. If the parent-constrained search finds no valid candidate and repository
+   state is absent, run one bounded identity-only search using the exact private
+   properties without assuming the current parent or visible name. This is the
+   database-rollback recovery path. A renamed, moved, shared, or otherwise
+   modified exact-identity candidate becomes detached; several identity
+   candidates become conflict; a trashed identity is recorded as missing audit
+   history and is not a usable live identity. The resolver must not create a
+   parallel branch merely because a user-modified identity was filtered out of
+   the first search.
+7. Only after both searches prove that no live identity requires detachment or
+   conflict handling—either no identity exists or every discovered identity was
+   recorded as trashed history—generate a Drive ID and persist its reservation
+   before calling folder creation.
+8. If creation has an ambiguous result, fetch that exact generated ID. Never
    guess from a name-only search.
-8. Mark the reservation verified only after exact metadata validation.
+9. Mark the reservation verified only after exact metadata validation.
 
 Adoption and creation both CAS the same current slot. Losing that CAS causes the
 resolver to reload the winning head rather than create another folder. A
-`detached` or `conflict` head returns a typed branch-blocked outcome without a
-provider search. When an ancestor is replaced, verified descendants tied to the
-old parent are superseded and replaced level by level under the new parent.
+`detached` or `conflict` head returns a typed branch-blocked outcome during
+normal upload admission without a provider search. When an ancestor is
+replaced, verified descendants tied to the old parent are superseded in the same
+database transaction and replaced level by level under the new parent.
+
+Blocked heads have a separate low-frequency revalidation path. Each blocked
+head records a durable next-check deadline using approximately `15m, 30m, 1h,
+2h, 4h, 6h` slots with fresh jitter and a six-hour cap. The branch probe
+performs at most one exact read for a detached head or one bounded candidate
+traversal for a conflict head. An exact administrator
+restoration may return a detached head to `verified`; removal of duplicate
+candidates may replace a conflict marker with one adopted reservation. Failed
+probes advance the deadline and remain fail-closed. Drive activation and an
+administrator retry action may request the same single bounded probe early;
+they never clear state optimistically.
 
 One installation-wide remote mutation lock prevents competing folder creation
 and activation/retirement changes. The existing one-transfer semaphore remains
@@ -247,9 +292,16 @@ the media concurrency boundary.
 
 ### 5.3 User-modified folders
 
-A renamed, moved, shared, ambiguously duplicated, or metadata-modified date
-folder becomes detached. Uploads for that date branch pause and raise a durable,
-cooldown-deduplicated alert. Other healthy date branches may continue.
+A renamed, moved, shared, or metadata-modified date folder becomes detached.
+Several valid identities for one path become conflict. Uploads for that date
+branch pause and raise a durable, cooldown-deduplicated alert. Other healthy
+date branches may continue.
+
+`incompleteSearch`, exhausted pagination, transport failure, and a rejected page
+token are not evidence that the remote identity conflicts. They remain
+retryable provider/discovery outcomes, enter the generation-scoped folder
+operation cooldown, and never poison a branch permanently or cycle through
+every artifact for the same path.
 
 Branch health is part of archive admission, not merely an upload exception.
 Before selecting unattempted motion artifacts, the repository excludes paths
@@ -285,26 +337,52 @@ current folder heads so blocked branches are skipped without provider calls.
 ## 6. Continuous local discovery
 
 Camera recovery performs bounded filesystem work but continues until one whole
-scan traversal completes:
+scan traversal completes. Bounds apply to directory enumeration, hashing bytes,
+wall time, memory, and accepted descriptors, not only to the number of returned
+videos:
 
 1. Process a bounded batch of completed database events lacking archive
    references.
-2. Advance the no-follow recursive filesystem cursor through a bounded batch.
-3. Hash one stable file at a time with the existing 64 KiB read buffer.
-4. Register artifacts and attach event rows idempotently.
-5. Yield to the event loop.
-6. If the traversal reports more work, dispatch the next batch immediately.
-7. When one complete traversal finishes, sleep until a Motion event, boot
+2. Advance an adapter-owned, process-local no-follow directory iterator through
+   at most the configured entry bound. Directory enumeration streams entries;
+   it never loads or sorts an unbounded directory merely to return one batch.
+3. Return cheap path and stable-stat candidates before hashing. Camera checks
+   its event state and a provider-neutral Archive registration-lookup port, then
+   skips already-known immutable files. Camera never imports an Archive
+   repository or persistence type.
+4. Resolve and hash only unknown candidates, one at a time, using the existing
+   64 KiB read buffer and a bounded total hash-byte budget per batch.
+5. Register artifacts and attach event rows idempotently.
+6. Yield to the event loop after the entry, byte, or wall-time budget is reached.
+7. If the traversal reports more work, dispatch the next batch cooperatively.
+8. When one complete traversal finishes, sleep until a Motion event, boot
    recovery, or the periodic safety trigger wakes it again.
+
+A video larger than one batch's hash-byte or wall-time budget is hashed across
+cooperative batches through adapter-owned in-progress state. No descriptor is
+published until the full digest and final no-follow identity check succeed.
+Cancellation closes the file handle and discards the partial hash; restart may
+rehash that one file from byte zero but never persists a provider-specific or
+filesystem-handle value.
 
 The completed-video port returns explicit traversal progress rather than
 inferring completion from the number of valid descriptors. A directory full of
 invalid, unstable, or already-known entries must still advance the cursor.
 
-Only one recovery traversal runs at a time. A process restart safely begins
-again from the root. Files added before a cursor position or while a directory
-snapshot is being traversed may wait for the next safety traversal, but cannot
-be lost permanently. Registration continues while Drive is offline.
+Only one recovery traversal runs at a time. Cancellation closes every retained
+directory handle, and a process restart safely begins again from the root.
+Files added before a cursor position or while a directory is being traversed may
+wait for the next safety traversal, but cannot be lost permanently.
+
+Wake reasons retain their identity while coalescing. A Motion-event wake during
+a traversal requests one follow-up traversal because the new file may precede
+the cursor. A safety wake that occurred before the current traversal completed
+is satisfied by that traversal and does not immediately start another full
+scan. After a safety traversal, the next safety-only traversal cannot begin
+before the configured interval; Motion-event wakes may bypass that rest period.
+This prevents a traversal that takes longer than two minutes from turning the
+Pi into a continuous full-disk hashing loop. Registration continues while Drive
+is offline.
 
 ## 7. Continuous Drive drain
 
@@ -314,7 +392,8 @@ be lost permanently. Registration continues while Drive is offline.
 - Drive activation or recovery;
 - new artifact registration;
 - transfer completion or failure;
-- the earliest durable retry or provider-cooldown deadline; and
+- the earliest durable retry or provider-cooldown deadline;
+- the earliest folder-branch revalidation or recoverable provider-block probe; and
 - the existing periodic safety tick.
 
 At each admission boundary it:
@@ -342,9 +421,10 @@ changed epoch immediately cancels the wait and repeats admission, so work
 registered between the empty read and timer installation cannot be lost.
 
 The repository exposes one bounded next-deadline projection covering attempt
-retry times, artifact-admission retry times, and the provider cooldown. On
-restart, durable queue state plus the runtime-start wake reconstructs the wait;
-the wake epoch itself does not need persistence.
+retry times, artifact-admission retry times, folder-branch revalidation,
+recoverable provider-block probes, and the provider cooldown. On restart,
+durable queue state plus the runtime-start wake reconstructs the wait; the wake
+epoch itself does not need persistence.
 
 The scheduler stores provider-state generation ID, failure class, failure
 streak, cooldown deadline, and block reason durably. Provider state is
@@ -354,11 +434,30 @@ is admitted. A success clears a transient streak only when it is the same
 operation class that failed,
 or when it is the explicit post-cooldown probe; an unrelated successful metadata
 read cannot clear an upload cooldown. A provider gate applies the state to all
-Drive mutations and to provider reads other than the single bounded recovery
-probe. Cached status, Motion, Telegram, registration, backups, and local work do
+Drive mutations and to provider reads other than the one CAS-claimed bounded
+recovery probe authorized by the current state. Cached status, Motion, Telegram,
+registration, backups, and local work do
 not depend on that gate. In-process waiting is cancellable; epoch deadlines allow
 restart recovery and are clamped to a configured maximum sleep when the wall
-clock changes implausibly.
+clock changes implausibly. Clamping a timer is not treated as deadline recovery.
+
+At runtime start, after the single-instance process lock is held, one database
+transaction releases every upload lease owned by an earlier process instance,
+returns its attempt to schedulable retry state, and preserves any encrypted
+resumable session and confirmed offset. This recovery does not depend on the
+wall clock or wait for an epoch lease to appear expired.
+
+The scheduler also compares the current wall clock with the latest durable
+archive timestamp. Archive scheduler state persists the last plausible wall
+time, clock-health state, observed rollback, and CAS revision independently of
+provider generation. A backward jump beyond the checked-in five-minute
+plausibility tolerance enters `clock-blocked`: all Drive work, retention, and
+deadline-driven queue claims pause, while Motion, Telegram, registration, local
+backups, status, and clock-health checks continue. In-process delays use a
+monotonic clock. Once the wall clock is plausible again, one CAS clears the
+clock block and wakes the pump; stored provider deadlines are never silently
+rebased earlier. A forward jump makes already-passed deadlines due but still
+admits only one gated provider probe or transfer.
 
 ## 8. Drive limitations and retry policy
 
@@ -389,10 +488,11 @@ treated merely as an expired session.
 | 403 rate-limit reason or 429 before session creation | Preserve the attempt, honor a bounded valid `Retry-After` when present, and pause provider work with truncated exponential backoff and fresh jitter. |
 | 403 rate-limit reason or 429 from a resumable session request | Apply the provider cooldown, treat the session URI as unusable, reconcile the reserved exact ID, clear the session durably, and start a fresh session after cooldown only when the ID remains free. |
 | 404 or another non-authorization, non-policy 4xx from a resumable session request | Treat the session URI as unusable, reconcile the reserved exact ID, clear the session durably, and start a fresh session only when the ID remains free. |
-| Storage quota exhausted | Run exact-ID retention once; if the deficit remains, block uploads and alert. |
+| Storage quota exhausted | Run exact-ID retention once; if the deficit remains, block uploads and alert. Persist a six-hour read-only quota-probe deadline with fresh jitter; clear the block only after current quota proves the next eligible object fits. |
 | `dailyLimitExceeded` or temporary provider capacity limit | Persist a generation-scoped long cooldown, alert, and re-evaluate with one bounded probe. |
-| `activeItemCreationLimitExceeded` or another account creation limit requiring user action | Persist a generation-scoped provider block and alert; do not cycle through artifacts. |
-| Revoked authorization, account mismatch, policy rejection | Suspend remote work until administrator action or reauthorization. |
+| `activeItemCreationLimitExceeded` or another account creation limit requiring user action | Persist a generation-scoped provider block and alert; do not cycle through artifacts. Only an administrator retry action or new generation may request one probe after the user fixes the account. |
+| Revoked authorization or account mismatch | Suspend remote work until reauthorization or activation of a matching generation. |
+| Policy rejection | Persist a provider block. An administrator retry may request one probe after policy remediation; a failed probe reinstates the block. |
 | Local source changed or missing | Stop only that artifact; never upload different bytes under its identity. |
 
 Inline retries are bounded. Drive's documented truncated exponential policy is
@@ -418,6 +518,11 @@ Drive failures never stop Motion recording, Telegram, registration, or local
 database backups. Unverified artifact paths remain protected from automatic
 local cleanup. If an extended outage causes disk pressure, the worker alerts
 rather than silently deleting the only unsynced copy.
+
+A provider, folder, or clock block is never cleared merely because an unrelated
+operation succeeded. Recoverable blocks clear only through their exact bounded
+probe and CAS transition; reauthorization-only blocks clear only through a new
+active connection generation.
 
 Logs and user-facing errors remain sanitized. They never include local paths,
 Drive IDs, installation IDs, chat IDs, tokens, client secrets, provider response
@@ -451,7 +556,8 @@ the worker never claims that deleting every flat object is safe.
 - queued and retryable video counts;
 - oldest queued-video age;
 - drain state: active, idle, cooling down, branch-blocked, quota-blocked,
-  capacity-blocked, policy-blocked, or reauthorization-required;
+  capacity-blocked, policy-blocked, clock-blocked, or
+  reauthorization-required;
 - unhealthy date-folder count;
 - last successful full Motion traversal;
 - last successful artifact registration; and
@@ -464,6 +570,40 @@ Provider-wide block states take precedence over branch state.
 Durable deduplicated alerts cover unhealthy folder branches, prolonged provider
 cooldown, storage/capacity block, reauthorization, prolonged backlog age, and
 local disk pressure. Status and alerts contain no raw folder or object IDs.
+
+`clock-blocked` takes precedence over queue or branch state while the wall clock
+is implausible. For every blocked state, status provides one exact localized
+required action. Quota and folder branches may recover through their bounded
+automatic probes. Capacity and policy blocks offer an administrator-only retry
+action that schedules one probe; it does not optimistically clear durable state.
+Reauthorization-required never offers that retry action.
+
+`/gdrive retry` and the equivalent administrator-private status action call one
+`RetryDriveArchiveUseCase`. The action binds to the active generation and the
+observed provider-state revision, contains no Drive or folder ID, and schedules
+at most one immediate probe. For a branch-blocked queue with clear provider
+state, the use case selects one unhealthy current head by durable next-check
+order and CAS revision without exposing its identity. Otherwise it is accepted
+only for capacity or policy blocks. Stale revisions are harmless no-ops, quota
+blocks retain their automatic probe, and reauthorization-required returns the
+existing connect guidance. A failed probe atomically reinstates the classified
+block and its alert cooldown.
+
+All status and admission projections remain SQL-aggregate and bounded in memory.
+They never materialize every queued or retryable artifact ID in application
+memory. Queue-critical indexes cover, at minimum:
+
+- artifact kind, lifecycle state, admission state/deadline, creation time, and
+  deterministic ID order;
+- artifact day path for blocked-prefix admission;
+- attempt generation, state, next-attempt deadline, retry order, creation time,
+  and deterministic ID order;
+- attempt artifact/generation/state existence checks; and
+- current folder generation/state/path checks.
+
+Infrastructure tests pin the expected SQLite query plans for large queue
+fixtures. A bounded selector or status query may not fall back to a full scan of
+historical verified attempts on every pump admission.
 
 ## 12. Tests
 
@@ -483,11 +623,19 @@ local disk pressure. Status and alerts contain no raw folder or object IDs.
 - reservation persistence before remote create;
 - restart after ambiguous create;
 - duplicate candidates, rejected page tokens, and incomplete search;
+- transient discovery uncertainty leaving no durable conflict head;
+- database rollback with a renamed, moved, shared, trashed, or duplicated
+  remote identity, without parallel-folder creation;
 - renamed, moved, shared, trashed, missing, and conflicting folders;
+- administrator restoration of an exact detached folder and duplicate removal
+  followed by one bounded branch revalidation probe;
+- failed branch probes advancing their durable deadline without provider storms;
 - concurrent resolution of the same path and connection-generation changes;
 - atomic current-slot replacement and immutable historical reservation rows;
 - upload attempts using the verified day-folder ID;
 - resumed attempts revalidating the complete folder chain;
+- year, month, or day mutation after the final upload chunk but before durable
+  verification, preserving the local source and refusing verification;
 - missing-folder repair before session creation, during a resumable session, and
   while an attempt is retryable;
 - an unhealthy oldest date branch not blocking a later healthy branch;
@@ -504,16 +652,30 @@ local disk pressure. Status and alerts contain no raw folder or object IDs.
   cooldown or block state;
 - phase-specific resumable 4xx handling and exact-ID reconciliation before a
   replacement session;
-- quota, authorization, policy, cancellation, and restart behavior; and
+- quota, authorization, policy, cancellation, and restart behavior;
+- quota recovery through a bounded read-only probe, administrator retry for
+  capacity/policy blocks, and reauthorization-only admission remaining closed;
+- `/gdrive retry` generation/revision fencing, one-probe scheduling for branch,
+  capacity, and policy recovery, stale-action no-op behavior, and refusal during
+  reauthorization-required;
+- restart with a large backward wall-clock jump releasing previous-process
+  leases without admitting provider work until clock health returns;
+- a large forward wall-clock jump preserving single-probe/single-transfer
+  admission; and
 - maintenance work continuing beside a stalled transfer.
 
 ### 12.3 Camera recovery
 
-- more than 64 videos across multiple date folders;
+- more than 64 videos across multiple date folders and one very large day
+  directory without unbounded `readdir` or sort behavior;
 - invalid and unstable files mixed with valid files;
+- already-known files skipped before hashing;
+- entry, hash-byte, wall-time, and memory bounds for one batch;
 - explicit cursor progress when a batch yields no valid descriptors;
 - cooperative continuation to traversal completion;
 - event and periodic wake-up coalescing;
+- a traversal longer than the safety interval not causing continuous safety-only
+  rescans, while a Motion-event wake still schedules one follow-up traversal;
 - cancellation; and
 - idempotent restart from the root.
 
@@ -523,6 +685,8 @@ local disk pressure. Status and alerts contain no raw folder or object IDs.
   migration coverage;
 - artifact admission state, blocked-branch selection, provider-state generation,
   and next-deadline projection persistence;
+- large-fixture SQLite query-plan coverage for admission, deadlines, status, and
+  blocked-prefix selection, with aggregate reads bounded in application memory;
 - Google folder queries, generated-ID creation, exact metadata validation,
   pagination, and error mapping;
 - resumable upload outcome and MIME metadata coverage;
@@ -538,9 +702,14 @@ local disk pressure. Status and alerts contain no raw folder or object IDs.
 4. Confirm the exact `Home Worker Archive/Motion/YYYY/MM/DD/filename` hierarchy.
 5. Restart during a resumable upload and confirm continuation or safe session
    replacement.
-6. After verifying the matching local source exists, remove one old flat Drive
+6. Rename one date folder during an upload and confirm the object is not accepted
+   as verified, the local file remains, and restoring the exact folder allows a
+   bounded branch probe to resume the backlog.
+7. Remove one duplicate date-folder candidate and confirm a blocked branch
+   recovers without creating another parallel folder.
+8. After verifying the matching local source exists, remove one old flat Drive
    video and confirm nested replacement.
-7. Confirm database backups, Motion, Telegram, status, and local cleanup remain
+9. Confirm database backups, Motion, Telegram, status, and local cleanup remain
    responsive throughout the drain.
 
 ## 13. Acceptance criteria
@@ -553,17 +722,31 @@ local disk pressure. Status and alerts contain no raw folder or object IDs.
   subject to backup fairness and Drive cooldowns.
 - A detached or conflicting date branch cannot repeatedly win admission or block
   a later healthy date branch.
+- Transient incomplete discovery cannot permanently poison a date branch, and a
+  corrected detached or duplicate branch can recover through exactly one
+  bounded revalidation path without automatic remote mutation.
 - Work registered while the pump is becoming idle is admitted without waiting
   for the periodic safety tick.
 - At most one media upload is active.
 - Folder and object IDs are durable before ambiguous remote mutations.
+- Restoring an older database cannot make the worker create a parallel folder
+  beside a surviving renamed, moved, shared, duplicated, or trashed exact
+  remote identity.
 - Folder replacement never changes an attempt's immutable container; an
   incompatible pending or retryable attempt is reconciled and replaced by an
   exact-ID transaction.
 - Restarts preserve folder resolution, retry deadlines, attempts, and resumable
   progress.
+- Restart recovery releases leases owned by the previous single process without
+  trusting a rolled-back wall clock; implausible time blocks provider work but
+  never blocks local recording, registration, backups, Telegram, or status.
+- An uploaded object becomes verified only after the complete date-folder chain
+  passes a second exact validation after transfer.
 - Provider cooldown and block state applies only to its recorded active
   connection generation and cannot be cleared by an unrelated successful call.
+- Recoverable folder, quota, capacity, and policy blocks resume only through
+  their exact CAS-fenced bounded probe; revoked authorization and account
+  mismatch remain closed until a matching generation is activated.
 - Rate limits and retryable server failures produce bounded exponential backoff,
   not a request storm.
 - Existing flat objects are neither moved nor automatically deleted.
@@ -571,6 +754,11 @@ local disk pressure. Status and alerts contain no raw folder or object IDs.
   local source.
 - Database backups and non-Drive runtime behavior remain available during
   backlog drain and Drive failure.
+- Filesystem discovery is bounded by entries, bytes, wall time, and memory; a
+  safety traversal longer than its interval cannot create a continuous rescan
+  loop, and already-known files are rejected before hashing.
+- Queue admission, deadlines, blocked-prefix selection, and aggregate status use
+  indexed, bounded-memory database operations at large backlog sizes.
 
 ## 14. Primary references checked
 
@@ -583,5 +771,6 @@ local disk pressure. Status and alerts contain no raw folder or object IDs.
 - [Google Drive: generate IDs](https://developers.google.com/workspace/drive/api/reference/rest/v3/files/generateIds)
 - [Motion movie configuration](https://motion-project.github.io/motion_config.html)
 
-These references were checked on 2026-08-13. Runtime error classification,
+These references were checked on 2026-08-13 and rechecked through the current
+official Drive documentation on 2026-08-27. Runtime error classification,
 rather than fixed numeric quota assumptions, remains authoritative.
