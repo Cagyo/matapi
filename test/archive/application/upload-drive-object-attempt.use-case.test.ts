@@ -11,6 +11,8 @@ import { InMemoryArchiveArtifactRepository } from '../../../src/archive/infrastr
 import { DriveConnection } from '../../../src/archive/domain/drive-connection.entity';
 import type { VerifiedDriveObject } from '../../../src/archive/domain/drive-object-metadata.value-object';
 import { DriveAttemptLeaseLostError } from '../../../src/archive/domain/errors/drive-attempt-lease-lost.error';
+import { DriveFolderBranchBlockedError } from '../../../src/archive/domain/errors/drive-folder-branch-blocked.error';
+import { DriveObjectDetachedError } from '../../../src/archive/domain/errors/drive-object-detached.error';
 import { DriveRateLimitedError } from '../../../src/archive/domain/errors/drive-rate-limited.error';
 import { DriveTemporaryUnavailableError } from '../../../src/archive/domain/errors/drive-temporary-unavailable.error';
 import { ArchiveProviderGateService } from '../../../src/archive/application/archive-provider-gate.service';
@@ -52,6 +54,42 @@ describe('UploadDriveObjectAttemptUseCase', () => {
       .toBeLessThan(fixture.journal.indexOf('query-session'));
   });
 
+  it.each(['year', 'month', 'day'] as const)(
+    'refuses verification when the %s folder changes after the final chunk',
+    async (level) => {
+      const fixture = await setup();
+      const markVerified = vi.spyOn(fixture.repository, 'markVerified');
+      fixture.resolver.execute
+        .mockResolvedValueOnce('day-folder-1')
+        .mockRejectedValueOnce(folderMutationFor(level));
+
+      await expect(fixture.useCase.execute(fixture.artifactId, signal))
+        .rejects.toMatchObject({ code: 'DRIVE_FOLDER_BRANCH_BLOCKED' });
+
+      expect(fixture.drive.uploadCalls).toBeGreaterThan(0);
+      expect(markVerified).not.toHaveBeenCalled();
+      expect(await fixture.repository.listAttempts(fixture.artifactId)).toMatchObject([
+        { remoteObjectId: 'reserved-1', containerId: 'day-folder-1', state: 'retryable' },
+      ]);
+    },
+  );
+
+  it('refuses verification when final resolution returns a replacement leaf', async () => {
+    const fixture = await setup();
+    const markVerified = vi.spyOn(fixture.repository, 'markVerified');
+    fixture.resolver.execute
+      .mockResolvedValueOnce('historical-day-id')
+      .mockResolvedValueOnce('replacement-day-id');
+
+    await expect(fixture.useCase.execute(fixture.artifactId, signal))
+      .rejects.toBeInstanceOf(DriveObjectDetachedError);
+
+    expect(markVerified).not.toHaveBeenCalled();
+    expect(await fixture.repository.listAttempts(fixture.artifactId)).toMatchObject([
+      { remoteObjectId: 'reserved-1', containerId: 'historical-day-id', state: 'retryable' },
+    ]);
+  });
+
   it('reconciles the old exact ID and atomically reserves a replacement when the leaf changed', async () => {
     const fixture = await setup({
       createAttempt: true,
@@ -75,7 +113,7 @@ describe('UploadDriveObjectAttemptUseCase', () => {
     ]);
   });
 
-  it('keeps a surviving old exact object bound to its historical attempt when the leaf changed', async () => {
+  it('keeps a surviving old exact object schedulable for reconciliation when the leaf changed', async () => {
     const fixture = await setup({
       createAttempt: true,
       relativePath: '2026/08/13/120000-event.mp4',
@@ -88,12 +126,11 @@ describe('UploadDriveObjectAttemptUseCase', () => {
       'reserved-1', bytes, {}, '120000-event.mp4', 'old-day-folder', 'video/mp4',
     ));
 
-    await expect(fixture.useCase.execute(fixture.attemptId(), signal)).resolves.toMatchObject({
-      kind: 'verified', fileId: 'reserved-1',
-    });
+    await expect(fixture.useCase.execute(fixture.attemptId(), signal))
+      .rejects.toBeInstanceOf(DriveObjectDetachedError);
 
     expect(await fixture.repository.listAttempts(fixture.artifactId)).toMatchObject([
-      { containerId: 'old-day-folder', state: 'verified' },
+      { remoteObjectId: 'reserved-1', containerId: 'old-day-folder', state: 'retryable' },
     ]);
   });
 
@@ -791,6 +828,10 @@ function providerRateLimit(
     sessionUsable: false,
     operationPhase,
   });
+}
+
+function folderMutationFor(_level: 'year' | 'month' | 'day'): DriveFolderBranchBlockedError {
+  return new DriveFolderBranchBlockedError();
 }
 
 function verified(

@@ -30,6 +30,7 @@ import { DriveConfigurationError } from '../../domain/errors/drive-configuration
 import { DriveFolderBranchBlockedError } from '../../domain/errors/drive-folder-branch-blocked.error';
 import { DriveLocalSourceChangedError } from '../../domain/errors/drive-local-source-changed.error';
 import { DriveObjectConflictError } from '../../domain/errors/drive-object-conflict.error';
+import { DriveObjectDetachedError } from '../../domain/errors/drive-object-detached.error';
 import { MotionArchivePath } from '../../domain/motion-archive-path.value-object';
 import { ArchiveTransferSemaphoreService } from '../archive-transfer-semaphore.service';
 import type { ArchiveRemoteMutationLockService } from '../archive-remote-mutation-lock.service';
@@ -596,8 +597,22 @@ export class UploadDriveObjectAttemptUseCase {
       }
       throw new DriveObjectConflictError('Drive object verification is not exact and private');
     }
+    await this.requireFinalContainer(artifact, attempt, connection, signal);
     await this.repository.markVerified(attempt.id, lease, toArchiveObject(remote), this.now());
     return { kind: 'verified', attemptId: attempt.id, fileId: attempt.remoteObjectId };
+  }
+
+  private async requireFinalContainer(
+    artifact: ArchiveArtifact,
+    attempt: ArchiveObjectAttempt,
+    connection: DriveConnection,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (artifact.kind !== 'motion_video') return;
+    const leafId = await this.resolveContainer(artifact, connection, signal);
+    if (leafId !== attempt.containerId) {
+      throw new DriveObjectDetachedError('Drive motion folder chain changed during upload');
+    }
   }
 
   private async digestWholeSource(
