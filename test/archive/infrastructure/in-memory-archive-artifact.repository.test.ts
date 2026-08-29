@@ -34,6 +34,19 @@ describe('InMemoryArchiveArtifactRepository session clearing', () => {
     expect((await repository.loadAttempt(attempt.id))?.session).toBeNull();
   });
 
+  it('releases process leases without a clock while preserving resumable upload state', async () => {
+    const repository = new InMemoryArchiveArtifactRepository();
+    const artifact = await repository.register(artifactFixture());
+    const attempt = await repository.createAttempt(artifact.id, 'generation-1', 'file-restart', 'folder-1', 10);
+    const claimed = await repository.claimAttempt(attempt.id, { owner: 'worker', nowMs: 20, leaseMs: 100 });
+    await repository.saveSession(attempt.id, claimed.lease, session(), 21);
+
+    expect(await repository.releaseProcessLeasesAfterRestart()).toBe(1);
+    expect(await repository.loadAttempt(attempt.id)).toMatchObject({
+      state: 'retryable', nextAttemptMs: 0, retryCount: 1, session: session(),
+    });
+  });
+
   it('does not claim a due attempt owned by a retired generation', async () => {
     const repository = new InMemoryArchiveArtifactRepository();
     const retired = await repository.register(artifactFixture());

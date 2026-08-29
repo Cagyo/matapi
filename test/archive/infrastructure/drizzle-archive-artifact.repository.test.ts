@@ -71,6 +71,18 @@ describe('DrizzleArchiveArtifactRepository', () => {
     expect(Object.values(row)).toEqual(Array(8).fill(null));
   });
 
+  it('releases process leases without a clock while preserving resumable upload state', async () => {
+    const artifact = await repository.register(artifactFixture());
+    const attempt = await repository.createAttempt(artifact.id, 'generation-1', 'file-restart', 'folder-1', 10);
+    const claimed = await repository.claimAttempt(attempt.id, { owner: 'worker', nowMs: 20, leaseMs: 100 });
+    await repository.saveSession(attempt.id, claimed.lease, sessionFixture(21), 21);
+
+    expect(await repository.releaseProcessLeasesAfterRestart()).toBe(1);
+    expect(await repository.loadAttempt(attempt.id)).toMatchObject({
+      state: 'retryable', nextAttemptMs: 0, retryCount: 1, session: sessionFixture(21),
+    });
+  });
+
   it('runs admission read-transition-write inside one real immediate transaction', async () => {
     let updateObservedInTransaction: boolean | null = null;
     sqlite.function('observe_admission_transaction', () => {

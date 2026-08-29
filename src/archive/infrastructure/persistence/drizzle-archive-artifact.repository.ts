@@ -157,6 +157,20 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
     return this.immediate((tx) => this.recoverExpiredInTransaction(tx, nowMs));
   }
 
+  async releaseProcessLeasesAfterRestart(): Promise<number> {
+    return this.immediate((tx) => {
+      const result = tx.update(driveObjectAttempts).set({
+        state: sql`case when ${driveObjectAttempts.state} = 'uploading' then 'retryable' else ${driveObjectAttempts.state} end`,
+        revision: sql`${driveObjectAttempts.revision} + 1`,
+        nextAttemptAt: 0,
+        retryCount: sql`case when ${driveObjectAttempts.state} = 'uploading' then ${driveObjectAttempts.retryCount} + 1 else ${driveObjectAttempts.retryCount} end`,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+      }).where(isNotNull(driveObjectAttempts.leaseOwner)).run();
+      return result.changes;
+    });
+  }
+
   async renewLease(attemptId: string, lease: AttemptLease, nowMs: number, leaseMs: number): Promise<AttemptLease> {
     validateLeaseDuration(leaseMs);
     const revision = lease.revision + 1;
@@ -730,6 +744,20 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
     return deadlines.length === 0 ? null : Math.min(...deadlines);
   }
 
+  async readNextEligibleTransferSize(generationId: string, nowMs: number): Promise<number | null> {
+    const row = this.db.select({ size: archiveArtifacts.size }).from(driveObjectAttempts)
+      .innerJoin(archiveArtifacts, eq(driveObjectAttempts.artifactId, archiveArtifacts.id))
+      .where(and(
+        eq(driveObjectAttempts.generationId, generationId),
+        inArray(driveObjectAttempts.state, ['pending', 'retryable']),
+        lte(driveObjectAttempts.nextAttemptAt, nowMs),
+      ))
+      .orderBy(asc(driveObjectAttempts.nextAttemptAt), asc(driveObjectAttempts.createdAt), asc(driveObjectAttempts.id))
+      .limit(1)
+      .get();
+    return row?.size ?? null;
+  }
+
   async readQueueStatus(generationId: string, nowMs?: number): Promise<ArchiveQueueStatus> {
     const queueCondition = and(
       eq(archiveArtifacts.kind, 'motion_video'),
@@ -1097,6 +1125,9 @@ function emptySchedulerState(): ArchiveSchedulerState {
     lastReconcileSuccessMs: null, lastCleanupSuccessMs: null,
     lastMotionTraversalSuccessMs: null,
     lastArtifactRegistrationSuccessMs: null,
+    lastPlausibleWallTimeMs: null,
+    clockHealth: 'healthy',
+    observedRollbackMs: null,
   };
 }
 
@@ -1105,7 +1136,10 @@ function schedulerRow(state: ArchiveSchedulerState) {
     lastBackupSuccessMs: state.lastBackupSuccessMs, lastUploadSuccessMs: state.lastUploadSuccessMs,
     lastReconcileSuccessMs: state.lastReconcileSuccessMs, lastCleanupSuccessMs: state.lastCleanupSuccessMs,
     lastMotionTraversalSuccessMs: state.lastMotionTraversalSuccessMs,
-    lastArtifactRegistrationSuccessMs: state.lastArtifactRegistrationSuccessMs };
+    lastArtifactRegistrationSuccessMs: state.lastArtifactRegistrationSuccessMs,
+    lastPlausibleWallTimeMs: state.lastPlausibleWallTimeMs,
+    clockHealth: state.clockHealth,
+    observedRollbackMs: state.observedRollbackMs };
 }
 
 function toScheduler(row: typeof archiveSchedulerState.$inferSelect): ArchiveSchedulerState {
@@ -1113,7 +1147,10 @@ function toScheduler(row: typeof archiveSchedulerState.$inferSelect): ArchiveSch
     lastBackupSuccessMs: row.lastBackupSuccessMs, lastUploadSuccessMs: row.lastUploadSuccessMs,
     lastReconcileSuccessMs: row.lastReconcileSuccessMs, lastCleanupSuccessMs: row.lastCleanupSuccessMs,
     lastMotionTraversalSuccessMs: row.lastMotionTraversalSuccessMs,
-    lastArtifactRegistrationSuccessMs: row.lastArtifactRegistrationSuccessMs };
+    lastArtifactRegistrationSuccessMs: row.lastArtifactRegistrationSuccessMs,
+    lastPlausibleWallTimeMs: row.lastPlausibleWallTimeMs,
+    clockHealth: row.clockHealth as ArchiveSchedulerState['clockHealth'],
+    observedRollbackMs: row.observedRollbackMs };
 }
 
 function validateClaim(input: ClaimAttempt): void {
@@ -1143,6 +1180,15 @@ function validateSession(session: EncryptedUploadSession): void {
 function validateScheduler(state: ArchiveSchedulerState): void {
   if ((state.backupLeaseOwner === null) !== (state.backupLeaseExpiresAtMs === null)) {
     throw new DriveObjectConflictError('Backup scheduler lease is malformed');
+  }
+  if (state.lastPlausibleWallTimeMs !== null && (!Number.isSafeInteger(state.lastPlausibleWallTimeMs) || state.lastPlausibleWallTimeMs < 0)) {
+    throw new DriveObjectConflictError('Archive scheduler plausible wall time is malformed');
+  }
+  if (!['healthy', 'clock-blocked'].includes(state.clockHealth)) {
+    throw new DriveObjectConflictError('Archive scheduler clock health is malformed');
+  }
+  if (state.observedRollbackMs !== null && (!Number.isSafeInteger(state.observedRollbackMs) || state.observedRollbackMs < 0)) {
+    throw new DriveObjectConflictError('Archive scheduler observed rollback is malformed');
   }
 }
 

@@ -147,6 +147,8 @@ export interface ArchiveQueueStatus {
   branchBlocked: boolean;
 }
 
+export type ArchiveClockHealth = 'healthy' | 'clock-blocked';
+
 export interface ArchiveSchedulerState {
   revision: number;
   backupLeaseOwner: string | null;
@@ -157,6 +159,9 @@ export interface ArchiveSchedulerState {
   lastCleanupSuccessMs: number | null;
   lastMotionTraversalSuccessMs: number | null;
   lastArtifactRegistrationSuccessMs: number | null;
+  lastPlausibleWallTimeMs: number | null;
+  clockHealth: ArchiveClockHealth;
+  observedRollbackMs: number | null;
 }
 
 export interface ArchiveSchedulerUpdate {
@@ -168,6 +173,9 @@ export interface ArchiveSchedulerUpdate {
   lastCleanupSuccessMs?: number | null;
   lastMotionTraversalSuccessMs?: number | null;
   lastArtifactRegistrationSuccessMs?: number | null;
+  lastPlausibleWallTimeMs?: number | null;
+  clockHealth?: ArchiveClockHealth;
+  observedRollbackMs?: number | null;
 }
 
 export interface ArchiveStatusCounts {
@@ -189,6 +197,7 @@ export interface ArchiveArtifactRepositoryPort {
   claimNextAttempt(input: ClaimAttempt): Promise<ClaimedAttempt | null>;
   claimExpiredAttempt(attemptId: string, input: ClaimAttempt): Promise<ClaimedAttempt>;
   recoverExpiredLeases(nowMs: number): Promise<number>;
+  releaseProcessLeasesAfterRestart(): Promise<number>;
   renewLease(attemptId: string, lease: AttemptLease, nowMs: number, leaseMs: number): Promise<AttemptLease>;
   saveSession(attemptId: string, lease: AttemptLease, session: EncryptedUploadSession, nowMs: number): Promise<AttemptLease>;
   confirmOffset(attemptId: string, lease: AttemptLease, offset: number, nowMs: number): Promise<AttemptLease>;
@@ -228,6 +237,7 @@ export interface ArchiveArtifactRepositoryPort {
   /** Aggregate-only status read; source paths, IDs, metadata, and errors stay private. */
   readStatusCounts(): Promise<ArchiveStatusCounts>;
   readNextDeadline(generationId: string, nowMs: number, providerCooldownUntilMs: number | null): Promise<number | null>;
+  readNextEligibleTransferSize(generationId: string, nowMs: number): Promise<number | null>;
   readQueueStatus(generationId: string, nowMs?: number): Promise<ArchiveQueueStatus>;
   readUnhealthyDateFolderCount(generationId: string): Promise<number>;
   readSchedulerState(): Promise<ArchiveSchedulerState>;

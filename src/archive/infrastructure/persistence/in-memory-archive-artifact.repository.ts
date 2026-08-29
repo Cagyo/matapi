@@ -142,6 +142,24 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
     return this.recoverExpired(nowMs);
   }
 
+  async releaseProcessLeasesAfterRestart(): Promise<number> {
+    let released = 0;
+    for (const entry of this.attempts.values()) {
+      if (entry.lease === null) continue;
+      const wasUploading = entry.attempt.state === 'uploading';
+      entry.attempt = DriveObjectAttempt.restore({
+        ...entry.attempt,
+        state: wasUploading ? 'retryable' : entry.attempt.state,
+        revision: entry.attempt.revision + 1,
+      });
+      entry.nextAttemptMs = 0;
+      if (wasUploading) entry.retryCount += 1;
+      entry.lease = null;
+      released += 1;
+    }
+    return released;
+  }
+
   async renewLease(attemptId: string, lease: AttemptLease, nowMs: number, leaseMs: number): Promise<AttemptLease> {
     const entry = this.requireLease(attemptId, lease, nowMs);
     entry.attempt = revise(entry.attempt, nowMs);
@@ -524,6 +542,16 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
     return deadlines.length === 0 ? null : Math.min(...deadlines);
   }
 
+  async readNextEligibleTransferSize(generationId: string, nowMs: number): Promise<number | null> {
+    const candidate = [...this.attempts.entries()]
+      .filter(([, entry]) => entry.attempt.generationId === generationId
+        && ['pending', 'retryable'].includes(entry.attempt.state)
+        && entry.nextAttemptMs <= nowMs)
+      .sort(([leftId, left], [rightId, right]) => left.nextAttemptMs - right.nextAttemptMs
+        || left.attempt.createdAtMs - right.attempt.createdAtMs || leftId.localeCompare(rightId))[0];
+    return candidate === undefined ? null : this.artifacts.get(candidate[1].attempt.artifactId)?.size ?? null;
+  }
+
   async readQueueStatus(generationId: string, nowMs?: number): Promise<ArchiveQueueStatus> {
     const queued = [...this.artifacts.values()].filter((artifact) => (
       artifact.kind === 'motion_video' && artifact.state === 'pending'
@@ -741,6 +769,9 @@ function emptySchedulerState(): ArchiveSchedulerState {
     lastReconcileSuccessMs: null, lastCleanupSuccessMs: null,
     lastMotionTraversalSuccessMs: null,
     lastArtifactRegistrationSuccessMs: null,
+    lastPlausibleWallTimeMs: null,
+    clockHealth: 'healthy',
+    observedRollbackMs: null,
   };
 }
 
@@ -762,6 +793,13 @@ function validateSession(session: EncryptedUploadSession): void {
 
 function validateScheduler(state: ArchiveSchedulerState): void {
   if ((state.backupLeaseOwner === null) !== (state.backupLeaseExpiresAtMs === null)) throw new DriveObjectConflictError('Backup scheduler lease is malformed');
+  if (state.lastPlausibleWallTimeMs !== null && (!Number.isSafeInteger(state.lastPlausibleWallTimeMs) || state.lastPlausibleWallTimeMs < 0)) {
+    throw new DriveObjectConflictError('Archive scheduler plausible wall time is malformed');
+  }
+  if (!['healthy', 'clock-blocked'].includes(state.clockHealth)) throw new DriveObjectConflictError('Archive scheduler clock health is malformed');
+  if (state.observedRollbackMs !== null && (!Number.isSafeInteger(state.observedRollbackMs) || state.observedRollbackMs < 0)) {
+    throw new DriveObjectConflictError('Archive scheduler observed rollback is malformed');
+  }
 }
 
 function validateLimit(limit: number): void {

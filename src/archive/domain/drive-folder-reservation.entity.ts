@@ -17,6 +17,8 @@ export interface DriveFolderReservationSnapshot {
   currentSlot: 1 | null;
   revision: number;
   errorCode: string | null;
+  revalidationFailureStreak: number;
+  nextRevalidationAtMs: number | null;
   createdAtMs: number;
   updatedAtMs: number;
   verifiedAtMs: number | null;
@@ -47,6 +49,8 @@ export class DriveFolderReservation implements DriveFolderReservationSnapshot {
   readonly currentSlot!: 1 | null;
   readonly revision!: number;
   readonly errorCode!: string | null;
+  readonly revalidationFailureStreak!: number;
+  readonly nextRevalidationAtMs!: number | null;
   readonly createdAtMs!: number;
   readonly updatedAtMs!: number;
   readonly verifiedAtMs!: number | null;
@@ -64,6 +68,8 @@ export class DriveFolderReservation implements DriveFolderReservationSnapshot {
       currentSlot: 1,
       revision: 0,
       errorCode: null,
+      revalidationFailureStreak: 0,
+      nextRevalidationAtMs: null,
       createdAtMs: input.nowMs,
       updatedAtMs: input.nowMs,
       verifiedAtMs: null,
@@ -78,15 +84,66 @@ export class DriveFolderReservation implements DriveFolderReservationSnapshot {
     return this.transition('verified', nowMs, { verifiedAtMs: nowMs, errorCode: null });
   }
 
-  block(state: Extract<DriveFolderReservationState, 'detached' | 'conflict'>, errorCode: string, nowMs: number): DriveFolderReservation {
+  block(
+    state: Extract<DriveFolderReservationState, 'detached' | 'conflict'>,
+    errorCode: string,
+    nowMs: number,
+    nextRevalidationAtMs: number | null = null,
+  ): DriveFolderReservation {
     requireText(errorCode, 'Drive folder reservation error code');
-    return this.transition(state, nowMs, { errorCode });
+    requireNullableNonNegativeInteger(nextRevalidationAtMs, 'Drive folder reservation revalidation time');
+    return this.transition(state, nowMs, {
+      errorCode,
+      revalidationFailureStreak: nextRevalidationAtMs === null
+        ? this.revalidationFailureStreak
+        : this.revalidationFailureStreak + 1,
+      nextRevalidationAtMs,
+    });
+  }
+
+  restoreAfterRevalidation(nowMs: number): DriveFolderReservation {
+    this.requireCurrentBlockedHead();
+    return new DriveFolderReservation({
+      ...this,
+      state: 'verified',
+      errorCode: null,
+      revalidationFailureStreak: 0,
+      nextRevalidationAtMs: null,
+      verifiedAtMs: nowMs,
+      updatedAtMs: nowMs,
+      revision: this.revision + 1,
+    });
+  }
+
+  rescheduleRevalidation(
+    errorCode: string,
+    nowMs: number,
+    nextRevalidationAtMs: number,
+  ): DriveFolderReservation {
+    this.requireCurrentBlockedHead();
+    requireText(errorCode, 'Drive folder reservation error code');
+    requireNonNegativeInteger(nextRevalidationAtMs, 'Drive folder reservation revalidation time');
+    return new DriveFolderReservation({
+      ...this,
+      errorCode,
+      revalidationFailureStreak: this.revalidationFailureStreak + 1,
+      nextRevalidationAtMs,
+      updatedAtMs: nowMs,
+      revision: this.revision + 1,
+    });
+  }
+
+  private requireCurrentBlockedHead(): void {
+    if (this.currentSlot !== 1 || !['detached', 'conflict'].includes(this.state)) {
+      throw new DriveObjectConflictError('Drive folder reservation is not a current blocked head');
+    }
   }
 
   private transition(
     state: DriveFolderReservationState,
     nowMs: number,
-    update: Partial<Pick<DriveFolderReservationSnapshot, 'errorCode' | 'verifiedAtMs' | 'currentSlot'>> = {},
+    update: Partial<Pick<DriveFolderReservationSnapshot,
+      'errorCode' | 'verifiedAtMs' | 'currentSlot' | 'revalidationFailureStreak' | 'nextRevalidationAtMs'>> = {},
   ): DriveFolderReservation {
     if (this.state === state) return this;
     const legal: Record<DriveFolderReservationState, readonly DriveFolderReservationState[]> = {
@@ -125,6 +182,8 @@ function validateSnapshot(snapshot: DriveFolderReservationSnapshot): void {
   if (snapshot.currentSlot !== 1 && snapshot.currentSlot !== null) throw new DriveObjectConflictError('Drive folder reservation current slot is malformed');
   for (const [value, label] of [[snapshot.revision, 'Drive folder reservation revision'], [snapshot.createdAtMs, 'Drive folder reservation creation time'], [snapshot.updatedAtMs, 'Drive folder reservation update time']] as const) requireNonNegativeInteger(value, label);
   if (snapshot.errorCode !== null) requireText(snapshot.errorCode, 'Drive folder reservation error code');
+  requireNonNegativeInteger(snapshot.revalidationFailureStreak, 'Drive folder reservation revalidation failure streak');
+  requireNullableNonNegativeInteger(snapshot.nextRevalidationAtMs, 'Drive folder reservation revalidation time');
   if (snapshot.verifiedAtMs !== null) requireNonNegativeInteger(snapshot.verifiedAtMs, 'Drive folder reservation verification time');
 }
 
@@ -134,4 +193,8 @@ function requireText(value: unknown, label: string): asserts value is string {
 
 function requireNonNegativeInteger(value: unknown, label: string): void {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) throw new DriveObjectConflictError(`${label} is malformed`);
+}
+
+function requireNullableNonNegativeInteger(value: unknown, label: string): void {
+  if (value !== null) requireNonNegativeInteger(value, label);
 }

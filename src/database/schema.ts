@@ -416,6 +416,16 @@ export const archiveArtifacts = sqliteTable(
     uniqueIndex('uq_archive_artifacts_source_fingerprint').on(table.sourceFingerprint),
     uniqueIndex('uq_archive_artifacts_current_verified_attempt').on(table.currentVerifiedAttemptId),
     index('idx_archive_artifacts_kind_created').on(table.kind, table.createdAt),
+    index('idx_archive_artifacts_admission_queue').on(
+      table.kind, table.state, table.admissionState, table.admissionNextAt,
+      table.createdAt, table.id,
+    ),
+    index('idx_archive_artifacts_motion_day').on(
+      table.motionDayPath, table.kind, table.state,
+    ),
+    index('idx_archive_artifacts_registration_lookup').on(
+      table.installationId, table.kind, table.sourceIdentity, table.size, table.mtimeNs,
+    ),
     check('archive_artifacts_kind_check', sql`${table.kind} in ('motion_video', 'database_backup')`),
     check('archive_artifacts_state_check', sql`${table.state} in ('stabilizing', 'pending', 'verified', 'local_missing', 'superseded')`),
     check('archive_artifacts_revision_check', sql`${table.revision} >= 0`),
@@ -439,6 +449,8 @@ export const driveMotionFolderReservations = sqliteTable(
     currentSlot: integer('current_slot'),
     revision: integer('revision').notNull(),
     errorCode: text('error_code'),
+    revalidationFailureStreak: integer('revalidation_failure_streak').notNull().default(0),
+    nextRevalidationAt: integer('next_revalidation_at'),
     createdAt: integer('created_at').notNull(),
     updatedAt: integer('updated_at').notNull(),
     verifiedAt: integer('verified_at'),
@@ -448,8 +460,13 @@ export const driveMotionFolderReservations = sqliteTable(
       .on(table.generationId, table.normalizedPath)
       .where(sql`${table.currentSlot} = 1`),
     uniqueIndex('uq_drive_motion_folder_id').on(table.folderId),
+    index('idx_drive_motion_folder_current_health').on(
+      table.generationId, table.currentSlot, table.state,
+      table.nextRevalidationAt, table.normalizedPath,
+    ),
     check('drive_motion_folder_state_check', sql`${table.state} in ('reserved','verified','missing','detached','conflict','superseded')`),
     check('drive_motion_folder_slot_check', sql`${table.currentSlot} is null or ${table.currentSlot} = 1`),
+    check('drive_motion_folder_revalidation_failure_streak_check', sql`${table.revalidationFailureStreak} >= 0`),
   ],
 );
 
@@ -525,6 +542,13 @@ export const driveObjectAttempts = sqliteTable(
     index('idx_drive_object_attempts_lease_expiry').on(table.leaseExpiresAt),
     index('idx_drive_object_attempts_generation').on(table.generationId),
     index('idx_drive_object_attempts_artifact').on(table.artifactId, table.createdAt),
+    index('idx_drive_attempts_generation_queue').on(
+      table.generationId, table.state, table.nextAttemptAt,
+      table.retryCount, table.createdAt, table.id,
+    ),
+    index('idx_drive_attempts_artifact_generation_state').on(
+      table.artifactId, table.generationId, table.state,
+    ),
     check('drive_object_attempts_state_check', sql`${table.state} in ('pending', 'uploading', 'retryable', 'verified', 'missing', 'detached', 'conflict', 'abandoned', 'deleted')`),
     check('drive_object_attempts_revision_check', sql`${table.revision} >= 0`),
     check('drive_object_attempts_lease_check', sql`(${table.leaseOwner} is null and ${table.leaseExpiresAt} is null) or (${table.leaseOwner} is not null and ${table.leaseExpiresAt} is not null)`),
@@ -546,11 +570,16 @@ export const archiveSchedulerState = sqliteTable(
     lastCleanupSuccessMs: integer('last_cleanup_success_ms'),
     lastMotionTraversalSuccessMs: integer('last_motion_traversal_success_ms'),
     lastArtifactRegistrationSuccessMs: integer('last_artifact_registration_success_ms'),
+    lastPlausibleWallTimeMs: integer('last_plausible_wall_time_ms'),
+    clockHealth: text('clock_health').notNull().default('healthy'),
+    observedRollbackMs: integer('observed_rollback_ms'),
   },
   (table) => [
     check('archive_scheduler_state_singleton_check', sql`${table.id} = 1`),
     check('archive_scheduler_state_revision_check', sql`${table.revision} >= 0`),
     check('archive_scheduler_state_lease_check', sql`(${table.backupLeaseOwner} is null and ${table.backupLeaseExpiresAt} is null) or (${table.backupLeaseOwner} is not null and ${table.backupLeaseExpiresAt} is not null)`),
+    check('archive_scheduler_state_clock_health_check', sql`${table.clockHealth} in ('healthy', 'clock-blocked')`),
+    check('archive_scheduler_state_observed_rollback_check', sql`${table.observedRollbackMs} is null or ${table.observedRollbackMs} >= 0`),
   ],
 );
 
