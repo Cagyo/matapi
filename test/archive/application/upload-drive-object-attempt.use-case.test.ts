@@ -21,6 +21,7 @@ import { InMemoryArchiveProviderStateRepository } from '../../../src/archive/inf
 const now = 1_000_000;
 const bytes = Buffer.alloc(700_000, 7);
 const digest = createHash('sha256').update(bytes).digest('hex');
+const resumedOffset = 512 * 1024;
 const signal = new AbortController().signal;
 
 describe('UploadDriveObjectAttemptUseCase', () => {
@@ -57,36 +58,74 @@ describe('UploadDriveObjectAttemptUseCase', () => {
   it.each(['year', 'month', 'day'] as const)(
     'refuses verification when the %s folder changes after the final chunk',
     async (level) => {
-      const fixture = await setup();
+      const fixture = await setup({ createAttempt: true });
+      await fixture.seedSession(resumedOffset);
+      fixture.drive.queryResult = { kind: 'resume', confirmedOffset: resumedOffset };
+      const original = await captureResumableAttempt(fixture, resumedOffset);
       const markVerified = vi.spyOn(fixture.repository, 'markVerified');
       const mutation = folderMutationFor(level);
+      const events: string[] = [];
+      const completedChunks: Pick<UploadChunk, 'start' | 'endInclusive'>[] = [];
+      fixture.drive.onChunkComplete = async ({ start, endInclusive }) => {
+        events.push('final-chunk');
+        completedChunks.push({ start, endInclusive });
+      };
       fixture.resolver.execute
-        .mockResolvedValueOnce('day-folder-1')
-        .mockRejectedValueOnce(mutation);
+        .mockImplementationOnce(async () => {
+          events.push('initial-resolve');
+          return 'day-folder-1';
+        })
+        .mockImplementationOnce(async () => {
+          events.push('final-resolve');
+          throw mutation;
+        });
 
-      await expect(fixture.useCase.execute(fixture.artifactId, signal))
+      await expect(fixture.useCase.execute(fixture.attemptId(), signal))
         .rejects.toMatchObject({
           code: 'DRIVE_FOLDER_BRANCH_BLOCKED', message: mutation.message, mutationLevel: level,
         });
 
+      expect(events).toEqual(['initial-resolve', 'final-chunk', 'final-resolve']);
+      expect(completedChunks).toEqual([{
+        start: resumedOffset, endInclusive: bytes.length - 1,
+      }]);
       expect(fixture.drive.uploadCalls).toBeGreaterThan(0);
       expect(markVerified).not.toHaveBeenCalled();
-      await expectExactRetryableAttempt(fixture, 'day-folder-1');
+      await expectExactRetryableAttempt(fixture, original);
     },
   );
 
   it('refuses verification when final resolution returns a replacement leaf', async () => {
-    const fixture = await setup();
+    const fixture = await setup({ createAttempt: true, attemptContainerId: 'historical-day-id' });
+    await fixture.seedSession(resumedOffset);
+    fixture.drive.queryResult = { kind: 'resume', confirmedOffset: resumedOffset };
+    const original = await captureResumableAttempt(fixture, resumedOffset);
     const markVerified = vi.spyOn(fixture.repository, 'markVerified');
+    const events: string[] = [];
+    const completedChunks: Pick<UploadChunk, 'start' | 'endInclusive'>[] = [];
+    fixture.drive.onChunkComplete = async ({ start, endInclusive }) => {
+      events.push('final-chunk');
+      completedChunks.push({ start, endInclusive });
+    };
     fixture.resolver.execute
-      .mockResolvedValueOnce('historical-day-id')
-      .mockResolvedValueOnce('replacement-day-id');
+      .mockImplementationOnce(async () => {
+        events.push('initial-resolve');
+        return 'historical-day-id';
+      })
+      .mockImplementationOnce(async () => {
+        events.push('final-resolve');
+        return 'replacement-day-id';
+      });
 
-    await expect(fixture.useCase.execute(fixture.artifactId, signal))
+    await expect(fixture.useCase.execute(fixture.attemptId(), signal))
       .rejects.toBeInstanceOf(DriveObjectDetachedError);
 
+    expect(events).toEqual(['initial-resolve', 'final-chunk', 'final-resolve']);
+    expect(completedChunks).toEqual([{
+      start: resumedOffset, endInclusive: bytes.length - 1,
+    }]);
     expect(markVerified).not.toHaveBeenCalled();
-    await expectExactRetryableAttempt(fixture, 'historical-day-id');
+    await expectExactRetryableAttempt(fixture, original);
   });
 
   it('reconciles the old exact ID and atomically reserves a replacement when the leaf changed', async () => {
@@ -745,6 +784,7 @@ class FakeDrive implements DriveArchivePort {
   onGenerate?: () => void;
   onBegin?: () => Promise<void>;
   onChunk?: () => Promise<void>;
+  onChunkComplete?: (input: UploadChunk) => Promise<void>;
 
   constructor(private readonly content: Buffer, private readonly journal: string[]) {}
 
@@ -793,7 +833,8 @@ class FakeDrive implements DriveArchivePort {
     if (!this.acceptInvalidBodyLength) {
       expect(read).toBe(input.endInclusive - input.start + 1);
     }
-    if (input.endInclusive + 1 === input.totalSize) {
+    const complete = input.endInclusive + 1 === input.totalSize;
+    if (complete) {
       const begin = this.beginInputs.find((value) => value.fileId === input.fileId);
       this.objects.set(input.fileId, verified(
         input.fileId,
@@ -804,9 +845,11 @@ class FakeDrive implements DriveArchivePort {
         begin?.mimeType ?? this.fallbackMimeType,
         this.artifactKind,
       ));
-      return { kind: 'complete' as const };
     }
-    return { kind: 'resume' as const, confirmedOffset: input.endInclusive + 1 };
+    await this.onChunkComplete?.(input);
+    return complete
+      ? { kind: 'complete' as const }
+      : { kind: 'resume' as const, confirmedOffset: input.endInclusive + 1 };
   }
 
   async loadObject(_connection: unknown, fileId: string): Promise<VerifiedDriveObject | null> {
@@ -839,29 +882,56 @@ DriveFolderBranchBlockedError & { mutationLevel: 'year' | 'month' | 'day' } {
 
 async function expectExactRetryableAttempt(
   fixture: Awaited<ReturnType<typeof setup>>,
-  containerId: string,
+  original: Awaited<ReturnType<typeof captureResumableAttempt>>,
 ): Promise<void> {
   expect(await fixture.repository.loadArtifact(fixture.artifactId)).toMatchObject({
     state: 'pending', currentVerifiedAttemptId: null, localDeletedAtMs: null,
   });
-  const [queued] = await fixture.repository.listAttempts(fixture.artifactId);
-  const retained = await fixture.repository.loadAttempt(queued?.id ?? 'missing-attempt');
+  expect(await fixture.repository.listAttempts(fixture.artifactId)).toHaveLength(1);
+  const retained = await fixture.repository.loadAttempt(original.id);
   expect(retained).toMatchObject({
-    remoteObjectId: 'reserved-1', containerId, state: 'retryable',
-    session: { ciphertext: expect.any(String), confirmedOffset: expect.any(Number) },
+    id: original.id, remoteObjectId: original.remoteObjectId, containerId: original.containerId,
+    state: 'retryable',
   });
-  const session = retained?.session;
+  expect(retained?.id).toBe(original.id);
+  expect(retained?.remoteObjectId).toBe(original.remoteObjectId);
+  expect(retained?.containerId).toBe(original.containerId);
+  expect(retained?.session).toEqual(original.session);
 
-  await expect(fixture.repository.claimNextAttempt({
+  const claimed = await fixture.repository.claimNextAttempt({
     generationId: 'generation-1', owner: 'reconciliation-worker',
     nowMs: fixture.clock.value + 1_000, leaseMs: 1_000,
     kind: 'motion_video', retryOnly: true,
-  })).resolves.toMatchObject({
+  });
+  expect(claimed).toMatchObject({
     attempt: {
-      id: retained?.id, remoteObjectId: 'reserved-1', containerId, state: 'uploading',
-      session: { ciphertext: session?.ciphertext, confirmedOffset: session?.confirmedOffset },
+      state: 'uploading',
     },
   });
+  expect(claimed?.attempt.id).toBe(original.id);
+  expect(claimed?.attempt.remoteObjectId).toBe(original.remoteObjectId);
+  expect(claimed?.attempt.containerId).toBe(original.containerId);
+  expect(claimed?.attempt.session).toEqual(original.session);
+}
+
+async function captureResumableAttempt(
+  fixture: Awaited<ReturnType<typeof setup>>,
+  confirmedOffset: number,
+) {
+  const attempt = await fixture.repository.loadAttempt(fixture.attemptId());
+  const session = attempt?.session;
+  if (attempt === null || session === null) throw new Error('Expected an initial resumable attempt');
+  expect(session).toEqual({
+    ciphertext: Buffer.from(fixture.drive.session.uri, 'utf8').toString('base64'),
+    nonce: 'nonce', authTag: 'tag', keyVersion: 1, formatVersion: 1,
+    createdAtMs: now - 100, expiresAtMs: now + 100_000, confirmedOffset,
+  });
+  return {
+    id: attempt.id,
+    remoteObjectId: attempt.remoteObjectId,
+    containerId: attempt.containerId,
+    session: { ...session },
+  };
 }
 
 function verified(
