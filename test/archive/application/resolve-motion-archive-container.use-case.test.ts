@@ -59,14 +59,24 @@ describe('ResolveMotionArchiveContainerUseCase', () => {
     expect(context.drive.exact.get('day-folder-id')).toMatchObject({ parentIds: ['month-folder-id'], name: '13' });
   });
 
-  it('uses expected-parent scope for every candidate discovery call', async () => {
+  it('uses parent-first and identity-second discovery before creating each missing level', async () => {
     const context = createContext(['year-folder-id', 'month-folder-id', 'day-folder-id']);
     context.drive.pages.push(emptyPage(), emptyPage(), emptyPage());
 
     await expect(context.useCase.execute(connection(), path, signal)).resolves.toBe('day-folder-id');
 
-    expect(context.drive.listInputs).toHaveLength(3);
-    expect(context.drive.listInputs.every((input) => input.scope === 'expected-parent')).toBe(true);
+    expect(context.drive.listInputs.map((input) => ({
+      scope: input.scope,
+      parentId: input.parentId,
+      normalizedPath: input.normalizedPath,
+    }))).toEqual([
+      { scope: 'expected-parent', parentId: 'motion-1', normalizedPath: '2026' },
+      { scope: 'identity', parentId: null, normalizedPath: '2026' },
+      { scope: 'expected-parent', parentId: 'year-folder-id', normalizedPath: '2026/08' },
+      { scope: 'identity', parentId: null, normalizedPath: '2026/08' },
+      { scope: 'expected-parent', parentId: 'month-folder-id', normalizedPath: '2026/08/13' },
+      { scope: 'identity', parentId: null, normalizedPath: '2026/08/13' },
+    ]);
   });
 
   it('recovers an ambiguous create only by reloading the generated exact ID', async () => {
@@ -124,16 +134,16 @@ describe('ResolveMotionArchiveContainerUseCase', () => {
     expect(context.repository.history().some((row) => row.folderId === 'stale-year')).toBe(false);
   });
 
-  it('does not restart candidate paging after a second rejected page token', async () => {
+  it('reports discovery uncertainty after a second rejected page token', async () => {
     const context = createContext();
     context.drive.pages.push(
       new DriveFolderPageTokenRejectedError(),
       new DriveFolderPageTokenRejectedError(),
     );
 
-    await expect(context.useCase.execute(connection(), path, signal)).rejects.toBeInstanceOf(
-      DriveFolderPageTokenRejectedError,
-    );
+    await expect(context.useCase.execute(connection(), path, signal)).rejects.toMatchObject({
+      code: 'DRIVE_FOLDER_DISCOVERY_UNCERTAIN',
+    });
 
     expect(context.drive.calls).toEqual(['list:first', 'list:first']);
     expect(context.repository.history()).toEqual([]);
@@ -177,14 +187,11 @@ describe('ResolveMotionArchiveContainerUseCase', () => {
     ]);
   });
 
-  it.each([
-    ['incomplete search', { folders: [], nextPageToken: null, incompleteSearch: true }],
-    ['multiple exact candidates', null],
-  ] as const)('durably marks %s as a conflict without creating a folder', async (scenario, configuredPage) => {
+  it('durably marks multiple exact candidates as a conflict without creating a folder', async () => {
     const context = createContext(['conflict-marker-id']);
     const left = folderFor('left-year', '2026', 'motion-1', 'motion-year', '2026');
     const right = folderFor('right-year', '2026', 'motion-1', 'motion-year', '2026');
-    context.drive.pages.push(configuredPage ?? { folders: [left, right], nextPageToken: null, incompleteSearch: false });
+    context.drive.pages.push({ folders: [left, right], nextPageToken: null, incompleteSearch: false });
 
     await expect(context.useCase.execute(connection(), path, signal)).rejects.toMatchObject({
       name: 'DriveFolderBranchBlockedError', code: 'DRIVE_FOLDER_BRANCH_BLOCKED',
@@ -194,6 +201,116 @@ describe('ResolveMotionArchiveContainerUseCase', () => {
     expect(context.drive.calls.some((call) => call.startsWith('create:'))).toBe(false);
     expect(context.drive.calls.filter((call) => call === 'list:first')).toHaveLength(1);
   });
+
+  it.each([
+    ['renamed', { name: 'renamed-day' }],
+    ['moved', { parentIds: ['other-parent'] }],
+    ['shared', { shared: true, permissionIds: ['owner-1', 'guest'] }],
+  ] as const)('blocks a database-rollback %s identity without creating a parallel folder', async (_case, patch) => {
+    const context = await createRollbackContext();
+    const surviving = { ...exactDayFolder(), ...patch };
+    context.drive.identityPages.push(page(surviving));
+    context.drive.exact.set(surviving.id, surviving);
+
+    await expect(context.useCase.execute(connection(), path, signal))
+      .rejects.toMatchObject({ code: 'DRIVE_FOLDER_BRANCH_BLOCKED' });
+
+    expect(context.drive.calls.some((call) => call.startsWith('generate:'))).toBe(false);
+    expect(context.drive.calls.some((call) => call.startsWith('create:'))).toBe(false);
+    expect(await context.repository.loadCurrent('generation-1', path.dayPath)).toMatchObject({
+      state: 'detached',
+      folderId: 'surviving-day-id',
+      revalidationFailureStreak: 1,
+      nextRevalidationAtMs: 900_600,
+    });
+  });
+
+  it('records a trashed rollback identity as missing history before reserving a replacement', async () => {
+    const context = await createRollbackContext(['replacement-day-id']);
+    context.drive.identityPages.push(page({ ...exactDayFolder(), trashed: true }));
+
+    await expect(context.useCase.execute(connection(), path, signal)).resolves.toBe('replacement-day-id');
+
+    expect(context.repository.history()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ folderId: 'surviving-day-id', state: 'missing', currentSlot: null }),
+      expect.objectContaining({ folderId: 'replacement-day-id', state: 'verified', currentSlot: 1 }),
+    ]));
+  });
+
+  it('records several trashed identities as missing history and still creates one replacement', async () => {
+    const context = await createRollbackContext(['replacement-day-id']);
+    context.drive.identityPages.push({
+      folders: [
+        { ...exactDayFolder('trashed-a'), trashed: true },
+        { ...exactDayFolder('trashed-b'), trashed: true },
+      ],
+      nextPageToken: null,
+      incompleteSearch: false,
+    });
+
+    await expect(context.useCase.execute(connection(), path, signal)).resolves.toBe('replacement-day-id');
+
+    expect(context.repository.history().filter((row) => row.state === 'missing')).toHaveLength(2);
+    expect(context.drive.calls.filter((call) => call.startsWith('create:'))).toHaveLength(1);
+  });
+
+  it('blocks several live rollback identities as conflict without creating a folder', async () => {
+    const context = await createRollbackContext(['conflict-marker-id']);
+    context.drive.identityPages.push({
+      folders: [exactDayFolder('live-a'), exactDayFolder('live-b')],
+      nextPageToken: null,
+      incompleteSearch: false,
+    });
+
+    await expect(context.useCase.execute(connection(), path, signal))
+      .rejects.toMatchObject({ code: 'DRIVE_FOLDER_BRANCH_BLOCKED' });
+
+    expect(context.drive.calls.some((call) => call.startsWith('create:'))).toBe(false);
+    expect(await context.repository.loadCurrent('generation-1', path.dayPath)).toMatchObject({
+      state: 'conflict',
+      folderId: 'conflict-marker-id',
+      revalidationFailureStreak: 1,
+      nextRevalidationAtMs: 900_600,
+    });
+  });
+
+  it('does not duplicate missing history when a trashed identity is rediscovered', async () => {
+    const context = await createRollbackContext(['replacement-day-id']);
+    await context.repository.appendMissingIdentity({
+      reservation: {
+        id: 'prior-missing-history',
+        installationId: 'installation-1',
+        generationId: 'generation-1',
+        normalizedPath: path.dayPath,
+        level: 'day',
+        segmentName: '13',
+        folderId: 'surviving-day-id',
+        parentFolderId: 'existing-month',
+      },
+      nowMs: 50,
+    });
+    context.drive.identityPages.push(page({ ...exactDayFolder(), trashed: true }));
+
+    await expect(context.useCase.execute(connection(), path, signal)).resolves.toBe('replacement-day-id');
+
+    expect(context.repository.history().filter(
+      (row) => row.folderId === 'surviving-day-id' && row.state === 'missing',
+    )).toHaveLength(1);
+  });
+
+  it.each(['incomplete', 'page-bound', 'second-token-rejection'] as const)(
+    'leaves no durable conflict head on %s discovery uncertainty',
+    async (failure) => {
+      const context = await createRollbackContext();
+      context.drive.failIdentityDiscovery(failure);
+
+      await expect(context.useCase.execute(connection(), path, signal))
+        .rejects.toMatchObject({ code: 'DRIVE_FOLDER_DISCOVERY_UNCERTAIN' });
+
+      expect(await context.repository.loadCurrent('generation-1', path.dayPath)).toBeNull();
+      expect(context.drive.calls.some((call) => call.startsWith('generate:'))).toBe(false);
+    },
+  );
 
   it('reloads and uses the winning head after losing the current-slot reservation CAS', async () => {
     const base = new InMemoryDriveFolderReservationRepository();
@@ -386,7 +503,9 @@ describe('ResolveMotionArchiveContainerUseCase', () => {
 
 class FakeDriveFolderPort implements DriveFolderPort {
   readonly exact = new Map<string, DriveFolderMetadata>();
-  readonly pages: (DriveFolderPage | Error)[] = [];
+  readonly parentPages: (DriveFolderPage | Error)[] = [];
+  readonly identityPages: (DriveFolderPage | Error)[] = [];
+  readonly pages = this.parentPages;
   readonly listInputs: DriveFolderListInput[] = [];
   readonly calls: string[] = [];
   readonly createFailures: { error: Error; persist: boolean }[] = [];
@@ -410,9 +529,31 @@ class FakeDriveFolderPort implements DriveFolderPort {
   async listCandidates(input: DriveFolderListInput): Promise<DriveFolderPage> {
     this.listInputs.push(input);
     this.calls.push(`list:${input.pageToken ?? 'first'}`);
-    const next = this.pages.shift() ?? emptyPage();
+    const queue = input.scope === 'expected-parent' ? this.parentPages : this.identityPages;
+    const next = queue.shift() ?? emptyPage();
     if (next instanceof Error) throw next;
     return next;
+  }
+
+  failIdentityDiscovery(failure: 'incomplete' | 'page-bound' | 'second-token-rejection'): void {
+    if (failure === 'incomplete') {
+      this.identityPages.push({ folders: [], nextPageToken: null, incompleteSearch: true });
+      return;
+    }
+    if (failure === 'second-token-rejection') {
+      this.identityPages.push(
+        new DriveFolderPageTokenRejectedError(),
+        new DriveFolderPageTokenRejectedError(),
+      );
+      return;
+    }
+    for (let pageNumber = 0; pageNumber < 5; pageNumber += 1) {
+      this.identityPages.push({
+        folders: [],
+        nextPageToken: `identity-page-${pageNumber + 1}`,
+        incompleteSearch: false,
+      });
+    }
   }
 
   async create(input: DriveFolderCreateInput): Promise<DriveFolderMetadata> {
@@ -444,13 +585,26 @@ class JournalReservationRepository implements DriveFolderReservationRepositoryPo
     return this.delegate.compareAndSetCurrent(input);
   }
 
+  appendMissingIdentity(input: { reservation: ReserveDriveFolder; nowMs: number }) {
+    return this.delegate.appendMissingIdentity(input);
+  }
+
   markVerified(id: string, expectedRevision: number, nowMs: number) {
     this.journal.push('verify');
     return this.delegate.markVerified(id, expectedRevision, nowMs);
   }
 
-  markBlocked(id: string, expectedRevision: number, state: 'detached' | 'conflict', errorCode: string, nowMs: number) {
-    return this.delegate.markBlocked(id, expectedRevision, state, errorCode, nowMs);
+  markBlocked(
+    id: string,
+    expectedRevision: number,
+    state: 'detached' | 'conflict',
+    errorCode: string,
+    nowMs: number,
+    nextRevalidationAtMs?: number | null,
+  ) {
+    return this.delegate.markBlocked(
+      id, expectedRevision, state, errorCode, nowMs, nextRevalidationAtMs,
+    );
   }
 
   replaceMissing(input: { expected: { id: string; revision: number; folderId: string }; replacement: ReserveDriveFolder; nowMs: number }) {
@@ -496,12 +650,25 @@ class LoseFirstCurrentSlotRepository implements DriveFolderReservationRepository
     return this.delegate.compareAndSetCurrent(input);
   }
 
+  appendMissingIdentity(input: { reservation: ReserveDriveFolder; nowMs: number }) {
+    return this.delegate.appendMissingIdentity(input);
+  }
+
   markVerified(id: string, expectedRevision: number, nowMs: number) {
     return this.delegate.markVerified(id, expectedRevision, nowMs);
   }
 
-  markBlocked(id: string, expectedRevision: number, state: 'detached' | 'conflict', errorCode: string, nowMs: number) {
-    return this.delegate.markBlocked(id, expectedRevision, state, errorCode, nowMs);
+  markBlocked(
+    id: string,
+    expectedRevision: number,
+    state: 'detached' | 'conflict',
+    errorCode: string,
+    nowMs: number,
+    nextRevalidationAtMs?: number | null,
+  ) {
+    return this.delegate.markBlocked(
+      id, expectedRevision, state, errorCode, nowMs, nextRevalidationAtMs,
+    );
   }
 
   replaceMissing(input: { expected: { id: string; revision: number; folderId: string }; replacement: ReserveDriveFolder; nowMs: number }) {
@@ -529,6 +696,10 @@ class FlakyMarkBlockedRepository implements DriveFolderReservationRepositoryPort
     return this.delegate.compareAndSetCurrent(input);
   }
 
+  appendMissingIdentity(input: { reservation: ReserveDriveFolder; nowMs: number }) {
+    return this.delegate.appendMissingIdentity(input);
+  }
+
   markVerified(id: string, expectedRevision: number, nowMs: number) {
     return this.delegate.markVerified(id, expectedRevision, nowMs);
   }
@@ -539,6 +710,7 @@ class FlakyMarkBlockedRepository implements DriveFolderReservationRepositoryPort
     state: 'detached' | 'conflict',
     errorCode: string,
     nowMs: number,
+    nextRevalidationAtMs?: number | null,
   ) {
     this.blockAttempts += 1;
     if (this.remainingLosses > 0) {
@@ -547,7 +719,9 @@ class FlakyMarkBlockedRepository implements DriveFolderReservationRepositoryPort
       if (advanced === null) throw new Error('expected synthetic revision winner');
       return null;
     }
-    return this.delegate.markBlocked(id, expectedRevision, state, errorCode, nowMs);
+    return this.delegate.markBlocked(
+      id, expectedRevision, state, errorCode, nowMs, nextRevalidationAtMs,
+    );
   }
 
   replaceMissing(input: { expected: { id: string; revision: number; folderId: string }; replacement: ReserveDriveFolder; nowMs: number }) {
@@ -576,7 +750,13 @@ function createContext(
     repository,
     new ArchiveRemoteMutationLockService(),
     alerts,
-    { now: () => 100, reservationId: () => `reservation-${++reservation}`, pageSize: 100, maxPages: 5 },
+    {
+      now: () => 100,
+      random: () => 0.5,
+      reservationId: () => `reservation-${++reservation}`,
+      pageSize: 100,
+      maxPages: 5,
+    },
   );
   return {
     drive,
@@ -588,6 +768,21 @@ function createContext(
       journal.length = 0;
     },
   };
+}
+
+async function createRollbackContext(generatedIds: string[] = []) {
+  const context = createContext(generatedIds);
+  await seedLevel(context.repository, context.drive, {
+    normalizedPath: '2026', level: 'year', role: 'motion-year', segmentName: '2026',
+    folderId: 'existing-year', parentFolderId: 'motion-1',
+  });
+  await seedLevel(context.repository, context.drive, {
+    normalizedPath: '2026/08', level: 'month', role: 'motion-month', segmentName: '08',
+    folderId: 'existing-month', parentFolderId: 'existing-year',
+  });
+  context.clearCalls();
+  context.drive.parentPages.push(emptyPage());
+  return context;
 }
 
 async function seedChain(context: ReturnType<typeof createContext>): Promise<void> {
@@ -670,6 +865,10 @@ function folderFor(
   return exactFolder(id, name, parentId, encodeMotionFolderAppProperties({
     installationId: 'installation-1', generationId: 'generation-1', role, normalizedPath, schemaVersion: 1,
   }));
+}
+
+function exactDayFolder(id = 'surviving-day-id'): DriveFolderMetadata {
+  return folderFor(id, '13', 'existing-month', 'motion-day', path.dayPath);
 }
 
 function exactFolder(

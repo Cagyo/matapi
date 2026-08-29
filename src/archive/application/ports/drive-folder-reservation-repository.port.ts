@@ -16,8 +16,19 @@ export interface DriveFolderReservationRepositoryPort {
     replacement: ReserveDriveFolder;
     nowMs: number;
   }): Promise<{ kind: 'stored'; reservation: DriveFolderReservation } | { kind: 'lost'; current: DriveFolderReservation | null }>;
+  appendMissingIdentity(input: {
+    reservation: ReserveDriveFolder;
+    nowMs: number;
+  }): Promise<'stored' | 'exists'>;
   markVerified(id: string, expectedRevision: number, nowMs: number): Promise<DriveFolderReservation | null>;
-  markBlocked(id: string, expectedRevision: number, state: 'detached' | 'conflict', errorCode: string, nowMs: number): Promise<DriveFolderReservation | null>;
+  markBlocked(
+    id: string,
+    expectedRevision: number,
+    state: 'detached' | 'conflict',
+    errorCode: string,
+    nowMs: number,
+    nextRevalidationAtMs?: number | null,
+  ): Promise<DriveFolderReservation | null>;
   replaceMissing(input: {
     expected: { id: string; revision: number; folderId: string };
     replacement: ReserveDriveFolder;

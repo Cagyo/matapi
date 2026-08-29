@@ -31,6 +31,19 @@ export class InMemoryDriveFolderReservationRepository implements DriveFolderRese
     return { kind: 'stored', reservation: this.clone(reservation) };
   }
 
+  async appendMissingIdentity(input: {
+    reservation: ReserveDriveFolder;
+    nowMs: number;
+  }): Promise<'stored' | 'exists'> {
+    if (this.hasFolderId(input.reservation.folderId)) return 'exists';
+    if (this.reservations.has(input.reservation.id)) {
+      throw new Error('Drive folder reservation ID is already stored');
+    }
+    const missing = missingIdentity(input.reservation, input.nowMs);
+    this.reservations.set(missing.id, missing);
+    return 'stored';
+  }
+
   async markVerified(id: string, expectedRevision: number, nowMs: number): Promise<DriveFolderReservation | null> {
     const current = this.reservations.get(id);
     if (current?.revision !== expectedRevision) return null;
@@ -39,10 +52,17 @@ export class InMemoryDriveFolderReservationRepository implements DriveFolderRese
     return this.clone(verified);
   }
 
-  async markBlocked(id: string, expectedRevision: number, state: 'detached' | 'conflict', errorCode: string, nowMs: number): Promise<DriveFolderReservation | null> {
+  async markBlocked(
+    id: string,
+    expectedRevision: number,
+    state: 'detached' | 'conflict',
+    errorCode: string,
+    nowMs: number,
+    nextRevalidationAtMs: number | null = null,
+  ): Promise<DriveFolderReservation | null> {
     const current = this.reservations.get(id);
     if (current?.revision !== expectedRevision) return null;
-    const blocked = current.block(state, errorCode, nowMs);
+    const blocked = current.block(state, errorCode, nowMs, nextRevalidationAtMs);
     this.reservations.set(id, blocked);
     return this.clone(blocked);
   }
@@ -163,4 +183,19 @@ function restoreWithState(reservation: DriveFolderReservation, state: 'missing' 
     updatedAtMs: nowMs,
   };
   return DriveFolderReservation.restore(snapshot);
+}
+
+function missingIdentity(reservation: ReserveDriveFolder, nowMs: number): DriveFolderReservation {
+  return DriveFolderReservation.restore({
+    ...reservation,
+    state: 'missing',
+    currentSlot: null,
+    revision: 0,
+    errorCode: null,
+    revalidationFailureStreak: 0,
+    nextRevalidationAtMs: null,
+    createdAtMs: nowMs,
+    updatedAtMs: nowMs,
+    verifiedAtMs: null,
+  });
 }

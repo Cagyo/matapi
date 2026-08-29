@@ -4,6 +4,7 @@ import { encodeMotionFolderAppProperties } from '../../domain/app-properties';
 import type { DriveConnection } from '../../domain/drive-connection.entity';
 import type { DriveFolderReservation } from '../../domain/drive-folder-reservation.entity';
 import { DriveFolderBranchBlockedError } from '../../domain/errors/drive-folder-branch-blocked.error';
+import { DriveFolderDiscoveryUncertainError } from '../../domain/errors/drive-folder-discovery-uncertain.error';
 import type { MotionArchivePath } from '../../domain/motion-archive-path.value-object';
 import type { ArchiveRemoteMutationLockService } from '../archive-remote-mutation-lock.service';
 import {
@@ -13,6 +14,7 @@ import {
 import {
   DRIVE_FOLDER,
   DriveFolderPageTokenRejectedError,
+  type DriveFolderCandidateScope,
   type DriveFolderMetadata,
   type DriveFolderPort,
 } from '../ports/drive-folder.port';
@@ -25,6 +27,8 @@ import {
 const FOLDER_MIME_TYPE = 'application/vnd.google-apps.folder';
 const BLOCKED_CODE = 'DRIVE_FOLDER_BRANCH_BLOCKED';
 const MAX_BLOCK_CAS_RELOADS = 3;
+const FIRST_REVALIDATION_SLOT_MS = 15 * 60 * 1_000;
+const REVALIDATION_JITTER_MS = 1_000;
 
 type DateFolderLevel = Readonly<{
   level: 'year' | 'month' | 'day';
@@ -35,6 +39,7 @@ type DateFolderLevel = Readonly<{
 
 export interface ResolveMotionArchiveContainerOptions {
   now?: () => number;
+  random?: () => number;
   reservationId?: () => string;
   pageSize?: number;
   maxPages?: number;
@@ -44,6 +49,7 @@ export interface ResolveMotionArchiveContainerOptions {
 @Injectable()
 export class ResolveMotionArchiveContainerUseCase {
   private readonly now: () => number;
+  private readonly random: () => number;
   private readonly reservationId: () => string;
   private readonly pageSize: number;
   private readonly maxPages: number;
@@ -59,6 +65,7 @@ export class ResolveMotionArchiveContainerUseCase {
     options: ResolveMotionArchiveContainerOptions = {},
   ) {
     this.now = options.now ?? Date.now;
+    this.random = options.random ?? Math.random;
     this.reservationId = options.reservationId ?? randomUUID;
     this.pageSize = positiveInteger(options.pageSize ?? 100, 'page size');
     this.maxPages = positiveInteger(options.maxPages ?? 20, 'page limit');
@@ -98,12 +105,40 @@ export class ResolveMotionArchiveContainerUseCase {
     const current = await this.reservations.loadCurrent(connection.id, level.normalizedPath);
     if (current !== null) return this.resolveCurrent(connection, level, parentId, current, signal);
 
-    const discovery = await this.listCandidates(connection, level, parentId, signal);
-    if (discovery.kind === 'conflict') {
+    const parentCandidates = (await this.listCandidates(
+      connection,
+      level,
+      'expected-parent',
+      parentId,
+      signal,
+    )).filter((folder) => isExactFolder(folder, connection, level, parentId, folder.id));
+    if (parentCandidates.length > 1) {
       return this.persistConflict(connection, level, parentId, signal);
     }
-    if (discovery.folders.length === 1) {
-      return this.adoptCandidate(connection, level, parentId, discovery.folders[0], signal);
+    if (parentCandidates.length === 1) {
+      return this.adoptCandidate(connection, level, parentId, parentCandidates[0], signal);
+    }
+
+    const identities = await this.listCandidates(
+      connection,
+      level,
+      'identity',
+      parentId,
+      signal,
+    );
+    const trashed = identities.filter((folder) => folder.trashed === true);
+    const live = identities.filter((folder) => folder.trashed !== true);
+    for (const folder of trashed) {
+      await this.reservations.appendMissingIdentity({
+        reservation: this.replacement(connection, level, parentId, folder.id),
+        nowMs: this.now(),
+      });
+    }
+    if (live.length > 1) {
+      return this.persistConflict(connection, level, parentId, signal);
+    }
+    if (live.length === 1) {
+      return this.adoptIdentityCandidate(connection, level, parentId, live[0], signal);
     }
     return this.reserveAndCreate(connection, level, parentId, null, signal);
   }
@@ -181,6 +216,16 @@ export class ResolveMotionArchiveContainerUseCase {
       );
     }
     return this.verifyReservation(connection, level, parentId, result.reservation, signal);
+  }
+
+  private adoptIdentityCandidate(
+    connection: DriveConnection,
+    level: DateFolderLevel,
+    parentId: string,
+    candidate: DriveFolderMetadata,
+    signal: AbortSignal,
+  ): Promise<string> {
+    return this.adoptCandidate(connection, level, parentId, candidate, signal);
   }
 
   private async reserveAndCreate(
@@ -295,12 +340,14 @@ export class ResolveMotionArchiveContainerUseCase {
     signal: AbortSignal,
     remainingReloads = MAX_BLOCK_CAS_RELOADS,
   ): Promise<string> {
+    const nowMs = this.now();
     const marked = await this.reservations.markBlocked(
       reservation.id,
       reservation.revision,
       state,
       BLOCKED_CODE,
-      this.now(),
+      nowMs,
+      firstRevalidationDeadline(nowMs, this.random),
     );
     if (marked !== null) {
       await this.alertBlockedBranch(connection.id);
@@ -330,12 +377,14 @@ export class ResolveMotionArchiveContainerUseCase {
     signal: AbortSignal,
     remainingReloads: number,
   ): Promise<string> {
+    const nowMs = this.now();
     const marked = await this.reservations.markBlocked(
       marker.id,
       marker.revision,
       'conflict',
       BLOCKED_CODE,
-      this.now(),
+      nowMs,
+      firstRevalidationDeadline(nowMs, this.random),
     );
     if (marked !== null) {
       await this.alertBlockedBranch(connection.id);
@@ -389,12 +438,10 @@ export class ResolveMotionArchiveContainerUseCase {
   private async listCandidates(
     connection: DriveConnection,
     level: DateFolderLevel,
+    scope: DriveFolderCandidateScope,
     parentId: string,
     signal: AbortSignal,
-  ): Promise<
-    | { kind: 'complete'; folders: readonly DriveFolderMetadata[] }
-    | { kind: 'conflict' }
-  > {
+  ): Promise<readonly DriveFolderMetadata[]> {
     let restarted = false;
     for (;;) {
       const candidates = new Map<string, DriveFolderMetadata>();
@@ -406,8 +453,8 @@ export class ResolveMotionArchiveContainerUseCase {
         try {
           page = await this.drive.listCandidates({
             connection,
-            scope: "expected-parent",
-            parentId,
+            scope,
+            parentId: scope === 'expected-parent' ? parentId : null,
             role: level.role,
             normalizedPath: level.normalizedPath,
             pageToken,
@@ -419,22 +466,20 @@ export class ResolveMotionArchiveContainerUseCase {
             restart = true;
             break;
           }
+          if (isRejectedPageToken(error)) throw new DriveFolderDiscoveryUncertainError();
           throw error;
         }
-        if (page.incompleteSearch) return { kind: 'conflict' };
+        if (page.incompleteSearch) throw new DriveFolderDiscoveryUncertainError();
         for (const folder of page.folders) {
-          if (isExactFolder(folder, connection, level, parentId, folder.id)) {
-            candidates.set(folder.id, folder);
-          }
+          candidates.set(folder.id, folder);
         }
-        if (candidates.size > 1) return { kind: 'conflict' };
         pageToken = page.nextPageToken;
         if (pageToken === null) {
-          return { kind: 'complete', folders: [...candidates.values()] };
+          return [...candidates.values()];
         }
       }
       if (restart) continue;
-      return { kind: 'conflict' };
+      throw new DriveFolderDiscoveryUncertainError();
     }
   }
 }
@@ -509,6 +554,14 @@ function positiveInteger(value: number, label: string): number {
     throw new Error(`Drive motion folder ${label} is invalid`);
   }
   return value;
+}
+
+function firstRevalidationDeadline(nowMs: number, random: () => number): number {
+  const sample = random();
+  const normalized = Number.isFinite(sample)
+    ? Math.max(0, Math.min(sample, 0.999999999))
+    : 0;
+  return nowMs + FIRST_REVALIDATION_SLOT_MS + Math.floor(normalized * REVALIDATION_JITTER_MS);
 }
 
 function throwIfAborted(signal: AbortSignal): void {

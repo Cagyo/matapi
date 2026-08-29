@@ -58,6 +58,23 @@ export class DrizzleDriveFolderReservationRepository implements DriveFolderReser
     }
   }
 
+  async appendMissingIdentity(input: {
+    reservation: ReserveDriveFolder;
+    nowMs: number;
+  }): Promise<'stored' | 'exists'> {
+    return this.immediate((tx) => {
+      const existing = tx.select({ id: driveMotionFolderReservations.id })
+        .from(driveMotionFolderReservations)
+        .where(eq(driveMotionFolderReservations.folderId, input.reservation.folderId))
+        .get();
+      if (existing !== undefined) return 'exists';
+      tx.insert(driveMotionFolderReservations)
+        .values(reservationRow(missingIdentity(input.reservation, input.nowMs)))
+        .run();
+      return 'stored';
+    });
+  }
+
   async markVerified(id: string, expectedRevision: number, nowMs: number): Promise<DriveFolderReservation | null> {
     return this.immediate((tx) => {
       const row = tx.select().from(driveMotionFolderReservations)
@@ -83,12 +100,13 @@ export class DrizzleDriveFolderReservationRepository implements DriveFolderReser
     state: 'detached' | 'conflict',
     errorCode: string,
     nowMs: number,
+    nextRevalidationAtMs: number | null = null,
   ): Promise<DriveFolderReservation | null> {
     return this.immediate((tx) => {
       const row = tx.select().from(driveMotionFolderReservations)
         .where(and(eq(driveMotionFolderReservations.id, id), eq(driveMotionFolderReservations.revision, expectedRevision))).get();
       if (!row) return null;
-      const blocked = toReservation(row).block(state, errorCode, nowMs);
+      const blocked = toReservation(row).block(state, errorCode, nowMs, nextRevalidationAtMs);
       const result = tx.update(driveMotionFolderReservations).set({
         state: blocked.state,
         revision: blocked.revision,
@@ -189,6 +207,21 @@ function reservationRow(reservation: DriveFolderReservation) {
     updatedAt: reservation.updatedAtMs,
     verifiedAt: reservation.verifiedAtMs,
   };
+}
+
+function missingIdentity(reservation: ReserveDriveFolder, nowMs: number): DriveFolderReservation {
+  return DriveFolderReservation.restore({
+    ...reservation,
+    state: 'missing',
+    currentSlot: null,
+    revision: 0,
+    errorCode: null,
+    revalidationFailureStreak: 0,
+    nextRevalidationAtMs: null,
+    createdAtMs: nowMs,
+    updatedAtMs: nowMs,
+    verifiedAtMs: null,
+  });
 }
 
 function toReservation(row: ReservationRow): DriveFolderReservation {
