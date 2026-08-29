@@ -1,3 +1,6 @@
+import { cpSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
@@ -6,8 +9,12 @@ import * as schema from '../../src/database/schema';
 
 describe('drive motion continuous sync migration', () => {
   const databases: Database.Database[] = [];
+  const migrationRoots: string[] = [];
 
-  afterEach(() => databases.splice(0).forEach((database) => database.close()));
+  afterEach(() => {
+    databases.splice(0).forEach((database) => database.close());
+    migrationRoots.splice(0).forEach((root) => rmSync(root, { recursive: true, force: true }));
+  });
 
   it('creates reservation and provider state with admission defaults', () => {
     const sqlite = new Database(':memory:');
@@ -69,4 +76,55 @@ describe('drive motion continuous sync migration', () => {
     expect(() => sqlite.prepare("INSERT INTO archive_scheduler_state (id, revision, clock_health) VALUES (1, 0, 'malformed')").run()).toThrow();
     expect(() => sqlite.prepare("INSERT INTO archive_scheduler_state (id, revision, clock_health, observed_rollback_ms) VALUES (1, 0, 'clock-blocked', -1)").run()).toThrow();
   });
+
+  it('preserves 0021 rows and defaults hardening fields through the 0023 rebuild', () => {
+    const sqlite = new Database(':memory:');
+    databases.push(sqlite);
+    const db = drizzle(sqlite, { schema });
+    migrateThrough0021(sqlite, migrationRoots);
+
+    sqlite.prepare("INSERT INTO drive_motion_folder_reservations (id, installation_id, generation_id, normalized_path, level, segment_name, folder_id, parent_folder_id, state, current_slot, revision, error_code, created_at, updated_at, verified_at) VALUES ('reservation-1', 'installation-1', 'generation-1', '2026/08', 'month', '08', 'folder-1', 'year-1', 'verified', 1, 4, 'legacy_error', 10, 20, 20)").run();
+    sqlite.prepare('INSERT INTO archive_scheduler_state (id, revision, last_backup_success_ms, last_upload_success_ms) VALUES (1, 7, 30, 40)').run();
+
+    migrate(db, { migrationsFolder: './migrations' });
+
+    expect(sqlite.prepare('SELECT folder_id, state, revision, error_code, revalidation_failure_streak, next_revalidation_at FROM drive_motion_folder_reservations WHERE id = ?').get('reservation-1')).toEqual({
+      folder_id: 'folder-1', state: 'verified', revision: 4, error_code: 'legacy_error',
+      revalidation_failure_streak: 0, next_revalidation_at: null,
+    });
+    expect(sqlite.prepare('SELECT revision, last_backup_success_ms, last_upload_success_ms, last_plausible_wall_time_ms, clock_health, observed_rollback_ms FROM archive_scheduler_state WHERE id = 1').get()).toEqual({
+      revision: 7, last_backup_success_ms: 30, last_upload_success_ms: 40,
+      last_plausible_wall_time_ms: null, clock_health: 'healthy', observed_rollback_ms: null,
+    });
+  });
 });
+
+function migrateThrough0021(sqlite: Database.Database, migrationRoots: string[]): void {
+  const root = mkdtempSync(join(tmpdir(), 'home-worker-migrations-'));
+  migrationRoots.push(root);
+  const migrationsFolder = join(root, 'migrations');
+  cpSync('./migrations', migrationsFolder, { recursive: true });
+  unlinkSync(join(migrationsFolder, '0022_drive_sync_pressure_hardening.sql'));
+  unlinkSync(join(migrationsFolder, '0023_drive_sync_pressure_constraints.sql'));
+
+  const journalPath = join(migrationsFolder, 'meta', '_journal.json');
+  const journal = JSON.parse(readFileSync(journalPath, 'utf8')) as MigrationJournal;
+  journal.entries = journal.entries.filter((entry) => entry.idx <= 21);
+  writeFileSync(journalPath, `${JSON.stringify(journal, null, 2)}\n`);
+
+  migrate(drizzle(sqlite, { schema }), { migrationsFolder });
+}
+
+interface MigrationJournal {
+  version: string;
+  dialect: string;
+  entries: MigrationJournalEntry[];
+}
+
+interface MigrationJournalEntry {
+  idx: number;
+  version: string;
+  when: number;
+  tag: string;
+  breakpoints: boolean;
+}
