@@ -11,6 +11,35 @@ export type ReserveDriveFolder = Pick<DriveFolderReservationSnapshot,
 
 export interface DriveFolderReservationRepositoryPort {
   loadCurrent(generationId: string, normalizedPath: string): Promise<DriveFolderReservation | null>;
+  claimNextBlockedRevalidation(input: {
+    generationId: string;
+    nowMs: number;
+    claimUntilMs: number;
+  }): Promise<DriveFolderReservation | null>;
+  requestNextBlockedRevalidation(input: {
+    generationId: string;
+    nowMs: number;
+  }): Promise<DriveFolderReservation | null>;
+  restoreDetached(
+    id: string,
+    expectedRevision: number,
+    nowMs: number,
+  ): Promise<DriveFolderReservation | null>;
+  adoptConflictCandidate(input: {
+    expected: { id: string; revision: number };
+    replacement: ReserveDriveFolder;
+    nowMs: number;
+  }): Promise<
+    | { kind: 'stored'; reservation: DriveFolderReservation }
+    | { kind: 'lost'; current: DriveFolderReservation | null }
+  >;
+  rescheduleBlockedRevalidation(input: {
+    id: string;
+    expectedRevision: number;
+    errorCode: string;
+    nowMs: number;
+    nextRevalidationAtMs: number;
+  }): Promise<DriveFolderReservation | null>;
   compareAndSetCurrent(input: {
     expected: { id: string; revision: number } | null;
     replacement: ReserveDriveFolder;

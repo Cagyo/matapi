@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, count, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, count, eq, gt, inArray, lte, sql } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../../database/database.module';
 import { driveMotionFolderReservations } from '../../../database/schema';
 import type {
@@ -18,6 +18,8 @@ type CurrentResult =
   | { kind: 'stored'; reservation: DriveFolderReservation }
   | { kind: 'lost'; current: DriveFolderReservation | null };
 
+const MINIMUM_REVALIDATION_SLOT_MS = 15 * 60_000;
+
 /** SQLite implementation of durable folder-head reservation and replacement CAS. */
 @Injectable()
 export class DrizzleDriveFolderReservationRepository implements DriveFolderReservationRepositoryPort {
@@ -26,6 +28,209 @@ export class DrizzleDriveFolderReservationRepository implements DriveFolderReser
   async loadCurrent(generationId: string, normalizedPath: string): Promise<DriveFolderReservation | null> {
     const row = this.current(this.db, generationId, normalizedPath);
     return row ? toReservation(row) : null;
+  }
+
+  async claimNextBlockedRevalidation(input: {
+    generationId: string;
+    nowMs: number;
+    claimUntilMs: number;
+  }): Promise<DriveFolderReservation | null> {
+    return this.immediate((tx) => {
+      const existingClaim = tx.select({ id: driveMotionFolderReservations.id })
+        .from(driveMotionFolderReservations).where(and(
+          eq(driveMotionFolderReservations.generationId, input.generationId),
+          eq(driveMotionFolderReservations.currentSlot, 1),
+          inArray(driveMotionFolderReservations.state, ['detached', 'conflict']),
+          gt(driveMotionFolderReservations.nextRevalidationAt, input.nowMs),
+          sql`${driveMotionFolderReservations.nextRevalidationAt}
+            - ${driveMotionFolderReservations.updatedAt}
+            < ${MINIMUM_REVALIDATION_SLOT_MS}`,
+        )).get();
+      if (existingClaim !== undefined) return null;
+      const row = tx.select().from(driveMotionFolderReservations).where(and(
+        dueBlockedHead(input.generationId, input.nowMs),
+      )).orderBy(
+        asc(driveMotionFolderReservations.nextRevalidationAt),
+        asc(driveMotionFolderReservations.normalizedPath),
+        asc(driveMotionFolderReservations.id),
+      ).limit(1).get();
+      if (row === undefined) return null;
+      const claimed = DriveFolderReservation.restore({
+        ...toReservation(row),
+        revision: row.revision + 1,
+        nextRevalidationAtMs: input.claimUntilMs,
+        updatedAtMs: input.nowMs,
+      });
+      const result = tx.update(driveMotionFolderReservations).set({
+        revision: claimed.revision,
+        nextRevalidationAt: claimed.nextRevalidationAtMs,
+        updatedAt: claimed.updatedAtMs,
+      }).where(and(
+        eq(driveMotionFolderReservations.id, row.id),
+        eq(driveMotionFolderReservations.generationId, input.generationId),
+        eq(driveMotionFolderReservations.currentSlot, 1),
+        eq(driveMotionFolderReservations.state, row.state),
+        eq(driveMotionFolderReservations.revision, row.revision),
+        inArray(driveMotionFolderReservations.state, ['detached', 'conflict']),
+        lte(driveMotionFolderReservations.nextRevalidationAt, input.nowMs),
+      )).run();
+      return result.changes === 1 ? claimed : null;
+    });
+  }
+
+  async requestNextBlockedRevalidation(input: {
+    generationId: string;
+    nowMs: number;
+  }): Promise<DriveFolderReservation | null> {
+    return this.immediate((tx) => {
+      const row = tx.select().from(driveMotionFolderReservations).where(and(
+        eq(driveMotionFolderReservations.generationId, input.generationId),
+        eq(driveMotionFolderReservations.currentSlot, 1),
+        inArray(driveMotionFolderReservations.state, ['detached', 'conflict']),
+      )).orderBy(
+        asc(driveMotionFolderReservations.nextRevalidationAt),
+        asc(driveMotionFolderReservations.normalizedPath),
+        asc(driveMotionFolderReservations.id),
+      ).limit(1).get();
+      if (row === undefined) return null;
+      const requested = DriveFolderReservation.restore({
+        ...toReservation(row),
+        revision: row.revision + 1,
+        nextRevalidationAtMs: input.nowMs,
+        updatedAtMs: input.nowMs,
+      });
+      const result = tx.update(driveMotionFolderReservations).set({
+        revision: requested.revision,
+        nextRevalidationAt: requested.nextRevalidationAtMs,
+        updatedAt: requested.updatedAtMs,
+      }).where(and(
+        eq(driveMotionFolderReservations.id, row.id),
+        eq(driveMotionFolderReservations.generationId, input.generationId),
+        eq(driveMotionFolderReservations.currentSlot, 1),
+        eq(driveMotionFolderReservations.state, row.state),
+        eq(driveMotionFolderReservations.revision, row.revision),
+        inArray(driveMotionFolderReservations.state, ['detached', 'conflict']),
+      )).run();
+      return result.changes === 1 ? requested : null;
+    });
+  }
+
+  async restoreDetached(
+    id: string,
+    expectedRevision: number,
+    nowMs: number,
+  ): Promise<DriveFolderReservation | null> {
+    return this.immediate((tx) => {
+      const row = tx.select().from(driveMotionFolderReservations).where(and(
+        eq(driveMotionFolderReservations.id, id),
+        eq(driveMotionFolderReservations.currentSlot, 1),
+        eq(driveMotionFolderReservations.state, 'detached'),
+        eq(driveMotionFolderReservations.revision, expectedRevision),
+      )).get();
+      if (row === undefined) return null;
+      const restored = toReservation(row).restoreAfterRevalidation(nowMs);
+      const result = tx.update(driveMotionFolderReservations).set({
+        state: restored.state,
+        revision: restored.revision,
+        errorCode: restored.errorCode,
+        revalidationFailureStreak: restored.revalidationFailureStreak,
+        nextRevalidationAt: restored.nextRevalidationAtMs,
+        updatedAt: restored.updatedAtMs,
+        verifiedAt: restored.verifiedAtMs,
+      }).where(and(
+        eq(driveMotionFolderReservations.id, id),
+        eq(driveMotionFolderReservations.currentSlot, 1),
+        eq(driveMotionFolderReservations.state, 'detached'),
+        eq(driveMotionFolderReservations.revision, expectedRevision),
+      )).run();
+      return result.changes === 1 ? restored : null;
+    });
+  }
+
+  async adoptConflictCandidate(input: {
+    expected: { id: string; revision: number };
+    replacement: ReserveDriveFolder;
+    nowMs: number;
+  }): Promise<CurrentResult> {
+    try {
+      return this.immediate((tx) => {
+        const expectedRow = tx.select().from(driveMotionFolderReservations)
+          .where(eq(driveMotionFolderReservations.id, input.expected.id)).get();
+        const current = expectedRow === undefined
+          ? undefined
+          : this.current(tx, expectedRow.generationId, expectedRow.normalizedPath);
+        if (expectedRow === undefined
+          || current?.id !== expectedRow.id
+          || expectedRow.currentSlot !== 1
+          || expectedRow.state !== 'conflict'
+          || expectedRow.revision !== input.expected.revision
+          || !sameReservationIdentity(toReservation(expectedRow), input.replacement)
+          || this.hasReservationIdentity(tx, input.replacement)) {
+          return lost(current);
+        }
+
+        const cleared = tx.update(driveMotionFolderReservations).set({
+          currentSlot: null,
+          revision: expectedRow.revision + 1,
+          updatedAt: input.nowMs,
+        }).where(and(
+          eq(driveMotionFolderReservations.id, input.expected.id),
+          eq(driveMotionFolderReservations.currentSlot, 1),
+          eq(driveMotionFolderReservations.state, 'conflict'),
+          eq(driveMotionFolderReservations.revision, input.expected.revision),
+        )).run();
+        if (cleared.changes !== 1) {
+          return lost(this.current(tx, expectedRow.generationId, expectedRow.normalizedPath));
+        }
+
+        const replacement = DriveFolderReservation.reserve({
+          ...input.replacement,
+          nowMs: input.nowMs,
+        }).verify(input.nowMs);
+        tx.insert(driveMotionFolderReservations).values(reservationRow(replacement)).run();
+        return { kind: 'stored', reservation: replacement };
+      });
+    } catch (error) {
+      if (isLostConstraint(error)) return this.lostExpected(input.expected.id);
+      throw error;
+    }
+  }
+
+  async rescheduleBlockedRevalidation(input: {
+    id: string;
+    expectedRevision: number;
+    errorCode: string;
+    nowMs: number;
+    nextRevalidationAtMs: number;
+  }): Promise<DriveFolderReservation | null> {
+    return this.immediate((tx) => {
+      const row = tx.select().from(driveMotionFolderReservations).where(and(
+        eq(driveMotionFolderReservations.id, input.id),
+        eq(driveMotionFolderReservations.currentSlot, 1),
+        inArray(driveMotionFolderReservations.state, ['detached', 'conflict']),
+        eq(driveMotionFolderReservations.revision, input.expectedRevision),
+      )).get();
+      if (row === undefined) return null;
+      const rescheduled = toReservation(row).rescheduleRevalidation(
+        input.errorCode,
+        input.nowMs,
+        input.nextRevalidationAtMs,
+      );
+      const result = tx.update(driveMotionFolderReservations).set({
+        revision: rescheduled.revision,
+        errorCode: rescheduled.errorCode,
+        revalidationFailureStreak: rescheduled.revalidationFailureStreak,
+        nextRevalidationAt: rescheduled.nextRevalidationAtMs,
+        updatedAt: rescheduled.updatedAtMs,
+      }).where(and(
+        eq(driveMotionFolderReservations.id, input.id),
+        eq(driveMotionFolderReservations.currentSlot, 1),
+        eq(driveMotionFolderReservations.state, row.state),
+        inArray(driveMotionFolderReservations.state, ['detached', 'conflict']),
+        eq(driveMotionFolderReservations.revision, input.expectedRevision),
+      )).run();
+      return result.changes === 1 ? rescheduled : null;
+    });
   }
 
   async compareAndSetCurrent(input: {
@@ -182,6 +387,21 @@ export class DrizzleDriveFolderReservationRepository implements DriveFolderReser
     return { kind: 'lost', current: await this.loadCurrent(generationId, normalizedPath) };
   }
 
+  private async lostExpected(id: string): Promise<CurrentResult> {
+    const expected = this.db.select().from(driveMotionFolderReservations)
+      .where(eq(driveMotionFolderReservations.id, id)).get();
+    if (expected === undefined) return { kind: 'lost', current: null };
+    return this.lostCurrent(expected.generationId, expected.normalizedPath);
+  }
+
+  private hasReservationIdentity(db: Writer, replacement: ReserveDriveFolder): boolean {
+    return db.select({ id: driveMotionFolderReservations.id })
+      .from(driveMotionFolderReservations)
+      .where(sql`${driveMotionFolderReservations.id} = ${replacement.id}
+        or ${driveMotionFolderReservations.folderId} = ${replacement.folderId}`)
+      .get() !== undefined;
+  }
+
   private immediate<T>(operation: (tx: Writer) => T): T {
     return this.db.transaction((tx) => operation(tx), { behavior: 'immediate' });
   }
@@ -248,6 +468,27 @@ function toReservation(row: ReservationRow): DriveFolderReservation {
 
 function matches(row: ReservationRow | undefined, expected: { id: string; revision: number } | null): boolean {
   return expected === null ? row === undefined : row?.id === expected.id && row.revision === expected.revision;
+}
+
+function dueBlockedHead(generationId: string, nowMs: number) {
+  return and(
+    eq(driveMotionFolderReservations.generationId, generationId),
+    eq(driveMotionFolderReservations.currentSlot, 1),
+    inArray(driveMotionFolderReservations.state, ['detached', 'conflict']),
+    lte(driveMotionFolderReservations.nextRevalidationAt, nowMs),
+  );
+}
+
+function sameReservationIdentity(
+  current: DriveFolderReservation,
+  replacement: ReserveDriveFolder,
+): boolean {
+  return current.installationId === replacement.installationId
+    && current.generationId === replacement.generationId
+    && current.normalizedPath === replacement.normalizedPath
+    && current.level === replacement.level
+    && current.segmentName === replacement.segmentName
+    && current.parentFolderId === replacement.parentFolderId;
 }
 
 function lost(row: ReservationRow | undefined): CurrentResult {

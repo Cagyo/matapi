@@ -7,6 +7,8 @@ import {
   type DriveFolderReservationSnapshot,
 } from '../../domain/drive-folder-reservation.entity';
 
+const MINIMUM_REVALIDATION_SLOT_MS = 15 * 60_000;
+
 /** Deterministic in-memory parity adapter for folder-reservation use cases. */
 export class InMemoryDriveFolderReservationRepository implements DriveFolderReservationRepositoryPort {
   private readonly reservations = new Map<string, DriveFolderReservation>();
@@ -14,6 +16,113 @@ export class InMemoryDriveFolderReservationRepository implements DriveFolderRese
 
   async loadCurrent(generationId: string, normalizedPath: string): Promise<DriveFolderReservation | null> {
     return this.cloneNullable(this.currentFor(generationId, normalizedPath));
+  }
+
+  async claimNextBlockedRevalidation(input: {
+    generationId: string;
+    nowMs: number;
+    claimUntilMs: number;
+  }): Promise<DriveFolderReservation | null> {
+    const blockedHeads = this.blockedHeads(input.generationId);
+    if (blockedHeads.some((reservation) => isActiveRevalidationClaim(
+      reservation,
+      input.nowMs,
+    ))) return null;
+    const current = blockedHeads.find((reservation) => reservation.nextRevalidationAtMs !== null
+      && reservation.nextRevalidationAtMs <= input.nowMs);
+    if (current === undefined) return null;
+    const claimed = DriveFolderReservation.restore({
+      ...current,
+      revision: current.revision + 1,
+      nextRevalidationAtMs: input.claimUntilMs,
+      updatedAtMs: input.nowMs,
+    });
+    this.reservations.set(claimed.id, claimed);
+    return this.clone(claimed);
+  }
+
+  async requestNextBlockedRevalidation(input: {
+    generationId: string;
+    nowMs: number;
+  }): Promise<DriveFolderReservation | null> {
+    const current = this.blockedHeads(input.generationId)[0];
+    if (current === undefined) return null;
+    const requested = DriveFolderReservation.restore({
+      ...current,
+      revision: current.revision + 1,
+      nextRevalidationAtMs: input.nowMs,
+      updatedAtMs: input.nowMs,
+    });
+    this.reservations.set(requested.id, requested);
+    return this.clone(requested);
+  }
+
+  async restoreDetached(
+    id: string,
+    expectedRevision: number,
+    nowMs: number,
+  ): Promise<DriveFolderReservation | null> {
+    const current = this.reservations.get(id);
+    if (!this.isCurrentBlockedHead(current, 'detached', expectedRevision)) return null;
+    const restored = current.restoreAfterRevalidation(nowMs);
+    this.reservations.set(restored.id, restored);
+    return this.clone(restored);
+  }
+
+  async adoptConflictCandidate(input: {
+    expected: { id: string; revision: number };
+    replacement: ReserveDriveFolder;
+    nowMs: number;
+  }): Promise<
+    | { kind: 'stored'; reservation: DriveFolderReservation }
+    | { kind: 'lost'; current: DriveFolderReservation | null }
+  > {
+    const current = this.reservations.get(input.expected.id);
+    const currentForPath = current === undefined
+      ? null
+      : this.currentFor(current.generationId, current.normalizedPath);
+    if (!this.isCurrentBlockedHead(current, 'conflict', input.expected.revision)
+      || !sameReservationIdentity(current, input.replacement)
+      || this.reservations.has(input.replacement.id)
+      || this.hasFolderId(input.replacement.folderId)) {
+      return { kind: 'lost', current: this.cloneNullable(currentForPath) };
+    }
+
+    const historical = DriveFolderReservation.restore({
+      ...current,
+      currentSlot: null,
+      revision: current.revision + 1,
+      updatedAtMs: input.nowMs,
+    });
+    const replacement = DriveFolderReservation.reserve({
+      ...input.replacement,
+      nowMs: input.nowMs,
+    }).verify(input.nowMs);
+    this.reservations.set(historical.id, historical);
+    this.reservations.set(replacement.id, replacement);
+    this.currentHeads.set(
+      keyFor(replacement.generationId, replacement.normalizedPath),
+      replacement.id,
+    );
+    return { kind: 'stored', reservation: this.clone(replacement) };
+  }
+
+  async rescheduleBlockedRevalidation(input: {
+    id: string;
+    expectedRevision: number;
+    errorCode: string;
+    nowMs: number;
+    nextRevalidationAtMs: number;
+  }): Promise<DriveFolderReservation | null> {
+    const current = this.reservations.get(input.id);
+    if (!this.isCurrentBlockedHead(current, undefined, input.expectedRevision)) return null;
+    const rescheduled = current.rescheduleRevalidation(
+      input.errorCode,
+      input.nowMs,
+      input.nextRevalidationAtMs,
+    );
+    this.reservations.set(rescheduled.id, rescheduled);
+    return this.clone(rescheduled);
   }
 
   async compareAndSetCurrent(input: {
@@ -157,6 +266,29 @@ export class InMemoryDriveFolderReservationRepository implements DriveFolderRese
     return [...this.reservations.values()].some((reservation) => reservation.folderId === folderId);
   }
 
+  private blockedHeads(generationId: string): DriveFolderReservation[] {
+    return [...this.currentHeads.entries()]
+      .filter(([key]) => key.startsWith(`${generationId}\0`))
+      .map(([, id]) => this.reservations.get(id))
+      .filter((reservation): reservation is DriveFolderReservation => reservation?.currentSlot === 1
+        && (reservation.state === 'detached' || reservation.state === 'conflict'))
+      .sort(compareRevalidationOrder);
+  }
+
+  private isCurrentBlockedHead(
+    reservation: DriveFolderReservation | undefined,
+    state: 'detached' | 'conflict' | undefined,
+    expectedRevision: number,
+  ): reservation is DriveFolderReservation {
+    return reservation?.currentSlot === 1
+      && reservation.revision === expectedRevision
+      && (state === undefined
+        ? reservation.state === 'detached' || reservation.state === 'conflict'
+        : reservation.state === state)
+      && this.currentHeads.get(keyFor(reservation.generationId, reservation.normalizedPath))
+        === reservation.id;
+  }
+
   private clone(reservation: DriveFolderReservation): DriveFolderReservation {
     return DriveFolderReservation.restore({ ...reservation });
   }
@@ -172,6 +304,43 @@ function keyFor(generationId: string, normalizedPath: string): string {
 
 function matches(current: DriveFolderReservation | null, expected: { id: string; revision: number } | null): boolean {
   return expected === null ? current === null : current?.id === expected.id && current.revision === expected.revision;
+}
+
+function compareRevalidationOrder(
+  left: DriveFolderReservation,
+  right: DriveFolderReservation,
+): number {
+  const leftDeadline = left.nextRevalidationAtMs ?? Number.NEGATIVE_INFINITY;
+  const rightDeadline = right.nextRevalidationAtMs ?? Number.NEGATIVE_INFINITY;
+  return leftDeadline - rightDeadline
+    || compareText(left.normalizedPath, right.normalizedPath)
+    || compareText(left.id, right.id);
+}
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function isActiveRevalidationClaim(
+  reservation: DriveFolderReservation,
+  nowMs: number,
+): boolean {
+  const deadline = reservation.nextRevalidationAtMs;
+  return deadline !== null
+    && deadline > nowMs
+    && deadline - reservation.updatedAtMs < MINIMUM_REVALIDATION_SLOT_MS;
+}
+
+function sameReservationIdentity(
+  current: DriveFolderReservation,
+  replacement: ReserveDriveFolder,
+): boolean {
+  return current.installationId === replacement.installationId
+    && current.generationId === replacement.generationId
+    && current.normalizedPath === replacement.normalizedPath
+    && current.level === replacement.level
+    && current.segmentName === replacement.segmentName
+    && current.parentFolderId === replacement.parentFolderId;
 }
 
 function restoreWithState(reservation: DriveFolderReservation, state: 'missing' | 'superseded', nowMs: number): DriveFolderReservation {
