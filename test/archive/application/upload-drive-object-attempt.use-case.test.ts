@@ -59,18 +59,19 @@ describe('UploadDriveObjectAttemptUseCase', () => {
     async (level) => {
       const fixture = await setup();
       const markVerified = vi.spyOn(fixture.repository, 'markVerified');
+      const mutation = folderMutationFor(level);
       fixture.resolver.execute
         .mockResolvedValueOnce('day-folder-1')
-        .mockRejectedValueOnce(folderMutationFor(level));
+        .mockRejectedValueOnce(mutation);
 
       await expect(fixture.useCase.execute(fixture.artifactId, signal))
-        .rejects.toMatchObject({ code: 'DRIVE_FOLDER_BRANCH_BLOCKED' });
+        .rejects.toMatchObject({
+          code: 'DRIVE_FOLDER_BRANCH_BLOCKED', message: mutation.message, mutationLevel: level,
+        });
 
       expect(fixture.drive.uploadCalls).toBeGreaterThan(0);
       expect(markVerified).not.toHaveBeenCalled();
-      expect(await fixture.repository.listAttempts(fixture.artifactId)).toMatchObject([
-        { remoteObjectId: 'reserved-1', containerId: 'day-folder-1', state: 'retryable' },
-      ]);
+      await expectExactRetryableAttempt(fixture, 'day-folder-1');
     },
   );
 
@@ -85,9 +86,7 @@ describe('UploadDriveObjectAttemptUseCase', () => {
       .rejects.toBeInstanceOf(DriveObjectDetachedError);
 
     expect(markVerified).not.toHaveBeenCalled();
-    expect(await fixture.repository.listAttempts(fixture.artifactId)).toMatchObject([
-      { remoteObjectId: 'reserved-1', containerId: 'historical-day-id', state: 'retryable' },
-    ]);
+    await expectExactRetryableAttempt(fixture, 'historical-day-id');
   });
 
   it('reconciles the old exact ID and atomically reserves a replacement when the leaf changed', async () => {
@@ -830,8 +829,39 @@ function providerRateLimit(
   });
 }
 
-function folderMutationFor(_level: 'year' | 'month' | 'day'): DriveFolderBranchBlockedError {
-  return new DriveFolderBranchBlockedError();
+function folderMutationFor(level: 'year' | 'month' | 'day'):
+DriveFolderBranchBlockedError & { mutationLevel: 'year' | 'month' | 'day' } {
+  const error = new DriveFolderBranchBlockedError() as DriveFolderBranchBlockedError & { mutationLevel: typeof level };
+  error.message = `Drive motion ${level} folder branch changed during upload`;
+  error.mutationLevel = level;
+  return error;
+}
+
+async function expectExactRetryableAttempt(
+  fixture: Awaited<ReturnType<typeof setup>>,
+  containerId: string,
+): Promise<void> {
+  expect(await fixture.repository.loadArtifact(fixture.artifactId)).toMatchObject({
+    state: 'pending', currentVerifiedAttemptId: null, localDeletedAtMs: null,
+  });
+  const [queued] = await fixture.repository.listAttempts(fixture.artifactId);
+  const retained = await fixture.repository.loadAttempt(queued?.id ?? 'missing-attempt');
+  expect(retained).toMatchObject({
+    remoteObjectId: 'reserved-1', containerId, state: 'retryable',
+    session: { ciphertext: expect.any(String), confirmedOffset: expect.any(Number) },
+  });
+  const session = retained?.session;
+
+  await expect(fixture.repository.claimNextAttempt({
+    generationId: 'generation-1', owner: 'reconciliation-worker',
+    nowMs: fixture.clock.value + 1_000, leaseMs: 1_000,
+    kind: 'motion_video', retryOnly: true,
+  })).resolves.toMatchObject({
+    attempt: {
+      id: retained?.id, remoteObjectId: 'reserved-1', containerId, state: 'uploading',
+      session: { ciphertext: session?.ciphertext, confirmedOffset: session?.confirmedOffset },
+    },
+  });
 }
 
 function verified(
