@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { ArchiveRemoteMutationLockService } from '../../../src/archive/application/archive-remote-mutation-lock.service';
 import type {
   DriveFolderCreateInput,
+  DriveFolderListInput,
   DriveFolderMetadata,
   DriveFolderPage,
   DriveFolderPort,
@@ -56,6 +57,16 @@ describe('ResolveMotionArchiveContainerUseCase', () => {
     ]);
     expect(context.drive.exact.get('month-folder-id')).toMatchObject({ parentIds: ['existing-year'], name: '08' });
     expect(context.drive.exact.get('day-folder-id')).toMatchObject({ parentIds: ['month-folder-id'], name: '13' });
+  });
+
+  it('uses expected-parent scope for every candidate discovery call', async () => {
+    const context = createContext(['year-folder-id', 'month-folder-id', 'day-folder-id']);
+    context.drive.pages.push(emptyPage(), emptyPage(), emptyPage());
+
+    await expect(context.useCase.execute(connection(), path, signal)).resolves.toBe('day-folder-id');
+
+    expect(context.drive.listInputs).toHaveLength(3);
+    expect(context.drive.listInputs.every((input) => input.scope === 'expected-parent')).toBe(true);
   });
 
   it('recovers an ambiguous create only by reloading the generated exact ID', async () => {
@@ -376,6 +387,7 @@ describe('ResolveMotionArchiveContainerUseCase', () => {
 class FakeDriveFolderPort implements DriveFolderPort {
   readonly exact = new Map<string, DriveFolderMetadata>();
   readonly pages: (DriveFolderPage | Error)[] = [];
+  readonly listInputs: DriveFolderListInput[] = [];
   readonly calls: string[] = [];
   readonly createFailures: { error: Error; persist: boolean }[] = [];
   readonly journal: string[] = [];
@@ -395,7 +407,8 @@ class FakeDriveFolderPort implements DriveFolderPort {
     return this.exact.get(folderId) ?? null;
   }
 
-  async listCandidates(input: { pageToken: string | null }): Promise<DriveFolderPage> {
+  async listCandidates(input: DriveFolderListInput): Promise<DriveFolderPage> {
+    this.listInputs.push(input);
     this.calls.push(`list:${input.pageToken ?? 'first'}`);
     const next = this.pages.shift() ?? emptyPage();
     if (next instanceof Error) throw next;
