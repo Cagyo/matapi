@@ -90,8 +90,11 @@ describe('RevalidateMotionArchiveBranchUseCase', () => {
     expect(JSON.stringify(fixture.alerts.alert.mock.calls)).not.toContain('2026/08/13');
   });
 
-  it('clamps repeated revalidation backoff and jitter to six hours', async () => {
-    const fixture = await detachedFixture({ random: () => 0.999999999 });
+  it('samples fresh jitter at the six-hour slot without exceeding its cap', async () => {
+    const random = vi.fn()
+      .mockReturnValueOnce(0.25)
+      .mockReturnValueOnce(0.75);
+    const fixture = await detachedFixture({ random });
     let current = await fixture.repository.loadCurrent(connection.id, '2026/08/13');
     if (current === null) throw new Error('expected detached fixture head');
     for (let streak = current.revalidationFailureStreak; streak < 8; streak += 1) {
@@ -108,9 +111,27 @@ describe('RevalidateMotionArchiveBranchUseCase', () => {
 
     await expect(fixture.useCase.executeNext(connection, NOW_MS, signal()))
       .resolves.toBe('still-blocked');
+    const first = await fixture.repository.loadCurrent(connection.id, '2026/08/13');
+    const firstDeadlineMs = first?.nextRevalidationAtMs ?? null;
+    if (firstDeadlineMs === null) {
+      throw new Error('expected first capped revalidation deadline');
+    }
+    expect(firstDeadlineMs - NOW_MS)
+      .toBe(6 * 60 * 60_000 - 250);
 
-    expect(await fixture.repository.loadCurrent(connection.id, '2026/08/13'))
-      .toMatchObject({ nextRevalidationAtMs: NOW_MS + 6 * 60 * 60_000 });
+    await expect(fixture.useCase.executeNext(
+      connection,
+      firstDeadlineMs,
+      signal(),
+    )).resolves.toBe('still-blocked');
+    const second = await fixture.repository.loadCurrent(connection.id, '2026/08/13');
+    const secondDeadlineMs = second?.nextRevalidationAtMs ?? null;
+    if (secondDeadlineMs === null) {
+      throw new Error('expected second capped revalidation deadline');
+    }
+    expect(secondDeadlineMs - firstDeadlineMs)
+      .toBe(6 * 60 * 60_000 - 750);
+    expect(random).toHaveBeenCalledTimes(2);
   });
 
   it('adopts one remaining conflict candidate after one identity-only traversal', async () => {
@@ -149,6 +170,61 @@ describe('RevalidateMotionArchiveBranchUseCase', () => {
     expect(fixture.drive.listCandidates).toHaveBeenCalledTimes(1);
     expect(await fixture.repository.loadCurrent(connection.id, '2026/08/13'))
       .toMatchObject({ state: 'conflict', revalidationFailureStreak: 2 });
+  });
+
+  it('reschedules a conflict adoption rejected by historical folder identity', async () => {
+    const fixture = await conflictFixture({ random: () => 0.5 });
+    await fixture.repository.appendMissingIdentity({
+      reservation: {
+        id: 'historical-reservation',
+        installationId: 'installation-1',
+        generationId: 'generation-1',
+        normalizedPath: '2026/08/12',
+        level: 'day',
+        segmentName: '12',
+        folderId: 'survivor-id',
+        parentFolderId: 'existing-month',
+      },
+      nowMs: 100,
+    });
+    fixture.drive.identitySteps.push(page(exactDayFolder({ id: 'survivor-id' })));
+
+    await expect(fixture.useCase.executeNext(connection, NOW_MS, signal()))
+      .resolves.toBe('still-blocked');
+
+    expect(fixture.drive.listCandidates).toHaveBeenCalledTimes(1);
+    expect(await fixture.repository.loadCurrent(connection.id, '2026/08/13'))
+      .toMatchObject({
+        state: 'conflict', revalidationFailureStreak: 2,
+        nextRevalidationAtMs: NOW_MS + 30 * 60_000 + 500,
+      });
+  });
+
+  it('leaves a genuine concurrent conflict winner unchanged after adoption CAS loss', async () => {
+    const fixture = await conflictFixture({ random: () => 0.5 });
+    fixture.drive.identitySteps.push(page(exactDayFolder({ id: 'survivor-id' })));
+    const reschedule = vi.spyOn(fixture.repository, 'rescheduleBlockedRevalidation');
+    vi.spyOn(fixture.repository, 'adoptConflictCandidate').mockImplementationOnce(async (input) => {
+      const winner = await fixture.repository.rescheduleBlockedRevalidation({
+        id: input.expected.id,
+        expectedRevision: input.expected.revision,
+        errorCode: 'concurrent_winner',
+        nowMs: NOW_MS + 1,
+        nextRevalidationAtMs: NOW_MS + 45 * 60_000,
+      });
+      return { kind: 'lost', current: winner };
+    });
+
+    await expect(fixture.useCase.executeNext(connection, NOW_MS, signal()))
+      .resolves.toBe('still-blocked');
+
+    expect(await fixture.repository.loadCurrent(connection.id, '2026/08/13'))
+      .toMatchObject({
+        errorCode: 'concurrent_winner', revalidationFailureStreak: 2,
+        nextRevalidationAtMs: NOW_MS + 45 * 60_000,
+      });
+    expect(reschedule).toHaveBeenCalledTimes(2);
+    expect(fixture.alerts.alert).not.toHaveBeenCalled();
   });
 
   it('restarts a rejected conflict page token once from page one', async () => {

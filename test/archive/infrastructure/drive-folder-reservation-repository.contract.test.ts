@@ -81,6 +81,31 @@ export function describeDriveFolderReservationRepositoryContract(
       expect(left ?? right).toMatchObject({ normalizedPath: '2026/08/13' });
     });
 
+    it('does not let an early request revoke an active generation claim', async () => {
+      const repository = await create();
+      await seedBlocked(repository, '2026/08/14', 'conflict', 900);
+      await seedBlocked(repository, '2026/08/13', 'detached', 900);
+      const claimed = await repository.claimNextBlockedRevalidation({
+        generationId: 'generation-1', nowMs: 900, claimUntilMs: 60_900,
+      });
+      if (claimed === null) throw new Error('expected active revalidation claim');
+
+      await expect(repository.requestNextBlockedRevalidation({
+        generationId: 'generation-1', nowMs: 901,
+      })).resolves.toBeNull();
+      expect(await repository.loadCurrent('generation-1', '2026/08/13'))
+        .toMatchObject({ revision: claimed.revision, nextRevalidationAtMs: 60_900 });
+      expect(await repository.loadCurrent('generation-1', '2026/08/14'))
+        .toMatchObject({ revision: 2, nextRevalidationAtMs: 900 });
+      await expect(repository.claimNextBlockedRevalidation({
+        generationId: 'generation-1', nowMs: 901, claimUntilMs: 60_901,
+      })).resolves.toBeNull();
+
+      await expect(repository.claimNextBlockedRevalidation({
+        generationId: 'generation-1', nowMs: 60_900, claimUntilMs: 120_900,
+      })).resolves.toMatchObject({ normalizedPath: '2026/08/14' });
+    });
+
     it('claims by earliest deadline before path and ignores another generation', async () => {
       const repository = await create();
       await seedBlocked(repository, '2026/08/12', 'detached', 800);

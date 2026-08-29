@@ -138,7 +138,9 @@ export class RevalidateMotionArchiveBranchUseCase {
       replacement: replacementFor(claimed, this.reservationId(), live[0].id),
       nowMs,
     });
-    return adopted.kind === 'stored' ? 'adopted' : 'still-blocked';
+    if (adopted.kind === 'stored') return 'adopted';
+    await this.keepBlocked(claimed, nowMs);
+    return 'still-blocked';
   }
 
   private async listIdentityCandidates(
@@ -296,10 +298,10 @@ function nextRevalidationDeadline(
   const normalized = Number.isFinite(sample)
     ? Math.max(0, Math.min(sample, 0.999999999))
     : 0;
-  const delay = Math.min(
-    MAX_REVALIDATION_DELAY_MS,
-    slot + Math.floor(normalized * REVALIDATION_JITTER_MS),
-  );
+  const jitterMs = Math.floor(normalized * REVALIDATION_JITTER_MS);
+  const delay = slot === MAX_REVALIDATION_DELAY_MS
+    ? slot - jitterMs
+    : slot + jitterMs;
   return nowMs + delay;
 }
 

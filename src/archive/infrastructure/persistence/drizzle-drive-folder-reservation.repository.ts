@@ -18,7 +18,7 @@ type CurrentResult =
   | { kind: 'stored'; reservation: DriveFolderReservation }
   | { kind: 'lost'; current: DriveFolderReservation | null };
 
-const MINIMUM_REVALIDATION_SLOT_MS = 15 * 60_000;
+const REVALIDATION_CLAIM_DURATION_MS = 60_000;
 
 /** SQLite implementation of durable folder-head reservation and replacement CAS. */
 @Injectable()
@@ -41,10 +41,7 @@ export class DrizzleDriveFolderReservationRepository implements DriveFolderReser
           eq(driveMotionFolderReservations.generationId, input.generationId),
           eq(driveMotionFolderReservations.currentSlot, 1),
           inArray(driveMotionFolderReservations.state, ['detached', 'conflict']),
-          gt(driveMotionFolderReservations.nextRevalidationAt, input.nowMs),
-          sql`${driveMotionFolderReservations.nextRevalidationAt}
-            - ${driveMotionFolderReservations.updatedAt}
-            < ${MINIMUM_REVALIDATION_SLOT_MS}`,
+          activeRevalidationClaim(input.nowMs),
         )).get();
       if (existingClaim !== undefined) return null;
       const row = tx.select().from(driveMotionFolderReservations).where(and(
@@ -83,6 +80,14 @@ export class DrizzleDriveFolderReservationRepository implements DriveFolderReser
     nowMs: number;
   }): Promise<DriveFolderReservation | null> {
     return this.immediate((tx) => {
+      const existingClaim = tx.select({ id: driveMotionFolderReservations.id })
+        .from(driveMotionFolderReservations).where(and(
+          eq(driveMotionFolderReservations.generationId, input.generationId),
+          eq(driveMotionFolderReservations.currentSlot, 1),
+          inArray(driveMotionFolderReservations.state, ['detached', 'conflict']),
+          activeRevalidationClaim(input.nowMs),
+        )).get();
+      if (existingClaim !== undefined) return null;
       const row = tx.select().from(driveMotionFolderReservations).where(and(
         eq(driveMotionFolderReservations.generationId, input.generationId),
         eq(driveMotionFolderReservations.currentSlot, 1),
@@ -476,6 +481,15 @@ function dueBlockedHead(generationId: string, nowMs: number) {
     eq(driveMotionFolderReservations.currentSlot, 1),
     inArray(driveMotionFolderReservations.state, ['detached', 'conflict']),
     lte(driveMotionFolderReservations.nextRevalidationAt, nowMs),
+  );
+}
+
+function activeRevalidationClaim(nowMs: number) {
+  return and(
+    gt(driveMotionFolderReservations.nextRevalidationAt, nowMs),
+    sql`${driveMotionFolderReservations.nextRevalidationAt}
+      - ${driveMotionFolderReservations.updatedAt}
+      = ${REVALIDATION_CLAIM_DURATION_MS}`,
   );
 }
 

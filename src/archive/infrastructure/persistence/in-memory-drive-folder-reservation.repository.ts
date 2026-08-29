@@ -7,7 +7,7 @@ import {
   type DriveFolderReservationSnapshot,
 } from '../../domain/drive-folder-reservation.entity';
 
-const MINIMUM_REVALIDATION_SLOT_MS = 15 * 60_000;
+const REVALIDATION_CLAIM_DURATION_MS = 60_000;
 
 /** Deterministic in-memory parity adapter for folder-reservation use cases. */
 export class InMemoryDriveFolderReservationRepository implements DriveFolderReservationRepositoryPort {
@@ -45,7 +45,12 @@ export class InMemoryDriveFolderReservationRepository implements DriveFolderRese
     generationId: string;
     nowMs: number;
   }): Promise<DriveFolderReservation | null> {
-    const current = this.blockedHeads(input.generationId)[0];
+    const blockedHeads = this.blockedHeads(input.generationId);
+    if (blockedHeads.some((reservation) => isActiveRevalidationClaim(
+      reservation,
+      input.nowMs,
+    ))) return null;
+    const current = blockedHeads[0];
     if (current === undefined) return null;
     const requested = DriveFolderReservation.restore({
       ...current,
@@ -328,7 +333,7 @@ function isActiveRevalidationClaim(
   const deadline = reservation.nextRevalidationAtMs;
   return deadline !== null
     && deadline > nowMs
-    && deadline - reservation.updatedAtMs < MINIMUM_REVALIDATION_SLOT_MS;
+    && deadline - reservation.updatedAtMs === REVALIDATION_CLAIM_DURATION_MS;
 }
 
 function sameReservationIdentity(
