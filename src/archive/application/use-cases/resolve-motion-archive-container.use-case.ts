@@ -406,6 +406,7 @@ export class ResolveMotionArchiveContainerUseCase {
         try {
           page = await this.drive.listCandidates({
             connection,
+            scope: "expected-parent",
             parentId,
             role: level.role,
             normalizedPath: level.normalizedPath,

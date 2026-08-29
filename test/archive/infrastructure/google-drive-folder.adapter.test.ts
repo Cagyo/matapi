@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { DriveConnection } from "../../../src/archive/domain/drive-connection.entity";
+import { DriveFolderDiscoveryUncertainError } from "../../../src/archive/domain/errors/drive-folder-discovery-uncertain.error";
+import { DriveTemporaryUnavailableError } from "../../../src/archive/domain/errors/drive-temporary-unavailable.error";
 import { GoogleDriveFolderAdapter } from "../../../src/archive/infrastructure/google/google-drive-folder.adapter";
 
 const sdk = vi.hoisted(() => ({
@@ -50,6 +52,11 @@ vi.mock("@googleapis/drive", () => ({
 const signal = new AbortController().signal;
 
 describe("GoogleDriveFolderAdapter", () => {
+  it("keeps discovery uncertainty distinct from generic temporary unavailability", () => {
+    expect(new DriveTemporaryUnavailableError().code).toBe("DRIVE_TEMPORARY_UNAVAILABLE");
+    expect(new DriveFolderDiscoveryUncertainError().code).toBe("DRIVE_FOLDER_DISCOVERY_UNCERTAIN");
+  });
+
   it("issues a parent-constrained date property query and returns exact metadata", async () => {
     resetSdk();
     sdk.listResponse = {
@@ -61,6 +68,7 @@ describe("GoogleDriveFolderAdapter", () => {
 
     await expect(adapter.listCandidates({
       connection: connection(),
+      scope: "expected-parent",
       parentId: "year-1",
       role: "motion-month",
       normalizedPath: "2026/08",
@@ -88,6 +96,45 @@ describe("GoogleDriveFolderAdapter", () => {
     expect(sdk.listInput?.pageSize).toBe(100);
     expect(String(sdk.listInput?.fields)).toContain("mimeType,parents,appProperties");
     expect(String(sdk.listInput?.fields)).toContain("owners(permissionId),permissionIds,shared,trashed");
+  });
+
+  it("uses parent and live-only filters for expected-parent discovery", async () => {
+    resetSdk();
+    const adapter = adapterFor();
+
+    await adapter.listCandidates({
+      connection: connection(),
+      scope: "expected-parent",
+      parentId: "month-id",
+      role: "motion-day",
+      normalizedPath: "2026/08/13",
+      pageToken: null,
+      pageSize: 100,
+    }, AbortSignal.timeout(1_000));
+
+    expect(sdk.listInput?.q).toContain("'month-id' in parents");
+    expect(sdk.listInput?.q).toContain("trashed=false");
+  });
+
+  it("searches exact private identity without parent, name, or trash filters", async () => {
+    resetSdk();
+    const adapter = adapterFor();
+
+    await adapter.listCandidates({
+      connection: connection(),
+      scope: "identity",
+      parentId: null,
+      role: "motion-day",
+      normalizedPath: "2026/08/13",
+      pageToken: null,
+      pageSize: 100,
+    }, AbortSignal.timeout(1_000));
+
+    const query = sdk.listInput?.q as string;
+    expect(query).toContain("appProperties has { key='a1p' and value='2026/08/13' }");
+    expect(query).not.toContain(" in parents");
+    expect(query).not.toContain("trashed=false");
+    expect(query).not.toContain("name=");
   });
 
   it("loads exact folder metadata and creates a folder with its reserved ID", async () => {
@@ -161,14 +208,14 @@ describe("GoogleDriveFolderAdapter", () => {
     const adapter = adapterFor();
 
     await expect(adapter.listCandidates({
-      connection: connection(), parentId: "year-1", role: "motion-month", normalizedPath: "2026/08", pageToken: "secret-token", pageSize: 100,
+      connection: connection(), scope: "expected-parent", parentId: "year-1", role: "motion-month", normalizedPath: "2026/08", pageToken: "secret-token", pageSize: 100,
     }, signal)).rejects.toMatchObject({
       name: "DriveFolderPageTokenRejectedError",
       code: "DRIVE_FOLDER_PAGE_TOKEN_REJECTED",
       message: "Google Drive folder page token was rejected",
     });
     await expect(adapter.listCandidates({
-      connection: connection(), parentId: "year-1", role: "motion-month", normalizedPath: "2026/08", pageToken: "secret-token", pageSize: 100,
+      connection: connection(), scope: "expected-parent", parentId: "year-1", role: "motion-month", normalizedPath: "2026/08", pageToken: "secret-token", pageSize: 100,
     }, signal)).rejects.not.toThrow(/secret-token/);
   });
 });

@@ -15,9 +15,12 @@ export interface DriveFolderMetadata {
   trashed: boolean | null;
 }
 
+export type DriveFolderCandidateScope = "expected-parent" | "identity";
+
 export interface DriveFolderListInput {
   connection: DriveConnection;
-  parentId: string;
+  scope: DriveFolderCandidateScope;
+  parentId: string | null;
   role: "motion-year" | "motion-month" | "motion-day";
   normalizedPath: string;
   pageToken: string | null;

@@ -62,9 +62,10 @@ export interface GoogleDriveManagedFolderList {
 export interface GoogleDriveDateFolderList {
   installationId: string;
   generationId: string;
+  scope: "expected-parent" | "identity";
   role: GoogleDriveDateFolderRole;
   normalizedPath: string;
-  parentId: string;
+  parentId: string | null;
   pageToken: string | null;
   pageSize: number;
   signal: AbortSignal;
@@ -184,22 +185,46 @@ export class GoogleDriveGateway {
 }
 
 function folderQuery(input: GoogleDriveFolderList): string {
-  const properties: Record<string, string> = {
+  const properties = "normalizedPath" in input
+    ? dateFolderProperties(input)
+    : managedFolderProperties(input);
+  const matches = Object.entries(properties).map(
+    ([key, value]) => `appProperties has { key='${escapeQuery(key)}' and value='${escapeQuery(value)}' }`,
+  );
+  const structural = "normalizedPath" in input
+    ? input.scope === "expected-parent"
+      ? ["trashed=false", `'${escapeQuery(requireParent(input.parentId))}' in parents`]
+      : []
+    : ["trashed=false", `'${escapeQuery(input.parentId)}' in parents`];
+  return [
+    "mimeType='application/vnd.google-apps.folder'",
+    ...structural,
+    ...matches,
+  ].join(" and ");
+}
+
+function managedFolderProperties(input: GoogleDriveManagedFolderList): Record<string, string> {
+  return {
     a1v: "1",
     a1i: input.installationId,
     a1g: input.generationId,
     a1k: input.role,
   };
-  if ("normalizedPath" in input) properties.a1p = input.normalizedPath;
-  const matches = Object.entries(properties).map(
-    ([key, value]) => `appProperties has { key='${escapeQuery(key)}' and value='${escapeQuery(value)}' }`,
-  );
-  return [
-    "mimeType='application/vnd.google-apps.folder'",
-    "trashed=false",
-    `'${escapeQuery(input.parentId)}' in parents`,
-    ...matches,
-  ].join(" and ");
+}
+
+function dateFolderProperties(input: GoogleDriveDateFolderList): Record<string, string> {
+  return {
+    a1v: "1",
+    a1i: input.installationId,
+    a1g: input.generationId,
+    a1k: input.role,
+    a1p: input.normalizedPath,
+  };
+}
+
+function requireParent(parentId: string | null): string {
+  if (parentId === null) throw new DriveConfigurationError("Google Drive expected-parent folder search requires a parent ID");
+  return parentId;
 }
 
 function toFolder(file: drive_v3.Schema$File): GoogleDriveFolder {

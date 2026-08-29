@@ -53,6 +53,7 @@ export class GoogleDriveFolderAdapter implements DriveFolderPort {
       const page = await gateway.listFolders({
         installationId: input.connection.installationId,
         generationId: input.connection.id,
+        scope: input.scope,
         role: input.role,
         normalizedPath: input.normalizedPath,
         parentId: input.parentId,
