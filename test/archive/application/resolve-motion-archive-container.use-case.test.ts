@@ -312,6 +312,56 @@ describe('ResolveMotionArchiveContainerUseCase', () => {
     },
   );
 
+  it.each([
+    [
+      'partial trashed evidence before incomplete search',
+      () => [
+        {
+          folders: [{ ...exactDayFolder('trashed-before-incomplete'), trashed: true }],
+          nextPageToken: 'identity-page-2',
+          incompleteSearch: false,
+        },
+        { folders: [], nextPageToken: null, incompleteSearch: true },
+      ],
+    ],
+    [
+      'partial live evidence before the page bound',
+      () => [
+        { folders: [exactDayFolder('live-before-bound')], nextPageToken: 'identity-page-2', incompleteSearch: false },
+        { folders: [], nextPageToken: 'identity-page-3', incompleteSearch: false },
+        { folders: [], nextPageToken: 'identity-page-4', incompleteSearch: false },
+        { folders: [], nextPageToken: 'identity-page-5', incompleteSearch: false },
+        { folders: [], nextPageToken: 'identity-page-6', incompleteSearch: false },
+      ],
+    ],
+    [
+      'partial conflict evidence before a second token rejection',
+      () => {
+        const left = exactDayFolder('live-conflict-left');
+        const right = exactDayFolder('live-conflict-right');
+        return [
+          { folders: [left, right], nextPageToken: 'identity-page-2', incompleteSearch: false },
+          new DriveFolderPageTokenRejectedError(),
+          { folders: [left, right], nextPageToken: 'identity-page-2', incompleteSearch: false },
+          new DriveFolderPageTokenRejectedError(),
+        ];
+      },
+    ],
+  ] as const)('does not persist %s when a later identity page is uncertain', async (_scenario, makePages) => {
+    const alert = vi.fn().mockResolvedValue(undefined);
+    const context = await createRollbackContext([], { alert });
+    const beforeHistory = context.repository.history();
+    context.drive.identityPages.push(...makePages());
+
+    await expect(context.useCase.execute(connection(), path, signal))
+      .rejects.toMatchObject({ code: 'DRIVE_FOLDER_DISCOVERY_UNCERTAIN' });
+
+    expect(context.repository.history()).toEqual(beforeHistory);
+    expect(await context.repository.loadCurrent('generation-1', path.dayPath)).toBeNull();
+    expect(context.drive.calls.some((call) => call.startsWith('generate:'))).toBe(false);
+    expect(alert).not.toHaveBeenCalled();
+  });
+
   it('reloads and uses the winning head after losing the current-slot reservation CAS', async () => {
     const base = new InMemoryDriveFolderReservationRepository();
     const drive = new FakeDriveFolderPort(['losing-year-id', 'month-folder-id', 'day-folder-id']);
@@ -770,8 +820,11 @@ function createContext(
   };
 }
 
-async function createRollbackContext(generatedIds: string[] = []) {
-  const context = createContext(generatedIds);
+async function createRollbackContext(
+  generatedIds: string[] = [],
+  alerts = { alert: async () => undefined },
+) {
+  const context = createContext(generatedIds, undefined, undefined, alerts);
   await seedLevel(context.repository, context.drive, {
     normalizedPath: '2026', level: 'year', role: 'motion-year', segmentName: '2026',
     folderId: 'existing-year', parentFolderId: 'motion-1',

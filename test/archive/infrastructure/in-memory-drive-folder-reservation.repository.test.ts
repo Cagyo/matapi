@@ -17,6 +17,76 @@ describe('InMemoryDriveFolderReservationRepository', () => {
     expect(await repository.loadCurrent('generation-1', '2026/08/13')).not.toBeNull();
   });
 
+  it('is idempotent by the globally unique folder ID', async () => {
+    const repository = new InMemoryDriveFolderReservationRepository();
+    const first = await repository.appendMissingIdentity({
+      reservation: reservation('missing-1', '2026', 'trashed-folder'),
+      nowMs: 10,
+    });
+    const second = await repository.appendMissingIdentity({
+      reservation: { ...reservation('missing-2', '2027', 'trashed-folder'), generationId: 'generation-2' },
+      nowMs: 20,
+    });
+
+    expect(first).toBe('stored');
+    expect(second).toBe('exists');
+    expect(repository.history()).toEqual([
+      expect.objectContaining({
+        id: 'missing-1',
+        generationId: 'generation-1',
+        normalizedPath: '2026',
+        folderId: 'trashed-folder',
+        state: 'missing',
+        currentSlot: null,
+      }),
+    ]);
+  });
+
+  it('keeps missing history outside the current slot and preserves an unrelated head', async () => {
+    const repository = new InMemoryDriveFolderReservationRepository();
+    const current = await repository.compareAndSetCurrent({
+      expected: null,
+      replacement: reservation('current-1', '2027', 'current-folder'),
+      nowMs: 10,
+    });
+    if (current.kind !== 'stored') throw new Error('expected current reservation');
+
+    const result = await repository.appendMissingIdentity({
+      reservation: reservation('missing-1', '2026', 'trashed-folder'),
+      nowMs: 20,
+    });
+
+    expect(result).toBe('stored');
+    expect(await repository.loadCurrent('generation-1', '2027')).toMatchObject({
+      id: 'current-1', folderId: 'current-folder', currentSlot: 1,
+    });
+    expect(await repository.loadCurrent('generation-1', '2026')).toBeNull();
+    expect(repository.history()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'missing-1', state: 'missing', currentSlot: null }),
+      expect.objectContaining({ id: 'current-1', currentSlot: 1 }),
+    ]));
+  });
+
+  it('returns one stored and one exists for concurrent appends of one folder ID', async () => {
+    const repository = new InMemoryDriveFolderReservationRepository();
+    const [left, right] = await Promise.all([
+      repository.appendMissingIdentity({
+        reservation: reservation('missing-left', '2026', 'same-folder'),
+        nowMs: 10,
+      }),
+      repository.appendMissingIdentity({
+        reservation: { ...reservation('missing-right', '2027', 'same-folder'), generationId: 'generation-2' },
+        nowMs: 10,
+      }),
+    ]);
+
+    expect([left, right].sort()).toEqual(['exists', 'stored']);
+    expect(repository.history()).toHaveLength(1);
+    expect(repository.history()[0]).toMatchObject({
+      folderId: 'same-folder', state: 'missing', currentSlot: null,
+    });
+  });
+
   it('terminalizes a missing ancestor and supersedes its current descendants atomically', async () => {
     const repository = new InMemoryDriveFolderReservationRepository();
     const rows = [
