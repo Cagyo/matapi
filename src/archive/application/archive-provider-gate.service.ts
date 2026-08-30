@@ -1,7 +1,9 @@
 import { Inject, Injectable } from '@nestjs/common';
 import {
   ARCHIVE_PROVIDER_STATE_REPOSITORY,
+  type ArchiveProviderBlockReason,
   type ArchiveProviderOperationClass,
+  type ArchiveProviderProbeReason,
   type ArchiveProviderState,
   type ArchiveProviderStateRepositoryPort,
 } from './ports/archive-provider-state-repository.port';
@@ -16,6 +18,8 @@ const RETRY_SLOTS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 64_000] as c
 const DEFAULT_MAXIMUM_SLEEP_MS = 2 * 60 * 1_000;
 const TEMPORARY_CAPACITY_MS = 60 * 60 * 1_000;
 const MAX_PROVIDER_DELAY_MS = 24 * 60 * 60 * 1_000;
+const QUOTA_PROBE_INTERVAL_MS = 6 * 60 * 60 * 1_000;
+const QUOTA_PROBE_JITTER_MS = 60_000;
 
 export interface ArchiveProviderGateClock { now(): Date }
 export interface ArchiveProviderGateSleeper { sleep(ms: number, signal?: AbortSignal): Promise<void> }
@@ -24,9 +28,22 @@ export interface ArchiveProviderGateOptions { maximumSleepMs?: number }
 
 export type ArchiveProviderAdmission =
   | { kind: 'allowed' }
-  | { kind: 'probe' }
+  | {
+    kind: 'probe';
+    generationId: string;
+    revision: number;
+    reason: ArchiveProviderProbeReason;
+    operationClass: ArchiveProviderOperationClass;
+  }
   | { kind: 'cooldown'; untilMs: number }
-  | { kind: 'blocked'; reason: string };
+  | { kind: 'blocked'; reason: ArchiveProviderBlockReason | 'stale_generation' };
+
+export interface ArchiveProviderProbeClaim {
+  generationId: string;
+  revision: number;
+  reason: ArchiveProviderProbeReason;
+  operationClass: ArchiveProviderOperationClass;
+}
 
 export type ArchiveProviderImmediateResult<T> =
   | { kind: 'executed'; value: T }
@@ -62,6 +79,8 @@ export class ArchiveProviderGateService {
   }): Promise<T> {
     throwIfAborted(input.signal);
     const admission = await this.inspect(input.generationId, input.operationClass);
+    let expectedProviderRevision: number | null = null;
+    let ownsProviderState = false;
     if (admission.kind === 'blocked') throw blockedError(admission.reason);
     if (admission.kind === 'cooldown') {
       await this.wait(admission.untilMs, input.signal, input.beforeWait);
@@ -71,23 +90,52 @@ export class ArchiveProviderGateService {
       return this.run(input);
     }
     if (admission.kind === 'probe') {
-      if (input.probe !== true || !(await this.claimProbe(input.generationId, input.operationClass))) {
+      if (input.probe !== true
+        || admission.reason === 'quota'
+        || admission.operationClass !== input.operationClass) {
         throw new DriveTemporaryUnavailableError('Drive provider recovery probe is pending');
       }
+      const claim = await this.claimRecoveryProbe(admission);
+      if (claim === null) {
+        throw new DriveTemporaryUnavailableError('Drive provider recovery probe is pending');
+      }
+      expectedProviderRevision = claim.revision;
+      ownsProviderState = true;
+    } else {
+      const current = await this.loadGeneration(input.generationId);
+      if (current === null || admissionFor(current, input.operationClass, this.nowMs()).kind !== 'allowed') {
+        throw new DriveTemporaryUnavailableError('Drive provider admission changed');
+      }
+      expectedProviderRevision = current.revision;
     }
 
     for (let retries = 0; ; retries += 1) {
       throwIfAborted(input.signal);
       try {
         const result = await input.operation();
-        await this.recordSuccess(input.generationId, input.operationClass, admission.kind === 'probe');
+        if (ownsProviderState) {
+          await this.recordSuccess(
+            input.generationId,
+            input.operationClass,
+            admission.kind === 'probe',
+            expectedProviderRevision,
+          );
+        }
         return result;
       } catch (error) {
         if (!(error instanceof Error)) throw error;
-        await this.recordFailure(input.generationId, input.operationClass, error);
+        expectedProviderRevision = await this.recordFailureAtRevision(
+          input.generationId,
+          input.operationClass,
+          error,
+          expectedProviderRevision,
+        );
+        ownsProviderState = expectedProviderRevision !== null;
         if (!isInlineRetryable(error) || retries >= RETRY_SLOTS_MS.length) throw error;
+        if (expectedProviderRevision === null) throw error;
         const state = await this.loadGeneration(input.generationId);
-        if (state === null) throw error;
+        if (state?.revision !== expectedProviderRevision
+          || state.operationClass !== input.operationClass) throw error;
         const deadline = state.cooldownUntilMs;
         if (deadline === null) throw error;
         await this.wait(deadline, input.signal, input.beforeWait);
@@ -112,7 +160,6 @@ export class ArchiveProviderGateService {
     if (admission.kind !== 'allowed') return { kind: 'denied' };
     try {
       const value = await input.operation();
-      await this.recordSuccess(input.generationId, input.operationClass, false);
       return { kind: 'executed', value };
     } catch (error) {
       if (error instanceof Error) {
@@ -134,16 +181,37 @@ export class ArchiveProviderGateService {
 
   async inspect(
     generationId: string,
-    _operationClass: ArchiveProviderOperationClass,
+    operationClass: ArchiveProviderOperationClass,
   ): Promise<ArchiveProviderAdmission> {
     const state = await this.loadGeneration(generationId);
     if (state === null) return { kind: 'blocked', reason: 'stale_generation' };
-    if (state.blockReason !== null) return { kind: 'blocked', reason: state.blockReason };
-    if (state.failureClass === 'quota') return { kind: 'allowed' };
-    if (state.cooldownUntilMs === null) return { kind: 'allowed' };
-    return state.cooldownUntilMs > this.nowMs()
-      ? { kind: 'cooldown', untilMs: state.cooldownUntilMs }
-      : { kind: 'probe' };
+    return admissionFor(state, operationClass, this.nowMs());
+  }
+
+  async claimRecoveryProbe(
+    admission: Extract<ArchiveProviderAdmission, { kind: 'probe' }>,
+  ): Promise<ArchiveProviderProbeClaim | null> {
+    const current = await this.repository.load();
+    const nowMs = this.nowMs();
+    if (current.generationId !== admission.generationId
+      || current.revision !== admission.revision
+      || current.operationClass !== admission.operationClass
+      || recoveryReason(current) !== admission.reason
+      || current.cooldownUntilMs === null
+      || current.cooldownUntilMs > nowMs) return null;
+    const claimed = await this.repository.compareAndSet(current.revision, {
+      ...withoutRevision(current),
+      cooldownUntilMs: nowMs + this.maximumSleepMs,
+      updatedAtMs: nowMs,
+    });
+    return claimed
+      ? {
+        generationId: admission.generationId,
+        revision: admission.revision + 1,
+        reason: admission.reason,
+        operationClass: admission.operationClass,
+      }
+      : null;
   }
 
   async recordFailure(
@@ -151,13 +219,23 @@ export class ArchiveProviderGateService {
     operationClass: ArchiveProviderOperationClass,
     error: Error,
   ): Promise<void> {
+    await this.recordFailureAtRevision(generationId, operationClass, error, null);
+  }
+
+  private async recordFailureAtRevision(
+    generationId: string,
+    operationClass: ArchiveProviderOperationClass,
+    error: Error,
+    expectedRevision: number | null,
+  ): Promise<number | null> {
     for (;;) {
       const current = await this.loadGeneration(generationId);
-      if (current === null) return;
+      if (current === null) return null;
+      if (expectedRevision !== null && current.revision !== expectedRevision) return null;
       const nowMs = this.nowMs();
       const classified = classifyFailure(error, current.failureStreak, nowMs, this.jitter);
-      if (classified === null) return;
-      if (preservesOtherOperationAdmission(current, operationClass, classified)) return;
+      if (classified === null) return null;
+      if (preservesOtherOperationAdmission(current, operationClass, classified)) return null;
       const next: Omit<ArchiveProviderState, 'revision'> = {
         generationId,
         operationClass,
@@ -167,7 +245,8 @@ export class ArchiveProviderGateService {
         blockReason: classified.blockReason,
         updatedAtMs: nowMs,
       };
-      if (await this.repository.compareAndSet(current.revision, next)) return;
+      if (await this.repository.compareAndSet(current.revision, next)) return current.revision + 1;
+      if (expectedRevision !== null) return null;
     }
   }
 
@@ -175,56 +254,51 @@ export class ArchiveProviderGateService {
     generationId: string,
     operationClass: ArchiveProviderOperationClass,
     _postCooldownProbe: boolean,
+    expectedRevision?: number | null,
   ): Promise<void> {
-    for (;;) {
-      const current = await this.loadGeneration(generationId);
-      if (current === null) return;
-      if (current.operationClass !== operationClass) return;
-      if (isClear(current)) return;
-      if (await this.repository.compareAndSet(current.revision, clearState(generationId, this.nowMs()))) return;
-    }
+    if (expectedRevision === undefined || expectedRevision === null) return;
+    const current = await this.loadGeneration(generationId);
+    if (current?.revision !== expectedRevision
+      || current.operationClass !== operationClass
+      || isClear(current)) return;
+    await this.repository.compareAndSet(
+      expectedRevision,
+      clearState(generationId, this.nowMs()),
+    );
   }
 
-  async recordQuotaOutcome(generationId: string, remainingDeficitBytes: number): Promise<void> {
+  async recordQuotaOutcome(
+    generationId: string,
+    remainingDeficitBytes: number,
+    claim?: ArchiveProviderProbeClaim,
+  ): Promise<void> {
     if (!Number.isSafeInteger(remainingDeficitBytes) || remainingDeficitBytes < 0) {
       throw new Error('Drive quota deficit is invalid');
     }
-    for (;;) {
-      const current = await this.loadGeneration(generationId);
-      if (current === null) return;
-      const next = remainingDeficitBytes === 0
-        ? clearState(generationId, this.nowMs())
-        : {
-          generationId,
-          operationClass: current.operationClass ?? 'delete' as const,
-          failureClass: 'quota' as const,
-          failureStreak: Math.max(1, current.failureStreak),
-          cooldownUntilMs: null,
-          blockReason: 'quota_exhausted',
-          updatedAtMs: this.nowMs(),
-        };
-      if (await this.repository.compareAndSet(current.revision, next)) return;
-    }
-  }
-
-  private async claimProbe(
-    generationId: string,
-    operationClass: ArchiveProviderOperationClass,
-  ): Promise<boolean> {
-    for (;;) {
-      const current = await this.loadGeneration(generationId);
-      if (current === null) return false;
-      if (current.blockReason !== null
-        || current.cooldownUntilMs === null
-        || current.cooldownUntilMs > this.nowMs()) return false;
-      const next = {
-        ...withoutRevision(current),
-        operationClass,
-        cooldownUntilMs: this.nowMs() + this.maximumSleepMs,
-        updatedAtMs: this.nowMs(),
+    const current = await this.loadGeneration(generationId);
+    if (current === null) return;
+    const isClaimedQuotaProbe = claim?.generationId === generationId
+      && claim.reason === 'quota'
+      && claim.revision === current.revision
+      && claim.operationClass === current.operationClass
+      && current.blockReason === 'quota_exhausted';
+    const isInitialQuotaClassification = claim === undefined
+      && current.failureClass === 'quota'
+      && current.blockReason === null;
+    if (!isClaimedQuotaProbe && !isInitialQuotaClassification) return;
+    const nowMs = this.nowMs();
+    const next = remainingDeficitBytes === 0
+      ? clearState(generationId, nowMs)
+      : {
+        generationId,
+        operationClass: current.operationClass ?? 'delete' as const,
+        failureClass: 'quota' as const,
+        failureStreak: Math.max(1, current.failureStreak),
+        cooldownUntilMs: quotaProbeDeadline(nowMs, this.jitter),
+        blockReason: 'quota_exhausted' as const,
+        updatedAtMs: nowMs,
       };
-      if (await this.repository.compareAndSet(current.revision, next)) return true;
-    }
+    await this.repository.compareAndSet(current.revision, next);
   }
 
   private async wait(
@@ -256,7 +330,11 @@ function classifyFailure(
   failureStreak: number,
   nowMs: number,
   jitter: ArchiveProviderGateRandom,
-): { failureClass: ArchiveProviderState['failureClass']; cooldownUntilMs: number | null; blockReason: string | null } | null {
+): {
+  failureClass: ArchiveProviderState['failureClass'];
+  cooldownUntilMs: number | null;
+  blockReason: ArchiveProviderState['blockReason'];
+} | null {
   if (error instanceof DriveQuotaExceededError) {
     return { failureClass: 'quota', cooldownUntilMs: null, blockReason: null };
   }
@@ -297,6 +375,56 @@ function boundedProviderDelay(value: number | null): number | null {
     : null;
 }
 
+function admissionFor(
+  state: ArchiveProviderState,
+  requestedOperationClass: ArchiveProviderOperationClass,
+  nowMs: number,
+): ArchiveProviderAdmission {
+  const probeReason = recoveryReason(state);
+  if (state.blockReason !== null) {
+    if (probeReason !== null
+      && state.cooldownUntilMs !== null
+      && state.cooldownUntilMs <= nowMs) {
+      return {
+        kind: 'probe',
+        generationId: state.generationId!,
+        revision: state.revision,
+        reason: probeReason,
+        operationClass: state.operationClass ?? requestedOperationClass,
+      };
+    }
+    return { kind: 'blocked', reason: state.blockReason };
+  }
+  if (state.failureClass === 'quota') return { kind: 'allowed' };
+  if (state.cooldownUntilMs === null) return { kind: 'allowed' };
+  if (state.cooldownUntilMs > nowMs) {
+    return { kind: 'cooldown', untilMs: state.cooldownUntilMs };
+  }
+  return {
+    kind: 'probe',
+    generationId: state.generationId!,
+    revision: state.revision,
+    reason: 'cooldown',
+    operationClass: state.operationClass ?? requestedOperationClass,
+  };
+}
+
+function recoveryReason(state: ArchiveProviderState): ArchiveProviderProbeReason | null {
+  if (state.blockReason === 'quota_exhausted') return 'quota';
+  if (state.blockReason === 'account_creation_limit') return 'capacity';
+  if (state.blockReason === 'policy_blocked') return 'policy';
+  if (state.blockReason !== null) return null;
+  return state.cooldownUntilMs === null ? null : 'cooldown';
+}
+
+function quotaProbeDeadline(nowMs: number, jitter: ArchiveProviderGateRandom): number {
+  const random = jitter.random();
+  const normalized = Number.isFinite(random)
+    ? Math.max(0, Math.min(random, 0.999999999))
+    : 0;
+  return nowMs + QUOTA_PROBE_INTERVAL_MS - Math.floor(normalized * QUOTA_PROBE_JITTER_MS);
+}
+
 function clearState(generationId: string, nowMs: number): Omit<ArchiveProviderState, 'revision'> {
   return {
     generationId, operationClass: null, failureClass: null, failureStreak: 0,
@@ -317,7 +445,7 @@ function isClear(state: ArchiveProviderState): boolean {
 function preservesOtherOperationAdmission(
   current: ArchiveProviderState,
   operationClass: ArchiveProviderOperationClass,
-  incoming: { blockReason: string | null },
+  incoming: Pick<ArchiveProviderState, 'blockReason'>,
 ): boolean {
   if (incoming.blockReason !== null) return false;
   if (current.blockReason !== null) return true;
@@ -332,7 +460,7 @@ function isInlineRetryable(error: Error): boolean {
   return error instanceof DriveTemporaryUnavailableError;
 }
 
-function blockedError(reason: string): Error {
+function blockedError(reason: ArchiveProviderBlockReason | 'stale_generation'): Error {
   if (reason === 'account_creation_limit') return new DriveProviderCapacityBlockedError('user-action');
   if (reason === 'policy_blocked') return new DrivePolicyBlockedError();
   if (reason === 'reauthorization_required') return new DriveReauthorizationRequiredError();

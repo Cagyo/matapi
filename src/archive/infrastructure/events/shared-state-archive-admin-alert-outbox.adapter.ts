@@ -3,7 +3,12 @@ import type {
   ArchiveAdminAlertOutboxInput,
   ArchiveAdminAlertOutboxPort,
   ArchiveAdminAlertStateLockPort,
+  ArchiveProviderProbeFailureSettlementInput,
 } from '../../application/ports/archive-admin-alert-outbox.port';
+import type {
+  ArchiveProviderStateRepositoryPort,
+  ArchiveProviderStateTransactionPort,
+} from '../../application/ports/archive-provider-state-repository.port';
 import type { EventRepositoryPort } from '../../../events/domain/ports/event-repository.port';
 import type { QueuedEvent } from '../../../events/domain/queued-event.entity';
 
@@ -14,12 +19,28 @@ export class SharedStateArchiveAdminAlertOutboxAdapter implements ArchiveAdminAl
       'loadActive' | 'readAlertCooldowns' | 'compareAndSetAlertCooldowns'>
       & ArchiveAdminAlertStateLockPort,
     private readonly events: Pick<EventRepositoryPort, 'enqueue'>,
+    private readonly providerState?: ArchiveProviderStateRepositoryPort
+      & ArchiveProviderStateTransactionPort,
   ) {}
 
   enqueue(input: ArchiveAdminAlertOutboxInput): Promise<QueuedEvent | null> {
     return this.credentials.withArchiveAdminAlertStateLock(
       () => this.enqueueExclusive(input),
     );
+  }
+
+  settleProviderProbeFailure(
+    input: ArchiveProviderProbeFailureSettlementInput,
+  ): Promise<'settled' | 'lost'> {
+    if (this.providerState === undefined) return Promise.resolve('lost');
+    return this.providerState.withArchiveProviderStateTransaction(
+      (providerState) => this.credentials.withArchiveAdminAlertStateLock(
+        () => this.settleProviderProbeFailureExclusive(providerState, input),
+      ),
+    ).catch((error: unknown) => {
+      if (error === LOST_SETTLEMENT) return 'lost';
+      throw error;
+    });
   }
 
   private async enqueueExclusive(input: ArchiveAdminAlertOutboxInput): Promise<QueuedEvent | null> {
@@ -41,6 +62,67 @@ export class SharedStateArchiveAdminAlertOutboxAdapter implements ArchiveAdminAl
         expected: next,
         next: current,
       });
+      throw error;
+    }
+  }
+
+  private async settleProviderProbeFailureExclusive(
+    providerState: ArchiveProviderStateRepositoryPort,
+    input: ArchiveProviderProbeFailureSettlementInput,
+  ): Promise<'settled' | 'lost'> {
+    const currentProviderState = await providerState.load();
+    if (input.nextProviderState.generationId !== input.fence.id
+      || input.nextProviderState.operationClass === null
+      || currentProviderState.generationId !== input.fence.id
+      || currentProviderState.revision !== input.expectedProviderRevision
+      || currentProviderState.operationClass !== input.nextProviderState.operationClass) {
+      return 'lost';
+    }
+    const active = await this.credentials.loadActive();
+    if (!sameFence(active, input.fence)) return 'lost';
+    const currentCooldowns = await this.credentials.readAlertCooldowns(input.fence.id);
+    if (currentCooldowns === null) return 'lost';
+
+    const providerUpdated = await providerState.compareAndSet(
+      input.expectedProviderRevision,
+      input.nextProviderState,
+    );
+    if (!providerUpdated) return 'lost';
+    if ((currentCooldowns[input.alertKind] ?? 0) > input.nowMs) return 'settled';
+
+    const nextCooldowns = {
+      ...currentCooldowns,
+      [input.alertKind]: Math.max(
+        currentCooldowns[input.alertKind] ?? 0,
+        input.alertCooldownUntilMs,
+      ),
+    };
+    const cooldownUpdated = await this.credentials.compareAndSetAlertCooldowns({
+      generationId: input.fence.id,
+      expected: currentCooldowns,
+      next: nextCooldowns,
+    });
+    if (!cooldownUpdated) {
+      throw LOST_SETTLEMENT;
+    }
+    try {
+      await this.events.enqueue(toEvent({
+        fence: input.fence,
+        kind: input.alertKind,
+        ...(input.errorCode === undefined ? {} : { errorCode: input.errorCode }),
+        nowMs: input.nowMs,
+        cooldownUntilMs: input.alertCooldownUntilMs,
+      }));
+      return 'settled';
+    } catch (error) {
+      const cooldownRolledBack = await this.credentials.compareAndSetAlertCooldowns({
+        generationId: input.fence.id,
+        expected: nextCooldowns,
+        next: currentCooldowns,
+      });
+      if (!cooldownRolledBack) {
+        throw new Error('Archive provider probe settlement rollback failed');
+      }
       throw error;
     }
   }
@@ -66,3 +148,5 @@ function toEvent(input: ArchiveAdminAlertOutboxInput) {
     createdAt: new Date(input.nowMs),
   };
 }
+
+const LOST_SETTLEMENT = new Error('Archive provider probe settlement lost its fence');

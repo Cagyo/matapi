@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../../database/database.module';
 import { archiveProviderState } from '../../../database/schema';
 import type {
@@ -53,6 +53,30 @@ export class DrizzleArchiveProviderStateRepository implements ArchiveProviderSta
     });
   }
 
+  async requestProbe(input: {
+    generationId: string;
+    expectedRevision: number;
+    allowedBlockReasons: readonly ('account_creation_limit' | 'policy_blocked')[];
+    nowMs: number;
+  }): Promise<boolean> {
+    if (input.allowedBlockReasons.length === 0) return false;
+    return this.immediate((tx) => {
+      this.ensure(tx);
+      const result = tx.update(archiveProviderState).set({
+        revision: input.expectedRevision + 1,
+        cooldownUntil: input.nowMs,
+        updatedAt: input.nowMs,
+      }).where(and(
+        eq(archiveProviderState.id, 1),
+        eq(archiveProviderState.generationId, input.generationId),
+        eq(archiveProviderState.revision, input.expectedRevision),
+        inArray(archiveProviderState.blockReason, [...input.allowedBlockReasons]),
+        isNull(archiveProviderState.cooldownUntil),
+      )).run();
+      return result.changes === 1;
+    });
+  }
+
   private ensure(tx: Writer): StateRow {
     tx.insert(archiveProviderState).values(emptyRow()).onConflictDoNothing().run();
     const row = tx.select().from(archiveProviderState).where(eq(archiveProviderState.id, 1)).get();
@@ -87,7 +111,7 @@ function toState(row: StateRow): ArchiveProviderState {
     failureClass: row.failureClass as ArchiveProviderState['failureClass'],
     failureStreak: row.failureStreak,
     cooldownUntilMs: row.cooldownUntil,
-    blockReason: row.blockReason,
+    blockReason: row.blockReason as ArchiveProviderState['blockReason'],
     updatedAtMs: row.updatedAt,
   });
 }

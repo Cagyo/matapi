@@ -9,6 +9,77 @@ import { DriveTemporaryUnavailableError } from '../../../src/archive/domain/erro
 import { InMemoryArchiveProviderStateRepository } from '../../../src/archive/infrastructure/persistence/in-memory-archive-provider-state.repository';
 
 describe('ArchiveProviderGateService', () => {
+  it('lets only one caller CAS-claim a due quota probe', async () => {
+    const repository = new InMemoryArchiveProviderStateRepository();
+    const clock = { value: 6 * 60 * 60_000 };
+    const initial = await repository.load();
+    await repository.compareAndSet(initial.revision, {
+      generationId: 'generation-1',
+      operationClass: 'upload',
+      failureClass: 'quota',
+      failureStreak: 1,
+      cooldownUntilMs: clock.value,
+      blockReason: 'quota_exhausted',
+      updatedAtMs: 0,
+    });
+    const gate = new ArchiveProviderGateService(
+      repository,
+      { now: () => new Date(clock.value) },
+    );
+
+    const admission = await gate.inspect('generation-1', 'account');
+    expect(admission).toMatchObject({ kind: 'probe', reason: 'quota', revision: 1 });
+    if (admission.kind !== 'probe') throw new Error('expected a quota probe admission');
+    const [left, right] = await Promise.all([
+      gate.claimRecoveryProbe(admission),
+      gate.claimRecoveryProbe(admission),
+    ]);
+
+    expect([left, right].filter(Boolean)).toHaveLength(1);
+  });
+
+  it('never offers a probe for reauthorization', async () => {
+    const { repository, gate, clock } = await fixture();
+    const current = await repository.load();
+    await repository.compareAndSet(current.revision, {
+      generationId: 'generation-1',
+      operationClass: 'upload',
+      failureClass: 'authorization',
+      failureStreak: 1,
+      cooldownUntilMs: clock.value,
+      blockReason: 'reauthorization_required',
+      updatedAtMs: clock.value,
+    });
+
+    await expect(gate.inspect('generation-1', 'upload')).resolves.toEqual({
+      kind: 'blocked',
+      reason: 'reauthorization_required',
+    });
+  });
+
+  it('does not treat a clamped wait as provider recovery', async () => {
+    const { repository, gate, clock } = await fixture();
+    const current = await repository.load();
+    await repository.compareAndSet(current.revision, {
+      generationId: 'generation-1',
+      operationClass: 'upload',
+      failureClass: 'rate-limit',
+      failureStreak: 1,
+      cooldownUntilMs: clock.value + 24 * 60 * 60_000,
+      blockReason: null,
+      updatedAtMs: clock.value,
+    });
+
+    await gate.run({
+      generationId: 'generation-1',
+      operationClass: 'upload',
+      probe: true,
+      operation: vi.fn(async () => undefined),
+    }).catch(() => undefined);
+
+    expect((await repository.load()).failureClass).toBe('rate-limit');
+  });
+
   it('rejects stale-generation inspection without reactivating old provider state', async () => {
     const { repository, gate } = await fixture();
     await gate.ensureGeneration('generation-1');
@@ -78,7 +149,9 @@ describe('ArchiveProviderGateService', () => {
     await expect(gate.run({
       generationId: 'generation-1', operationClass: 'account', operation: async () => 'account-ok',
     })).rejects.toBeInstanceOf(DriveTemporaryUnavailableError);
-    await expect(gate.inspect('generation-1', 'upload')).resolves.toEqual({ kind: 'probe' });
+    await expect(gate.inspect('generation-1', 'upload')).resolves.toMatchObject({
+      kind: 'probe', reason: 'cooldown', operationClass: 'upload',
+    });
 
     await expect(gate.run({
       generationId: 'generation-1', operationClass: 'upload', probe: true, operation: async () => 'upload-ok',
@@ -98,7 +171,7 @@ describe('ArchiveProviderGateService', () => {
     })).rejects.toBeInstanceOf(DriveTemporaryUnavailableError);
   });
 
-  it('lets an explicit foreign recovery probe claim an expired upload cooldown and clear it on success', async () => {
+  it('does not let an explicit foreign operation claim an expired upload cooldown', async () => {
     const { repository, gate, clock } = await fixture();
     await gate.recordFailure('generation-1', 'upload', new DriveRateLimitedError({
       retryAfterMs: 1_000, sessionUsable: true, operationPhase: 'metadata',
@@ -107,13 +180,13 @@ describe('ArchiveProviderGateService', () => {
 
     await expect(gate.run({
       generationId: 'generation-1', operationClass: 'folder', probe: true, operation: async () => 'folder-ok',
-    })).resolves.toBe('folder-ok');
+    })).rejects.toBeInstanceOf(DriveTemporaryUnavailableError);
     await expect(repository.load()).resolves.toMatchObject({
-      operationClass: null, failureClass: null, cooldownUntilMs: null,
+      operationClass: 'upload', failureClass: 'rate-limit', cooldownUntilMs: 2_000,
     });
   });
 
-  it('attributes a failed foreign recovery probe to its winning operation and renews its cooldown', async () => {
+  it('attributes a failed recovery probe to the exact operation that claimed it', async () => {
     const { repository, gate, clock } = await fixture();
     await gate.recordFailure('generation-1', 'upload', new DriveRateLimitedError({
       retryAfterMs: 1_000, sessionUsable: false, operationPhase: 'metadata',
@@ -122,12 +195,12 @@ describe('ArchiveProviderGateService', () => {
 
     await expect(gate.run({
       generationId: 'generation-1',
-      operationClass: 'folder',
+      operationClass: 'upload',
       probe: true,
       operation: async () => { throw new DriveProviderCapacityBlockedError('temporary'); },
     })).rejects.toBeInstanceOf(DriveProviderCapacityBlockedError);
     await expect(repository.load()).resolves.toMatchObject({
-      operationClass: 'folder',
+      operationClass: 'upload',
       failureClass: 'capacity',
       failureStreak: 2,
       cooldownUntilMs: clock.value + 60 * 60 * 1_000,
@@ -159,8 +232,12 @@ describe('ArchiveProviderGateService', () => {
 
     await gate.recordFailure('generation-1', 'account', new DriveTemporaryUnavailableError());
 
-    await expect(gate.inspect('generation-1', 'upload')).resolves.toEqual({ kind: 'probe' });
-    await expect(gate.inspect('generation-1', 'account')).resolves.toEqual({ kind: 'probe' });
+    await expect(gate.inspect('generation-1', 'upload')).resolves.toMatchObject({
+      kind: 'probe', reason: 'cooldown', operationClass: 'upload',
+    });
+    await expect(gate.inspect('generation-1', 'account')).resolves.toMatchObject({
+      kind: 'probe', reason: 'cooldown', operationClass: 'upload',
+    });
   });
 
   it('resets stale provider state when the active generation changes', async () => {
@@ -292,8 +369,8 @@ describe('ArchiveProviderGateService', () => {
     await expect(gate.inspect('generation-1', observer)).resolves.toMatchObject({ kind: 'cooldown' });
   });
 
-  it('defers a quota block until the exact-ID retention outcome is known', async () => {
-    const { gate } = await fixture();
+  it('defers a quota block until retention, then lets only its due claim clear it', async () => {
+    const { gate, clock } = await fixture();
     await gate.recordFailure('generation-1', 'upload', new DriveQuotaExceededError());
     await expect(gate.inspect('generation-1', 'upload')).resolves.toMatchObject({ kind: 'allowed' });
 
@@ -302,7 +379,13 @@ describe('ArchiveProviderGateService', () => {
       kind: 'blocked', reason: 'quota_exhausted',
     });
 
-    await gate.recordQuotaOutcome('generation-1', 0);
+    clock.value += 6 * 60 * 60_000;
+    const admission = await gate.inspect('generation-1', 'upload');
+    expect(admission).toMatchObject({ kind: 'probe', reason: 'quota' });
+    if (admission.kind !== 'probe') throw new Error('expected a quota probe admission');
+    const claim = await gate.claimRecoveryProbe(admission);
+    expect(claim).not.toBeNull();
+    await gate.recordQuotaOutcome('generation-1', 0, claim ?? undefined);
     await expect(gate.inspect('generation-1', 'upload')).resolves.toEqual({ kind: 'allowed' });
   });
 
@@ -313,7 +396,9 @@ describe('ArchiveProviderGateService', () => {
     }));
     clock.value += 1_001;
 
-    await expect(gate.inspect('generation-1', 'upload')).resolves.toEqual({ kind: 'probe' });
+    await expect(gate.inspect('generation-1', 'upload')).resolves.toMatchObject({
+      kind: 'probe', reason: 'cooldown', operationClass: 'upload',
+    });
     await expect(gate.run({
       generationId: 'generation-1', operationClass: 'upload', operation: async () => 'no probe',
     })).rejects.toBeInstanceOf(DriveTemporaryUnavailableError);

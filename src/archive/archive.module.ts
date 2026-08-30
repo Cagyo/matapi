@@ -96,7 +96,12 @@ import {
 import {
   ARCHIVE_PROVIDER_STATE_REPOSITORY,
   type ArchiveProviderStateRepositoryPort,
+  type ArchiveProviderStateTransactionPort,
 } from './application/ports/archive-provider-state-repository.port';
+import {
+  DRIVE_QUOTA_PROBE,
+  type DriveQuotaProbePort,
+} from './application/ports/drive-quota-probe.port';
 import { BeginDriveConnectionUseCase } from './application/use-cases/begin-drive-connection.use-case';
 import { CancelDriveConnectionUseCase } from './application/use-cases/cancel-drive-connection.use-case';
 import { ConfirmDriveAccountUseCase } from './application/use-cases/confirm-drive-account.use-case';
@@ -110,6 +115,8 @@ import { SubmitDriveClientUseCase } from './application/use-cases/submit-drive-c
 import { VerifyArchiveArtifactUseCase } from './application/use-cases/verify-archive-artifact.use-case';
 import { ApplyDriveRetentionUseCase } from './application/use-cases/apply-drive-retention.use-case';
 import { ResolveMotionArchiveContainerUseCase } from './application/use-cases/resolve-motion-archive-container.use-case';
+import { ProbeDriveQuotaRecoveryUseCase } from './application/use-cases/probe-drive-quota-recovery.use-case';
+import { RetryDriveArchiveUseCase } from './application/use-cases/retry-drive-archive.use-case';
 import { DriveClockUnhealthyError } from './domain/errors/drive-clock-unhealthy.error';
 import {
   ARCHIVE_UPLOAD_SOURCE,
@@ -233,6 +240,7 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
       inject: [CLOCK],
     },
     GoogleDriveConnectionAccountAdapter,
+    { provide: DRIVE_QUOTA_PROBE, useExisting: GoogleDriveConnectionAccountAdapter },
     {
       provide: DRIVE_ACCOUNT,
       useFactory: (
@@ -270,8 +278,18 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         useFactory: (
           credentials: DriveCredentialRepositoryPort & ArchiveAdminAlertStateLockPort,
           events: EventRepositoryPort,
-        ) => new SharedStateArchiveAdminAlertOutboxAdapter(credentials, events),
-        inject: [DRIVE_CREDENTIAL_REPOSITORY, EVENT_REPOSITORY],
+          providerState: ArchiveProviderStateRepositoryPort
+            & ArchiveProviderStateTransactionPort,
+        ) => new SharedStateArchiveAdminAlertOutboxAdapter(
+          credentials,
+          events,
+          providerState,
+        ),
+        inject: [
+          DRIVE_CREDENTIAL_REPOSITORY,
+          EVENT_REPOSITORY,
+          ARCHIVE_PROVIDER_STATE_REPOSITORY,
+        ],
       }
       : {
         provide: DrizzleArchiveAdminAlertOutboxAdapter,
@@ -296,6 +314,36 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
       inject: [ARCHIVE_ADMIN_ALERT_OUTBOX, ArchiveAdminAlertService, CLOCK, NotificationService],
     },
     { provide: ARCHIVE_ADMIN_ALERT, useExisting: DurableArchiveAdminAlertAdapter },
+    {
+      provide: ProbeDriveQuotaRecoveryUseCase,
+      useFactory: (
+        artifacts: ArchiveArtifactRepositoryPort,
+        quota: DriveQuotaProbePort,
+        gate: ArchiveProviderGateService,
+        clock: ClockPort,
+      ) => new ProbeDriveQuotaRecoveryUseCase(artifacts, quota, gate, clock),
+      inject: [
+        ARCHIVE_ARTIFACT_REPOSITORY,
+        DRIVE_QUOTA_PROBE,
+        ArchiveProviderGateService,
+        CLOCK,
+      ],
+    },
+    {
+      provide: RetryDriveArchiveUseCase,
+      useFactory: (
+        providerState: ArchiveProviderStateRepositoryPort,
+        reservations: DriveFolderReservationRepositoryPort,
+        clock: ClockPort,
+        wake: ArchiveWakeService,
+      ) => new RetryDriveArchiveUseCase(providerState, reservations, clock, wake),
+      inject: [
+        ARCHIVE_PROVIDER_STATE_REPOSITORY,
+        DRIVE_FOLDER_RESERVATION_REPOSITORY,
+        CLOCK,
+        ArchiveWakeService,
+      ],
+    },
     {
       provide: ResolveMotionArchiveContainerUseCase,
       useFactory: (
@@ -807,6 +855,8 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
     ARCHIVE_ADMIN_ALERT,
     ArchiveAdminAlertService,
     ReportDriveStatusUseCase,
+    ProbeDriveQuotaRecoveryUseCase,
+    RetryDriveArchiveUseCase,
   ],
 })
 export class ArchiveModule {}

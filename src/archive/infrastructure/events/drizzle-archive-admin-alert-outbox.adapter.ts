@@ -1,12 +1,14 @@
 import { Logger } from '@nestjs/common';
 import { and, asc, count, eq, isNull, sql } from 'drizzle-orm';
 import type { AppDatabase } from '../../../database/database.module';
-import { driveConnections, events } from '../../../database/schema';
+import { archiveProviderState, driveConnections, events } from '../../../database/schema';
 import type { EventQueueOptions } from '../../../events/application/ports/event-queue-options.port';
 import type { NewQueuedEvent, QueuedEvent } from '../../../events/domain/queued-event.entity';
+import type { ArchiveAdminAlertKind } from '../../application/ports/archive-admin-alert.port';
 import type {
   ArchiveAdminAlertOutboxInput,
   ArchiveAdminAlertOutboxPort,
+  ArchiveProviderProbeFailureSettlementInput,
 } from '../../application/ports/archive-admin-alert-outbox.port';
 
 type EventRow = typeof events.$inferSelect;
@@ -48,10 +50,92 @@ export class DrizzleArchiveAdminAlertOutboxAdapter implements ArchiveAdminAlertO
         ))
         .run();
       if (updated.changes !== 1) return null;
-      return enqueueWithin(tx, this.options, toEvent(input));
+      return enqueueWithinTransaction(tx, this.options, toEvent(input));
     });
     if (result?.evicted) this.recordOverflow();
     return result?.queued ?? null;
+  }
+
+  async settleProviderProbeFailure(
+    input: ArchiveProviderProbeFailureSettlementInput,
+  ): Promise<'settled' | 'lost'> {
+    if (input.nextProviderState.generationId !== input.fence.id
+      || input.nextProviderState.operationClass === null) return 'lost';
+    const operationClass = input.nextProviderState.operationClass;
+    try {
+      const result = this.db.transaction((tx) => {
+        const provider = tx.select().from(archiveProviderState).where(and(
+          eq(archiveProviderState.id, 1),
+          eq(archiveProviderState.generationId, input.fence.id),
+          eq(archiveProviderState.revision, input.expectedProviderRevision),
+          eq(archiveProviderState.operationClass, operationClass),
+        )).get();
+        if (provider === undefined) return { outcome: 'lost' as const, evicted: false };
+
+        const active = tx.select({
+          cooldowns: driveConnections.alertCooldowns,
+        }).from(driveConnections).where(and(
+          eq(driveConnections.id, input.fence.id),
+          eq(driveConnections.currentSlot, 1),
+          eq(driveConnections.revision, input.fence.revision),
+          eq(driveConnections.status, input.fence.status),
+        )).get();
+        if (active === undefined) return { outcome: 'lost' as const, evicted: false };
+
+        const providerUpdated = tx.update(archiveProviderState).set({
+          revision: input.expectedProviderRevision + 1,
+          generationId: input.nextProviderState.generationId,
+          operationClass,
+          failureClass: input.nextProviderState.failureClass,
+          failureStreak: input.nextProviderState.failureStreak,
+          cooldownUntil: input.nextProviderState.cooldownUntilMs,
+          blockReason: input.nextProviderState.blockReason,
+          updatedAt: input.nextProviderState.updatedAtMs,
+        }).where(and(
+          eq(archiveProviderState.id, 1),
+          eq(archiveProviderState.generationId, input.fence.id),
+          eq(archiveProviderState.revision, input.expectedProviderRevision),
+          eq(archiveProviderState.operationClass, operationClass),
+        )).run();
+        if (providerUpdated.changes !== 1) throw LOST_SETTLEMENT;
+
+        const currentCooldowns = parseCooldowns(active.cooldowns);
+        if ((currentCooldowns[input.alertKind] ?? 0) > input.nowMs) {
+          return { outcome: 'settled' as const, evicted: false };
+        }
+        const nextCooldowns = {
+          ...currentCooldowns,
+          [input.alertKind]: Math.max(
+            currentCooldowns[input.alertKind] ?? 0,
+            input.alertCooldownUntilMs,
+          ),
+        };
+        const cooldownUpdated = tx.update(driveConnections).set({
+          alertCooldowns: nextCooldowns,
+        }).where(and(
+          eq(driveConnections.id, input.fence.id),
+          eq(driveConnections.currentSlot, 1),
+          eq(driveConnections.revision, input.fence.revision),
+          eq(driveConnections.status, input.fence.status),
+          active.cooldowns === null
+            ? isNull(driveConnections.alertCooldowns)
+            : sql`${driveConnections.alertCooldowns} = ${JSON.stringify(currentCooldowns)}`,
+        )).run();
+        if (cooldownUpdated.changes !== 1) throw LOST_SETTLEMENT;
+
+        const queued = enqueueWithinTransaction(tx, this.options, toEvent({
+          kind: input.alertKind,
+          ...(input.errorCode === undefined ? {} : { errorCode: input.errorCode }),
+          nowMs: input.nowMs,
+        }));
+        return { outcome: 'settled' as const, evicted: queued.evicted };
+      }, { behavior: 'immediate' });
+      if (result.evicted) this.recordOverflow();
+      return result.outcome;
+    } catch (error) {
+      if (error === LOST_SETTLEMENT) return 'lost';
+      throw error;
+    }
   }
 
   private recordOverflow(): void {
@@ -63,7 +147,9 @@ export class DrizzleArchiveAdminAlertOutboxAdapter implements ArchiveAdminAlertO
   }
 }
 
-function enqueueWithin(
+const LOST_SETTLEMENT = new Error('Archive provider probe settlement lost its fence');
+
+function enqueueWithinTransaction(
   writer: TransactionWriter,
   options: Pick<EventQueueOptions, 'maxUnsentEvents'>,
   event: NewQueuedEvent,
@@ -85,7 +171,11 @@ function enqueueWithin(
   return { queued: toQueuedEvent(row), evicted };
 }
 
-function toEvent(input: ArchiveAdminAlertOutboxInput): NewQueuedEvent {
+function toEvent(input: {
+  kind: ArchiveAdminAlertKind;
+  errorCode?: string;
+  nowMs: number;
+}): NewQueuedEvent {
   return {
     sensorId: null,
     type: 'archive_admin_alert',
