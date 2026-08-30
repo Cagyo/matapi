@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ArchiveProviderGateService } from '../../../src/archive/application/archive-provider-gate.service';
 import type { ArchiveArtifactRepositoryPort } from '../../../src/archive/application/ports/archive-artifact-repository.port';
+import type { ArchiveAdminAlertOutboxPort } from '../../../src/archive/application/ports/archive-admin-alert-outbox.port';
 import type { DriveQuotaProbePort } from '../../../src/archive/application/ports/drive-quota-probe.port';
 import { ProbeDriveQuotaRecoveryUseCase } from '../../../src/archive/application/use-cases/probe-drive-quota-recovery.use-case';
 import { DriveConnection } from '../../../src/archive/domain/drive-connection.entity';
@@ -106,6 +107,49 @@ describe('ProbeDriveQuotaRecoveryUseCase', () => {
     expect(fixture.quota.readQuota).toHaveBeenCalledOnce();
   });
 
+  it.each(['still-blocked', 'provider-error'] as const)(
+    'atomically settles a claimed quota probe after a %s outcome',
+    async (outcome) => {
+      const settleProviderProbeFailure = vi.fn(async () => 'settled' as const);
+      const fixture = await createFixture({ settleProviderProbeFailure });
+      fixture.artifacts.readNextEligibleTransferSize.mockResolvedValue(6_000);
+      if (outcome === 'provider-error') {
+        fixture.quota.readQuota.mockRejectedValue(new DriveTemporaryUnavailableError());
+      } else {
+        fixture.quota.readQuota.mockResolvedValue({
+          limitBytes: 10_000,
+          usageBytes: 5_000,
+          usageInDriveBytes: 5_000,
+          usageInDriveTrashBytes: 0,
+        });
+      }
+      const compareAndSet = vi.spyOn(fixture.providerState, 'compareAndSet');
+
+      await expect(fixture.useCase.execute(
+        fixture.connection,
+        fixture.admission,
+        new AbortController().signal,
+      )).resolves.toBe('still-blocked');
+
+      expect(settleProviderProbeFailure).toHaveBeenCalledOnce();
+      expect(settleProviderProbeFailure).toHaveBeenCalledWith(expect.objectContaining({
+        fence: { id: 'generation-1', revision: 1, status: 'active' },
+        expectedProviderRevision: 3,
+        alertKind: 'quota-reclamation-required',
+        nowMs: fixture.nowMs,
+        alertCooldownUntilMs: fixture.nowMs + 60 * 60_000,
+        nextProviderState: expect.objectContaining({
+          generationId: 'generation-1',
+          operationClass: 'upload',
+          failureClass: 'quota',
+          blockReason: 'quota_exhausted',
+          updatedAtMs: fixture.nowMs,
+        }),
+      }));
+      expect(compareAndSet).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it('does not clear quota when there is no eligible transfer to prove fits', async () => {
     const fixture = await createFixture();
     fixture.artifacts.readNextEligibleTransferSize.mockResolvedValue(null);
@@ -155,7 +199,9 @@ describe('ProbeDriveQuotaRecoveryUseCase', () => {
   });
 });
 
-async function createFixture() {
+async function createFixture(options: {
+  settleProviderProbeFailure?: ArchiveAdminAlertOutboxPort['settleProviderProbeFailure'];
+} = {}) {
   const nowMs = 6 * 60 * 60_000;
   const providerState = new InMemoryArchiveProviderStateRepository();
   const empty = await providerState.load();
@@ -176,6 +222,15 @@ async function createFixture() {
     clock,
     undefined,
     { random: () => 0.5 },
+    {},
+    {
+      settleProviderProbeFailure: options.settleProviderProbeFailure ?? (async (input) => (
+        await providerState.compareAndSet(
+          input.expectedProviderRevision,
+          input.nextProviderState,
+        ) ? 'settled' : 'lost'
+      )),
+    },
   );
   const inspected = await gate.inspect('generation-1', 'upload');
   if (inspected.kind !== 'probe' || inspected.reason !== 'quota') {

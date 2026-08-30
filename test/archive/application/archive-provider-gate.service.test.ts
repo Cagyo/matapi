@@ -127,6 +127,74 @@ describe('ArchiveProviderGateService', () => {
     },
   );
 
+  it.each([
+    {
+      name: 'capacity',
+      failureClass: 'capacity',
+      blockReason: 'account_creation_limit',
+    },
+    {
+      name: 'policy',
+      failureClass: 'policy',
+      blockReason: 'policy_blocked',
+    },
+    {
+      name: 'reauthorization',
+      failureClass: 'authorization',
+      blockReason: 'reauthorization_required',
+    },
+  ] as const)(
+    'does not overwrite or alert after runIfAllowed loses to newer $name state',
+    async ({ failureClass, blockReason }) => {
+      const repository = new InMemoryArchiveProviderStateRepository();
+      const initial = await repository.load();
+      await repository.activateGeneration(initial.revision, 'generation-1', 1_000);
+      const settleProviderProbeFailure = vi.fn(async () => 'settled' as const);
+      const gate = new ArchiveProviderGateService(
+        repository,
+        { now: () => new Date(2_000) },
+        undefined,
+        { random: () => 0.5 },
+        {},
+        { settleProviderProbeFailure },
+      );
+      let announceStarted!: () => void;
+      let releaseOperation!: () => void;
+      const started = new Promise<void>((resolve) => { announceStarted = resolve; });
+      const hold = new Promise<void>((resolve) => { releaseOperation = resolve; });
+      const staleFailure = new DriveProviderCapacityBlockedError('user-action');
+      const running = gate.runIfAllowed({
+        generationId: 'generation-1',
+        operationClass: 'reconcile',
+        operation: async () => {
+          announceStarted();
+          await hold;
+          throw staleFailure;
+        },
+      });
+      await started;
+      const admitted = await repository.load();
+      await repository.compareAndSet(admitted.revision, {
+        generationId: 'generation-1',
+        operationClass: 'upload',
+        failureClass,
+        failureStreak: 7,
+        cooldownUntilMs: null,
+        blockReason,
+        updatedAtMs: 1_500,
+      });
+      const newer = await repository.load();
+      const compareAndSet = vi.spyOn(repository, 'compareAndSet');
+
+      releaseOperation();
+      await expect(running).rejects.toBe(staleFailure);
+
+      await expect(repository.load()).resolves.toEqual(newer);
+      expect(compareAndSet).not.toHaveBeenCalled();
+      expect(settleProviderProbeFailure).not.toHaveBeenCalled();
+    },
+  );
+
   it('does not let unrelated metadata success clear an upload cooldown', async () => {
     const { gate } = await fixture();
     await gate.recordFailure('generation-1', 'upload', new DriveRateLimitedError({
@@ -206,6 +274,92 @@ describe('ArchiveProviderGateService', () => {
       cooldownUntilMs: clock.value + 60 * 60 * 1_000,
     });
   });
+
+  it.each([
+    {
+      name: 'capacity',
+      error: new DriveProviderCapacityBlockedError('user-action'),
+      failureClass: 'capacity',
+      blockReason: 'account_creation_limit',
+      alertKind: 'provider-capacity-blocked',
+    },
+    {
+      name: 'policy',
+      error: new DrivePolicyBlockedError(),
+      failureClass: 'policy',
+      blockReason: 'policy_blocked',
+      alertKind: 'policy-rejected',
+    },
+    {
+      name: 'quota',
+      error: new DriveQuotaExceededError(),
+      failureClass: 'quota',
+      blockReason: 'quota_exhausted',
+      alertKind: 'quota-reclamation-required',
+    },
+  ] as const)(
+    'atomically settles a claimed probe that is reclassified as $name',
+    async ({ error, failureClass, blockReason, alertKind }) => {
+      const repository = new InMemoryArchiveProviderStateRepository();
+      const nowMs = 10_000;
+      const empty = await repository.load();
+      await repository.compareAndSet(empty.revision, {
+        generationId: 'generation-1',
+        operationClass: 'upload',
+        failureClass: 'policy',
+        failureStreak: 1,
+        cooldownUntilMs: nowMs,
+        blockReason: 'policy_blocked',
+        updatedAtMs: 0,
+      });
+      const settleProviderProbeFailure = vi.fn(async () => 'settled' as const);
+      const compareAndSet = vi.spyOn(repository, 'compareAndSet');
+      let activeRevision = 17;
+      const loadActive = vi.fn(async () => ({
+        id: 'generation-1',
+        revision: activeRevision,
+        status: 'active' as const,
+      }));
+      const gate = new ArchiveProviderGateService(
+        repository,
+        { now: () => new Date(nowMs) },
+        undefined,
+        { random: () => 0.5 },
+        {},
+        { settleProviderProbeFailure },
+        { loadActive },
+      );
+
+      await expect(gate.run({
+        generationId: 'generation-1',
+        operationClass: 'upload',
+        probe: true,
+        operation: async () => {
+          activeRevision = 18;
+          throw error;
+        },
+      })).rejects.toBe(error);
+
+      expect(loadActive).toHaveBeenCalledOnce();
+      expect(settleProviderProbeFailure).toHaveBeenCalledOnce();
+      expect(settleProviderProbeFailure).toHaveBeenCalledWith(expect.objectContaining({
+        fence: { id: 'generation-1', revision: 17, status: 'active' },
+        expectedProviderRevision: 2,
+        alertKind,
+        nowMs,
+        alertCooldownUntilMs: nowMs + 60 * 60_000,
+        nextProviderState: expect.objectContaining({
+          generationId: 'generation-1',
+          operationClass: 'upload',
+          failureClass,
+          failureStreak: 2,
+          blockReason,
+          updatedAtMs: nowMs,
+        }),
+      }));
+      expect(compareAndSet).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('does not replace an upload cooldown when another operation fails retryably', async () => {
     const { gate } = await fixture();
@@ -319,6 +473,63 @@ describe('ArchiveProviderGateService', () => {
     expect(sleeps).toEqual([120_000]);
     await expect(gate.inspect('generation-1', 'upload')).resolves.toMatchObject({ kind: 'cooldown' });
   });
+
+  it.each([
+    { priorFailureStreak: 5, durableDelayMs: 32_000 },
+    { priorFailureStreak: 6, durableDelayMs: 64_000 },
+  ])(
+    'does not retry a temporary failure when the $durableDelayMs ms deadline exceeds a 30s sleep cap',
+    async ({ priorFailureStreak, durableDelayMs }) => {
+      const repository = new InMemoryArchiveProviderStateRepository();
+      const clock = { value: 1_000 };
+      const empty = await repository.load();
+      await repository.activateGeneration(empty.revision, 'generation-1', clock.value);
+      const active = await repository.load();
+      await repository.compareAndSet(active.revision, {
+        generationId: 'generation-1',
+        operationClass: 'upload',
+        failureClass: 'transport',
+        failureStreak: priorFailureStreak,
+        cooldownUntilMs: null,
+        blockReason: null,
+        updatedAtMs: clock.value,
+      });
+      const sleeps: number[] = [];
+      const gate = new ArchiveProviderGateService(
+        repository,
+        { now: () => new Date(clock.value) },
+        {
+          sleep: async (ms) => {
+            sleeps.push(ms);
+            clock.value += ms;
+          },
+        },
+        { random: () => 0 },
+        { maximumSleepMs: 30_000 },
+      );
+      const failure = new DriveTemporaryUnavailableError();
+      const operation = vi.fn(async () => { throw failure; });
+
+      await expect(gate.run({
+        generationId: 'generation-1',
+        operationClass: 'upload',
+        operation,
+      })).rejects.toBe(failure);
+
+      expect(operation).toHaveBeenCalledOnce();
+      expect(sleeps).toEqual([30_000]);
+      await expect(repository.load()).resolves.toEqual({
+        revision: 3,
+        generationId: 'generation-1',
+        operationClass: 'upload',
+        failureClass: 'transport',
+        failureStreak: priorFailureStreak + 1,
+        cooldownUntilMs: 1_000 + durableDelayMs,
+        blockReason: null,
+        updatedAtMs: 1_000,
+      });
+    },
+  );
 
   it.each([
     [new DriveProviderCapacityBlockedError('temporary'), 'cooldown'],
@@ -493,6 +704,22 @@ async function fixture(options: { random?: () => number } = {}) {
     { now: () => new Date(clock.value) },
     { sleep: async (ms: number) => { sleeps.push(ms); clock.value += ms; } },
     { random: options.random ?? (() => 0.5) },
+    {},
+    {
+      settleProviderProbeFailure: async (input) => (
+        await repository.compareAndSet(
+          input.expectedProviderRevision,
+          input.nextProviderState,
+        ) ? 'settled' : 'lost'
+      ),
+    },
+    {
+      loadActive: async () => ({
+        id: 'generation-1',
+        revision: 1,
+        status: 'active',
+      }),
+    },
   );
   await gate.ensureGeneration('generation-1');
   return { repository, clock, sleeps, gate };

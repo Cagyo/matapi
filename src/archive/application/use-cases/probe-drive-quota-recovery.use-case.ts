@@ -41,9 +41,16 @@ export class ProbeDriveQuotaRecoveryUseCase {
     signal: AbortSignal,
   ): Promise<ProbeDriveQuotaRecoveryResult> {
     throwIfAborted(signal);
-    if (admission.reason !== 'quota' || admission.generationId !== connection.id) {
+    if (connection.status !== 'active'
+      || admission.reason !== 'quota'
+      || admission.generationId !== connection.id) {
       return 'stale';
     }
+    const fence = {
+      id: connection.id,
+      revision: connection.revision,
+      status: connection.status,
+    } as const;
     const claim = await this.providerGate.claimRecoveryProbe(admission);
     if (claim === null) return 'stale';
 
@@ -66,10 +73,11 @@ export class ProbeDriveQuotaRecoveryUseCase {
         connection.id,
         remainingDeficitBytes,
         claim,
+        fence,
       );
       return recovered ? 'recovered' : 'still-blocked';
     } catch (_error) {
-      await this.providerGate.recordQuotaOutcome(connection.id, 1, claim);
+      await this.providerGate.recordQuotaOutcome(connection.id, 1, claim, fence);
       if (signal.aborted) throw abortReason(signal);
       return 'still-blocked';
     }

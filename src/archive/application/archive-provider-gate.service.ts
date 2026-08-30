@@ -13,6 +13,12 @@ import { DriveQuotaExceededError } from '../domain/errors/drive-quota-exceeded.e
 import { DriveRateLimitedError } from '../domain/errors/drive-rate-limited.error';
 import { DriveReauthorizationRequiredError } from '../domain/errors/drive-reauthorization-required.error';
 import { DriveTemporaryUnavailableError } from '../domain/errors/drive-temporary-unavailable.error';
+import type { DriveConnectionSnapshot } from '../domain/drive-connection.entity';
+import { ARCHIVE_ADMIN_ALERT_COOLDOWN_MS } from './archive-admin-alert.service';
+import type {
+  ArchiveAdminAlertActiveFence,
+  ArchiveAdminAlertOutboxPort,
+} from './ports/archive-admin-alert-outbox.port';
 
 const RETRY_SLOTS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 64_000] as const;
 const DEFAULT_MAXIMUM_SLEEP_MS = 2 * 60 * 1_000;
@@ -25,6 +31,10 @@ export interface ArchiveProviderGateClock { now(): Date }
 export interface ArchiveProviderGateSleeper { sleep(ms: number, signal?: AbortSignal): Promise<void> }
 export interface ArchiveProviderGateRandom { random(): number }
 export interface ArchiveProviderGateOptions { maximumSleepMs?: number }
+
+export interface ArchiveProviderGateActiveConnectionReader {
+  loadActive(): Promise<Pick<DriveConnectionSnapshot, 'id' | 'revision' | 'status'> | null>;
+}
 
 export type ArchiveProviderAdmission =
   | { kind: 'allowed' }
@@ -61,6 +71,11 @@ export class ArchiveProviderGateService {
     private readonly sleeper: ArchiveProviderGateSleeper = { sleep: defaultSleep },
     private readonly jitter: ArchiveProviderGateRandom = { random: Math.random },
     options: ArchiveProviderGateOptions = {},
+    private readonly probeFailureSettlement?: Pick<
+      ArchiveAdminAlertOutboxPort,
+      'settleProviderProbeFailure'
+    >,
+    private readonly activeConnections?: ArchiveProviderGateActiveConnectionReader,
   ) {
     const maximumSleepMs = options.maximumSleepMs ?? DEFAULT_MAXIMUM_SLEEP_MS;
     if (!Number.isSafeInteger(maximumSleepMs) || maximumSleepMs < 1) {
@@ -81,6 +96,8 @@ export class ArchiveProviderGateService {
     const admission = await this.inspect(input.generationId, input.operationClass);
     let expectedProviderRevision: number | null = null;
     let ownsProviderState = false;
+    let probeClaim: ArchiveProviderProbeClaim | null = null;
+    let probeFence: ArchiveAdminAlertActiveFence | null = null;
     if (admission.kind === 'blocked') throw blockedError(admission.reason);
     if (admission.kind === 'cooldown') {
       await this.wait(admission.untilMs, input.signal, input.beforeWait);
@@ -101,6 +118,8 @@ export class ArchiveProviderGateService {
       }
       expectedProviderRevision = claim.revision;
       ownsProviderState = true;
+      probeClaim = claim;
+      probeFence = await this.captureActiveFence(input.generationId);
     } else {
       const current = await this.loadGeneration(input.generationId);
       if (current === null || admissionFor(current, input.operationClass, this.nowMs()).kind !== 'allowed') {
@@ -124,12 +143,17 @@ export class ArchiveProviderGateService {
         return result;
       } catch (error) {
         if (!(error instanceof Error)) throw error;
+        const failedProbeClaim = probeClaim;
         expectedProviderRevision = await this.recordFailureAtRevision(
           input.generationId,
           input.operationClass,
           error,
           expectedProviderRevision,
+          failedProbeClaim,
+          probeFence,
         );
+        probeClaim = null;
+        probeFence = null;
         ownsProviderState = expectedProviderRevision !== null;
         if (!isInlineRetryable(error) || retries >= RETRY_SLOTS_MS.length) throw error;
         if (expectedProviderRevision === null) throw error;
@@ -139,11 +163,7 @@ export class ArchiveProviderGateService {
         const deadline = state.cooldownUntilMs;
         if (deadline === null) throw error;
         await this.wait(deadline, input.signal, input.beforeWait);
-        if (error instanceof DriveRateLimitedError
-          && error.detail.retryAfterMs !== null
-          && deadline > this.nowMs()) {
-          throw error;
-        }
+        if (deadline > this.nowMs()) throw error;
       }
     }
   }
@@ -158,12 +178,23 @@ export class ArchiveProviderGateService {
     throwIfAborted(input.signal);
     const admission = await this.inspect(input.generationId, input.operationClass);
     if (admission.kind !== 'allowed') return { kind: 'denied' };
+    const current = await this.loadGeneration(input.generationId);
+    if (current === null
+      || admissionFor(current, input.operationClass, this.nowMs()).kind !== 'allowed') {
+      return { kind: 'denied' };
+    }
+    const expectedProviderRevision = current.revision;
     try {
       const value = await input.operation();
       return { kind: 'executed', value };
     } catch (error) {
       if (error instanceof Error) {
-        await this.recordFailure(input.generationId, input.operationClass, error);
+        await this.recordFailureAtRevision(
+          input.generationId,
+          input.operationClass,
+          error,
+          expectedProviderRevision,
+        );
       }
       throw error;
     }
@@ -227,6 +258,8 @@ export class ArchiveProviderGateService {
     operationClass: ArchiveProviderOperationClass,
     error: Error,
     expectedRevision: number | null,
+    probeClaim: ArchiveProviderProbeClaim | null = null,
+    probeFence: ArchiveAdminAlertActiveFence | null = null,
   ): Promise<number | null> {
     for (;;) {
       const current = await this.loadGeneration(generationId);
@@ -235,16 +268,36 @@ export class ArchiveProviderGateService {
       const nowMs = this.nowMs();
       const classified = classifyFailure(error, current.failureStreak, nowMs, this.jitter);
       if (classified === null) return null;
-      if (preservesOtherOperationAdmission(current, operationClass, classified)) return null;
+      if (probeClaim === null
+        && preservesOtherOperationAdmission(current, operationClass, classified)) return null;
       const next: Omit<ArchiveProviderState, 'revision'> = {
         generationId,
         operationClass,
         failureClass: classified.failureClass,
         failureStreak: current.failureStreak + 1,
-        cooldownUntilMs: classified.cooldownUntilMs,
-        blockReason: classified.blockReason,
+        cooldownUntilMs: probeClaim !== null && classified.failureClass === 'quota'
+          ? quotaProbeDeadline(nowMs, this.jitter)
+          : classified.cooldownUntilMs,
+        blockReason: probeClaim !== null && classified.failureClass === 'quota'
+          ? 'quota_exhausted'
+          : classified.blockReason,
         updatedAtMs: nowMs,
       };
+      const probeAlertKind = probeFailureAlertKind(classified.failureClass);
+      if (probeClaim !== null && probeAlertKind !== null) {
+        if (expectedRevision !== probeClaim.revision
+          || probeFence?.id !== generationId
+          || this.probeFailureSettlement === undefined) return null;
+        const outcome = await this.probeFailureSettlement.settleProviderProbeFailure({
+          fence: probeFence,
+          expectedProviderRevision: probeClaim.revision,
+          nextProviderState: next,
+          alertKind: probeAlertKind,
+          nowMs,
+          alertCooldownUntilMs: nowMs + ARCHIVE_ADMIN_ALERT_COOLDOWN_MS,
+        });
+        return outcome === 'settled' ? probeClaim.revision + 1 : null;
+      }
       if (await this.repository.compareAndSet(current.revision, next)) return current.revision + 1;
       if (expectedRevision !== null) return null;
     }
@@ -271,6 +324,7 @@ export class ArchiveProviderGateService {
     generationId: string,
     remainingDeficitBytes: number,
     claim?: ArchiveProviderProbeClaim,
+    fence?: ArchiveAdminAlertActiveFence,
   ): Promise<void> {
     if (!Number.isSafeInteger(remainingDeficitBytes) || remainingDeficitBytes < 0) {
       throw new Error('Drive quota deficit is invalid');
@@ -298,6 +352,19 @@ export class ArchiveProviderGateService {
         blockReason: 'quota_exhausted' as const,
         updatedAtMs: nowMs,
       };
+    if (isClaimedQuotaProbe && remainingDeficitBytes > 0) {
+      if (fence?.id !== generationId
+        || this.probeFailureSettlement === undefined) return;
+      await this.probeFailureSettlement.settleProviderProbeFailure({
+        fence,
+        expectedProviderRevision: claim.revision,
+        nextProviderState: next,
+        alertKind: 'quota-reclamation-required',
+        nowMs,
+        alertCooldownUntilMs: nowMs + ARCHIVE_ADMIN_ALERT_COOLDOWN_MS,
+      });
+      return;
+    }
     await this.repository.compareAndSet(current.revision, next);
   }
 
@@ -322,6 +389,18 @@ export class ArchiveProviderGateService {
   private async loadGeneration(generationId: string): Promise<ArchiveProviderState | null> {
     const current = await this.repository.load();
     return current.generationId === generationId ? current : null;
+  }
+
+  private async captureActiveFence(
+    generationId: string,
+  ): Promise<ArchiveAdminAlertActiveFence | null> {
+    if (this.activeConnections === undefined) return null;
+    const active = await this.activeConnections.loadActive();
+    if (active?.id !== generationId
+      || !Number.isSafeInteger(active.revision)
+      || active.revision < 0
+      || (active.status !== 'active' && active.status !== 'reauth_required')) return null;
+    return { id: active.id, revision: active.revision, status: active.status };
   }
 }
 
@@ -359,6 +438,15 @@ function classifyFailure(
   if (error instanceof DriveTemporaryUnavailableError) {
     return { failureClass: 'transport', cooldownUntilMs: nowMs + retryDelay(failureStreak, jitter), blockReason: null };
   }
+  return null;
+}
+
+function probeFailureAlertKind(
+  failureClass: ArchiveProviderState['failureClass'],
+): 'quota-reclamation-required' | 'provider-capacity-blocked' | 'policy-rejected' | null {
+  if (failureClass === 'quota') return 'quota-reclamation-required';
+  if (failureClass === 'capacity') return 'provider-capacity-blocked';
+  if (failureClass === 'policy') return 'policy-rejected';
   return null;
 }
 
