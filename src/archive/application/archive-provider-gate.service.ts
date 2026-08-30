@@ -152,10 +152,15 @@ export class ArchiveProviderGateService {
           failedProbeClaim,
           probeFence,
         );
-        probeClaim = null;
-        probeFence = null;
         ownsProviderState = expectedProviderRevision !== null;
-        if (!isInlineRetryable(error) || retries >= RETRY_SLOTS_MS.length) throw error;
+        if (expectedProviderRevision === null) {
+          probeClaim = null;
+          probeFence = null;
+        } else if (probeClaim !== null) {
+          probeClaim = { ...probeClaim, revision: expectedProviderRevision };
+        }
+        if (!isInlineRetryable(error, failedProbeClaim !== null)
+          || retries >= RETRY_SLOTS_MS.length) throw error;
         if (expectedProviderRevision === null) throw error;
         const state = await this.loadGeneration(input.generationId);
         if (state?.revision !== expectedProviderRevision
@@ -283,7 +288,7 @@ export class ArchiveProviderGateService {
           : classified.blockReason,
         updatedAtMs: nowMs,
       };
-      const probeAlertKind = probeFailureAlertKind(classified.failureClass);
+      const probeAlertKind = probeFailureAlertKind(next.blockReason);
       if (probeClaim !== null && probeAlertKind !== null) {
         if (expectedRevision !== probeClaim.revision
           || probeFence?.id !== generationId
@@ -442,11 +447,11 @@ function classifyFailure(
 }
 
 function probeFailureAlertKind(
-  failureClass: ArchiveProviderState['failureClass'],
+  blockReason: ArchiveProviderState['blockReason'],
 ): 'quota-reclamation-required' | 'provider-capacity-blocked' | 'policy-rejected' | null {
-  if (failureClass === 'quota') return 'quota-reclamation-required';
-  if (failureClass === 'capacity') return 'provider-capacity-blocked';
-  if (failureClass === 'policy') return 'policy-rejected';
+  if (blockReason === 'quota_exhausted') return 'quota-reclamation-required';
+  if (blockReason === 'account_creation_limit') return 'provider-capacity-blocked';
+  if (blockReason === 'policy_blocked') return 'policy-rejected';
   return null;
 }
 
@@ -542,8 +547,12 @@ function preservesOtherOperationAdmission(
     && current.cooldownUntilMs !== null;
 }
 
-function isInlineRetryable(error: Error): boolean {
-  if (error instanceof DriveProviderCapacityBlockedError) return false;
+function isInlineRetryable(error: Error, claimedRecoveryProbe: boolean): boolean {
+  if (error instanceof DriveProviderCapacityBlockedError) {
+    return claimedRecoveryProbe
+      && error.kind === 'temporary'
+      && error.retryAfterMs !== null;
+  }
   if (error instanceof DriveRateLimitedError) return error.detail.sessionUsable;
   return error instanceof DriveTemporaryUnavailableError;
 }

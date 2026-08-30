@@ -361,6 +361,195 @@ describe('ArchiveProviderGateService', () => {
     },
   );
 
+  it.each([
+    {
+      name: 'capacity probe through transport to quota',
+      initialBlockReason: 'account_creation_limit',
+      transient: new DriveTemporaryUnavailableError(),
+      actionable: new DriveQuotaExceededError(),
+      sleeps: [2_000],
+      settledAtMs: 12_000,
+      alertKind: 'quota-reclamation-required',
+      failureClass: 'quota',
+      blockReason: 'quota_exhausted',
+    },
+    {
+      name: 'policy probe through rate limit to policy',
+      initialBlockReason: 'policy_blocked',
+      transient: new DriveRateLimitedError({
+        retryAfterMs: 1_000,
+        sessionUsable: true,
+        operationPhase: 'metadata',
+      }),
+      actionable: new DrivePolicyBlockedError(),
+      sleeps: [1_000],
+      settledAtMs: 11_000,
+      alertKind: 'policy-rejected',
+      failureClass: 'policy',
+      blockReason: 'policy_blocked',
+    },
+    {
+      name: 'capacity probe through immediate rate limit to actionable capacity',
+      initialBlockReason: 'account_creation_limit',
+      transient: new DriveRateLimitedError({
+        retryAfterMs: 0,
+        sessionUsable: true,
+        operationPhase: 'metadata',
+      }),
+      actionable: new DriveProviderCapacityBlockedError('user-action'),
+      sleeps: [0],
+      settledAtMs: 10_000,
+      alertKind: 'provider-capacity-blocked',
+      failureClass: 'capacity',
+      blockReason: 'account_creation_limit',
+    },
+    {
+      name: 'policy probe through temporary capacity to actionable policy',
+      initialBlockReason: 'policy_blocked',
+      transient: new DriveProviderCapacityBlockedError('temporary', 1_000),
+      actionable: new DrivePolicyBlockedError(),
+      sleeps: [1_000],
+      settledAtMs: 11_000,
+      alertKind: 'policy-rejected',
+      failureClass: 'policy',
+      blockReason: 'policy_blocked',
+    },
+  ] as const)(
+    'retains the current claimed revision for $name',
+    async ({
+      initialBlockReason,
+      transient,
+      actionable,
+      sleeps,
+      settledAtMs,
+      alertKind,
+      failureClass,
+      blockReason,
+    }) => {
+      const fixture = await claimedProbeFixture(initialBlockReason);
+      const operation = vi.fn()
+        .mockRejectedValueOnce(transient)
+        .mockRejectedValueOnce(actionable);
+
+      await expect(fixture.gate.run({
+        generationId: 'generation-1',
+        operationClass: 'upload',
+        probe: true,
+        operation,
+      })).rejects.toBe(actionable);
+
+      expect(operation).toHaveBeenCalledTimes(2);
+      expect(fixture.sleeps).toEqual(sleeps);
+      expect(fixture.settleProviderProbeFailure).toHaveBeenCalledOnce();
+      expect(fixture.settleProviderProbeFailure).toHaveBeenCalledWith(expect.objectContaining({
+        fence: { id: 'generation-1', revision: 7, status: 'active' },
+        expectedProviderRevision: 3,
+        alertKind,
+        nowMs: settledAtMs,
+        alertCooldownUntilMs: settledAtMs + 60 * 60_000,
+        nextProviderState: expect.objectContaining({
+          generationId: 'generation-1',
+          operationClass: 'upload',
+          failureClass,
+          failureStreak: 3,
+          blockReason,
+          updatedAtMs: settledAtMs,
+        }),
+      }));
+      expect(fixture.compareAndSet).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('persists temporary capacity without an administrator-action alert or cooldown', async () => {
+    const fixture = await claimedProbeFixture('account_creation_limit');
+    const transient = new DriveProviderCapacityBlockedError('temporary');
+    const operation = vi.fn(async () => { throw transient; });
+
+    await expect(fixture.gate.run({
+      generationId: 'generation-1',
+      operationClass: 'upload',
+      probe: true,
+      operation,
+    })).rejects.toBe(transient);
+
+    expect(operation).toHaveBeenCalledOnce();
+    expect(fixture.sleeps).toEqual([]);
+    expect(fixture.settleProviderProbeFailure).not.toHaveBeenCalled();
+    expect(fixture.compareAndSet).toHaveBeenCalledTimes(2);
+    await expect(fixture.repository.load()).resolves.toEqual({
+      revision: 3,
+      generationId: 'generation-1',
+      operationClass: 'upload',
+      failureClass: 'capacity',
+      failureStreak: 2,
+      cooldownUntilMs: 10_000 + 60 * 60_000,
+      blockReason: null,
+      updatedAtMs: 10_000,
+    });
+  });
+
+  it('does not fall back to direct settlement when the retained claim loses atomic settlement', async () => {
+    const fixture = await claimedProbeFixture('policy_blocked', 'lost');
+    const transport = new DriveTemporaryUnavailableError();
+    const actionable = new DrivePolicyBlockedError();
+    const operation = vi.fn()
+      .mockRejectedValueOnce(transport)
+      .mockRejectedValueOnce(actionable);
+
+    await expect(fixture.gate.run({
+      generationId: 'generation-1',
+      operationClass: 'upload',
+      probe: true,
+      operation,
+    })).rejects.toBe(actionable);
+
+    expect(operation).toHaveBeenCalledTimes(2);
+    expect(fixture.settleProviderProbeFailure).toHaveBeenCalledWith(expect.objectContaining({
+      expectedProviderRevision: 3,
+      alertKind: 'policy-rejected',
+    }));
+    expect(fixture.compareAndSet).toHaveBeenCalledTimes(2);
+    await expect(fixture.repository.load()).resolves.toMatchObject({
+      revision: 3,
+      failureClass: 'transport',
+      blockReason: null,
+    });
+  });
+
+  it('stops a claimed retry loop when its transient provider CAS is stale', async () => {
+    const fixture = await claimedProbeFixture('account_creation_limit');
+    const concurrent = {
+      generationId: 'generation-1',
+      operationClass: 'upload' as const,
+      failureClass: 'policy' as const,
+      failureStreak: 9,
+      cooldownUntilMs: null,
+      blockReason: 'policy_blocked' as const,
+      updatedAtMs: 10_000,
+    };
+    const transient = new DriveTemporaryUnavailableError();
+    const operation = vi.fn(async () => {
+      const claimed = await fixture.repository.load();
+      await fixture.repository.compareAndSet(claimed.revision, concurrent);
+      throw transient;
+    });
+
+    await expect(fixture.gate.run({
+      generationId: 'generation-1',
+      operationClass: 'upload',
+      probe: true,
+      operation,
+    })).rejects.toBe(transient);
+
+    expect(operation).toHaveBeenCalledOnce();
+    expect(fixture.sleeps).toEqual([]);
+    expect(fixture.settleProviderProbeFailure).not.toHaveBeenCalled();
+    await expect(fixture.repository.load()).resolves.toMatchObject({
+      ...concurrent,
+      revision: 3,
+    });
+  });
+
   it('does not replace an upload cooldown when another operation fails retryably', async () => {
     const { gate } = await fixture();
     await gate.recordFailure('generation-1', 'upload', new DriveRateLimitedError({
@@ -723,4 +912,47 @@ async function fixture(options: { random?: () => number } = {}) {
   );
   await gate.ensureGeneration('generation-1');
   return { repository, clock, sleeps, gate };
+}
+
+async function claimedProbeFixture(
+  blockReason: 'account_creation_limit' | 'policy_blocked',
+  settlement: 'settled' | 'lost' = 'settled',
+) {
+  const repository = new InMemoryArchiveProviderStateRepository();
+  const clock = { value: 10_000 };
+  const sleeps: number[] = [];
+  const empty = await repository.load();
+  await repository.compareAndSet(empty.revision, {
+    generationId: 'generation-1',
+    operationClass: 'upload',
+    failureClass: blockReason === 'account_creation_limit' ? 'capacity' : 'policy',
+    failureStreak: 1,
+    cooldownUntilMs: clock.value,
+    blockReason,
+    updatedAtMs: 0,
+  });
+  const compareAndSet = vi.spyOn(repository, 'compareAndSet');
+  const settleProviderProbeFailure = vi.fn(async () => settlement);
+  const gate = new ArchiveProviderGateService(
+    repository,
+    { now: () => new Date(clock.value) },
+    { sleep: async (ms) => { sleeps.push(ms); clock.value += ms; } },
+    { random: () => 0 },
+    {},
+    { settleProviderProbeFailure },
+    {
+      loadActive: async () => ({
+        id: 'generation-1',
+        revision: 7,
+        status: 'active',
+      }),
+    },
+  );
+  return {
+    repository,
+    gate,
+    sleeps,
+    compareAndSet,
+    settleProviderProbeFailure,
+  };
 }
