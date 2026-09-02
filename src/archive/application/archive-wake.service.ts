@@ -21,12 +21,15 @@ export class ArchiveWakeService {
     deadlineMs: number | null,
     maximumSleepMs: number,
     signal: AbortSignal,
+    checkedWallTimeMs = Date.now(),
   ): Promise<void> {
     if (signal.aborted) throw abortReason(signal);
-    const nowMs = Date.now();
     const delayMs = Math.max(
       0,
-      Math.min(maximumSleepMs, (deadlineMs ?? nowMs + maximumSleepMs) - nowMs),
+      Math.min(
+        maximumSleepMs,
+        (deadlineMs ?? checkedWallTimeMs + maximumSleepMs) - checkedWallTimeMs,
+      ),
     );
     await new Promise<void>((resolve, reject) => {
       const finish = () => {

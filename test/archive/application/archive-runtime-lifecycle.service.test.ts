@@ -10,6 +10,7 @@ import type { CreateDatabaseBackupUseCase } from '../../../src/archive/applicati
 import { DriveConnection } from '../../../src/archive/domain/drive-connection.entity';
 import type { ClockPort } from '../../../src/events/domain/ports/clock.port';
 import { ArchiveWakeService } from '../../../src/archive/application/archive-wake.service';
+import type { ArchiveClockHealthService } from '../../../src/archive/application/archive-clock-health.service';
 import { BootRecoveryService } from '../../../src/system/application/boot-recovery.service';
 import { DatabaseRecoveryState } from '../../../src/database/database-recovery.state';
 
@@ -27,6 +28,120 @@ function connection(
 }
 
 describe('ArchiveRuntimeLifecycleService', () => {
+  it('releases every previous-process upload lease before reading wall time', async () => {
+    const order: string[] = [];
+    const repository = {
+      releaseProcessLeasesAfterRestart: vi.fn(async () => {
+        order.push('release-process-leases');
+        return 2;
+      }),
+      recoverExpiredLeases: vi.fn(async () => 0),
+      listUnverifiedArtifactPaths: vi.fn(async () => []),
+    } as unknown as ArchiveArtifactRepositoryPort;
+    const clock = {
+      now: vi.fn(() => {
+        order.push('read-wall-clock');
+        return new Date(100);
+      }),
+    };
+    const clockHealth = {
+      check: vi.fn(async () => {
+        order.push('check-clock-health');
+        return 'healthy' as const;
+      }),
+    };
+    const lifecycle = lifecycleWithClockHealth([
+      { expireStaged: vi.fn(async () => []), listInterruptedMaintenance: vi.fn(async () => []) },
+      repository,
+      { execute: vi.fn() },
+      { cancelAll: vi.fn() },
+      { removeStaleTemporarySnapshots: vi.fn(async () => 0) },
+      { execute: vi.fn(async () => ({ created: false, reason: 'not_due' })) },
+      { startTimers: vi.fn(), shutdown: vi.fn(async () => undefined) },
+      new ArchiveSchedulerHooksService(),
+      clock,
+      undefined,
+      new ArchiveWakeService(),
+    ], clockHealth);
+
+    await lifecycle.start();
+
+    expect(order.slice(0, 3)).toEqual([
+      'release-process-leases', 'read-wall-clock', 'check-clock-health',
+    ]);
+  });
+
+  it('keeps local boot continuity while clock-blocked and skips wall-time and Drive recovery', async () => {
+    const order: string[] = [];
+    const hooks = new ArchiveSchedulerHooksService();
+    hooks.registerCamera({
+      reconcileMotion: async () => { order.push('motion-reconcile'); },
+      cleanupLocal: async () => undefined,
+    });
+    const remoteMaintenance = vi.fn(async () => { order.push('remote-maintenance'); });
+    hooks.registerRemoteMaintenance(remoteMaintenance);
+    const credentials = {
+      expireStaged: vi.fn(async () => { order.push('expire-staged'); return []; }),
+      listInterruptedMaintenance: vi.fn(async () => []),
+    };
+    const repository = {
+      releaseProcessLeasesAfterRestart: vi.fn(async () => {
+        order.push('release-process-leases');
+        return 1;
+      }),
+      recoverExpiredLeases: vi.fn(async () => { order.push('recover-expired'); return 0; }),
+      listUnverifiedArtifactPaths: vi.fn(async () => []),
+    } as unknown as ArchiveArtifactRepositoryPort;
+    const snapshots = {
+      removeStaleTemporarySnapshots: vi.fn(async () => { order.push('stale-snapshots'); return 0; }),
+    };
+    const backups = {
+      execute: vi.fn(async () => {
+        order.push('database-backup');
+        return { created: false, reason: 'not_due' };
+      }),
+    };
+    const scheduler = {
+      startTimers: vi.fn(() => { order.push('start-timers'); }),
+      shutdown: vi.fn(async () => undefined),
+    };
+    const wake = new ArchiveWakeService();
+    const wakeSpy = vi.spyOn(wake, 'wake').mockImplementation(() => {
+      order.push('wake');
+    });
+    const clockHealth = {
+      check: vi.fn(async () => {
+        order.push('check-clock-health');
+        return 'clock-blocked' as const;
+      }),
+    };
+    const lifecycle = lifecycleWithClockHealth([
+      credentials,
+      repository,
+      { execute: vi.fn() },
+      { cancelAll: vi.fn() },
+      snapshots,
+      backups,
+      scheduler,
+      hooks,
+      { now: () => new Date(1_000) },
+      undefined,
+      wake,
+    ], clockHealth);
+
+    await lifecycle.start();
+
+    expect(order).toEqual([
+      'release-process-leases', 'check-clock-health', 'motion-reconcile',
+      'database-backup', 'start-timers', 'wake',
+    ]);
+    expect(credentials.expireStaged).not.toHaveBeenCalled();
+    expect(repository.recoverExpiredLeases).not.toHaveBeenCalled();
+    expect(remoteMaintenance).not.toHaveBeenCalled();
+    expect(snapshots.removeStaleTemporarySnapshots).not.toHaveBeenCalled();
+    expect(wakeSpy).toHaveBeenCalledOnce();
+  });
+
   it('wakes the pump after boot recovery starts archive scheduling', async () => {
     const wake = new ArchiveWakeService();
     const wakeSpy = vi.spyOn(wake, 'wake');
@@ -34,6 +149,7 @@ describe('ArchiveRuntimeLifecycleService', () => {
     const lifecycle = new ArchiveRuntimeLifecycleService(
       { expireStaged: vi.fn(async () => []), listInterruptedMaintenance: vi.fn(async () => []) },
       {
+        ...healthyClockRepository(),
         recoverExpiredLeases: vi.fn(async () => 0),
         listUnverifiedArtifactPaths: vi.fn(async () => []),
       } as unknown as ArchiveArtifactRepositoryPort,
@@ -65,6 +181,7 @@ describe('ArchiveRuntimeLifecycleService', () => {
       ]),
     } as unknown as DriveCredentialRepositoryPort;
     const repository = {
+      ...healthyClockRepository(),
       releaseGenerationLeases: vi.fn(async () => undefined),
       clearGenerationSessions: vi.fn(async () => undefined),
       recoverExpiredLeases: vi.fn(async () => { order.push('recover-leases'); return 0; }),
@@ -112,6 +229,7 @@ describe('ArchiveRuntimeLifecycleService', () => {
         listInterruptedMaintenance: vi.fn(async () => []),
       },
       {
+        ...healthyClockRepository(),
         recoverExpiredLeases: vi.fn(async () => { order.push('recover-leases'); return 0; }),
         listUnverifiedArtifactPaths: vi.fn(async () => ['/pinned.db']),
       } as unknown as ArchiveArtifactRepositoryPort,
@@ -149,7 +267,11 @@ describe('ArchiveRuntimeLifecycleService', () => {
     const polling = { cancelAll: vi.fn(() => { order.push('cancel-polling'); }) } as unknown as DriveAuthorizationPollingService;
     const lifecycle = new ArchiveRuntimeLifecycleService(
       { expireStaged: vi.fn(), listInterruptedMaintenance: vi.fn() },
-      { recoverExpiredLeases: vi.fn(), listUnverifiedArtifactPaths: vi.fn() } as unknown as ArchiveArtifactRepositoryPort,
+      {
+        ...healthyClockRepository(),
+        recoverExpiredLeases: vi.fn(),
+        listUnverifiedArtifactPaths: vi.fn(),
+      } as unknown as ArchiveArtifactRepositoryPort,
       { execute: vi.fn() },
       polling,
       { removeStaleTemporarySnapshots: vi.fn() },
@@ -187,6 +309,7 @@ describe('ArchiveRuntimeLifecycleService', () => {
     const lifecycle = new ArchiveRuntimeLifecycleService(
       { expireStaged: vi.fn(async () => []), listInterruptedMaintenance: vi.fn(async () => []) },
       {
+        ...healthyClockRepository(),
         recoverExpiredLeases: vi.fn(async () => 0),
         listUnverifiedArtifactPaths: vi.fn(async () => []),
       } as unknown as ArchiveArtifactRepositoryPort,
@@ -243,6 +366,7 @@ describe('ArchiveRuntimeLifecycleService', () => {
     const lifecycle = new ArchiveRuntimeLifecycleService(
       credentials,
       {
+        ...healthyClockRepository(),
         recoverExpiredLeases: vi.fn(overrides.recoverExpiredLeases ?? (async () => 0)),
         listUnverifiedArtifactPaths: vi.fn(overrides.listUnverifiedArtifactPaths ?? (async () => [])),
       } as unknown as ArchiveArtifactRepositoryPort,
@@ -597,3 +721,26 @@ describe('ArchiveRuntimeLifecycleService', () => {
     expect(attempts).toBe(1);
   });
 });
+
+function lifecycleWithClockHealth(
+  constructorArguments: readonly unknown[],
+  clockHealth: Pick<ArchiveClockHealthService, 'check'>,
+): ArchiveRuntimeLifecycleService {
+  return Reflect.construct(
+    ArchiveRuntimeLifecycleService,
+    [...constructorArguments, clockHealth],
+  ) as ArchiveRuntimeLifecycleService;
+}
+
+function healthyClockRepository() {
+  return {
+    releaseProcessLeasesAfterRestart: vi.fn(async () => 0),
+    readSchedulerState: vi.fn(async () => ({
+      revision: 0,
+      lastPlausibleWallTimeMs: null,
+      clockHealth: 'healthy' as const,
+      observedRollbackMs: null,
+    })),
+    compareAndSetSchedulerState: vi.fn(async () => true),
+  };
+}

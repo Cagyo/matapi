@@ -28,6 +28,7 @@ import type {
 import type { LocalStoragePort } from '../../camera/domain/ports/local-storage.port';
 import type { ArchiveSchedulerActivitySnapshot } from './use-cases/report-drive-status.use-case';
 import type { ArchiveRuntimeSignalPort } from './ports/archive-runtime-signal.port';
+import { ArchiveClockHealthService } from './archive-clock-health.service';
 
 const DEFAULT_INTERVAL_MS = 2 * 60 * 1_000;
 const DEFAULT_LEASE_MS = 5 * 60 * 1_000;
@@ -126,6 +127,8 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
     private readonly providerState?: Pick<ArchiveProviderStateRepositoryPort, 'load'>,
     private readonly alerts?: ArchiveAdminAlertPort,
     private readonly localDisk?: Pick<LocalStoragePort, 'usagePercent'>,
+    private readonly clockHealth: Pick<ArchiveClockHealthService, 'check'> =
+      new ArchiveClockHealthService(repository, wake),
   ) {
     this.intervalMs = positive(options.intervalMs ?? DEFAULT_INTERVAL_MS, 'interval');
     this.leaseMs = positive(options.leaseMs ?? DEFAULT_LEASE_MS, 'lease');
@@ -194,6 +197,11 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
   private async runTick(): Promise<void> {
     const nowMs = this.clock.now().getTime();
     const signal = this.controller.signal;
+    const clockHealth = await this.clockHealth.check(nowMs);
+    if (clockHealth === 'clock-blocked') {
+      await this.runClockBlockedContinuity(nowMs, signal);
+      return;
+    }
     await Promise.all([
       this.runJob('database backup', async () => {
         await this.backups.execute({ nowMs, scheduled: true });
@@ -249,10 +257,22 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
     while (this.acceptingWork && !signal.aborted) {
       const recoveryEpoch = this.wake.snapshot();
       try {
+        const nowMs = this.clock.now().getTime();
+        if (await this.clockHealth.check(nowMs) === 'clock-blocked') {
+          await this.runClockBlockedContinuity(nowMs, signal);
+          if (signal.aborted || !this.acceptingWork) return;
+          await this.wake.waitForChange(
+            this.wake.snapshot(),
+            null,
+            this.intervalMs,
+            signal,
+          );
+          continue;
+        }
         const context = await this.loadProviderContext();
         if (context.generationId !== null && canDispatch(context.admission)) {
           const worked = await this.dispatchOneTransfer(
-            this.clock.now().getTime(),
+            nowMs,
             signal,
             context.generationId,
           );
@@ -263,10 +283,22 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
         }
 
         const expectedEpoch = this.wake.snapshot();
+        const finalNowMs = this.clock.now().getTime();
+        if (await this.clockHealth.check(finalNowMs) === 'clock-blocked') {
+          await this.runClockBlockedContinuity(finalNowMs, signal);
+          if (signal.aborted || !this.acceptingWork) return;
+          await this.wake.waitForChange(
+            this.wake.snapshot(),
+            null,
+            this.intervalMs,
+            signal,
+          );
+          continue;
+        }
         const finalContext = await this.loadProviderContext();
         if (finalContext.generationId !== null && canDispatch(finalContext.admission)) {
           const worked = await this.dispatchOneTransfer(
-            this.clock.now().getTime(),
+            finalNowMs,
             signal,
             finalContext.generationId,
           );
@@ -276,12 +308,11 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
           }
         }
         if (signal.aborted || !this.acceptingWork) return;
-        const nowMs = this.clock.now().getTime();
         const deadlineMs = finalContext.generationId === null
           ? null
           : await this.repository.readNextDeadline(
             finalContext.generationId,
-            nowMs,
+            finalNowMs,
             finalContext.admission.kind === 'cooldown'
               ? finalContext.admission.untilMs
               : null,
@@ -291,6 +322,7 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
           deadlineMs,
           this.intervalMs,
           signal,
+          finalNowMs,
         );
         if (deadlineMs !== null && this.wake.snapshot() === expectedEpoch) {
           this.wake.wake();
@@ -472,7 +504,8 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
         if (error instanceof DriveQuotaExceededError) {
           const requiredBytes = boundedPendingBytes(pendingArtifactBytes);
           let remainingDeficitBytes = requiredBytes;
-          if (requiredBytes > 0) {
+          const clockHealth = await this.clockHealth.check(this.clock.now().getTime());
+          if (requiredBytes > 0 && clockHealth === 'healthy') {
             try {
               const result = await this.retention.execute({ requiredBytes }, signal);
               remainingDeficitBytes = result.remainingDeficitBytes;
@@ -536,6 +569,17 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
       const state = await this.repository.readSchedulerState();
       if (await this.repository.compareAndSetSchedulerState(state.revision, update)) return;
     }
+  }
+
+  private async runClockBlockedContinuity(
+    nowMs: number,
+    signal: AbortSignal,
+  ): Promise<void> {
+    await this.runJob('database backup', async () => {
+      await this.backups.execute({ nowMs, scheduled: true });
+    });
+    if (signal.aborted) return;
+    await this.runJob('Motion reconciliation', () => this.hooks.reconcileMotion(signal));
   }
 
   private async runJob(name: string, job: () => Promise<void>): Promise<void> {

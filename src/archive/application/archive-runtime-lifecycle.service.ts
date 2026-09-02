@@ -20,6 +20,7 @@ import {
   ArchiveWakeService,
   DEFAULT_ARCHIVE_WAKE_SERVICE,
 } from './archive-wake.service';
+import { ArchiveClockHealthService } from './archive-clock-health.service';
 
 const SHUTDOWN_WAIT_MS = 1_000;
 const ARCHIVE_OPERATION_FAILED = 'ARCHIVE_OPERATION_FAILED';
@@ -39,7 +40,9 @@ implements OnApplicationBootstrap, OnModuleDestroy {
     private readonly credentials: Pick<DriveCredentialRepositoryPort,
       'expireStaged' | 'listInterruptedMaintenance'>,
     private readonly repository: Pick<ArchiveArtifactRepositoryPort,
-      'releaseGenerationLeases' | 'clearGenerationSessions' | 'recoverExpiredLeases' | 'listUnverifiedArtifactPaths'>,
+      'releaseGenerationLeases' | 'clearGenerationSessions' | 'recoverExpiredLeases' |
+      'releaseProcessLeasesAfterRestart' | 'listUnverifiedArtifactPaths' |
+      'readSchedulerState' | 'compareAndSetSchedulerState'>,
     private readonly retire: Pick<RetireDriveConnectionUseCase, 'execute'>,
     private readonly polling: Pick<DriveAuthorizationPollingService, 'cancelAll'>,
     private readonly snapshots: Pick<DatabaseBackupSnapshotPort, 'removeStaleTemporarySnapshots'>,
@@ -49,6 +52,8 @@ implements OnApplicationBootstrap, OnModuleDestroy {
     private readonly clock: ClockPort,
     private readonly remoteMutationLock: ArchiveRemoteMutationLockService = new ArchiveRemoteMutationLockService(),
     private readonly wake: ArchiveWakeService = DEFAULT_ARCHIVE_WAKE_SERVICE,
+    private readonly clockHealth: Pick<ArchiveClockHealthService, 'check'> =
+      new ArchiveClockHealthService(repository, wake),
   ) {}
 
   get signal(): AbortSignal {
@@ -83,34 +88,44 @@ implements OnApplicationBootstrap, OnModuleDestroy {
     try {
       const signal = this.controller.signal;
       throwIfAborted(signal);
+      await this.repository.releaseProcessLeasesAfterRestart();
+      throwIfAborted(signal);
       const nowMs = this.clock.now().getTime();
-      await this.credentials.expireStaged(Number.MAX_SAFE_INTEGER);
+      const clockHealth = await this.clockHealth.check(nowMs);
       throwIfAborted(signal);
 
-      const interrupted = [...await this.credentials.listInterruptedMaintenance()]
-        .sort(compareMaintenance);
-      throwIfAborted(signal);
-      for (const connection of interrupted) {
-        await this.repository.releaseGenerationLeases(connection.id, nowMs);
+      if (clockHealth === 'healthy') {
+        await this.credentials.expireStaged(Number.MAX_SAFE_INTEGER);
         throwIfAborted(signal);
-        await this.repository.clearGenerationSessions(connection.id, nowMs);
+
+        const interrupted = [...await this.credentials.listInterruptedMaintenance()]
+          .sort(compareMaintenance);
         throwIfAborted(signal);
-        await this.retire.execute(connection, signal);
+        for (const connection of interrupted) {
+          await this.repository.releaseGenerationLeases(connection.id, nowMs);
+          throwIfAborted(signal);
+          await this.repository.clearGenerationSessions(connection.id, nowMs);
+          throwIfAborted(signal);
+          await this.retire.execute(connection, signal);
+          throwIfAborted(signal);
+        }
+
+        await this.repository.recoverExpiredLeases(nowMs);
         throwIfAborted(signal);
       }
 
-      await this.repository.recoverExpiredLeases(nowMs);
-      throwIfAborted(signal);
       await this.runBootJob('Motion reconciliation', () => this.hooks.reconcileMotion(signal));
       throwIfAborted(signal);
-      await this.runBootJob('remote maintenance', () =>
-        this.hooks.runRemoteMaintenance(this.remoteMutationLock, signal));
-      throwIfAborted(signal);
-      await this.runBootJob('stale snapshot cleanup', async () => {
-        const referencedPaths = new Set(await this.repository.listUnverifiedArtifactPaths());
-        await this.snapshots.removeStaleTemporarySnapshots({ nowMs, referencedPaths });
-      });
-      throwIfAborted(signal);
+      if (clockHealth === 'healthy') {
+        await this.runBootJob('remote maintenance', () =>
+          this.hooks.runRemoteMaintenance(this.remoteMutationLock, signal));
+        throwIfAborted(signal);
+        await this.runBootJob('stale snapshot cleanup', async () => {
+          const referencedPaths = new Set(await this.repository.listUnverifiedArtifactPaths());
+          await this.snapshots.removeStaleTemporarySnapshots({ nowMs, referencedPaths });
+        });
+        throwIfAborted(signal);
+      }
       await this.runBootJob('database backup', async () => {
         await this.backups.execute({ nowMs });
       });

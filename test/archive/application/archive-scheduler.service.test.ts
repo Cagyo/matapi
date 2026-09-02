@@ -22,6 +22,7 @@ import type { DriveCredentialRepositoryPort } from '../../../src/archive/applica
 import { DriveConnection } from '../../../src/archive/domain/drive-connection.entity';
 import type { ArchiveProviderState } from '../../../src/archive/application/ports/archive-provider-state-repository.port';
 import type { ArchiveAdminAlertKind } from '../../../src/archive/application/ports/archive-admin-alert.port';
+import type { ArchiveClockHealthService } from '../../../src/archive/application/archive-clock-health.service';
 
 function claimedAttempt(overrides: Partial<ClaimedAttempt['attempt']> = {}): ClaimedAttempt {
   return {
@@ -169,6 +170,9 @@ function setup(options: {
   };
   const alerts = { alert: vi.fn(async (_kind: ArchiveAdminAlertKind) => undefined) };
   const localDisk = { usagePercent: vi.fn(async () => options.diskUsagePercent ?? null) };
+  const clockHealth = {
+    check: vi.fn(async () => 'healthy' as const),
+  } satisfies Pick<ArchiveClockHealthService, 'check'>;
   const Scheduler = ArchiveSchedulerService as unknown as new (
     repository: ArchiveArtifactRepositoryPort,
     backups: CreateDatabaseBackupUseCase,
@@ -184,6 +188,7 @@ function setup(options: {
     providerState: typeof providerState,
     alerts: typeof alerts,
     localDisk: typeof localDisk,
+    clockHealth: Pick<ArchiveClockHealthService, 'check'>,
   ) => ArchiveSchedulerService;
   const scheduler = new Scheduler(
     repository,
@@ -200,10 +205,11 @@ function setup(options: {
     providerState,
     alerts,
     localDisk,
+    clockHealth,
   );
   return {
     repository, backups, uploads, retention, hooks, scheduler, wake, providerGate, clock,
-    credentials, providerState, alerts, localDisk, video,
+    credentials, providerState, alerts, localDisk, clockHealth, video,
     seedFreshVideos(count: number) {
       queuedArtifacts.push(...Array.from({ length: count }, (_, index) => ({
         ...video, id: `video-${index + 1}`,
@@ -526,6 +532,108 @@ describe('ArchiveSchedulerService', () => {
     );
   });
 
+  it('fails closed on every Drive admission while clock-blocked but keeps local continuity', async () => {
+    vi.useFakeTimers();
+    const fixture = setup();
+    fixture.clockHealth.check.mockResolvedValue('clock-blocked');
+    const reconcileMotion = vi.fn(async () => undefined);
+    const cleanupLocal = vi.fn(async () => undefined);
+    const remoteMaintenance = vi.fn(async () => undefined);
+    fixture.hooks.registerCamera({ reconcileMotion, cleanupLocal });
+    fixture.hooks.registerRemoteMaintenance(remoteMaintenance);
+    const ensureGeneration = vi.spyOn(fixture.providerGate, 'ensureGeneration');
+    const inspectProvider = vi.spyOn(fixture.providerGate, 'inspect');
+
+    fixture.scheduler.startTimers();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(fixture.clockHealth.check).toHaveBeenCalledWith(10_000);
+    expect(fixture.backups.execute).toHaveBeenCalledWith({ nowMs: 10_000, scheduled: true });
+    expect(reconcileMotion).toHaveBeenCalledOnce();
+    expect(cleanupLocal).not.toHaveBeenCalled();
+    expect(remoteMaintenance).not.toHaveBeenCalled();
+    expect(fixture.credentials.loadActive).not.toHaveBeenCalled();
+    expect(ensureGeneration).not.toHaveBeenCalled();
+    expect(inspectProvider).not.toHaveBeenCalled();
+    expect(fixture.repository.claimNextAttempt).not.toHaveBeenCalled();
+    expect(fixture.repository.listUnattemptedArtifacts).not.toHaveBeenCalled();
+    expect(fixture.repository.readNextDeadline).not.toHaveBeenCalled();
+    expect(fixture.uploads.execute).not.toHaveBeenCalled();
+    expect(fixture.uploads.executeClaimed).not.toHaveBeenCalled();
+    expect(fixture.retention.execute).not.toHaveBeenCalled();
+    await fixture.scheduler.shutdown();
+  });
+
+  it('checks clock health on each repeated blocked tick and never runs remote or cleanup work', async () => {
+    const fixture = setup();
+    fixture.clockHealth.check.mockResolvedValue('clock-blocked');
+    const reconcileMotion = vi.fn(async () => undefined);
+    const cleanupLocal = vi.fn(async () => undefined);
+    const remoteMaintenance = vi.fn(async () => undefined);
+    fixture.hooks.registerCamera({ reconcileMotion, cleanupLocal });
+    fixture.hooks.registerRemoteMaintenance(remoteMaintenance);
+
+    await fixture.scheduler.tick();
+    await fixture.scheduler.tick();
+
+    expect(fixture.clockHealth.check.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(fixture.backups.execute.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(reconcileMotion.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(cleanupLocal).not.toHaveBeenCalled();
+    expect(remoteMaintenance).not.toHaveBeenCalled();
+    expect(fixture.credentials.loadActive).not.toHaveBeenCalled();
+    expect(fixture.repository.readQueueStatus).not.toHaveBeenCalled();
+    expect(fixture.alerts.alert).not.toHaveBeenCalled();
+  });
+
+  it('closes the blocked-wait wake race and admits work only after a fresh healthy check', async () => {
+    vi.useFakeTimers();
+    const fixture = setup();
+    fixture.seedFreshVideos(1);
+    fixture.clockHealth.check
+      .mockResolvedValueOnce('clock-blocked')
+      .mockResolvedValue('healthy');
+
+    fixture.scheduler.startTimers();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.uploads.execute).not.toHaveBeenCalled();
+
+    fixture.wake.wake();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(fixture.clockHealth.check.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(fixture.uploads.execute).toHaveBeenCalledOnce();
+    await fixture.scheduler.shutdown();
+  });
+
+  it('keeps one transfer and one due provider-probe admission after a large forward jump', async () => {
+    let uploadStarted!: () => void;
+    const started = new Promise<void>((resolve) => { uploadStarted = resolve; });
+    const stalled = new Promise<never>(() => undefined);
+    const fixture = setup({
+      nowMs: 10_000_000_000,
+      upload: async () => {
+        uploadStarted();
+        return stalled;
+      },
+    });
+    fixture.seedClaimedAttempts(claimedAttempt());
+    const inspectProvider = vi.spyOn(fixture.providerGate, 'inspect').mockResolvedValue({
+      kind: 'probe', generationId: 'generation-1', revision: 1,
+      reason: 'cooldown', operationClass: 'upload',
+    });
+
+    fixture.scheduler.startTimers();
+    await started;
+
+    expect(fixture.clockHealth.check).toHaveBeenCalledOnce();
+    expect(fixture.clockHealth.check).toHaveBeenCalledWith(10_000_000_000);
+    expect(inspectProvider).toHaveBeenCalledOnce();
+    expect(fixture.uploads.executeClaimed).toHaveBeenCalledOnce();
+    expect(fixture.maxConcurrentUploads()).toBe(1);
+    await fixture.scheduler.shutdown();
+  });
+
   it('sleeps until the earliest durable deadline without tight polling', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(10_000);
@@ -629,6 +737,22 @@ describe('ArchiveSchedulerService', () => {
     await fixture.scheduler.shutdown();
   });
 
+  it('does not start quota retention when clock health blocks during upload settlement', async () => {
+    const fixture = setup({ upload: async () => { throw new DriveQuotaExceededError(); } });
+    fixture.seedClaimedAttempts(claimedAttempt({ id: 'quota-attempt' }));
+    fixture.clockHealth.check
+      .mockResolvedValueOnce('healthy')
+      .mockResolvedValue('clock-blocked');
+
+    fixture.scheduler.startTimers();
+    await vi.waitFor(() => expect(fixture.uploads.executeClaimed).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(fixture.scheduler.readActivitySnapshot()).toBeNull());
+
+    expect(fixture.clockHealth.check.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(fixture.retention.execute).not.toHaveBeenCalled();
+    await fixture.scheduler.shutdown();
+  });
+
   it('does not admit another artifact while quota reclamation leaves a positive deficit', async () => {
     const upload = vi.fn(async () => { throw new DriveQuotaExceededError(); });
     const fixture = setup({ upload });
@@ -636,9 +760,16 @@ describe('ArchiveSchedulerService', () => {
       claimedAttempt({ id: 'quota-attempt' }),
       claimedAttempt({ id: 'must-wait-attempt' }),
     );
-    vi.mocked(fixture.retention.execute).mockResolvedValue({
-      deletedIds: ['old-backup'], reclaimedBytes: 3_000,
-      remainingDeficitBytes: 1_096, accountingWindowActive: true,
+    vi.mocked(fixture.retention.execute).mockImplementation(async () => {
+      await fixture.providerGate.recordFailure(
+        'generation-1',
+        'upload',
+        new DriveQuotaExceededError(),
+      );
+      return {
+        deletedIds: ['old-backup'], reclaimedBytes: 3_000,
+        remainingDeficitBytes: 1_096, accountingWindowActive: true,
+      };
     });
 
     fixture.scheduler.startTimers();
