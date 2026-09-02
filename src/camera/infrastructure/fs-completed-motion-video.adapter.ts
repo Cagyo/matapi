@@ -1,28 +1,31 @@
+import { createHash, type Hash } from 'node:crypto';
 import { constants, type BigIntStats } from 'node:fs';
 import {
-  open as nodeOpen,
   lstat as nodeLstat,
-  readdir as nodeReaddir,
+  open as nodeOpen,
+  opendir as nodeOpenDir,
 } from 'node:fs/promises';
-import { createHash } from 'node:crypto';
 import { join, relative, resolve, sep } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { Injectable } from '@nestjs/common';
 import { canonicalSourceFingerprintInput } from '../../archive/domain/archive-artifact.entity';
-import type {
-  CompletedMotionVideoDescriptor,
-  CompletedMotionVideoPort,
-  CompletedMotionVideoScanBatch,
-  CompletedMotionVideoScanCursor,
-} from '../domain/ports/completed-motion-video.port';
 import {
   CompletedMotionVideoFilesystemError,
   type CompletedMotionVideoFilesystemErrorCode,
   type CompletedMotionVideoFilesystemOperation,
 } from '../domain/errors/completed-motion-video-filesystem.error';
+import type { MonotonicClockPort } from '../domain/ports/monotonic-clock.port';
+import type {
+  CompletedMotionHashResult,
+  CompletedMotionVideoCandidate,
+  CompletedMotionVideoDescriptor,
+  CompletedMotionVideoPort,
+  CompletedMotionVideoTraversal,
+} from '../domain/ports/completed-motion-video.port';
 
 const STABILITY_MS = 60_000;
 const HASH_BUFFER_BYTES = 64 * 1024;
-const MAX_SCAN_ENTRIES = 64;
+const DIRECTORY_BUFFER_ENTRIES = 32;
 const MOTION_VIDEO_PATH = /^(\d{4})\/(\d{2})\/(\d{2})\/(\d{6})-[A-Za-z0-9][A-Za-z0-9._-]*\.(avi|mkv|mp4)$/u;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
@@ -30,22 +33,45 @@ export interface FsCompletedMotionVideoOptions {
   root?: string;
   installationId?: string;
   now?: () => number;
+  monotonicClock?: MonotonicClockPort;
   stabilityMs?: number;
   /** Test seam invoked after the stable descriptor bytes are hashed. */
   afterHash?: () => Promise<void> | void;
   filesystem?: CompletedMotionVideoFilesystem;
 }
 
+interface DirectoryEntry {
+  name: string;
+  isSymbolicLink(): boolean;
+  isDirectory(): boolean;
+  isFile(): boolean;
+}
+
+interface DirectoryHandle {
+  read(): Promise<DirectoryEntry | null>;
+  close(): Promise<void>;
+}
+
+interface ReadFileHandle {
+  stat(input: { bigint: true }): Promise<BigIntStats>;
+  read(
+    buffer: Buffer,
+    offset: number,
+    length: number,
+    position: number | null,
+  ): Promise<{ bytesRead: number }>;
+  close(): Promise<void>;
+}
+
 interface CompletedMotionVideoFilesystem {
-  lstat(path: string): ReturnType<typeof filesystemLstat>;
-  readdir(path: string): ReturnType<typeof filesystemReaddir>;
-  open(path: string, flags: number): ReturnType<typeof filesystemOpen>;
+  lstat(path: string): Promise<BigIntStats>;
+  opendir(path: string): Promise<DirectoryHandle>;
+  open(path: string, flags: number): Promise<ReadFileHandle>;
 }
 
 interface PathIdentity {
   dev: bigint;
   ino: bigint;
-  ctimeNs: bigint;
 }
 
 interface InspectedCandidate {
@@ -53,242 +79,549 @@ interface InspectedCandidate {
   identities: readonly PathIdentity[];
 }
 
-interface ScanFrame {
+interface OpenDirectory {
   relativeDirectory: string;
-  nextEntry: number;
+  handle: DirectoryHandle;
+}
+
+interface InProgressHash {
+  candidate: CompletedMotionVideoCandidate;
+  handle: ReadFileHandle;
+  expected: InspectedCandidate;
+  hash: Hash;
+  position: number;
+}
+
+interface InspectedMotionCandidate {
+  candidate: CompletedMotionVideoCandidate;
+  inspected: InspectedCandidate;
+}
+
+interface TraversalDependencies {
+  root: string;
+  installationId: string | null;
+  now: () => number;
+  monotonicClock: MonotonicClockPort;
+  stabilityMs: number;
+  afterHash?: () => Promise<void> | void;
+  filesystem: CompletedMotionVideoFilesystem;
 }
 
 /**
- * No-follow filesystem boundary for Motion videos. It preserves the identity
- * of every root-to-file component while hashing, so pathname swaps cannot be
- * registered as the bytes just read.
+ * No-follow filesystem boundary for Motion videos. The public traversal is
+ * opaque while all live directory, file, and hash state remains in this adapter.
  */
 @Injectable()
 export class FsCompletedMotionVideoAdapter implements CompletedMotionVideoPort {
-  private readonly root: string;
-  private readonly installationId: string | null;
-  private readonly now: () => number;
-  private readonly stabilityMs: number;
-  private readonly afterHash?: () => Promise<void> | void;
-  private readonly filesystem: CompletedMotionVideoFilesystem;
+  private readonly dependencies: TraversalDependencies;
 
   constructor(options: FsCompletedMotionVideoOptions = {}) {
-    this.root = resolve(options.root ?? process.env.MOTION_LOCAL_DIR ?? '/home/pi/motion/videos');
-    this.installationId = isInstallationId(options.installationId) ? options.installationId : null;
-    this.now = options.now ?? Date.now;
-    this.stabilityMs = options.stabilityMs ?? STABILITY_MS;
-    this.afterHash = options.afterHash;
-    this.filesystem = options.filesystem ?? NODE_FILESYSTEM;
-  }
-
-  async resolve(candidatePath: string): Promise<CompletedMotionVideoDescriptor | null> {
-    if (!this.installationId) return null;
-    const candidate = this.toContainedCandidate(candidatePath);
-    if (!candidate) return null;
-    const match = MOTION_VIDEO_PATH.exec(candidate.relativePath);
-    if (!match) return null;
-
-    const before = await this.inspectNoFollow(candidate.relativePath);
-    if (!before || !before.file.isFile() || before.file.size <= 0n || before.file.size > BigInt(Number.MAX_SAFE_INTEGER)) {
-      return null;
-    }
-    if (this.now() - Number(before.file.mtimeMs) < this.stabilityMs) return null;
-
-    const size = Number(before.file.size);
-    const mtimeNs = before.file.mtimeNs.toString();
-    const sha256 = await this.hashIfSameFile(candidate.absolutePath, before.file);
-    if (!sha256) return null;
-    await this.afterHash?.();
-
-    const after = await this.inspectNoFollow(candidate.relativePath);
-    if (!after || !sameCandidate(before, after)) return null;
-
-    const sourceTimeMs = motionSourceTimeMs(match);
-    if (sourceTimeMs === null) return null;
-    const sourceFingerprint = createHash('sha256').update(canonicalSourceFingerprintInput({
-      installationId: this.installationId,
-      kind: 'motion_video',
-      relativePath: candidate.relativePath,
-      size,
-      mtimeNs,
-      sha256,
-    }), 'utf8').digest('hex');
-
-    return {
-      kind: 'motion_video',
-      sourceIdentity: `motion:${candidate.relativePath}`,
-      trustedPath: candidate.absolutePath,
-      relativePath: candidate.relativePath,
-      size,
-      mtimeNs,
-      sourceTimeMs,
-      sha256,
-      sourceFingerprint,
+    this.dependencies = {
+      root: resolve(options.root ?? process.env.MOTION_LOCAL_DIR ?? '/home/pi/motion/videos'),
+      installationId: isInstallationId(options.installationId) ? options.installationId : null,
+      now: options.now ?? Date.now,
+      monotonicClock: options.monotonicClock ?? SYSTEM_MONOTONIC_CLOCK,
+      stabilityMs: options.stabilityMs ?? STABILITY_MS,
+      afterHash: options.afterHash,
+      filesystem: options.filesystem ?? NODE_FILESYSTEM,
     };
   }
 
-  async scanBatch(input: {
-    cursor: CompletedMotionVideoScanCursor | null;
-    entryLimit: number;
-  }): Promise<CompletedMotionVideoScanBatch> {
-    if (!this.installationId || !Number.isSafeInteger(input.entryLimit) || input.entryLimit <= 0) {
-      return { descriptors: [], cursor: null, complete: true, visitedEntries: 0 };
-    }
-    if (!(await this.inspectDirectory(''))) {
-      return { descriptors: [], cursor: null, complete: true, visitedEntries: 0 };
-    }
-    const entryLimit = Math.min(input.entryLimit, MAX_SCAN_ENTRIES);
-    const frames: ScanFrame[] = input.cursor === null
-      ? [{ relativeDirectory: '', nextEntry: 0 }]
-      : input.cursor.frames.map((frame) => ({
-        relativeDirectory: frame.relativeDirectory,
-        nextEntry: frame.nextEntry,
-      }));
-    const descriptors: CompletedMotionVideoDescriptor[] = [];
-    let visited = 0;
-    while (frames.length > 0 && visited < entryLimit) {
-      const frame = frames.shift()!;
-      if (!validFrame(frame)) continue;
-      if (!(await this.inspectDirectory(frame.relativeDirectory))) continue;
-      const directory = frame.relativeDirectory
-        ? join(this.root, frame.relativeDirectory)
-        : this.root;
-      let entries: Awaited<ReturnType<typeof filesystemReaddir>>;
-      try {
-        entries = await this.filesystem.readdir(directory);
-      } catch (error) {
-        if (isExpectedFilesystemRace(error)) continue;
-        throw filesystemFailure('read-directory', error);
+  async resolve(
+    candidatePath: string,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<CompletedMotionVideoDescriptor | null> {
+    throwIfAborted(signal);
+    const traversal = new FsCompletedMotionVideoTraversal(this.dependencies);
+    try {
+      const candidate = await traversal.inspect(candidatePath, signal);
+      if (!candidate) return null;
+      while (true) {
+        const result = await traversal.continueHash(candidate, {
+          hashByteLimit: Number.MAX_SAFE_INTEGER,
+          deadlineMonotonicMs: Number.POSITIVE_INFINITY,
+        }, signal);
+        if (result.kind === 'complete') return result.descriptor;
+        if (result.kind === 'rejected') return null;
       }
-      const ordered = entries.sort((left, right) => String(left.name).localeCompare(String(right.name)));
-      let index = frame.nextEntry;
-      for (; index < ordered.length && visited < entryLimit; index += 1) {
-        const entry = ordered[index];
-        visited += 1;
-        if (entry.isSymbolicLink()) continue;
-        const child = frame.relativeDirectory
-          ? `${frame.relativeDirectory}/${entry.name}`
-          : String(entry.name);
+    } finally {
+      await traversal.close();
+    }
+  }
+
+  async openTraversal(signal: AbortSignal): Promise<CompletedMotionVideoTraversal> {
+    throwIfAborted(signal);
+    return new FsCompletedMotionVideoTraversal(this.dependencies);
+  }
+}
+
+class FsCompletedMotionVideoTraversal implements CompletedMotionVideoTraversal {
+  private readonly directories: OpenDirectory[] = [];
+  private readonly hashBuffer = Buffer.allocUnsafe(HASH_BUFFER_BYTES);
+  private started = false;
+  private exhausted = false;
+  private closed = false;
+  private pending: CompletedMotionVideoCandidate | null = null;
+  private lastInspected: InspectedMotionCandidate | null = null;
+  private inProgress: InProgressHash | null = null;
+
+  constructor(private readonly dependencies: TraversalDependencies) {}
+
+  pendingCandidate(): CompletedMotionVideoCandidate | null {
+    return this.pending ? { ...this.pending } : null;
+  }
+
+  async inspect(candidatePath: string, signal: AbortSignal): Promise<CompletedMotionVideoCandidate | null> {
+    return this.run(signal, async () => {
+      const result = await this.inspectCandidate(candidatePath, signal);
+      this.lastInspected = result;
+      return result ? { ...result.candidate } : null;
+    });
+  }
+
+  async nextCandidate(
+    input: { entryLimit: number },
+    signal: AbortSignal,
+  ): Promise<{ candidate: CompletedMotionVideoCandidate | null; visitedEntries: number; complete: boolean }> {
+    return this.run(signal, async () => {
+      if (this.closed || this.exhausted || !this.dependencies.installationId) {
+        return { candidate: null, visitedEntries: 0, complete: true };
+      }
+      if (!Number.isSafeInteger(input.entryLimit) || input.entryLimit <= 0) {
+        return { candidate: null, visitedEntries: 0, complete: false };
+      }
+      if (this.pending) {
+        return { candidate: { ...this.pending }, visitedEntries: 0, complete: false };
+      }
+      if (!this.started) {
+        this.started = true;
+        const root = await this.openDirectory('', signal);
+        if (!root) {
+          this.exhausted = true;
+          return { candidate: null, visitedEntries: 0, complete: true };
+        }
+        this.directories.push(root);
+      }
+
+      let visitedEntries = 0;
+      while (this.directories.length > 0 && visitedEntries < input.entryLimit) {
+        throwIfAborted(signal);
+        const current = this.directories[this.directories.length - 1];
+        let entry: DirectoryEntry | null;
+        try {
+          entry = await current.handle.read();
+        } catch (error) {
+          if (isExpectedFilesystemRace(error)) {
+            await this.popDirectory();
+            continue;
+          }
+          throw filesystemFailure('read-directory', error);
+        }
+        throwIfAborted(signal);
+        if (!entry) {
+          await this.popDirectory();
+          continue;
+        }
+
+        visitedEntries += 1;
+        if (!safeDirectoryEntryName(entry.name) || entry.isSymbolicLink()) continue;
+        const relativePath = current.relativeDirectory
+          ? `${current.relativeDirectory}/${entry.name}`
+          : entry.name;
         if (entry.isDirectory()) {
-          frames.push({ relativeDirectory: child, nextEntry: 0 });
+          const child = await this.openDirectory(relativePath, signal);
+          if (child) this.directories.push(child);
           continue;
         }
         if (!entry.isFile()) continue;
-        const descriptor = await this.resolve(join(this.root, child));
-        if (descriptor) descriptors.push(descriptor);
+
+        const inspected = await this.inspectCandidate(join(this.dependencies.root, relativePath), signal);
+        if (!inspected) continue;
+        this.lastInspected = inspected;
+        this.pending = { ...inspected.candidate };
+        return { candidate: { ...inspected.candidate }, visitedEntries, complete: false };
       }
-      if (index < ordered.length) {
-        frames.unshift({ relativeDirectory: frame.relativeDirectory, nextEntry: index });
+
+      if (this.directories.length === 0) this.exhausted = true;
+      return { candidate: null, visitedEntries, complete: this.exhausted };
+    });
+  }
+
+  async continueHash(
+    candidate: CompletedMotionVideoCandidate,
+    input: { hashByteLimit: number; deadlineMonotonicMs: number },
+    signal: AbortSignal,
+  ): Promise<CompletedMotionHashResult> {
+    return this.run(signal, async () => {
+      if (this.closed || !this.dependencies.installationId) return rejected(0);
+
+      if (this.inProgress && !sameCandidateValue(this.inProgress.candidate, candidate)) {
+        await this.closeInProgressHash();
+        this.pending = null;
       }
+      if (!this.inProgress) {
+        const started = await this.startHash(candidate, signal);
+        if (!started) return this.rejectHash(0);
+      }
+
+      const byteLimit = Number.isSafeInteger(input.hashByteLimit) && input.hashByteLimit > 0
+        ? input.hashByteLimit
+        : 0;
+      if (byteLimit === 0 || this.dependencies.monotonicClock.now() >= input.deadlineMonotonicMs) {
+        return { kind: 'in-progress', hashedBytes: 0 };
+      }
+
+      let hashedBytes = 0;
+      while (hashedBytes < byteLimit) {
+        throwIfAborted(signal);
+        const active = this.inProgress;
+        if (!active) return rejected(hashedBytes);
+        const remainingFileBytes = active.candidate.size - active.position;
+        const readLength = Math.min(HASH_BUFFER_BYTES, byteLimit - hashedBytes, remainingFileBytes);
+        if (readLength <= 0) return this.completeHash(hashedBytes, signal);
+
+        let bytesRead: number;
+        try {
+          ({ bytesRead } = await active.handle.read(this.hashBuffer, 0, readLength, active.position));
+        } catch (error) {
+          if (isExpectedFilesystemRace(error)) return this.rejectHash(hashedBytes);
+          throw filesystemFailure('hash', error);
+        }
+        throwIfAborted(signal);
+        if (bytesRead <= 0) return this.rejectHash(hashedBytes);
+
+        active.hash.update(this.hashBuffer.subarray(0, bytesRead));
+        active.position += bytesRead;
+        hashedBytes += bytesRead;
+        const deadlineReached = this.dependencies.monotonicClock.now() >= input.deadlineMonotonicMs;
+        if (active.position === active.candidate.size) return this.completeHash(hashedBytes, signal);
+        if (deadlineReached) return { kind: 'in-progress', hashedBytes };
+      }
+      return { kind: 'in-progress', hashedBytes };
+    });
+  }
+
+  async close(): Promise<void> {
+    if (this.closed && !this.inProgress && this.directories.length === 0) return;
+    this.closed = true;
+    this.exhausted = true;
+    this.pending = null;
+    this.lastInspected = null;
+    await this.closeInProgressHash();
+    while (this.directories.length > 0) await this.popDirectory();
+  }
+
+  private async inspectCandidate(
+    candidatePath: string,
+    signal: AbortSignal,
+  ): Promise<InspectedMotionCandidate | null> {
+    if (this.closed || !this.dependencies.installationId) return null;
+    const candidate = toContainedCandidate(this.dependencies.root, candidatePath);
+    if (!candidate) return null;
+    const match = MOTION_VIDEO_PATH.exec(candidate.relativePath);
+    if (!match) return null;
+    const sourceTimeMs = motionSourceTimeMs(match);
+    if (sourceTimeMs === null) return null;
+
+    const inspected = await this.inspectNoFollow(candidate.relativePath, signal);
+    if (!inspected || !validStableFile(inspected.file, this.dependencies.now(), this.dependencies.stabilityMs)) {
+      return null;
     }
-    const complete = frames.length === 0;
     return {
-      descriptors,
-      cursor: complete ? null : { frames: frames.map((frame) => ({ ...frame })) },
-      complete,
-      visitedEntries: visited,
+      candidate: {
+        sourceIdentity: `motion:${candidate.relativePath}`,
+        trustedPath: candidate.absolutePath,
+        relativePath: candidate.relativePath,
+        size: Number(inspected.file.size),
+        mtimeNs: inspected.file.mtimeNs.toString(),
+        sourceTimeMs,
+      },
+      inspected,
     };
   }
 
-  private toContainedCandidate(candidatePath: string): { absolutePath: string; relativePath: string } | null {
-    if (!candidatePath || candidatePath.includes('\0')) return null;
-    const absolutePath = resolve(candidatePath);
-    const relativePath = relative(this.root, absolutePath);
-    if (!relativePath || relativePath === '..' || relativePath.startsWith(`..${sep}`) || relativePath.startsWith('/')) return null;
-    return { absolutePath, relativePath: relativePath.split(sep).join('/') };
+  private async startHash(candidate: CompletedMotionVideoCandidate, signal: AbortSignal): Promise<boolean> {
+    let initial = this.lastInspected;
+    if (!initial || !sameCandidateValue(initial.candidate, candidate)) {
+      initial = await this.inspectCandidate(candidate.trustedPath, signal);
+    }
+    if (!initial || !sameCandidateValue(initial.candidate, candidate)) return false;
+
+    const expected = initial.inspected;
+    const current = await this.inspectNoFollow(candidate.relativePath, signal);
+    if (!current
+      || !validStableFile(current.file, this.dependencies.now(), this.dependencies.stabilityMs)
+      || !sameInspectedCandidate(expected, current)) {
+      return false;
+    }
+
+    let handle: ReadFileHandle | null = null;
+    try {
+      handle = await this.dependencies.filesystem.open(
+        candidate.trustedPath,
+        constants.O_RDONLY | constants.O_NOFOLLOW,
+      );
+      throwIfAborted(signal);
+      const opened = await handle.stat({ bigint: true });
+      throwIfAborted(signal);
+      if (!opened.isFile() || !sameFile(expected.file, opened)) {
+        await closeFileHandle(handle);
+        return false;
+      }
+      this.inProgress = {
+        candidate: { ...candidate },
+        handle,
+        expected,
+        hash: createHash('sha256'),
+        position: 0,
+      };
+      this.pending = { ...candidate };
+      return true;
+    } catch (error) {
+      if (handle) await closeFileHandle(handle);
+      if (isExpectedFilesystemRace(error)) return false;
+      if (isAbort(error, signal)) throw error;
+      throw filesystemFailure('hash', error);
+    }
   }
 
-  private async inspectNoFollow(relativePath: string): Promise<InspectedCandidate | null> {
-    const parts = relativePath.split('/');
-    let current = this.root;
+  private async completeHash(
+    hashedBytes: number,
+    signal: AbortSignal,
+  ): Promise<CompletedMotionHashResult> {
+    const active = this.inProgress;
+    const installationId = this.dependencies.installationId;
+    if (!active || !installationId) return this.rejectHash(hashedBytes);
+
+    let finalOpened: BigIntStats;
+    try {
+      finalOpened = await active.handle.stat({ bigint: true });
+    } catch (error) {
+      if (isExpectedFilesystemRace(error)) return this.rejectHash(hashedBytes);
+      throw filesystemFailure('hash', error);
+    }
+    throwIfAborted(signal);
+    if (!finalOpened.isFile() || !sameFile(active.expected.file, finalOpened)) {
+      return this.rejectHash(hashedBytes);
+    }
+
+    const sha256 = active.hash.digest('hex');
+    await this.dependencies.afterHash?.();
+    throwIfAborted(signal);
+    const finalPath = await this.inspectNoFollow(active.candidate.relativePath, signal);
+    if (!finalPath || !sameInspectedCandidate(active.expected, finalPath)) {
+      return this.rejectHash(hashedBytes);
+    }
+
+    const descriptor = descriptorFor(active.candidate, installationId, sha256);
+    await this.closeInProgressHash();
+    this.pending = null;
+    return { kind: 'complete', descriptor, hashedBytes };
+  }
+
+  private async rejectHash(hashedBytes: number): Promise<CompletedMotionHashResult> {
+    await this.closeInProgressHash();
+    this.pending = null;
+    return rejected(hashedBytes);
+  }
+
+  private async openDirectory(relativeDirectory: string, signal: AbortSignal): Promise<OpenDirectory | null> {
+    const before = await this.inspectNoFollow(relativeDirectory, signal);
+    if (!before?.file.isDirectory()) return null;
+    const absolutePath = relativeDirectory
+      ? join(this.dependencies.root, relativeDirectory)
+      : this.dependencies.root;
+    let handle: DirectoryHandle | null = null;
+    try {
+      handle = await this.dependencies.filesystem.opendir(absolutePath);
+      throwIfAborted(signal);
+      const after = await this.inspectNoFollow(relativeDirectory, signal);
+      if (!after || !after.file.isDirectory() || !sameInspectedCandidate(before, after)) {
+        await closeDirectoryHandle(handle);
+        return null;
+      }
+      return { relativeDirectory, handle };
+    } catch (error) {
+      if (handle) await closeDirectoryHandle(handle);
+      if (isExpectedFilesystemRace(error)) return null;
+      if (isAbort(error, signal)) throw error;
+      throw filesystemFailure('read-directory', error);
+    }
+  }
+
+  private async inspectNoFollow(
+    relativePath: string,
+    signal: AbortSignal,
+  ): Promise<InspectedCandidate | null> {
+    const parts = relativePath === '' ? [] : relativePath.split('/');
+    let current = this.dependencies.root;
     const identities: PathIdentity[] = [];
-    for (let index = -1; index < parts.length; index += 1) {
-      if (index >= 0) current = join(current, parts[index]);
+    for (let index = 0; index <= parts.length; index += 1) {
+      if (index > 0) current = join(current, parts[index - 1]);
       let stat: BigIntStats;
       try {
-        stat = await this.filesystem.lstat(current);
+        stat = await this.dependencies.filesystem.lstat(current);
       } catch (error) {
         if (isExpectedFilesystemRace(error)) return null;
         throw filesystemFailure('inspect', error);
       }
+      throwIfAborted(signal);
       if (stat.isSymbolicLink()) return null;
-      if (index < parts.length - 1 && !stat.isDirectory()) return null;
+      const final = index === parts.length;
+      if (!final && !stat.isDirectory()) return null;
       identities.push(identity(stat));
-      if (index === parts.length - 1) return { file: stat, identities };
+      if (final) return { file: stat, identities };
     }
     return null;
   }
 
-  private async inspectDirectory(relativePath: string): Promise<boolean> {
-    if (!relativePath) {
-      try {
-        const root = await this.filesystem.lstat(this.root);
-        return root.isDirectory() && !root.isSymbolicLink();
-      } catch (error) {
-        if (isExpectedFilesystemRace(error)) return false;
-        throw filesystemFailure('inspect', error);
-      }
-    }
-    const inspected = await this.inspectNoFollow(relativePath);
-    return inspected?.file.isDirectory() ?? false;
+  private async popDirectory(): Promise<void> {
+    const directory = this.directories.pop();
+    if (directory) await closeDirectoryHandle(directory.handle);
   }
 
-  private async hashIfSameFile(filePath: string, expected: BigIntStats): Promise<string | null> {
+  private async closeInProgressHash(): Promise<void> {
+    const active = this.inProgress;
+    this.inProgress = null;
+    if (active) await closeFileHandle(active.handle);
+  }
+
+  private async run<T>(signal: AbortSignal, operation: () => Promise<T>): Promise<T> {
     try {
-      const handle = await this.filesystem.open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
-      return await closeAfter(handle, async () => {
-        const opened = await handle.stat({ bigint: true });
-        if (!opened.isFile() || !sameFile(expected, opened)) return null;
-        const expectedSize = Number(expected.size);
-        const hash = createHash('sha256');
-        const buffer = Buffer.allocUnsafe(HASH_BUFFER_BYTES);
-        let position = 0;
-        while (position < expectedSize) {
-          const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, expectedSize - position), position);
-          if (bytesRead === 0) return null;
-          hash.update(buffer.subarray(0, bytesRead));
-          position += bytesRead;
-        }
-        const final = await handle.stat({ bigint: true });
-        return sameFile(expected, final) ? hash.digest('hex') : null;
-      });
+      throwIfAborted(signal);
+      const result = await operation();
+      throwIfAborted(signal);
+      return result;
     } catch (error) {
-      if (isExpectedFilesystemRace(error)) return null;
-      throw filesystemFailure('hash', error);
+      await this.close();
+      throw error;
     }
   }
 }
 
-async function closeAfter<T>(
-  handle: Awaited<ReturnType<typeof filesystemOpen>>,
-  operation: () => Promise<T>,
-): Promise<T> {
-  try {
-    const result = await operation();
-    await handle.close();
-    return result;
-  } catch (error) {
-    await handle.close().catch(() => undefined);
-    throw error;
-  }
-}
+const SYSTEM_MONOTONIC_CLOCK: MonotonicClockPort = {
+  now: () => performance.now(),
+};
 
 const NODE_FILESYSTEM: CompletedMotionVideoFilesystem = {
   lstat: filesystemLstat,
-  readdir: filesystemReaddir,
+  opendir: filesystemOpenDir,
   open: filesystemOpen,
 };
 
-function filesystemLstat(path: string) {
+function filesystemLstat(path: string): Promise<BigIntStats> {
   return nodeLstat(path, { bigint: true });
 }
 
-function filesystemReaddir(path: string) {
-  return nodeReaddir(path, { withFileTypes: true, encoding: 'utf8' });
+function filesystemOpenDir(path: string): Promise<DirectoryHandle> {
+  return nodeOpenDir(path, { bufferSize: DIRECTORY_BUFFER_ENTRIES });
 }
 
-function filesystemOpen(path: string, flags: number) {
+function filesystemOpen(path: string, flags: number): Promise<ReadFileHandle> {
   return nodeOpen(path, flags);
+}
+
+function descriptorFor(
+  candidate: CompletedMotionVideoCandidate,
+  installationId: string,
+  sha256: string,
+): CompletedMotionVideoDescriptor {
+  const sourceFingerprint = createHash('sha256').update(canonicalSourceFingerprintInput({
+    installationId,
+    kind: 'motion_video',
+    relativePath: candidate.relativePath,
+    size: candidate.size,
+    mtimeNs: candidate.mtimeNs,
+    sha256,
+  }), 'utf8').digest('hex');
+  return {
+    kind: 'motion_video',
+    ...candidate,
+    sha256,
+    sourceFingerprint,
+  };
+}
+
+function rejected(hashedBytes: number): CompletedMotionHashResult {
+  return { kind: 'rejected', hashedBytes };
+}
+
+function toContainedCandidate(
+  root: string,
+  candidatePath: string,
+): { absolutePath: string; relativePath: string } | null {
+  if (!candidatePath || candidatePath.includes('\0')) return null;
+  const absolutePath = resolve(candidatePath);
+  const relativePath = relative(root, absolutePath);
+  if (!relativePath || relativePath === '..' || relativePath.startsWith(`..${sep}`) || relativePath.startsWith('/')) {
+    return null;
+  }
+  return { absolutePath, relativePath: relativePath.split(sep).join('/') };
+}
+
+function validStableFile(stat: BigIntStats, nowMs: number, stabilityMs: number): boolean {
+  return stat.isFile()
+    && stat.size > 0n
+    && stat.size <= BigInt(Number.MAX_SAFE_INTEGER)
+    && nowMs - Number(stat.mtimeMs) >= stabilityMs;
+}
+
+function sameCandidateValue(
+  left: CompletedMotionVideoCandidate,
+  right: CompletedMotionVideoCandidate,
+): boolean {
+  return left.sourceIdentity === right.sourceIdentity
+    && left.trustedPath === right.trustedPath
+    && left.relativePath === right.relativePath
+    && left.size === right.size
+    && left.mtimeNs === right.mtimeNs
+    && left.sourceTimeMs === right.sourceTimeMs;
+}
+
+function sameInspectedCandidate(left: InspectedCandidate, right: InspectedCandidate): boolean {
+  return sameFile(left.file, right.file)
+    && left.identities.length === right.identities.length
+    && left.identities.every((current, index) => {
+      const other = right.identities[index];
+      return current.dev === other.dev && current.ino === other.ino;
+    });
+}
+
+function sameFile(left: BigIntStats, right: BigIntStats): boolean {
+  return left.dev === right.dev
+    && left.ino === right.ino
+    && left.size === right.size
+    && left.mtimeNs === right.mtimeNs
+    && left.ctimeNs === right.ctimeNs;
+}
+
+function identity(stat: BigIntStats): PathIdentity {
+  return { dev: stat.dev, ino: stat.ino };
+}
+
+function safeDirectoryEntryName(name: string): boolean {
+  return name !== ''
+    && name !== '.'
+    && name !== '..'
+    && !name.includes('\0')
+    && !name.includes('/')
+    && !name.includes(sep);
+}
+
+async function closeDirectoryHandle(handle: DirectoryHandle): Promise<void> {
+  await handle.close().catch(() => undefined);
+}
+
+async function closeFileHandle(handle: ReadFileHandle): Promise<void> {
+  await handle.close().catch(() => undefined);
+}
+
+function throwIfAborted(signal: AbortSignal): void {
+  if (signal.aborted) throw signal.reason ?? new DOMException('Aborted', 'AbortError');
+}
+
+function isAbort(error: unknown, signal: AbortSignal): boolean {
+  return signal.aborted || (error instanceof DOMException && error.name === 'AbortError');
 }
 
 function isExpectedFilesystemRace(error: unknown): boolean {
@@ -316,24 +649,6 @@ function nodeErrorCode(error: unknown): string | null {
     : null;
 }
 
-function identity(stat: BigIntStats): PathIdentity {
-  return { dev: stat.dev, ino: stat.ino, ctimeNs: stat.ctimeNs };
-}
-
-function sameCandidate(left: InspectedCandidate, right: InspectedCandidate): boolean {
-  return sameFile(left.file, right.file)
-    && left.identities.length === right.identities.length
-    && left.identities.every((current, index) => {
-      const other = right.identities[index];
-      return current.dev === other.dev && current.ino === other.ino;
-    });
-}
-
-function sameFile(left: BigIntStats, right: BigIntStats): boolean {
-  return left.dev === right.dev && left.ino === right.ino && left.size === right.size
-    && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
-}
-
 function isInstallationId(value: string | undefined): value is string {
   return typeof value === 'string' && UUID.test(value);
 }
@@ -348,17 +663,12 @@ function motionSourceTimeMs(match: RegExpExecArray): number | null {
   const second = Number(hhmmss.slice(4, 6));
   const timestamp = Date.UTC(year, month - 1, day, hour, minute, second);
   const value = new Date(timestamp);
-  return value.getUTCFullYear() === year && value.getUTCMonth() === month - 1 && value.getUTCDate() === day
-    && value.getUTCHours() === hour && value.getUTCMinutes() === minute && value.getUTCSeconds() === second
+  return value.getUTCFullYear() === year
+    && value.getUTCMonth() === month - 1
+    && value.getUTCDate() === day
+    && value.getUTCHours() === hour
+    && value.getUTCMinutes() === minute
+    && value.getUTCSeconds() === second
     ? timestamp
     : null;
-}
-
-function validFrame(frame: ScanFrame): boolean {
-  if (!Number.isSafeInteger(frame.nextEntry) || frame.nextEntry < 0) return false;
-  if (frame.relativeDirectory === '') return true;
-  if (frame.relativeDirectory.includes('\0') || frame.relativeDirectory.startsWith('/')) return false;
-  return frame.relativeDirectory.split('/').every(
-    (component) => component !== '' && component !== '.' && component !== '..',
-  );
 }

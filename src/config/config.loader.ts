@@ -12,6 +12,10 @@ export interface DefaultsConfig {
     scheduler_interval_ms: number;
     upload_lease_ms: number;
     newer_video_batch: number;
+    motion_recovery_entry_limit: number;
+    motion_recovery_hash_bytes: number;
+    motion_recovery_wall_time_ms: number;
+    motion_recovery_descriptor_limit: number;
   };
 }
 

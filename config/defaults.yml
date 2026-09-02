@@ -34,3 +34,7 @@ archive:
   scheduler_interval_ms: 120000
   upload_lease_ms: 300000
   newer_video_batch: 3
+  motion_recovery_entry_limit: 64
+  motion_recovery_hash_bytes: 8388608
+  motion_recovery_wall_time_ms: 100
+  motion_recovery_descriptor_limit: 16
