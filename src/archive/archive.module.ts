@@ -63,6 +63,7 @@ import {
   type ArchiveAdminAlertOutboxPort,
 } from './application/ports/archive-admin-alert-outbox.port';
 import { ARCHIVE_REGISTRATION } from './application/ports/archive-registration.port';
+import { ARCHIVE_REGISTRATION_LOOKUP } from './application/ports/archive-registration-lookup.port';
 import { ARCHIVE_RUNTIME_SIGNAL } from './application/ports/archive-runtime-signal.port';
 import { ARCHIVE_VERIFICATION } from './application/ports/archive-verification.port';
 import { ARCHIVE_SECRET_CIPHER } from './application/ports/archive-secret-cipher.port';
@@ -108,6 +109,7 @@ import { ConfirmDriveAccountUseCase } from './application/use-cases/confirm-driv
 import { CreateDatabaseBackupUseCase } from './application/use-cases/create-database-backup.use-case';
 import { DisconnectDriveUseCase } from './application/use-cases/disconnect-drive.use-case';
 import { RegisterArchiveArtifactUseCase } from './application/use-cases/register-archive-artifact.use-case';
+import { FindRegisteredArchiveArtifactUseCase } from './application/use-cases/find-registered-archive-artifact.use-case';
 import { ReconcileDriveUseCase } from './application/use-cases/reconcile-drive.use-case';
 import { RetireDriveConnectionUseCase } from './application/use-cases/retire-drive-connection.use-case';
 import { ReportDriveStatusUseCase } from './application/use-cases/report-drive-status.use-case';
@@ -239,6 +241,11 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
       inject: [ARCHIVE_ARTIFACT_REPOSITORY, CLOCK, ArchiveWakeService],
     },
     { provide: ARCHIVE_REGISTRATION, useExisting: RegisterArchiveArtifactUseCase },
+    FindRegisteredArchiveArtifactUseCase,
+    {
+      provide: ARCHIVE_REGISTRATION_LOOKUP,
+      useExisting: FindRegisteredArchiveArtifactUseCase,
+    },
     {
       provide: DRIVE_DEVICE_AUTHORIZATION,
       useFactory: (clock: ClockPort) => new GoogleDeviceAuthorizationAdapter({
@@ -849,6 +856,7 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
   ],
   exports: [
     ARCHIVE_REGISTRATION,
+    ARCHIVE_REGISTRATION_LOOKUP,
     ARCHIVE_RUNTIME_SIGNAL,
     ARCHIVE_VERIFICATION,
     BeginDriveConnectionUseCase,

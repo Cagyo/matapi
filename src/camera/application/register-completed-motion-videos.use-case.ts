@@ -1,15 +1,19 @@
 import { Inject, Injectable } from '@nestjs/common';
 import type { RegisterArchiveArtifact } from '../../archive/domain/archive-artifact.entity';
 import {
+  ARCHIVE_REGISTRATION_LOOKUP,
+  type ArchiveRegistrationLookupPort,
+} from '../../archive/application/ports/archive-registration-lookup.port';
+import {
   ARCHIVE_REGISTRATION,
   type ArchiveRegistrationPort,
 } from '../../archive/application/ports/archive-registration.port';
 import {
   COMPLETED_MOTION_VIDEO,
+  type CompletedMotionVideoCandidate,
   type CompletedMotionVideoDescriptor,
   type CompletedMotionVideoPort,
-  type CompletedMotionRecoveryBatch,
-  type CompletedMotionVideoScanCursor,
+  type CompletedMotionVideoTraversal,
 } from '../domain/ports/completed-motion-video.port';
 import {
   MEDIA_REPOSITORY,
@@ -19,113 +23,293 @@ import {
   MEDIA_WRITER,
   type MediaWriterPort,
 } from '../domain/ports/media-writer.port';
+import {
+  MONOTONIC_CLOCK,
+  type MonotonicClockPort,
+} from '../domain/ports/monotonic-clock.port';
 
 const RECONCILIATION_LIMIT = 64;
+
+export interface CompletedMotionRecoveryOptions {
+  entryLimit: number;
+  hashByteLimit: number;
+  wallTimeMs: number;
+  descriptorLimit: number;
+}
+
+export interface CompletedMotionRecoveryWorkResult {
+  complete: boolean;
+  madeProgress: boolean;
+  budgetExhausted: boolean;
+}
+
+interface CandidateWorkResult {
+  hashedBytes: number;
+  registered: boolean;
+  inProgress: boolean;
+  madeProgress: boolean;
+}
 
 /** Registers validated Motion files and makes DB event rows point at the artifact. */
 @Injectable()
 export class RegisterCompletedMotionVideosUseCase {
   constructor(
-    @Inject(MEDIA_REPOSITORY) private readonly media: Pick<MediaRepositoryPort,
-      'findEventById' | 'findUnarchivedCompletedVideos' | 'findCompletedEventsByVideoPath' | 'findEventsByVideoPath'>,
-    @Inject(COMPLETED_MOTION_VIDEO) private readonly completedVideos: CompletedMotionVideoPort,
-    @Inject(ARCHIVE_REGISTRATION) private readonly archive: ArchiveRegistrationPort,
+    @Inject(MEDIA_REPOSITORY)
+    private readonly media: Pick<MediaRepositoryPort,
+      'findEventById' | 'findUnarchivedCompletedVideos' | 'findCompletedEventsByVideoPath'>,
+    @Inject(COMPLETED_MOTION_VIDEO)
+    private readonly completedVideos: CompletedMotionVideoPort,
+    @Inject(ARCHIVE_REGISTRATION)
+    private readonly archive: ArchiveRegistrationPort,
+    @Inject(ARCHIVE_REGISTRATION_LOOKUP)
+    private readonly archiveLookup: ArchiveRegistrationLookupPort,
+    @Inject(MONOTONIC_CLOCK)
+    private readonly monotonic: MonotonicClockPort,
     private readonly installationId: string | null,
-    @Inject(MEDIA_WRITER) private readonly writer?: Pick<MediaWriterPort,
+    @Inject(MEDIA_WRITER)
+    private readonly writer: Pick<MediaWriterPort,
       'createCompletedEvent' | 'attachArchiveArtifact' | 'deferArchiveRegistration'>,
   ) {}
 
   async executeForEvent(eventId: number): Promise<void> {
     const event = await this.media.findEventById(eventId);
     if (!event?.videoPath || !event.endedAt || event.archiveArtifactId) return;
-    await this.registerPath(event.videoPath, [event.id]);
+
+    const signal = new AbortController().signal;
+    const traversal = await this.completedVideos.openTraversal(signal);
+    try {
+      const candidate = await traversal.inspect(event.videoPath, signal);
+      if (candidate === null) {
+        await this.writer.deferArchiveRegistration([event.id]);
+        return;
+      }
+      const matching = await this.media.findCompletedEventsByVideoPath(candidate.trustedPath);
+      let result = await this.processCandidate(
+        traversal,
+        candidate,
+        matching.length > 0 ? matching.map(({ id }) => id) : [event.id],
+        Number.MAX_SAFE_INTEGER,
+        Number.POSITIVE_INFINITY,
+        signal,
+      );
+      while (result.inProgress) {
+        result = await this.processCandidate(
+          traversal,
+          candidate,
+          matching.length > 0 ? matching.map(({ id }) => id) : [event.id],
+          Number.MAX_SAFE_INTEGER,
+          Number.POSITIVE_INFINITY,
+          signal,
+        );
+      }
+    } finally {
+      await traversal.close();
+    }
   }
 
   async reconcileBatch(
-    cursor: CompletedMotionVideoScanCursor | null,
-    signal?: AbortSignal,
-  ): Promise<CompletedMotionRecoveryBatch> {
+    traversal: CompletedMotionVideoTraversal,
+    options: CompletedMotionRecoveryOptions,
+    signal: AbortSignal,
+  ): Promise<CompletedMotionRecoveryWorkResult> {
     throwIfAborted(signal);
-    const processedPaths = new Set<string>();
-    const grouped = new Map<string, {
-      descriptor: CompletedMotionVideoDescriptor;
-      eventIds: Set<number>;
-    }>();
+    if (options.descriptorLimit < 1 || options.wallTimeMs < 1) {
+      return { complete: false, madeProgress: false, budgetExhausted: true };
+    }
+
+    const deadline = this.monotonic.now() + options.wallTimeMs;
+    let hashBytesRemaining = Math.max(0, options.hashByteLimit);
+    let accepted = 0;
+    let madeProgress = false;
+
+    const partial = traversal.pendingCandidate();
+    if (partial !== null) {
+      const matching = await this.media.findCompletedEventsByVideoPath(partial.trustedPath);
+      throwIfAborted(signal);
+      const resumed = await this.processCandidate(
+        traversal,
+        partial,
+        matching.map(({ id }) => id),
+        hashBytesRemaining,
+        deadline,
+        signal,
+      );
+      hashBytesRemaining -= resumed.hashedBytes;
+      accepted += resumed.registered ? 1 : 0;
+      madeProgress ||= resumed.madeProgress;
+      if (resumed.inProgress) {
+        return { complete: false, madeProgress, budgetExhausted: true };
+      }
+    }
+
+    if (this.budgetReached(hashBytesRemaining, accepted, deadline, options)) {
+      return { complete: false, madeProgress, budgetExhausted: true };
+    }
+
     const pending = await this.media.findUnarchivedCompletedVideos(RECONCILIATION_LIMIT);
     throwIfAborted(signal);
     for (const event of pending) {
       throwIfAborted(signal);
-      if (!event.videoPath || processedPaths.has(event.videoPath)) continue;
-      processedPaths.add(event.videoPath);
-      const descriptor = await this.completedVideos.resolve(event.videoPath);
+      if (this.budgetReached(hashBytesRemaining, accepted, deadline, options)) break;
+      if (!event.videoPath) continue;
+
+      const candidate = await traversal.inspect(event.videoPath, signal);
       throwIfAborted(signal);
-      if (!descriptor) {
-        await this.requireWriter().deferArchiveRegistration([event.id]);
+      if (candidate === null) {
+        await this.writer.deferArchiveRegistration([event.id]);
         throwIfAborted(signal);
+        madeProgress = true;
         continue;
       }
-      const matching = await this.media.findCompletedEventsByVideoPath(descriptor.trustedPath);
+      const matching = await this.media.findCompletedEventsByVideoPath(candidate.trustedPath);
       throwIfAborted(signal);
-      if (await this.attachExistingArtifact(descriptor.trustedPath, matching.map((candidate) => candidate.id))) {
-        throwIfAborted(signal);
-        continue;
-      }
-      throwIfAborted(signal);
-      this.groupDescriptor(
-        grouped,
-        descriptor,
-        matching.length > 0 ? matching.map((candidate) => candidate.id) : [event.id],
+      const result = await this.processCandidate(
+        traversal,
+        candidate,
+        matching.map(({ id }) => id),
+        hashBytesRemaining,
+        deadline,
+        signal,
       );
+      hashBytesRemaining -= result.hashedBytes;
+      accepted += result.registered ? 1 : 0;
+      madeProgress ||= result.madeProgress;
+      if (result.inProgress || accepted >= options.descriptorLimit) {
+        return { complete: false, madeProgress, budgetExhausted: true };
+      }
     }
 
-    const scanned = await this.completedVideos.scanBatch({
-      cursor,
-      entryLimit: RECONCILIATION_LIMIT,
-    });
-    throwIfAborted(signal);
-    for (const descriptor of scanned.descriptors) {
+    let visitedEntries = 0;
+    let traversalComplete = false;
+    while (visitedEntries < options.entryLimit) {
       throwIfAborted(signal);
-      if (processedPaths.has(descriptor.trustedPath)) continue;
-      processedPaths.add(descriptor.trustedPath);
-      const matching = await this.media.findCompletedEventsByVideoPath(descriptor.trustedPath);
+      if (this.budgetReached(hashBytesRemaining, accepted, deadline, options)) {
+        return { complete: false, madeProgress, budgetExhausted: true };
+      }
+
+      const step = await traversal.nextCandidate({
+        entryLimit: options.entryLimit - visitedEntries,
+      }, signal);
       throwIfAborted(signal);
-      if (await this.attachExistingArtifact(descriptor.trustedPath, matching.map((candidate) => candidate.id))) {
-        throwIfAborted(signal);
+      visitedEntries += step.visitedEntries;
+      madeProgress ||= step.visitedEntries > 0;
+      traversalComplete = step.complete;
+      if (step.candidate === null) {
+        if (step.complete) break;
+        if (step.visitedEntries === 0) {
+          return { complete: false, madeProgress, budgetExhausted: true };
+        }
         continue;
       }
+
+      const matching = await this.media.findCompletedEventsByVideoPath(step.candidate.trustedPath);
       throwIfAborted(signal);
-      const eventIds = matching.map((event) => event.id);
-      if (eventIds.length === 0) {
-        const created = await this.requireWriter().createCompletedEvent(
-          null,
-          new Date(descriptor.sourceTimeMs),
-          new Date(descriptor.sourceTimeMs),
-          descriptor.trustedPath,
-        );
-        throwIfAborted(signal);
-        eventIds.push(created.id);
+      const result = await this.processCandidate(
+        traversal,
+        step.candidate,
+        matching.map(({ id }) => id),
+        hashBytesRemaining,
+        deadline,
+        signal,
+      );
+      hashBytesRemaining -= result.hashedBytes;
+      accepted += result.registered ? 1 : 0;
+      madeProgress ||= result.madeProgress;
+      if (result.inProgress || accepted >= options.descriptorLimit) {
+        return { complete: false, madeProgress, budgetExhausted: true };
       }
-      this.groupDescriptor(grouped, descriptor, eventIds);
     }
 
-    for (const { descriptor, eventIds } of grouped.values()) {
-      throwIfAborted(signal);
-      await this.registerDescriptor(descriptor, [...eventIds]);
-      throwIfAborted(signal);
-    }
-    return { cursor: scanned.cursor, complete: scanned.complete };
+    return {
+      complete: traversalComplete,
+      madeProgress,
+      budgetExhausted: !traversalComplete,
+    };
   }
 
-  private async registerPath(path: string, fallbackEventIds: readonly number[]): Promise<void> {
-    const descriptor = await this.completedVideos.resolve(path);
-    if (!descriptor) {
-      await this.requireWriter().deferArchiveRegistration([...fallbackEventIds]);
-      return;
+  private budgetReached(
+    hashBytesRemaining: number,
+    accepted: number,
+    deadlineMonotonicMs: number,
+    options: CompletedMotionRecoveryOptions,
+  ): boolean {
+    return hashBytesRemaining < 1
+      || accepted >= options.descriptorLimit
+      || this.monotonic.now() >= deadlineMonotonicMs;
+  }
+
+  private async processCandidate(
+    traversal: CompletedMotionVideoTraversal,
+    candidate: CompletedMotionVideoCandidate,
+    eventIds: readonly number[],
+    hashByteLimit: number,
+    deadlineMonotonicMs: number,
+    signal: AbortSignal,
+  ): Promise<CandidateWorkResult> {
+    throwIfAborted(signal);
+    const isPartial = traversal.pendingCandidate() === candidate;
+    if (!isPartial) {
+      const known = await this.archiveLookup.findKnown({
+        installationId: this.requireInstallationId(),
+        kind: 'motion_video',
+        sourceIdentity: candidate.sourceIdentity,
+        size: candidate.size,
+        mtimeNs: candidate.mtimeNs,
+      });
+      throwIfAborted(signal);
+      if (known !== null) {
+        if (eventIds.length > 0) {
+          await this.writer.attachArchiveArtifact([...new Set(eventIds)], known.artifactId);
+          throwIfAborted(signal);
+        }
+        return {
+          hashedBytes: 0,
+          registered: false,
+          inProgress: false,
+          madeProgress: true,
+        };
+      }
     }
-    const matching = await this.media.findCompletedEventsByVideoPath(descriptor.trustedPath);
-    const eventIds = matching.length > 0 ? matching.map((event) => event.id) : fallbackEventIds;
-    if (await this.attachExistingArtifact(descriptor.trustedPath, eventIds)) return;
-    await this.registerDescriptor(descriptor, eventIds);
+
+    const hashed = await traversal.continueHash(candidate, {
+      hashByteLimit,
+      deadlineMonotonicMs,
+    }, signal);
+    throwIfAborted(signal);
+    if (hashed.kind === 'in-progress') {
+      return {
+        hashedBytes: hashed.hashedBytes,
+        registered: false,
+        inProgress: true,
+        madeProgress: true,
+      };
+    }
+    if (hashed.kind === 'rejected') {
+      return {
+        hashedBytes: hashed.hashedBytes,
+        registered: false,
+        inProgress: false,
+        madeProgress: true,
+      };
+    }
+
+    const attachedIds = eventIds.length > 0
+      ? [...new Set(eventIds)]
+      : [(await this.writer.createCompletedEvent(
+          null,
+          new Date(hashed.descriptor.sourceTimeMs),
+          new Date(hashed.descriptor.sourceTimeMs),
+          hashed.descriptor.trustedPath,
+        )).id];
+    throwIfAborted(signal);
+    await this.registerDescriptor(hashed.descriptor, attachedIds);
+    throwIfAborted(signal);
+    return {
+      hashedBytes: hashed.hashedBytes,
+      registered: true,
+      inProgress: false,
+      madeProgress: true,
+    };
   }
 
   private async registerDescriptor(
@@ -133,57 +317,23 @@ export class RegisterCompletedMotionVideosUseCase {
     eventIds: readonly number[],
   ): Promise<void> {
     const artifact = await this.archive.register(this.toArchiveArtifact(descriptor));
-    await this.requireWriter().attachArchiveArtifact([...new Set(eventIds)], artifact.id);
-  }
-
-  private groupDescriptor(
-    groups: Map<string, { descriptor: CompletedMotionVideoDescriptor; eventIds: Set<number> }>,
-    descriptor: CompletedMotionVideoDescriptor,
-    eventIds: readonly number[],
-  ): void {
-    const existing = groups.get(descriptor.sourceFingerprint);
-    if (existing) {
-      eventIds.forEach((id) => existing.eventIds.add(id));
-      return;
-    }
-    groups.set(descriptor.sourceFingerprint, { descriptor, eventIds: new Set(eventIds) });
-  }
-
-  private async attachExistingArtifact(
-    videoPath: string,
-    candidateEventIds: readonly number[],
-  ): Promise<boolean> {
-    const events = await this.media.findEventsByVideoPath(videoPath);
-    const artifactId = events.find((event) => event.archiveArtifactId !== null)?.archiveArtifactId;
-    if (!artifactId) return false;
-    const unreferenced = new Set(events
-      .filter((event) => event.archiveArtifactId === null)
-      .map((event) => event.id));
-    candidateEventIds.forEach((id) => {
-      if (events.some((event) => event.id === id && event.archiveArtifactId === null)) {
-        unreferenced.add(id);
-      }
-    });
-    if (unreferenced.size > 0) {
-      await this.requireWriter().attachArchiveArtifact([...unreferenced], artifactId);
-    }
-    return true;
+    await this.writer.attachArchiveArtifact([...new Set(eventIds)], artifact.id);
   }
 
   private toArchiveArtifact(descriptor: CompletedMotionVideoDescriptor): RegisterArchiveArtifact {
-    if (!this.installationId) throw new Error('Archive installation identity is unavailable');
-    return { installationId: this.installationId, ...descriptor };
+    return { installationId: this.requireInstallationId(), ...descriptor };
   }
 
-  private requireWriter(): Pick<MediaWriterPort,
-    'createCompletedEvent' | 'attachArchiveArtifact' | 'deferArchiveRegistration'> {
-    if (!this.writer) throw new Error('Motion archive writer is not configured');
-    return this.writer;
+  private requireInstallationId(): string {
+    if (this.installationId === null) {
+      throw new Error('Archive installation identity is unavailable');
+    }
+    return this.installationId;
   }
 }
 
-function throwIfAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) {
+function throwIfAborted(signal: AbortSignal): void {
+  if (signal.aborted) {
     throw signal.reason instanceof Error
       ? signal.reason
       : new DOMException('Aborted', 'AbortError');

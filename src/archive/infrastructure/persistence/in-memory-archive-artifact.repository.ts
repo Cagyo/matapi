@@ -4,6 +4,7 @@ import type {
   ClaimedAttempt, EncryptedUploadSession, ReconciliationSelection, ReplaceAttemptForContainer, RetentionSelection, TerminalizeArtifactAttempt,
   UnattemptedArtifactSelection, VerifiedArchiveObject,
 } from '../../application/ports/archive-artifact-repository.port';
+import type { ArchiveRegistrationLookupInput } from '../../application/ports/archive-registration-lookup.port';
 import { ArchiveArtifact, type RegisterArchiveArtifact } from '../../domain/archive-artifact.entity';
 import { DriveObjectAttempt } from '../../domain/drive-object-attempt.entity';
 import type { VerifiedDriveObject } from '../../domain/drive-object-metadata.value-object';
@@ -39,6 +40,19 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
     const artifact = ArchiveArtifact.register(input, { id: randomUUID(), nowMs: Date.now() });
     this.artifacts.set(artifact.id, artifact);
     return artifact;
+  }
+
+  async findRegisteredSource(
+    input: ArchiveRegistrationLookupInput,
+  ): Promise<{ artifactId: string } | null> {
+    const artifact = [...this.artifacts.values()].find((candidate) => (
+      candidate.installationId === input.installationId
+      && candidate.kind === input.kind
+      && candidate.sourceIdentity === input.sourceIdentity
+      && candidate.size === input.size
+      && candidate.mtimeNs === input.mtimeNs
+    ));
+    return artifact ? { artifactId: artifact.id } : null;
   }
 
   async loadArtifact(id: string): Promise<ArchiveArtifact | null> {

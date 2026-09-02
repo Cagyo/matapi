@@ -3,10 +3,15 @@ import { readFileSync } from 'node:fs';
 import { ArchiveModule } from '../archive/archive.module';
 import { ARCHIVE_REGISTRATION, type ArchiveRegistrationPort } from '../archive/application/ports/archive-registration.port';
 import {
+  ARCHIVE_REGISTRATION_LOOKUP,
+  type ArchiveRegistrationLookupPort,
+} from '../archive/application/ports/archive-registration-lookup.port';
+import {
   ARCHIVE_RUNTIME_SIGNAL,
   type ArchiveRuntimeSignalPort,
 } from '../archive/application/ports/archive-runtime-signal.port';
 import { ArchiveSchedulerHooksService } from '../archive/application/archive-scheduler.service';
+import { loadDefaults } from '../config/config.loader';
 import { AppDatabase, DB, DatabaseModule } from '../database/database.module';
 import { EventModule } from '../events/event.module';
 import { FeatureModule } from '../features/feature.module';
@@ -153,6 +158,9 @@ import { FsLiveStreamLeaseAdapter } from './infrastructure/fs-live-stream-lease.
 import { FsLocalStorageAdapter } from './infrastructure/fs-local-storage.adapter';
 import { FsMediaFileAdapter } from './infrastructure/fs-media-file.adapter';
 import { FsCompletedMotionVideoAdapter } from './infrastructure/fs-completed-motion-video.adapter';
+import {
+  completedMotionRecoveryOptionsFromConfig,
+} from './infrastructure/completed-motion-recovery-options.adapter';
 import { InMemoryLiveStreamGatewayAdapter } from './infrastructure/in-memory-live-stream-gateway.adapter';
 import { InMemoryLiveStreamLeaseAdapter } from './infrastructure/in-memory-live-stream-lease.adapter';
 import { InMemoryMediaRepository } from './infrastructure/in-memory-media.repository';
@@ -183,6 +191,10 @@ function resolveCameraMode(): CameraMode {
 
 const mode = resolveCameraMode();
 const liveStreamOptions = liveStreamOptionsFromEnv(process.env);
+const completedMotionRecoveryOptions = completedMotionRecoveryOptionsFromConfig(
+  loadDefaults().archive,
+  process.env,
+);
 
 function cameraInstallationId(cameraMode: CameraMode): string | null {
   const direct = process.env.HOME_WORKER_INSTALLATION_ID?.trim();
@@ -230,9 +242,12 @@ function isInstallationId(value: string | undefined): value is string {
     },
     {
       provide: COMPLETED_MOTION_VIDEO,
-      useFactory: (): CompletedMotionVideoPort => new FsCompletedMotionVideoAdapter({
-        installationId: cameraInstallationId(mode) ?? undefined,
-      }),
+      useFactory: (monotonic: MonotonicClockPort): CompletedMotionVideoPort =>
+        new FsCompletedMotionVideoAdapter({
+          installationId: cameraInstallationId(mode) ?? undefined,
+          monotonicClock: monotonic,
+        }),
+      inject: [MONOTONIC_CLOCK],
     },
     {
       provide: RegisterCompletedMotionVideosUseCase,
@@ -241,25 +256,39 @@ function isInstallationId(value: string | undefined): value is string {
         writer: import('./domain/ports/media-writer.port').MediaWriterPort,
         completedVideos: CompletedMotionVideoPort,
         archive: ArchiveRegistrationPort,
+        archiveLookup: ArchiveRegistrationLookupPort,
+        monotonic: MonotonicClockPort,
       ) => new RegisterCompletedMotionVideosUseCase(
         media,
         completedVideos,
         archive,
+        archiveLookup,
+        monotonic,
         cameraInstallationId(mode),
         writer,
       ),
-      inject: [MEDIA_REPOSITORY, MEDIA_WRITER, COMPLETED_MOTION_VIDEO, ARCHIVE_REGISTRATION],
+      inject: [
+        MEDIA_REPOSITORY,
+        MEDIA_WRITER,
+        COMPLETED_MOTION_VIDEO,
+        ARCHIVE_REGISTRATION,
+        ARCHIVE_REGISTRATION_LOOKUP,
+        MONOTONIC_CLOCK,
+      ],
     },
     {
       provide: CompletedMotionVideoRecoveryScheduler,
       useFactory: (
         cameraMode: CameraMode,
         registration: RegisterCompletedMotionVideosUseCase,
+        completedVideos: CompletedMotionVideoPort,
         progress: ArchiveRuntimeSignalPort,
         alerts: AdminAlertPort,
       ) => new CompletedMotionVideoRecoveryScheduler(
         cameraMode,
         registration,
+        completedVideos,
+        completedMotionRecoveryOptions,
         progress,
         undefined, // clock: the scheduler keeps its own system clock
         alerts,
@@ -267,6 +296,7 @@ function isInstallationId(value: string | undefined): value is string {
       inject: [
         CAMERA_MODE,
         RegisterCompletedMotionVideosUseCase,
+        COMPLETED_MOTION_VIDEO,
         ARCHIVE_RUNTIME_SIGNAL,
         ADMIN_ALERT,
       ],

@@ -4,8 +4,15 @@ import type { ArchiveRuntimeSignalPort } from '../../archive/application/ports/a
 import { CAMERA_MODE, type CameraMode } from '../camera.tokens';
 import { CompletedMotionVideoFilesystemError } from '../domain/errors/completed-motion-video-filesystem.error';
 import { ADMIN_ALERT, type AdminAlertPort } from '../domain/ports/admin-alert.port';
-import type { CompletedMotionVideoScanCursor } from '../domain/ports/completed-motion-video.port';
-import { RegisterCompletedMotionVideosUseCase } from './register-completed-motion-videos.use-case';
+import {
+  COMPLETED_MOTION_VIDEO,
+  type CompletedMotionVideoPort,
+  type CompletedMotionVideoTraversal,
+} from '../domain/ports/completed-motion-video.port';
+import {
+  RegisterCompletedMotionVideosUseCase,
+  type CompletedMotionRecoveryOptions,
+} from './register-completed-motion-videos.use-case';
 
 const RECOVERY_INTERVAL_MS = 2 * 60 * 1000;
 
@@ -62,13 +69,10 @@ export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBoots
   private inFlight: Promise<void> | null = null;
   private activeController: AbortController | null = null;
   private readonly abortListenerCleanups = new Set<() => void>();
-  private cursor: CompletedMotionVideoScanCursor | null = null;
-  private pendingWake = false;
-  /**
-   * Consecutive failed traversals. A failing progress write also lands here,
-   * but `clearScanFailures()` runs first on a completed scan, so that case
-   * always sits at 1 and never accumulates toward an alert.
-   */
+  private pendingMotionWake = false;
+  private lastSafetyTraversalStartedMs: number | null = null;
+  private safetyTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Consecutive failures while opening, draining, or closing a traversal. */
   private consecutiveFailures = 0;
   private scanAlertAtMs: number | null = null;
 
@@ -76,6 +80,9 @@ export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBoots
     @Inject(CAMERA_MODE) private readonly mode: CameraMode,
     @Inject(RegisterCompletedMotionVideosUseCase)
     private readonly registration: Pick<RegisterCompletedMotionVideosUseCase, 'reconcileBatch'>,
+    @Inject(COMPLETED_MOTION_VIDEO)
+    private readonly completedVideos: Pick<CompletedMotionVideoPort, 'openTraversal'>,
+    private readonly options: CompletedMotionRecoveryOptions,
     @Optional() private readonly progress: ArchiveRuntimeSignalPort = NOOP_PROGRESS,
     @Optional() private readonly clock: RecoveryClock = SYSTEM_CLOCK,
     @Optional()
@@ -92,13 +99,17 @@ export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBoots
     this.wake('safety');
   }
 
-  wake(_reason: CompletedMotionRecoveryWakeReason): void {
+  wake(reason: CompletedMotionRecoveryWakeReason): void {
     if (this.mode !== 'real') return;
     if (this.inFlight !== null) {
-      this.pendingWake = true;
+      if (reason === 'motion-event') this.pendingMotionWake = true;
       return;
     }
-    this.dispatchBestEffort();
+    if (reason === 'safety') {
+      this.dispatchSafetyBestEffort();
+      return;
+    }
+    this.dispatchBestEffort(reason);
   }
 
   reconcile(signal?: AbortSignal): Promise<void> {
@@ -108,21 +119,57 @@ export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBoots
       return this.inFlight;
     }
 
+    return this.startTraversal('boot', signal);
+  }
+
+  private startTraversal(
+    reason: CompletedMotionRecoveryWakeReason,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (this.inFlight !== null) {
+      this.bridgeAbort(signal, this.activeController);
+      return this.inFlight;
+    }
+
+    this.cancelSafetyTimer();
+    if (reason === 'safety') this.lastSafetyTraversalStartedMs = this.clock.now();
     const controller = new AbortController();
     this.activeController = controller;
     this.bridgeAbort(signal, controller);
-    const shared = this.runTraversal(controller.signal).finally(() => {
+    const shared = this.openAndRunTraversal(controller.signal).finally(() => {
       if (this.inFlight !== shared) return;
       this.inFlight = null;
       this.cleanupAbortListeners();
       if (this.activeController === controller) this.activeController = null;
-      if (this.pendingWake) {
-        this.pendingWake = false;
-        this.dispatchBestEffort();
+      if (this.pendingMotionWake) {
+        this.pendingMotionWake = false;
+        this.dispatchBestEffort('motion-event');
       }
     });
     this.inFlight = shared;
     return shared;
+  }
+
+  private dispatchSafetyBestEffort(): void {
+    const earliestStart = this.lastSafetyTraversalStartedMs === null
+      ? this.clock.now()
+      : this.lastSafetyTraversalStartedMs + RECOVERY_INTERVAL_MS;
+    const delayMs = earliestStart - this.clock.now();
+    if (delayMs <= 0) {
+      this.dispatchBestEffort('safety');
+      return;
+    }
+    if (this.safetyTimer !== null) return;
+    this.safetyTimer = setTimeout(() => {
+      this.safetyTimer = null;
+      this.wake('safety');
+    }, delayMs);
+  }
+
+  private cancelSafetyTimer(): void {
+    if (this.safetyTimer === null) return;
+    clearTimeout(this.safetyTimer);
+    this.safetyTimer = null;
   }
 
   private bridgeAbort(
@@ -154,7 +201,7 @@ export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBoots
   private abortTraversal(controller: AbortController, signal: AbortSignal): void {
     // Wakes queued before cancellation belong to the canceled traversal. A
     // wake arriving after this boundary is preserved by the normal wake path.
-    this.pendingWake = false;
+    this.pendingMotionWake = false;
     controller.abort(abortReason(signal));
   }
 
@@ -162,28 +209,17 @@ export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBoots
     [...this.abortListenerCleanups].forEach((cleanup) => cleanup());
   }
 
-  private async runTraversal(signal?: AbortSignal): Promise<void> {
+  private async openAndRunTraversal(signal: AbortSignal): Promise<void> {
     try {
-      let cursor = copyCursor(this.cursor);
-      while (true) {
-        throwIfAborted(signal);
-        const batch = await this.registration.reconcileBatch(copyCursor(cursor), signal);
-        throwIfAborted(signal);
-        if (batch.complete) {
-          this.cursor = null;
-          this.clearScanFailures();
-          await this.progress.motionTraversalCompleted(this.clock.now());
-          return;
-        }
-        if (batch.cursor === null) {
-          throw new Error('Incomplete Motion traversal did not return a cursor');
-        }
-        cursor = copyCursor(batch.cursor);
-        this.cursor = copyCursor(cursor);
-        await yieldToEventLoop();
+      throwIfAborted(signal);
+      const traversal = await this.completedVideos.openTraversal(signal);
+      try {
+        await this.runTraversal(traversal, signal);
+      } finally {
+        await traversal.close();
       }
+      throwIfAborted(signal);
     } catch (error) {
-      this.cursor = null;
       // A cancelled traversal reports nothing about the scan root, so it
       // neither arms nor clears the latch. The second clause is the one that
       // does the work: `abortReason()` propagates a caller's non-`AbortError`
@@ -194,6 +230,22 @@ export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBoots
         this.recordScanFailure(error);
       }
       throw error;
+    }
+
+    this.clearScanFailures();
+    await this.progress.motionTraversalCompleted(this.clock.now());
+  }
+
+  private async runTraversal(
+    traversal: CompletedMotionVideoTraversal,
+    signal: AbortSignal,
+  ): Promise<void> {
+    while (true) {
+      throwIfAborted(signal);
+      const batch = await this.registration.reconcileBatch(traversal, this.options, signal);
+      throwIfAborted(signal);
+      if (batch.complete) return;
+      await yieldToEventLoop();
     }
   }
 
@@ -230,22 +282,14 @@ export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBoots
     this.scanAlertAtMs = null;
   }
 
-  private dispatchBestEffort(): void {
-    void this.reconcile().catch((error: unknown) => {
+  private dispatchBestEffort(reason: CompletedMotionRecoveryWakeReason): void {
+    void this.startTraversal(reason).catch((error: unknown) => {
       if (isAbortError(error)) return;
       this.logger.error(
         `Completed Motion recovery failed: ${scanFailureCode(error) ?? CAMERA_OPERATION_FAILED}`,
       );
     });
   }
-}
-
-function copyCursor(
-  cursor: CompletedMotionVideoScanCursor | null,
-): CompletedMotionVideoScanCursor | null {
-  return cursor === null
-    ? null
-    : { frames: cursor.frames.map((frame) => ({ ...frame })) };
 }
 
 function throwIfAborted(signal?: AbortSignal): void {

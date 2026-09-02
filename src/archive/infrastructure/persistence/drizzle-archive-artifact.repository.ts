@@ -8,6 +8,7 @@ import type {
   ClaimedAttempt, EncryptedUploadSession, ReconciliationSelection, ReplaceAttemptForContainer, RetentionSelection, TerminalizeArtifactAttempt,
   UnattemptedArtifactSelection, VerifiedArchiveObject,
 } from '../../application/ports/archive-artifact-repository.port';
+import type { ArchiveRegistrationLookupInput } from '../../application/ports/archive-registration-lookup.port';
 import { ArchiveArtifact, type ArchiveArtifactKind, type RegisterArchiveArtifact } from '../../domain/archive-artifact.entity';
 import { DriveObjectAttempt, type DriveAttemptState } from '../../domain/drive-object-attempt.entity';
 import type { CanonicalSharingState, VerifiedDriveObject } from '../../domain/drive-object-metadata.value-object';
@@ -36,6 +37,22 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
       throw error;
     }
     return artifact;
+  }
+
+  async findRegisteredSource(
+    input: ArchiveRegistrationLookupInput,
+  ): Promise<{ artifactId: string } | null> {
+    return this.db.select({ artifactId: archiveArtifacts.id })
+      .from(archiveArtifacts)
+      .where(and(
+        eq(archiveArtifacts.installationId, input.installationId),
+        eq(archiveArtifacts.kind, input.kind),
+        eq(archiveArtifacts.sourceIdentity, input.sourceIdentity),
+        eq(archiveArtifacts.size, input.size),
+        eq(archiveArtifacts.mtimeNs, input.mtimeNs),
+      ))
+      .limit(1)
+      .get() ?? null;
   }
 
   async loadArtifact(id: string): Promise<ArchiveArtifact | null> {

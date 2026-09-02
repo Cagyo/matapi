@@ -1,4 +1,5 @@
 import type { ArchiveArtifactKind, ArchiveArtifact, ArchiveArtifactState, RegisterArchiveArtifact } from '../../domain/archive-artifact.entity';
+import type { ArchiveRegistrationLookupInput } from './archive-registration-lookup.port';
 
 export const ARCHIVE_ARTIFACT_REPOSITORY = Symbol('ARCHIVE_ARTIFACT_REPOSITORY');
 
@@ -186,6 +187,9 @@ export interface ArchiveStatusCounts {
 /** Provider-neutral durable archive queue and scheduler state boundary. */
 export interface ArchiveArtifactRepositoryPort {
   register(input: RegisterArchiveArtifact): Promise<ArchiveArtifact>;
+  findRegisteredSource(
+    input: ArchiveRegistrationLookupInput,
+  ): Promise<{ artifactId: string } | null>;
   loadArtifact(id: string): Promise<ArchiveArtifact | null>;
   findByFingerprint(fingerprint: string): Promise<ArchiveArtifact | null>;
   recordMotionAdmissionPath(artifactId: string, expectedRevision: number, dayPath: string, nowMs: number): Promise<ArchiveArtifact>;
