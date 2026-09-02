@@ -340,6 +340,65 @@ describe('CompletedMotionVideoRecoveryScheduler', () => {
     expect(fixture.registration.reconcileBatch).not.toHaveBeenCalled();
   });
 
+  it('cancels an idle safety timer and refuses all post-shutdown wake paths', async () => {
+    vi.useFakeTimers();
+    const clock = mutableClock();
+    const fixture = schedulerFixture({ clock });
+
+    fixture.subject.wake('safety');
+    await fixture.subject.reconcile();
+    fixture.subject.wake('safety');
+    expect(vi.getTimerCount()).toBe(1);
+
+    await fixture.subject.onModuleDestroy();
+
+    expect(vi.getTimerCount()).toBe(0);
+    clock.advance(RECOVERY_INTERVAL_MS);
+    await vi.advanceTimersByTimeAsync(RECOVERY_INTERVAL_MS);
+    fixture.subject.reconcileTick();
+    fixture.subject.wake('motion-event');
+    await fixture.subject.reconcile();
+
+    expect(fixture.completedVideos.openTraversal).toHaveBeenCalledOnce();
+    expect(fixture.registration.reconcileBatch).toHaveBeenCalledOnce();
+  });
+
+  it('aborts, closes, and settles an active traversal without retaining bridge listeners or wakes', async () => {
+    const source = new AbortController();
+    const closeRelease = deferred<void>();
+    const handle = traversal({ close: vi.fn(() => closeRelease.promise) });
+    const registration = vi.fn(async (_handle, _options, signal: AbortSignal) => {
+      await aborted(signal);
+      throw abortReason(signal);
+    });
+    const fixture = schedulerFixture({ handles: [handle], registration });
+    const removeAbortListener = vi.spyOn(source.signal, 'removeEventListener');
+
+    const run = fixture.subject.reconcile(source.signal);
+    await until(() => registration.mock.calls.length === 1);
+    fixture.subject.wake('motion-event');
+    const shutdown = fixture.subject.onModuleDestroy();
+    await until(() => handle.close.mock.calls.length === 1);
+
+    let settled = false;
+    void shutdown.then(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    closeRelease.resolve(undefined);
+    await expect(shutdown).resolves.toBeUndefined();
+    await expect(run).rejects.toMatchObject({ name: 'AbortError' });
+
+    expect(handle.close).toHaveBeenCalledOnce();
+    expect(removeAbortListener).toHaveBeenCalledWith('abort', expect.any(Function));
+    fixture.subject.wake('motion-event');
+    fixture.subject.reconcileTick();
+    await fixture.subject.reconcile();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(fixture.completedVideos.openTraversal).toHaveBeenCalledOnce();
+    expect(registration).toHaveBeenCalledOnce();
+  });
+
   it('logs only a sanitized code for a detached traversal failure', async () => {
     const fixture = schedulerFixture({ registration: vi.fn().mockRejectedValue(scanFailure()) });
     const log = vi.spyOn(loggerOf(fixture.subject), 'error').mockImplementation(() => undefined);
@@ -526,6 +585,7 @@ function schedulerFixture(input: {
   };
   const registration = {
     reconcileBatch: input.registration ?? vi.fn(async () => COMPLETE),
+    discardDeferredCandidate: vi.fn(),
   };
   const progress = input.progress ?? {
     motionTraversalCompleted: vi.fn(async () => undefined),

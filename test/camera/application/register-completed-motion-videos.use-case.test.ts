@@ -351,6 +351,55 @@ describe('RegisterCompletedMotionVideosUseCase', () => {
     expect(handle.continueHash).not.toHaveBeenCalled();
   });
 
+  it('defers a candidate when lookup reaches the deadline and resumes its exact identity first', async () => {
+    const candidate = candidateFor(1);
+    const clock = mutableClock();
+    const order: string[] = [];
+    let scanCalls = 0;
+    const handle = traversal({
+      nextCandidate: vi.fn(async () => {
+        order.push('next');
+        return scanCalls++ === 0
+          ? { candidate, visitedEntries: 1, complete: false }
+          : { candidate: null, visitedEntries: 1, complete: true };
+      }),
+      continueHash: vi.fn(async (offered) => {
+        order.push('hash');
+        expect(offered).toBe(candidate);
+        return { kind: 'rejected' as const, hashedBytes: 0 };
+      }),
+    });
+    const fixture = useCaseFixture({ traversal: handle, clock });
+    let lookupCalls = 0;
+    fixture.lookup.findKnown.mockImplementation(async () => {
+      order.push('lookup');
+      if (lookupCalls++ === 0) clock.nowMs = 5;
+      return null;
+    });
+    const options = { entryLimit: 1, hashByteLimit: 10, wallTimeMs: 5, descriptorLimit: 1 };
+
+    await expect(fixture.subject.reconcileBatch(
+      handle,
+      options,
+      new AbortController().signal,
+    )).resolves.toEqual({ complete: false, madeProgress: true, budgetExhausted: true });
+
+    expect(handle.continueHash).not.toHaveBeenCalled();
+    order.push('batch-boundary');
+
+    await expect(fixture.subject.reconcileBatch(
+      handle,
+      options,
+      new AbortController().signal,
+    )).resolves.toEqual({ complete: true, madeProgress: true, budgetExhausted: false });
+
+    expect(order).toEqual(['next', 'lookup', 'batch-boundary', 'lookup', 'hash', 'next']);
+    expect(handle.continueHash).toHaveBeenCalledWith(candidate, {
+      hashByteLimit: 10,
+      deadlineMonotonicMs: 10,
+    }, expect.any(AbortSignal));
+  });
+
   it('does not start fresh work with zero entry, descriptor, or wall-time budget', async () => {
     const handle = traversal();
     const fixture = useCaseFixture({ traversal: handle });
@@ -392,7 +441,7 @@ describe('RegisterCompletedMotionVideosUseCase', () => {
       handle,
       { ...DEFAULT_OPTIONS, hashByteLimit: 0 },
       new AbortController().signal,
-    )).resolves.toEqual({ complete: false, madeProgress: true, budgetExhausted: true });
+    )).resolves.toEqual({ complete: false, madeProgress: false, budgetExhausted: true });
 
     expect(handle.continueHash).toHaveBeenCalledWith(candidate, {
       hashByteLimit: 0,
@@ -405,7 +454,11 @@ describe('RegisterCompletedMotionVideosUseCase', () => {
     const events = Array.from({ length: 64 }, (_, index) => motionEvent(index + 1, `/motion/${index}.mp4`));
     const handle = traversal({
       inspect: vi.fn(async () => null),
-      nextCandidate: vi.fn(async () => ({ candidate: null, visitedEntries: 64, complete: false })),
+      nextCandidate: vi.fn(async ({ entryLimit }) => ({
+        candidate: null,
+        visitedEntries: entryLimit,
+        complete: false,
+      })),
     });
     const fixture = useCaseFixture({ events, traversal: handle });
 
@@ -415,8 +468,56 @@ describe('RegisterCompletedMotionVideosUseCase', () => {
       new AbortController().signal,
     )).resolves.toEqual({ complete: false, madeProgress: true, budgetExhausted: true });
 
-    expect(fixture.repository.deferArchiveRegistration).toHaveBeenCalledTimes(64);
+    expect(fixture.repository.deferArchiveRegistration).toHaveBeenCalledTimes(63);
     expect(handle.continueHash).not.toHaveBeenCalled();
+  });
+
+  it('reserves traversal progress across repeated invalid pending rows without counting no-op deferrals', async () => {
+    const clock = mutableClock();
+    let traversalTurn = 0;
+    const inspect = vi.fn(async () => {
+      clock.nowMs += 1;
+      return null;
+    });
+    const nextCandidate = vi.fn(async () => ({
+      candidate: null,
+      visitedEntries: traversalTurn++ === 0 ? 0 : 1,
+      complete: false,
+    }));
+    const handle = traversal({ inspect, nextCandidate });
+    const fixture = useCaseFixture({
+      clock,
+      events: Array.from({ length: 4 }, (_, index) => motionEvent(index + 1)),
+      traversal: handle,
+    });
+    const options = { entryLimit: 2, hashByteLimit: 10, wallTimeMs: 10, descriptorLimit: 1 };
+
+    await expect(fixture.subject.reconcileBatch(
+      handle,
+      options,
+      new AbortController().signal,
+    )).resolves.toEqual({ complete: false, madeProgress: false, budgetExhausted: true });
+    await expect(fixture.subject.reconcileBatch(
+      handle,
+      options,
+      new AbortController().signal,
+    )).resolves.toEqual({ complete: false, madeProgress: true, budgetExhausted: true });
+
+    expect(inspect).toHaveBeenCalledTimes(2);
+    expect(nextCandidate).toHaveBeenCalledTimes(2);
+    expect(nextCandidate).toHaveBeenNthCalledWith(
+      1,
+      { entryLimit: 1 },
+      expect.any(AbortSignal),
+    );
+    expect(nextCandidate).toHaveBeenNthCalledWith(
+      2,
+      { entryLimit: 1 },
+      expect.any(AbortSignal),
+    );
+    expect(fixture.repository.deferArchiveRegistration).toHaveBeenCalledTimes(2);
+    expect(handle.continueHash).not.toHaveBeenCalled();
+    expect(fixture.archive.register).not.toHaveBeenCalled();
   });
 
   it('stops at an abort checkpoint without registering later descriptors', async () => {

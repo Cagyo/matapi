@@ -4,16 +4,20 @@ import { ARCHIVE_RUNTIME_SIGNAL } from '../../src/archive/application/ports/arch
 import { CleanupCoordinatorService } from '../../src/camera/application/cleanup-coordinator.service';
 import { CompletedMotionVideoRecoveryScheduler } from '../../src/camera/application/completed-motion-video-recovery.scheduler';
 import { CameraSourceAuthorizationRegistry } from '../../src/camera/application/camera-source-authorization-registry.service';
+import { RecordMotionEndUseCase } from '../../src/camera/application/record-motion-end.use-case';
+import { RegisterCompletedMotionVideosUseCase } from '../../src/camera/application/register-completed-motion-videos.use-case';
 import { CameraModule } from '../../src/camera/camera.module';
 import { CameraNameTakenError } from '../../src/camera/domain/errors/camera-name-taken.error';
 import { CAMERA_SOURCE_AUTHORIZATION } from '../../src/camera/domain/ports/camera-source-authorization.port';
 import { LIVE_SOURCE_REPOSITORY } from '../../src/camera/domain/ports/live-source-repository.port';
 import { MEDIA_REPOSITORY } from '../../src/camera/domain/ports/media-repository.port';
+import { MEDIA_WRITER } from '../../src/camera/domain/ports/media-writer.port';
 import { RTSP_SOURCE_CONFIGURATION } from '../../src/camera/domain/ports/rtsp-source-configuration.port';
 import { AesGcmLiveSourceCredentialAdapter } from '../../src/camera/infrastructure/aes-gcm-live-source-credential.adapter';
 import { InMemoryLiveSourceRepository } from '../../src/camera/infrastructure/in-memory-live-source.repository';
 import { InMemoryMediaRepository } from '../../src/camera/infrastructure/in-memory-media.repository';
 import { DB } from '../../src/database/database.module';
+import { FEATURE_AVAILABILITY } from '../../src/features/domain/ports/feature-availability.port';
 import {
   liveStreamOptionsFromEnv,
   type LiveStreamOptions,
@@ -84,6 +88,45 @@ describe('CameraModule live-stream composition', () => {
 });
 
 describe('CameraModule archive recovery composition', () => {
+  it('wires successful Motion-end registration to the recovery wake through the provider graph', async () => {
+    interface ProviderMetadata {
+      provide?: unknown;
+      inject?: readonly unknown[];
+      useFactory?: (...dependencies: unknown[]) => unknown;
+    }
+    const providers = Reflect.getMetadata('providers', CameraModule) as unknown[];
+    const provider = providers.find(
+      (candidate): candidate is ProviderMetadata => typeof candidate === 'object'
+        && candidate !== null
+        && 'provide' in candidate
+        && candidate.provide === RecordMotionEndUseCase,
+    );
+
+    expect(provider?.inject).toEqual([
+      MEDIA_REPOSITORY,
+      MEDIA_WRITER,
+      FEATURE_AVAILABILITY,
+      RegisterCompletedMotionVideosUseCase,
+      CompletedMotionVideoRecoveryScheduler,
+    ]);
+    if (!provider?.useFactory) throw new Error('RecordMotionEndUseCase factory is unavailable');
+
+    const registration = { executeForEvent: vi.fn(async () => undefined) };
+    const recovery = { wake: vi.fn() };
+    const useCase = provider.useFactory(
+      { listCameras: vi.fn(async () => [{ id: 'front', name: 'Front' }]) },
+      { closeLatestOpenEvent: vi.fn(async () => ({ id: 42 })) },
+      { requireReady: vi.fn(async () => undefined) },
+      registration,
+      recovery,
+    ) as RecordMotionEndUseCase;
+
+    await useCase.execute('front', '/motion/2026/08/29/123456-event.mp4');
+
+    expect(registration.executeForEvent).toHaveBeenCalledWith(42);
+    expect(recovery.wake).toHaveBeenCalledWith('motion-event');
+  });
+
   it('provides the recovery coordinator and routes Archive hooks through it', async () => {
     interface ProviderMetadata {
       provide?: unknown;

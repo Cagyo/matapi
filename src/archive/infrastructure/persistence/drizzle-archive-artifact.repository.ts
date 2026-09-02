@@ -51,6 +51,7 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
         eq(archiveArtifacts.size, input.size),
         eq(archiveArtifacts.mtimeNs, input.mtimeNs),
       ))
+      .orderBy(asc(archiveArtifacts.id))
       .limit(1)
       .get() ?? null;
   }

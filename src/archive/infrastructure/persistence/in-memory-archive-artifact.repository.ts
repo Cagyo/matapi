@@ -45,13 +45,15 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
   async findRegisteredSource(
     input: ArchiveRegistrationLookupInput,
   ): Promise<{ artifactId: string } | null> {
-    const artifact = [...this.artifacts.values()].find((candidate) => (
-      candidate.installationId === input.installationId
-      && candidate.kind === input.kind
-      && candidate.sourceIdentity === input.sourceIdentity
-      && candidate.size === input.size
-      && candidate.mtimeNs === input.mtimeNs
-    ));
+    const artifact = [...this.artifacts.values()]
+      .filter((candidate) => (
+        candidate.installationId === input.installationId
+        && candidate.kind === input.kind
+        && candidate.sourceIdentity === input.sourceIdentity
+        && candidate.size === input.size
+        && candidate.mtimeNs === input.mtimeNs
+      ))
+      .sort((left, right) => left.id.localeCompare(right.id))[0];
     return artifact ? { artifactId: artifact.id } : null;
   }
 

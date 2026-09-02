@@ -48,11 +48,20 @@ interface CandidateWorkResult {
   registered: boolean;
   inProgress: boolean;
   madeProgress: boolean;
+  deferred: boolean;
+}
+
+interface DeferredCandidate {
+  traversal: CompletedMotionVideoTraversal;
+  candidate: CompletedMotionVideoCandidate;
 }
 
 /** Registers validated Motion files and makes DB event rows point at the artifact. */
 @Injectable()
 export class RegisterCompletedMotionVideosUseCase {
+  /** One offered-but-unhashed candidate, owned by the currently open traversal. */
+  private deferredCandidate: DeferredCandidate | null = null;
+
   constructor(
     @Inject(MEDIA_REPOSITORY)
     private readonly media: Pick<MediaRepositoryPort,
@@ -121,6 +130,10 @@ export class RegisterCompletedMotionVideosUseCase {
     let hashBytesRemaining = Math.max(0, options.hashByteLimit);
     let accepted = 0;
     let madeProgress = false;
+    const entryLimit = boundedEntryLimit(options.entryLimit);
+    let entriesUsed = 0;
+
+    if (this.deferredCandidate?.traversal !== traversal) this.deferredCandidate = null;
 
     const partial = traversal.pendingCandidate();
     if (partial !== null) {
@@ -142,61 +155,96 @@ export class RegisterCompletedMotionVideosUseCase {
       }
     }
 
-    if (this.budgetReached(hashBytesRemaining, accepted, deadline, options)) {
-      return { complete: false, madeProgress, budgetExhausted: true };
-    }
-
-    const pending = await this.media.findUnarchivedCompletedVideos(RECONCILIATION_LIMIT);
-    throwIfAborted(signal);
-    for (const event of pending) {
-      throwIfAborted(signal);
-      if (this.budgetReached(hashBytesRemaining, accepted, deadline, options)) break;
-      if (!event.videoPath) continue;
-
-      const candidate = await traversal.inspect(event.videoPath, signal);
-      throwIfAborted(signal);
-      if (candidate === null) {
-        await this.writer.deferArchiveRegistration([event.id]);
-        throwIfAborted(signal);
-        madeProgress = true;
-        continue;
+    const deferred = this.takeDeferredCandidate(traversal);
+    if (deferred !== null) {
+      if (this.monotonic.now() >= deadline) {
+        this.deferCandidate(traversal, deferred);
+        return { complete: false, madeProgress, budgetExhausted: true };
       }
-      const matching = await this.media.findCompletedEventsByVideoPath(candidate.trustedPath);
+      const matching = await this.media.findCompletedEventsByVideoPath(deferred.trustedPath);
       throwIfAborted(signal);
-      const result = await this.processCandidate(
+      const resumed = await this.processCandidate(
         traversal,
-        candidate,
+        deferred,
         matching.map(({ id }) => id),
         hashBytesRemaining,
         deadline,
         signal,
       );
-      hashBytesRemaining -= result.hashedBytes;
-      accepted += result.registered ? 1 : 0;
-      madeProgress ||= result.madeProgress;
-      if (result.inProgress || accepted >= options.descriptorLimit) {
+      hashBytesRemaining -= resumed.hashedBytes;
+      accepted += resumed.registered ? 1 : 0;
+      madeProgress ||= resumed.madeProgress;
+      if (resumed.deferred) this.deferCandidate(traversal, deferred);
+      if (resumed.inProgress || resumed.deferred) {
         return { complete: false, madeProgress, budgetExhausted: true };
       }
     }
 
-    let visitedEntries = 0;
+    if (this.budgetReached(hashBytesRemaining, accepted, deadline, options)) {
+      return { complete: false, madeProgress, budgetExhausted: true };
+    }
+
+    // Preserve one entry for the filesystem traversal whenever it has any
+    // budget. Otherwise an unchanged oldest DB row can permanently consume a
+    // batch before the traversal observes new Motion files.
+    const pendingEntryLimit = Math.max(0, entryLimit - 1);
+    if (pendingEntryLimit > 0) {
+      const pending = await this.media.findUnarchivedCompletedVideos(RECONCILIATION_LIMIT);
+      throwIfAborted(signal);
+      for (const event of pending) {
+        throwIfAborted(signal);
+        if (entriesUsed >= pendingEntryLimit
+          || this.budgetReached(hashBytesRemaining, accepted, deadline, options)) break;
+        if (!event.videoPath) continue;
+
+        // A DB-owned path still enters the same filesystem boundary as a
+        // discovered path, so it spends one shared entry slot.
+        entriesUsed += 1;
+        const candidate = await traversal.inspect(event.videoPath, signal);
+        throwIfAborted(signal);
+        if (candidate === null) {
+          await this.writer.deferArchiveRegistration([event.id]);
+          throwIfAborted(signal);
+          continue;
+        }
+        const matching = await this.media.findCompletedEventsByVideoPath(candidate.trustedPath);
+        throwIfAborted(signal);
+        const result = await this.processCandidate(
+          traversal,
+          candidate,
+          matching.map(({ id }) => id),
+          hashBytesRemaining,
+          deadline,
+          signal,
+        );
+        hashBytesRemaining -= result.hashedBytes;
+        accepted += result.registered ? 1 : 0;
+        madeProgress ||= result.madeProgress;
+        if (result.deferred) this.deferCandidate(traversal, candidate);
+        if (result.inProgress || result.deferred || accepted >= options.descriptorLimit) {
+          return { complete: false, madeProgress, budgetExhausted: true };
+        }
+      }
+    }
+
     let traversalComplete = false;
-    while (visitedEntries < options.entryLimit) {
+    while (entriesUsed < entryLimit) {
       throwIfAborted(signal);
       if (this.budgetReached(hashBytesRemaining, accepted, deadline, options)) {
         return { complete: false, madeProgress, budgetExhausted: true };
       }
 
       const step = await traversal.nextCandidate({
-        entryLimit: options.entryLimit - visitedEntries,
+        entryLimit: entryLimit - entriesUsed,
       }, signal);
       throwIfAborted(signal);
-      visitedEntries += step.visitedEntries;
-      madeProgress ||= step.visitedEntries > 0;
+      const visitedEntries = boundedVisitedEntries(step.visitedEntries, entryLimit - entriesUsed);
+      entriesUsed += visitedEntries;
+      madeProgress ||= visitedEntries > 0;
       traversalComplete = step.complete;
       if (step.candidate === null) {
         if (step.complete) break;
-        if (step.visitedEntries === 0) {
+        if (visitedEntries === 0) {
           return { complete: false, madeProgress, budgetExhausted: true };
         }
         continue;
@@ -215,7 +263,11 @@ export class RegisterCompletedMotionVideosUseCase {
       hashBytesRemaining -= result.hashedBytes;
       accepted += result.registered ? 1 : 0;
       madeProgress ||= result.madeProgress;
-      if (result.inProgress || accepted >= options.descriptorLimit) {
+      if (result.deferred) this.deferCandidate(traversal, step.candidate);
+      if (result.inProgress || result.deferred || accepted >= options.descriptorLimit) {
+        return { complete: false, madeProgress, budgetExhausted: true };
+      }
+      if (visitedEntries === 0) {
         return { complete: false, madeProgress, budgetExhausted: true };
       }
     }
@@ -225,6 +277,11 @@ export class RegisterCompletedMotionVideosUseCase {
       madeProgress,
       budgetExhausted: !traversalComplete,
     };
+  }
+
+  /** Called by the traversal owner immediately before it closes the handle. */
+  discardDeferredCandidate(traversal: CompletedMotionVideoTraversal): void {
+    if (this.deferredCandidate?.traversal === traversal) this.deferredCandidate = null;
   }
 
   private budgetReached(
@@ -266,7 +323,17 @@ export class RegisterCompletedMotionVideosUseCase {
           hashedBytes: 0,
           registered: false,
           inProgress: false,
-          madeProgress: true,
+          madeProgress: eventIds.length > 0,
+          deferred: false,
+        };
+      }
+      if (this.monotonic.now() >= deadlineMonotonicMs) {
+        return {
+          hashedBytes: 0,
+          registered: false,
+          inProgress: false,
+          madeProgress: false,
+          deferred: true,
         };
       }
     }
@@ -281,7 +348,8 @@ export class RegisterCompletedMotionVideosUseCase {
         hashedBytes: hashed.hashedBytes,
         registered: false,
         inProgress: true,
-        madeProgress: true,
+        madeProgress: hashed.hashedBytes > 0,
+        deferred: false,
       };
     }
     if (hashed.kind === 'rejected') {
@@ -289,7 +357,8 @@ export class RegisterCompletedMotionVideosUseCase {
         hashedBytes: hashed.hashedBytes,
         registered: false,
         inProgress: false,
-        madeProgress: true,
+        madeProgress: hashed.hashedBytes > 0,
+        deferred: false,
       };
     }
 
@@ -309,7 +378,24 @@ export class RegisterCompletedMotionVideosUseCase {
       registered: true,
       inProgress: false,
       madeProgress: true,
+      deferred: false,
     };
+  }
+
+  private takeDeferredCandidate(
+    traversal: CompletedMotionVideoTraversal,
+  ): CompletedMotionVideoCandidate | null {
+    if (this.deferredCandidate?.traversal !== traversal) return null;
+    const candidate = this.deferredCandidate.candidate;
+    this.deferredCandidate = null;
+    return candidate;
+  }
+
+  private deferCandidate(
+    traversal: CompletedMotionVideoTraversal,
+    candidate: CompletedMotionVideoCandidate,
+  ): void {
+    this.deferredCandidate = { traversal, candidate };
   }
 
   private async registerDescriptor(
@@ -338,4 +424,14 @@ function throwIfAborted(signal: AbortSignal): void {
       ? signal.reason
       : new DOMException('Aborted', 'AbortError');
   }
+}
+
+function boundedEntryLimit(value: number): number {
+  return Number.isSafeInteger(value) && value > 0 ? value : 0;
+}
+
+function boundedVisitedEntries(value: number, maximum: number): number {
+  return Number.isSafeInteger(value) && value > 0
+    ? Math.min(value, maximum)
+    : 0;
 }

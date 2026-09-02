@@ -1,4 +1,12 @@
-import { Inject, Injectable, Logger, Optional, type OnApplicationBootstrap } from '@nestjs/common';
+import {
+  Inject,
+  Injectable,
+  Logger,
+  Optional,
+  type OnApplicationBootstrap,
+  type OnApplicationShutdown,
+  type OnModuleDestroy,
+} from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
 import type { ArchiveRuntimeSignalPort } from '../../archive/application/ports/archive-runtime-signal.port';
 import { CAMERA_MODE, type CameraMode } from '../camera.tokens';
@@ -64,7 +72,9 @@ const NOOP_ADMIN_ALERT: AdminAlertPort = {
 
 /** Cooperatively drains one explicit filesystem traversal without overlapping it. */
 @Injectable()
-export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBootstrap {
+export class CompletedMotionVideoRecoveryScheduler
+  implements OnApplicationBootstrap, OnModuleDestroy, OnApplicationShutdown
+{
   private readonly logger = new Logger(CompletedMotionVideoRecoveryScheduler.name);
   private inFlight: Promise<void> | null = null;
   private activeController: AbortController | null = null;
@@ -72,6 +82,8 @@ export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBoots
   private pendingMotionWake = false;
   private lastSafetyTraversalStartedMs: number | null = null;
   private safetyTimer: ReturnType<typeof setTimeout> | null = null;
+  private stopped = false;
+  private shutdown: Promise<void> | null = null;
   /** Consecutive failures while opening, draining, or closing a traversal. */
   private consecutiveFailures = 0;
   private scanAlertAtMs: number | null = null;
@@ -79,7 +91,10 @@ export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBoots
   constructor(
     @Inject(CAMERA_MODE) private readonly mode: CameraMode,
     @Inject(RegisterCompletedMotionVideosUseCase)
-    private readonly registration: Pick<RegisterCompletedMotionVideosUseCase, 'reconcileBatch'>,
+    private readonly registration: Pick<
+      RegisterCompletedMotionVideosUseCase,
+      'reconcileBatch' | 'discardDeferredCandidate'
+    >,
     @Inject(COMPLETED_MOTION_VIDEO)
     private readonly completedVideos: Pick<CompletedMotionVideoPort, 'openTraversal'>,
     private readonly options: CompletedMotionRecoveryOptions,
@@ -94,13 +109,22 @@ export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBoots
     this.wake('boot');
   }
 
+  async onModuleDestroy(): Promise<void> {
+    await this.stop();
+  }
+
+  async onApplicationShutdown(): Promise<void> {
+    await this.stop();
+  }
+
   @Interval('completed-motion-video-recovery', RECOVERY_INTERVAL_MS)
   reconcileTick(): void {
+    if (this.stopped) return;
     this.wake('safety');
   }
 
   wake(reason: CompletedMotionRecoveryWakeReason): void {
-    if (this.mode !== 'real') return;
+    if (this.stopped || this.mode !== 'real') return;
     if (this.inFlight !== null) {
       if (reason === 'motion-event') this.pendingMotionWake = true;
       return;
@@ -113,7 +137,7 @@ export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBoots
   }
 
   reconcile(signal?: AbortSignal): Promise<void> {
-    if (this.mode !== 'real') return Promise.resolve();
+    if (this.stopped || this.mode !== 'real') return Promise.resolve();
     if (this.inFlight !== null) {
       this.bridgeAbort(signal, this.activeController);
       return this.inFlight;
@@ -126,6 +150,7 @@ export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBoots
     reason: CompletedMotionRecoveryWakeReason,
     signal?: AbortSignal,
   ): Promise<void> {
+    if (this.stopped || this.mode !== 'real') return Promise.resolve();
     if (this.inFlight !== null) {
       this.bridgeAbort(signal, this.activeController);
       return this.inFlight;
@@ -141,7 +166,7 @@ export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBoots
       this.inFlight = null;
       this.cleanupAbortListeners();
       if (this.activeController === controller) this.activeController = null;
-      if (this.pendingMotionWake) {
+      if (!this.stopped && this.pendingMotionWake) {
         this.pendingMotionWake = false;
         this.dispatchBestEffort('motion-event');
       }
@@ -151,6 +176,7 @@ export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBoots
   }
 
   private dispatchSafetyBestEffort(): void {
+    if (this.stopped) return;
     const earliestStart = this.lastSafetyTraversalStartedMs === null
       ? this.clock.now()
       : this.lastSafetyTraversalStartedMs + RECOVERY_INTERVAL_MS;
@@ -162,6 +188,7 @@ export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBoots
     if (this.safetyTimer !== null) return;
     this.safetyTimer = setTimeout(() => {
       this.safetyTimer = null;
+      if (this.stopped) return;
       this.wake('safety');
     }, delayMs);
   }
@@ -216,7 +243,11 @@ export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBoots
       try {
         await this.runTraversal(traversal, signal);
       } finally {
-        await traversal.close();
+        try {
+          this.registration.discardDeferredCandidate(traversal);
+        } finally {
+          await traversal.close();
+        }
       }
       throwIfAborted(signal);
     } catch (error) {
@@ -283,12 +314,31 @@ export class CompletedMotionVideoRecoveryScheduler implements OnApplicationBoots
   }
 
   private dispatchBestEffort(reason: CompletedMotionRecoveryWakeReason): void {
+    if (this.stopped) return;
     void this.startTraversal(reason).catch((error: unknown) => {
       if (isAbortError(error)) return;
       this.logger.error(
         `Completed Motion recovery failed: ${scanFailureCode(error) ?? CAMERA_OPERATION_FAILED}`,
       );
     });
+  }
+
+  private stop(): Promise<void> {
+    if (this.shutdown !== null) return this.shutdown;
+
+    this.stopped = true;
+    this.cancelSafetyTimer();
+    this.pendingMotionWake = false;
+    this.cleanupAbortListeners();
+    if (this.activeController !== null && !this.activeController.signal.aborted) {
+      this.activeController.abort(new DOMException('shutdown', 'AbortError'));
+    }
+
+    const active = this.inFlight;
+    const shutdown = (active === null ? Promise.resolve() : active.catch(() => undefined))
+      .finally(() => this.cleanupAbortListeners());
+    this.shutdown = shutdown;
+    return shutdown;
   }
 }
 
