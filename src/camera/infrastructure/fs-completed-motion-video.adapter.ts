@@ -161,21 +161,22 @@ class FsCompletedMotionVideoTraversal implements CompletedMotionVideoTraversal {
   private started = false;
   private exhausted = false;
   private closed = false;
-  private pending: CompletedMotionVideoCandidate | null = null;
-  private lastInspected: InspectedMotionCandidate | null = null;
+  private offered: InspectedMotionCandidate | null = null;
   private inProgress: InProgressHash | null = null;
 
   constructor(private readonly dependencies: TraversalDependencies) {}
 
   pendingCandidate(): CompletedMotionVideoCandidate | null {
-    return this.pending ? { ...this.pending } : null;
+    return this.inProgress?.candidate ?? null;
   }
 
   async inspect(candidatePath: string, signal: AbortSignal): Promise<CompletedMotionVideoCandidate | null> {
     return this.run(signal, async () => {
+      await this.closeInProgressHash();
+      this.offered = null;
       const result = await this.inspectCandidate(candidatePath, signal);
-      this.lastInspected = result;
-      return result ? { ...result.candidate } : null;
+      this.offered = result;
+      return result?.candidate ?? null;
     });
   }
 
@@ -190,9 +191,10 @@ class FsCompletedMotionVideoTraversal implements CompletedMotionVideoTraversal {
       if (!Number.isSafeInteger(input.entryLimit) || input.entryLimit <= 0) {
         return { candidate: null, visitedEntries: 0, complete: false };
       }
-      if (this.pending) {
-        return { candidate: { ...this.pending }, visitedEntries: 0, complete: false };
+      if (this.inProgress) {
+        return { candidate: this.inProgress.candidate, visitedEntries: 0, complete: false };
       }
+      this.offered = null;
       if (!this.started) {
         this.started = true;
         const root = await this.openDirectory('', signal);
@@ -229,6 +231,7 @@ class FsCompletedMotionVideoTraversal implements CompletedMotionVideoTraversal {
           ? `${current.relativeDirectory}/${entry.name}`
           : entry.name;
         if (entry.isDirectory()) {
+          if (!validMotionDirectoryPrefix(relativePath)) continue;
           const child = await this.openDirectory(relativePath, signal);
           if (child) this.directories.push(child);
           continue;
@@ -237,9 +240,8 @@ class FsCompletedMotionVideoTraversal implements CompletedMotionVideoTraversal {
 
         const inspected = await this.inspectCandidate(join(this.dependencies.root, relativePath), signal);
         if (!inspected) continue;
-        this.lastInspected = inspected;
-        this.pending = { ...inspected.candidate };
-        return { candidate: { ...inspected.candidate }, visitedEntries, complete: false };
+        this.offered = inspected;
+        return { candidate: inspected.candidate, visitedEntries, complete: false };
       }
 
       if (this.directories.length === 0) this.exhausted = true;
@@ -255,11 +257,10 @@ class FsCompletedMotionVideoTraversal implements CompletedMotionVideoTraversal {
     return this.run(signal, async () => {
       if (this.closed || !this.dependencies.installationId) return rejected(0);
 
-      if (this.inProgress && !sameCandidateValue(this.inProgress.candidate, candidate)) {
-        await this.closeInProgressHash();
-        this.pending = null;
-      }
-      if (!this.inProgress) {
+      if (this.inProgress) {
+        if (this.inProgress.candidate !== candidate) return rejected(0);
+      } else {
+        if (this.offered?.candidate !== candidate) return rejected(0);
         const started = await this.startHash(candidate, signal);
         if (!started) return this.rejectHash(0);
       }
@@ -305,8 +306,7 @@ class FsCompletedMotionVideoTraversal implements CompletedMotionVideoTraversal {
     if (this.closed && !this.inProgress && this.directories.length === 0) return;
     this.closed = true;
     this.exhausted = true;
-    this.pending = null;
-    this.lastInspected = null;
+    this.offered = null;
     await this.closeInProgressHash();
     while (this.directories.length > 0) await this.popDirectory();
   }
@@ -328,26 +328,23 @@ class FsCompletedMotionVideoTraversal implements CompletedMotionVideoTraversal {
       return null;
     }
     return {
-      candidate: {
+      candidate: Object.freeze({
         sourceIdentity: `motion:${candidate.relativePath}`,
         trustedPath: candidate.absolutePath,
         relativePath: candidate.relativePath,
         size: Number(inspected.file.size),
         mtimeNs: inspected.file.mtimeNs.toString(),
         sourceTimeMs,
-      },
+      }),
       inspected,
     };
   }
 
   private async startHash(candidate: CompletedMotionVideoCandidate, signal: AbortSignal): Promise<boolean> {
-    let initial = this.lastInspected;
-    if (!initial || !sameCandidateValue(initial.candidate, candidate)) {
-      initial = await this.inspectCandidate(candidate.trustedPath, signal);
-    }
-    if (!initial || !sameCandidateValue(initial.candidate, candidate)) return false;
-
-    const expected = initial.inspected;
+    const offered = this.offered;
+    if (offered?.candidate !== candidate) return false;
+    this.offered = null;
+    const expected = offered.inspected;
     const current = await this.inspectNoFollow(candidate.relativePath, signal);
     if (!current
       || !validStableFile(current.file, this.dependencies.now(), this.dependencies.stabilityMs)
@@ -359,7 +356,7 @@ class FsCompletedMotionVideoTraversal implements CompletedMotionVideoTraversal {
     try {
       handle = await this.dependencies.filesystem.open(
         candidate.trustedPath,
-        constants.O_RDONLY | constants.O_NOFOLLOW,
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
       );
       throwIfAborted(signal);
       const opened = await handle.stat({ bigint: true });
@@ -369,13 +366,12 @@ class FsCompletedMotionVideoTraversal implements CompletedMotionVideoTraversal {
         return false;
       }
       this.inProgress = {
-        candidate: { ...candidate },
+        candidate,
         handle,
         expected,
         hash: createHash('sha256'),
         position: 0,
       };
-      this.pending = { ...candidate };
       return true;
     } catch (error) {
       if (handle) await closeFileHandle(handle);
@@ -415,13 +411,12 @@ class FsCompletedMotionVideoTraversal implements CompletedMotionVideoTraversal {
 
     const descriptor = descriptorFor(active.candidate, installationId, sha256);
     await this.closeInProgressHash();
-    this.pending = null;
     return { kind: 'complete', descriptor, hashedBytes };
   }
 
   private async rejectHash(hashedBytes: number): Promise<CompletedMotionHashResult> {
     await this.closeInProgressHash();
-    this.pending = null;
+    this.offered = null;
     return rejected(hashedBytes);
   }
 
@@ -566,18 +561,6 @@ function validStableFile(stat: BigIntStats, nowMs: number, stabilityMs: number):
     && nowMs - Number(stat.mtimeMs) >= stabilityMs;
 }
 
-function sameCandidateValue(
-  left: CompletedMotionVideoCandidate,
-  right: CompletedMotionVideoCandidate,
-): boolean {
-  return left.sourceIdentity === right.sourceIdentity
-    && left.trustedPath === right.trustedPath
-    && left.relativePath === right.relativePath
-    && left.size === right.size
-    && left.mtimeNs === right.mtimeNs
-    && left.sourceTimeMs === right.sourceTimeMs;
-}
-
 function sameInspectedCandidate(left: InspectedCandidate, right: InspectedCandidate): boolean {
   return sameFile(left.file, right.file)
     && left.identities.length === right.identities.length
@@ -606,6 +589,22 @@ function safeDirectoryEntryName(name: string): boolean {
     && !name.includes('\0')
     && !name.includes('/')
     && !name.includes(sep);
+}
+
+function validMotionDirectoryPrefix(relativeDirectory: string): boolean {
+  const parts = relativeDirectory.split('/');
+  if (parts.length < 1 || parts.length > 3 || !/^\d{4}$/u.test(parts[0])) return false;
+  const year = Number(parts[0]);
+  if (year < 1970) return false;
+  if (parts.length === 1) return true;
+  if (!/^\d{2}$/u.test(parts[1])) return false;
+  const month = Number(parts[1]);
+  if (month < 1 || month > 12) return false;
+  if (parts.length === 2) return true;
+  if (!/^\d{2}$/u.test(parts[2])) return false;
+  const day = Number(parts[2]);
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  return day >= 1 && day <= daysInMonth;
 }
 
 async function closeDirectoryHandle(handle: DirectoryHandle): Promise<void> {
@@ -655,6 +654,7 @@ function isInstallationId(value: string | undefined): value is string {
 
 function motionSourceTimeMs(match: RegExpExecArray): number | null {
   const year = Number(match[1]);
+  if (year < 1970) return null;
   const month = Number(match[2]);
   const day = Number(match[3]);
   const hhmmss = match[4];

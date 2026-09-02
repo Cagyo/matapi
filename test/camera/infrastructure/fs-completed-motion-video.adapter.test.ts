@@ -1,4 +1,5 @@
-import { type BigIntStats } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { constants, type BigIntStats } from 'node:fs';
 import {
   lstat,
   mkdtemp,
@@ -13,7 +14,8 @@ import {
 } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { canonicalSourceFingerprintInput } from '../../../src/archive/domain/archive-artifact.entity';
 import type { CompletedMotionVideoCandidate } from '../../../src/camera/domain/ports/completed-motion-video.port';
@@ -22,6 +24,7 @@ import { FsCompletedMotionVideoAdapter } from '../../../src/camera/infrastructur
 const installationId = '00000000-0000-4000-8000-000000000001';
 const HASH_BUFFER_BYTES = 64 * 1024;
 const FAR_FUTURE = Number.MAX_SAFE_INTEGER;
+const execFileAsync = promisify(execFile);
 
 describe('FsCompletedMotionVideoAdapter', () => {
   const directories: string[] = [];
@@ -124,6 +127,25 @@ describe('FsCompletedMotionVideoAdapter', () => {
     }).resolve(file)).toBeNull();
   });
 
+  it.each([
+    '1969/12/31/235959-before-epoch.mp4',
+    '2026/02/29/120000-non-leap-day.mp4',
+    '2026/00/01/120000-zero-month.mp4',
+    '2026/13/01/120000-thirteenth-month.mp4',
+    '2026/07/29/246000-invalid-time.mp4',
+    '2026/7/29/120000-unpadded-month.mp4',
+  ])('rejects malformed Motion timestamp path %s', async (relativePath) => {
+    const root = await mkdtemp(join(tmpdir(), 'motion-video-invalid-time-'));
+    directories.push(root);
+    const file = join(root, relativePath);
+    await mkdir(dirname(file), { recursive: true });
+    await writeFile(file, 'completed video');
+    await makeStable(file);
+    const adapter = new FsCompletedMotionVideoAdapter({ root, installationId });
+
+    expect(await adapter.resolve(file)).toBeNull();
+  });
+
   it('rejects a same-size, same-mtime replacement after immediate hashing', async () => {
     const { root, file } = await fixture();
     const original = await import('node:fs/promises').then(({ stat }) => stat(file));
@@ -201,6 +223,77 @@ describe('FsCompletedMotionVideoAdapter', () => {
     });
     expect(filesystem.readCount()).toBe(7);
     await traversal.close();
+  });
+
+  it('advances past known, invalid, and unhashed candidates across bounded calls', async () => {
+    const { root } = await fixture('120000-known.mp4');
+    const day = join(root, '2026', '07', '29');
+    const second = join(day, '120001-unhashed.mkv');
+    await writeFile(second, 'second video');
+    await writeFile(join(day, 'notes.txt'), 'invalid');
+    await makeStable(second);
+    const adapter = new FsCompletedMotionVideoAdapter({ root, installationId });
+    const signal = new AbortController().signal;
+    const traversal = await adapter.openTraversal(signal);
+    const observed: string[] = [];
+    let complete = false;
+
+    for (let batch = 0; batch < 32 && !complete; batch += 1) {
+      const step = await traversal.nextCandidate({ entryLimit: 1 }, signal);
+      if (step.candidate) observed.push(step.candidate.relativePath);
+      complete = step.complete;
+      expect(step.visitedEntries).toBeLessThanOrEqual(1);
+    }
+
+    expect(complete).toBe(true);
+    expect(observed.sort()).toEqual([
+      '2026/07/29/120000-known.mp4',
+      '2026/07/29/120001-unhashed.mkv',
+    ]);
+    expect(traversal.pendingCandidate()).toBeNull();
+    await traversal.close();
+  });
+
+  it('retains at most root/year/month/day handles and never descends invalid prefixes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'motion-video-depth-'));
+    directories.push(root);
+    const day = join(root, '2026', '07', '29');
+    await mkdir(day, { recursive: true });
+    const valid = join(day, '120000-valid.mp4');
+    await writeFile(valid, 'valid video');
+    await makeStable(valid);
+    await mkdir(join(day, 'extra', 'deep', 'deeper'), { recursive: true });
+    await writeFile(join(day, 'extra', 'deep', 'deeper', '120001-hidden.mp4'), 'hidden video');
+    await mkdir(join(root, 'not-year', 'one', 'two', 'three', 'four'), { recursive: true });
+    await mkdir(join(root, '1969', '12', '31', 'extra'), { recursive: true });
+    await mkdir(join(root, '2026', '13', '01'), { recursive: true });
+    await mkdir(join(root, '2026', '02', '30'), { recursive: true });
+
+    const openedDirectories: string[] = [];
+    const filesystem = nativeFilesystem({ onOpenDirectory: (path) => openedDirectories.push(path) });
+    const adapter = new FsCompletedMotionVideoAdapter({ root, installationId, filesystem });
+    const signal = new AbortController().signal;
+    const traversal = await adapter.openTraversal(signal);
+    const observed: string[] = [];
+    let complete = false;
+    for (let batch = 0; batch < 200 && !complete; batch += 1) {
+      const step = await traversal.nextCandidate({ entryLimit: 2 }, signal);
+      if (step.candidate) observed.push(step.candidate.relativePath);
+      complete = step.complete;
+    }
+
+    expect(complete).toBe(true);
+    expect(observed).toEqual(['2026/07/29/120000-valid.mp4']);
+    expect(filesystem.maximumOpenDirectoryHandles()).toBeLessThanOrEqual(4);
+    expect(openedDirectories.sort()).toEqual([
+      root,
+      join(root, '2026'),
+      join(root, '2026', '02'),
+      join(root, '2026', '07'),
+      join(root, '2026', '07', '29'),
+    ].sort());
+    await traversal.close();
+    expect(filesystem.openHandles()).toBe(0);
   });
 
   it('hashes a file across cooperative byte-budget batches', async () => {
@@ -312,7 +405,6 @@ describe('FsCompletedMotionVideoAdapter', () => {
     const signal = new AbortController().signal;
     const traversal = await adapter.openTraversal(signal);
     const firstCandidate = await traversal.inspect(first, signal);
-    const secondCandidate = await traversal.inspect(second, signal);
 
     expect(await traversal.continueHash(firstCandidate!, hashBudget(HASH_BUFFER_BYTES), signal)).toEqual({
       kind: 'in-progress',
@@ -320,6 +412,8 @@ describe('FsCompletedMotionVideoAdapter', () => {
     });
     expect(tracking.openFileHandles()).toBe(1);
 
+    const secondCandidate = await traversal.inspect(second, signal);
+    expect(tracking.openFileHandles()).toBe(0);
     expect(await traversal.continueHash(secondCandidate!, hashBudget(HASH_BUFFER_BYTES), signal)).toEqual({
       kind: 'in-progress',
       hashedBytes: HASH_BUFFER_BYTES,
@@ -329,6 +423,72 @@ describe('FsCompletedMotionVideoAdapter', () => {
     expect(tracking.openFileHandles()).toBe(1);
     await traversal.close();
     expect(tracking.openHandles()).toBe(0);
+  });
+
+  it('rejects a candidate offered by another traversal even when public metadata matches', async () => {
+    const { file, adapter } = await fixture('120000-cross-traversal.mp4');
+    const signal = new AbortController().signal;
+    const first = await adapter.openTraversal(signal);
+    const second = await adapter.openTraversal(signal);
+    const foreignCandidate = await first.inspect(file, signal);
+    const localCandidate = await second.inspect(file, signal);
+
+    expect(foreignCandidate).toEqual(localCandidate);
+    expect(await second.continueHash(foreignCandidate!, hashBudget(HASH_BUFFER_BYTES), signal)).toEqual({
+      kind: 'rejected',
+      hashedBytes: 0,
+    });
+    expect(await second.continueHash(localCandidate!, hashBudget(HASH_BUFFER_BYTES), signal)).toMatchObject({
+      kind: 'complete',
+      hashedBytes: 'completed video'.length,
+    });
+    await first.close();
+    await second.close();
+  });
+
+  it('rejects a previously offered candidate displaced by a later inspection', async () => {
+    const { root, file: first } = await fixture('120000-displaced.mp4');
+    const second = join(root, '2026', '07', '29', '120001-current.mp4');
+    await writeFile(second, 'second video');
+    await makeStable(second);
+    const adapter = new FsCompletedMotionVideoAdapter({ root, installationId });
+    const signal = new AbortController().signal;
+    const traversal = await adapter.openTraversal(signal);
+    const displaced = await traversal.inspect(first, signal);
+    const current = await traversal.inspect(second, signal);
+
+    expect(await traversal.continueHash(displaced!, hashBudget(HASH_BUFFER_BYTES), signal)).toEqual({
+      kind: 'rejected',
+      hashedBytes: 0,
+    });
+    expect(await traversal.continueHash(current!, hashBudget(HASH_BUFFER_BYTES), signal)).toMatchObject({
+      kind: 'complete',
+      hashedBytes: 'second video'.length,
+    });
+    await traversal.close();
+  });
+
+  it('rejects a previously offered candidate displaced by the next traversal step', async () => {
+    const { root } = await fixture('120000-first-offer.mp4');
+    const second = join(root, '2026', '07', '29', '120001-second-offer.mp4');
+    await writeFile(second, 'second video');
+    await makeStable(second);
+    const adapter = new FsCompletedMotionVideoAdapter({ root, installationId });
+    const signal = new AbortController().signal;
+    const traversal = await adapter.openTraversal(signal);
+    const first = await firstCandidate(traversal, signal);
+    const next = await traversal.nextCandidate({ entryLimit: 64 }, signal);
+
+    expect(next.candidate).not.toBeNull();
+    expect(next.candidate).not.toBe(first);
+    expect(await traversal.continueHash(first, hashBudget(HASH_BUFFER_BYTES), signal)).toEqual({
+      kind: 'rejected',
+      hashedBytes: 0,
+    });
+    expect(await traversal.continueHash(next.candidate!, hashBudget(HASH_BUFFER_BYTES), signal)).toMatchObject({
+      kind: 'complete',
+    });
+    await traversal.close();
   });
 
   it('reports every byte consumed when the final no-follow identity check rejects a replacement', async () => {
@@ -371,6 +531,39 @@ describe('FsCompletedMotionVideoAdapter', () => {
       kind: 'rejected',
       hashedBytes: 0,
     });
+    await traversal.close();
+  });
+
+  it('rejects a regular-file to unwritten-FIFO race without blocking or leaking a handle', async () => {
+    const { root, file } = await fixture('120000-fifo-race.mp4');
+    const native = nativeFilesystem();
+    let openedFlags = 0;
+    const adapter = new FsCompletedMotionVideoAdapter({
+      root,
+      installationId,
+      filesystem: {
+        ...native,
+        open: async (path: string, flags: number) => {
+          openedFlags = flags;
+          if ((flags & constants.O_NONBLOCK) === 0) throw new Error('candidate open would block');
+          await rename(path, `${path}.old`);
+          await execFileAsync('mkfifo', [path]);
+          return native.open(path, flags);
+        },
+      },
+    });
+    const signal = new AbortController().signal;
+    const traversal = await adapter.openTraversal(signal);
+    const candidate = await traversal.inspect(file, signal);
+
+    const result = await within(
+      traversal.continueHash(candidate!, hashBudget(HASH_BUFFER_BYTES), signal),
+      500,
+    );
+
+    expect(result).toEqual({ kind: 'rejected', hashedBytes: 0 });
+    expect(openedFlags).toBe(constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    expect(native.openHandles()).toBe(0);
     await traversal.close();
   });
 
@@ -599,12 +792,28 @@ function abortError(): DOMException {
   return new DOMException('Aborted', 'AbortError');
 }
 
+async function within<T>(operation: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('operation timed out')), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function nativeFilesystem(options: {
   onRead?: (input: { length: number; position: number | null }) => void;
+  onOpenDirectory?: (path: string) => void;
 } = {}) {
   const directories = new Set<object>();
   const files = new Set<object>();
   let maximumFiles = 0;
+  let maximumDirectories = 0;
   return {
     lstat: (path: string): Promise<BigIntStats> => lstat(path, { bigint: true }),
     opendir: async (path: string) => {
@@ -617,6 +826,8 @@ function nativeFilesystem(options: {
         },
       };
       directories.add(tracked);
+      maximumDirectories = Math.max(maximumDirectories, directories.size);
+      options.onOpenDirectory?.(path);
       return tracked;
     },
     open: async (path: string, flags: number) => {
@@ -640,6 +851,7 @@ function nativeFilesystem(options: {
     openHandles: () => directories.size + files.size,
     openFileHandles: () => files.size,
     maximumOpenFileHandles: () => maximumFiles,
+    maximumOpenDirectoryHandles: () => maximumDirectories,
   };
 }
 
