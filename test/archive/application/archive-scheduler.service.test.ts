@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
   ArchiveArtifactRepositoryPort,
@@ -385,6 +386,97 @@ describe('ArchiveSchedulerService', () => {
     },
   );
 
+  it('claims a due folder recovery probe through the folder gate before ordinary work', async () => {
+    const fixture = setup({ nowMs: 10_000 });
+    fixture.seedFreshVideos(1);
+    await fixture.providerGate.ensureGeneration('generation-1');
+    await fixture.providerGate.recordFailure(
+      'generation-1',
+      'folder',
+      new DriveProviderCapacityBlockedError('temporary'),
+    );
+    fixture.clock.now.mockImplementation(() => new Date(3_610_000));
+    const claimed = vi.spyOn(fixture.providerGate, 'claimRecoveryProbe');
+    const run = vi.spyOn(fixture.providerGate, 'run');
+    let branchSignal: AbortSignal | undefined;
+    fixture.branchProbe.executeNext.mockImplementation(async (_connection, _nowMs, signal) => {
+      branchSignal = signal;
+      await new Promise<void>((resolve) => {
+        signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+      return 'none';
+    });
+
+    fixture.scheduler.startTimers();
+    await vi.waitFor(() => expect(branchSignal).toBeDefined(), { timeout: 500 });
+
+    expect(run).toHaveBeenCalledWith(expect.objectContaining({
+      generationId: 'generation-1', operationClass: 'folder', probe: true,
+    }));
+    expect(claimed).toHaveBeenCalledWith(expect.objectContaining({
+      generationId: 'generation-1', operationClass: 'folder', reason: 'cooldown',
+    }));
+    expect(fixture.uploads.execute).not.toHaveBeenCalled();
+    expect(fixture.uploads.executeClaimed).not.toHaveBeenCalled();
+    await fixture.scheduler.shutdown();
+  });
+
+  it('routes a quota-reason probe owned by folder work through the folder gate', async () => {
+    const fixture = setup();
+    const run = vi.spyOn(fixture.providerGate, 'run').mockImplementation(
+      async (input) => input.operation(),
+    );
+    vi.spyOn(fixture.providerGate, 'inspect')
+      .mockResolvedValueOnce({
+        kind: 'probe', generationId: 'generation-1', revision: 1,
+        reason: 'quota', operationClass: 'folder',
+      })
+      .mockResolvedValue({ kind: 'blocked', reason: 'quota_exhausted' });
+    fixture.branchProbe.executeNext.mockResolvedValue('still-blocked');
+
+    fixture.scheduler.startTimers();
+    await vi.waitFor(() => expect(fixture.branchProbe.executeNext).toHaveBeenCalledOnce(), {
+      timeout: 500,
+    });
+
+    expect(run).toHaveBeenCalledWith(expect.objectContaining({
+      generationId: 'generation-1', operationClass: 'folder', probe: true,
+    }));
+    expect(fixture.quotaProbe.execute).not.toHaveBeenCalled();
+    expect(fixture.uploads.execute).not.toHaveBeenCalled();
+    expect(fixture.uploads.executeClaimed).not.toHaveBeenCalled();
+    await fixture.scheduler.shutdown();
+  });
+
+  it('reloads once before backing off when a folder recovery probe throws', async () => {
+    const fixture = setup({ nowMs: 100 });
+    vi.spyOn(fixture.providerGate, 'inspect').mockResolvedValue({
+      kind: 'probe', generationId: 'generation-1', revision: 7,
+      reason: 'cooldown', operationClass: 'folder',
+    });
+    const run = vi.spyOn(fixture.providerGate, 'run')
+      .mockRejectedValue(new Error('folder probe unavailable'));
+    fixture.repository.readNextDeadline.mockResolvedValue(250);
+    const log = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    const waitForChange = vi.spyOn(fixture.wake, 'waitForChange')
+      .mockImplementation(async () => fixture.scheduler.stopTimers());
+
+    fixture.scheduler.startTimers();
+    await vi.waitFor(() => expect(waitForChange).toHaveBeenCalledOnce(), { timeout: 500 });
+
+    expect(run).toHaveBeenCalledOnce();
+    expect(fixture.clockHealth.check).toHaveBeenCalledTimes(2);
+    expect(fixture.credentials.loadActive).toHaveBeenCalledTimes(2);
+    expect(fixture.providerGate.inspect).toHaveBeenCalledTimes(2);
+    expect(fixture.repository.readNextDeadline).toHaveBeenCalledWith({
+      generationId: 'generation-1', nowMs: 100, providerDeadlineMs: null,
+    });
+    expect(log).toHaveBeenCalledWith(
+      'Archive scheduler pump failed: ARCHIVE_OPERATION_FAILED',
+    );
+    await fixture.scheduler.shutdown();
+  });
+
   it('runs one read-only quota probe and no upload while quota remains blocked', async () => {
     const fixture = setup();
     fixture.seedFreshVideos(1);
@@ -552,14 +644,14 @@ describe('ArchiveSchedulerService', () => {
     await fixture.scheduler.shutdown();
   });
 
-  it('backs off when a stale quota revision leaves the same due result visible', async () => {
+  it('reloads once then backs off when a stale quota revision leaves the same due result visible', async () => {
     const fixture = setup({ nowMs: 100 });
     vi.spyOn(fixture.providerGate, 'inspect').mockResolvedValue({
       kind: 'probe', generationId: 'generation-1', revision: 7,
       reason: 'quota', operationClass: 'upload',
     });
     fixture.quotaProbe.execute.mockResolvedValue('stale');
-    fixture.repository.readNextDeadline.mockResolvedValue(100);
+    fixture.repository.readNextDeadline.mockResolvedValue(250);
     const waitForChange = vi.spyOn(fixture.wake, 'waitForChange')
       .mockImplementation(async () => fixture.scheduler.stopTimers());
 
@@ -567,12 +659,74 @@ describe('ArchiveSchedulerService', () => {
     await vi.waitFor(() => expect(waitForChange).toHaveBeenCalled(), { timeout: 500 });
 
     expect(fixture.quotaProbe.execute).toHaveBeenCalledOnce();
+    expect(fixture.clockHealth.check).toHaveBeenCalledTimes(2);
+    expect(fixture.credentials.loadActive).toHaveBeenCalledTimes(2);
+    expect(fixture.providerGate.inspect).toHaveBeenCalledTimes(2);
     expect(waitForChange).toHaveBeenCalledWith(
       expect.any(Number),
-      null,
+      250,
       60_000,
       expect.any(AbortSignal),
       100,
+    );
+    await fixture.scheduler.shutdown();
+  });
+
+  it('reloads once and uses a fresh deadline after a quota probe throws', async () => {
+    const fixture = setup({ nowMs: 100 });
+    vi.spyOn(fixture.providerGate, 'inspect').mockResolvedValue({
+      kind: 'probe', generationId: 'generation-1', revision: 7,
+      reason: 'quota', operationClass: 'upload',
+    });
+    fixture.quotaProbe.execute.mockRejectedValue(new Error('quota probe unavailable'));
+    fixture.repository.readNextDeadline.mockResolvedValue(250);
+    const log = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    const waitForChange = vi.spyOn(fixture.wake, 'waitForChange')
+      .mockImplementation(async () => fixture.scheduler.stopTimers());
+
+    fixture.scheduler.startTimers();
+    await vi.waitFor(() => expect(waitForChange).toHaveBeenCalledOnce(), { timeout: 500 });
+
+    expect(fixture.quotaProbe.execute).toHaveBeenCalledOnce();
+    expect(fixture.clockHealth.check).toHaveBeenCalledTimes(2);
+    expect(fixture.credentials.loadActive).toHaveBeenCalledTimes(2);
+    expect(fixture.providerGate.inspect).toHaveBeenCalledTimes(2);
+    expect(waitForChange).toHaveBeenCalledWith(
+      expect.any(Number),
+      250,
+      60_000,
+      expect.any(AbortSignal),
+      100,
+    );
+    expect(log).toHaveBeenCalledWith(
+      'Archive scheduler pump failed: ARCHIVE_OPERATION_FAILED',
+    );
+    await fixture.scheduler.shutdown();
+  });
+
+  it('reloads a replaced generation once after a branch probe throws', async () => {
+    const fixture = setup();
+    fixture.seedFreshVideos(1);
+    fixture.branchProbe.executeNext.mockRejectedValue(new Error('branch probe unavailable'));
+    fixture.credentials.loadActive
+      .mockResolvedValueOnce(activeConnection('generation-1'))
+      .mockResolvedValue(null);
+    const inspect = vi.spyOn(fixture.providerGate, 'inspect');
+    const log = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    const waitForChange = vi.spyOn(fixture.wake, 'waitForChange')
+      .mockImplementation(async () => fixture.scheduler.stopTimers());
+
+    fixture.scheduler.startTimers();
+    await vi.waitFor(() => expect(waitForChange).toHaveBeenCalledOnce(), { timeout: 500 });
+
+    expect(fixture.branchProbe.executeNext).toHaveBeenCalledOnce();
+    expect(fixture.clockHealth.check).toHaveBeenCalledTimes(2);
+    expect(fixture.credentials.loadActive).toHaveBeenCalledTimes(2);
+    expect(inspect).toHaveBeenCalledOnce();
+    expect(fixture.uploads.execute).not.toHaveBeenCalled();
+    expect(fixture.uploads.executeClaimed).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(
+      'Archive scheduler pump failed: ARCHIVE_OPERATION_FAILED',
     );
     await fixture.scheduler.shutdown();
   });
@@ -922,6 +1076,31 @@ describe('ArchiveSchedulerService', () => {
 
     expect(fixture.clockHealth.check.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(fixture.uploads.execute).toHaveBeenCalledOnce();
+    await fixture.scheduler.shutdown();
+  });
+
+  it('waits after a clock-blocked continuity self-wake instead of immediately traversing again', async () => {
+    const fixture = setup();
+    fixture.clockHealth.check.mockResolvedValue('clock-blocked');
+    let continuities = 0;
+    const reconcileMotion = vi.fn(async () => {
+      continuities += 1;
+      if (continuities === 1) await fixture.scheduler.motionTraversalCompleted(10_000);
+    });
+    fixture.hooks.registerCamera({ reconcileMotion, cleanupLocal: vi.fn(async () => undefined) });
+    const waitForChange = vi.spyOn(fixture.wake, 'waitForChange').mockImplementation(
+      async (expectedEpoch) => {
+        if (fixture.wake.snapshot() === expectedEpoch) fixture.scheduler.stopTimers();
+      },
+    );
+
+    fixture.scheduler.startTimers();
+    await vi.waitFor(() => expect(waitForChange).toHaveBeenCalled(), { timeout: 500 });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(reconcileMotion).toHaveBeenCalledOnce();
+    expect(waitForChange).toHaveBeenCalledOnce();
+    expect(waitForChange.mock.calls[0][0]).toBe(1);
     await fixture.scheduler.shutdown();
   });
 

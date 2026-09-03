@@ -43,6 +43,8 @@ const PROLONGED_BACKLOG_AGE_MS = 24 * 60 * 60 * 1_000;
 const LOCAL_DISK_PRESSURE_PERCENT = 70;
 const ARCHIVE_OPERATION_FAILED = 'ARCHIVE_OPERATION_FAILED';
 
+type AdmissionResult = 'none' | 'admitted' | 'reload';
+
 export interface ArchiveCameraSchedulerHooks {
   reconcileMotion(signal: AbortSignal): Promise<void>;
   cleanupLocal(signal: AbortSignal): Promise<void>;
@@ -126,7 +128,7 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
     options: ArchiveSchedulerOptions = {},
     private readonly wake: ArchiveWakeService = DEFAULT_ARCHIVE_WAKE_SERVICE,
     private readonly providerGate?: Pick<ArchiveProviderGateService,
-      'ensureGeneration' | 'inspect' | 'recordQuotaOutcome'>,
+      'ensureGeneration' | 'inspect' | 'recordQuotaOutcome' | 'run'>,
     private readonly credentials?: Pick<DriveCredentialRepositoryPort, 'loadActive'>,
     private readonly providerState?: Pick<ArchiveProviderStateRepositoryPort, 'load'>,
     private readonly alerts?: ArchiveAdminAlertPort,
@@ -260,6 +262,7 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
 
   private async runPump(): Promise<void> {
     const signal = this.controller.signal;
+    let skipAdmissionAfterProbeReload = false;
     while (this.acceptingWork && !signal.aborted) {
       const expectedEpoch = this.wake.snapshot();
       try {
@@ -268,8 +271,9 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
         if (clockHealth === 'clock-blocked') {
           await this.runClockBlockedContinuity(nowMs, signal);
           if (signal.aborted || !this.acceptingWork) return;
+          const continuityEpoch = this.wake.snapshot();
           await this.wake.waitForChange(
-            expectedEpoch,
+            continuityEpoch,
             null,
             this.intervalMs,
             signal,
@@ -278,9 +282,20 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
           continue;
         }
         const context = await this.loadProviderContext();
-        if (await this.admitOne({ ...context, clockHealth }, nowMs, signal, expectedEpoch)) {
-          await yieldToEventLoop();
-          continue;
+        if (skipAdmissionAfterProbeReload) {
+          skipAdmissionAfterProbeReload = false;
+        } else {
+          const admission = await this.admitOne(
+            { ...context, clockHealth }, nowMs, signal, expectedEpoch,
+          );
+          if (admission === 'admitted') {
+            await yieldToEventLoop();
+            continue;
+          }
+          if (admission === 'reload') {
+            skipAdmissionAfterProbeReload = true;
+            continue;
+          }
         }
         if (signal.aborted || !this.acceptingWork) return;
         const deadlineMs = context.generation === null
@@ -371,39 +386,87 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
     nowMs: number,
     signal: AbortSignal,
     expectedEpoch: number,
-  ): Promise<boolean> {
-    if (context.clockHealth === 'clock-blocked' || context.generation === null) return false;
+  ): Promise<AdmissionResult> {
+    if (context.clockHealth === 'clock-blocked' || context.generation === null) return 'none';
     if (context.admission.kind === 'probe') {
-      if (context.admission.reason === 'quota') {
-        if (this.quotaProbe === undefined) return false;
-        const result = await this.quotaProbe.execute(
-          context.generation,
-          context.admission,
-          signal,
-        );
-        if (result === 'stale') return false;
-        await yieldToEventLoop();
-        this.wake.wake();
-        return true;
+      if (context.admission.operationClass === 'folder') {
+        const branchProbe = this.branchProbe;
+        const generation = context.generation;
+        if (branchProbe === undefined || this.providerGate === undefined || generation === null) {
+          return 'none';
+        }
+        try {
+          await this.providerGate.run({
+            generationId: generation.id,
+            operationClass: 'folder',
+            probe: true,
+            operation: () => branchProbe.executeNext(generation, nowMs, signal),
+            signal,
+          });
+          await this.settleProbe();
+          return 'admitted';
+        } catch (error) {
+          return this.settleFailedProbe(error, signal);
+        }
       }
-      if (context.admission.operationClass !== 'upload'
-        && context.admission.operationClass !== 'folder') return false;
-      return this.dispatchOneTransfer(nowMs, signal, context.generation.id);
+      if (context.admission.reason === 'quota') {
+        if (this.quotaProbe === undefined) return 'none';
+        try {
+          const result = await this.quotaProbe.execute(
+            context.generation,
+            context.admission,
+            signal,
+          );
+          if (result === 'stale') {
+            await this.settleProbe();
+            return 'reload';
+          }
+          await this.settleProbe();
+          return 'admitted';
+        } catch (error) {
+          return this.settleFailedProbe(error, signal);
+        }
+      }
+      if (context.admission.operationClass !== 'upload') return 'none';
+      return (await this.dispatchOneTransfer(nowMs, signal, context.generation.id))
+        ? 'admitted'
+        : 'none';
     }
-    if (context.admission.kind !== 'allowed') return false;
+    if (context.admission.kind !== 'allowed') return 'none';
     if (this.branchProbe !== undefined) {
-      const result = await this.branchProbe.executeNext(context.generation, nowMs, signal);
+      let result: Awaited<ReturnType<RevalidateMotionArchiveBranchUseCase['executeNext']>>;
+      try {
+        result = await this.branchProbe.executeNext(context.generation, nowMs, signal);
+      } catch (error) {
+        return this.settleFailedProbe(error, signal);
+      }
       if (result !== 'none') {
-        await yieldToEventLoop();
-        this.wake.wake();
-        return true;
+        await this.settleProbe();
+        return 'admitted';
       }
       // A transfer or concurrent mutation can settle while the no-op probe is
       // in flight. Its wake invalidates this provider/generation snapshot, so
       // reload it before admitting another transfer.
-      if (this.wake.snapshot() !== expectedEpoch) return true;
+      if (this.wake.snapshot() !== expectedEpoch) return 'admitted';
     }
-    return this.dispatchOneTransfer(nowMs, signal, context.generation.id);
+    return (await this.dispatchOneTransfer(nowMs, signal, context.generation.id))
+      ? 'admitted'
+      : 'none';
+  }
+
+  private async settleProbe(): Promise<void> {
+    await yieldToEventLoop();
+    this.wake.wake();
+  }
+
+  private async settleFailedProbe(
+    error: unknown,
+    signal: AbortSignal,
+  ): Promise<AdmissionResult> {
+    if (signal.aborted) throw error;
+    this.logger.error(`Archive scheduler pump failed: ${ARCHIVE_OPERATION_FAILED}`);
+    await this.settleProbe();
+    return 'reload';
   }
 
   private async dispatchOneTransfer(
