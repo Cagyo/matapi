@@ -533,15 +533,36 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
     return { artifacts, attempts };
   }
 
-  async readNextDeadline(
+  readNextDeadline(input: {
+    generationId: string;
+    nowMs: number;
+    providerDeadlineMs: number | null;
+  }): Promise<number | null>;
+  readNextDeadline(
     generationId: string,
     nowMs: number,
-    providerCooldownUntilMs: number | null,
+    providerDeadlineMs: number | null,
+  ): Promise<number | null>;
+  async readNextDeadline(
+    inputOrGenerationId: {
+      generationId: string;
+      nowMs: number;
+      providerDeadlineMs: number | null;
+    } | string,
+    legacyNowMs?: number,
+    legacyProviderDeadlineMs?: number | null,
   ): Promise<number | null> {
+    const { generationId, nowMs, providerDeadlineMs } = typeof inputOrGenerationId === 'string'
+      ? {
+          generationId: inputOrGenerationId,
+          nowMs: legacyNowMs!,
+          providerDeadlineMs: legacyProviderDeadlineMs ?? null,
+        }
+      : inputOrGenerationId;
     const attempted = new Set([...this.attempts.values()].map(({ attempt }) => attempt.artifactId));
     const deadlines: number[] = [];
-    if (providerCooldownUntilMs !== null && providerCooldownUntilMs > nowMs) {
-      deadlines.push(providerCooldownUntilMs);
+    if (providerDeadlineMs !== null && providerDeadlineMs > nowMs) {
+      deadlines.push(providerDeadlineMs);
     }
     for (const artifact of this.artifacts.values()) {
       if (artifact.kind === 'motion_video' && artifact.state === 'pending'
@@ -554,6 +575,15 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
       const entry = this.attempts.get(attempt.id)!;
       if (attempt.generationId === generationId && ['pending', 'retryable'].includes(attempt.state)
         && entry.nextAttemptMs > nowMs) deadlines.push(entry.nextAttemptMs);
+    }
+    for (const reservation of this.folderReservations.history()) {
+      if (reservation.generationId === generationId
+        && reservation.currentSlot === 1
+        && (reservation.state === 'detached' || reservation.state === 'conflict')
+        && reservation.nextRevalidationAtMs !== null
+        && reservation.nextRevalidationAtMs > nowMs) {
+        deadlines.push(reservation.nextRevalidationAtMs);
+      }
     }
     return deadlines.length === 0 ? null : Math.min(...deadlines);
   }

@@ -3,6 +3,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import type { ClockPort } from '../../events/domain/ports/clock.port';
 import type {
   ArchiveArtifactRepositoryPort,
+  ArchiveClockHealth,
   ArchiveSchedulerUpdate,
   ClaimedAttempt,
 } from './ports/archive-artifact-repository.port';
@@ -29,6 +30,9 @@ import type { LocalStoragePort } from '../../camera/domain/ports/local-storage.p
 import type { ArchiveSchedulerActivitySnapshot } from './use-cases/report-drive-status.use-case';
 import type { ArchiveRuntimeSignalPort } from './ports/archive-runtime-signal.port';
 import { ArchiveClockHealthService } from './archive-clock-health.service';
+import type { DriveConnection } from '../domain/drive-connection.entity';
+import type { ProbeDriveQuotaRecoveryUseCase } from './use-cases/probe-drive-quota-recovery.use-case';
+import type { RevalidateMotionArchiveBranchUseCase } from './use-cases/revalidate-motion-archive-branch.use-case';
 
 const DEFAULT_INTERVAL_MS = 2 * 60 * 1_000;
 const DEFAULT_LEASE_MS = 5 * 60 * 1_000;
@@ -129,6 +133,8 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
     private readonly localDisk?: Pick<LocalStoragePort, 'usagePercent'>,
     private readonly clockHealth: Pick<ArchiveClockHealthService, 'check'> =
       new ArchiveClockHealthService(repository, wake),
+    private readonly branchProbe?: Pick<RevalidateMotionArchiveBranchUseCase, 'executeNext'>,
+    private readonly quotaProbe?: Pick<ProbeDriveQuotaRecoveryUseCase, 'execute'>,
   ) {
     this.intervalMs = positive(options.intervalMs ?? DEFAULT_INTERVAL_MS, 'interval');
     this.leaseMs = positive(options.leaseMs ?? DEFAULT_LEASE_MS, 'lease');
@@ -255,83 +261,52 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
   private async runPump(): Promise<void> {
     const signal = this.controller.signal;
     while (this.acceptingWork && !signal.aborted) {
-      const recoveryEpoch = this.wake.snapshot();
+      const expectedEpoch = this.wake.snapshot();
       try {
         const nowMs = this.clock.now().getTime();
-        if (await this.clockHealth.check(nowMs) === 'clock-blocked') {
+        const clockHealth = await this.clockHealth.check(nowMs);
+        if (clockHealth === 'clock-blocked') {
           await this.runClockBlockedContinuity(nowMs, signal);
           if (signal.aborted || !this.acceptingWork) return;
           await this.wake.waitForChange(
-            this.wake.snapshot(),
+            expectedEpoch,
             null,
             this.intervalMs,
             signal,
+            nowMs,
           );
           continue;
         }
         const context = await this.loadProviderContext();
-        if (context.generationId !== null && canDispatch(context.admission)) {
-          const worked = await this.dispatchOneTransfer(
-            nowMs,
-            signal,
-            context.generationId,
-          );
-          if (worked) {
-            await yieldToEventLoop();
-            continue;
-          }
-        }
-
-        const expectedEpoch = this.wake.snapshot();
-        const finalNowMs = this.clock.now().getTime();
-        if (await this.clockHealth.check(finalNowMs) === 'clock-blocked') {
-          await this.runClockBlockedContinuity(finalNowMs, signal);
-          if (signal.aborted || !this.acceptingWork) return;
-          await this.wake.waitForChange(
-            this.wake.snapshot(),
-            null,
-            this.intervalMs,
-            signal,
-          );
+        if (await this.admitOne({ ...context, clockHealth }, nowMs, signal, expectedEpoch)) {
+          await yieldToEventLoop();
           continue;
         }
-        const finalContext = await this.loadProviderContext();
-        if (finalContext.generationId !== null && canDispatch(finalContext.admission)) {
-          const worked = await this.dispatchOneTransfer(
-            finalNowMs,
-            signal,
-            finalContext.generationId,
-          );
-          if (worked) {
-            await yieldToEventLoop();
-            continue;
-          }
-        }
         if (signal.aborted || !this.acceptingWork) return;
-        const deadlineMs = finalContext.generationId === null
+        const deadlineMs = context.generation === null
           ? null
           : await this.repository.readNextDeadline(
-            finalContext.generationId,
-            finalNowMs,
-            finalContext.admission.kind === 'cooldown'
-              ? finalContext.admission.untilMs
-              : null,
+            {
+              generationId: context.generation.id,
+              nowMs,
+              providerDeadlineMs: context.providerDeadlineMs,
+            },
           );
+        const futureDeadlineMs = deadlineMs !== null && deadlineMs > nowMs
+          ? deadlineMs
+          : null;
         await this.wake.waitForChange(
           expectedEpoch,
-          deadlineMs,
+          futureDeadlineMs,
           this.intervalMs,
           signal,
-          finalNowMs,
+          nowMs,
         );
-        if (deadlineMs !== null && this.wake.snapshot() === expectedEpoch) {
-          this.wake.wake();
-        }
       } catch {
         if (signal.aborted || !this.acceptingWork) return;
         this.logger.error(`Archive scheduler pump failed: ${ARCHIVE_OPERATION_FAILED}`);
         await this.wake.waitForChange(
-          recoveryEpoch,
+          expectedEpoch,
           null,
           this.intervalMs,
           signal,
@@ -341,21 +316,94 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
   }
 
   private async loadProviderContext(): Promise<{
-    generationId: string | null;
+    generation: DriveConnection | null;
     admission: ArchiveProviderAdmission;
+    providerDeadlineMs: number | null;
   }> {
     return this.remoteMutationLock.runExclusive(async () => {
       const active = await this.credentials?.loadActive();
       if (active === null || active === undefined) {
-        return { generationId: null, admission: { kind: 'allowed' } };
+        return {
+          generation: null,
+          admission: { kind: 'blocked', reason: 'stale_generation' },
+          providerDeadlineMs: null,
+        };
       }
       if (this.providerGate === undefined) {
-        return { generationId: active.id, admission: { kind: 'allowed' } };
+        return {
+          generation: active,
+          admission: active.status === 'active'
+            ? { kind: 'allowed' }
+            : { kind: 'blocked', reason: 'reauthorization_required' },
+          providerDeadlineMs: null,
+        };
       }
-      await this.providerGate.ensureGeneration(active.id);
+      const provider = await this.providerGate.ensureGeneration(active.id);
+      if (active.status !== 'active') {
+        return {
+          generation: active,
+          admission: { kind: 'blocked', reason: 'reauthorization_required' },
+          providerDeadlineMs: provider.generationId === active.id
+            ? provider.cooldownUntilMs
+            : null,
+        };
+      }
       const admission = await this.providerGate.inspect(active.id, 'upload');
-      return { generationId: active.id, admission };
+      return {
+        generation: active,
+        admission,
+        providerDeadlineMs: admission.kind === 'cooldown'
+          ? admission.untilMs
+          : provider.generationId === active.id
+            ? provider.cooldownUntilMs
+            : null,
+      };
     });
+  }
+
+  private async admitOne(
+    context: {
+      generation: DriveConnection | null;
+      admission: ArchiveProviderAdmission;
+      providerDeadlineMs: number | null;
+      clockHealth: ArchiveClockHealth;
+    },
+    nowMs: number,
+    signal: AbortSignal,
+    expectedEpoch: number,
+  ): Promise<boolean> {
+    if (context.clockHealth === 'clock-blocked' || context.generation === null) return false;
+    if (context.admission.kind === 'probe') {
+      if (context.admission.reason === 'quota') {
+        if (this.quotaProbe === undefined) return false;
+        const result = await this.quotaProbe.execute(
+          context.generation,
+          context.admission,
+          signal,
+        );
+        if (result === 'stale') return false;
+        await yieldToEventLoop();
+        this.wake.wake();
+        return true;
+      }
+      if (context.admission.operationClass !== 'upload'
+        && context.admission.operationClass !== 'folder') return false;
+      return this.dispatchOneTransfer(nowMs, signal, context.generation.id);
+    }
+    if (context.admission.kind !== 'allowed') return false;
+    if (this.branchProbe !== undefined) {
+      const result = await this.branchProbe.executeNext(context.generation, nowMs, signal);
+      if (result !== 'none') {
+        await yieldToEventLoop();
+        this.wake.wake();
+        return true;
+      }
+      // A transfer or concurrent mutation can settle while the no-op probe is
+      // in flight. Its wake invalidates this provider/generation snapshot, so
+      // reload it before admitting another transfer.
+      if (this.wake.snapshot() !== expectedEpoch) return true;
+    }
+    return this.dispatchOneTransfer(nowMs, signal, context.generation.id);
   }
 
   private async dispatchOneTransfer(
@@ -390,7 +438,7 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
     if (newBackup !== undefined) {
       this.consecutiveFreshVideos = 0;
       let selectedGenerationId: string | null = null;
-      await this.runTransfer(
+      this.startTransfer(
         this.uploads.execute(
           newBackup.id,
           signal,
@@ -423,7 +471,7 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
     if (newVideo !== undefined) {
       this.consecutiveFreshVideos += 1;
       let selectedGenerationId: string | null = null;
-      await this.runTransfer(
+      this.startTransfer(
         this.uploads.execute(
           newVideo.id,
           signal,
@@ -468,7 +516,7 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
     }
     this.noteAdmission(claimed);
     let selectedGenerationId: string | null = null;
-    await this.runTransfer(
+    this.startTransfer(
       this.uploads.executeClaimed(
         claimed,
         signal,
@@ -483,6 +531,26 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
         startedAtMs: nowMs,
       },
     );
+  }
+
+  private startTransfer(
+    transferOperation: Promise<unknown>,
+    signal: AbortSignal,
+    pendingArtifactBytes: number,
+    selectedGenerationId: () => string | null,
+    activity: ArchiveSchedulerActivitySnapshot,
+  ): void {
+    void this.runTransfer(
+      transferOperation,
+      signal,
+      pendingArtifactBytes,
+      selectedGenerationId,
+      activity,
+    ).catch(() => {
+      if (!signal.aborted) {
+        this.logger.error(`Archive scheduler transfer settlement failed: ${ARCHIVE_OPERATION_FAILED}`);
+      }
+    });
   }
 
   private async runTransfer(
@@ -520,7 +588,8 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
         }
         this.logger.warn(`Archive upload failed: ${ARCHIVE_OPERATION_FAILED}`);
       });
-    const tracked = transfer.finally(() => {
+    const tracked = transfer.finally(async () => {
+      await yieldToEventLoop();
       if (this.activeUpload === tracked) this.activeUpload = null;
       if (this.activity === activity) this.activity = null;
       this.wake.wake();
@@ -645,10 +714,6 @@ function isVerifiedTransferResult(result: unknown): boolean {
     && result !== null
     && 'kind' in result
     && result.kind === 'verified';
-}
-
-function canDispatch(admission: ArchiveProviderAdmission): boolean {
-  return admission.kind === 'allowed' || admission.kind === 'probe';
 }
 
 function yieldToEventLoop(): Promise<void> {

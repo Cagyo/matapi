@@ -730,11 +730,32 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
     return { artifacts, attempts };
   }
 
-  async readNextDeadline(
+  readNextDeadline(input: {
+    generationId: string;
+    nowMs: number;
+    providerDeadlineMs: number | null;
+  }): Promise<number | null>;
+  readNextDeadline(
     generationId: string,
     nowMs: number,
-    providerCooldownUntilMs: number | null,
+    providerDeadlineMs: number | null,
+  ): Promise<number | null>;
+  async readNextDeadline(
+    inputOrGenerationId: {
+      generationId: string;
+      nowMs: number;
+      providerDeadlineMs: number | null;
+    } | string,
+    legacyNowMs?: number,
+    legacyProviderDeadlineMs?: number | null,
   ): Promise<number | null> {
+    const { generationId, nowMs, providerDeadlineMs } = typeof inputOrGenerationId === 'string'
+      ? {
+          generationId: inputOrGenerationId,
+          nowMs: legacyNowMs!,
+          providerDeadlineMs: legacyProviderDeadlineMs ?? null,
+        }
+      : inputOrGenerationId;
     const admissionDeadline = this.db.select({ value: min(archiveArtifacts.admissionNextAt) })
       .from(archiveArtifacts)
       .where(and(
@@ -752,11 +773,22 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
         inArray(driveObjectAttempts.state, ['pending', 'retryable']),
         gt(driveObjectAttempts.nextAttemptAt, nowMs),
       )).get()?.value ?? null;
+    const folderDeadline = this.db.select({
+      value: min(driveMotionFolderReservations.nextRevalidationAt),
+    })
+      .from(driveMotionFolderReservations)
+      .where(and(
+        eq(driveMotionFolderReservations.generationId, generationId),
+        eq(driveMotionFolderReservations.currentSlot, 1),
+        inArray(driveMotionFolderReservations.state, ['detached', 'conflict']),
+        gt(driveMotionFolderReservations.nextRevalidationAt, nowMs),
+      )).get()?.value ?? null;
     const deadlines = [
       admissionDeadline,
       attemptDeadline,
-      providerCooldownUntilMs !== null && providerCooldownUntilMs > nowMs
-        ? providerCooldownUntilMs
+      folderDeadline,
+      providerDeadlineMs !== null && providerDeadlineMs > nowMs
+        ? providerDeadlineMs
         : null,
     ].filter((deadline): deadline is number => deadline !== null);
     return deadlines.length === 0 ? null : Math.min(...deadlines);

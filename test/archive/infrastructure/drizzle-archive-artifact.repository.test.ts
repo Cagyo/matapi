@@ -8,6 +8,7 @@ import { DriveAttemptLeaseLostError } from '../../../src/archive/domain/errors/d
 import { DrizzleArchiveArtifactRepository } from '../../../src/archive/infrastructure/persistence/drizzle-archive-artifact.repository';
 import { DrizzleDriveFolderReservationRepository } from '../../../src/archive/infrastructure/persistence/drizzle-drive-folder-reservation.repository';
 import { InMemoryArchiveArtifactRepository } from '../../../src/archive/infrastructure/persistence/in-memory-archive-artifact.repository';
+import { InMemoryDriveFolderReservationRepository } from '../../../src/archive/infrastructure/persistence/in-memory-drive-folder-reservation.repository';
 
 describe('DrizzleArchiveArtifactRepository', () => {
   let sqlite: Database.Database;
@@ -197,7 +198,7 @@ describe('DrizzleArchiveArtifactRepository', () => {
     })).map((artifact) => artifact.id)).toEqual(expect.arrayContaining([wildcard.id, unparsed.id]));
   });
 
-  it('persists terminal filtering, all queue deadlines, and aggregate queue status', async () => {
+  it('projects separate queue, current branch, and provider minima without historical folder rows', async () => {
     vi.spyOn(Date, 'now')
       .mockReturnValueOnce(10)
       .mockReturnValueOnce(20)
@@ -225,10 +226,73 @@ describe('DrizzleArchiveArtifactRepository', () => {
     await repository.markRetryable(attempt.id, claim.lease, 'temporary', 350, 51);
     await repository.markAdmissionTerminal(attempted.id, 0, 'invalid', 52);
     await seedBlockedPath(folderReservations, 'generation-1', '2026/08/16', 'detached');
+    const blockedHead = await folderReservations.loadCurrent('generation-1', '2026/08/16');
+    if (blockedHead === null) throw new Error('expected current blocked folder head');
+    await folderReservations.rescheduleBlockedRevalidation({
+      id: blockedHead.id,
+      expectedRevision: blockedHead.revision,
+      errorCode: 'retry_branch',
+      nowMs: 60,
+      nextRevalidationAtMs: 275,
+    });
+    const storedHistorical = await folderReservations.compareAndSetCurrent({
+      expected: null,
+      replacement: {
+        id: 'historical-conflict',
+        installationId: 'installation-1',
+        generationId: 'generation-1',
+        normalizedPath: '2025',
+        level: 'year',
+        segmentName: '2025',
+        folderId: 'historical-folder',
+        parentFolderId: 'motion-root',
+      },
+      nowMs: 61,
+    });
+    if (storedHistorical.kind !== 'stored') throw new Error('expected conflict fixture');
+    const verifiedHistorical = await folderReservations.markVerified(
+      storedHistorical.reservation.id,
+      storedHistorical.reservation.revision,
+      62,
+    );
+    if (verifiedHistorical === null) throw new Error('expected verified conflict fixture');
+    const blockedHistorical = await folderReservations.markBlocked(
+      verifiedHistorical.id,
+      verifiedHistorical.revision,
+      'conflict',
+      'historical_conflict',
+      63,
+      150,
+    );
+    if (blockedHistorical === null) throw new Error('expected blocked conflict fixture');
+    const adoptedHistorical = await folderReservations.adoptConflictCandidate({
+      expected: { id: blockedHistorical.id, revision: blockedHistorical.revision },
+      replacement: {
+        id: 'current-conflict-replacement',
+        installationId: blockedHistorical.installationId,
+        generationId: blockedHistorical.generationId,
+        normalizedPath: blockedHistorical.normalizedPath,
+        level: blockedHistorical.level,
+        segmentName: blockedHistorical.segmentName,
+        folderId: 'current-replacement-folder',
+        parentFolderId: blockedHistorical.parentFolderId,
+      },
+      nowMs: 64,
+    });
+    if (adoptedHistorical.kind !== 'stored') throw new Error('expected adopted fixture');
 
-    expect(await repository.readNextDeadline('generation-1', 100, 400)).toBe(350);
-    expect(await repository.readNextDeadline('other-generation', 100, null)).toBe(500);
-    expect(await repository.readNextDeadline('other-generation', 100, 400)).toBe(400);
+    expect(await repository.readNextDeadline({
+      generationId: 'generation-1', nowMs: 100, providerDeadlineMs: 400,
+    })).toBe(275);
+    expect(await repository.readNextDeadline({
+      generationId: 'other-generation', nowMs: 100, providerDeadlineMs: null,
+    })).toBe(500);
+    expect(await repository.readNextDeadline({
+      generationId: 'generation-1', nowMs: 100, providerDeadlineMs: 275,
+    })).toBe(275);
+    expect(await repository.readNextDeadline({
+      generationId: 'generation-1', nowMs: 275, providerDeadlineMs: null,
+    })).toBe(350);
     expect(await repository.listUnattemptedArtifacts({
       kind: 'motion_video', generationId: 'generation-1', nowMs: 100, limit: 10,
     })).toEqual([]);
@@ -238,6 +302,43 @@ describe('DrizzleArchiveArtifactRepository', () => {
       oldestQueuedVideoAtMs: 10,
       branchBlocked: true,
     });
+  });
+
+  it('mirrors current branch and provider deadline minima in memory', async () => {
+    const inMemoryFolders = new InMemoryDriveFolderReservationRepository();
+    const inMemory = new InMemoryArchiveArtifactRepository(inMemoryFolders);
+    const retryable = await inMemory.register(artifactFixture());
+    await inMemory.markAdmissionRetryable(
+      retryable.id, retryable.admission.revision, 'temporary', 500, 41,
+    );
+    const attempted = await inMemory.register({
+      ...artifactFixture(),
+      sourceIdentity: 'attempted-in-memory',
+      sourceFingerprint: 'e'.repeat(64),
+    });
+    const attempt = await inMemory.createAttempt(
+      attempted.id, 'generation-1', 'in-memory-file', 'folder-1', 42,
+    );
+    const claim = await inMemory.claimAttempt(attempt.id, {
+      generationId: 'generation-1', owner: 'worker', nowMs: 50, leaseMs: 10,
+    });
+    await inMemory.markRetryable(attempt.id, claim.lease, 'temporary', 350, 51);
+    await inMemoryFolders.seedBlockedPath(
+      'generation-1', '2026/08/16', 'detached',
+    );
+    const blocked = await inMemoryFolders.loadCurrent('generation-1', '2026/08/16');
+    if (blocked === null) throw new Error('expected in-memory blocked head');
+    await inMemoryFolders.rescheduleBlockedRevalidation({
+      id: blocked.id,
+      expectedRevision: blocked.revision,
+      errorCode: 'retry_branch',
+      nowMs: 60,
+      nextRevalidationAtMs: 275,
+    });
+
+    await expect(inMemory.readNextDeadline({
+      generationId: 'generation-1', nowMs: 100, providerDeadlineMs: 300,
+    })).resolves.toBe(275);
   });
 
   it('matches scheduler eligibility when a healthy artifact has only a retired-generation attempt', async () => {

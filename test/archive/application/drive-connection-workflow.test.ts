@@ -19,7 +19,7 @@ import { ArchiveProviderGateService } from '../../../src/archive/application/arc
 import { InMemoryArchiveProviderStateRepository } from '../../../src/archive/infrastructure/persistence/in-memory-archive-provider-state.repository';
 
 describe('Drive connection workflow', () => {
-  it('activates a staged generation under the shared mutation lock and replaces stale provider state', async () => {
+  it('activates a staged generation, requests one durable branch revalidation, then wakes', async () => {
     const credentials = new InMemoryDriveCredentialRepository();
     await credentials.stage({
       id: 'old-generation', installationId: 'installation-1',
@@ -57,6 +57,22 @@ describe('Drive connection workflow', () => {
     );
     const lock = new ArchiveRemoteMutationLockService();
     const exclusive = vi.spyOn(lock, 'runExclusive');
+    const activationOrder: string[] = [];
+    const ensureGeneration = gate.ensureGeneration.bind(gate);
+    vi.spyOn(gate, 'ensureGeneration').mockImplementation(async (generationId) => {
+      activationOrder.push('provider');
+      return ensureGeneration(generationId);
+    });
+    const reservations = {
+      requestNextBlockedRevalidation: vi.fn(async () => {
+        activationOrder.push('reservation');
+        return null;
+      }),
+    };
+    const wake = new ArchiveWakeService();
+    vi.spyOn(wake, 'wake').mockImplementation(() => {
+      activationOrder.push('wake');
+    });
     const accounts = {
       resolveAccount: vi.fn().mockResolvedValue({
         permissionId: 'new-permission', email: null, displayName: null,
@@ -69,9 +85,10 @@ describe('Drive connection workflow', () => {
       credentials,
       accounts as never,
       { now: () => new Date(10) },
-      new ArchiveWakeService(),
+      wake,
       lock,
       gate,
+      reservations,
     );
 
     await expect(workflow.execute({
@@ -87,6 +104,10 @@ describe('Drive connection workflow', () => {
       operationClass: null,
       blockReason: null,
     });
+    expect(reservations.requestNextBlockedRevalidation).toHaveBeenCalledWith({
+      generationId: 'new-generation', nowMs: 10,
+    });
+    expect(activationOrder).toEqual(['provider', 'reservation', 'wake']);
   });
 
   it('wakes archive dispatch after the newly confirmed generation is active', async () => {
@@ -114,6 +135,55 @@ describe('Drive connection workflow', () => {
     })).resolves.toBe('activated');
 
     expect(wakeSpy).toHaveBeenCalledOnce();
+  });
+
+  it('wakes after a failed durable branch request without reporting activation as failed', async () => {
+    const credentials = new InMemoryDriveCredentialRepository();
+    await credentials.stage({
+      id: 'generation-00001', installationId: 'installation-1',
+      client: { clientId: 'new.apps.googleusercontent.com', clientSecret: 'new-secret' },
+      clientIdHash: 'new', adminUserId: 7, chatId: 9, receiptId: 'receipt-1',
+      createdAtMs: 1, expiresAtMs: 100,
+    });
+    await credentials.storeExchangedTokens('generation-00001', 0, {
+      accessToken: null, refreshToken: 'refresh', expiryDateMs: null,
+      tokenType: null, scope: null,
+    });
+    const wake = new ArchiveWakeService();
+    const activationOrder: string[] = [];
+    vi.spyOn(wake, 'wake').mockImplementation(() => {
+      activationOrder.push('wake');
+    });
+    const reservations = {
+      requestNextBlockedRevalidation: vi.fn(async () => {
+        activationOrder.push('reservation');
+        throw new Error('reservation store temporarily unavailable');
+      }),
+    };
+    const workflow = new ConfirmDriveAccountUseCase(
+      credentials,
+      {
+        resolveAccount: vi.fn().mockResolvedValue({
+          permissionId: 'permission-1', email: null, displayName: null,
+        }),
+        resolveManagedFolders: vi.fn().mockResolvedValue({
+          rootId: 'root', motionId: 'motion', backupsId: 'backups',
+        }),
+      } as never,
+      { now: () => new Date(10) },
+      wake,
+      new ArchiveRemoteMutationLockService(),
+      undefined,
+      reservations,
+    );
+
+    await expect(workflow.execute({
+      generationId: 'generation-00001', receiptId: 'receipt-1', adminUserId: 7,
+      chatId: 9, effectiveDeadlineMs: 100, signal: new AbortController().signal,
+    })).resolves.toBe('activated');
+
+    expect(activationOrder).toEqual(['reservation', 'wake']);
+    expect((await credentials.loadActive())?.id).toBe('generation-00001');
   });
 
   it('keeps a committed activation successful and wakes when provider-state reset transiently fails', async () => {

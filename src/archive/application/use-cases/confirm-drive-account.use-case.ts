@@ -9,6 +9,7 @@ import {
 } from '../archive-wake.service';
 import type { ArchiveProviderGateService } from '../archive-provider-gate.service';
 import { ArchiveRemoteMutationLockService } from '../archive-remote-mutation-lock.service';
+import type { DriveFolderReservationRepositoryPort } from '../ports/drive-folder-reservation-repository.port';
 
 /** Binds the approved account to the exact staged receipt and activates it atomically. */
 export class ConfirmDriveAccountUseCase {
@@ -20,6 +21,10 @@ export class ConfirmDriveAccountUseCase {
     private readonly remoteMutationLock: Pick<ArchiveRemoteMutationLockService, 'runExclusive'> =
       new ArchiveRemoteMutationLockService(),
     private readonly providerGate?: Pick<ArchiveProviderGateService, 'ensureGeneration'>,
+    private readonly reservations?: Pick<
+      DriveFolderReservationRepositoryPort,
+      'requestNextBlockedRevalidation'
+    >,
   ) {}
 
   async execute(input: {
@@ -57,13 +62,26 @@ export class ConfirmDriveAccountUseCase {
       this.assertLive(input.effectiveDeadlineMs, activatedAtMs);
       await this.credentials.activate({ stagedId: staged.id, expectedRevision: staged.revision, ...account, folders, activatedAtMs });
       activated = true;
-      this.wake.wake();
       try {
         await this.providerGate?.ensureGeneration(staged.id);
       } catch {
         // The credential commit is authoritative. The woken scheduler retries
         // generation-state synchronization under the shared mutation lock.
+        this.wake.wake();
+        return 'activated';
       }
+      try {
+        await this.reservations?.requestNextBlockedRevalidation({
+          generationId: staged.id,
+          nowMs: this.clock.now().getTime(),
+        });
+      } catch {
+        // Activation remains authoritative. A later bounded deadline read can
+        // retry the durable request without optimistically clearing a branch.
+        this.wake.wake();
+        return 'activated';
+      }
+      this.wake.wake();
       return 'activated';
     } catch (error) {
       if (!activated) await this.credentials.discardStaged(staged.id, input.receiptId);

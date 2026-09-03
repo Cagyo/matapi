@@ -240,7 +240,11 @@ export interface ArchiveArtifactRepositoryPort {
   listRetentionCandidates(selection: RetentionSelection): Promise<readonly ArchiveObjectAttempt[]>;
   /** Aggregate-only status read; source paths, IDs, metadata, and errors stay private. */
   readStatusCounts(): Promise<ArchiveStatusCounts>;
-  readNextDeadline(generationId: string, nowMs: number, providerCooldownUntilMs: number | null): Promise<number | null>;
+  readNextDeadline(input: {
+    generationId: string;
+    nowMs: number;
+    providerDeadlineMs: number | null;
+  }): Promise<number | null>;
   readNextEligibleTransferSize(generationId: string, nowMs: number): Promise<number | null>;
   readQueueStatus(generationId: string, nowMs?: number): Promise<ArchiveQueueStatus>;
   readUnhealthyDateFolderCount(generationId: string): Promise<number>;

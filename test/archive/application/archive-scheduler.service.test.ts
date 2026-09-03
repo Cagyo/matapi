@@ -23,6 +23,8 @@ import { DriveConnection } from '../../../src/archive/domain/drive-connection.en
 import type { ArchiveProviderState } from '../../../src/archive/application/ports/archive-provider-state-repository.port';
 import type { ArchiveAdminAlertKind } from '../../../src/archive/application/ports/archive-admin-alert.port';
 import type { ArchiveClockHealthService } from '../../../src/archive/application/archive-clock-health.service';
+import type { ProbeDriveQuotaRecoveryUseCase } from '../../../src/archive/application/use-cases/probe-drive-quota-recovery.use-case';
+import type { RevalidateMotionArchiveBranchUseCase } from '../../../src/archive/application/use-cases/revalidate-motion-archive-branch.use-case';
 
 function claimedAttempt(overrides: Partial<ClaimedAttempt['attempt']> = {}): ClaimedAttempt {
   return {
@@ -83,9 +85,11 @@ function setup(options: {
     listUnattemptedArtifacts: vi.fn(async (selection: { kind: string }) =>
       queuedArtifacts.filter(({ kind }) => kind === selection.kind).slice(0, 1)),
     readNextDeadline: vi.fn(async (
-      _generationId: string,
-      _nowMs: number,
-      _providerCooldownUntilMs: number | null,
+      _input: {
+        generationId: string;
+        nowMs: number;
+        providerDeadlineMs: number | null;
+      },
     ) => null),
     readSchedulerState: vi.fn(async () => ({
       revision: 0, backupLeaseOwner: null, backupLeaseExpiresAtMs: null,
@@ -173,6 +177,14 @@ function setup(options: {
   const clockHealth = {
     check: vi.fn(async () => 'healthy' as const),
   } satisfies Pick<ArchiveClockHealthService, 'check'>;
+  const branchProbe = {
+    executeNext: vi.fn<RevalidateMotionArchiveBranchUseCase['executeNext']>(
+      async () => 'none',
+    ),
+  } satisfies Pick<RevalidateMotionArchiveBranchUseCase, 'executeNext'>;
+  const quotaProbe = {
+    execute: vi.fn<ProbeDriveQuotaRecoveryUseCase['execute']>(async () => 'stale'),
+  } satisfies Pick<ProbeDriveQuotaRecoveryUseCase, 'execute'>;
   const Scheduler = ArchiveSchedulerService as unknown as new (
     repository: ArchiveArtifactRepositoryPort,
     backups: CreateDatabaseBackupUseCase,
@@ -189,6 +201,8 @@ function setup(options: {
     alerts: typeof alerts,
     localDisk: typeof localDisk,
     clockHealth: Pick<ArchiveClockHealthService, 'check'>,
+    branchProbe: Pick<RevalidateMotionArchiveBranchUseCase, 'executeNext'>,
+    quotaProbe: Pick<ProbeDriveQuotaRecoveryUseCase, 'execute'>,
   ) => ArchiveSchedulerService;
   const scheduler = new Scheduler(
     repository,
@@ -206,10 +220,12 @@ function setup(options: {
     alerts,
     localDisk,
     clockHealth,
+    branchProbe,
+    quotaProbe,
   );
   return {
     repository, backups, uploads, retention, hooks, scheduler, wake, providerGate, clock,
-    credentials, providerState, alerts, localDisk, clockHealth, video,
+    credentials, providerState, alerts, localDisk, clockHealth, branchProbe, quotaProbe, video,
     seedFreshVideos(count: number) {
       queuedArtifacts.push(...Array.from({ length: count }, (_, index) => ({
         ...video, id: `video-${index + 1}`,
@@ -313,6 +329,309 @@ describe('ArchiveSchedulerService', () => {
       expect(fixture.repository.compareAndSetSchedulerState).not.toHaveBeenCalled();
     },
   );
+
+  it('arms the earliest folder, quota, provider, admission, or attempt deadline', async () => {
+    vi.useFakeTimers();
+    const fixture = setup({ nowMs: 100 });
+    vi.spyOn(fixture.providerGate, 'inspect').mockResolvedValue({
+      kind: 'cooldown', untilMs: 700,
+    });
+    fixture.repository.readNextDeadline.mockResolvedValue(500);
+    const waitForChange = vi.spyOn(fixture.wake, 'waitForChange');
+
+    fixture.scheduler.startTimers();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(fixture.repository.readNextDeadline).toHaveBeenCalledWith({
+      generationId: 'generation-1',
+      nowMs: 100,
+      providerDeadlineMs: 700,
+    });
+    expect(waitForChange).toHaveBeenCalledWith(
+      expect.any(Number),
+      500,
+      60_000,
+      expect.any(AbortSignal),
+      100,
+    );
+    await fixture.scheduler.shutdown();
+  });
+
+  it.each(['capacity', 'policy', 'cooldown'] as const)(
+    'admits a due %s provider operation before branch discovery',
+    async (reason) => {
+      const fixture = setup();
+      fixture.seedClaimedAttempts(claimedAttempt());
+      fixture.branchProbe.executeNext
+        .mockResolvedValueOnce('restored')
+        .mockResolvedValue('none');
+      vi.spyOn(fixture.providerGate, 'inspect')
+        .mockResolvedValueOnce({
+          kind: 'probe', generationId: 'generation-1', revision: 1,
+          reason, operationClass: 'upload',
+        })
+        .mockResolvedValue({ kind: 'allowed' });
+
+      fixture.scheduler.startTimers();
+      await vi.waitFor(() => expect(fixture.branchProbe.executeNext).toHaveBeenCalled(), {
+        timeout: 500,
+      });
+
+      expect(fixture.uploads.executeClaimed).toHaveBeenCalledOnce();
+      expect(fixture.uploads.executeClaimed.mock.invocationCallOrder[0]).toBeLessThan(
+        fixture.branchProbe.executeNext.mock.invocationCallOrder[0],
+      );
+      await fixture.scheduler.shutdown();
+    },
+  );
+
+  it('runs one read-only quota probe and no upload while quota remains blocked', async () => {
+    const fixture = setup();
+    fixture.seedFreshVideos(1);
+    fixture.branchProbe.executeNext.mockResolvedValue('restored');
+    vi.spyOn(fixture.providerGate, 'inspect')
+      .mockResolvedValueOnce({
+        kind: 'probe', generationId: 'generation-1', revision: 1,
+        reason: 'quota', operationClass: 'upload',
+      })
+      .mockResolvedValue({ kind: 'blocked', reason: 'quota_exhausted' });
+    fixture.quotaProbe.execute.mockResolvedValue('still-blocked');
+
+    fixture.scheduler.startTimers();
+    await vi.waitFor(() => expect(fixture.quotaProbe.execute).toHaveBeenCalledOnce(), {
+      timeout: 500,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(fixture.uploads.execute).not.toHaveBeenCalled();
+    expect(fixture.uploads.executeClaimed).not.toHaveBeenCalled();
+    expect(fixture.branchProbe.executeNext).not.toHaveBeenCalled();
+    await fixture.scheduler.shutdown();
+  });
+
+  it('reloads provider and generation state after quota settlement before probing a branch', async () => {
+    const fixture = setup();
+    fixture.quotaProbe.execute.mockResolvedValue('recovered');
+    fixture.branchProbe.executeNext
+      .mockResolvedValueOnce('restored')
+      .mockResolvedValue('none');
+    vi.spyOn(fixture.providerGate, 'inspect')
+      .mockResolvedValueOnce({
+        kind: 'probe', generationId: 'generation-1', revision: 1,
+        reason: 'quota', operationClass: 'upload',
+      })
+      .mockResolvedValue({ kind: 'allowed' });
+
+    fixture.scheduler.startTimers();
+    await vi.waitFor(() => expect(fixture.branchProbe.executeNext).toHaveBeenCalled(), {
+      timeout: 500,
+    });
+
+    expect(fixture.quotaProbe.execute.mock.invocationCallOrder[0]).toBeLessThan(
+      fixture.branchProbe.executeNext.mock.invocationCallOrder[0],
+    );
+    expect(fixture.clockHealth.check.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(fixture.credentials.loadActive.mock.calls.length).toBeGreaterThanOrEqual(2);
+    await fixture.scheduler.shutdown();
+  });
+
+  it('reloads provider state when a transfer settles during a no-op branch check', async () => {
+    let releaseUpload!: () => void;
+    const firstUpload = new Promise<void>((resolve) => { releaseUpload = resolve; });
+    const upload = vi.fn()
+      .mockImplementationOnce(async () => firstUpload)
+      .mockResolvedValue({ kind: 'verified' });
+    let announceBranch!: () => void;
+    const branchStarted = new Promise<void>((resolve) => { announceBranch = resolve; });
+    let releaseBranch!: () => void;
+    const branchWait = new Promise<void>((resolve) => { releaseBranch = resolve; });
+    const fixture = setup({ upload });
+    fixture.seedClaimedAttempts(
+      claimedAttempt({ id: 'first-attempt' }),
+      claimedAttempt({ id: 'must-reload-attempt', retryCount: 1 }),
+    );
+    fixture.branchProbe.executeNext
+      .mockResolvedValueOnce('none')
+      .mockImplementationOnce(async () => {
+        announceBranch();
+        await branchWait;
+        return 'none';
+      })
+      .mockResolvedValue('none');
+    vi.spyOn(fixture.providerGate, 'inspect')
+      .mockResolvedValueOnce({ kind: 'allowed' })
+      .mockResolvedValueOnce({ kind: 'allowed' })
+      .mockResolvedValue({ kind: 'blocked', reason: 'quota_exhausted' });
+
+    fixture.scheduler.startTimers();
+    await branchStarted;
+    releaseUpload();
+    await vi.waitFor(() => expect(fixture.scheduler.readActivitySnapshot()).toBeNull());
+    releaseBranch();
+    await vi.waitFor(() => {
+      expect(fixture.providerGate.inspect.mock.calls.length).toBeGreaterThanOrEqual(3);
+    });
+
+    expect(fixture.uploads.executeClaimed).toHaveBeenCalledOnce();
+    await fixture.scheduler.shutdown();
+  });
+
+  it.each(['restored', 'adopted', 'still-blocked'] as const)(
+    'settles one %s branch probe before scanning artifacts in that branch',
+    async (result) => {
+      const fixture = setup();
+      fixture.branchProbe.executeNext
+        .mockResolvedValueOnce(result)
+        .mockResolvedValue('none');
+
+      fixture.scheduler.startTimers();
+      await vi.waitFor(() => {
+        expect(fixture.repository.listUnattemptedArtifacts).toHaveBeenCalled();
+      }, { timeout: 500 });
+
+      expect(fixture.branchProbe.executeNext.mock.invocationCallOrder[0]).toBeLessThan(
+        fixture.repository.listUnattemptedArtifacts.mock.invocationCallOrder[0],
+      );
+      await fixture.scheduler.shutdown();
+    },
+  );
+
+  it('continues from a no-op branch probe to one transfer admission in the same loop', async () => {
+    const fixture = setup();
+    fixture.seedFreshVideos(1);
+    fixture.branchProbe.executeNext.mockResolvedValue('none');
+
+    fixture.scheduler.startTimers();
+    await vi.waitFor(() => expect(fixture.uploads.execute).toHaveBeenCalledOnce(), {
+      timeout: 500,
+    });
+
+    expect(fixture.branchProbe.executeNext).toHaveBeenCalled();
+    expect(fixture.branchProbe.executeNext.mock.invocationCallOrder[0]).toBeLessThan(
+      fixture.uploads.execute.mock.invocationCallOrder[0],
+    );
+    await fixture.scheduler.shutdown();
+  });
+
+  it('runs due branch maintenance while a single transfer remains stalled', async () => {
+    const stalled = new Promise<never>(() => undefined);
+    const fixture = setup({ upload: () => stalled });
+    fixture.seedClaimedAttempts(claimedAttempt());
+    fixture.branchProbe.executeNext
+      .mockResolvedValueOnce('none')
+      .mockResolvedValueOnce('restored')
+      .mockResolvedValue('none');
+
+    fixture.scheduler.startTimers();
+    await vi.waitFor(() => {
+      expect(fixture.uploads.executeClaimed).toHaveBeenCalledOnce();
+      expect(fixture.branchProbe.executeNext.mock.calls.length).toBeGreaterThanOrEqual(2);
+    }, { timeout: 500 });
+
+    expect(fixture.maxConcurrentUploads()).toBe(1);
+    expect(fixture.uploads.execute).not.toHaveBeenCalled();
+    await fixture.scheduler.shutdown();
+  });
+
+  it('reloads a replaced generation after branch settlement before admitting a transfer', async () => {
+    const fixture = setup();
+    fixture.seedFreshVideos(1);
+    fixture.branchProbe.executeNext.mockResolvedValueOnce('restored');
+    fixture.credentials.loadActive
+      .mockResolvedValueOnce(activeConnection('generation-1'))
+      .mockResolvedValue(null);
+    const waitForChange = vi.spyOn(fixture.wake, 'waitForChange')
+      .mockImplementation(async () => fixture.scheduler.stopTimers());
+
+    fixture.scheduler.startTimers();
+    await vi.waitFor(() => expect(waitForChange).toHaveBeenCalled(), { timeout: 500 });
+
+    expect(fixture.branchProbe.executeNext).toHaveBeenCalledOnce();
+    expect(fixture.uploads.execute).not.toHaveBeenCalled();
+    expect(fixture.uploads.executeClaimed).not.toHaveBeenCalled();
+    await fixture.scheduler.shutdown();
+  });
+
+  it('backs off when a stale quota revision leaves the same due result visible', async () => {
+    const fixture = setup({ nowMs: 100 });
+    vi.spyOn(fixture.providerGate, 'inspect').mockResolvedValue({
+      kind: 'probe', generationId: 'generation-1', revision: 7,
+      reason: 'quota', operationClass: 'upload',
+    });
+    fixture.quotaProbe.execute.mockResolvedValue('stale');
+    fixture.repository.readNextDeadline.mockResolvedValue(100);
+    const waitForChange = vi.spyOn(fixture.wake, 'waitForChange')
+      .mockImplementation(async () => fixture.scheduler.stopTimers());
+
+    fixture.scheduler.startTimers();
+    await vi.waitFor(() => expect(waitForChange).toHaveBeenCalled(), { timeout: 500 });
+
+    expect(fixture.quotaProbe.execute).toHaveBeenCalledOnce();
+    expect(waitForChange).toHaveBeenCalledWith(
+      expect.any(Number),
+      null,
+      60_000,
+      expect.any(AbortSignal),
+      100,
+    );
+    await fixture.scheduler.shutdown();
+  });
+
+  it('admits no provider, branch, or transfer work without an active generation', async () => {
+    const fixture = setup({ connection: null });
+    const waitForChange = vi.spyOn(fixture.wake, 'waitForChange')
+      .mockImplementation(async () => fixture.scheduler.stopTimers());
+    const inspect = vi.spyOn(fixture.providerGate, 'inspect');
+
+    fixture.scheduler.startTimers();
+    await vi.waitFor(() => expect(waitForChange).toHaveBeenCalled(), { timeout: 500 });
+
+    expect(inspect).not.toHaveBeenCalled();
+    expect(fixture.quotaProbe.execute).not.toHaveBeenCalled();
+    expect(fixture.branchProbe.executeNext).not.toHaveBeenCalled();
+    expect(fixture.repository.readNextDeadline).not.toHaveBeenCalled();
+    expect(fixture.repository.claimNextAttempt).not.toHaveBeenCalled();
+    await fixture.scheduler.shutdown();
+  });
+
+  it('keeps reauthorization closed without probing a branch or transfer queue', async () => {
+    const fixture = setup({
+      connection: activeConnection('generation-1').requireReauthorization(90),
+    });
+    fixture.seedFreshVideos(1);
+    fixture.branchProbe.executeNext.mockResolvedValue('restored');
+    const inspect = vi.spyOn(fixture.providerGate, 'inspect');
+    const waitForChange = vi.spyOn(fixture.wake, 'waitForChange')
+      .mockImplementation(async () => fixture.scheduler.stopTimers());
+
+    fixture.scheduler.startTimers();
+    await vi.waitFor(() => expect(waitForChange).toHaveBeenCalled(), { timeout: 500 });
+
+    expect(inspect).not.toHaveBeenCalled();
+    expect(fixture.quotaProbe.execute).not.toHaveBeenCalled();
+    expect(fixture.branchProbe.executeNext).not.toHaveBeenCalled();
+    expect(fixture.repository.claimNextAttempt).not.toHaveBeenCalled();
+    expect(fixture.repository.listUnattemptedArtifacts).not.toHaveBeenCalled();
+    await fixture.scheduler.shutdown();
+  });
+
+  it('aborts an admitted branch probe during scheduler cancellation', async () => {
+    let branchSignal: AbortSignal | undefined;
+    const fixture = setup();
+    fixture.branchProbe.executeNext.mockImplementation(async (_connection, _nowMs, signal) => {
+      branchSignal = signal;
+      await new Promise<void>((resolve) => {
+        signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+      return 'none';
+    });
+
+    fixture.scheduler.startTimers();
+    await vi.waitFor(() => expect(branchSignal).toBeDefined(), { timeout: 500 });
+    await fixture.scheduler.shutdown();
+
+    expect(branchSignal?.aborted).toBe(true);
+  });
 
   it('does not lose a registration between the final empty read and wait arming', async () => {
     const fixture = setup();
@@ -640,7 +959,7 @@ describe('ArchiveSchedulerService', () => {
     const fixture = setup();
     fixture.clock.now.mockImplementation(() => new Date(Date.now()));
     vi.mocked(fixture.repository.readNextDeadline).mockImplementation(
-      async (_generationId, nowMs) => nowMs < 20_000 ? 20_000 : null,
+      async ({ nowMs }) => nowMs < 20_000 ? 20_000 : null,
     );
     vi.mocked(fixture.repository.claimNextAttempt).mockResolvedValue(null);
     vi.mocked(fixture.repository.listUnattemptedArtifacts).mockResolvedValue([]);
