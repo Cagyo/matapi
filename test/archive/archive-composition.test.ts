@@ -143,6 +143,8 @@ describe('ArchiveModule composition', () => {
       RevalidateMotionArchiveBranchUseCase,
       ProbeDriveQuotaRecoveryUseCase,
     ]);
+    expect(providerFor(providers, ArchiveRuntimeLifecycleService).inject?.at(-1))
+      .toBe(ArchiveClockHealthService);
   });
 
   it('injects one shared mutation lock and provider gate across active-generation work', () => {
@@ -246,10 +248,14 @@ describe('ArchiveModule composition', () => {
         branchProbe: unknown;
         quotaProbe: unknown;
       }>(ArchiveSchedulerService);
+      const lifecycle = app.get<{
+        clockHealth: unknown;
+      }>(ArchiveRuntimeLifecycleService);
       expect(app.get(RetryDriveArchiveUseCase)).toBeDefined();
       expect(scheduler.clockHealth).toBe(clockHealth);
       expect(scheduler.branchProbe).toBe(branchProbe);
       expect(scheduler.quotaProbe).toBe(quotaProbe);
+      expect(lifecycle.clockHealth).toBe(clockHealth);
     } finally {
       await app.close();
       await rm(directory, { recursive: true, force: true });

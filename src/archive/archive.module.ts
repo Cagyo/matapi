@@ -816,9 +816,10 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         clock: ClockPort,
         lock: ArchiveRemoteMutationLockService,
         wake: ArchiveWakeService,
+        clockHealth: ArchiveClockHealthService,
       ) => new ArchiveRuntimeLifecycleService(
         credentials, repository, retire, polling, snapshots, backups,
-        scheduler, hooks, clock, lock, wake,
+        scheduler, hooks, clock, lock, wake, clockHealth,
       ),
       inject: [
         DRIVE_CREDENTIAL_REPOSITORY,
@@ -832,6 +833,7 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         CLOCK,
         ArchiveRemoteMutationLockService,
         ArchiveWakeService,
+        ArchiveClockHealthService,
       ],
     },
     {

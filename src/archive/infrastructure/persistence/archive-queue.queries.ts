@@ -24,16 +24,22 @@ interface AttemptDeadlineQueryInput {
 
 interface BlockedPrefixQueryInput {
   generationId: string;
-  dayPath: string;
+  dayPath: SQLWrapper | string;
 }
 
 const dialect = new SQLiteSyncDialect();
+// Retain composability without widening the public prepared-query shape.
+const querySources = new WeakMap<ArchiveSqlQuery, SQL>();
 
 /**
  * Selects bounded, due Motion artifacts that have no immutable attempt and no
  * blocked current date-folder ancestor.
  */
 export function admissionQueueQuery(input: AdmissionQueueQueryInput): ArchiveSqlQuery {
+  const blockedPrefix = querySource(blockedPrefixQuery({
+    generationId: input.generationId,
+    dayPath: archiveArtifacts.motionDayPath,
+  }));
   return compile(sql`
     select
       ${archiveArtifacts.id} as "id",
@@ -71,7 +77,7 @@ export function admissionQueueQuery(input: AdmissionQueueQueryInput): ArchiveSql
       )
       and (
         ${archiveArtifacts.motionDayPath} is null
-        or not ${blockedPrefixExists(input.generationId, archiveArtifacts.motionDayPath)}
+        or (${blockedPrefix}) = 0
       )
     order by ${archiveArtifacts.createdAt}, ${archiveArtifacts.id}
     limit ${input.limit}
@@ -97,6 +103,10 @@ export function queueStatusAggregateQuery(
   generationId: string,
   nowMs: number,
 ): ArchiveSqlQuery {
+  const blockedPrefix = querySource(blockedPrefixQuery({
+    generationId,
+    dayPath: archiveArtifacts.motionDayPath,
+  }));
   return compile(sql`
     select
       (
@@ -132,7 +142,7 @@ export function queueStatusAggregateQuery(
           from ${archiveArtifacts} indexed by idx_archive_artifacts_admission_queue
           where ${queuedMotionPredicate()}
             and ${archiveArtifacts.motionDayPath} is not null
-            and ${blockedPrefixExists(generationId, archiveArtifacts.motionDayPath)}
+            and (${blockedPrefix}) = 1
           limit 1
         )
         and not exists (
@@ -142,7 +152,7 @@ export function queueStatusAggregateQuery(
             and ${dueArtifactPredicate(generationId, nowMs)}
             and (
               ${archiveArtifacts.motionDayPath} is null
-              or not ${blockedPrefixExists(generationId, archiveArtifacts.motionDayPath)}
+              or (${blockedPrefix}) = 0
             )
           limit 1
         )
@@ -152,7 +162,7 @@ export function queueStatusAggregateQuery(
   `);
 }
 
-/** Probes whether a concrete Motion day has an unhealthy current ancestor. */
+/** One-row scalar probe shared by standalone and correlated production paths. */
 export function blockedPrefixQuery(input: BlockedPrefixQueryInput): ArchiveSqlQuery {
   return compile(sql`
     select case when ${blockedPrefixExists(input.generationId, input.dayPath)}
@@ -207,5 +217,13 @@ function blockedPrefixExists(generationId: string, dayPath: SQLWrapper | string)
 
 function compile(query: SQL): ArchiveSqlQuery {
   const compiled = dialect.sqlToQuery(query);
-  return { sql: compiled.sql, params: compiled.params };
+  const result = { sql: compiled.sql, params: compiled.params };
+  querySources.set(result, query);
+  return result;
+}
+
+function querySource(query: ArchiveSqlQuery): SQL {
+  const source = querySources.get(query);
+  if (source === undefined) throw new Error('Archive SQL query source is unavailable');
+  return source;
 }

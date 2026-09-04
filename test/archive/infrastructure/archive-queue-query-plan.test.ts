@@ -28,22 +28,50 @@ describe('archive queue query plans', () => {
 
   afterAll(() => sqlite.close());
 
-  it('uses queue-critical indexes with 10000 queued artifacts and 50000 historical attempts', () => {
-    const queries = [
-      admissionQueueQuery({ generationId: GENERATION_ID, nowMs: NOW_MS, limit: 1 }),
-      attemptDeadlineQuery({ generationId: GENERATION_ID, nowMs: NOW_MS }),
-      queueStatusAggregateQuery(GENERATION_ID, NOW_MS),
-      blockedPrefixQuery({ generationId: GENERATION_ID, dayPath: '2026/08/13' }),
-    ];
-    const plans = queries
-      .flatMap((query) => explain(sqlite, query))
-      .join('\n');
+  it('uses each production query\'s own queue-critical indexes at 10000/50000 pressure', () => {
+    expectPlanUses(sqlite, admissionQueueQuery({
+      generationId: GENERATION_ID,
+      nowMs: NOW_MS,
+      limit: 1,
+    }), [
+      'idx_archive_artifacts_admission_queue',
+      'idx_drive_attempts_artifact_generation_state',
+      'idx_drive_motion_folder_current_health',
+    ]);
+    expectPlanUses(sqlite, attemptDeadlineQuery({
+      generationId: GENERATION_ID,
+      nowMs: NOW_MS,
+    }), [
+      'idx_drive_attempts_generation_queue',
+    ]);
+    expectPlanUses(sqlite, queueStatusAggregateQuery(GENERATION_ID, NOW_MS), [
+      'idx_archive_artifacts_admission_queue',
+      'idx_drive_attempts_generation_queue',
+      'idx_drive_attempts_artifact_generation_state',
+      'idx_drive_motion_folder_current_health',
+    ]);
+    expectPlanUses(sqlite, blockedPrefixQuery({
+      generationId: GENERATION_ID,
+      dayPath: '2026/08/13',
+    }), [
+      'idx_drive_motion_folder_current_health',
+    ]);
+  });
 
-    expect(plans).toMatch(/idx_archive_artifacts_admission_queue/u);
-    expect(plans).toMatch(/idx_drive_attempts_generation_queue/u);
-    expect(plans).toMatch(/idx_drive_attempts_artifact_generation_state/u);
-    expect(plans).toMatch(/idx_drive_motion_folder_current_health/u);
-    expect(plans).not.toMatch(/SCAN drive_object_attempts(?:\s|$)/u);
+  it('embeds the shared blocked-prefix SQL in both bounded production queue paths', () => {
+    const blockedPrefix = blockedPrefixQuery({
+      generationId: GENERATION_ID,
+      dayPath: schema.archiveArtifacts.motionDayPath,
+    });
+    const admission = admissionQueueQuery({
+      generationId: GENERATION_ID,
+      nowMs: NOW_MS,
+      limit: 1,
+    });
+    const status = queueStatusAggregateQuery(GENERATION_ID, NOW_MS);
+
+    expect(admission.sql).toContain(blockedPrefix.sql);
+    expect(status.sql).toContain(blockedPrefix.sql);
   });
 
   it('returns aggregate status as one bounded SQL row with distinct retryable artifacts', () => {
@@ -106,6 +134,16 @@ describe('archive queue query plans', () => {
 function explain(sqlite: Database.Database, query: ArchiveSqlQuery): string[] {
   return (sqlite.prepare(`EXPLAIN QUERY PLAN ${query.sql}`).all(...query.params) as QueryPlanRow[])
     .map(({ detail }) => detail);
+}
+
+function expectPlanUses(
+  sqlite: Database.Database,
+  query: ArchiveSqlQuery,
+  indexes: readonly string[],
+): void {
+  const plan = explain(sqlite, query).join('\n');
+  for (const index of indexes) expect(plan).toContain(index);
+  expect(plan).not.toMatch(/SCAN drive_object_attempts(?:\s|$)/u);
 }
 
 function seedArchivePressureFixture(
