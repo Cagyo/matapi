@@ -184,9 +184,11 @@ actions. It never reports a local path, filename, date branch, artifact ID,
 Drive ID, provider body, token, or session URI. Durable,
 cooldown-deduplicated alerts cover reauthorization, policy rejection, quota
 review, unhealthy date-folder branches, provider capacity, prolonged provider
-cooldown/backlog age, remote detachment/missing objects, retired generations,
-prolonged upload/backup failure, corrupt credentials, clock health, and local
-disk pressure.
+cooldown, remote missing objects, retired generations, prolonged upload/backup
+failure, corrupt credentials, clock health, and local disk pressure. Remote
+object detachment and prolonged backlog age are cooldown-deduplicated,
+log-only conditions: current and historical queued forms are settled without
+Telegram delivery.
 
 The aggregate archive, attempt, and queue sections never enumerate artifact,
 attempt, object, or date-folder IDs. Managed root, Motion, and Backups folder

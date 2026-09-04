@@ -219,6 +219,90 @@ describe('NotificationService', () => {
     expect(repo.sentAtFor(event.id)).toBe(FIXED_NOW);
   });
 
+  it.each([
+    ['current detached kind', { kind: 'remote-object-detached' }],
+    ['current backlog kind', { kind: 'backlog-age-prolonged' }],
+    [
+      'legacy detached reason',
+      {
+        reason: 'remote-object-detached',
+        message: '⚠️ An archive object changed outside the worker and was detached safely.',
+      },
+    ],
+    [
+      'legacy backlog reason',
+      {
+        reason: 'backlog-age-prolonged',
+        message: '⚠️ The archive video backlog has remained pending for an extended period.',
+      },
+    ],
+    [
+      'oldest detached message',
+      { message: '⚠️ An archive object changed outside the worker and was detached safely.' },
+    ],
+    [
+      'oldest backlog message',
+      { message: '⚠️ The archive video backlog has remained pending for an extended period.' },
+    ],
+  ])('records the %s as log-only without notifying administrators', async (_scenario, payload) => {
+    const { repo, notifier, service } = await setup({
+      admins: [recipient({ telegramId: 7 })],
+    });
+    const event = await repo.enqueue({
+      sensorId: null,
+      type: 'archive_admin_alert',
+      payload,
+      createdAt: FIXED_NOW,
+    });
+
+    await service.process(event);
+
+    expect(notifier.userSends).toEqual([]);
+    expect(repo.sentAtFor(event.id)).toBe(FIXED_NOW);
+  });
+
+  it('settles a log-only archive alert without Telegram readiness or administrators', async () => {
+    const { repo, notifier, service } = await setup({});
+    notifier.ready = false;
+    const event = await repo.enqueue({
+      sensorId: null,
+      type: 'archive_admin_alert',
+      payload: { kind: 'backlog-age-prolonged' },
+      createdAt: FIXED_NOW,
+    });
+
+    await service.process(event);
+
+    expect(notifier.userSends).toEqual([]);
+    expect(repo.sentAtFor(event.id)).toBe(FIXED_NOW);
+  });
+
+  it('keeps historical actionable archive alerts on their existing Telegram path', async () => {
+    const { repo, notifier, service } = await setup({
+      admins: [{ ...recipient({ telegramId: 7 }), locale: 'uk' }],
+    });
+    const event = await repo.enqueue({
+      sensorId: null,
+      type: 'archive_admin_alert',
+      payload: {
+        reason: 'provider-capacity-blocked',
+        message: '⚠️ Google Drive capacity requires administrator action.',
+      },
+      createdAt: FIXED_NOW,
+    });
+
+    await service.process(event);
+
+    expect(notifier.userSends).toEqual([{
+      telegramId: 7,
+      message: {
+        text: '⚠️ Google Drive capacity requires administrator action.',
+        asFile: false,
+      },
+    }]);
+    expect(repo.sentAtFor(event.id)).toBe(FIXED_NOW);
+  });
+
   it('delivers to every eligible recipient and marks the event sent', async () => {
     const { repo, notifier, service } = await setup({
       recipients: [recipient({ telegramId: 1 }), recipient({ telegramId: 2 })],

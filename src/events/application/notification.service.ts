@@ -62,13 +62,22 @@ export class NotificationService {
   ) {}
 
   async process(event: QueuedEvent): Promise<void> {
-    // Notifier offline → leave queued; the drain delivers on reconnect.
-    if (!this.notifier.isReady()) return;
-
     if (event.type === 'archive_admin_alert') {
+      const kind = logOnlyArchiveAlertKind(event.payload);
+      if (kind !== null && LOG_ONLY_ARCHIVE_ALERT_KINDS.has(kind)) {
+        this.logger.warn(`Archive alert recorded in logs only: ${kind}`);
+        await this.markSent(event);
+        return;
+      }
+
+      // Actionable administrator alerts remain durable while Telegram is offline.
+      if (!this.notifier.isReady()) return;
       await this.notifyAdmins(event);
       return;
     }
+
+    // Notifier offline → leave queued; the drain delivers on reconnect.
+    if (!this.notifier.isReady()) return;
 
     const sensorId = event.sensorId;
     if (!sensorId) {
@@ -153,7 +162,7 @@ export class NotificationService {
 
   private async notifyAdmins(event: QueuedEvent): Promise<void> {
     const payload = event.payload as { kind?: unknown; message?: unknown } | null;
-    const kind = archiveAlertKind(payload?.kind);
+    const kind = archiveAlertCatalogKey(payload?.kind);
     const legacyMessage = payload?.message;
     if (kind === null && (typeof legacyMessage !== 'string' || legacyMessage.length === 0)) return;
     const admins = await this.recipients.listAdmins();
@@ -316,7 +325,30 @@ export class NotificationService {
 
 type ArchiveAlertCatalogKey = keyof typeof en.gdrive.alerts;
 
-function archiveAlertKind(value: unknown): ArchiveAlertCatalogKey | null {
+const LOG_ONLY_ARCHIVE_ALERT_KINDS: ReadonlySet<ArchiveAlertCatalogKey> = new Set([
+  'remote-object-detached',
+  'backlog-age-prolonged',
+]);
+
+function logOnlyArchiveAlertKind(payload: unknown): ArchiveAlertCatalogKey | null {
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  const record = payload as Record<string, unknown>;
+  const currentKind = archiveAlertCatalogKey(record.kind);
+  if (currentKind !== null) return LOG_ONLY_ARCHIVE_ALERT_KINDS.has(currentKind) ? currentKind : null;
+  const legacyReason = archiveAlertCatalogKey(record.reason);
+  if (legacyReason !== null) {
+    return LOG_ONLY_ARCHIVE_ALERT_KINDS.has(legacyReason) ? legacyReason : null;
+  }
+  if (record.message === en.gdrive.alerts['remote-object-detached']) {
+    return 'remote-object-detached';
+  }
+  if (record.message === en.gdrive.alerts['backlog-age-prolonged']) {
+    return 'backlog-age-prolonged';
+  }
+  return null;
+}
+
+function archiveAlertCatalogKey(value: unknown): ArchiveAlertCatalogKey | null {
   return typeof value === 'string' && Object.prototype.hasOwnProperty.call(en.gdrive.alerts, value)
     ? value as ArchiveAlertCatalogKey
     : null;
