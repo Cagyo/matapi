@@ -77,6 +77,12 @@ install_rtsp_runtime() {
   sudo usermod -L "$stream_user"
   sudo usermod -aG "$stream_group" "$USER"
 
+  # Provision the fixed worker credential through the validated root helper.
+  # The helper preserves a valid key byte-for-byte and never returns its value.
+  if ! sudo /usr/lib/home-worker/feature-installer --provision-rtsp-credentials; then
+    return "$RTSP_EXIT_PRIVILEGED"
+  fi
+
   # The root-only applier runs last. Until it has published and activated a
   # generation-bound deny-all policy, no installed RTSP feature is reported as
   # ready by the root helper.
@@ -120,7 +126,7 @@ EOF
   sudo systemctl daemon-reload
   sudo systemctl enable homeworker-stream-net.service
 
-  if ! /usr/lib/home-worker/live-view-policy-applier --bootstrap-rtsp; then
+  if ! sudo /usr/lib/home-worker/live-view-policy-applier --bootstrap-rtsp; then
     return "$RTSP_EXIT_PRIVILEGED"
   fi
 }

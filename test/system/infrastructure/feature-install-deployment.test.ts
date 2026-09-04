@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -8,6 +9,9 @@ const helper = readFileSync(resolve("scripts/feature-installer.py"), "utf8");
 
 describe("feature-management deployment boundary", () => {
   it("deploys all root bundle assets atomically with usable spool permissions", () => {
+    expect(
+      readFileSync(resolve("config/feature-installer.version"), "utf8"),
+    ).toBe("8\n");
     for (const asset of [
       "feature-installer.py",
       "install-feature.sh",
@@ -48,6 +52,43 @@ describe("feature-management deployment boundary", () => {
       '-m 0770 -o root -g "$USER" /var/lib/home-worker/live-view-settings-acks',
     );
     expect(helper).toContain("0o770");
+  });
+
+  it("cleans a staged root temp when final publication fails", () => {
+    const output = execFileSync(
+      "bash",
+      [
+        "-c",
+        String.raw`
+set -euo pipefail
+HOME_WORKER_INSTALL_LIBRARY=1
+source ${JSON.stringify(resolve("scripts/install.sh"))}
+root="$(mktemp -d)"
+trap 'rm -rf "$root"' EXIT
+printf 'asset\n' > "$root/source"
+sudo() {
+  case "$1" in
+    mktemp) shift; command mktemp "$@" ;;
+    install)
+      shift
+      source_path="${"${@: -2:1}"}"
+      destination="${"${@: -1}"}"
+      command cp "$source_path" "$destination"
+      ;;
+    mv) return 71 ;;
+    rm) shift; command rm "$@" ;;
+    *) return 90 ;;
+  esac
+}
+if install_root_bundle_file "$root/source" "$root/target" 0644; then
+  exit 91
+fi
+find "$root" -name 'target.tmp.*' -type f | wc -l
+`,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(output.trim()).toBe("0");
   });
 
   it("installs and proves the route inspection prerequisite before publishing the root bundle", () => {
@@ -187,7 +228,7 @@ describe("feature-management deployment boundary", () => {
       expect(copied.get(path)).toBe(declared.get(path));
   });
 
-  it("grants only the four fixed no-block feature starts through the new sudoers file", () => {
+  it("renders exactly the four fixed no-block feature starts in the sudoers file", () => {
     const match =
       /install_feature_management_sudoers\(\) \{([\s\S]*?)\n\}/.exec(
         install,
@@ -206,6 +247,32 @@ describe("feature-management deployment boundary", () => {
     );
     expect(match.match(/\/bin\/systemctl start --no-block/g)).toHaveLength(4);
     expect(match).not.toContain("daemon-reload");
+
+    const rendered = execFileSync(
+      "bash",
+      [
+        "-c",
+        String.raw`
+set -euo pipefail
+HOME_WORKER_INSTALL_LIBRARY=1
+HOME_WORKER_USER=homeworker
+source ${JSON.stringify(resolve("scripts/install.sh"))}
+sudo() {
+  if [ "$1" = visudo ]; then return 0; fi
+  if [ "$1" = install ]; then
+    command cat "${"${@: -2:1}"}"
+    return 0
+  fi
+  return 90
+}
+install_feature_management_sudoers
+`,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(rendered).toBe(
+      "homeworker ALL=(root) NOPASSWD: /bin/systemctl start --no-block homeworker-feature-install.service, /bin/systemctl start --no-block homeworker-feature-supervisor-restart.service, /bin/systemctl start --no-block homeworker-feature-host-reboot.service, /bin/systemctl start --no-block homeworker-live-view-policy-apply.service\n",
+    );
   });
 
   it("keeps an unprivileged updater fail-closed and free of root artifact installation", () => {

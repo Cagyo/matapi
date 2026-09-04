@@ -827,12 +827,19 @@ install_feature_management_artifacts() {
   install_feature_management_sudoers
 }
 
-install_root_bundle_file() {
+install_root_bundle_file() (
   local source="$1" target="$2" mode="$3" temporary
-  temporary="$(sudo mktemp "${target}.tmp.XXXXXX")"
-  sudo install -m "$mode" -o root -g root "$source" "$temporary"
-  sudo mv -f "$temporary" "$target"
-}
+  cleanup_root_bundle_temp() {
+    if [ -n "${temporary:-}" ]; then
+      sudo rm -f -- "$temporary" || true
+    fi
+  }
+  trap cleanup_root_bundle_temp EXIT
+  temporary="$(sudo mktemp "${target}.tmp.XXXXXX")" || return $?
+  sudo install -m "$mode" -o root -g root "$source" "$temporary" || return $?
+  sudo mv -f "$temporary" "$target" || return $?
+  temporary=""
+)
 
 install_feature_management_sudoers() {
   local temporary

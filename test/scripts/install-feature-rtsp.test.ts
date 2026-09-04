@@ -21,6 +21,7 @@ const installFeature = readFileSync(
 interface RoutineOptions {
   applierStatus?: number;
   aptStatus?: number;
+  credentialsStatus?: number;
 }
 
 /** Run the production privileged routine with only operating-system commands stubbed. */
@@ -63,9 +64,22 @@ function routineHarness(options: RoutineOptions = {}) {
   chmodSync(join(bundle, "live-stream-ffmpeg-runner"), 0o755);
   writeFileSync(
     join(bundle, "live-view-policy-applier"),
-    `#!/bin/sh\nprintf 'applier %s\\n' "$*" >> ${JSON.stringify(log)}\nexit ${options.applierStatus ?? 0}\n`,
+    `#!/bin/sh
+[ "\${HOME_WORKER_TEST_ELEVATED:-0}" = "1" ] || exit 91
+printf 'elevated-applier %s\\n' "$*" >> ${JSON.stringify(log)}
+exit ${options.applierStatus ?? 0}
+`,
   );
   chmodSync(join(bundle, "live-view-policy-applier"), 0o755);
+  writeFileSync(
+    join(bundle, "feature-installer"),
+    `#!/bin/sh
+[ "\${HOME_WORKER_TEST_ELEVATED:-0}" = "1" ] || exit 91
+printf 'elevated-feature-installer %s\\n' "$*" >> ${JSON.stringify(log)}
+exit ${options.credentialsStatus ?? 0}
+`,
+  );
+  chmodSync(join(bundle, "feature-installer"), 0o755);
 
   writeFileSync(join(bin, "getent"), "#!/bin/sh\nexit 0\n");
   writeFileSync(
@@ -97,6 +111,8 @@ case "$1" in
   apt-get) shift; exec ${JSON.stringify(join(bin, "apt-get"))} "$@" ;;
   install) shift; exec ${JSON.stringify(join(bin, "install"))} "$@" ;;
   rm) shift; exec /bin/rm "$@" ;;
+  ${JSON.stringify(join(bundle, "feature-installer"))}) shift; HOME_WORKER_TEST_ELEVATED=1 exec ${JSON.stringify(join(bundle, "feature-installer"))} "$@" ;;
+  ${JSON.stringify(join(bundle, "live-view-policy-applier"))}) shift; HOME_WORKER_TEST_ELEVATED=1 exec ${JSON.stringify(join(bundle, "live-view-policy-applier"))} "$@" ;;
   *) exit 0 ;;
 esac
 `,
@@ -174,7 +190,7 @@ describe("restricted RTSP runtime installation", () => {
     expect(install).toContain("['digital','uart','zigbee','motion','rtsp']");
   });
 
-  it("creates a locked no-login no-home stream identity and removes legacy env authority", () => {
+  it("creates a locked no-login no-home stream identity and keeps only credential env authority", () => {
     expect(installFeature).toMatch(
       /useradd[^\n]*(?:--system|-r)[^\n]*(?:--no-create-home|-M)/,
     );
@@ -186,23 +202,32 @@ describe("restricted RTSP runtime installation", () => {
     expect(installFeature).not.toContain("RTSP_POLICY_DIGEST");
     expect(installFeature).not.toContain("live-stream-policy-inspector");
     expect(installFeature).not.toContain(".staged");
+    expect(readFileSync(resolve(".env.example"), "utf8")).toMatch(
+      /^RTSP_CREDENTIALS_KEY=\s*$/m,
+    );
   });
 
-  it("bootstraps the v2 authority after assets and daemon reload without changing the env", () => {
+  it("provisions credentials and bootstraps through elevation after assets and daemon reload", () => {
     const harness = routineHarness();
     try {
-      const before = readFileSync(join(harness.app, ".env"), "utf8");
       expect(() => harness.run()).not.toThrow();
       const commands = readFileSync(harness.log, "utf8");
       expect(commands).toContain("systemctl daemon-reload");
       expect(commands).toContain(
         "systemctl enable homeworker-stream-net.service",
       );
-      expect(commands).toContain("applier --bootstrap-rtsp");
-      expect(commands.indexOf("systemctl daemon-reload")).toBeLessThan(
-        commands.indexOf("applier --bootstrap-rtsp"),
+      expect(commands).toContain(
+        "elevated-feature-installer --provision-rtsp-credentials",
       );
-      expect(readFileSync(join(harness.app, ".env"), "utf8")).toBe(before);
+      expect(commands).toContain("elevated-applier --bootstrap-rtsp");
+      expect(
+        commands.indexOf(
+          "elevated-feature-installer --provision-rtsp-credentials",
+        ),
+      ).toBeLessThan(commands.indexOf("apt-get"));
+      expect(commands.indexOf("systemctl daemon-reload")).toBeLessThan(
+        commands.indexOf("elevated-applier --bootstrap-rtsp"),
+      );
       expect(existsSync(join(harness.etc, "live-stream-policy.json"))).toBe(
         false,
       );
@@ -217,7 +242,9 @@ describe("restricted RTSP runtime installation", () => {
     try {
       expect(routineExitStatus(packages.run)).toBe(22);
       expect(readFileSync(packages.log, "utf8")).toContain("apt-get");
-      expect(readFileSync(packages.log, "utf8")).not.toContain("applier");
+      expect(readFileSync(packages.log, "utf8")).not.toContain(
+        "elevated-applier",
+      );
     } finally {
       rmSync(packages.root, { recursive: true, force: true });
     }
@@ -226,7 +253,7 @@ describe("restricted RTSP runtime installation", () => {
     try {
       expect(routineExitStatus(bootstrap.run)).toBe(23);
       expect(readFileSync(bootstrap.log, "utf8")).toContain(
-        "applier --bootstrap-rtsp",
+        "elevated-applier --bootstrap-rtsp",
       );
     } finally {
       rmSync(bootstrap.root, { recursive: true, force: true });

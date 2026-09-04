@@ -41,7 +41,7 @@ VERSION_PATH = "/usr/lib/home-worker/feature-installer.version"
 MANIFEST_PATH = "/usr/lib/home-worker/feature-installer.manifest"
 WORKER_ENV_PATH = "/opt/home-worker/.env"
 
-APPLIER_VERSION = "7"
+APPLIER_VERSION = "8"
 WORKER_NAME = "homeworker"
 STREAM_NAME = "homeworker-stream"
 SYSTEMCTL = "/bin/systemctl"
@@ -893,6 +893,69 @@ def remove_attention_marker():
         os.close(descriptor)
 
 
+def reset_attention_marker_identity(worker_gid):
+    """Accept any bounded safe marker inode; reset repairs its payload."""
+    descriptor = directory_fd(
+        INSTALL_ROOT, ROOT_UID, ROOT_GID, INSTALL_ROOT_MODE
+    )
+    name = os.path.basename(ATTENTION_PATH)
+    marker = None
+    try:
+        try:
+            marker = os.open(
+                name,
+                os.O_RDONLY | os.O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW,
+                dir_fd=descriptor,
+            )
+        except FileNotFoundError:
+            return None
+        value = os.fstat(marker)
+        if (
+            not stat.S_ISREG(value.st_mode)
+            or value.st_nlink != 1
+            or value.st_uid != ROOT_UID
+            or value.st_gid != worker_gid
+            or stat.S_IMODE(value.st_mode) != 0o640
+            or not 1 <= value.st_size <= MAX_BYTES
+        ):
+            raise InvalidRequest("attention marker")
+        return value.st_dev, value.st_ino
+    except (OSError, InvalidRequest) as error:
+        raise ApplyFailure("settings-state-unsafe") from error
+    finally:
+        if marker is not None:
+            os.close(marker)
+        os.close(descriptor)
+
+
+def remove_reset_attention_marker(identity, worker_gid):
+    """Remove only the same safe fixed-name marker inspected before reset."""
+    if identity is None:
+        return
+    descriptor = directory_fd(
+        INSTALL_ROOT, ROOT_UID, ROOT_GID, INSTALL_ROOT_MODE
+    )
+    name = os.path.basename(ATTENTION_PATH)
+    try:
+        try:
+            value = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        if (
+            (value.st_dev, value.st_ino) != identity
+            or not stat.S_ISREG(value.st_mode)
+            or value.st_nlink != 1
+            or value.st_uid != ROOT_UID
+            or value.st_gid != worker_gid
+            or stat.S_IMODE(value.st_mode) != 0o640
+            or not 1 <= value.st_size <= MAX_BYTES
+        ):
+            raise ApplyFailure("settings-state-unsafe")
+        remove_entry(descriptor, name)
+    finally:
+        os.close(descriptor)
+
+
 def parse_environment(data):
     try:
         lines = data.decode("utf-8", "strict").splitlines()
@@ -1362,6 +1425,36 @@ def bootstrap_rtsp():
         os.close(lock)
 
 
+def reset_live_view_settings():
+    """Commit deny-all and generation zero as one shared-lock operation."""
+    try:
+        lock = lock_applier()
+    except BlockingIOError:
+        return False
+    try:
+        worker_uid, worker_gid = worker_ids()
+        validate_fixed_parents()
+        validate_layout(worker_uid, worker_gid)
+        validate_root_bundle()
+        marker_identity = reset_attention_marker_identity(worker_gid)
+        assets = rtsp_assets_state()
+        if assets == RTSP_ASSETS_UNSAFE:
+            raise ApplyFailure("policy-apply-failed")
+        safe = {
+            "version": 1,
+            "generation": 0,
+            "enabled": False,
+            "allowedCameraCidrs": [],
+        }
+        if assets == RTSP_ASSETS_VALID:
+            install_policy(policy_for(safe, False))
+        write_settings_atomic(safe, worker_gid)
+        remove_reset_attention_marker(marker_identity, worker_gid)
+        return True
+    finally:
+        os.close(lock)
+
+
 def run_spool_once():
     try:
         lock = lock_applier()
@@ -1381,6 +1474,11 @@ def main(argv=None):
     if arguments == ["--bootstrap-rtsp"]:
         try:
             return 0 if bootstrap_rtsp() else 3
+        except (OSError, RuntimeError, InvalidRequest, ApplyFailure):
+            return 3
+    if arguments == ["--reset-live-view-settings"]:
+        try:
+            return 0 if reset_live_view_settings() else 3
         except (OSError, RuntimeError, InvalidRequest, ApplyFailure):
             return 3
     if arguments:

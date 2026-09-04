@@ -125,6 +125,115 @@ with tempfile.TemporaryDirectory() as root:
     });
   });
 
+  it("provisions one cryptographic RTSP credential key atomically and rejects unsafe env state", async () => {
+    const program = String.raw`
+import importlib.util, os, re, stat, tempfile
+spec = importlib.util.spec_from_file_location('helper', ${JSON.stringify(helper)})
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.ROOT_UID = os.getuid(); m.ROOT_GID = os.getgid()
+m.worker_ids = lambda: (os.getuid(), os.getgid())
+
+def configure(root, body, mode=0o600):
+    os.chmod(root, 0o700)
+    m.WORKER_ENV_PATH = root + '/.env'
+    with open(m.WORKER_ENV_PATH, 'wb') as stream:
+        stream.write(body)
+    os.chmod(m.WORKER_ENV_PATH, mode)
+
+with tempfile.TemporaryDirectory() as root:
+    configure(root, b'UNCHANGED=value\n')
+    calls = []
+    m.secrets.token_hex = lambda count: (calls.append(count), 'ab' * 32)[1]
+    events, paths = [], {}
+    real_open, real_fsync, real_replace = m.os.open, m.os.fsync, m.os.replace
+    def traced_open(path, *args, **kwargs):
+        descriptor = real_open(path, *args, **kwargs)
+        paths[descriptor] = path
+        return descriptor
+    def traced_fsync(descriptor):
+        label = paths.get(descriptor, '')
+        events.append('dir-fsync' if stat.S_ISDIR(os.fstat(descriptor).st_mode) else 'file-fsync:' + os.path.basename(label))
+        return real_fsync(descriptor)
+    def traced_replace(source, target, **kwargs):
+        events.append('replace:' + os.path.basename(target))
+        return real_replace(source, target, **kwargs)
+    m.os.open, m.os.fsync, m.os.replace = traced_open, traced_fsync, traced_replace
+    m.provision_rtsp_credentials()
+    raw = open(m.WORKER_ENV_PATH, 'rb').read()
+    assert raw == b'UNCHANGED=value\nRTSP_CREDENTIALS_KEY=' + b'ab' * 32 + b'\n'
+    assert calls == [32]
+    info = os.stat(m.WORKER_ENV_PATH, follow_symlinks=False)
+    assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+    assert info.st_uid == os.getuid() and info.st_gid == os.getgid()
+    assert stat.S_IMODE(info.st_mode) == 0o600
+    replace = events.index('replace:.env')
+    assert events[replace - 1].startswith('file-fsync:..env.'), events
+    assert events[replace + 1] == 'dir-fsync', events
+    assert not [name for name in os.listdir(root) if name != '.env']
+    m.os.open, m.os.fsync, m.os.replace = real_open, real_fsync, real_replace
+
+with tempfile.TemporaryDirectory() as root:
+    valid = b'RTSP_CREDENTIALS_KEY=' + b'01' * 32 + b'\nUNCHANGED=yes\n'
+    configure(root, valid)
+    before = os.stat(m.WORKER_ENV_PATH).st_ino
+    m.secrets.token_hex = lambda _count: (_ for _ in ()).throw(AssertionError('valid key regenerated'))
+    m.provision_rtsp_credentials()
+    assert open(m.WORKER_ENV_PATH, 'rb').read() == valid
+    assert os.stat(m.WORKER_ENV_PATH).st_ino == before
+
+for body in (
+    b'RTSP_CREDENTIALS_KEY=\n',
+    b'RTSP_CREDENTIALS_KEY=xyz\n',
+    b'RTSP_CREDENTIALS_KEY=' + b'A' * 64 + b'\n',
+    b'RTSP_CREDENTIALS_KEY=' + b'01' * 32 + b'\nRTSP_CREDENTIALS_KEY=' + b'23' * 32 + b'\n',
+):
+    with tempfile.TemporaryDirectory() as root:
+        configure(root, body)
+        before = open(m.WORKER_ENV_PATH, 'rb').read()
+        if body == b'RTSP_CREDENTIALS_KEY=\n':
+            m.secrets.token_hex = lambda count: 'cd' * 32
+            m.provision_rtsp_credentials()
+            assert open(m.WORKER_ENV_PATH, 'rb').read() == b'RTSP_CREDENTIALS_KEY=' + b'cd' * 32 + b'\n'
+            continue
+        try:
+            m.provision_rtsp_credentials()
+            raise AssertionError('malformed credential state accepted')
+        except RuntimeError as error:
+            assert str(error) == 'rtsp-credentials-unsafe'
+        assert open(m.WORKER_ENV_PATH, 'rb').read() == before
+
+with tempfile.TemporaryDirectory() as root:
+    configure(root, b'X=' + b'x' * (m.MAX_ENV_BYTES + 1))
+    try: m.provision_rtsp_credentials(); raise AssertionError('oversized env accepted')
+    except RuntimeError as error: assert str(error) == 'rtsp-credentials-unsafe'
+
+for unsafe in ('mode', 'hardlink', 'symlink'):
+    with tempfile.TemporaryDirectory() as root:
+        configure(root, b'UNCHANGED=value\n')
+        if unsafe == 'mode':
+            os.chmod(m.WORKER_ENV_PATH, 0o644)
+        elif unsafe == 'hardlink':
+            os.link(m.WORKER_ENV_PATH, root + '/linked')
+        else:
+            target = root + '/target'; os.rename(m.WORKER_ENV_PATH, target); os.symlink(target, m.WORKER_ENV_PATH)
+        try: m.provision_rtsp_credentials(); raise AssertionError('unsafe env accepted: ' + unsafe)
+        except RuntimeError as error: assert str(error) == 'rtsp-credentials-unsafe'
+
+calls = []
+m.validate_root_bundle = lambda: calls.append('bundle')
+m.provision_rtsp_credentials = lambda: calls.append('credentials')
+m.sys.argv = ['feature-installer', '--provision-rtsp-credentials']
+m.os.geteuid = lambda: 1
+assert m.main() == 1 and calls == []
+m.os.geteuid = lambda: m.ROOT_UID
+assert m.main() == 0 and calls == ['bundle', 'credentials']
+`;
+    await expect(run("python3", ["-c", program])).resolves.toMatchObject({
+      stdout: "",
+      stderr: "",
+    });
+  });
+
   it("executes strict parsers, claim durability ordering, and terminal-marker recovery", async () => {
     const program = String.raw`
 import importlib.util, json, os, tempfile

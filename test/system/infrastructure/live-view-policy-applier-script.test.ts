@@ -434,6 +434,65 @@ with tempfile.TemporaryDirectory() as root:
 `);
   });
 
+  it("resets deny-all before generation zero and repairs only a safe fixed marker", async () => {
+    await execute(String.raw`
+safe = settings(0, False, [])
+with tempfile.TemporaryDirectory() as root:
+    configure(root, settings(9, True, ['192.168.1.0/24']))
+    write_file(m.ATTENTION_PATH, b'{"corrupt":true}\n', 0o640)
+    events = []
+    real_settings = m.write_settings_atomic
+    m.install_policy = lambda policy: events.append(('policy', policy.copy()))
+    m.write_settings_atomic = lambda value, gid: (
+        events.append(('settings', value.copy())), real_settings(value, gid)
+    )[1]
+    assert m.reset_live_view_settings() is True
+    assert [event[0] for event in events] == ['policy', 'settings'], events
+    policy = events[0][1]
+    assert policy['settingsGeneration'] == 0
+    assert policy['rtspEnabled'] is False and policy['allowedCidrs'] == []
+    assert json.loads(Path(m.SETTINGS_PATH).read_text()) == safe
+    assert not os.path.exists(m.ATTENTION_PATH)
+
+with tempfile.TemporaryDirectory() as root:
+    configure(root, settings(9, True, ['192.168.1.0/24']), assets=False)
+    before = Path(m.SETTINGS_PATH).read_bytes()
+    m.install_policy = lambda _policy: (_ for _ in ()).throw(AssertionError('policy install with wholly absent assets'))
+    assert m.reset_live_view_settings() is True
+    assert Path(m.SETTINGS_PATH).read_bytes() != before
+    assert json.loads(Path(m.SETTINGS_PATH).read_text()) == safe
+
+with tempfile.TemporaryDirectory() as root:
+    configure(root, settings(9, True, ['192.168.1.0/24']), assets=False)
+    before = Path(m.SETTINGS_PATH).read_bytes()
+    m.rtsp_assets_state = lambda: m.RTSP_ASSETS_UNSAFE
+    try:
+        m.reset_live_view_settings()
+        raise AssertionError('unsafe enforcement assets accepted')
+    except m.ApplyFailure as error:
+        assert error.code == 'policy-apply-failed'
+    assert Path(m.SETTINGS_PATH).read_bytes() == before
+
+for unsafe in ('mode', 'hardlink', 'symlink'):
+    with tempfile.TemporaryDirectory() as root:
+        configure(root, settings(9, True, ['192.168.1.0/24']))
+        marker = m.ATTENTION_PATH
+        if unsafe == 'symlink':
+            target = marker + '.target'; write_file(target, b'{}\n', 0o640); os.symlink(target, marker)
+        else:
+            write_file(marker, b'{}\n', 0o600 if unsafe == 'mode' else 0o640)
+            if unsafe == 'hardlink': os.link(marker, marker + '.linked')
+        before = Path(m.SETTINGS_PATH).read_bytes()
+        m.install_policy = lambda _policy: (_ for _ in ()).throw(AssertionError('policy changed before marker validation'))
+        try:
+            m.reset_live_view_settings()
+            raise AssertionError('unsafe marker accepted: ' + unsafe)
+        except m.ApplyFailure as error:
+            assert error.code == 'settings-state-unsafe'
+        assert Path(m.SETTINGS_PATH).read_bytes() == before
+`);
+  });
+
   it("distinguishes wholly absent RTSP assets from unsafe or partial installs", async () => {
     await execute(String.raw`
 old_policy = {
@@ -576,17 +635,37 @@ with tempfile.TemporaryDirectory() as root:
 `);
   });
 
-  it("returns immediately when the nonblocking global policy lock is busy", async () => {
+  it("serializes reset and normal apply on the same nonblocking global policy lock", async () => {
     await execute(String.raw`
 with tempfile.TemporaryDirectory() as root:
     configure(root)
     m.os.geteuid = lambda: 0
-    held = m.lock_applier()
+    publish(settings_request())
+    before = Path(m.SETTINGS_PATH).read_bytes()
+    ready_read, ready_write = os.pipe()
+    release_read, release_write = os.pipe()
+    child = os.fork()
+    if child == 0:
+        os.close(ready_read); os.close(release_write)
+        held = m.lock_applier()
+        os.write(ready_write, b'1')
+        os.read(release_read, 1)
+        os.close(held)
+        os._exit(0)
+    os.close(ready_write); os.close(release_read)
     try:
+        assert os.read(ready_read, 1) == b'1'
         assert m.main([]) == 0
         assert m.main(['--bootstrap-rtsp']) == 3
+        assert m.main(['--reset-live-view-settings']) == 3
+        assert Path(m.SETTINGS_PATH).read_bytes() == before
+        assert os.path.exists(os.path.join(m.REQUEST_DIRECTORY, REQUEST_ID + '.json'))
+        assert not os.path.exists(m.POLICY_PATH)
     finally:
-        os.close(held)
+        os.write(release_write, b'1')
+        os.close(ready_read); os.close(release_write)
+        waited, status = os.waitpid(child, 0)
+        assert waited == child and os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
 `);
   });
 
@@ -1080,19 +1159,23 @@ with tempfile.TemporaryDirectory() as root:
 `);
   });
 
-  it("keeps bootstrap root-only and exposes no argument-bearing command surface", async () => {
+  it("keeps bootstrap and reset root-only and exposes no argument-bearing command surface", async () => {
     await execute(String.raw`
 calls = []
 m.bootstrap_rtsp = lambda: calls.append('bootstrap') or True
+m.reset_live_view_settings = lambda: calls.append('reset') or True
 m.os.geteuid = lambda: 1
 assert m.main(['--bootstrap-rtsp']) == 1
+assert m.main(['--reset-live-view-settings']) == 1
 assert calls == []
 m.os.geteuid = lambda: 0
 assert m.main(['--bootstrap-rtsp', '/tmp/caller-path']) == 2
+assert m.main(['--reset-live-view-settings', '/tmp/caller-path']) == 2
 assert m.main(['--unknown']) == 2
 assert calls == []
 assert m.main(['--bootstrap-rtsp']) == 0
-assert calls == ['bootstrap']
+assert m.main(['--reset-live-view-settings']) == 0
+assert calls == ['bootstrap', 'reset']
 `);
   });
 });

@@ -15,6 +15,7 @@ import json
 import os
 import pwd
 import re
+import secrets
 import signal
 import stat
 import subprocess
@@ -30,7 +31,7 @@ LOCK_PATH = '/run/lock/homeworker-feature-install.lock'
 ROUTINES_PATH = '/usr/lib/home-worker/install-feature-routines'
 VERSION_PATH = '/usr/lib/home-worker/feature-installer.version'
 MANIFEST_PATH = '/usr/lib/home-worker/feature-installer.manifest'
-INSTALLER_VERSION = '7'
+INSTALLER_VERSION = '8'
 WORKER_NAME = 'homeworker'
 STREAM_NAME = 'homeworker-stream'
 STREAM_GROUP = 'homeworker-stream'
@@ -59,6 +60,10 @@ MAX_ENV_BYTES = 64 * 1024
 MAX_ALLOWED_CIDRS = 16
 TIMEOUT_SECONDS = 30 * 60
 CHECK_TIMEOUT_SECONDS = 15
+# The applier's hardened systemd operation is bounded by TimeoutStartSec=60.
+# The direct installer reset includes process startup and teardown around that
+# complete operation, so its caller bound must be strictly larger.
+LIVE_VIEW_RESET_TIMEOUT_SECONDS = 75
 JOB_ID = re.compile(r'^[A-Za-z0-9_-]{16}$')
 ENTRY_NAME = re.compile(r'^([A-Za-z0-9_-]{16})\.json$')
 FEATURES = frozenset(('digital', 'uart', 'zigbee', 'motion', 'rtsp'))
@@ -338,40 +343,200 @@ def _remove_attention_marker(worker_gid):
         os.close(directory)
 
 
-def run_live_view_bootstrap():
+def _attention_marker_present(worker_gid):
+    raw = _read_regular(
+        LIVE_VIEW_ATTENTION_PATH, ROOT_UID, worker_gid, 0o640,
+        MAX_BYTES, missing_ok=True)
+    if raw is None:
+        return False
     try:
-        completed = subprocess.run(
-            [LIVE_VIEW_APPLIER_PATH, '--bootstrap-rtsp'],
+        value = json.loads(
+            raw.decode('utf-8', 'strict'), object_pairs_hook=no_duplicates)
+    except (InvalidRequest, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError('settings-state-unsafe') from error
+    if value != {'version': 1, 'code': 'legacy-values-invalid'}:
+        raise RuntimeError('settings-state-unsafe')
+    return True
+
+
+def _credential_environment(worker_uid, worker_gid):
+    """Read one exact worker-owned env inode without exposing its contents."""
+    try:
+        descriptor = os.open(
+            WORKER_ENV_PATH,
+            os.O_RDONLY | os.O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW,
+        )
+    except OSError as error:
+        raise RuntimeError('rtsp-credentials-unsafe') from error
+    try:
+        value = os.fstat(descriptor)
+        if (not stat.S_ISREG(value.st_mode) or value.st_nlink != 1
+                or value.st_uid != worker_uid or value.st_gid != worker_gid
+                or stat.S_IMODE(value.st_mode) != 0o600
+                or not 1 <= value.st_size <= MAX_ENV_BYTES):
+            raise RuntimeError('rtsp-credentials-unsafe')
+        raw = os.read(descriptor, MAX_ENV_BYTES + 1)
+        if len(raw) != value.st_size or len(raw) > MAX_ENV_BYTES:
+            raise RuntimeError('rtsp-credentials-unsafe')
+        return raw, (value.st_dev, value.st_ino)
+    finally:
+        os.close(descriptor)
+
+
+def _credential_payload(raw):
+    try:
+        text = raw.decode('utf-8', 'strict')
+    except UnicodeDecodeError as error:
+        raise RuntimeError('rtsp-credentials-unsafe') from error
+    lines = text.splitlines(keepends=True)
+    found = None
+    value = None
+    assignment = re.compile(
+        r'^[ \t]*(?:export[ \t]+)?RTSP_CREDENTIALS_KEY[ \t]*=')
+    for index, line in enumerate(lines):
+        body = line.rstrip('\r\n')
+        if not assignment.match(body):
+            continue
+        if found is not None or not body.startswith('RTSP_CREDENTIALS_KEY='):
+            raise RuntimeError('rtsp-credentials-unsafe')
+        found = index
+        value = body[len('RTSP_CREDENTIALS_KEY='):]
+    if value is not None and value != '':
+        if re.fullmatch(r'[0-9a-f]{64}', value) is None:
+            raise RuntimeError('rtsp-credentials-unsafe')
+        return None
+
+    credential = secrets.token_hex(32)
+    if re.fullmatch(r'[0-9a-f]{64}', credential) is None:
+        raise RuntimeError('rtsp-credentials-unsafe')
+    line = 'RTSP_CREDENTIALS_KEY=' + credential + '\n'
+    if found is None:
+        if text and not text.endswith(('\n', '\r')):
+            text += '\n'
+        updated = text + line
+    else:
+        ending = ('\r\n' if lines[found].endswith('\r\n')
+                  else '\n' if lines[found].endswith('\n') else '')
+        lines[found] = line.rstrip('\n') + ending
+        updated = ''.join(lines)
+    payload = updated.encode('utf-8')
+    if not 1 <= len(payload) <= MAX_ENV_BYTES:
+        raise RuntimeError('rtsp-credentials-unsafe')
+    return payload
+
+
+def _replace_credential_environment(payload, worker_uid, worker_gid, identity):
+    parent = os.path.dirname(WORKER_ENV_PATH)
+    name = os.path.basename(WORKER_ENV_PATH)
+    temporary = '.%s.%s.tmp' % (name, uuid.uuid4().hex)
+    directory = None
+    descriptor = None
+    try:
+        directory = os.open(
+            parent, os.O_RDONLY | os.O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+        parent_value = os.fstat(directory)
+        if (not stat.S_ISDIR(parent_value.st_mode)
+                or parent_value.st_uid not in (ROOT_UID, worker_uid)
+                or stat.S_IMODE(parent_value.st_mode) & 0o022):
+            raise RuntimeError('rtsp-credentials-unsafe')
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+            0o600,
+            dir_fd=directory,
+        )
+        os.fchown(descriptor, worker_uid, worker_gid)
+        os.fchmod(descriptor, 0o600)
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError('short write')
+            view = view[written:]
+        staged = os.fstat(descriptor)
+        if (not stat.S_ISREG(staged.st_mode) or staged.st_nlink != 1
+                or staged.st_uid != worker_uid or staged.st_gid != worker_gid
+                or stat.S_IMODE(staged.st_mode) != 0o600
+                or staged.st_size != len(payload)):
+            raise RuntimeError('rtsp-credentials-unsafe')
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+
+        current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        if ((current.st_dev, current.st_ino) != identity
+                or not stat.S_ISREG(current.st_mode) or current.st_nlink != 1
+                or current.st_uid != worker_uid or current.st_gid != worker_gid
+                or stat.S_IMODE(current.st_mode) != 0o600):
+            raise RuntimeError('rtsp-credentials-unsafe')
+        os.replace(
+            temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
+        os.fsync(directory)
+    except RuntimeError:
+        raise
+    except OSError as error:
+        raise RuntimeError('rtsp-credentials-unsafe') from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if directory is not None:
+            try:
+                os.unlink(temporary, dir_fd=directory)
+                os.fsync(directory)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+            os.close(directory)
+
+
+def provision_rtsp_credentials():
+    worker_uid, worker_gid = worker_ids()
+    raw, identity = _credential_environment(worker_uid, worker_gid)
+    payload = _credential_payload(raw)
+    if payload is None:
+        return
+    _replace_credential_environment(payload, worker_uid, worker_gid, identity)
+
+
+def run_live_view_reset():
+    process = None
+    try:
+        process = subprocess.Popen(
+            [LIVE_VIEW_APPLIER_PATH, '--reset-live-view-settings'],
             cwd='/', env=SAFE_ENV, shell=False, stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            check=False, timeout=CHECK_TIMEOUT_SECONDS)
+            start_new_session=True)
+        try:
+            returncode = process.wait(timeout=LIVE_VIEW_RESET_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as error:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+            raise RuntimeError('policy-reset-failed') from error
+    except RuntimeError:
+        raise
     except (OSError, subprocess.SubprocessError) as error:
-        raise RuntimeError('policy-bootstrap-failed') from error
-    if completed.returncode != 0:
-        raise RuntimeError('policy-bootstrap-failed')
+        if process is not None and process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+        raise RuntimeError('policy-reset-failed') from error
+    if returncode != 0:
+        raise RuntimeError('policy-reset-failed')
 
 
-def migrate_live_view_settings(reset=False):
-    """Create generation zero once, or deliberately reset through deny-all."""
+def migrate_live_view_settings():
+    """Create generation zero once without replacing typed authority."""
     _worker_uid, worker_gid = worker_ids()
-    if not reset:
-        existing = _existing_typed_settings(worker_gid)
-        if existing is not None:
-            return {'status': 'preserved', 'settings': existing, 'attention': None}
-
-    safe = {
-        'version': 1,
-        'generation': 0,
-        'enabled': False,
-        'allowedCameraCidrs': [],
-    }
-    if reset:
-        _atomic_path_write(
-            LIVE_VIEW_SETTINGS_PATH, _settings_payload(safe),
-            ROOT_UID, worker_gid, 0o640)
-        run_live_view_bootstrap()
-        _remove_attention_marker(worker_gid)
-        return {'status': 'reset', 'settings': safe, 'attention': None}
+    existing = _existing_typed_settings(worker_gid)
+    if existing is not None:
+        return {'status': 'preserved', 'settings': existing, 'attention': None}
+    marker_present = _attention_marker_present(worker_gid)
 
     legacy = _read_legacy_environment(_worker_uid, worker_gid)
     migrated = legacy_live_view_settings(legacy if legacy is not None else object())
@@ -382,6 +547,8 @@ def migrate_live_view_settings(reset=False):
     _atomic_path_write(
         LIVE_VIEW_SETTINGS_PATH, _settings_payload(migrated['settings']),
         ROOT_UID, worker_gid, 0o640)
+    if migrated['attention'] is None and marker_present:
+        _remove_attention_marker(worker_gid)
     return {'status': 'created', **migrated}
 
 
@@ -898,12 +1065,23 @@ def main():
             return 0
         except RuntimeError:
             return 3
+    if len(sys.argv) == 2 and sys.argv[1] == '--provision-rtsp-credentials':
+        if os.geteuid() != ROOT_UID:
+            return 1
+        try:
+            validate_root_bundle()
+            provision_rtsp_credentials()
+            return 0
+        except (OSError, RuntimeError, ValueError):
+            return 5
     if len(sys.argv) == 2 and sys.argv[1] in (
             '--migrate-live-view-settings', '--reset-live-view-settings'):
         try:
             validate_root_bundle()
-            migrate_live_view_settings(
-                reset=sys.argv[1] == '--reset-live-view-settings')
+            if sys.argv[1] == '--reset-live-view-settings':
+                run_live_view_reset()
+            else:
+                migrate_live_view_settings()
             return 0
         except (OSError, RuntimeError, ValueError):
             return 5
