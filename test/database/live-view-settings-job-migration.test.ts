@@ -1,4 +1,6 @@
 import Database from 'better-sqlite3';
+import { drizzle } from 'drizzle-orm/better-sqlite3';
+import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -11,7 +13,11 @@ function migrationFilenames(): string[] {
 }
 
 function executeMigrations(sqlite: Database.Database): void {
-  for (const filename of migrationFilenames()) {
+  executeMigrationFiles(sqlite, migrationFilenames());
+}
+
+function executeMigrationFiles(sqlite: Database.Database, filenames: readonly string[]): void {
+  for (const filename of filenames) {
     const sql = readFileSync(resolve(filename), 'utf8');
     for (const statement of sql.split('--> statement-breakpoint')) {
       if (statement.trim()) sqlite.exec(statement);
@@ -85,6 +91,53 @@ describe('live-view-settings-job migration', () => {
     )).toThrow(/CHECK/);
   });
 
+  it('upgrades an authority that already applied the original generated 0022', () => {
+    const upgrading = new Database(':memory:');
+    try {
+      upgrading.pragma('foreign_keys = ON');
+      const filenames = migrationFilenames();
+      const original0022 = filenames.findIndex((filename) => (
+        filename.endsWith('/0022_loose_doctor_octopus.sql')
+      ));
+      expect(original0022).toBeGreaterThan(-1);
+
+      executeMigrationFiles(upgrading, filenames.slice(0, original0022 + 1));
+      upgrading.exec(`CREATE TABLE __drizzle_migrations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        hash text NOT NULL,
+        created_at numeric
+      )`);
+      upgrading.prepare(
+        'INSERT INTO __drizzle_migrations (hash, created_at) VALUES (?, ?)',
+      ).run('applied-original-0022', 1_788_506_175_664);
+      upgrading.prepare("INSERT INTO users (telegram_id, name, role) VALUES (1001, 'Admin', 'admin')").run();
+      insertJobInto(upgrading, 'AbCdEfGhIjKlMnOp', 'succeeded', null, null, 3);
+
+      expect(() => migrate(drizzle(upgrading), { migrationsFolder: 'migrations' }))
+        .not.toThrow();
+      const applied = upgrading.prepare(
+        'SELECT created_at AS createdAt FROM __drizzle_migrations ORDER BY created_at',
+      ).all() as { createdAt: number }[];
+      expect(applied[0]).toEqual({ createdAt: 1_788_506_175_664 });
+      expect(applied.some(({ createdAt }) => createdAt > 1_788_506_175_664)).toBe(true);
+      expect(upgrading.prepare(
+        'SELECT id, expected_generation AS expectedGeneration FROM live_view_settings_jobs',
+      ).all()).toEqual([{ id: 'AbCdEfGhIjKlMnOp', expectedGeneration: 3 }]);
+      expect(() => insertJobInto(upgrading, 'malformed', 'succeeded', null, null, 3))
+        .toThrow(/CHECK/);
+      expect(() => insertJobInto(
+        upgrading,
+        'BcDeFgHiJkLmNoPq',
+        'succeeded',
+        null,
+        null,
+        3.5,
+      )).toThrow(/CHECK/);
+    } finally {
+      upgrading.close();
+    }
+  });
+
   function insertJob(
     id: string,
     status: string,
@@ -93,23 +146,43 @@ describe('live-view-settings-job migration', () => {
     expectedGeneration: number | bigint = 3,
     requestedByUserId = 1001,
   ): void {
-    sqlite.prepare(`INSERT INTO live_view_settings_jobs
+    insertJobInto(
+      sqlite,
+      id,
+      status,
+      activeSlot,
+      failureCode,
+      expectedGeneration,
+      requestedByUserId,
+    );
+  }
+});
+
+function insertJobInto(
+  sqlite: Database.Database,
+  id: string,
+  status: string,
+  activeSlot: number | null,
+  failureCode: string | null,
+  expectedGeneration: number | bigint,
+  requestedByUserId = 1001,
+): void {
+  sqlite.prepare(`INSERT INTO live_view_settings_jobs
       (id, status, active_slot, expected_generation, candidate_settings,
        requested_by_user_id, requested_in_chat_id, workflow_receipt_id,
        failure_code, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(
-        id,
-        status,
-        activeSlot,
-        expectedGeneration,
-        '{"enabled":true,"allowedCameraCidrs":["192.168.1.0/24"]}',
-        requestedByUserId,
-        1001,
-        'QrStUvWxYz012345',
-        failureCode,
-        1_893_456_000,
-        1_893_456_000,
-      );
-  }
-});
+    .run(
+      id,
+      status,
+      activeSlot,
+      expectedGeneration,
+      '{"enabled":true,"allowedCameraCidrs":["192.168.1.0/24"]}',
+      requestedByUserId,
+      1001,
+      'QrStUvWxYz012345',
+      failureCode,
+      1_893_456_000,
+      1_893_456_000,
+    );
+}

@@ -11,9 +11,8 @@ CREATE TABLE `live_view_settings_jobs` (
 	`created_at` integer NOT NULL,
 	`updated_at` integer NOT NULL,
 	FOREIGN KEY (`requested_by_user_id`) REFERENCES `users`(`telegram_id`) ON UPDATE no action ON DELETE no action,
-	CONSTRAINT "live_view_settings_jobs_id_check" CHECK(length("live_view_settings_jobs"."id") = 16 and "live_view_settings_jobs"."id" not glob '*[^A-Za-z0-9_-]*'),
 	CONSTRAINT "live_view_settings_jobs_status_check" CHECK("live_view_settings_jobs"."status" in ('prepared', 'published', 'committed', 'restart-required', 'succeeded', 'failed')),
-	CONSTRAINT "live_view_settings_jobs_generation_check" CHECK(typeof("live_view_settings_jobs"."expected_generation") = 'integer' and "live_view_settings_jobs"."expected_generation" between 0 and 9007199254740991),
+	CONSTRAINT "live_view_settings_jobs_generation_check" CHECK("live_view_settings_jobs"."expected_generation" >= 0),
 	CONSTRAINT "live_view_settings_jobs_active_slot_check" CHECK((
       ("live_view_settings_jobs"."status" in ('prepared', 'published', 'committed', 'restart-required') and "live_view_settings_jobs"."active_slot" is 1)
       or ("live_view_settings_jobs"."status" in ('succeeded', 'failed') and "live_view_settings_jobs"."active_slot" is null)
