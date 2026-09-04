@@ -6,6 +6,7 @@ import { FeatureInconsistentError } from '../../../src/features/domain/errors/fe
 import { FeatureRestartDispatchError } from '../../../src/features/domain/errors/feature-restart-dispatch.error';
 import { FeatureStateChangedError } from '../../../src/features/domain/errors/feature-state-changed.error';
 import { FeatureVerificationError } from '../../../src/features/domain/errors/feature-verification.error';
+import type { ManageableFeatureName } from '../../../src/features/domain/manageable-feature';
 import type { FeatureInstallJobRepositoryPort } from '../../../src/features/domain/ports/feature-install-job.repository.port';
 import type { FeatureRestartPort } from '../../../src/features/domain/ports/feature-restart.port';
 import type { FeatureRuntimeLifecycleRegistryPort } from '../../../src/features/domain/ports/feature-runtime-lifecycle.port';
@@ -14,9 +15,9 @@ import { InMemoryFeatureRepository } from '../../../src/features/infrastructure/
 
 const expected = { installed: true, enabled: false, attentionReason: null } as const;
 
-function setup() {
+function setup(name: ManageableFeatureName = 'digital') {
   const features = new InMemoryFeatureRepository([
-    { name: 'digital', installed: true, enabled: false, config: null, attentionReason: null },
+    { name, installed: true, enabled: false, config: null, attentionReason: null },
   ]);
   const jobs: Pick<FeatureInstallJobRepositoryPort, 'findActive'> = {
     findActive: vi.fn().mockResolvedValue(null),
@@ -55,6 +56,32 @@ describe('EnableFeatureUseCase', () => {
     expect(result).toMatchObject({ feature: { enabled: true }, restartScope: 'worker' });
     expect(order).toEqual(['verify', 'reload', 'restart']);
     expect(verify.execute).toHaveBeenCalledWith({ name: 'digital', source: 'mutation' });
+  });
+
+  it('commits RTSP enabled state before running its true-policy lifecycle', async () => {
+    const { useCase, features, lifecycle, restart } = setup('rtsp');
+    const order: string[] = [];
+    const compare = features.compareAndSetEnabled.bind(features);
+    features.compareAndSetEnabled = async (input) => {
+      order.push(`feature-cas:${String(input.enabled)}`);
+      return compare(input);
+    };
+    vi.mocked(lifecycle.afterEnable).mockImplementation(async () => {
+      order.push('policy:true');
+      order.push('rtsp-gate-open');
+    });
+    vi.mocked(restart.dispatch).mockImplementation(async () => {
+      order.push('restart');
+    });
+
+    await useCase.execute({ name: 'rtsp', expected });
+
+    expect(order).toEqual([
+      'feature-cas:true',
+      'policy:true',
+      'rtsp-gate-open',
+      'restart',
+    ]);
   });
 
   it('blocks only an active install of the same feature', async () => {
@@ -109,14 +136,35 @@ describe('EnableFeatureUseCase', () => {
     expect(restart.dispatch).not.toHaveBeenCalled();
   });
 
-  it('compensates a failed reload by tearing down and returning to disabled', async () => {
-    const { useCase, features, lifecycle, restart } = setup();
+  it('compensates a failed RTSP enable with false policy before reverting the feature row', async () => {
+    const { useCase, features, lifecycle, restart } = setup('rtsp');
+    const order: string[] = [];
+    const compare = features.compareAndSetEnabled.bind(features);
+    features.compareAndSetEnabled = async (input) => {
+      order.push(`feature-cas:${String(input.enabled)}`);
+      return compare(input);
+    };
     const failure = new Error('reload failed');
-    vi.mocked(lifecycle.afterEnable).mockRejectedValue(failure);
+    vi.mocked(lifecycle.afterEnable).mockImplementation(async () => {
+      order.push('policy:true');
+      throw failure;
+    });
+    vi.mocked(lifecycle.beforeDisable).mockImplementation(async () => {
+      order.push('policy:false');
+    });
 
-    await expect(useCase.execute({ name: 'digital', expected })).rejects.toBe(failure);
-    expect(lifecycle.beforeDisable).toHaveBeenCalledWith('digital');
-    expect(await features.findByName('digital')).toMatchObject({ enabled: false, attentionReason: null });
+    await expect(useCase.execute({ name: 'rtsp', expected })).rejects.toBe(failure);
+    expect(order).toEqual([
+      'feature-cas:true',
+      'policy:true',
+      'policy:false',
+      'feature-cas:false',
+    ]);
+    expect(lifecycle.beforeDisable).toHaveBeenCalledWith('rtsp');
+    expect(await features.findByName('rtsp')).toMatchObject({
+      enabled: false,
+      attentionReason: null,
+    });
     expect(restart.dispatch).not.toHaveBeenCalled();
   });
 

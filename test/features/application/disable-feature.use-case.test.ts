@@ -3,6 +3,7 @@ import { DisableFeatureUseCase } from '../../../src/features/application/disable
 import { FeatureInstallBusyError } from '../../../src/features/domain/errors/feature-install-busy.error';
 import { FeatureRestartDispatchError } from '../../../src/features/domain/errors/feature-restart-dispatch.error';
 import { FeatureStateChangedError } from '../../../src/features/domain/errors/feature-state-changed.error';
+import type { ManageableFeatureName } from '../../../src/features/domain/manageable-feature';
 import type { FeatureInstallJobRepositoryPort } from '../../../src/features/domain/ports/feature-install-job.repository.port';
 import type { FeatureRestartPort } from '../../../src/features/domain/ports/feature-restart.port';
 import type { FeatureRuntimeLifecycleRegistryPort } from '../../../src/features/domain/ports/feature-runtime-lifecycle.port';
@@ -10,9 +11,9 @@ import { InMemoryFeatureRepository } from '../../../src/features/infrastructure/
 
 const expected = { installed: true, enabled: true, attentionReason: null } as const;
 
-function setup() {
+function setup(name: ManageableFeatureName = 'uart') {
   const features = new InMemoryFeatureRepository([
-    { name: 'uart', installed: true, enabled: true, config: null, attentionReason: null },
+    { name, installed: true, enabled: true, config: null, attentionReason: null },
   ]);
   const jobs: Pick<FeatureInstallJobRepositoryPort, 'findActive'> = {
     findActive: vi.fn().mockResolvedValue(null),
@@ -32,21 +33,31 @@ function setup() {
 }
 
 describe('DisableFeatureUseCase', () => {
-  it('tears down before CAS, retains installed, and then restarts the worker', async () => {
-    const { useCase, features, lifecycle, restart } = setup();
+  it('disables RTSP runtime and policy before committing disabled and restarting', async () => {
+    const { useCase, features, lifecycle, restart } = setup('rtsp');
     const order: string[] = [];
-    vi.mocked(lifecycle.beforeDisable).mockImplementation(async () => { order.push('teardown'); });
+    vi.mocked(lifecycle.beforeDisable).mockImplementation(async () => {
+      order.push('rtsp-gate-close');
+      order.push('rtsp-quiesce');
+      order.push('policy:false');
+    });
     const compare = features.compareAndSetEnabled.bind(features);
     features.compareAndSetEnabled = async (input) => {
-      order.push('persist');
+      order.push(`feature-cas:${String(input.enabled)}`);
       return compare(input);
     };
     vi.mocked(restart.dispatch).mockImplementation(async () => { order.push('restart'); });
 
-    const result = await useCase.execute({ name: 'uart', expected });
+    const result = await useCase.execute({ name: 'rtsp', expected });
 
     expect(result).toMatchObject({ feature: { installed: true, enabled: false }, restartScope: 'worker' });
-    expect(order).toEqual(['teardown', 'persist', 'restart']);
+    expect(order).toEqual([
+      'rtsp-gate-close',
+      'rtsp-quiesce',
+      'policy:false',
+      'feature-cas:false',
+      'restart',
+    ]);
   });
 
   it('blocks only an active install of the same feature', async () => {
@@ -70,13 +81,26 @@ describe('DisableFeatureUseCase', () => {
     expect(await features.findByName('uart')).toMatchObject({ enabled: true });
   });
 
-  it('restores runtime when CAS loses a race after teardown', async () => {
-    const { useCase, features, lifecycle } = setup();
-    features.compareAndSetEnabled = vi.fn().mockResolvedValue(null);
+  it('restores true RTSP policy when CAS loses after false-policy teardown', async () => {
+    const { useCase, features, lifecycle } = setup('rtsp');
+    const order: string[] = [];
+    vi.mocked(lifecycle.beforeDisable).mockImplementation(async () => {
+      order.push('policy:false');
+    });
+    features.compareAndSetEnabled = vi.fn(async () => {
+      order.push('feature-cas:false');
+      return null;
+    });
+    vi.mocked(lifecycle.afterEnable).mockImplementation(async () => {
+      order.push('policy:true');
+    });
 
-    await expect(useCase.execute({ name: 'uart', expected })).rejects.toBeInstanceOf(FeatureStateChangedError);
-    expect(lifecycle.afterEnable).toHaveBeenCalledWith('uart');
-    expect(await features.findByName('uart')).toMatchObject({ enabled: true });
+    await expect(useCase.execute({ name: 'rtsp', expected })).rejects.toBeInstanceOf(
+      FeatureStateChangedError,
+    );
+    expect(order).toEqual(['policy:false', 'feature-cas:false', 'policy:true']);
+    expect(lifecycle.afterEnable).toHaveBeenCalledWith('rtsp');
+    expect(await features.findByName('rtsp')).toMatchObject({ enabled: true });
   });
 
   it('marks partial uncertainty when runtime restoration fails after a CAS race', async () => {
