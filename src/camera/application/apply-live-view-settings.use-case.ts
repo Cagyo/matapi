@@ -18,7 +18,10 @@ export class ApplyLiveViewSettingsUseCase {
     const outcome = await this.reconcile.execute(jobId);
     switch (outcome.kind) {
       case "resumed":
+        return { kind: "restart-dispatched" };
       case "succeeded":
+        // Stub mode activates and reconciles the committed generation in the
+        // current process; callers still observe the same dispatch receipt.
         return { kind: "restart-dispatched" };
       case "restart-required":
         return outcome;

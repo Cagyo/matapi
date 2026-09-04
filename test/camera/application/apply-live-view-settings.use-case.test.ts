@@ -30,6 +30,7 @@ import type { LiveStreamCapabilityPort } from "../../../src/camera/domain/ports/
 import type { CameraClockPort } from "../../../src/camera/domain/ports/camera-clock.port";
 import type { FeatureQueryPort } from "../../../src/features/domain/ports/feature-query.port";
 import type { ProcessRestarterPort } from "../../../src/system/domain/ports/process-restarter.port";
+import { StubProcessRestarter } from "../../../src/system/infrastructure/stub-process-restarter.adapter";
 
 const JOB_ID = "AbCdEfGhIjKlMnOp";
 const NOW = new Date("2030-01-02T03:04:05.000Z");
@@ -332,6 +333,27 @@ describe("ApplyLiveViewSettingsUseCase", () => {
       resultWriteCount: 1,
     });
     expect(await settings.readCommitted()).toEqual(COMMITTED);
+  });
+
+  it("simulates a development restart so reconciliation activates the committed generation", async () => {
+    const settings = new InMemoryLiveViewSettingsAdapter(CURRENT);
+    const policy = new InMemoryLiveViewPolicyAdapter(settings);
+    const test = setup({
+      settings,
+      request: policy,
+      controller: policy,
+      result: policy,
+      acknowledgement: policy,
+      restarter: new StubProcessRestarter(),
+    });
+
+    await expect(test.apply.execute(JOB_ID)).resolves.toEqual({
+      kind: "restart-dispatched",
+    });
+
+    expect(settings.bootLoadedGeneration()).toBe(5);
+    expect((await jobOf(test.jobs)).status).toBe("succeeded");
+    expect(() => test.gate.assertCanStart()).not.toThrow();
   });
 
   it("terminalizes a fixed-unit start refusal and only restores a proven-ready old gate", async () => {

@@ -52,6 +52,7 @@ import {
   type LiveViewSettingsStorePort,
 } from "../domain/ports/live-view-settings-store.port";
 import { LiveStreamSessionService } from "./live-stream-session.service";
+import { LiveViewRestartActivationService } from "./live-view-restart-activation.service";
 import {
   LiveViewPolicyCoordinatorService,
   type LiveViewPolicyMutationLease,
@@ -124,6 +125,8 @@ export class ReconcileLiveViewSettingsJobUseCase {
     @Optional()
     @Inject(RECONCILE_LIVE_VIEW_SETTINGS_JOB_OPTIONS)
     options: ReconcileLiveViewSettingsJobOptions = {},
+    @Optional()
+    private readonly restartActivation?: LiveViewRestartActivationService,
   ) {
     this.maxResultPolls = positiveInteger(
       options.maxResultPolls ?? DEFAULT_MAX_RESULT_POLLS,
@@ -260,7 +263,7 @@ export class ReconcileLiveViewSettingsJobUseCase {
           this.clock.now(),
         );
         lease.markRestartPending();
-        return this.dispatchRestart(committedJob);
+        return this.dispatchRestart(committedJob, lease, gateEpoch);
       }
       if (committed.generation !== job.expectedGeneration) {
         throw new LiveViewPolicyApplyError();
@@ -297,7 +300,7 @@ export class ReconcileLiveViewSettingsJobUseCase {
     );
     lease.markRestartPending();
     await this.acknowledgeAndCleanup(job.id);
-    return this.dispatchRestart(committedJob);
+    return this.dispatchRestart(committedJob, lease, gateEpoch);
   }
 
   private async handleUnitStartFailure(
@@ -313,7 +316,7 @@ export class ReconcileLiveViewSettingsJobUseCase {
         this.clock.now(),
       );
       lease.markRestartPending();
-      return this.dispatchRestart(committedJob);
+      return this.dispatchRestart(committedJob, lease, gateEpoch);
     }
 
     const failed = await this.terminalizeFailure(job, "unit-start-failed");
@@ -374,6 +377,7 @@ export class ReconcileLiveViewSettingsJobUseCase {
       }
 
       await this.jobs.terminalizeSuccess(job.id, this.clock.now());
+      this.restartActivation?.cancelOnBoot(job.id);
       if (terminal !== null) await this.acknowledgeAndCleanup(job.id);
       if (committed.enabled) this.gate.openIfCurrent(gateEpoch);
       return { kind: "succeeded" };
@@ -381,7 +385,7 @@ export class ReconcileLiveViewSettingsJobUseCase {
 
     lease.markRestartPending();
     if (job.status === "restart-required") return { kind: "restart-required" };
-    return this.dispatchRestart(job);
+    return this.dispatchRestart(job, lease, gateEpoch);
   }
 
   private async resumeSucceeded(
@@ -430,9 +434,17 @@ export class ReconcileLiveViewSettingsJobUseCase {
 
   private async dispatchRestart(
     job: LiveViewSettingsJob,
+    lease: LiveViewPolicyMutationLease,
+    gateEpoch: number,
   ): Promise<ReconcileLiveViewSettingsJobResult> {
     try {
-      await this.restarter.restart();
+      await this.restarter.restart(() =>
+        this.settings.simulateDevelopmentRestart(),
+      );
+      if (this.settings.bootLoadedGeneration() !== job.expectedGeneration) {
+        return this.resumeCommitted(job, lease, gateEpoch);
+      }
+      this.restartActivation?.arm(job.id, job.expectedGeneration);
       return { kind: "resumed" };
     } catch {
       try {
