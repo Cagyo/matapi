@@ -52,6 +52,7 @@ import { LiveSourceCredentialRotationCoordinator } from './application/live-sour
 import { LiveStreamSourceResolverService } from './application/live-stream-source-resolver.service';
 import { MotionWatcherService } from './application/motion-watcher.service';
 import { OpenLiveStreamUseCase } from './application/open-live-stream.use-case';
+import { LiveViewStartGate } from './application/live-view-start-gate.service';
 import { RtspSourceStartGate } from './application/rtsp-source-start-gate.service';
 import { RecordMotionEndUseCase } from './application/record-motion-end.use-case';
 import { RecordMotionStartUseCase } from './application/record-motion-start.use-case';
@@ -493,6 +494,7 @@ function isInstallationId(value: string | undefined): value is string {
       useExisting: LiveStreamMessageCleanupService,
     },
     LiveStreamSourceResolverService,
+    LiveViewStartGate,
     RtspSourceStartGate,
     {
       provide: LiveStreamSessionService,
@@ -503,6 +505,7 @@ function isInstallationId(value: string | undefined): value is string {
         alerts: AdminAlertService,
         messageCleanup: LiveStreamMessageCleanupPort,
         options: LiveStreamOptions,
+        liveViewStartGate: LiveViewStartGate,
         sourceStartGate: RtspSourceStartGate,
         availability: FeatureAvailabilityPort,
       ) => new LiveStreamSessionService(
@@ -514,6 +517,7 @@ function isInstallationId(value: string | undefined): value is string {
         options.durationMs,
         options.startTimeoutMs,
         options.maxViewers,
+        liveViewStartGate,
         sourceStartGate,
         availability,
       ),
@@ -524,6 +528,7 @@ function isInstallationId(value: string | undefined): value is string {
         ADMIN_ALERT,
         LIVE_STREAM_MESSAGE_CLEANUP,
         LIVE_STREAM_OPTIONS,
+        LiveViewStartGate,
         RtspSourceStartGate,
         FEATURE_AVAILABILITY,
       ],
@@ -614,6 +619,7 @@ function isInstallationId(value: string | undefined): value is string {
     StopLiveStreamUseCase,
     LiveStreamSessionService,
     LiveStreamMessageCleanupService,
+    LiveViewStartGate,
     RtspSourceStartGate,
   ],
 })

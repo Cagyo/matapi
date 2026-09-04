@@ -30,6 +30,7 @@ import {
   MONOTONIC_CLOCK,
   type MonotonicClockPort,
 } from '../domain/ports/monotonic-clock.port';
+import { LiveViewStartGate } from './live-view-start-gate.service';
 import { RtspSourceStartGate } from './rtsp-source-start-gate.service';
 import { FEATURE_AVAILABILITY, type FeatureAvailabilityPort } from '../../features/domain/ports/feature-availability.port';
 
@@ -92,6 +93,7 @@ interface CleanupBlocker {
 
 /** Which slice of session work a stop caller is waiting to see drained. */
 type SessionStopScope =
+  | { type: 'all' }
   | { type: 'kind'; kind: LiveStreamSource['kind'] }
   | { type: 'camera'; cameraId: string };
 
@@ -138,6 +140,8 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
     private readonly durationMs = 300_000,
     private readonly operationTimeoutMs = 30_000,
     private readonly maxViewers = 2,
+    // Direct construction without boot reconciliation remains fail closed.
+    private readonly liveViewStartGate = new LiveViewStartGate(),
     // Direct unit construction has no feature lifecycle; composition always
     // injects the fail-closed gate.
     private readonly sourceStartGate = new RtspSourceStartGate(undefined, true),
@@ -189,14 +193,14 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
   open(source: LiveStreamSource, telegramId: number): Promise<OpenLiveStreamResult> {
     if (this.shuttingDown) return Promise.reject(new LiveStreamUnavailableError());
     try {
-      this.sourceStartGate.assertCanStart(source.kind);
+      this.assertCanStart(source.kind);
     } catch {
       return Promise.reject(new LiveStreamUnavailableError());
     }
     const deferred = createDeferred<OpenLiveStreamResult>();
     const queued = this.enqueue(async () => {
       try {
-        this.sourceStartGate.assertCanStart(source.kind);
+        this.assertCanStart(source.kind);
         if (this.leaseMutationsPending > 0) {
           deferred.reject(new LiveStreamUnavailableError());
           return;
@@ -220,7 +224,7 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
         }
 
         if (this.active) {
-          await this.stopActive(() => this.sourceStartGate.assertCanStart(source.kind));
+          await this.stopActive(() => this.assertCanStart(source.kind));
         }
 
         if (this.pending) {
@@ -339,6 +343,65 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
     }).catch(() => {
       throw new LiveStreamUnavailableError();
     });
+  }
+
+  /**
+   * Cancels every prospective start and resolves only after all live work,
+   * late cleanup, blocked teardown, and lease mutations have drained.
+   */
+  async quiesce(): Promise<void> {
+    const scope: SessionStopScope = { type: 'all' };
+    const waiter: SessionStopWaiter = {
+      scope,
+      resolve: () => undefined,
+    };
+    const stopped = new Promise<void>((resolve) => {
+      waiter.resolve = resolve;
+    });
+
+    const draining = this.enqueue(async () => {
+      const blockedPending = this.cleanupBlocked?.pending;
+      if (blockedPending) {
+        blockedPending.cancelled = true;
+        this.rejectPending(blockedPending);
+        this.rejectReplacement(blockedPending);
+      }
+
+      const pending = this.pending;
+      if (pending) {
+        pending.cancelled = true;
+        this.rejectPending(pending);
+        this.rejectReplacement(pending);
+      }
+
+      const lateStart = this.pendingStartCleanup;
+      if (lateStart) {
+        lateStart.cancelled = true;
+        this.rejectPending(lateStart);
+        this.rejectReplacement(lateStart);
+      }
+
+      if (this.cleanupBlocked && !this.cleanupBlocked.teardownInFlight) {
+        if (!(await this.retryBlockedCleanup())) {
+          throw new LiveStreamUnavailableError();
+        }
+      }
+
+      if (this.active && !this.cleanupBlocked) {
+        await this.stopActive();
+      }
+
+      if (this.hasScopedWork(scope)) this.stopWaiters.add(waiter);
+      else waiter.resolve();
+    }).then(() => stopped);
+
+    try {
+      await this.withOperationTimeout(draining);
+    } catch {
+      throw new LiveStreamUnavailableError();
+    } finally {
+      this.stopWaiters.delete(waiter);
+    }
   }
 
   /** Ordered process-shutdown entry point; module teardown reuses it defensively. */
@@ -464,7 +527,7 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
     this.pending = pending;
     try {
       if (this.availability) await this.availability.requireReady(source.kind === 'rtsp' ? 'rtsp' : 'motion');
-      this.sourceStartGate.assertCanStart(source.kind);
+      this.assertCanStart(source.kind);
     } catch {
       if (this.pending === pending) {
         this.pending = undefined;
@@ -485,9 +548,10 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    const start = Promise.resolve().then(() =>
-      this.gateway.start({ session: pending.provisionalSession, source }),
-    );
+    const start = Promise.resolve().then(() => {
+      this.assertCanStart(source.kind);
+      return this.gateway.start({ session: pending.provisionalSession, source });
+    });
 
     void this.withOperationTimeout(start).then(
       (started) => {
@@ -556,6 +620,13 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
       viewerGrants: new Map(),
       messageReferences: [],
     };
+
+    try {
+      this.assertCanStart(pending.source.kind);
+    } catch {
+      this.abortStartedPending(pending, active);
+      return;
+    }
 
     if (pending.cancelled || !isQuickTunnelHostname(started.publicHostname)) {
       this.abortStartedPending(pending, active);
@@ -653,14 +724,31 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
     const tokenHash = createHash('sha256').update(token).digest('hex');
     await this.requireSourceReady(active.sourceKind);
     await this.withOperationTimeout(
-      Promise.resolve().then(() =>
-        this.gateway.addViewer({
+      Promise.resolve().then(() => {
+        this.assertCanStart(active.sourceKind);
+        return this.gateway.addViewer({
           tokenHash,
           telegramId,
           expiresMonotonicMs: active.session.expiresMonotonicMs,
-        }),
-      ),
+        });
+      }),
     );
+    try {
+      this.assertCanStart(active.sourceKind);
+    } catch {
+      try {
+        await this.withOperationTimeout(
+          Promise.resolve().then(() => this.gateway.revokeViewer(tokenHash)),
+        );
+      } catch {
+        try {
+          await this.stopActive();
+        } catch {
+          // The cleanup blocker retains uncertain teardown until reconciliation.
+        }
+      }
+      throw new LiveStreamUnavailableError();
+    }
     active.viewerGrants.set(telegramId, { grantId, tokenHash });
     return {
       watchUrl: `https://${active.publicHostname}/watch/${token}`,
@@ -675,6 +763,12 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
 
   private async requireSourceReady(kind: LiveStreamSource['kind']): Promise<void> {
     if (this.availability) await this.availability.requireReady(kind === 'rtsp' ? 'rtsp' : 'motion');
+    this.liveViewStartGate.assertCanStart();
+    this.sourceStartGate.assertCanStart(kind);
+  }
+
+  private assertCanStart(kind: LiveStreamSource['kind']): void {
+    this.liveViewStartGate.assertCanStart();
     this.sourceStartGate.assertCanStart(kind);
   }
 
@@ -941,9 +1035,11 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
     const settled = mutation.then(
       () => {
         this.leaseMutationsPending -= 1;
+        this.resolveStopWaiters();
       },
       () => {
         this.leaseMutationsPending -= 1;
+        this.resolveStopWaiters();
       },
     );
     this.leaseMutationTail = settled;
@@ -1068,6 +1164,7 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
   }
 
   private hasScopedWork(scope: SessionStopScope): boolean {
+    if (scope.type === 'all' && this.leaseMutationsPending > 0) return true;
     return this.occupiedSlots().some((work) => work && this.scopeOwns(scope, work));
   }
 
@@ -1093,6 +1190,7 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
   }
 
   private scopeOwns(scope: SessionStopScope, work: ScopedWork): boolean {
+    if (scope.type === 'all') return true;
     return scope.type === 'kind'
       ? work.kind === scope.kind
       : work.cameraId === scope.cameraId;

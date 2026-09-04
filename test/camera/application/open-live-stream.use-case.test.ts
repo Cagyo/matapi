@@ -7,7 +7,9 @@ import { describe, expect, it } from 'vitest';
 import { LiveStreamSessionService } from '../../../src/camera/application/live-stream-session.service';
 import { LiveStreamSourceResolverService } from '../../../src/camera/application/live-stream-source-resolver.service';
 import { OpenLiveStreamUseCase } from '../../../src/camera/application/open-live-stream.use-case';
+import { LiveViewStartGate } from '../../../src/camera/application/live-view-start-gate.service';
 import { RtspSourceStartGate } from '../../../src/camera/application/rtsp-source-start-gate.service';
+import { LiveStreamUnavailableError } from '../../../src/camera/domain/errors/live-stream-unavailable.error';
 import { LiveStreamSourceUnavailableError } from '../../../src/camera/domain/errors/live-stream-source-unavailable.error';
 import type { Camera } from '../../../src/camera/domain/camera.entity';
 import type { MediaRepositoryPort } from '../../../src/camera/domain/ports/media-repository.port';
@@ -16,7 +18,7 @@ import type { LiveStreamLeasePort } from '../../../src/camera/domain/ports/live-
 import type { MonotonicClockPort } from '../../../src/camera/domain/ports/monotonic-clock.port';
 
 describe('OpenLiveStreamUseCase', () => {
-  it('exposes the RTSP start gate as a Nest-resolvable constructor dependency', () => {
+  it('exposes the global and RTSP start gates as Nest-resolvable constructor dependencies', () => {
     const outputDir = mkdtempSync(join(tmpdir(), 'home-worker-di-'));
 
     try {
@@ -40,11 +42,26 @@ describe('OpenLiveStreamUseCase', () => {
       );
 
       expect(compiledUseCase).toContain(
+        'Object, live_view_start_gate_service_1.LiveViewStartGate,',
+      );
+      expect(compiledUseCase).toContain(
         'rtsp_source_start_gate_service_1.RtspSourceStartGate, Object])',
       );
     } finally {
       rmSync(outputDir, { force: true, recursive: true });
     }
+  });
+
+  it('rejects Motion before opening a session while the global start gate is closed', async () => {
+    const gate = openedLiveViewGate();
+    const useCase = createUseCase(
+      new FakeMediaRepository([camera('Front door')]),
+      gate,
+    );
+    gate.close();
+
+    await expect(useCase.execute({ telegramId: 7, cameraName: 'Front door' }))
+      .rejects.toBeInstanceOf(LiveStreamUnavailableError);
   });
 
   it('returns a tokenized tunnel URL for an enabled camera without trusting a camera URL', async () => {
@@ -148,7 +165,10 @@ describe('OpenLiveStreamUseCase', () => {
   });
 });
 
-function createUseCase(media: FakeMediaRepository): OpenLiveStreamUseCase {
+function createUseCase(
+  media: FakeMediaRepository,
+  liveViewStartGate = openedLiveViewGate(),
+): OpenLiveStreamUseCase {
   const gateway: LiveStreamGatewayPort = {
     start: async () => ({
       publicHostname: 'clear-moon.trycloudflare.com',
@@ -173,13 +193,23 @@ function createUseCase(media: FakeMediaRepository): OpenLiveStreamUseCase {
     { alert: async () => undefined },
     { delete: async () => undefined },
     300_000,
+    30_000,
+    2,
+    liveViewStartGate,
   );
   return new OpenLiveStreamUseCase(
     new LiveStreamSourceResolverService(media),
     session,
     { isAvailable: async () => true },
+    liveViewStartGate,
     new RtspSourceStartGate(),
   );
+}
+
+function openedLiveViewGate(): LiveViewStartGate {
+  const gate = new LiveViewStartGate();
+  gate.openIfCurrent(0);
+  return gate;
 }
 
 function camera(name: string): Camera {
