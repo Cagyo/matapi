@@ -61,6 +61,15 @@ with earlier or replaced IDs retained as audit history. Missing IDs are replaced
 through CAS; detached/conflicting branches remain blocked and alert an
 administrator instead of creating parallel folder trees.
 
+Database rollback recovery is identity-only: after the expected-parent search
+finds no candidate, the resolver searches immutable installation, generation,
+role, and normalized-path properties across parents. It never falls back to a
+folder name. Incomplete pagination or more than one live identity fails closed
+without creating or adopting a folder. A detached/conflict head is claimed by
+CAS for one bounded revalidation; repeated failure is rescheduled through
+15-minute, 30-minute, 1-hour, 2-hour, 4-hour, then capped 6-hour backoff slots
+with at most one second of jitter.
+
 Every object is created under an immutable attempt row with installation,
 generation, kind, source fingerprint, digest, and source-time app properties.
 Replacement creates a new attempt; earlier Drive IDs and metadata remain audit
@@ -80,9 +89,16 @@ and artifact ID before applying its bound.
 - Saved-session 200/201/308/404 outcomes reconcile before another attempt.
 - Ambiguous responses search only by immutable attempt identity; they never
   adopt an unrelated object.
+- After bytes and exact object metadata verify, Motion performs one final
+  post-transfer resolution of the complete year/month/day reservation chain.
+  A changed leaf or ancestor fails before the attempt can become verified.
 - A stalled transfer does not block snapshots, Motion registration, status,
   local cleanup, backups, or later non-overlapping scheduler work.
 - Shutdown aborts in-flight network work within the PM2 handoff window.
+- At process start, every process-owned attempt lease is revision-fenced and
+  released without consulting wall-clock time. An interrupted `uploading`
+  attempt becomes immediately due `retryable`; its encrypted resumable session
+  and provider-confirmed offset remain available for safe reconciliation.
 
 A generation-scoped provider gate persists reason-first cooldown and block
 state before work yields. Transport and rate-limit failures use bounded retry
@@ -90,6 +106,10 @@ slots and one post-cooldown probe; quota, capacity, policy, and reauthorization
 remain distinct. A block from an old generation cannot block staged OAuth or
 account confirmation: confirmation runs under the shared mutation lock, commits
 the new active generation, replaces provider state, and then wakes dispatch.
+When the durable wall clock is `clock-blocked`, that state takes precedence over
+all provider cooldowns, quota probes, branch probes, uploads, retention, and
+remote cleanup. Local backup creation and Motion reconciliation remain
+available, and restart lease release still runs before the clock verdict.
 
 ## Backup
 
@@ -143,6 +163,17 @@ The provider gate wraps active-generation folder, upload, reconciliation,
 account/quota, and deletion paths; staged OAuth and reauthorization bypass old
 active-generation admission state.
 
+Queue admission, next-attempt deadline, blocked-prefix, and status SQL share the
+production `ArchiveSqlQuery` builders with bound parameters. The status builder
+returns exactly one row and computes retryable videos with
+`count(distinct artifact_id)`; it never enumerates an unbounded ID set in
+JavaScript. The 10,000-artifact/50,000-attempt pressure fixture pins use of
+`idx_archive_artifacts_admission_queue`,
+`idx_drive_attempts_generation_queue`,
+`idx_drive_attempts_artifact_generation_state`, and
+`idx_drive_motion_folder_current_health`, and rejects an unindexed
+`SCAN drive_object_attempts`.
+
 ## Status and alerts
 
 `/gdrive status` reports generation state, permission identity, quota, aggregate
@@ -164,10 +195,22 @@ private administrator interface, and those three navigation links are useful
 for direct inspection. The exception does not permit local paths, filenames,
 per-object links, provider payloads, tokens, or session data.
 
+`/gdrive retry` is a revision-fenced request for the one recovery action shown
+by a fresh status projection. It can request the next blocked branch or a
+claimable provider probe, but cannot accept a remote identifier or clear quota,
+reauthorization, clock, or policy state optimistically.
+
+Legacy flat Motion objects are recreated beneath the exact date branch only
+when the immutable local source is still present and unchanged. A remote-only
+flat video cannot be recreated after its local source is pruned.
+
 ## Release evidence
 
 Automated tests use in-memory repositories and fake Google gateways. Before a
 release, an operator must complete and record
 `test/archive/google-drive-date-folders-live-smoke.md` on the actual supported Raspberry Pi
 hardware/OS/architecture combinations. CI evidence is not a substitute for
-that on-device and disposable-account record.
+that on-device and disposable-account record. Release installation must apply
+both generated migrations: **0022** adds continuous-sync state and indexes, and
+**0023** rebuilds the affected tables with the required constraints. Both are
+required; they must not be collapsed, renamed, or hand-edited.

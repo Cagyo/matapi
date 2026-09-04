@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ArchiveSchedulerHooksService } from '../../src/archive/application/archive-scheduler.service';
+import { ARCHIVE_REGISTRATION_LOOKUP } from '../../src/archive/application/ports/archive-registration-lookup.port';
 import { ARCHIVE_RUNTIME_SIGNAL } from '../../src/archive/application/ports/archive-runtime-signal.port';
 import { CleanupCoordinatorService } from '../../src/camera/application/cleanup-coordinator.service';
 import { CompletedMotionVideoRecoveryScheduler } from '../../src/camera/application/completed-motion-video-recovery.scheduler';
@@ -24,6 +25,10 @@ import {
 } from '../../src/camera/camera.tokens';
 import { FeatureModule } from '../../src/features/feature.module';
 import { RTSP_POLICY_STATUS } from '../../src/features/domain/ports/rtsp-policy-status.port';
+import { NestFactory } from '@nestjs/core';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 describe('CameraModule live-stream composition', () => {
   it('uses the safe live-stream defaults', () => {
@@ -88,6 +93,26 @@ describe('CameraModule live-stream composition', () => {
 });
 
 describe('CameraModule archive recovery composition', () => {
+  it('injects the exported Archive lookup singleton into completed-video registration', async () => {
+    const previousDatabasePath = process.env.DATABASE_PATH;
+    const directory = await mkdtemp(join(tmpdir(), 'camera-archive-composition-'));
+    process.env.DATABASE_PATH = join(directory, 'worker.sqlite');
+    const app = await NestFactory.createApplicationContext(CameraModule, { logger: false });
+    try {
+      const lookup = app.get(ARCHIVE_REGISTRATION_LOOKUP);
+      const registration = app.get<{
+        archiveLookup: unknown;
+      }>(RegisterCompletedMotionVideosUseCase);
+
+      expect(registration.archiveLookup).toBe(lookup);
+    } finally {
+      await app.close();
+      await rm(directory, { recursive: true, force: true });
+      if (previousDatabasePath === undefined) delete process.env.DATABASE_PATH;
+      else process.env.DATABASE_PATH = previousDatabasePath;
+    }
+  });
+
   it('wires successful Motion-end registration to the recovery wake through the provider graph', async () => {
     interface ProviderMetadata {
       provide?: unknown;

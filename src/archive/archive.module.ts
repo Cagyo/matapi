@@ -44,6 +44,7 @@ import {
 } from './application/archive-scheduler.service';
 import { ArchiveTransferSemaphoreService } from './application/archive-transfer-semaphore.service';
 import { ArchiveWakeService } from './application/archive-wake.service';
+import { ArchiveClockHealthService } from './application/archive-clock-health.service';
 import { ArchiveProviderGateService } from './application/archive-provider-gate.service';
 import {
   DriveAuthorizationOutcomeRegistrationService,
@@ -118,6 +119,7 @@ import { VerifyArchiveArtifactUseCase } from './application/use-cases/verify-arc
 import { ApplyDriveRetentionUseCase } from './application/use-cases/apply-drive-retention.use-case';
 import { ResolveMotionArchiveContainerUseCase } from './application/use-cases/resolve-motion-archive-container.use-case';
 import { ProbeDriveQuotaRecoveryUseCase } from './application/use-cases/probe-drive-quota-recovery.use-case';
+import { RevalidateMotionArchiveBranchUseCase } from './application/use-cases/revalidate-motion-archive-branch.use-case';
 import { RetryDriveArchiveUseCase } from './application/use-cases/retry-drive-archive.use-case';
 import { DriveClockUnhealthyError } from './domain/errors/drive-clock-unhealthy.error';
 import {
@@ -241,7 +243,12 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
       inject: [ARCHIVE_ARTIFACT_REPOSITORY, CLOCK, ArchiveWakeService],
     },
     { provide: ARCHIVE_REGISTRATION, useExisting: RegisterArchiveArtifactUseCase },
-    FindRegisteredArchiveArtifactUseCase,
+    {
+      provide: FindRegisteredArchiveArtifactUseCase,
+      useFactory: (repository: ArchiveArtifactRepositoryPort) =>
+        new FindRegisteredArchiveArtifactUseCase(repository),
+      inject: [ARCHIVE_ARTIFACT_REPOSITORY],
+    },
     {
       provide: ARCHIVE_REGISTRATION_LOOKUP,
       useExisting: FindRegisteredArchiveArtifactUseCase,
@@ -331,6 +338,26 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
       inject: [ARCHIVE_ADMIN_ALERT_OUTBOX, ArchiveAdminAlertService, CLOCK, NotificationService],
     },
     { provide: ARCHIVE_ADMIN_ALERT, useExisting: DurableArchiveAdminAlertAdapter },
+    {
+      provide: RevalidateMotionArchiveBranchUseCase,
+      useFactory: (
+        drive: DriveFolderPort,
+        reservations: DriveFolderReservationRepositoryPort,
+        lock: ArchiveRemoteMutationLockService,
+        alerts: ArchiveAdminAlertPort,
+      ) => new RevalidateMotionArchiveBranchUseCase(
+        drive,
+        reservations,
+        lock,
+        alerts,
+      ),
+      inject: [
+        DRIVE_FOLDER,
+        DRIVE_FOLDER_RESERVATION_REPOSITORY,
+        ArchiveRemoteMutationLockService,
+        ARCHIVE_ADMIN_ALERT,
+      ],
+    },
     {
       provide: ProbeDriveQuotaRecoveryUseCase,
       useFactory: (
@@ -700,6 +727,14 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
     },
     { provide: ARCHIVE_RETENTION, useExisting: ApplyDriveRetentionUseCase },
     {
+      provide: ArchiveClockHealthService,
+      useFactory: (
+        repository: ArchiveArtifactRepositoryPort,
+        wake: ArchiveWakeService,
+      ) => new ArchiveClockHealthService(repository, wake),
+      inject: [ARCHIVE_ARTIFACT_REPOSITORY, ArchiveWakeService],
+    },
+    {
       provide: ArchiveSchedulerService,
       useFactory: (
         repository: ArchiveArtifactRepositoryPort,
@@ -716,6 +751,9 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         providerState: ArchiveProviderStateRepositoryPort,
         alerts: ArchiveAdminAlertPort,
         health: SystemHealthPort,
+        clockHealth: ArchiveClockHealthService,
+        branchProbe: RevalidateMotionArchiveBranchUseCase,
+        quotaProbe: ProbeDriveQuotaRecoveryUseCase,
       ) => new ArchiveSchedulerService(
         repository,
         backups,
@@ -739,6 +777,9 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
             return (snapshot.diskUsedBytes / snapshot.diskTotalBytes) * 100;
           },
         },
+        clockHealth,
+        branchProbe,
+        quotaProbe,
       ),
       inject: [
         ARCHIVE_ARTIFACT_REPOSITORY,
@@ -755,6 +796,9 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         ARCHIVE_PROVIDER_STATE_REPOSITORY,
         ARCHIVE_ADMIN_ALERT,
         SYSTEM_HEALTH,
+        ArchiveClockHealthService,
+        RevalidateMotionArchiveBranchUseCase,
+        ProbeDriveQuotaRecoveryUseCase,
       ],
     },
     { provide: ARCHIVE_RUNTIME_SIGNAL, useExisting: ArchiveSchedulerService },
@@ -808,7 +852,11 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
             return current;
           });
           const reconcileOperation = () => reconcile.execute({ limit: 20 }, signal, sharedLock);
-          if (active?.status === 'active') {
+          const runReconcile = async () => {
+            if (active?.status !== 'active') {
+              await reconcileOperation();
+              return;
+            }
             await gate.run({
               generationId: active.id,
               operationClass: 'reconcile',
@@ -816,19 +864,30 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
               operation: reconcileOperation,
               signal,
             });
-          } else {
-            await reconcileOperation();
+          };
+          const runRetention = async () => {
+            try {
+              await retention.execute({ requiredBytes: 0 }, signal);
+            } catch (error) {
+              if (!(error instanceof DriveClockUnhealthyError)) throw error;
+              await alerts.alert('clock-unhealthy', {
+                generationId: '',
+                errorCode: error.code,
+              });
+            }
+          };
+          const deleteAdmission = active?.status === 'active'
+            ? await gate.inspect(active.id, 'delete')
+            : null;
+          const deleteProbeDue = deleteAdmission?.kind === 'probe'
+            && deleteAdmission.operationClass === 'delete';
+          if (deleteProbeDue) {
+            await runRetention();
+            if (!signal.aborted) await runReconcile();
+            return;
           }
-          if (signal.aborted) return;
-          try {
-            await retention.execute({ requiredBytes: 0 }, signal);
-          } catch (error) {
-            if (!(error instanceof DriveClockUnhealthyError)) throw error;
-            await alerts.alert('clock-unhealthy', {
-              generationId: '',
-              errorCode: error.code,
-            });
-          }
+          await runReconcile();
+          if (!signal.aborted) await runRetention();
         });
         return reconcile;
       },

@@ -5,9 +5,11 @@ import { AppModule } from '../../src/app.module';
 import { CameraModule } from '../../src/camera/camera.module';
 import { TelegramModule } from '../../src/telegram/telegram.module';
 import { ARCHIVE_REGISTRATION } from '../../src/archive/application/ports/archive-registration.port';
+import { ARCHIVE_REGISTRATION_LOOKUP } from '../../src/archive/application/ports/archive-registration-lookup.port';
 import { ARCHIVE_RUNTIME_SIGNAL } from '../../src/archive/application/ports/archive-runtime-signal.port';
 import { ARCHIVE_VERIFICATION } from '../../src/archive/application/ports/archive-verification.port';
 import { ARCHIVE_ADMIN_ALERT } from '../../src/archive/application/ports/archive-admin-alert.port';
+import { ARCHIVE_ARTIFACT_REPOSITORY } from '../../src/archive/application/ports/archive-artifact-repository.port';
 import { ArchiveRemoteMutationLockService } from '../../src/archive/application/archive-remote-mutation-lock.service';
 import { ReconcileDriveUseCase } from '../../src/archive/application/use-cases/reconcile-drive.use-case';
 import { ArchiveRuntimeLifecycleService } from '../../src/archive/application/archive-runtime-lifecycle.service';
@@ -22,7 +24,13 @@ import { ArchiveProviderGateService } from '../../src/archive/application/archiv
 import { ARCHIVE_PROVIDER_STATE_REPOSITORY } from '../../src/archive/application/ports/archive-provider-state-repository.port';
 import { DRIVE_FOLDER } from '../../src/archive/application/ports/drive-folder.port';
 import { DRIVE_FOLDER_RESERVATION_REPOSITORY } from '../../src/archive/application/ports/drive-folder-reservation-repository.port';
+import { DRIVE_QUOTA_PROBE } from '../../src/archive/application/ports/drive-quota-probe.port';
 import { ResolveMotionArchiveContainerUseCase } from '../../src/archive/application/use-cases/resolve-motion-archive-container.use-case';
+import { FindRegisteredArchiveArtifactUseCase } from '../../src/archive/application/use-cases/find-registered-archive-artifact.use-case';
+import { ProbeDriveQuotaRecoveryUseCase } from '../../src/archive/application/use-cases/probe-drive-quota-recovery.use-case';
+import { RevalidateMotionArchiveBranchUseCase } from '../../src/archive/application/use-cases/revalidate-motion-archive-branch.use-case';
+import { RetryDriveArchiveUseCase } from '../../src/archive/application/use-cases/retry-drive-archive.use-case';
+import { ArchiveClockHealthService } from '../../src/archive/application/archive-clock-health.service';
 import {
   DriveAuthorizationOutcomeRegistrationService,
 } from '../../src/archive/application/drive-authorization-polling.service';
@@ -41,6 +49,7 @@ import { DRIVE_ACCOUNT } from '../../src/archive/application/ports/drive-account
 import { DriveClockUnhealthyError } from '../../src/archive/domain/errors/drive-clock-unhealthy.error';
 import { DriveRateLimitedError } from '../../src/archive/domain/errors/drive-rate-limited.error';
 import { InMemoryArchiveProviderStateRepository } from '../../src/archive/infrastructure/persistence/in-memory-archive-provider-state.repository';
+import { GoogleDriveConnectionAccountAdapter } from '../../src/archive/infrastructure/google/google-drive-connection-account.adapter';
 import { NestFactory } from '@nestjs/core';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -93,6 +102,47 @@ describe('ArchiveModule composition', () => {
     expect(providerFor(providers, ARCHIVE_RUNTIME_SIGNAL)).toMatchObject({
       useExisting: ArchiveSchedulerService,
     });
+  });
+
+  it('binds every recovery collaborator explicitly to its intended singleton', () => {
+    const providers = Reflect.getMetadata('providers', ArchiveModule) as ProviderRecord[];
+
+    expect(providerFor(providers, ARCHIVE_REGISTRATION_LOOKUP)).toMatchObject({
+      useExisting: FindRegisteredArchiveArtifactUseCase,
+    });
+    expect(providerFor(providers, FindRegisteredArchiveArtifactUseCase).inject).toEqual([
+      ARCHIVE_ARTIFACT_REPOSITORY,
+    ]);
+    expect(providerFor(providers, DRIVE_QUOTA_PROBE)).toMatchObject({
+      useExisting: GoogleDriveConnectionAccountAdapter,
+    });
+    expect(providerFor(providers, RevalidateMotionArchiveBranchUseCase).inject).toEqual([
+      DRIVE_FOLDER,
+      DRIVE_FOLDER_RESERVATION_REPOSITORY,
+      ArchiveRemoteMutationLockService,
+      ARCHIVE_ADMIN_ALERT,
+    ]);
+    expect(providerFor(providers, ArchiveClockHealthService).inject).toEqual([
+      ARCHIVE_ARTIFACT_REPOSITORY,
+      ArchiveWakeService,
+    ]);
+    expect(providerFor(providers, ProbeDriveQuotaRecoveryUseCase).inject).toEqual([
+      ARCHIVE_ARTIFACT_REPOSITORY,
+      DRIVE_QUOTA_PROBE,
+      ArchiveProviderGateService,
+      CLOCK,
+    ]);
+    expect(providerFor(providers, RetryDriveArchiveUseCase).inject).toEqual([
+      ARCHIVE_PROVIDER_STATE_REPOSITORY,
+      DRIVE_FOLDER_RESERVATION_REPOSITORY,
+      CLOCK,
+      ArchiveWakeService,
+    ]);
+    expect(providerFor(providers, ArchiveSchedulerService).inject?.slice(-3)).toEqual([
+      ArchiveClockHealthService,
+      RevalidateMotionArchiveBranchUseCase,
+      ProbeDriveQuotaRecoveryUseCase,
+    ]);
   });
 
   it('injects one shared mutation lock and provider gate across active-generation work', () => {
@@ -183,6 +233,23 @@ describe('ArchiveModule composition', () => {
       expect(app.get(ARCHIVE_REGISTRATION)).toBeDefined();
       expect(app.get(ARCHIVE_VERIFICATION)).toBeDefined();
       expect(app.get(ARCHIVE_RETENTION)).toBeDefined();
+      expect(app.get(ARCHIVE_REGISTRATION_LOOKUP))
+        .toBe(app.get(FindRegisteredArchiveArtifactUseCase));
+      expect(app.get(DRIVE_QUOTA_PROBE))
+        .toBe(app.get(GoogleDriveConnectionAccountAdapter));
+
+      const clockHealth = app.get(ArchiveClockHealthService);
+      const branchProbe = app.get(RevalidateMotionArchiveBranchUseCase);
+      const quotaProbe = app.get(ProbeDriveQuotaRecoveryUseCase);
+      const scheduler = app.get<{
+        clockHealth: unknown;
+        branchProbe: unknown;
+        quotaProbe: unknown;
+      }>(ArchiveSchedulerService);
+      expect(app.get(RetryDriveArchiveUseCase)).toBeDefined();
+      expect(scheduler.clockHealth).toBe(clockHealth);
+      expect(scheduler.branchProbe).toBe(branchProbe);
+      expect(scheduler.quotaProbe).toBe(quotaProbe);
     } finally {
       await app.close();
       await rm(directory, { recursive: true, force: true });
@@ -292,7 +359,7 @@ describe('ArchiveModule composition', () => {
     expect(order).toEqual(['reconcile', 'retention']);
   });
 
-  it('runs reconcile then retention after a delete-owned cooldown expires', async () => {
+  it('settles a delete-owned recovery probe through retention before reconciliation', async () => {
     const order: string[] = [];
     const clock = { value: 1_000 };
     const repository = new InMemoryArchiveProviderStateRepository();
@@ -310,10 +377,18 @@ describe('ArchiveModule composition', () => {
 
     const hooks = new ArchiveSchedulerHooksService();
     const provider = remoteMaintenanceProvider();
+    const retention = {
+      execute: vi.fn(async () => gate.run({
+        generationId: 'generation-1',
+        operationClass: 'delete',
+        probe: true,
+        operation: async () => { order.push('retention'); },
+      })),
+    };
     provider.useFactory(
       hooks,
       { execute: vi.fn(async () => { order.push('reconcile'); }) },
-      { execute: vi.fn(async () => { order.push('retention'); }) },
+      retention,
       { alert: vi.fn(async () => undefined) },
       { loadActive: vi.fn(async () => ({ id: 'generation-1', status: 'active' })) },
       gate,
@@ -325,7 +400,13 @@ describe('ArchiveModule composition', () => {
       new AbortController().signal,
     );
 
-    expect(order).toEqual(['reconcile', 'retention']);
+    expect(order).toEqual(['retention', 'reconcile']);
+    expect(retention.execute).toHaveBeenCalledOnce();
+    await expect(repository.load()).resolves.toMatchObject({
+      operationClass: null,
+      failureClass: null,
+      cooldownUntilMs: null,
+    });
   });
 
   it('fails retention closed on an unhealthy clock while keeping maintenance available', async () => {

@@ -13,6 +13,7 @@ Administrator, private chat only.
 ```text
 /gdrive connect
 /gdrive status
+/gdrive retry
 /gdrive disconnect
 ```
 
@@ -63,8 +64,19 @@ last artifact registration, reclamation state, detached/missing objects, and
 retired audit generations. Queue reporting is aggregate-only: queued and
 retryable video counts, oldest queued-video age, unhealthy date-folder count,
 and one drain state (`active`, `idle`, `cooling-down`, `branch-blocked`,
-`quota-blocked`, `capacity-blocked`, `policy-blocked`, or
-`reauthorization-required`). Required actions remain explicit.
+`quota-blocked`, `capacity-blocked`, `policy-blocked`,
+`reauthorization-required`, or `clock-blocked`). `clock-blocked` takes
+precedence over every provider or branch state. Required actions remain explicit.
+
+Queue status is one bounded aggregate SQL row. Retryable videos are computed as
+`count(distinct artifact_id)` across retryable admission and the active
+generation's retryable attempts; the handler never receives an unbounded ID
+set. The production query plans must use
+`idx_archive_artifacts_admission_queue`,
+`idx_drive_attempts_generation_queue`,
+`idx_drive_attempts_artifact_generation_state`, and
+`idx_drive_motion_folder_current_health`, with no unindexed scan of
+`drive_object_attempts`.
 
 Folder links are shown only in the administrator's private chat. Errors are
 sanitized and never include credentials, tokens, session URLs, local paths,
@@ -72,7 +84,19 @@ filenames, date branches, Drive object IDs, provider response bodies, or
 bot-token-bearing URLs. Objects created by an older release directly under the
 Motion folder remain flat audit objects until exact reconciliation/replacement;
 status must warn when such an object needs attention and must not imply that it
-was silently moved into a date folder.
+was silently moved into a date folder. A remote-only flat video cannot be
+recreated after its unchanged local source has been pruned.
+
+## Retry
+
+`/gdrive retry` first obtains a fresh aggregate status and accepts no Drive,
+generation, folder, artifact, or attempt identifier from Telegram. For a
+retryable report it submits the observed generation and provider revision to
+`RetryDriveArchiveUseCase`; its CAS schedules exactly one eligible blocked-head
+revalidation or revision-fenced provider probe, then wakes the dispatcher.
+Stale reports are harmless. Quota recovery remains automatic after space is
+freed, and reauthorization continues through `/gdrive connect`; retry never
+clears either condition optimistically.
 
 ## Disconnect
 

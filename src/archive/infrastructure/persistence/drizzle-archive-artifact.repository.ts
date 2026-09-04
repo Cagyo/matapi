@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import type Database from 'better-sqlite3';
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, count, eq, exists, gt, gte, inArray, isNotNull, isNull, lte, max, min, ne, notExists, or, sql } from 'drizzle-orm';
+import { and, asc, count, eq, gt, gte, inArray, isNotNull, isNull, lte, max, min, ne, notExists, or, sql } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../../database/database.module';
 import { archiveArtifacts, archiveSchedulerState, driveMotionFolderReservations, driveObjectAttempts } from '../../../database/schema';
 import type {
@@ -14,10 +15,39 @@ import { DriveObjectAttempt, type DriveAttemptState } from '../../domain/drive-o
 import type { CanonicalSharingState, VerifiedDriveObject } from '../../domain/drive-object-metadata.value-object';
 import { DriveAttemptLeaseLostError } from '../../domain/errors/drive-attempt-lease-lost.error';
 import { DriveObjectConflictError } from '../../domain/errors/drive-object-conflict.error';
+import {
+  admissionQueueQuery,
+  attemptDeadlineQuery,
+  queueStatusAggregateQuery,
+  type ArchiveSqlQuery,
+} from './archive-queue.queries';
 
 type ArtifactRow = typeof archiveArtifacts.$inferSelect;
 type AttemptRow = typeof driveObjectAttempts.$inferSelect;
 type Writer = Pick<AppDatabase, 'insert' | 'select' | 'update'>;
+
+interface QueueStatusAggregateRow {
+  queuedVideos: number;
+  retryableVideos: number;
+  oldestQueuedVideoAtMs: number | null;
+  branchBlocked: number;
+}
+
+interface AppDatabaseWithClient extends AppDatabase {
+  $client: Database.Database;
+}
+
+function runAll<Row>(db: AppDatabase, query: ArchiveSqlQuery): Row[] {
+  return (db as AppDatabaseWithClient).$client
+    .prepare(query.sql)
+    .all(...query.params) as Row[];
+}
+
+function runGet<Row>(db: AppDatabase, query: ArchiveSqlQuery): Row | undefined {
+  return (db as AppDatabaseWithClient).$client
+    .prepare(query.sql)
+    .get(...query.params) as Row | undefined;
+}
 
 /** SQLite manifest adapter. Every lease-owned mutation is expiry- and revision-fenced. */
 @Injectable()
@@ -660,6 +690,14 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
 
   async listUnattemptedArtifacts(selection: UnattemptedArtifactSelection): Promise<readonly ArchiveArtifact[]> {
     validateLimit(selection.limit);
+    if (selection.kind === 'motion_video' && selection.generationId !== undefined) {
+      const query = admissionQueueQuery({
+        generationId: selection.generationId,
+        nowMs: selection.nowMs ?? Date.now(),
+        limit: selection.limit,
+      });
+      return runAll<ArtifactRow>(this.db, query).map(toArtifact);
+    }
     const conditions = [
       eq(archiveArtifacts.kind, selection.kind),
       eq(archiveArtifacts.state, 'pending'),
@@ -667,12 +705,6 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
       lte(archiveArtifacts.admissionNextAt, selection.nowMs ?? Date.now()),
       isNull(driveObjectAttempts.id),
     ];
-    if (selection.generationId !== undefined) {
-      conditions.push(or(
-        isNull(archiveArtifacts.motionDayPath),
-        notExists(blockedHeadsQuery(this.db, selection.generationId)),
-      )!);
-    }
     return this.db.select({ artifact: archiveArtifacts }).from(archiveArtifacts)
       .leftJoin(driveObjectAttempts, eq(driveObjectAttempts.artifactId, archiveArtifacts.id))
       .where(and(...conditions))
@@ -766,13 +798,10 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
         notExists(this.db.select({ value: sql`1` }).from(driveObjectAttempts)
           .where(eq(driveObjectAttempts.artifactId, archiveArtifacts.id))),
       )).get()?.value ?? null;
-    const attemptDeadline = this.db.select({ value: min(driveObjectAttempts.nextAttemptAt) })
-      .from(driveObjectAttempts)
-      .where(and(
-        eq(driveObjectAttempts.generationId, generationId),
-        inArray(driveObjectAttempts.state, ['pending', 'retryable']),
-        gt(driveObjectAttempts.nextAttemptAt, nowMs),
-      )).get()?.value ?? null;
+    const attemptDeadline = runGet<{ value: number | null }>(
+      this.db,
+      attemptDeadlineQuery({ generationId, nowMs }),
+    )?.value ?? null;
     const folderDeadline = this.db.select({
       value: min(driveMotionFolderReservations.nextRevalidationAt),
     })
@@ -809,62 +838,15 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
   }
 
   async readQueueStatus(generationId: string, nowMs?: number): Promise<ArchiveQueueStatus> {
-    const queueCondition = and(
-      eq(archiveArtifacts.kind, 'motion_video'),
-      eq(archiveArtifacts.state, 'pending'),
-      inArray(archiveArtifacts.admissionState, ['ready', 'retryable']),
+    const aggregate = runGet<QueueStatusAggregateRow>(
+      this.db,
+      queueStatusAggregateQuery(generationId, nowMs ?? Number.MIN_SAFE_INTEGER),
     );
-    const aggregate = this.db.select({
-      count: count(),
-      oldest: min(archiveArtifacts.createdAt),
-    }).from(archiveArtifacts).where(queueCondition).get();
-    const retryableIds = new Set(this.db.select({ id: archiveArtifacts.id })
-      .from(archiveArtifacts)
-      .where(and(queueCondition, eq(archiveArtifacts.admissionState, 'retryable')))
-      .all().map(({ id }) => id));
-    for (const row of this.db.select({ artifactId: driveObjectAttempts.artifactId })
-      .from(driveObjectAttempts)
-      .innerJoin(archiveArtifacts, eq(driveObjectAttempts.artifactId, archiveArtifacts.id))
-      .where(and(
-        queueCondition,
-        eq(driveObjectAttempts.generationId, generationId),
-        eq(driveObjectAttempts.state, 'retryable'),
-      )).all()) retryableIds.add(row.artifactId);
-    const blocked = this.db.select({ id: archiveArtifacts.id })
-      .from(archiveArtifacts)
-      .where(and(
-        queueCondition,
-        isNotNull(archiveArtifacts.motionDayPath),
-        exists(blockedHeadsQuery(this.db, generationId)),
-      )).limit(1).get();
-    const healthyDue = nowMs === undefined ? undefined : this.db.select({ id: archiveArtifacts.id })
-      .from(archiveArtifacts)
-      .where(and(
-        queueCondition,
-        or(
-          and(
-            notExists(this.db.select({ value: sql`1` }).from(driveObjectAttempts)
-              .where(eq(driveObjectAttempts.artifactId, archiveArtifacts.id))),
-            lte(archiveArtifacts.admissionNextAt, nowMs),
-          ),
-          exists(this.db.select({ value: sql`1` }).from(driveObjectAttempts)
-            .where(and(
-              eq(driveObjectAttempts.artifactId, archiveArtifacts.id),
-              eq(driveObjectAttempts.generationId, generationId),
-              inArray(driveObjectAttempts.state, ['pending', 'retryable']),
-              lte(driveObjectAttempts.nextAttemptAt, nowMs),
-            ))),
-        ),
-        or(
-          isNull(archiveArtifacts.motionDayPath),
-          notExists(blockedHeadsQuery(this.db, generationId)),
-        ),
-      )).limit(1).get();
     return {
-      queuedVideos: aggregate?.count ?? 0,
-      retryableVideos: retryableIds.size,
-      oldestQueuedVideoAtMs: aggregate?.oldest ?? null,
-      branchBlocked: blocked !== undefined && (nowMs === undefined || healthyDue === undefined),
+      queuedVideos: aggregate?.queuedVideos ?? 0,
+      retryableVideos: aggregate?.retryableVideos ?? 0,
+      oldestQueuedVideoAtMs: aggregate?.oldestQueuedVideoAtMs ?? null,
+      branchBlocked: aggregate?.branchBlocked === 1,
     };
   }
 
@@ -1086,19 +1068,6 @@ function toArtifact(row: ArtifactRow): ArchiveArtifact {
       revision: row.admissionRevision,
     },
   });
-}
-
-function blockedHeadsQuery(db: AppDatabase, generationId: string) {
-  return db.select({ value: sql`1` }).from(driveMotionFolderReservations).where(and(
-    eq(driveMotionFolderReservations.generationId, generationId),
-    eq(driveMotionFolderReservations.currentSlot, 1),
-    inArray(driveMotionFolderReservations.state, ['detached', 'conflict']),
-    sql`${driveMotionFolderReservations.normalizedPath} in (
-      substr(${archiveArtifacts.motionDayPath}, 1, 4),
-      substr(${archiveArtifacts.motionDayPath}, 1, 7),
-      ${archiveArtifacts.motionDayPath}
-    )`,
-  ));
 }
 
 function toAttempt(row: AttemptRow): DriveObjectAttempt {

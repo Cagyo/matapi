@@ -434,9 +434,19 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
     }
     if (context.admission.kind !== 'allowed') return 'none';
     if (this.branchProbe !== undefined) {
+      const branchProbe = this.branchProbe;
+      const generation = context.generation;
       let result: Awaited<ReturnType<RevalidateMotionArchiveBranchUseCase['executeNext']>>;
       try {
-        result = await this.branchProbe.executeNext(context.generation, nowMs, signal);
+        result = this.providerGate === undefined
+          ? await branchProbe.executeNext(generation, nowMs, signal)
+          : await this.providerGate.run({
+              generationId: generation.id,
+              operationClass: 'folder',
+              probe: true,
+              operation: () => branchProbe.executeNext(generation, nowMs, signal),
+              signal,
+            });
       } catch (error) {
         return this.settleFailedProbe(error, signal);
       }

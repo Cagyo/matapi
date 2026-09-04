@@ -1,65 +1,143 @@
 # Google Drive date-folders live smoke record
 
-Run this checklist only on a supported Raspberry Pi with a disposable Google
-Drive account. Use the exact release commit and normal non-root worker service.
-This is an operator procedure, not an automated test, and it must not perform
-any action against a personal or production Drive account.
+Execution status: **NOT RUN**. This is required manual release evidence; CI is
+not a substitute.
+
+Run this procedure only on a supported Raspberry Pi with a disposable Google
+Drive account, the exact release commit, and the normal non-root worker service.
+Never run it against a personal or production account.
 
 ## Privacy rules
 
-Record only the aggregate evidence fields and pass/fail results requested below.
-Never copy or photograph a local absolute path, filename, Drive folder/object
-ID, installation/generation/artifact/attempt ID, OAuth client content, token,
-device code, provider response body, or resumable session URI. Redact terminal
-output before attaching it. The test account and every test object must be
-disposable.
+Record only timestamps, pass/fail results, and sanitized aggregate observations.
+Never copy or photograph a Drive ID, local path, filename, installation,
+generation, artifact or attempt ID, OAuth content, token, device code, chat ID,
+provider response body, or resumable URI. Redact terminal output before
+attaching it. The account and every remote object used here must be disposable.
 
 ## Environment record
 
 - Raspberry Pi model:
 - Raspbian release:
-- Node version:
-- Commit SHA:
-- Disposable Drive account type (consumer or Workspace only; no address):
-- Smoke start timestamp with timezone:
-- Smoke end timestamp with timezone:
-- Observed maximum concurrent upload count:
+- Node 22 exact version:
+- Exact commit SHA:
+- Generated migration 0022 applied (`YES` / `NO`):
+- Generated migration 0023 applied (`YES` / `NO`):
+- Disposable account type (`consumer` / `Workspace`; no address):
+- Overall smoke start timestamp with timezone:
+- Overall smoke end timestamp with timezone:
 
-## Procedure and evidence
+Both generated migrations are required: 0022 adds continuous-sync feature
+state and indexes; 0023 rebuilds the affected tables with the required
+constraints. Do not begin unless both report `YES`.
 
-For every numbered check, record `PASS` or `FAIL`, the start/end timestamps, and
-a sanitized observation. Do not record identifying values prohibited above.
+## Nine-step procedure and evidence
 
-1. Disable networking. Across two different local calendar dates, record at
-   least three completed Motion videos whose formats collectively use supported
-   AVI, MKV, or MP4 extensions. Confirm Motion registration remains responsive
-   while offline.
-2. Restore networking. Record the timestamp when durable registration completes
-   and the start timestamp of each consecutive transfer. Confirm the next
-   eligible transfer begins after settlement without waiting for the two-minute
-   safety interval; no consecutive-transfer gap may be two minutes or longer.
-3. In the disposable Drive UI, inspect the exact shape
-   `Home Worker Archive/Motion/YYYY/MM/DD/filename` for both local dates. Confirm
-   every tested video is under its matching date and `Backups` objects remain
-   direct children of `Home Worker Archive/Backups`.
-4. During a resumable upload, restart the worker once. Record only whether the
-   upload resumed from the provider-confirmed offset or safely replaced the
-   unusable session/reservation; confirm it did not replay an unconfirmed range
-   or create two current objects.
-5. Select one old flat Motion object whose exact matching local source is still
-   present and unchanged. Remove only that exact disposable Drive object. Run
-   reconciliation and confirm only that object is recreated beneath its exact
-   date folder; unrelated flat or nested objects must remain unchanged.
-6. Throughout the drain, verify Motion keeps recording, Telegram responds,
-   `/gdrive status` returns aggregate sanitized state, database backup creation
-   completes, reconciliation runs, and local cleanup remains responsive.
-7. Confirm the observed maximum concurrent upload count is exactly one. Review
-   every captured note/screenshot/log for prohibited IDs, paths, filenames,
-   credentials, tokens, provider bodies, and session URIs before retaining the
-   smoke record.
+For every step, fill in all four evidence fields. Observations must remain
+aggregate and must not contain any value prohibited above.
+
+### 1. Record while offline
+
+Disable networking and record several completed Motion videos across two local
+calendar dates. Confirm Motion remains responsive and completed-video recovery
+does not require Drive connectivity.
+
+- Start timestamp with timezone:
+- End timestamp with timezone:
+- Result (`PASS` / `FAIL`):
+- Sanitized aggregate observation:
+
+### 2. Restore connectivity and register
+
+Restore networking and confirm every eligible local video completes durable
+Archive registration.
+
+- Start timestamp with timezone:
+- End timestamp with timezone:
+- Result (`PASS` / `FAIL`):
+- Sanitized aggregate observation:
+
+### 3. Confirm continuous draining
+
+Observe consecutive transfer settlements and admissions. Confirm the next
+eligible item starts without a two-minute inter-file pause and that no more than
+one upload is active at once.
+
+- Start timestamp with timezone:
+- End timestamp with timezone:
+- Result (`PASS` / `FAIL`):
+- Sanitized aggregate observation:
+
+### 4. Confirm the exact remote hierarchy
+
+In the disposable account, confirm tested videos appear only under
+`Home Worker Archive/Motion/YYYY/MM/DD/filename` for their matching dates and
+that backup objects remain direct children of `Home Worker Archive/Backups`.
+
+- Start timestamp with timezone:
+- End timestamp with timezone:
+- Result (`PASS` / `FAIL`):
+- Sanitized aggregate observation:
+
+### 5. Restart during a resumable upload
+
+Restart the worker during one resumable transfer. Confirm it continues from the
+provider-confirmed offset or safely replaces an unusable session/reservation,
+without replaying an unconfirmed range or creating two current objects.
+
+- Start timestamp with timezone:
+- End timestamp with timezone:
+- Result (`PASS` / `FAIL`):
+- Sanitized aggregate observation:
+
+### 6. Rename a date folder during upload
+
+Rename one disposable date folder while a video targeting that branch is in
+flight. Confirm the attempt does not become verified, local retention stays
+blocked, the exact hierarchy is restored, and exactly one bounded recovery
+probe runs.
+
+- Start timestamp with timezone:
+- End timestamp with timezone:
+- Result (`PASS` / `FAIL`):
+- Sanitized aggregate observation:
+
+### 7. Remove one duplicate date-folder candidate
+
+Create a disposable duplicate candidate, allow the branch to become blocked,
+then remove one candidate. Confirm one survivor is adopted and no parallel
+folder is created.
+
+- Start timestamp with timezone:
+- End timestamp with timezone:
+- Result (`PASS` / `FAIL`):
+- Sanitized aggregate observation:
+
+### 8. Replace one flat video while its local source exists
+
+With the unchanged local source still present, remove one legacy flat remote
+video and run reconciliation. Confirm one nested replacement appears and
+unrelated objects remain unchanged. Record this limitation: a remote-only flat
+video cannot be recreated after its local source is pruned.
+
+- Start timestamp with timezone:
+- End timestamp with timezone:
+- Result (`PASS` / `FAIL`):
+- Sanitized aggregate observation:
+
+### 9. Confirm service responsiveness throughout
+
+Confirm database backups, Motion recording, Telegram, aggregate Drive status,
+reconciliation, and local cleanup remain responsive during all preceding
+pressure and recovery steps.
+
+- Start timestamp with timezone:
+- End timestamp with timezone:
+- Result (`PASS` / `FAIL`):
+- Sanitized aggregate observation:
 
 ## Result
 
-- Overall: `PASS` / `FAIL`
-- Failed check numbers (if any):
-- Sanitized follow-up reference (optional; no sensitive data):
+- Overall result (`PASS` / `FAIL` / `NOT RUN`): `NOT RUN`
+- Failed step numbers, if any:
+- Sanitized follow-up reference, if any:

@@ -553,6 +553,8 @@ describe('ArchiveSchedulerService', () => {
     vi.spyOn(fixture.providerGate, 'inspect')
       .mockResolvedValueOnce({ kind: 'allowed' })
       .mockResolvedValueOnce({ kind: 'allowed' })
+      .mockResolvedValueOnce({ kind: 'allowed' })
+      .mockResolvedValueOnce({ kind: 'allowed' })
       .mockResolvedValue({ kind: 'blocked', reason: 'quota_exhausted' });
 
     fixture.scheduler.startTimers();
@@ -585,6 +587,50 @@ describe('ArchiveSchedulerService', () => {
         fixture.repository.listUnattemptedArtifacts.mock.invocationCallOrder[0],
       );
       await fixture.scheduler.shutdown();
+    },
+  );
+
+  it.each([
+    ['claimed', 'restored', 'admitted'],
+    ['no claimed head', 'none', 'none'],
+  ] as const)(
+    'runs an ordinary %s branch check through exactly one folder gate',
+    async (_case, branchResult, admissionResult) => {
+      const fixture = setup();
+      fixture.branchProbe.executeNext.mockResolvedValue(branchResult);
+      const run = vi.spyOn(fixture.providerGate, 'run')
+        .mockImplementation(async (input) => input.operation());
+      const scheduler = fixture.scheduler as unknown as {
+        admitOne(
+          context: {
+            generation: DriveConnection;
+            admission: { kind: 'allowed' };
+            providerDeadlineMs: null;
+            clockHealth: 'healthy';
+          },
+          nowMs: number,
+          signal: AbortSignal,
+          expectedEpoch: number,
+        ): Promise<string>;
+      };
+      const signal = new AbortController().signal;
+
+      await expect(scheduler.admitOne({
+        generation: activeConnection('generation-1'),
+        admission: { kind: 'allowed' },
+        providerDeadlineMs: null,
+        clockHealth: 'healthy',
+      }, 10_000, signal, fixture.wake.snapshot())).resolves.toBe(admissionResult);
+
+      expect(run).toHaveBeenCalledOnce();
+      expect(run).toHaveBeenCalledWith({
+        generationId: 'generation-1',
+        operationClass: 'folder',
+        probe: true,
+        operation: expect.any(Function),
+        signal,
+      });
+      expect(fixture.branchProbe.executeNext).toHaveBeenCalledOnce();
     },
   );
 
@@ -722,7 +768,9 @@ describe('ArchiveSchedulerService', () => {
     expect(fixture.branchProbe.executeNext).toHaveBeenCalledOnce();
     expect(fixture.clockHealth.check).toHaveBeenCalledTimes(2);
     expect(fixture.credentials.loadActive).toHaveBeenCalledTimes(2);
-    expect(inspect).toHaveBeenCalledOnce();
+    expect(inspect).toHaveBeenCalledTimes(2);
+    expect(inspect).toHaveBeenNthCalledWith(1, 'generation-1', 'upload');
+    expect(inspect).toHaveBeenNthCalledWith(2, 'generation-1', 'folder');
     expect(fixture.uploads.execute).not.toHaveBeenCalled();
     expect(fixture.uploads.executeClaimed).not.toHaveBeenCalled();
     expect(log).toHaveBeenCalledWith(

@@ -103,11 +103,22 @@ Schema supports multiple cameras from day one. Commands default to first camera 
 
 Boot, Motion completion, and the two-minute safety trigger wake one cooperative
 filesystem traversal. The traversal carries an explicit, copied directory
-cursor; scans at most 64 filesystem entries and registers at most 64 durable
-events per batch; hashes sequentially; and yields to the event loop before its
-immediate continuation. A second wake coalesces behind the active traversal and
-never starts an overlapping scan. Cancellation clears the cursor so the next
-traversal starts from a fresh no-follow validation boundary.
+cursor, hashes sequentially, and yields to the event loop before its immediate
+continuation. Its four independently enforced per-run budgets are:
+
+| Environment variable | Bounds | Default |
+|---|---:|---:|
+| `ARCHIVE_MOTION_RECOVERY_ENTRY_LIMIT` | 1–256 entries | 64 |
+| `ARCHIVE_MOTION_RECOVERY_HASH_BYTES` | 65,536–67,108,864 bytes | 8,388,608 |
+| `ARCHIVE_MOTION_RECOVERY_WALL_TIME_MS` | 10–1,000 ms | 100 |
+| `ARCHIVE_MOTION_RECOVERY_DESCRIPTOR_LIMIT` | 1–64 descriptors | 16 |
+
+A second wake coalesces behind the active traversal and never starts an
+overlapping scan. `FsCompletedMotionVideoAdapter` keeps its `opendir` cursor and
+streaming-hash continuation process-local. Cancellation or restart closes and
+discards that state, so the next traversal starts from a fresh exact-root,
+no-follow validation boundary; durable registration lookup makes replay
+idempotent rather than treating the cursor as durable authority.
 
 Only a fully completed traversal reports `motionTraversalCompleted(completedAtMs)`
 through `ARCHIVE_RUNTIME_SIGNAL`. Archive records that timestamp with a
