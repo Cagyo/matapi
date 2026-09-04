@@ -4373,6 +4373,7 @@ __metadata:
     eslint-config-prettier: "npm:^9.1.0"
     google-auth-library: "npm:^10.9.1"
     grammy: "npm:^1.34.0"
+    ipaddr.js: "npm:^2.2.0"
     mqtt: "npm:^5"
     prettier: "npm:^3.4.2"
     reflect-metadata: "npm:^0.2.2"
@@ -4527,6 +4528,13 @@ __metadata:
   version: 1.9.1
   resolution: "ipaddr.js@npm:1.9.1"
   checksum: 10c0/0486e775047971d3fdb5fb4f063829bac45af299ae0b82dcf3afa2145338e08290563a2a70f34b732d795ecc8311902e541a8530eeb30d75860a78ff4e94ce2a
+  languageName: node
+  linkType: hard
+
+"ipaddr.js@npm:^2.2.0":
+  version: 2.5.0
+  resolution: "ipaddr.js@npm:2.5.0"
+  checksum: 10c0/5cef50d91a14f6388c3b5df3568ee7f8b18e07fa18896debc84d3393b78c1096e1b8e3a4f9fa9020c5ca5b556efc28550432f92a34d23c0cd643bd3194eb439d
   languageName: node
   linkType: hard
 
