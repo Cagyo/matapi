@@ -12,8 +12,7 @@ const DEFAULT_SETTINGS_PATH = "/var/lib/home-worker/live-view-settings.json";
 const MAX_SETTINGS_BYTES = 4_096;
 const SETTINGS_MODE = 0o640;
 const ROOT_UID = 0;
-const O_CLOEXEC =
-  (constants as unknown as Record<string, number>).O_CLOEXEC ?? 0;
+const O_CLOEXEC = closeOnExecFlagFor(process.platform);
 
 type SettingsFileHandle = Pick<FileHandle, "stat" | "read" | "close">;
 type OpenSettingsFile = (
@@ -26,6 +25,14 @@ export interface FsLiveViewSettingsOptions {
   readonly expectedUid?: number;
   readonly expectedGid?: number;
   readonly openFile?: OpenSettingsFile;
+}
+
+export function closeOnExecFlagFor(platform: NodeJS.Platform): number {
+  // Node does not expose O_CLOEXEC in `fs.constants`; these are the stable
+  // target ABI values from Linux and Darwin fcntl headers.
+  if (platform === "linux") return 0x80000;
+  if (platform === "darwin") return 0x1000000;
+  throw new LiveViewSettingsStateError("unsafe-settings-state");
 }
 
 export class FsLiveViewSettingsAdapter implements LiveViewSettingsStorePort {
@@ -104,7 +111,7 @@ export function assertSafeMetadata(
     metadata.nlink !== 1 ||
     metadata.uid !== expectedUid ||
     metadata.gid !== expectedGid ||
-    (metadata.mode & 0o777) !== expectedMode ||
+    (metadata.mode & 0o7777) !== expectedMode ||
     !Number.isSafeInteger(metadata.size) ||
     metadata.size < 1 ||
     metadata.size > maximumBytes

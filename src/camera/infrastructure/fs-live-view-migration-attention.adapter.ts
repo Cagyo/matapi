@@ -9,6 +9,7 @@ import type {
 import {
   assertNoDuplicateJsonKeys,
   assertSafeMetadata,
+  closeOnExecFlagFor,
   readBounded,
 } from "./fs-live-view-settings.adapter";
 
@@ -17,8 +18,7 @@ const DEFAULT_ATTENTION_PATH =
 const MAX_ATTENTION_BYTES = 4_096;
 const ATTENTION_MODE = 0o640;
 const ROOT_UID = 0;
-const O_CLOEXEC =
-  (constants as unknown as Record<string, number>).O_CLOEXEC ?? 0;
+const O_CLOEXEC = closeOnExecFlagFor(process.platform);
 
 type AttentionFileHandle = Pick<FileHandle, "stat" | "read" | "close">;
 type OpenAttentionFile = (

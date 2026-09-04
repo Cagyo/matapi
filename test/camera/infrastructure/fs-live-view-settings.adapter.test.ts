@@ -17,7 +17,10 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { LiveViewSettingsStateError } from "../../../src/camera/domain/errors/live-view-settings-state.error";
 import { FsLiveViewMigrationAttentionAdapter } from "../../../src/camera/infrastructure/fs-live-view-migration-attention.adapter";
-import { FsLiveViewSettingsAdapter } from "../../../src/camera/infrastructure/fs-live-view-settings.adapter";
+import {
+  closeOnExecFlagFor,
+  FsLiveViewSettingsAdapter,
+} from "../../../src/camera/infrastructure/fs-live-view-settings.adapter";
 
 const settingsV3 = {
   version: 1 as const,
@@ -70,11 +73,16 @@ describe("FsLiveViewSettingsAdapter", () => {
     expect(observedFlags & constants.O_RDONLY).toBe(constants.O_RDONLY);
     expect(observedFlags & constants.O_NONBLOCK).toBe(constants.O_NONBLOCK);
     expect(observedFlags & constants.O_NOFOLLOW).toBe(constants.O_NOFOLLOW);
-    const closeOnExec =
-      (constants as unknown as Record<string, number>).O_CLOEXEC ?? 0;
-    if (closeOnExec !== 0) {
-      expect(observedFlags & closeOnExec).toBe(closeOnExec);
-    }
+    const closeOnExec = process.platform === "linux" ? 0x80000 : 0x1000000;
+    expect(observedFlags & closeOnExec).toBe(closeOnExec);
+  });
+
+  it("uses the target ABI close-on-exec flag and refuses unsupported platforms", () => {
+    expect(closeOnExecFlagFor("linux")).toBe(0x80000);
+    expect(closeOnExecFlagFor("darwin")).toBe(0x1000000);
+    expect(() => closeOnExecFlagFor("win32")).toThrow(
+      LiveViewSettingsStateError,
+    );
   });
 
   it("rejects an absent settings file", async () => {
@@ -148,6 +156,24 @@ describe("FsLiveViewSettingsAdapter", () => {
       LiveViewSettingsStateError,
     );
   });
+
+  it.each([0o1640, 0o2640, 0o4640])(
+    "rejects special mode bits in settings mode %o",
+    async (mode) => {
+      const { path } = await fixture();
+      const adapter = new FsLiveViewSettingsAdapter({
+        path,
+        expectedUid: process.getuid?.() ?? -1,
+        expectedGid: process.getgid?.() ?? -1,
+        openFile: (openedPath, flags) =>
+          openWithReportedMode(openedPath, flags, mode),
+      });
+
+      await expect(adapter.readCommitted()).rejects.toBeInstanceOf(
+        LiveViewSettingsStateError,
+      );
+    },
+  );
 
   it("rejects a settings file with more than one hard link", async () => {
     const { path, adapter } = await fixture();
@@ -281,23 +307,64 @@ describe("FsLiveViewMigrationAttentionAdapter", () => {
       await writeFile(path, body);
       await chmod(path, 0o640);
     }
-    return new FsLiveViewMigrationAttentionAdapter({
+    return {
       path,
-      expectedUid: process.getuid?.() ?? -1,
-      expectedGid: process.getgid?.() ?? -1,
-    });
+      adapter: new FsLiveViewMigrationAttentionAdapter({
+        path,
+        expectedUid: process.getuid?.() ?? -1,
+        expectedGid: process.getgid?.() ?? -1,
+      }),
+    };
   }
 
   it("returns null when the bounded migration marker is absent", async () => {
-    await expect((await fixture()).read()).resolves.toBeNull();
+    const { adapter } = await fixture();
+    await expect(adapter.read()).resolves.toBeNull();
   });
 
   it("reads only the closed legacy-values-invalid marker vocabulary", async () => {
-    const adapter = await fixture(
+    const { adapter } = await fixture(
       '{"version":1,"code":"legacy-values-invalid"}',
     );
 
     await expect(adapter.read()).resolves.toBe("legacy-values-invalid");
+  });
+
+  it("opens the migration marker with the host close-on-exec flag", async () => {
+    const { path } = await fixture(
+      '{"version":1,"code":"legacy-values-invalid"}',
+    );
+    let observedFlags = 0;
+    const adapter = new FsLiveViewMigrationAttentionAdapter({
+      path,
+      expectedUid: process.getuid?.() ?? -1,
+      expectedGid: process.getgid?.() ?? -1,
+      openFile: async (openedPath, flags) => {
+        observedFlags = flags;
+        return open(openedPath, flags);
+      },
+    });
+
+    await expect(adapter.read()).resolves.toBe("legacy-values-invalid");
+    const closeOnExec = process.platform === "linux" ? 0x80000 : 0x1000000;
+    expect(observedFlags & closeOnExec).toBe(closeOnExec);
+  });
+
+  it("rejects special mode bits on the migration marker", async () => {
+    const { path } = await fixture(
+      '{"version":1,"code":"legacy-values-invalid"}',
+    );
+    const adapter = new FsLiveViewMigrationAttentionAdapter({
+      path,
+      expectedUid: process.getuid?.() ?? -1,
+      expectedGid: process.getgid?.() ?? -1,
+      openFile: (openedPath, flags) =>
+        openWithReportedMode(openedPath, flags, 0o2640),
+    });
+
+    await expect(adapter.read()).rejects.toMatchObject({
+      reason: "unsafe-settings-state",
+    });
   });
 
   it.each([
@@ -307,7 +374,7 @@ describe("FsLiveViewMigrationAttentionAdapter", () => {
   ])(
     "rejects malformed marker state without exposing its body",
     async (body) => {
-      const adapter = await fixture(body);
+      const { adapter } = await fixture(body);
 
       await expect(adapter.read()).rejects.toMatchObject({
         name: "LiveViewSettingsStateError",
@@ -316,3 +383,27 @@ describe("FsLiveViewMigrationAttentionAdapter", () => {
     },
   );
 });
+
+async function openWithReportedMode(
+  path: string,
+  flags: number,
+  reportedMode: number,
+) {
+  const handle = await open(path, flags);
+  return {
+    stat: async () => {
+      const metadata = await handle.stat();
+      return new Proxy(metadata, {
+        get(target, property) {
+          if (property === "mode") {
+            return (target.mode & ~0o7777) | reportedMode;
+          }
+          const value = Reflect.get(target, property, target) as unknown;
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    },
+    read: handle.read.bind(handle),
+    close: handle.close.bind(handle),
+  };
+}
