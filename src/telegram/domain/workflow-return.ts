@@ -4,7 +4,8 @@ export type ExternalWorkflow =
   | 'logs' | 'csv' | 'language' | 'help' | 'sensor-add'
   | 'sensor-modify' | 'sensor-remove' | 'sensor-import' | 'sensor-export'
   | 'drive-status' | 'drive-setup' | 'storage-cleanup' | 'health'
-  | 'system-update' | 'system-restart' | 'invite' | 'camera' | 'feature';
+  | 'system-update' | 'system-restart' | 'invite' | 'camera' | 'feature'
+  | 'live-view-settings';
 
 /** Telegram's receipt boundary deliberately mirrors, but does not import, Feature state. */
 export type FeatureAttentionReason =
@@ -20,6 +21,12 @@ export interface FeatureWorkflowOperation {
   expectedInstalled: boolean;
   expectedEnabled: boolean;
   expectedAttentionReason: FeatureAttentionReason | null;
+}
+
+export interface LiveViewSettingsWorkflowOperation {
+  readonly kind: 'live-view-settings-mutation';
+  readonly jobId: string;
+  readonly expectedGeneration: number;
 }
 
 export type WorkflowReturnPhase = 'cancellable' | 'running';
@@ -52,7 +59,7 @@ const WORKFLOWS = new Set<ExternalWorkflow>([
   'sensor-modify', 'sensor-remove', 'sensor-import', 'sensor-export',
   'drive-status', 'drive-setup', 'storage-cleanup', 'health',
   'system-update', 'system-restart', 'invite', 'camera',
-  'feature',
+  'feature', 'live-view-settings',
 ]);
 
 export function workflowReturnCallback(

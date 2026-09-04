@@ -5,6 +5,7 @@ import {
   isWorkflowReturnPhase,
   type ExternalWorkflow,
   type FeatureWorkflowOperation,
+  type LiveViewSettingsWorkflowOperation,
   type WorkflowDeliveryStage,
   type WorkflowReturnPhase,
 } from './workflow-return';
@@ -31,10 +32,10 @@ interface WorkflowReturnPayloadBase {
   origin: HomeView;
 }
 
-/** Strict workflow discriminator: only feature receipts may carry an operation. */
+/** Strict workflow discriminator: operations are bound to their exact workflow. */
 export type WorkflowReturnPayload =
   | (WorkflowReturnPayloadBase & {
-    workflow: Exclude<ExternalWorkflow, 'feature'>;
+    workflow: Exclude<ExternalWorkflow, 'feature' | 'live-view-settings'>;
     /** Absent on receipts written before durable outcome delivery existed. */
     deliveryStage?: WorkflowDeliveryStage;
     operation?: never;
@@ -49,6 +50,16 @@ export type WorkflowReturnPayload =
     workflow: 'feature';
     deliveryStage: WorkflowDeliveryStage;
     operation: FeatureWorkflowOperation;
+  })
+  | (WorkflowReturnPayloadBase & {
+    workflow: 'live-view-settings';
+    deliveryStage: WorkflowDeliveryStage;
+    operation?: never;
+  })
+  | (WorkflowReturnPayloadBase & {
+    workflow: 'live-view-settings';
+    deliveryStage: WorkflowDeliveryStage;
+    operation: LiveViewSettingsWorkflowOperation;
   });
 
 export interface ClaimedExternalAction {
@@ -116,7 +127,7 @@ function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): b
 }
 
 function hasWorkflowReturnPayloadKeys(value: Record<string, unknown>): boolean {
-  if (value.workflow === 'feature') {
+  if (value.workflow === 'feature' || value.workflow === 'live-view-settings') {
     return hasKeys(value, ['workflow', 'phase', 'originSource', 'origin', 'deliveryStage'])
       || hasKeys(value, ['workflow', 'phase', 'originSource', 'origin', 'operation', 'deliveryStage']);
   }
@@ -125,8 +136,13 @@ function hasWorkflowReturnPayloadKeys(value: Record<string, unknown>): boolean {
 }
 
 function isWorkflowPayloadShape(value: Record<string, unknown>): boolean {
-  if (value.workflow !== 'feature') return value.operation === undefined;
-  return value.operation === undefined || isFeatureWorkflowOperation(value.operation);
+  if (value.workflow === 'feature') {
+    return value.operation === undefined || isFeatureWorkflowOperation(value.operation);
+  }
+  if (value.workflow === 'live-view-settings') {
+    return value.operation === undefined || isLiveViewSettingsWorkflowOperation(value.operation);
+  }
+  return value.operation === undefined;
 }
 
 function isFeatureWorkflowOperation(value: unknown): value is FeatureWorkflowOperation {
@@ -142,6 +158,17 @@ function isFeatureWorkflowOperation(value: unknown): value is FeatureWorkflowOpe
       || value.expectedAttentionReason === 'partial-state-uncertain'
       || value.expectedAttentionReason === 'readiness-failed'
       || value.expectedAttentionReason === 'restart-required');
+}
+
+function isLiveViewSettingsWorkflowOperation(
+  value: unknown,
+): value is LiveViewSettingsWorkflowOperation {
+  return isRecord(value)
+    && hasKeys(value, ['kind', 'jobId', 'expectedGeneration'])
+    && value.kind === 'live-view-settings-mutation'
+    && isReceiptId(value.jobId)
+    && isSafeInteger(value.expectedGeneration)
+    && value.expectedGeneration >= 0;
 }
 
 function isSafeInteger(value: unknown): value is number {

@@ -1,8 +1,16 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { and, eq } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../database/database.module';
-import { homeActionReceipts, notificationPauseReceipts, users } from '../../database/schema';
-import type { FeatureMutationClaimResult, HomeActionRepositoryPort, WorkflowClaimResult } from '../application/ports/home-action-repository.port';
+import { featureInstallJobs, homeActionReceipts, liveViewSettingsJobs, notificationPauseReceipts, users } from '../../database/schema';
+import { createLiveViewSettingsCandidate } from '../../camera/domain/live-view-settings';
+import type { LiveViewSettingsJob } from '../../camera/domain/live-view-settings-job';
+import type {
+  FeatureMutationClaimResult,
+  HomeActionRepositoryPort,
+  LiveViewSettingsMutationClaimInput,
+  LiveViewSettingsMutationClaimResult,
+  WorkflowClaimResult,
+} from '../application/ports/home-action-repository.port';
 import {
   isExternalReceipt,
   isHomeActionReceipt,
@@ -308,7 +316,8 @@ export class DrizzleHomeActionRepository implements HomeActionRepositoryPort {
         .where(currentKey({ ...input, kind: 'workflow-return' })).get();
       const receipt = row && decode(row);
       if (receipt?.kind !== 'workflow-return' || receipt.id !== input.id) return { kind: 'superseded' };
-      if (receipt.payload.workflow !== 'feature' || !receipt.payload.operation) return { kind: 'mismatched' };
+      const operation = receipt.payload.workflow === 'feature' ? receipt.payload.operation : undefined;
+      if (!operation) return { kind: 'mismatched' };
       if (receipt.status !== 'pending') return { kind: 'terminal' };
       if (receipt.expiresAt.getTime() <= input.now.getTime()) return { kind: 'expired' };
       const user = tx.select({ role: users.role }).from(users)
@@ -321,7 +330,7 @@ export class DrizzleHomeActionRepository implements HomeActionRepositoryPort {
         expiresAt: new Date(input.now.getTime() + 24 * 60 * 60 * 1_000),
         payload: { ...receipt.payload, phase: 'running' },
       };
-      if (!isHomeActionReceipt(running) || !running.payload.operation) throw new RangeError('Invalid feature mutation receipt');
+      if (!isHomeActionReceipt(running)) throw new RangeError('Invalid feature mutation receipt');
       const result = tx.update(homeActionReceipts)
         .set({
           status: 'executing',
@@ -336,7 +345,81 @@ export class DrizzleHomeActionRepository implements HomeActionRepositoryPort {
         ))
         .run();
       if (result.changes !== 1) return { kind: 'superseded' };
-      return { kind: 'claimed', receipt: running, operation: running.payload.operation };
+      return { kind: 'claimed', receipt: running, operation };
+    });
+  }
+
+  async claimLiveViewSettingsMutation(
+    input: LiveViewSettingsMutationClaimInput,
+  ): Promise<LiveViewSettingsMutationClaimResult> {
+    return this.immediate((tx) => {
+      const row = tx.select().from(homeActionReceipts)
+        .where(currentKey({ ...input, kind: 'workflow-return' })).get();
+      const receipt = row && decode(row);
+      if (receipt?.kind !== 'workflow-return' || receipt.id !== input.receiptId) {
+        return { kind: 'superseded' };
+      }
+      const operation = receipt.payload.operation;
+      if (receipt.payload.workflow !== 'live-view-settings'
+        || operation?.kind !== 'live-view-settings-mutation'
+        || operation.jobId !== input.jobId
+        || operation.expectedGeneration !== input.expectedGeneration) {
+        return { kind: 'mismatched' };
+      }
+      if (receipt.status !== 'pending') return { kind: 'terminal' };
+      if (receipt.expiresAt.getTime() <= input.now.getTime()) return { kind: 'expired' };
+      const user = tx.select({ role: users.role }).from(users)
+        .where(eq(users.telegramId, input.userId)).get();
+      if (user?.role !== 'admin') return { kind: 'unauthorized' };
+
+      const rtspInstall = tx.select({ id: featureInstallJobs.id }).from(featureInstallJobs)
+        .where(and(eq(featureInstallJobs.featureName, 'rtsp'), eq(featureInstallJobs.activeSlot, 1)))
+        .get();
+      if (rtspInstall) return { kind: 'busy' };
+      const activeSettings = tx.select({ id: liveViewSettingsJobs.id }).from(liveViewSettingsJobs)
+        .where(eq(liveViewSettingsJobs.activeSlot, 1)).get();
+      if (activeSettings) return { kind: 'busy' };
+
+      const candidate = createLiveViewSettingsCandidate(input.candidate);
+      const running: WorkflowReturnReceipt = {
+        ...receipt,
+        status: 'executing',
+        expiresAt: new Date(input.now.getTime() + 24 * 60 * 60 * 1_000),
+        payload: { ...receipt.payload, phase: 'running' },
+      };
+      if (!isHomeActionReceipt(running)) {
+        throw new RangeError('Invalid live view settings mutation receipt');
+      }
+
+      const claimed = tx.update(homeActionReceipts)
+        .set({
+          status: 'executing',
+          payload: JSON.stringify(running.payload),
+          expiresAt: running.expiresAt,
+          updatedAt: input.now,
+        })
+        .where(and(
+          exactKey({ ...input, id: input.receiptId, kind: 'workflow-return' }),
+          eq(homeActionReceipts.currentSlot, 1),
+          eq(homeActionReceipts.status, 'pending'),
+        ))
+        .run();
+      if (claimed.changes !== 1) return { kind: 'superseded' };
+
+      const inserted = tx.insert(liveViewSettingsJobs).values({
+        id: input.jobId,
+        status: 'prepared',
+        activeSlot: 1,
+        expectedGeneration: input.expectedGeneration,
+        candidateSettings: candidate,
+        requestedByUserId: input.userId,
+        requestedInChatId: input.chatId,
+        workflowReceiptId: input.receiptId,
+        failureCode: null,
+        createdAt: input.now,
+        updatedAt: input.now,
+      }).returning().get();
+      return { kind: 'claimed', job: toLiveViewSettingsJob(inserted) };
     });
   }
 
@@ -375,4 +458,17 @@ export class DrizzleHomeActionRepository implements HomeActionRepositoryPort {
       currentSlot: 1, status: receipt.status, payload: JSON.stringify(receipt.payload), expiresAt: receipt.expiresAt, updatedAt: receipt.expiresAt,
     }).run();
   }
+}
+
+function toLiveViewSettingsJob(
+  row: typeof liveViewSettingsJobs.$inferSelect,
+): LiveViewSettingsJob {
+  return {
+    id: row.id,
+    status: 'prepared',
+    activeSlot: 1,
+    expectedGeneration: row.expectedGeneration,
+    candidateSettings: createLiveViewSettingsCandidate(row.candidateSettings),
+    failureCode: null,
+  };
 }

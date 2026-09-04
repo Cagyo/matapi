@@ -1,4 +1,15 @@
-import type { FeatureMutationClaimResult, HomeActionRepositoryPort, WorkflowClaimResult } from '../application/ports/home-action-repository.port';
+import { LiveViewSettingsBusyError } from '../../camera/domain/errors/live-view-settings-busy.error';
+import type { LiveViewSettingsJob } from '../../camera/domain/live-view-settings-job';
+import { createLiveViewSettingsCandidate } from '../../camera/domain/live-view-settings';
+import type { PrepareLiveViewSettingsJobInput } from '../../camera/domain/ports/live-view-settings-job-repository.port';
+import type { FeatureInstallJobRepositoryPort } from '../../features/domain/ports/feature-install-job.repository.port';
+import type {
+  FeatureMutationClaimResult,
+  HomeActionRepositoryPort,
+  LiveViewSettingsMutationClaimInput,
+  LiveViewSettingsMutationClaimResult,
+  WorkflowClaimResult,
+} from '../application/ports/home-action-repository.port';
 import { isExternalReceipt, isHomeActionReceipt, type HomeActionReceipt } from '../domain/home-action-receipt';
 import {
   canTransitionWorkflowDeliveryStage,
@@ -31,7 +42,15 @@ export class InMemoryHomeActionRepository implements HomeActionRepositoryPort {
   private readonly receipts = new Map<string, HomeActionReceipt>();
   private readonly current = new Map<string, string>();
 
-  constructor(private readonly users?: InMemoryUserRepository) {}
+  private liveViewSettingsClaims: Promise<void> = Promise.resolve();
+
+  constructor(
+    private readonly users?: InMemoryUserRepository,
+    private readonly featureInstallJobs?: Pick<FeatureInstallJobRepositoryPort, 'findActive'>,
+    private readonly liveViewSettingsJobs?: {
+      claimPrepared(input: PrepareLiveViewSettingsJobInput): LiveViewSettingsJob;
+    },
+  ) {}
 
   async create(receipt: HomeActionReceipt): Promise<void> {
     if (!isHomeActionReceipt(receipt)) throw new RangeError('Invalid Home action receipt');
@@ -228,7 +247,8 @@ export class InMemoryHomeActionRepository implements HomeActionRepositoryPort {
     return this.transactionSync(() => {
       const receipt = this.getCurrent(`${input.userId}:${input.chatId}:workflow-return`);
       if (receipt?.kind !== 'workflow-return' || receipt.id !== input.id) return { kind: 'superseded' } as const;
-      if (receipt.payload.workflow !== 'feature' || !receipt.payload.operation) return { kind: 'mismatched' } as const;
+      const operation = receipt.payload.workflow === 'feature' ? receipt.payload.operation : undefined;
+      if (!operation) return { kind: 'mismatched' } as const;
       if (receipt.status !== 'pending') return { kind: 'terminal' } as const;
       if (receipt.expiresAt.getTime() <= input.now.getTime()) return { kind: 'expired' } as const;
       if (this.users?.readRoleForHomeAction(input.userId) !== 'admin') return { kind: 'unauthorized' } as const;
@@ -238,9 +258,65 @@ export class InMemoryHomeActionRepository implements HomeActionRepositoryPort {
         expiresAt: new Date(input.now.getTime() + 24 * 60 * 60 * 1_000),
         payload: { ...receipt.payload, phase: 'running' },
       };
-      if (!isHomeActionReceipt(running) || !running.payload.operation) throw new RangeError('Invalid feature mutation receipt');
+      if (!isHomeActionReceipt(running)) throw new RangeError('Invalid feature mutation receipt');
       this.save(running);
-      return { kind: 'claimed', receipt: clone(running) as WorkflowReturnReceipt, operation: running.payload.operation } as const;
+      return { kind: 'claimed', receipt: clone(running) as WorkflowReturnReceipt, operation } as const;
+    });
+  }
+
+  async claimLiveViewSettingsMutation(
+    input: LiveViewSettingsMutationClaimInput,
+  ): Promise<LiveViewSettingsMutationClaimResult> {
+    return this.serializeLiveViewSettingsClaim(async () => {
+      const receipt = this.getCurrent(`${input.userId}:${input.chatId}:workflow-return`);
+      if (receipt?.kind !== 'workflow-return' || receipt.id !== input.receiptId) {
+        return { kind: 'superseded' } as const;
+      }
+      const operation = receipt.payload.operation;
+      if (receipt.payload.workflow !== 'live-view-settings'
+        || operation?.kind !== 'live-view-settings-mutation'
+        || operation.jobId !== input.jobId
+        || operation.expectedGeneration !== input.expectedGeneration) {
+        return { kind: 'mismatched' } as const;
+      }
+      if (receipt.status !== 'pending') return { kind: 'terminal' } as const;
+      if (receipt.expiresAt.getTime() <= input.now.getTime()) return { kind: 'expired' } as const;
+      if (this.users?.readRoleForHomeAction(input.userId) !== 'admin') {
+        return { kind: 'unauthorized' } as const;
+      }
+      const featureJob = await this.featureInstallJobs?.findActive();
+      if (featureJob?.feature === 'rtsp') return { kind: 'busy' } as const;
+      if (!this.liveViewSettingsJobs) {
+        throw new Error('InMemoryHomeActionRepository requires live view settings jobs for settings claims');
+      }
+
+      const candidate = createLiveViewSettingsCandidate(input.candidate);
+      const running: WorkflowReturnReceipt = {
+        ...receipt,
+        status: 'executing',
+        expiresAt: new Date(input.now.getTime() + 24 * 60 * 60 * 1_000),
+        payload: { ...receipt.payload, phase: 'running' },
+      };
+      if (!isHomeActionReceipt(running)) {
+        throw new RangeError('Invalid live view settings mutation receipt');
+      }
+
+      try {
+        const job = this.liveViewSettingsJobs.claimPrepared({
+          id: input.jobId,
+          expectedGeneration: input.expectedGeneration,
+          candidateSettings: candidate,
+          requestedByUserId: input.userId,
+          requestedInChatId: input.chatId,
+          workflowReceiptId: input.receiptId,
+          now: input.now,
+        });
+        this.save(running);
+        return { kind: 'claimed', job } as const;
+      } catch (error) {
+        if (error instanceof LiveViewSettingsBusyError) return { kind: 'busy' } as const;
+        throw error;
+      }
     });
   }
 
@@ -263,6 +339,12 @@ export class InMemoryHomeActionRepository implements HomeActionRepositoryPort {
   private transactionSync<T>(operation: () => T): T {
     const receipts = this.snapshotReceipts();
     try { return operation(); } catch (error) { this.restoreReceipts(receipts); throw error; }
+  }
+
+  private serializeLiveViewSettingsClaim<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.liveViewSettingsClaims.then(operation, operation);
+    this.liveViewSettingsClaims = result.then(() => undefined, () => undefined);
+    return result;
   }
 
   private getCurrent(slot: string): HomeActionReceipt | null {
