@@ -341,7 +341,7 @@ describe('DrizzleArchiveArtifactRepository', () => {
     })).resolves.toBe(275);
   });
 
-  it('matches scheduler eligibility when a healthy artifact has only a retired-generation attempt', async () => {
+  it('admits retired-generation-only Motion work exactly once for the active generation', async () => {
     const blocked = await repository.register({
       ...artifactFixture(), sourceIdentity: 'blocked-due',
       relativePath: '2026/08/16/blocked.mp4', sourceFingerprint: '1'.repeat(64),
@@ -359,10 +359,135 @@ describe('DrizzleArchiveArtifactRepository', () => {
       folderReservations, 'generation-active', '2026/08/16', 'detached',
     );
 
+    await expect(repository.listUnattemptedArtifacts({
+      kind: 'motion_video', generationId: 'generation-active', nowMs: 100, limit: 1,
+    })).resolves.toMatchObject([{ id: stale.id }]);
+    const legacySelection = await repository.listUnattemptedArtifacts({
+      kind: 'motion_video', nowMs: 100, limit: 10,
+    });
+    expect(legacySelection.map(({ id }) => id)).not.toContain(stale.id);
     await expect(repository.readQueueStatus('generation-active', 100)).resolves.toMatchObject({
       queuedVideos: 2,
-      branchBlocked: true,
+      branchBlocked: false,
     });
+
+    await repository.createAttempt(
+      stale.id, 'generation-active', 'active-file', 'active-folder', 13,
+    );
+    const afterActiveAttempt = await repository.listUnattemptedArtifacts({
+      kind: 'motion_video', generationId: 'generation-active', nowMs: 100, limit: 10,
+    });
+    expect(afterActiveAttempt.map(({ id }) => id)).not.toContain(stale.id);
+  });
+
+  it('admits a retired-generation-only backup exactly once for the active generation', async () => {
+    const backup = await repository.register({
+      ...artifactFixture(), kind: 'database_backup',
+      sourceIdentity: 'backup-rollover', sourceFingerprint: '3'.repeat(64),
+    });
+    await repository.createAttempt(
+      backup.id, 'generation-retired', 'retired-backup', 'retired-folder', 10,
+    );
+
+    await expect(repository.listUnattemptedArtifacts({
+      kind: 'database_backup', generationId: 'generation-active', nowMs: 100, limit: 1,
+    })).resolves.toMatchObject([{ id: backup.id }]);
+    await expect(repository.listUnattemptedArtifacts({
+      kind: 'database_backup', nowMs: 100, limit: 1,
+    })).resolves.toEqual([]);
+
+    await repository.createAttempt(
+      backup.id, 'generation-active', 'active-backup', 'active-folder', 11,
+    );
+    await expect(repository.listUnattemptedArtifacts({
+      kind: 'database_backup', generationId: 'generation-active', nowMs: 100, limit: 1,
+    })).resolves.toEqual([]);
+  });
+
+  it('keeps a future admission deadline visible across generation rollover', async () => {
+    const artifact = await repository.register({
+      ...artifactFixture(), sourceIdentity: 'future-rollover', sourceFingerprint: '4'.repeat(64),
+    });
+    await repository.markAdmissionRetryable(
+      artifact.id, artifact.admission.revision, 'temporary', 500, 10,
+    );
+    await repository.createAttempt(
+      artifact.id, 'generation-retired', 'retired-future', 'retired-folder', 11,
+    );
+
+    await expect(repository.readNextDeadline({
+      generationId: 'generation-active', nowMs: 100, providerDeadlineMs: null,
+    })).resolves.toBe(500);
+  });
+
+  it('reports a due pre-attempt artifact as the next eligible transfer size', async () => {
+    const artifact = await repository.register({
+      ...artifactFixture(),
+      size: 8_192,
+    });
+    const admitted = await repository.recordMotionAdmissionPath(
+      artifact.id,
+      artifact.admission.revision,
+      '2026/08/13',
+      10,
+    );
+    await repository.markAdmissionRetryable(
+      artifact.id,
+      admitted.admission.revision,
+      'folder_resolution_failed',
+      50,
+      11,
+    );
+
+    await expect(repository.readNextEligibleTransferSize('generation-1', 49))
+      .resolves.toBeNull();
+    await expect(repository.readNextEligibleTransferSize('generation-1', 50))
+      .resolves.toBe(8_192);
+  });
+
+  it('reports the backup-first transfer size before a smaller due video', async () => {
+    const video = await repository.register(artifactFixture());
+    await repository.createAttempt(
+      video.id,
+      'generation-1',
+      'video-file',
+      'motion-folder',
+      10,
+    );
+    await repository.register({
+      ...artifactFixture(),
+      kind: 'database_backup',
+      sourceIdentity: 'backup:priority',
+      sourceFingerprint: 'c'.repeat(64),
+      size: 8_192,
+    });
+
+    await expect(repository.readNextEligibleTransferSize('generation-1', 100))
+      .resolves.toBe(8_192);
+  });
+
+  it('mirrors fresh-video fairness when selecting the next transfer size', async () => {
+    const retryArtifact = await repository.register({
+      ...artifactFixture(), size: 9_000,
+    });
+    const retry = await repository.createAttempt(
+      retryArtifact.id, 'generation-1', 'retry-file', 'motion-folder', 10,
+    );
+    const claimed = await repository.claimAttempt(retry.id, {
+      generationId: 'generation-1', owner: 'worker', nowMs: 20, leaseMs: 100,
+    });
+    await repository.markRetryable(retry.id, claimed.lease, 'temporary', 30, 21);
+    await repository.register({
+      ...artifactFixture(),
+      sourceIdentity: 'motion:fresh-priority',
+      sourceFingerprint: 'd'.repeat(64),
+      size: 1_000,
+    });
+
+    await expect(repository.readNextEligibleTransferSize('generation-1', 100))
+      .resolves.toBe(1_000);
+    await expect(repository.readNextEligibleTransferSize('generation-1', 100, 100))
+      .resolves.toBe(9_000);
   });
 
   it('filters terminal restoration candidates before applying the limit', async () => {

@@ -46,6 +46,7 @@ import { ApplyDriveRetentionUseCase } from '../../src/archive/application/use-ca
 import { VerifyArchiveArtifactUseCase } from '../../src/archive/application/use-cases/verify-archive-artifact.use-case';
 import { ARCHIVE_RETENTION } from '../../src/archive/application/ports/archive-retention.port';
 import { DRIVE_ACCOUNT } from '../../src/archive/application/ports/drive-account.port';
+import { DRIVE_CREDENTIAL_REPOSITORY } from '../../src/archive/application/ports/drive-credential-repository.port';
 import { DriveClockUnhealthyError } from '../../src/archive/domain/errors/drive-clock-unhealthy.error';
 import { DriveRateLimitedError } from '../../src/archive/domain/errors/drive-rate-limited.error';
 import { InMemoryArchiveProviderStateRepository } from '../../src/archive/infrastructure/persistence/in-memory-archive-provider-state.repository';
@@ -138,10 +139,11 @@ describe('ArchiveModule composition', () => {
       CLOCK,
       ArchiveWakeService,
     ]);
-    expect(providerFor(providers, ArchiveSchedulerService).inject?.slice(-3)).toEqual([
+    expect(providerFor(providers, ArchiveSchedulerService).inject?.slice(-4)).toEqual([
       ArchiveClockHealthService,
       RevalidateMotionArchiveBranchUseCase,
       ProbeDriveQuotaRecoveryUseCase,
+      DRIVE_QUOTA_PROBE,
     ]);
     expect(providerFor(providers, ArchiveRuntimeLifecycleService).inject?.at(-1))
       .toBe(ArchiveClockHealthService);
@@ -167,8 +169,15 @@ describe('ArchiveModule composition', () => {
     ]) {
       expect(providerFor(providers, token).inject).toContain(ArchiveProviderGateService);
     }
-    expect(providerFor(providers, ConfirmDriveAccountUseCase).inject)
-      .toEqual(expect.arrayContaining([ArchiveProviderGateService, ArchiveWakeService]));
+    expect(providerFor(providers, ConfirmDriveAccountUseCase).inject).toEqual([
+      DRIVE_CREDENTIAL_REPOSITORY,
+      GoogleDriveConnectionAccountAdapter,
+      CLOCK,
+      ArchiveWakeService,
+      ArchiveRemoteMutationLockService,
+      ArchiveProviderGateService,
+      DRIVE_FOLDER_RESERVATION_REPOSITORY,
+    ]);
     expect(providerFor(providers, VerifyArchiveArtifactUseCase).inject)
       .toContain(ArchiveProviderGateService);
     expect(providerFor(providers, ARCHIVE_VERIFICATION)).toMatchObject({
@@ -243,10 +252,14 @@ describe('ArchiveModule composition', () => {
       const clockHealth = app.get(ArchiveClockHealthService);
       const branchProbe = app.get(RevalidateMotionArchiveBranchUseCase);
       const quotaProbe = app.get(ProbeDriveQuotaRecoveryUseCase);
+      const accountProbe = app.get(DRIVE_QUOTA_PROBE);
+      const reservations = app.get(DRIVE_FOLDER_RESERVATION_REPOSITORY);
+      const confirm = app.get<{ reservations: unknown }>(ConfirmDriveAccountUseCase);
       const scheduler = app.get<{
         clockHealth: unknown;
         branchProbe: unknown;
         quotaProbe: unknown;
+        accountProbe: unknown;
       }>(ArchiveSchedulerService);
       const lifecycle = app.get<{
         clockHealth: unknown;
@@ -255,6 +268,8 @@ describe('ArchiveModule composition', () => {
       expect(scheduler.clockHealth).toBe(clockHealth);
       expect(scheduler.branchProbe).toBe(branchProbe);
       expect(scheduler.quotaProbe).toBe(quotaProbe);
+      expect(scheduler.accountProbe).toBe(accountProbe);
+      expect(confirm.reservations).toBe(reservations);
       expect(lifecycle.clockHealth).toBe(clockHealth);
     } finally {
       await app.close();

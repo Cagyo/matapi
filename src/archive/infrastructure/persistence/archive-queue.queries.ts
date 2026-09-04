@@ -74,6 +74,7 @@ export function admissionQueueQuery(input: AdmissionQueueQueryInput): ArchiveSql
         from ${driveObjectAttempts}
           indexed by idx_drive_attempts_artifact_generation_state
         where ${driveObjectAttempts.artifactId} = ${archiveArtifacts.id}
+          and ${driveObjectAttempts.generationId} = ${input.generationId}
       )
       and (
         ${archiveArtifacts.motionDayPath} is null
@@ -184,6 +185,7 @@ function dueArtifactPredicate(generationId: string, nowMs: number): SQL {
         from ${driveObjectAttempts}
           indexed by idx_drive_attempts_artifact_generation_state
         where ${driveObjectAttempts.artifactId} = ${archiveArtifacts.id}
+          and ${driveObjectAttempts.generationId} = ${generationId}
       )
       and ${archiveArtifacts.admissionNextAt} <= ${nowMs}
     )

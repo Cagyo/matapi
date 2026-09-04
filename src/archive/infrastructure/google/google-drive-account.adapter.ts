@@ -50,7 +50,7 @@ export class GoogleDriveAccountAdapter implements DriveAccountPort {
     const usageInDriveBytes = parseInt64(quota.usageInDrive, "usageInDrive");
     const usageInDriveTrashBytes = parseInt64(quota.usageInDriveTrash, "usageInDriveTrash");
     const limitBytes = quota.limit === null ? null : parseInt64(quota.limit, "limit");
-    if (usageBytes < usageInDriveBytes + usageInDriveTrashBytes || (limitBytes !== null && limitBytes < usageBytes)) {
+    if (usageInDriveBytes > usageBytes || usageInDriveTrashBytes > usageInDriveBytes) {
       throw new DriveFolderAmbiguousError("Google Drive storage quota is inconsistent");
     }
     return { limitBytes, usageBytes, usageInDriveBytes, usageInDriveTrashBytes };

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   deriveArchiveDrainState,
   ReportDriveStatusUseCase,
@@ -47,6 +47,12 @@ describe('ReportDriveStatusUseCase', () => {
   });
 
   it('reports clock-blocked before provider, queue, or active transfer state', async () => {
+    const readQuota = vi.fn(async () => ({
+      limitBytes: 100,
+      usageBytes: 70,
+      usageInDriveBytes: 60,
+      usageInDriveTrashBytes: 10,
+    }));
     const artifacts = aggregateArtifacts();
     artifacts.readSchedulerState = async () => ({
       ...schedulerState(),
@@ -64,13 +70,16 @@ describe('ReportDriveStatusUseCase', () => {
           generationId: 'generation-1', artifactKind: 'motion_video', startedAtMs: 9_000,
         }),
       },
+      account: { readQuota },
     });
 
     await expect(useCase.execute()).resolves.toMatchObject({
       drainState: 'clock-blocked',
       requiredAction: 'fix-system-clock',
       recovery: null,
+      quota: null,
     });
+    expect(readQuota).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -406,12 +415,13 @@ function statusUseCase(overrides: {
     failureClass: 'transport' | 'rate-limit' | 'quota' | 'capacity' | 'authorization' | 'policy' | null;
     failureStreak: number; cooldownUntilMs: number | null; blockReason: string | null; updatedAtMs: number;
   }> };
+  account?: { readQuota(): Promise<unknown> };
   activity?: { readActivitySnapshot(): unknown };
 } = {}): ReportDriveStatusUseCase {
   const Constructor = ReportDriveStatusUseCase as unknown as new (
     connections: ReturnType<typeof activeConnections>,
     artifacts: ReturnType<typeof aggregateArtifacts>,
-    account: { readQuota(): Promise<null> },
+    account: { readQuota(): Promise<unknown> },
     provider: NonNullable<typeof overrides.provider>,
     clock: { now(): Date },
     activity: NonNullable<typeof overrides.activity>,
@@ -419,7 +429,7 @@ function statusUseCase(overrides: {
   return new Constructor(
     overrides.connections ?? activeConnections(),
     overrides.artifacts ?? aggregateArtifacts(),
-    { readQuota: async () => null },
+    overrides.account ?? { readQuota: async () => null },
     overrides.provider ?? {
       load: async () => ({
         revision: 0, generationId: null, operationClass: null, failureClass: null,

@@ -245,7 +245,11 @@ export interface ArchiveArtifactRepositoryPort {
     nowMs: number;
     providerDeadlineMs: number | null;
   }): Promise<number | null>;
-  readNextEligibleTransferSize(generationId: string, nowMs: number): Promise<number | null>;
+  readNextEligibleTransferSize(
+    generationId: string,
+    nowMs: number,
+    forceVideoRetryBeforeMs?: number,
+  ): Promise<number | null>;
   readQueueStatus(generationId: string, nowMs?: number): Promise<ArchiveQueueStatus>;
   readUnhealthyDateFolderCount(generationId: string): Promise<number>;
   readSchedulerState(): Promise<ArchiveSchedulerState>;

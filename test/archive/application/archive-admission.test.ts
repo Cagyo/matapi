@@ -201,7 +201,7 @@ describe('archive artifact admission', () => {
     });
   });
 
-  it('does not treat an artifact attempted by a retired generation as unattempted active-generation work', async () => {
+  it('admits retired-generation-only Motion work exactly once for the active generation', async () => {
     const blocked = await repository.register(artifactInput('blocked-due', 'b', '2026/08/16'));
     await repository.recordMotionAdmissionPath(blocked.id, 0, '2026/08/16', 10);
     const stale = await repository.register(artifactInput('stale-attempt', 'c', '2026/08/17'));
@@ -213,10 +213,62 @@ describe('archive artifact admission', () => {
       'generation-active', '2026/08/16', 'detached',
     );
 
+    await expect(repository.listUnattemptedArtifacts({
+      kind: 'motion_video', generationId: 'generation-active', nowMs: 100, limit: 1,
+    })).resolves.toMatchObject([{ id: stale.id }]);
+    const legacySelection = await repository.listUnattemptedArtifacts({
+      kind: 'motion_video', nowMs: 100, limit: 10,
+    });
+    expect(legacySelection.map(({ id }) => id)).not.toContain(stale.id);
     await expect(repository.readQueueStatus('generation-active', 100)).resolves.toMatchObject({
       queuedVideos: 2,
-      branchBlocked: true,
+      branchBlocked: false,
     });
+
+    await repository.createAttempt(
+      stale.id, 'generation-active', 'active-file', 'active-folder', 13,
+    );
+    const afterActiveAttempt = await repository.listUnattemptedArtifacts({
+      kind: 'motion_video', generationId: 'generation-active', nowMs: 100, limit: 10,
+    });
+    expect(afterActiveAttempt.map(({ id }) => id)).not.toContain(stale.id);
+  });
+
+  it('admits a retired-generation-only backup exactly once for the active generation', async () => {
+    const backup = await repository.register({
+      ...artifactInput('backup-rollover', 'd'), kind: 'database_backup',
+    });
+    await repository.createAttempt(
+      backup.id, 'generation-retired', 'retired-backup', 'retired-folder', 10,
+    );
+
+    await expect(repository.listUnattemptedArtifacts({
+      kind: 'database_backup', generationId: 'generation-active', nowMs: 100, limit: 1,
+    })).resolves.toMatchObject([{ id: backup.id }]);
+    await expect(repository.listUnattemptedArtifacts({
+      kind: 'database_backup', nowMs: 100, limit: 1,
+    })).resolves.toEqual([]);
+
+    await repository.createAttempt(
+      backup.id, 'generation-active', 'active-backup', 'active-folder', 11,
+    );
+    await expect(repository.listUnattemptedArtifacts({
+      kind: 'database_backup', generationId: 'generation-active', nowMs: 100, limit: 1,
+    })).resolves.toEqual([]);
+  });
+
+  it('keeps a future admission deadline visible across generation rollover', async () => {
+    const artifact = await repository.register(artifactInput('future-rollover', 'e'));
+    await repository.markAdmissionRetryable(
+      artifact.id, artifact.admission.revision, 'temporary', 500, 10,
+    );
+    await repository.createAttempt(
+      artifact.id, 'generation-retired', 'retired-future', 'retired-folder', 11,
+    );
+
+    await expect(repository.readNextDeadline({
+      generationId: 'generation-active', nowMs: 100, providerDeadlineMs: null,
+    })).resolves.toBe(500);
   });
 });
 

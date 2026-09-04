@@ -26,7 +26,53 @@ describe('ProbeDriveQuotaRecoveryUseCase', () => {
     )).resolves.toBe('recovered');
 
     expect((await fixture.providerState.load()).blockReason).toBeNull();
-    expect(fixture.artifacts.readNextEligibleTransferSize).toHaveBeenCalledOnce();
+    expect(fixture.artifacts.readNextEligibleTransferSize).toHaveBeenCalledWith(
+      'generation-1', fixture.nowMs, undefined,
+    );
+    expect(fixture.quota.readQuota).toHaveBeenCalledOnce();
+  });
+
+  it('accepts trashed Drive usage as a subset of total Drive usage', async () => {
+    const fixture = await createFixture();
+    fixture.artifacts.readNextEligibleTransferSize.mockResolvedValue(4_000);
+    fixture.quota.readQuota.mockResolvedValue({
+      limitBytes: 10_000,
+      usageBytes: 6_000,
+      usageInDriveBytes: 6_000,
+      usageInDriveTrashBytes: 1_000,
+    });
+
+    await expect(fixture.useCase.execute(
+      fixture.connection,
+      fixture.admission,
+      new AbortController().signal,
+    )).resolves.toBe('recovered');
+
+    expect((await fixture.providerState.load()).blockReason).toBeNull();
+    expect(fixture.quota.readQuota).toHaveBeenCalledOnce();
+  });
+
+  it('treats a consistent over-quota account as zero available bytes', async () => {
+    const fixture = await createFixture();
+    fixture.artifacts.readNextEligibleTransferSize.mockResolvedValue(1);
+    fixture.quota.readQuota.mockResolvedValue({
+      limitBytes: 100,
+      usageBytes: 120,
+      usageInDriveBytes: 80,
+      usageInDriveTrashBytes: 30,
+    });
+
+    await expect(fixture.useCase.execute(
+      fixture.connection,
+      fixture.admission,
+      new AbortController().signal,
+    )).resolves.toBe('still-blocked');
+
+    expect(await fixture.providerState.load()).toMatchObject({
+      blockReason: 'quota_exhausted',
+      failureClass: 'quota',
+      cooldownUntilMs: expect.any(Number),
+    });
     expect(fixture.quota.readQuota).toHaveBeenCalledOnce();
   });
 
@@ -67,10 +113,10 @@ describe('ProbeDriveQuotaRecoveryUseCase', () => {
     {
       name: 'inconsistent provider counters',
       quota: {
-        limitBytes: 4_000,
+        limitBytes: 10_000,
         usageBytes: 5_000,
-        usageInDriveBytes: 5_000,
-        usageInDriveTrashBytes: 0,
+        usageInDriveBytes: 5_001,
+        usageInDriveTrashBytes: 1,
       },
     },
   ])('keeps the quota block for $name', async ({ quota }) => {

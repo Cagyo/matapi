@@ -39,6 +39,7 @@ export class ProbeDriveQuotaRecoveryUseCase {
     connection: DriveConnection,
     admission: Extract<ArchiveProviderAdmission, { kind: 'probe' }>,
     signal: AbortSignal,
+    forceVideoRetryBeforeMs?: number,
   ): Promise<ProbeDriveQuotaRecoveryResult> {
     throwIfAborted(signal);
     if (connection.status !== 'active'
@@ -59,6 +60,7 @@ export class ProbeDriveQuotaRecoveryUseCase {
       const candidateBytes = await this.artifacts.readNextEligibleTransferSize(
         connection.id,
         nowMs,
+        forceVideoRetryBeforeMs,
       );
       const quota = await this.quota.readQuota(connection, signal);
       const availableBytes = readAvailableBytes(quota);
@@ -90,11 +92,11 @@ function readAvailableBytes(quota: DriveQuota): number | null {
     || !isNonNegativeSafeInteger(quota.usageBytes)
     || !isNonNegativeSafeInteger(quota.usageInDriveBytes)
     || !isNonNegativeSafeInteger(quota.usageInDriveTrashBytes)
-    || quota.usageInDriveBytes + quota.usageInDriveTrashBytes > quota.usageBytes
-    || quota.usageBytes > quota.limitBytes) {
+    || quota.usageInDriveBytes > quota.usageBytes
+    || quota.usageInDriveTrashBytes > quota.usageInDriveBytes) {
     return null;
   }
-  return quota.limitBytes - quota.usageBytes;
+  return Math.max(0, quota.limitBytes - quota.usageBytes);
 }
 
 function positiveDeficit(candidateBytes: number | null, availableBytes: number | null): number {

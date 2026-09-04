@@ -565,6 +565,7 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         wake: ArchiveWakeService,
         lock: ArchiveRemoteMutationLockService,
         gate: ArchiveProviderGateService,
+        reservations: DriveFolderReservationRepositoryPort,
       ) => new ConfirmDriveAccountUseCase(
         credentials,
         account,
@@ -572,6 +573,7 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         wake,
         lock,
         gate,
+        reservations,
       ),
       inject: [
         DRIVE_CREDENTIAL_REPOSITORY,
@@ -580,6 +582,7 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         ArchiveWakeService,
         ArchiveRemoteMutationLockService,
         ArchiveProviderGateService,
+        DRIVE_FOLDER_RESERVATION_REPOSITORY,
       ],
     },
     {
@@ -754,6 +757,7 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         clockHealth: ArchiveClockHealthService,
         branchProbe: RevalidateMotionArchiveBranchUseCase,
         quotaProbe: ProbeDriveQuotaRecoveryUseCase,
+        accountProbe: DriveQuotaProbePort,
       ) => new ArchiveSchedulerService(
         repository,
         backups,
@@ -780,6 +784,7 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         clockHealth,
         branchProbe,
         quotaProbe,
+        accountProbe,
       ),
       inject: [
         ARCHIVE_ARTIFACT_REPOSITORY,
@@ -799,6 +804,7 @@ const archiveMode = process.env.NODE_ENV === 'test' ? 'memory' : 'production';
         ArchiveClockHealthService,
         RevalidateMotionArchiveBranchUseCase,
         ProbeDriveQuotaRecoveryUseCase,
+        DRIVE_QUOTA_PROBE,
       ],
     },
     { provide: ARCHIVE_RUNTIME_SIGNAL, useExisting: ArchiveSchedulerService },

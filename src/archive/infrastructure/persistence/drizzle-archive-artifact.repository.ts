@@ -698,15 +698,21 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
       });
       return runAll<ArtifactRow>(this.db, query).map(toArtifact);
     }
+    const attempted = this.db.select({ value: sql`1` }).from(driveObjectAttempts)
+      .where(and(
+        eq(driveObjectAttempts.artifactId, archiveArtifacts.id),
+        selection.generationId === undefined
+          ? undefined
+          : eq(driveObjectAttempts.generationId, selection.generationId),
+      ));
     const conditions = [
       eq(archiveArtifacts.kind, selection.kind),
       eq(archiveArtifacts.state, 'pending'),
       inArray(archiveArtifacts.admissionState, ['ready', 'retryable']),
       lte(archiveArtifacts.admissionNextAt, selection.nowMs ?? Date.now()),
-      isNull(driveObjectAttempts.id),
+      notExists(attempted),
     ];
     return this.db.select({ artifact: archiveArtifacts }).from(archiveArtifacts)
-      .leftJoin(driveObjectAttempts, eq(driveObjectAttempts.artifactId, archiveArtifacts.id))
       .where(and(...conditions))
       .orderBy(asc(archiveArtifacts.createdAt), asc(archiveArtifacts.id))
       .limit(selection.limit).all().map(({ artifact }) => toArtifact(artifact));
@@ -796,7 +802,10 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
         eq(archiveArtifacts.admissionState, 'retryable'),
         gt(archiveArtifacts.admissionNextAt, nowMs),
         notExists(this.db.select({ value: sql`1` }).from(driveObjectAttempts)
-          .where(eq(driveObjectAttempts.artifactId, archiveArtifacts.id))),
+          .where(and(
+            eq(driveObjectAttempts.artifactId, archiveArtifacts.id),
+            eq(driveObjectAttempts.generationId, generationId),
+          ))),
       )).get()?.value ?? null;
     const attemptDeadline = runGet<{ value: number | null }>(
       this.db,
@@ -823,18 +832,46 @@ export class DrizzleArchiveArtifactRepository implements ArchiveArtifactReposito
     return deadlines.length === 0 ? null : Math.min(...deadlines);
   }
 
-  async readNextEligibleTransferSize(generationId: string, nowMs: number): Promise<number | null> {
-    const row = this.db.select({ size: archiveArtifacts.size }).from(driveObjectAttempts)
-      .innerJoin(archiveArtifacts, eq(driveObjectAttempts.artifactId, archiveArtifacts.id))
-      .where(and(
-        eq(driveObjectAttempts.generationId, generationId),
-        inArray(driveObjectAttempts.state, ['pending', 'retryable']),
-        lte(driveObjectAttempts.nextAttemptAt, nowMs),
-      ))
-      .orderBy(asc(driveObjectAttempts.nextAttemptAt), asc(driveObjectAttempts.createdAt), asc(driveObjectAttempts.id))
-      .limit(1)
-      .get();
-    return row?.size ?? null;
+  async readNextEligibleTransferSize(
+    generationId: string,
+    nowMs: number,
+    forceVideoRetryBeforeMs?: number,
+  ): Promise<number | null> {
+    const dueAttemptSize = (
+      kind: ArchiveArtifactKind,
+      retryBeforeMs?: number,
+    ): number | null => {
+      const row = this.db.select({ size: archiveArtifacts.size }).from(driveObjectAttempts)
+        .innerJoin(archiveArtifacts, eq(driveObjectAttempts.artifactId, archiveArtifacts.id))
+        .where(and(
+          eq(driveObjectAttempts.generationId, generationId),
+          eq(archiveArtifacts.kind, kind),
+          inArray(driveObjectAttempts.state, ['pending', 'retryable']),
+          lte(driveObjectAttempts.nextAttemptAt, nowMs),
+          retryBeforeMs === undefined ? undefined : and(
+            eq(driveObjectAttempts.state, 'retryable'),
+            lte(driveObjectAttempts.nextAttemptAt, retryBeforeMs),
+          ),
+        ))
+        .orderBy(asc(driveObjectAttempts.nextAttemptAt), asc(driveObjectAttempts.createdAt), asc(driveObjectAttempts.id))
+        .limit(1)
+        .get();
+      return row?.size ?? null;
+    };
+    const dueBackupAttempt = dueAttemptSize('database_backup');
+    if (dueBackupAttempt !== null) return dueBackupAttempt;
+    const [newBackup] = await this.listUnattemptedArtifacts({
+      kind: 'database_backup', generationId, nowMs, limit: 1,
+    });
+    if (newBackup !== undefined) return newBackup.size;
+    const forcedVideoRetry = forceVideoRetryBeforeMs === undefined
+      ? null
+      : dueAttemptSize('motion_video', forceVideoRetryBeforeMs);
+    if (forcedVideoRetry !== null) return forcedVideoRetry;
+    const [newVideo] = await this.listUnattemptedArtifacts({
+      kind: 'motion_video', generationId, nowMs, limit: 1,
+    });
+    return newVideo?.size ?? dueAttemptSize('motion_video');
   }
 
   async readQueueStatus(generationId: string, nowMs?: number): Promise<ArchiveQueueStatus> {

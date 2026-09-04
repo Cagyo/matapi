@@ -24,7 +24,7 @@ describe("GoogleDriveAccountAdapter", () => {
     });
   });
 
-  it("reads string-int64 quota fields and rejects inconsistent quota", async () => {
+  it("reads string-int64 quota fields with trash as a subset of Drive usage", async () => {
     const drive = new DriveStub();
     const adapter = adapterFor(drive);
 
@@ -38,7 +38,33 @@ describe("GoogleDriveAccountAdapter", () => {
     drive.about = aboutFixture({
       storageQuota: { limit: "1000", usage: "100", usageInDrive: "80", usageInDriveTrash: "30" },
     });
-    await expect(adapter.readQuota(connection(), signal)).rejects.toThrow(DriveFolderAmbiguousError);
+    await expect(adapter.readQuota(connection(), signal)).resolves.toEqual({
+      limitBytes: 1_000,
+      usageBytes: 100,
+      usageInDriveBytes: 80,
+      usageInDriveTrashBytes: 30,
+    });
+
+    drive.about = aboutFixture({
+      storageQuota: { limit: "100", usage: "120", usageInDrive: "80", usageInDriveTrash: "30" },
+    });
+    await expect(adapter.readQuota(connection(), signal)).resolves.toEqual({
+      limitBytes: 100,
+      usageBytes: 120,
+      usageInDriveBytes: 80,
+      usageInDriveTrashBytes: 30,
+    });
+  });
+
+  it.each([
+    ["Drive usage exceeds total usage", { limit: "1000", usage: "100", usageInDrive: "101", usageInDriveTrash: "30" }],
+    ["trash usage exceeds Drive usage", { limit: "1000", usage: "100", usageInDrive: "80", usageInDriveTrash: "81" }],
+  ])("rejects inconsistent quota when %s", async (_case, storageQuota) => {
+    const drive = new DriveStub();
+    drive.about = aboutFixture({ storageQuota });
+
+    await expect(adapterFor(drive).readQuota(connection(), signal))
+      .rejects.toThrow(DriveFolderAmbiguousError);
   });
 
   it("reuses all stored folder IDs only after exact metadata validation", async () => {

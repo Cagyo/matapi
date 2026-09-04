@@ -32,6 +32,7 @@ import type { ArchiveRuntimeSignalPort } from './ports/archive-runtime-signal.po
 import { ArchiveClockHealthService } from './archive-clock-health.service';
 import type { DriveConnection } from '../domain/drive-connection.entity';
 import type { ProbeDriveQuotaRecoveryUseCase } from './use-cases/probe-drive-quota-recovery.use-case';
+import type { DriveQuotaProbePort } from './ports/drive-quota-probe.port';
 import type { RevalidateMotionArchiveBranchUseCase } from './use-cases/revalidate-motion-archive-branch.use-case';
 
 const DEFAULT_INTERVAL_MS = 2 * 60 * 1_000;
@@ -44,6 +45,7 @@ const LOCAL_DISK_PRESSURE_PERCENT = 70;
 const ARCHIVE_OPERATION_FAILED = 'ARCHIVE_OPERATION_FAILED';
 
 type AdmissionResult = 'none' | 'admitted' | 'reload';
+type TransferDispatchResult = 'dispatched' | 'occupied' | 'empty';
 
 export interface ArchiveCameraSchedulerHooks {
   reconcileMotion(signal: AbortSignal): Promise<void>;
@@ -114,6 +116,7 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
   private activeUpload: Promise<void> | null = null;
   private activity: ArchiveSchedulerActivitySnapshot | null = null;
   private consecutiveFreshVideos = 0;
+  private transferOpportunityDueForGenerationId: string | null = null;
 
   constructor(
     private readonly repository: Pick<ArchiveArtifactRepositoryPort,
@@ -137,6 +140,7 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
       new ArchiveClockHealthService(repository, wake),
     private readonly branchProbe?: Pick<RevalidateMotionArchiveBranchUseCase, 'executeNext'>,
     private readonly quotaProbe?: Pick<ProbeDriveQuotaRecoveryUseCase, 'execute'>,
+    private readonly accountProbe?: Pick<DriveQuotaProbePort, 'readQuota'>,
   ) {
     this.intervalMs = positive(options.intervalMs ?? DEFAULT_INTERVAL_MS, 'interval');
     this.leaseMs = positive(options.leaseMs ?? DEFAULT_LEASE_MS, 'lease');
@@ -388,27 +392,11 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
     expectedEpoch: number,
   ): Promise<AdmissionResult> {
     if (context.clockHealth === 'clock-blocked' || context.generation === null) return 'none';
+    if (this.transferOpportunityDueForGenerationId !== null
+      && this.transferOpportunityDueForGenerationId !== context.generation.id) {
+      this.transferOpportunityDueForGenerationId = null;
+    }
     if (context.admission.kind === 'probe') {
-      if (context.admission.operationClass === 'folder') {
-        const branchProbe = this.branchProbe;
-        const generation = context.generation;
-        if (branchProbe === undefined || this.providerGate === undefined || generation === null) {
-          return 'none';
-        }
-        try {
-          await this.providerGate.run({
-            generationId: generation.id,
-            operationClass: 'folder',
-            probe: true,
-            operation: () => branchProbe.executeNext(generation, nowMs, signal),
-            signal,
-          });
-          await this.settleProbe();
-          return 'admitted';
-        } catch (error) {
-          return this.settleFailedProbe(error, signal);
-        }
-      }
       if (context.admission.reason === 'quota') {
         if (this.quotaProbe === undefined) return 'none';
         try {
@@ -416,6 +404,7 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
             context.generation,
             context.admission,
             signal,
+            this.consecutiveFreshVideos >= this.newerVideoBatch ? nowMs : undefined,
           );
           if (result === 'stale') {
             await this.settleProbe();
@@ -427,12 +416,69 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
           return this.settleFailedProbe(error, signal);
         }
       }
+      if (context.admission.operationClass === 'folder') {
+        const branchProbe = this.branchProbe;
+        const generation = context.generation;
+        if (branchProbe === undefined || this.providerGate === undefined || generation === null) {
+          return 'none';
+        }
+        try {
+          const result = await this.providerGate.run({
+            generationId: generation.id,
+            operationClass: 'folder',
+            probe: true,
+            operation: () => branchProbe.executeNext(generation, nowMs, signal),
+            signal,
+          });
+          if (result !== 'none') {
+            this.transferOpportunityDueForGenerationId = generation.id;
+          }
+          await this.settleProbe();
+          return 'admitted';
+        } catch (error) {
+          return this.settleFailedProbe(error, signal);
+        }
+      }
+      if (context.admission.operationClass === 'account') {
+        const accountProbe = this.accountProbe;
+        const generation = context.generation;
+        if (accountProbe === undefined || this.providerGate === undefined) return 'none';
+        try {
+          await this.providerGate.run({
+            generationId: generation.id,
+            operationClass: 'account',
+            probe: true,
+            operation: () => accountProbe.readQuota(generation, signal),
+            signal,
+          });
+          await this.settleProbe();
+          return 'admitted';
+        } catch (error) {
+          return this.settleFailedProbe(error, signal);
+        }
+      }
       if (context.admission.operationClass !== 'upload') return 'none';
-      return (await this.dispatchOneTransfer(nowMs, signal, context.generation.id))
-        ? 'admitted'
-        : 'none';
+      const dispatch = await this.dispatchOneTransfer(
+        nowMs,
+        signal,
+        context.generation.id,
+      );
+      if (dispatch !== 'occupied'
+        && this.transferOpportunityDueForGenerationId === context.generation.id) {
+        this.transferOpportunityDueForGenerationId = null;
+      }
+      return dispatch === 'dispatched' ? 'admitted' : 'none';
     }
     if (context.admission.kind !== 'allowed') return 'none';
+    if (this.transferOpportunityDueForGenerationId === context.generation.id) {
+      const dispatch = await this.dispatchOneTransfer(
+        nowMs,
+        signal,
+        context.generation.id,
+      );
+      if (dispatch !== 'occupied') this.transferOpportunityDueForGenerationId = null;
+      return dispatch === 'dispatched' ? 'admitted' : 'none';
+    }
     if (this.branchProbe !== undefined) {
       const branchProbe = this.branchProbe;
       const generation = context.generation;
@@ -451,6 +497,9 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
         return this.settleFailedProbe(error, signal);
       }
       if (result !== 'none') {
+        // A productive branch probe yields the next free transfer slot before
+        // another branch head can consume provider capacity.
+        this.transferOpportunityDueForGenerationId = generation.id;
         await this.settleProbe();
         return 'admitted';
       }
@@ -459,7 +508,7 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
       // reload it before admitting another transfer.
       if (this.wake.snapshot() !== expectedEpoch) return 'admitted';
     }
-    return (await this.dispatchOneTransfer(nowMs, signal, context.generation.id))
+    return (await this.dispatchOneTransfer(nowMs, signal, context.generation.id)) === 'dispatched'
       ? 'admitted'
       : 'none';
   }
@@ -483,8 +532,8 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
     nowMs: number,
     signal: AbortSignal,
     generationId: string,
-  ): Promise<boolean> {
-    if (this.activeUpload !== null) return false;
+  ): Promise<TransferDispatchResult> {
+    if (this.activeUpload !== null) return 'occupied';
     const forceVideoRetryBeforeMs = this.consecutiveFreshVideos >= this.newerVideoBatch
       ? nowMs
       : undefined;
@@ -501,13 +550,13 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
     });
     if (backupClaim !== null) {
       await this.dispatchClaimed(backupClaim, signal, nowMs);
-      return true;
+      return 'dispatched';
     }
-    if (signal.aborted) return false;
+    if (signal.aborted) return 'empty';
     const [newBackup] = await this.repository.listUnattemptedArtifacts({
       kind: 'database_backup', generationId, nowMs, limit: 1,
     });
-    if (signal.aborted) return false;
+    if (signal.aborted) return 'empty';
     if (newBackup !== undefined) {
       this.consecutiveFreshVideos = 0;
       let selectedGenerationId: string | null = null;
@@ -522,7 +571,7 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
         () => selectedGenerationId,
         { generationId, artifactKind: 'database_backup', startedAtMs: nowMs },
       );
-      return true;
+      return 'dispatched';
     }
     if (forceVideoRetryBeforeMs !== undefined) {
       const retry = await this.repository.claimNextAttempt({
@@ -533,14 +582,14 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
       });
       if (retry !== null) {
         await this.dispatchClaimed(retry, signal, nowMs);
-        return true;
+        return 'dispatched';
       }
-      if (signal.aborted) return false;
+      if (signal.aborted) return 'empty';
     }
     const [newVideo] = await this.repository.listUnattemptedArtifacts({
       kind: 'motion_video', generationId, nowMs, limit: 1,
     });
-    if (signal.aborted) return false;
+    if (signal.aborted) return 'empty';
     if (newVideo !== undefined) {
       this.consecutiveFreshVideos += 1;
       let selectedGenerationId: string | null = null;
@@ -555,7 +604,7 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
         () => selectedGenerationId,
         { generationId, artifactKind: 'motion_video', startedAtMs: nowMs },
       );
-      return true;
+      return 'dispatched';
     }
     const claimed = await this.repository.claimNextAttempt({
       ...baseClaim,
@@ -563,9 +612,9 @@ export class ArchiveSchedulerService implements ArchiveRuntimeSignalPort {
     });
     if (claimed !== null) {
       await this.dispatchClaimed(claimed, signal, nowMs);
-      return true;
+      return 'dispatched';
     }
-    return false;
+    return 'empty';
   }
 
   private async dispatchClaimed(

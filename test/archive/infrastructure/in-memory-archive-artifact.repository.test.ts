@@ -62,6 +62,79 @@ describe('InMemoryArchiveArtifactRepository session clearing', () => {
       generationId: 'generation-active', owner: 'worker', nowMs: 100, leaseMs: 100,
     })).resolves.toMatchObject({ attempt: { remoteObjectId: 'file-active' } });
   });
+
+  it('reports a due pre-attempt artifact as the next eligible transfer size', async () => {
+    const repository = new InMemoryArchiveArtifactRepository();
+    const artifact = await repository.register({
+      ...artifactFixture(),
+      size: 8_192,
+    });
+    const admitted = await repository.recordMotionAdmissionPath(
+      artifact.id,
+      artifact.admission.revision,
+      '2026/08/13',
+      10,
+    );
+    await repository.markAdmissionRetryable(
+      artifact.id,
+      admitted.admission.revision,
+      'folder_resolution_failed',
+      50,
+      11,
+    );
+
+    await expect(repository.readNextEligibleTransferSize('generation-1', 49))
+      .resolves.toBeNull();
+    await expect(repository.readNextEligibleTransferSize('generation-1', 50))
+      .resolves.toBe(8_192);
+  });
+
+  it('reports the backup-first transfer size before a smaller due video', async () => {
+    const repository = new InMemoryArchiveArtifactRepository();
+    const video = await repository.register(artifactFixture());
+    await repository.createAttempt(
+      video.id,
+      'generation-1',
+      'video-file',
+      'motion-folder',
+      10,
+    );
+    await repository.register({
+      ...artifactFixture(),
+      kind: 'database_backup',
+      sourceIdentity: 'backup:priority',
+      sourceFingerprint: 'c'.repeat(64),
+      size: 8_192,
+    });
+
+    await expect(repository.readNextEligibleTransferSize('generation-1', 100))
+      .resolves.toBe(8_192);
+  });
+
+  it('mirrors fresh-video fairness when selecting the next transfer size', async () => {
+    const repository = new InMemoryArchiveArtifactRepository();
+    const retryArtifact = await repository.register({
+      ...artifactFixture(), size: 9_000,
+    });
+    const retry = await repository.createAttempt(
+      retryArtifact.id, 'generation-1', 'retry-file', 'motion-folder', 10,
+    );
+    const claimed = await repository.claimAttempt(retry.id, {
+      generationId: 'generation-1', owner: 'worker', nowMs: 20, leaseMs: 100,
+    });
+    await repository.markRetryable(retry.id, claimed.lease, 'temporary', 30, 21);
+    await repository.register({
+      ...artifactFixture(),
+      sourceIdentity: 'motion:fresh-priority',
+      sourceFingerprint: 'd'.repeat(64),
+      size: 1_000,
+    });
+
+    await expect(repository.readNextEligibleTransferSize('generation-1', 100))
+      .resolves.toBe(1_000);
+    await expect(repository.readNextEligibleTransferSize('generation-1', 100, 100))
+      .resolves.toBe(9_000);
+  });
 });
 
 function artifactFixture() {

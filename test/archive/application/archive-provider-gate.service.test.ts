@@ -516,6 +516,52 @@ describe('ArchiveProviderGateService', () => {
     });
   });
 
+  it('revalidates exact recovery-probe ownership after sleeping before retrying provider I/O', async () => {
+    const repository = new InMemoryArchiveProviderStateRepository();
+    const clock = { value: 1_000 };
+    let announceSleep!: () => void;
+    let releaseSleep!: () => void;
+    const sleepStarted = new Promise<void>((resolve) => { announceSleep = resolve; });
+    const sleepGate = new Promise<void>((resolve) => { releaseSleep = resolve; });
+    const gate = new ArchiveProviderGateService(
+      repository,
+      { now: () => new Date(clock.value) },
+      {
+        sleep: async (ms) => {
+          clock.value += ms;
+          announceSleep();
+          await sleepGate;
+        },
+      },
+      { random: () => 0 },
+    );
+    await gate.ensureGeneration('generation-1');
+    const transient = new DriveTemporaryUnavailableError();
+    const operation = vi.fn(async () => { throw transient; });
+
+    const sleepingOwner = gate.run({
+      generationId: 'generation-1',
+      operationClass: 'upload',
+      operation,
+    });
+    await sleepStarted;
+    const due = await gate.inspect('generation-1', 'upload');
+    expect(due).toMatchObject({ kind: 'probe', reason: 'cooldown' });
+    if (due.kind !== 'probe') throw new Error('expected due cooldown probe');
+    const newerOwner = await gate.claimRecoveryProbe(due);
+    expect(newerOwner).not.toBeNull();
+
+    releaseSleep();
+    await expect(sleepingOwner).rejects.toBe(transient);
+
+    expect(operation).toHaveBeenCalledOnce();
+    await expect(repository.load()).resolves.toMatchObject({
+      revision: newerOwner?.revision,
+      generationId: 'generation-1',
+      operationClass: 'upload',
+    });
+  });
+
   it('stops a claimed retry loop when its transient provider CAS is stale', async () => {
     const fixture = await claimedProbeFixture('account_creation_limit');
     const concurrent = {

@@ -26,6 +26,7 @@ import type { ArchiveAdminAlertKind } from '../../../src/archive/application/por
 import type { ArchiveClockHealthService } from '../../../src/archive/application/archive-clock-health.service';
 import type { ProbeDriveQuotaRecoveryUseCase } from '../../../src/archive/application/use-cases/probe-drive-quota-recovery.use-case';
 import type { RevalidateMotionArchiveBranchUseCase } from '../../../src/archive/application/use-cases/revalidate-motion-archive-branch.use-case';
+import type { DriveQuotaProbePort } from '../../../src/archive/application/ports/drive-quota-probe.port';
 
 function claimedAttempt(overrides: Partial<ClaimedAttempt['attempt']> = {}): ClaimedAttempt {
   return {
@@ -158,10 +159,8 @@ function setup(options: {
   } as ArchiveRetentionPort;
   const hooks = new ArchiveSchedulerHooksService();
   const wake = new ArchiveWakeService();
-  const providerGate = new ArchiveProviderGateService(
-    new InMemoryArchiveProviderStateRepository(),
-    clock,
-  );
+  const providerStateRepository = new InMemoryArchiveProviderStateRepository();
+  const providerGate = new ArchiveProviderGateService(providerStateRepository, clock);
   const credentials = {
     loadActive: vi.fn(async () => options.connection === undefined
       ? activeConnection('generation-1')
@@ -186,6 +185,14 @@ function setup(options: {
   const quotaProbe = {
     execute: vi.fn<ProbeDriveQuotaRecoveryUseCase['execute']>(async () => 'stale'),
   } satisfies Pick<ProbeDriveQuotaRecoveryUseCase, 'execute'>;
+  const accountProbe = {
+    readQuota: vi.fn<DriveQuotaProbePort['readQuota']>(async () => ({
+      limitBytes: 10_000,
+      usageBytes: 1_000,
+      usageInDriveBytes: 1_000,
+      usageInDriveTrashBytes: 0,
+    })),
+  } satisfies Pick<DriveQuotaProbePort, 'readQuota'>;
   const Scheduler = ArchiveSchedulerService as unknown as new (
     repository: ArchiveArtifactRepositoryPort,
     backups: CreateDatabaseBackupUseCase,
@@ -204,6 +211,7 @@ function setup(options: {
     clockHealth: Pick<ArchiveClockHealthService, 'check'>,
     branchProbe: Pick<RevalidateMotionArchiveBranchUseCase, 'executeNext'>,
     quotaProbe: Pick<ProbeDriveQuotaRecoveryUseCase, 'execute'>,
+    accountProbe: Pick<DriveQuotaProbePort, 'readQuota'>,
   ) => ArchiveSchedulerService;
   const scheduler = new Scheduler(
     repository,
@@ -223,10 +231,12 @@ function setup(options: {
     clockHealth,
     branchProbe,
     quotaProbe,
+    accountProbe,
   );
   return {
     repository, backups, uploads, retention, hooks, scheduler, wake, providerGate, clock,
-    credentials, providerState, alerts, localDisk, clockHealth, branchProbe, quotaProbe, video,
+    credentials, providerState, providerStateRepository, alerts, localDisk, clockHealth,
+    branchProbe, quotaProbe, accountProbe, video,
     seedFreshVideos(count: number) {
       queuedArtifacts.push(...Array.from({ length: count }, (_, index) => ({
         ...video, id: `video-${index + 1}`,
@@ -421,31 +431,108 @@ describe('ArchiveSchedulerService', () => {
     await fixture.scheduler.shutdown();
   });
 
-  it('routes a quota-reason probe owned by folder work through the folder gate', async () => {
-    const fixture = setup();
-    const run = vi.spyOn(fixture.providerGate, 'run').mockImplementation(
-      async (input) => input.operation(),
+  it('routes a folder-owned quota admission through the quota probe before operation routing', async () => {
+    const fixture = setup({ nowMs: 10_000 });
+    const genericRun = vi.spyOn(fixture.providerGate, 'run');
+    await fixture.providerGate.ensureGeneration('generation-1');
+    await fixture.providerGate.recordFailure(
+      'generation-1',
+      'folder',
+      new DriveQuotaExceededError(),
     );
-    vi.spyOn(fixture.providerGate, 'inspect')
-      .mockResolvedValueOnce({
-        kind: 'probe', generationId: 'generation-1', revision: 1,
-        reason: 'quota', operationClass: 'folder',
-      })
-      .mockResolvedValue({ kind: 'blocked', reason: 'quota_exhausted' });
-    fixture.branchProbe.executeNext.mockResolvedValue('still-blocked');
-
-    fixture.scheduler.startTimers();
-    await vi.waitFor(() => expect(fixture.branchProbe.executeNext).toHaveBeenCalledOnce(), {
-      timeout: 500,
+    await fixture.providerGate.recordQuotaOutcome('generation-1', 1);
+    const dueAtMs = 10_000 + 6 * 60 * 60_000 + 1;
+    fixture.clock.now.mockReturnValue(new Date(dueAtMs));
+    const admission = await fixture.providerGate.inspect('generation-1', 'upload');
+    expect(admission).toMatchObject({
+      kind: 'probe', reason: 'quota', operationClass: 'folder',
     });
+    if (admission.kind !== 'probe') throw new Error('expected due quota admission');
+    fixture.quotaProbe.execute.mockResolvedValue('still-blocked');
+    const scheduler = fixture.scheduler as unknown as {
+      admitOne(
+        context: {
+          generation: DriveConnection;
+          admission: typeof admission;
+          providerDeadlineMs: number | null;
+          clockHealth: 'healthy';
+        },
+        nowMs: number,
+        signal: AbortSignal,
+        expectedEpoch: number,
+      ): Promise<string>;
+    };
+    const signal = new AbortController().signal;
 
-    expect(run).toHaveBeenCalledWith(expect.objectContaining({
-      generationId: 'generation-1', operationClass: 'folder', probe: true,
-    }));
-    expect(fixture.quotaProbe.execute).not.toHaveBeenCalled();
+    await expect(scheduler.admitOne({
+      generation: activeConnection('generation-1'),
+      admission,
+      providerDeadlineMs: null,
+      clockHealth: 'healthy',
+    }, dueAtMs, signal, fixture.wake.snapshot())).resolves.toBe('admitted');
+
+    expect(fixture.quotaProbe.execute).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'generation-1' }),
+      admission,
+      signal,
+      undefined,
+    );
+    expect(fixture.branchProbe.executeNext).not.toHaveBeenCalled();
+    expect(genericRun).not.toHaveBeenCalled();
     expect(fixture.uploads.execute).not.toHaveBeenCalled();
     expect(fixture.uploads.executeClaimed).not.toHaveBeenCalled();
-    await fixture.scheduler.shutdown();
+  });
+
+  it('executes and settles an account-owned recovery probe made due by retry', async () => {
+    const fixture = setup({ nowMs: 10_000 });
+    await fixture.providerGate.ensureGeneration('generation-1');
+    await fixture.providerGate.recordFailure(
+      'generation-1',
+      'account',
+      new DriveProviderCapacityBlockedError('user-action'),
+    );
+    const blocked = await fixture.providerStateRepository.load();
+    await fixture.providerStateRepository.requestProbe({
+      generationId: 'generation-1',
+      expectedRevision: blocked.revision,
+      allowedBlockReasons: ['account_creation_limit'],
+      nowMs: 10_000,
+    });
+    const admission = await fixture.providerGate.inspect('generation-1', 'account');
+    expect(admission).toMatchObject({
+      kind: 'probe', reason: 'capacity', operationClass: 'account',
+    });
+    if (admission.kind !== 'probe') throw new Error('expected due account probe');
+    const scheduler = fixture.scheduler as unknown as {
+      admitOne(
+        context: {
+          generation: DriveConnection;
+          admission: typeof admission;
+          providerDeadlineMs: number | null;
+          clockHealth: 'healthy';
+        },
+        nowMs: number,
+        signal: AbortSignal,
+        expectedEpoch: number,
+      ): Promise<string>;
+    };
+    const signal = new AbortController().signal;
+
+    await expect(scheduler.admitOne({
+      generation: activeConnection('generation-1'),
+      admission,
+      providerDeadlineMs: null,
+      clockHealth: 'healthy',
+    }, 10_000, signal, fixture.wake.snapshot())).resolves.toBe('admitted');
+
+    expect(fixture.accountProbe.readQuota).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'generation-1' }),
+      signal,
+    );
+    expect(fixture.branchProbe.executeNext).not.toHaveBeenCalled();
+    expect(fixture.uploads.execute).not.toHaveBeenCalled();
+    await expect(fixture.providerGate.inspect('generation-1', 'account'))
+      .resolves.toEqual({ kind: 'allowed' });
   });
 
   it('reloads once before backing off when a folder recovery probe throws', async () => {
@@ -668,6 +755,71 @@ describe('ArchiveSchedulerService', () => {
 
     expect(fixture.maxConcurrentUploads()).toBe(1);
     expect(fixture.uploads.execute).not.toHaveBeenCalled();
+    await fixture.scheduler.shutdown();
+  });
+
+  it('bounds productive branch precedence to one probe before each transfer opportunity', async () => {
+    let releaseBackup!: () => void;
+    const stalledBackup = new Promise<void>((resolve) => { releaseBackup = resolve; });
+    const upload = vi.fn()
+      .mockImplementationOnce(async () => stalledBackup)
+      .mockResolvedValue({ kind: 'verified' });
+    const fixture = setup({ upload });
+    fixture.seedFreshBackups(1);
+    fixture.seedFreshVideos(1);
+    fixture.branchProbe.executeNext
+      .mockResolvedValueOnce('restored')
+      .mockResolvedValueOnce('still-blocked')
+      .mockResolvedValueOnce('adopted')
+      .mockResolvedValue('none');
+
+    fixture.scheduler.startTimers();
+    await vi.waitFor(() => {
+      expect(fixture.uploads.execute).toHaveBeenCalledOnce();
+      expect(fixture.branchProbe.executeNext).toHaveBeenCalledTimes(2);
+    }, { timeout: 500 });
+
+    expect(fixture.branchProbe.executeNext.mock.invocationCallOrder[0]).toBeLessThan(
+      fixture.uploads.execute.mock.invocationCallOrder[0],
+    );
+    expect(fixture.uploads.execute.mock.invocationCallOrder[0]).toBeLessThan(
+      fixture.branchProbe.executeNext.mock.invocationCallOrder[1],
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(fixture.branchProbe.executeNext).toHaveBeenCalledTimes(2);
+
+    releaseBackup();
+    await vi.waitFor(() => {
+      expect(fixture.uploads.execute).toHaveBeenCalledTimes(2);
+      expect(fixture.branchProbe.executeNext.mock.calls.length).toBeGreaterThanOrEqual(3);
+    }, { timeout: 500 });
+
+    expect(fixture.uploads.execute.mock.invocationCallOrder[1]).toBeLessThan(
+      fixture.branchProbe.executeNext.mock.invocationCallOrder[2],
+    );
+    expect(fixture.maxConcurrentUploads()).toBe(1);
+    await fixture.scheduler.shutdown();
+  });
+
+  it('releases branch fairness debt after an empty free-slot transfer scan', async () => {
+    const fixture = setup();
+    fixture.branchProbe.executeNext
+      .mockResolvedValueOnce('restored')
+      .mockResolvedValue('none');
+
+    fixture.scheduler.startTimers();
+    await vi.waitFor(() => {
+      expect(fixture.branchProbe.executeNext).toHaveBeenCalledOnce();
+      expect(fixture.repository.readNextDeadline).toHaveBeenCalled();
+    }, { timeout: 500 });
+
+    fixture.wake.wake();
+    await vi.waitFor(() => {
+      expect(fixture.branchProbe.executeNext).toHaveBeenCalledTimes(2);
+    }, { timeout: 500 });
+
+    expect(fixture.uploads.execute).not.toHaveBeenCalled();
+    expect(fixture.uploads.executeClaimed).not.toHaveBeenCalled();
     await fixture.scheduler.shutdown();
   });
 

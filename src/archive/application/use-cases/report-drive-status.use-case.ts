@@ -136,10 +136,15 @@ export class ReportDriveStatusUseCase {
       this.artifacts.readSchedulerState(),
       this.providerState.load(),
     ]);
+    const providerOwnsActiveGeneration = providerState.generationId === active?.id;
+    const reauthorizationRequired = active?.status === 'reauth_required'
+      || active?.errorCode === 'authorization_required'
+      || (providerOwnsActiveGeneration && providerState.blockReason === 'reauthorization_required');
+    const clockBlocked = scheduler.clockHealth === 'clock-blocked';
     const [quota, reclamation, queue, unhealthyDateFolders] = active === null
       ? [null, null, EMPTY_QUEUE, 0] as const
       : await Promise.all([
-        active.status === 'active'
+        active.status === 'active' && !reauthorizationRequired && !clockBlocked
           ? this.account.readQuota(toConnection(active), signal).catch(() => null)
           : Promise.resolve(null),
         this.connections.readQuotaReclamation(active.id),
@@ -147,10 +152,6 @@ export class ReportDriveStatusUseCase {
         this.artifacts.readUnhealthyDateFolderCount(active.id),
       ]);
 
-    const providerOwnsActiveGeneration = providerState.generationId === active?.id;
-    const reauthorizationRequired = active?.status === 'reauth_required'
-      || active?.errorCode === 'authorization_required'
-      || (providerOwnsActiveGeneration && providerState.blockReason === 'reauthorization_required');
     const providerBlock = providerOwnsActiveGeneration ? providerBlockFor(providerState) : null;
     const coolingDown = providerState.generationId === active?.id
       && providerState.cooldownUntilMs !== null
@@ -158,7 +159,7 @@ export class ReportDriveStatusUseCase {
     const activity = this.schedulerActivity.readActivitySnapshot();
     const drainState = deriveArchiveDrainState({
       reauthorizationRequired,
-      clockBlocked: scheduler.clockHealth === 'clock-blocked',
+      clockBlocked,
       providerBlock,
       hasActiveTransfer: active !== null
         && activity?.generationId === active.id

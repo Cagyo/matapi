@@ -5,7 +5,7 @@ import type {
   UnattemptedArtifactSelection, VerifiedArchiveObject,
 } from '../../application/ports/archive-artifact-repository.port';
 import type { ArchiveRegistrationLookupInput } from '../../application/ports/archive-registration-lookup.port';
-import { ArchiveArtifact, type RegisterArchiveArtifact } from '../../domain/archive-artifact.entity';
+import { ArchiveArtifact, type ArchiveArtifactKind, type RegisterArchiveArtifact } from '../../domain/archive-artifact.entity';
 import { DriveObjectAttempt } from '../../domain/drive-object-attempt.entity';
 import type { VerifiedDriveObject } from '../../domain/drive-object-metadata.value-object';
 import { DriveAttemptLeaseLostError } from '../../domain/errors/drive-attempt-lease-lost.error';
@@ -474,7 +474,10 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
   async listUnattemptedArtifacts(selection: UnattemptedArtifactSelection): Promise<readonly ArchiveArtifact[]> {
     validateLimit(selection.limit);
     const nowMs = selection.nowMs ?? Date.now();
-    const attempted = new Set([...this.attempts.values()].map(({ attempt }) => attempt.artifactId));
+    const attempted = new Set([...this.attempts.values()]
+      .filter(({ attempt }) => selection.generationId === undefined
+        || attempt.generationId === selection.generationId)
+      .map(({ attempt }) => attempt.artifactId));
     const eligible: ArchiveArtifact[] = [];
     for (const artifact of this.artifacts.values()) {
       if (artifact.kind !== selection.kind || artifact.state !== 'pending' || attempted.has(artifact.id)
@@ -559,7 +562,9 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
           providerDeadlineMs: legacyProviderDeadlineMs ?? null,
         }
       : inputOrGenerationId;
-    const attempted = new Set([...this.attempts.values()].map(({ attempt }) => attempt.artifactId));
+    const attempted = new Set([...this.attempts.values()]
+      .filter(({ attempt }) => attempt.generationId === generationId)
+      .map(({ attempt }) => attempt.artifactId));
     const deadlines: number[] = [];
     if (providerDeadlineMs !== null && providerDeadlineMs > nowMs) {
       deadlines.push(providerDeadlineMs);
@@ -588,14 +593,42 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
     return deadlines.length === 0 ? null : Math.min(...deadlines);
   }
 
-  async readNextEligibleTransferSize(generationId: string, nowMs: number): Promise<number | null> {
-    const candidate = [...this.attempts.entries()]
-      .filter(([, entry]) => entry.attempt.generationId === generationId
-        && ['pending', 'retryable'].includes(entry.attempt.state)
-        && entry.nextAttemptMs <= nowMs)
-      .sort(([leftId, left], [rightId, right]) => left.nextAttemptMs - right.nextAttemptMs
-        || left.attempt.createdAtMs - right.attempt.createdAtMs || leftId.localeCompare(rightId))[0];
-    return candidate === undefined ? null : this.artifacts.get(candidate[1].attempt.artifactId)?.size ?? null;
+  async readNextEligibleTransferSize(
+    generationId: string,
+    nowMs: number,
+    forceVideoRetryBeforeMs?: number,
+  ): Promise<number | null> {
+    const dueAttemptSize = (
+      kind: ArchiveArtifactKind,
+      retryBeforeMs?: number,
+    ): number | null => {
+      const candidate = [...this.attempts.entries()]
+        .filter(([, entry]) => entry.attempt.generationId === generationId
+          && ['pending', 'retryable'].includes(entry.attempt.state)
+          && entry.nextAttemptMs <= nowMs
+          && (retryBeforeMs === undefined
+            || (entry.attempt.state === 'retryable' && entry.nextAttemptMs <= retryBeforeMs))
+          && this.artifacts.get(entry.attempt.artifactId)?.kind === kind)
+        .sort(([leftId, left], [rightId, right]) => left.nextAttemptMs - right.nextAttemptMs
+          || left.attempt.createdAtMs - right.attempt.createdAtMs || leftId.localeCompare(rightId))[0];
+      return candidate === undefined
+        ? null
+        : this.artifacts.get(candidate[1].attempt.artifactId)?.size ?? null;
+    };
+    const dueBackupAttempt = dueAttemptSize('database_backup');
+    if (dueBackupAttempt !== null) return dueBackupAttempt;
+    const [newBackup] = await this.listUnattemptedArtifacts({
+      kind: 'database_backup', generationId, nowMs, limit: 1,
+    });
+    if (newBackup !== undefined) return newBackup.size;
+    const forcedVideoRetry = forceVideoRetryBeforeMs === undefined
+      ? null
+      : dueAttemptSize('motion_video', forceVideoRetryBeforeMs);
+    if (forcedVideoRetry !== null) return forcedVideoRetry;
+    const [newVideo] = await this.listUnattemptedArtifacts({
+      kind: 'motion_video', generationId, nowMs, limit: 1,
+    });
+    return newVideo?.size ?? dueAttemptSize('motion_video');
   }
 
   async readQueueStatus(generationId: string, nowMs?: number): Promise<ArchiveQueueStatus> {
@@ -622,12 +655,11 @@ export class InMemoryArchiveArtifactRepository implements ArchiveArtifactReposit
     const hasHealthyDueCandidate = nowMs === undefined ? false : queued.some((artifact) => {
       if (blockedByArtifact.get(artifact.id) === true) return false;
       const attempts = [...this.attempts.values()].filter(({ attempt }) => (
-        attempt.artifactId === artifact.id
+        attempt.artifactId === artifact.id && attempt.generationId === generationId
       ));
       if (attempts.length === 0) return artifact.admission.nextAttemptMs <= nowMs;
       return attempts.some(({ attempt, nextAttemptMs }) => (
-        attempt.generationId === generationId
-        && ['pending', 'retryable'].includes(attempt.state)
+        ['pending', 'retryable'].includes(attempt.state)
         && nextAttemptMs <= nowMs
       ));
     });

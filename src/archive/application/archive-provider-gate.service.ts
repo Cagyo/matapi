@@ -169,6 +169,9 @@ export class ArchiveProviderGateService {
         if (deadline === null) throw error;
         await this.wait(deadline, input.signal, input.beforeWait);
         if (deadline > this.nowMs()) throw error;
+        const resumed = await this.loadGeneration(input.generationId);
+        if (resumed?.revision !== expectedProviderRevision
+          || resumed.operationClass !== input.operationClass) throw error;
       }
     }
   }
