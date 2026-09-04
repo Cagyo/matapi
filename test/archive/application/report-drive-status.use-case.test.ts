@@ -7,6 +7,7 @@ import {
 describe('ReportDriveStatusUseCase', () => {
   it.each([
     ['reauthorization_required', 'reauthorization-required'],
+    ['clock_blocked', 'clock-blocked'],
     ['policy_blocked', 'policy-blocked'],
     ['capacity_blocked', 'capacity-blocked'],
     ['quota_blocked', 'quota-blocked'],
@@ -16,8 +17,9 @@ describe('ReportDriveStatusUseCase', () => {
     ['idle', 'idle'],
   ] as const)('applies drain-state precedence for %s', (scenario, expected) => {
     const input = {
-      providerBlock: scenario === 'reauthorization_required' ? 'reauthorization-required' as const
-        : scenario === 'policy_blocked' ? 'policy-blocked' as const
+      reauthorizationRequired: scenario === 'reauthorization_required',
+      clockBlocked: scenario === 'clock_blocked',
+      providerBlock: scenario === 'policy_blocked' ? 'policy-blocked' as const
           : scenario === 'capacity_blocked' ? 'capacity-blocked' as const
             : scenario === 'quota_blocked' ? 'quota-blocked' as const : null,
       hasActiveTransfer: scenario === 'active',
@@ -27,6 +29,111 @@ describe('ReportDriveStatusUseCase', () => {
     };
 
     expect(deriveArchiveDrainState(input)).toBe(expected);
+  });
+
+  it('reports clock-blocked before provider, queue, or active transfer state', async () => {
+    const artifacts = aggregateArtifacts();
+    artifacts.readSchedulerState = async () => ({
+      ...schedulerState(),
+      clockHealth: 'clock-blocked' as const,
+    });
+    artifacts.readQueueStatus = async () => ({
+      queuedVideos: 1, retryableVideos: 1, oldestQueuedVideoAtMs: 9_000,
+      branchBlocked: true,
+    });
+    const useCase = statusUseCase({
+      artifacts,
+      provider: providerState({ blockReason: 'quota_exhausted' }),
+      activity: {
+        readActivitySnapshot: () => ({
+          generationId: 'generation-1', artifactKind: 'motion_video', startedAtMs: 9_000,
+        }),
+      },
+    });
+
+    await expect(useCase.execute()).resolves.toMatchObject({
+      drainState: 'clock-blocked',
+      requiredAction: 'fix-system-clock',
+      recovery: null,
+    });
+  });
+
+  it.each([
+    ['branch-blocked', 'restore-date-folder', null],
+    ['quota-blocked', 'free-drive-space', 'quota_exhausted'],
+    ['capacity-blocked', 'fix-capacity-then-retry', 'account_creation_limit'],
+    ['policy-blocked', 'fix-policy-then-retry', 'policy_blocked'],
+    ['clock-blocked', 'fix-system-clock', null],
+    ['reauthorization-required', 'reauthorize', 'reauthorization_required'],
+    ['idle', null, null],
+  ] as const)('maps %s to one exact action', async (state, requiredAction, blockReason) => {
+    const artifacts = aggregateArtifacts();
+    if (state === 'branch-blocked') {
+      artifacts.readQueueStatus = async () => ({
+        queuedVideos: 1, retryableVideos: 1, oldestQueuedVideoAtMs: 9_000,
+        branchBlocked: true,
+      });
+    }
+    if (state === 'clock-blocked') {
+      artifacts.readSchedulerState = async () => ({
+        ...schedulerState(),
+        clockHealth: 'clock-blocked' as const,
+      });
+    }
+
+    const report = await statusUseCase({
+      artifacts,
+      provider: providerState({ blockReason }),
+    }).execute();
+
+    expect(report).toMatchObject({ drainState: state, requiredAction });
+  });
+
+  it('projects the current provider revision only through a retryable recovery fence', async () => {
+    const report = await statusUseCase({
+      provider: providerState({ revision: 17, blockReason: 'policy_blocked' }),
+    }).execute();
+
+    expect(report).toMatchObject({
+      drainState: 'policy-blocked',
+      requiredAction: 'fix-policy-then-retry',
+      recovery: { generationId: 'generation-1', providerRevision: 17, retryable: true },
+    });
+  });
+
+  it('marks a current branch fence retryable', async () => {
+    const artifacts = aggregateArtifacts();
+    artifacts.readQueueStatus = async () => ({
+      queuedVideos: 1, retryableVideos: 1, oldestQueuedVideoAtMs: 9_000,
+      branchBlocked: true,
+    });
+
+    const report = await statusUseCase({
+      artifacts,
+      provider: providerState({ revision: 23 }),
+    }).execute();
+
+    expect(report.recovery).toEqual({
+      generationId: 'generation-1', providerRevision: 23, retryable: true,
+    });
+  });
+
+  it('keeps quota recovery automatic and reauthorization outside manual retry', async () => {
+    const quota = await statusUseCase({
+      provider: providerState({ revision: 31, blockReason: 'quota_exhausted' }),
+    }).execute();
+    const reauthorization = await statusUseCase({
+      provider: providerState({ revision: 37, blockReason: 'reauthorization_required' }),
+    }).execute();
+
+    expect(quota).toMatchObject({
+      requiredAction: 'free-drive-space',
+      recovery: { generationId: 'generation-1', providerRevision: 31, retryable: false },
+    });
+    expect(reauthorization).toMatchObject({
+      requiredAction: 'reauthorize',
+      recovery: { generationId: 'generation-1', providerRevision: 37, retryable: false },
+    });
   });
 
   it('reports permissionId even when presentation fields are absent', async () => {
@@ -264,18 +371,38 @@ function activeStatusConnections(id: string) {
   }];
 }
 
+function providerState(overrides: {
+  revision?: number;
+  blockReason?: 'quota_exhausted' | 'account_creation_limit' | 'policy_blocked' | 'reauthorization_required' | null;
+} = {}) {
+  return {
+    load: async () => ({
+      revision: overrides.revision ?? 1,
+      generationId: 'generation-1', operationClass: 'upload' as const,
+      failureClass: null, failureStreak: 0, cooldownUntilMs: null,
+      blockReason: overrides.blockReason ?? null, updatedAtMs: 9_000,
+    }),
+  };
+}
+
+function schedulerState() {
+  return {
+    revision: 0, backupLeaseOwner: null, backupLeaseExpiresAtMs: null,
+    lastBackupSuccessMs: null, lastUploadSuccessMs: null,
+    lastReconcileSuccessMs: null, lastCleanupSuccessMs: null,
+    lastMotionTraversalSuccessMs: null, lastArtifactRegistrationSuccessMs: null,
+    lastPlausibleWallTimeMs: null, clockHealth: 'healthy' as const,
+    observedRollbackMs: null,
+  };
+}
+
 function aggregateArtifacts() {
   return {
     readStatusCounts: async () => ({
       artifacts: { stabilizing: 0, pending: 1, verified: 0, local_missing: 0, superseded: 0 },
       attempts: { pending: 0, uploading: 0, retryable: 0, verified: 0, missing: 0, detached: 0, conflict: 0, abandoned: 0, deleted: 0 },
     }),
-    readSchedulerState: async () => ({
-      revision: 0, backupLeaseOwner: null, backupLeaseExpiresAtMs: null,
-      lastBackupSuccessMs: null, lastUploadSuccessMs: null,
-      lastReconcileSuccessMs: null, lastCleanupSuccessMs: null,
-      lastMotionTraversalSuccessMs: null, lastArtifactRegistrationSuccessMs: null,
-    }),
+    readSchedulerState: async () => schedulerState(),
     readQueueStatus: async () => ({
       queuedVideos: 1, retryableVideos: 0, oldestQueuedVideoAtMs: 9_000,
       branchBlocked: false,

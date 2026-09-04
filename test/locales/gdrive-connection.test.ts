@@ -22,3 +22,23 @@ it('keeps the Drive setup catalog shape identical and each guide within 3,500 ch
     expect(catalog.gdriveConnection.guide).toMatch(/seven days|сім днів|семь дней/u);
   }
 });
+
+it('keeps every Drive drain, action, and retry outcome localized in every catalog', () => {
+  const drainStates = [
+    'active', 'idle', 'cooling-down', 'branch-blocked', 'quota-blocked',
+    'capacity-blocked', 'policy-blocked', 'clock-blocked', 'reauthorization-required',
+  ];
+  const actions = [
+    'restore-date-folder', 'free-drive-space', 'fix-capacity-then-retry',
+    'fix-policy-then-retry', 'fix-system-clock', 'reauthorize',
+  ];
+  const outcomes = ['scheduled', 'stale', 'automatic-quota-probe', 'reauthorize', 'nothing-blocked'];
+
+  for (const catalog of Object.values(catalogs)) {
+    expect(Object.keys(catalog.gdrive.drainStates).sort()).toEqual([...drainStates].sort());
+    expect(Object.keys(catalog.gdrive.actions).sort()).toEqual([...actions].sort());
+    expect(Object.keys(catalog.gdrive.retryResults).sort()).toEqual([...outcomes].sort());
+    expect(catalog.gdrive.retryButton).toEqual(expect.any(String));
+    expect(catalog.gdrive.usage).toContain('connect|status|retry|disconnect');
+  }
+});

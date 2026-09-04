@@ -12,7 +12,7 @@ const gdrive = (count: number, drainState: ArchiveDrainState = 'idle') => uk.gdr
     motionTraversalAtMs: null, artifactRegistrationAtMs: null,
   },
   artifacts: { pending: count }, attempts: { pending: count, missing: 0, detached: 0 },
-  generations: [], quota: null, reclamation: null, requiredActions: [],
+  generations: [], quota: null, reclamation: null, requiredAction: null,
   queue: { queuedVideos: 0, retryableVideos: 0, oldestQueuedVideoAgeMs: null, unhealthyDateFolders: 0 },
   drainState,
 });
@@ -66,6 +66,7 @@ describe('Ukrainian count-bearing formatters', () => {
     ['quota-blocked', 'квоту вичерпано'],
     ['capacity-blocked', 'ліміт місткості'],
     ['policy-blocked', 'політику заблоковано'],
+    ['clock-blocked', 'системний годинник заблоковано'],
     ['reauthorization-required', 'потрібна повторна авторизація'],
   ] as const)('localizes the %s Drive drain state', (state, label) => {
     const rendered = gdrive(0, state);

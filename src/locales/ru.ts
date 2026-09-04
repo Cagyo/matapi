@@ -4,7 +4,11 @@ import type { SensorSeverity, SensorType } from '../sensors/domain/sensor';
 import type { ImportSummary } from '../sensors/application/import-sensors.use-case';
 import type { DepUpdate } from '../system/domain/ports/system-deps.port';
 import type { User } from '../telegram/domain/user.entity';
-import type { ArchiveDrainState } from '../archive/application/use-cases/report-drive-status.use-case';
+import type {
+  ArchiveDrainState,
+  ArchiveRequiredAction,
+} from '../archive/application/use-cases/report-drive-status.use-case';
+import type { RetryDriveArchiveResult } from '../archive/application/use-cases/retry-drive-archive.use-case';
 import type { LocaleCatalog } from './catalog';
 import { deepFreeze } from './freeze';
 
@@ -69,7 +73,25 @@ const DRIVE_DRAIN_LABELS: Record<ArchiveDrainState, string> = {
   'quota-blocked': 'квота исчерпана',
   'capacity-blocked': 'лимит ёмкости',
   'policy-blocked': 'политика заблокирована',
+  'clock-blocked': 'системные часы заблокированы',
   'reauthorization-required': 'требуется повторная авторизация',
+};
+
+const DRIVE_REQUIRED_ACTIONS: Record<NonNullable<ArchiveRequiredAction>, string> = {
+  'restore-date-folder': 'Восстановите нужную папку даты, затем повторите.',
+  'free-drive-space': 'Освободите место в Drive; восстановление будет проверено автоматически.',
+  'fix-capacity-then-retry': 'Устраните ограничение ёмкости Drive, затем повторите.',
+  'fix-policy-then-retry': 'Устраните блокировку политики Drive, затем повторите.',
+  'fix-system-clock': 'Исправьте системные часы перед возобновлением архивации.',
+  reauthorize: 'Повторно подключите Google Drive через /gdrive connect.',
+};
+
+const DRIVE_RETRY_RESULTS: Record<RetryDriveArchiveResult, string> = {
+  scheduled: '✅ Восстановление архива Drive запланировано.',
+  stale: '↻ Состояние Drive изменилось. Обновите статус и повторите попытку.',
+  'automatic-quota-probe': 'ℹ️ Восстановление места Drive будет проверено автоматически.',
+  reauthorize: 'ℹ️ Повторно подключите Google Drive через /gdrive connect.',
+  'nothing-blocked': 'ℹ️ Сейчас ничего не заблокировано.',
 };
 
 function fmtDate(date: Date | null | undefined, withSeconds = false): string {
@@ -190,7 +212,7 @@ export interface GdriveStatusView {
   generations: readonly { generationId: string; state: string; retiredAtMs: number | null }[];
   quota: { limitBytes: number | null; usageBytes: number; usageInDriveBytes: number; usageInDriveTrashBytes: number } | null;
   reclamation: { windowStartedMs: number | null; reclaimedBytes: number } | null;
-  requiredActions: readonly ('reauthorize' | 'check-clock' | 'manual-cleanup')[];
+  requiredAction: ArchiveRequiredAction;
   queue: { queuedVideos: number; retryableVideos: number; oldestQueuedVideoAgeMs: number | null; unhealthyDateFolders: number };
   drainState: ArchiveDrainState;
 }
@@ -1481,12 +1503,15 @@ const ruCatalog = {
   },
 
   gdrive: {
-    usage: 'Использование: /gdrive connect|status|disconnect',
+    usage: 'Использование: /gdrive connect|status|retry|disconnect',
     header: '☁️ Состояние Google Drive',
+    drainStates: DRIVE_DRAIN_LABELS,
+    actions: DRIVE_REQUIRED_ACTIONS,
+    retryResults: DRIVE_RETRY_RESULTS,
+    retryButton: '↻ Повторить восстановление архива',
     body: (v: GdriveStatusView): string => {
       const lines = [
         `Подключение: ${v.connection?.state ?? 'не подключено'}`,
-        v.account ? `Идентификатор разрешения: ${v.account.permissionId}` : 'Аккаунт недоступен',
         `📦 Использовано: ${gb(v.quota?.usageBytes ?? null)} / ${gb(v.quota?.limitBytes ?? null)} (${percent(v.quota?.usageBytes ?? null, v.quota?.limitBytes ?? null)})`,
         `📤 Последняя загрузка: ${fmtDate(v.last.uploadAtMs === null ? null : new Date(v.last.uploadAtMs))}`,
         `💾 Последняя резервная копия: ${fmtDate(v.last.backupAtMs === null ? null : new Date(v.last.backupAtMs))}`,
@@ -1500,9 +1525,7 @@ const ruCatalog = {
         `📋 Артефактов: ${Object.values(v.artifacts).reduce((sum, count) => sum + count, 0)}; попыток: ${Object.values(v.attempts).reduce((sum, count) => sum + count, 0)}`,
         `⚠️ Отсутствуют / отсоединены: ${v.attempts.missing ?? 0} / ${v.attempts.detached ?? 0}`,
       ];
-      if (v.connection?.errorCode) lines.push(`⚠️ Состояние архива: ${v.connection.errorCode}`);
-      if (v.folders) lines.push(`Приватные папки:\nКорень: ${v.folders.root}\nВидео: ${v.folders.motion}\nКопии: ${v.folders.backups}`);
-      if (v.requiredActions.length > 0) lines.push('Требуется действие администратора.');
+      if (v.requiredAction) lines.push(`Требуемое действие: ${DRIVE_REQUIRED_ACTIONS[v.requiredAction]}`);
       return lines.join('\n');
     },
     notInstalled: '❌ Интеграция Google Drive недоступна.',

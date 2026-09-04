@@ -23,6 +23,10 @@ import {
   type TelegramDriveClientDocumentAdapter,
 } from '../infrastructure/telegram-drive-client-document.adapter';
 import { ReportDriveStatusUseCase } from '../../archive/application/use-cases/report-drive-status.use-case';
+import {
+  RetryDriveArchiveUseCase,
+  type RetryDriveArchiveResult,
+} from '../../archive/application/use-cases/retry-drive-archive.use-case';
 import { en } from '../../locales/en';
 import { RoleMiddleware } from './role.middleware';
 import { TelegramHandler } from './telegram-handler';
@@ -49,6 +53,7 @@ const GOOGLE_CLOUD_CONSOLE_URL = 'https://console.cloud.google.com/apis/credenti
 export class GdriveHandler implements TelegramHandler {
   private readonly logger = new Logger(GdriveHandler.name);
   private readonly disconnects = new Map<string, { receiptId: string; generationId: string; userId: number; chatId: number }>();
+  private readonly retries = new Map<string, ArchiveRetryReceipt>();
 
   constructor(
     private readonly status: ReportDriveStatusUseCase,
@@ -63,6 +68,7 @@ export class GdriveHandler implements TelegramHandler {
     private readonly cancelConnection: CancelDriveConnectionUseCase,
     private readonly disconnect: DisconnectDriveUseCase,
     @Inject(DriveSetupStateRegistry) private readonly setupStates: DriveSetupStateRegistry,
+    @Inject(RetryDriveArchiveUseCase) private readonly retry: RetryDriveArchiveUseCase,
   ) {}
 
   register(composer: Composer<TelegramContext>): void {
@@ -76,6 +82,10 @@ export class GdriveHandler implements TelegramHandler {
         await this.handleDisconnect(ctx);
         return;
       }
+      if (sub === 'retry') {
+        await this.handleRetry(ctx);
+        return;
+      }
       if (sub && sub !== 'status') {
         await ctx.reply((ctx.localeState?.catalog ?? en).gdrive.usage);
         return;
@@ -86,6 +96,10 @@ export class GdriveHandler implements TelegramHandler {
     composer.callbackQuery(/^gdc:/, async (ctx) => {
       await ctx.answerCallbackQuery().catch(() => undefined);
       await this.handleCallback(ctx);
+    });
+    composer.callbackQuery(/^gdr:/, async (ctx) => {
+      await ctx.answerCallbackQuery().catch(() => undefined);
+      await this.handleRetryCallback(ctx);
     });
   }
 
@@ -404,13 +418,85 @@ export class GdriveHandler implements TelegramHandler {
     });
     if (!receipt) return;
     const catalog = ctx.localeState?.catalog ?? en;
+    let retryReceipt: string | null = null;
     try {
       const result = await this.status.execute();
       const body = catalog.gdrive.body(result);
-      await this.complete(ctx, receipt, () => ctx.reply(`${catalog.gdrive.header}\n\n${body}`));
+      const replyMarkup = result.recovery?.retryable
+        ? this.storeRetryReceipt(ctx, result.recovery)
+        : undefined;
+      retryReceipt = replyMarkup?.receipt ?? null;
+      await this.complete(ctx, receipt, () => ctx.reply(`${catalog.gdrive.header}\n\n${body}`, replyMarkup?.options));
     } catch (err) {
+      if (retryReceipt) this.retries.delete(retryReceipt);
       await this.handleError(ctx, receipt, err);
     }
+  }
+
+  /** Private-admin-only retry entry that accepts no Drive identifier from Telegram. */
+  async handleRetry(ctx: TelegramContext): Promise<void> {
+    if (!this.currentAdmin(ctx)) return;
+    const catalog = ctx.localeState?.catalog ?? en;
+    try {
+      const report = await this.status.execute();
+      await ctx.reply(catalog.gdrive.retryResults[await this.retryFromReport(report)]);
+    } catch {
+      this.logger.error('/gdrive retry failed');
+      await ctx.reply(catalog.gdrive.retryResults.stale);
+    }
+  }
+
+  private async handleRetryCallback(ctx: TelegramContext): Promise<void> {
+    const current = this.currentAdmin(ctx);
+    const receiptId = parseRetryCallback(ctx.callbackQuery?.data ?? '');
+    if (!current || !receiptId) return;
+    const requested = this.retries.get(receiptId);
+    if (requested?.userId !== current.userId || requested?.chatId !== current.chatId) return;
+    this.retries.delete(receiptId);
+    const catalog = ctx.localeState?.catalog ?? en;
+    try {
+      const result = await this.retry.execute({
+        generationId: requested.generationId,
+        observedProviderRevision: requested.providerRevision,
+      });
+      await ctx.reply(catalog.gdrive.retryResults[result]);
+    } catch {
+      this.logger.error('/gdrive retry callback failed');
+      await ctx.reply(catalog.gdrive.retryResults.stale);
+    }
+  }
+
+  private async retryFromReport(report: Awaited<ReturnType<ReportDriveStatusUseCase['execute']>>): Promise<RetryDriveArchiveResult> {
+    if (report.recovery?.retryable) {
+      return this.retry.execute({
+        generationId: report.recovery.generationId,
+        observedProviderRevision: report.recovery.providerRevision,
+      });
+    }
+    if (report.requiredAction === 'free-drive-space') return 'automatic-quota-probe';
+    if (report.requiredAction === 'reauthorize') return 'reauthorize';
+    return 'nothing-blocked';
+  }
+
+  private storeRetryReceipt(
+    ctx: TelegramContext,
+    recovery: NonNullable<Awaited<ReturnType<ReportDriveStatusUseCase['execute']>>['recovery']>,
+  ): { receipt: string; options: { reply_markup: InlineKeyboard } } | undefined {
+    const current = this.currentAdmin(ctx);
+    if (!current || !recovery.retryable) return undefined;
+    const receipt = randomReceipt();
+    this.retries.set(receipt, {
+      userId: current.userId,
+      chatId: current.chatId,
+      generationId: recovery.generationId,
+      providerRevision: recovery.providerRevision,
+    });
+    return {
+      receipt,
+      options: {
+        reply_markup: new InlineKeyboard().text((ctx.localeState?.catalog ?? en).gdrive.retryButton, `gdr:${receipt}`),
+      },
+    };
   }
 
   private async handleError(
@@ -443,6 +529,13 @@ export class GdriveHandler implements TelegramHandler {
   }
 }
 
+interface ArchiveRetryReceipt {
+  userId: number;
+  chatId: number;
+  generationId: string;
+  providerRevision: number;
+}
+
 type DriveCallbackAction = 'a' | 'c' | 'd' | 'x';
 
 function callback(action: DriveCallbackAction, receiptId: string, generationId: string): string {
@@ -452,6 +545,11 @@ function callback(action: DriveCallbackAction, receiptId: string, generationId: 
 function parseCallback(data: string): { receiptId: string; generationId: string; action: DriveCallbackAction } | null {
   const match = /^gdc:([A-Za-z0-9_-]{16}):([A-Za-z0-9_-]{1,16}):(a|c|d|x)$/.exec(data);
   return match ? { receiptId: match[1], generationId: match[2], action: match[3] as DriveCallbackAction } : null;
+}
+
+function parseRetryCallback(data: string): string | null {
+  const match = /^gdr:([A-Za-z0-9_-]{16})$/.exec(data);
+  return match?.[1] ?? null;
 }
 
 function randomReceipt(): string {

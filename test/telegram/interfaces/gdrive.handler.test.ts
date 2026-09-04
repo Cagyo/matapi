@@ -8,6 +8,7 @@ import { DriveRateLimitedError } from '../../../src/archive/domain/errors/drive-
 import { DriveSetupBusyError } from '../../../src/archive/domain/errors/drive-setup-busy.error';
 import { DriveSetupExpiredError } from '../../../src/archive/domain/errors/drive-setup-expired.error';
 import { DriveTemporaryUnavailableError } from '../../../src/archive/domain/errors/drive-temporary-unavailable.error';
+import type { DriveStatusReport } from '../../../src/archive/application/use-cases/report-drive-status.use-case';
 import { catalogFor } from '../../../src/locales';
 import { DriveSetupStateRegistry } from '../../../src/telegram/interfaces/drive-setup-state.registry';
 import { GdriveHandler } from '../../../src/telegram/interfaces/gdrive.handler';
@@ -60,6 +61,171 @@ describe('GdriveHandler status', () => {
     expect(ctx.reply).toHaveBeenCalledWith(catalogFor('en').gdrive.statusUnavailable);
     expect(navigation.complete).toHaveBeenCalledOnce();
     expect(events).toEqual(['result', 'restore']);
+  });
+});
+
+describe('GdriveHandler archive retry', () => {
+  it('schedules one retry from /gdrive retry without exposing a generation or folder ID', async () => {
+    const fixture = setupRetryHandler();
+    const report = driveStatusReport({
+      drainState: 'policy-blocked',
+      requiredAction: 'fix-policy-then-retry',
+      recovery: { generationId: 'generation-sensitive', providerRevision: 13, retryable: true },
+    });
+    fixture.status.execute.mockResolvedValue(report);
+    fixture.retry.execute.mockResolvedValue('scheduled');
+
+    await fixture.handler.handleRetry(fixture.ctx as never);
+
+    expect(fixture.retry.execute).toHaveBeenCalledWith({
+      generationId: 'generation-sensitive', observedProviderRevision: 13,
+    });
+    expect(lastReplyText(fixture.ctx)).toBe(fixture.catalog.gdrive.retryResults.scheduled);
+    expect(JSON.stringify(fixture.ctx.reply.mock.calls))
+      .not.toMatch(/generation-sensitive|folder-sensitive|drive\.google\.com/u);
+  });
+
+  it('uses only a sixteen-character opaque receipt in a status retry callback', async () => {
+    const fixture = setupRetryHandler();
+    fixture.status.execute.mockResolvedValue(driveStatusReport({
+      drainState: 'branch-blocked',
+      requiredAction: 'restore-date-folder',
+      recovery: { generationId: 'generation-sensitive', providerRevision: 17, retryable: true },
+    }));
+
+    await fixture.handler.handleStatus(fixture.ctx as never);
+
+    const callbackData = retryCallbackData(fixture.ctx);
+    expect(callbackData).toMatch(/^gdr:[A-Za-z0-9_-]{16}$/u);
+    expect(callbackData).not.toContain('generation-sensitive');
+    expect(JSON.stringify(fixture.ctx.reply.mock.calls))
+      .not.toMatch(/generation-sensitive|folder-sensitive|provider-secret|drive\.google\.com/u);
+  });
+
+  it('does not render report-only Drive identifiers, URLs, revisions, or provider errors', async () => {
+    const fixture = setupRetryHandler();
+    fixture.status.execute.mockResolvedValue(driveStatusReport({
+      connection: {
+        generationId: 'generation-sensitive', state: 'active',
+        errorCode: 'provider-secret https://drive.google.com/private',
+      },
+      folders: {
+        root: 'https://drive.google.com/drive/folders/folder-sensitive-root',
+        motion: 'https://drive.google.com/drive/folders/folder-sensitive-motion',
+        backups: 'https://drive.google.com/drive/folders/folder-sensitive-backups',
+      },
+      drainState: 'policy-blocked',
+      requiredAction: 'fix-policy-then-retry',
+      recovery: { generationId: 'generation-sensitive', providerRevision: 47, retryable: true },
+    }));
+
+    await fixture.handler.handleStatus(fixture.ctx as never);
+
+    expect(JSON.stringify(fixture.ctx.reply.mock.calls))
+      .not.toMatch(/generation-sensitive|folder-sensitive|provider-secret|drive\.google\.com|47/u);
+  });
+
+  it('consumes a retry receipt once before invoking the retry use case', async () => {
+    const fixture = setupRetryHandler();
+    fixture.status.execute.mockResolvedValue(driveStatusReport({
+      drainState: 'capacity-blocked',
+      requiredAction: 'fix-capacity-then-retry',
+      recovery: { generationId: 'generation-sensitive', providerRevision: 23, retryable: true },
+    }));
+    fixture.retry.execute.mockResolvedValue('scheduled');
+
+    await fixture.handler.handleStatus(fixture.ctx as never);
+    const receipt = retryCallbackData(fixture.ctx);
+    await invokeRetryCallback(fixture, receipt);
+    await invokeRetryCallback(fixture, receipt);
+
+    expect(fixture.retry.execute).toHaveBeenCalledTimes(1);
+    expect(lastReplyText(fixture.ctx)).toBe(fixture.catalog.gdrive.retryResults.scheduled);
+  });
+
+  it.each([
+    ['malformed', 'gdr:not-a-receipt'],
+    ['missing', 'gdr:abcdefghijklmnop'],
+  ] as const)('leaves the valid retry receipt untouched after a %s callback', async (_name, invalidData) => {
+    const fixture = setupRetryHandler();
+    fixture.status.execute.mockResolvedValue(driveStatusReport({
+      drainState: 'branch-blocked',
+      requiredAction: 'restore-date-folder',
+      recovery: { generationId: 'generation-sensitive', providerRevision: 27, retryable: true },
+    }));
+    fixture.retry.execute.mockResolvedValue('scheduled');
+
+    await fixture.handler.handleStatus(fixture.ctx as never);
+    const validReceipt = retryCallbackData(fixture.ctx);
+    const replyCount = fixture.ctx.reply.mock.calls.length;
+    await invokeRetryCallback(fixture, invalidData);
+
+    expect(fixture.retry.execute).not.toHaveBeenCalled();
+    expect(fixture.ctx.reply).toHaveBeenCalledTimes(replyCount);
+    await invokeRetryCallback(fixture, validReceipt);
+    expect(fixture.retry.execute).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ['wrong user', { from: { id: 8 } }],
+    ['wrong private chat', { chat: { id: 8, type: 'private' } }],
+  ] as const)('does not consume a retry receipt from a %s', async (_name, identity) => {
+    const fixture = setupRetryHandler();
+    fixture.status.execute.mockResolvedValue(driveStatusReport({
+      drainState: 'branch-blocked',
+      requiredAction: 'restore-date-folder',
+      recovery: { generationId: 'generation-sensitive', providerRevision: 29, retryable: true },
+    }));
+    fixture.retry.execute.mockResolvedValue('scheduled');
+
+    await fixture.handler.handleStatus(fixture.ctx as never);
+    const receipt = retryCallbackData(fixture.ctx);
+    const intruder = { ...fixture.ctx, ...identity, answerCallbackQuery: vi.fn().mockResolvedValue(undefined) };
+    const replyCount = intruder.reply.mock.calls.length;
+    await invokeRetryCallback(fixture, receipt, intruder);
+
+    expect(fixture.retry.execute).not.toHaveBeenCalled();
+    expect(intruder.reply).toHaveBeenCalledTimes(replyCount);
+    await invokeRetryCallback(fixture, receipt);
+    expect(fixture.retry.execute).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ['stale', driveStatusReport({
+      drainState: 'policy-blocked', requiredAction: 'fix-policy-then-retry',
+      recovery: { generationId: 'generation-sensitive', providerRevision: 31, retryable: true },
+    }), 'stale'],
+    ['automatic quota probe', driveStatusReport({
+      drainState: 'quota-blocked', requiredAction: 'free-drive-space',
+      recovery: { generationId: 'generation-sensitive', providerRevision: 37, retryable: false },
+    }), 'automatic-quota-probe'],
+    ['reauthorization guidance', driveStatusReport({
+      drainState: 'reauthorization-required', requiredAction: 'reauthorize',
+      recovery: { generationId: 'generation-sensitive', providerRevision: 41, retryable: false },
+    }), 'reauthorize'],
+    ['nothing blocked', driveStatusReport(), 'nothing-blocked'],
+  ] as const)('renders exactly one localized %s retry outcome', async (_name, report, outcome) => {
+    const fixture = setupRetryHandler();
+    fixture.status.execute.mockResolvedValue(report);
+    fixture.retry.execute.mockResolvedValue(outcome);
+
+    await fixture.handler.handleRetry(fixture.ctx as never);
+
+    expect(lastReplyText(fixture.ctx)).toBe(fixture.catalog.gdrive.retryResults[outcome]);
+    expect(fixture.retry.execute).toHaveBeenCalledTimes(outcome === 'stale' ? 1 : 0);
+  });
+
+  it('renders connect guidance without a retry button for reauthorization', async () => {
+    const fixture = setupRetryHandler();
+    fixture.status.execute.mockResolvedValue(driveStatusReport({
+      drainState: 'reauthorization-required', requiredAction: 'reauthorize',
+      recovery: { generationId: 'generation-sensitive', providerRevision: 43, retryable: false },
+    }));
+
+    await fixture.handler.handleStatus(fixture.ctx as never);
+
+    expect(lastReplyText(fixture.ctx)).toContain(fixture.catalog.gdrive.actions.reauthorize);
+    expect(retryCallbackData(fixture.ctx)).toBeUndefined();
   });
 });
 
@@ -548,6 +714,89 @@ function driveSetupReceipt(workflow: 'drive-setup' | 'drive-status' = 'drive-set
   };
 }
 
+function setupRetryHandler() {
+  const status = { execute: vi.fn() };
+  const retry = { execute: vi.fn() };
+  const callbacks: { pattern: RegExp; fn: (ctx: object) => Promise<void> }[] = [];
+  const catalog = catalogFor('en');
+  const ctx = {
+    from: { id: 7 }, chat: { id: 7, type: 'private' },
+    localeState: { locale: 'en', catalog, user: { telegramId: 7, role: 'admin' } },
+    reply: vi.fn(async () => ({ message_id: 1 })),
+    answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+  };
+  const workflows = {
+    begin: vi.fn().mockResolvedValue(driveSetupReceipt('drive-status')),
+    loadCurrent: vi.fn().mockResolvedValue(driveSetupReceipt('drive-status')),
+  };
+  const handler = new GdriveHandler(
+    status as never,
+    {} as never,
+    workflows as never,
+    undefined,
+    { read: vi.fn() },
+    { execute: vi.fn() } as never,
+    { execute: vi.fn() } as never,
+    { execute: vi.fn() } as never,
+    { execute: vi.fn() } as never,
+    { activeGeneration: vi.fn() } as never,
+    {} as never,
+    retry as never,
+  ) as GdriveHandler & {
+    handleRetry(ctx: object): Promise<void>;
+  };
+  handler.register({
+    command: vi.fn(), on: vi.fn(),
+    callbackQuery: vi.fn((pattern: RegExp, fn: (callback: object) => Promise<void>) => {
+      callbacks.push({ pattern, fn });
+    }),
+  } as never);
+  return { handler, ctx, status, retry, callbacks, catalog };
+}
+
+function driveStatusReport(overrides: Partial<DriveStatusReport> = {}): DriveStatusReport {
+  return {
+    connection: { generationId: 'generation-sensitive', state: 'active', errorCode: null },
+    account: { permissionId: 'permission-sensitive', email: null, displayName: null },
+    folders: null,
+    last: {
+      refreshAtMs: null, uploadAtMs: null, backupAtMs: null, reconcileAtMs: null,
+      cleanupAtMs: null, motionTraversalAtMs: null, artifactRegistrationAtMs: null,
+    },
+    artifacts: { stabilizing: 0, pending: 0, verified: 0, local_missing: 0, superseded: 0 },
+    attempts: { pending: 0, uploading: 0, retryable: 0, verified: 0, missing: 0, detached: 0, conflict: 0, abandoned: 0, deleted: 0 },
+    generations: [], quota: null, reclamation: null,
+    requiredAction: null,
+    recovery: null,
+    queue: { queuedVideos: 0, retryableVideos: 0, oldestQueuedVideoAgeMs: null, unhealthyDateFolders: 0 },
+    drainState: 'idle',
+    ...overrides,
+  };
+}
+
+function lastReplyText(ctx: { reply: ReturnType<typeof vi.fn> }): string | undefined {
+  return ctx.reply.mock.calls.at(-1)?.[0] as string | undefined;
+}
+
+function retryCallbackData(ctx: { reply: ReturnType<typeof vi.fn> }): string | undefined {
+  const options = ctx.reply.mock.calls.at(-1)?.[1] as {
+    reply_markup?: { inline_keyboard?: { callback_data?: string }[][] };
+  } | undefined;
+  return options?.reply_markup?.inline_keyboard?.flat()
+    .find((button) => typeof button.callback_data === 'string')?.callback_data;
+}
+
+async function invokeRetryCallback(
+  fixture: ReturnType<typeof setupRetryHandler>,
+  data: string | undefined,
+  ctx = fixture.ctx,
+): Promise<void> {
+  const callback = fixture.callbacks.find(({ pattern }) => pattern.test(data ?? ''));
+  if (!callback) throw new Error('retry callback was not registered');
+  Object.assign(ctx, { callbackQuery: { data } });
+  await callback.fn(ctx);
+}
+
 function setupDriveHandler(options: {
   statusReceipt?: boolean;
   setupStates?: DriveSetupStateRegistry;
@@ -595,6 +844,7 @@ function setupDriveHandler(options: {
     cancel as never,
     { activeGeneration: vi.fn() } as never,
     (options.setupStates ?? states) as never,
+    { execute: vi.fn() } as never,
   );
   return {
     handler, ctx, status, workflows, navigation, states, receipt, documents, begin, submit, confirm, cancel, events,

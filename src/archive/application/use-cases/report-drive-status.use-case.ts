@@ -30,7 +30,24 @@ export type ArchiveDrainState =
   | 'quota-blocked'
   | 'capacity-blocked'
   | 'policy-blocked'
+  | 'clock-blocked'
   | 'reauthorization-required';
+
+export type ArchiveRequiredAction =
+  | 'restore-date-folder'
+  | 'free-drive-space'
+  | 'fix-capacity-then-retry'
+  | 'fix-policy-then-retry'
+  | 'fix-system-clock'
+  | 'reauthorize'
+  | null;
+
+/** Fenced recovery input for application consumers. Interface adapters must not render it. */
+export interface DriveArchiveRecoveryFence {
+  generationId: string;
+  providerRevision: number;
+  retryable: boolean;
+}
 
 export interface ArchiveSchedulerActivitySnapshot {
   generationId: string;
@@ -60,7 +77,8 @@ export interface DriveStatusReport {
   generations: readonly { generationId: string; state: string; retiredAtMs: number | null }[];
   quota: DriveQuota | null;
   reclamation: { windowStartedMs: number | null; reclaimedBytes: number } | null;
-  requiredActions: readonly ('reauthorize' | 'check-clock' | 'manual-cleanup')[];
+  requiredAction: ArchiveRequiredAction;
+  recovery: DriveArchiveRecoveryFence | null;
   queue: {
     queuedVideos: number;
     retryableVideos: number;
@@ -128,16 +146,26 @@ export class ReportDriveStatusUseCase {
         this.artifacts.readUnhealthyDateFolderCount(active.id),
       ]);
 
-    const providerBlock = active?.status === 'reauth_required'
+    const providerOwnsActiveGeneration = providerState.generationId === active?.id;
+    const reauthorizationRequired = active?.status === 'reauth_required'
       || active?.errorCode === 'authorization_required'
-      ? 'reauthorization-required'
-      : providerState.generationId === active?.id
-        ? providerBlockFor(providerState)
-        : null;
+      || (providerOwnsActiveGeneration && providerState.blockReason === 'reauthorization_required');
+    const providerBlock = providerOwnsActiveGeneration ? providerBlockFor(providerState) : null;
     const coolingDown = providerState.generationId === active?.id
       && providerState.cooldownUntilMs !== null
       && providerState.cooldownUntilMs > nowMs;
     const activity = this.schedulerActivity.readActivitySnapshot();
+    const drainState = deriveArchiveDrainState({
+      reauthorizationRequired,
+      clockBlocked: scheduler.clockHealth === 'clock-blocked',
+      providerBlock,
+      hasActiveTransfer: active !== null
+        && activity?.generationId === active.id
+        && activity.artifactKind === 'motion_video',
+      queuedVideos: queue.queuedVideos,
+      branchBlocked: queue.branchBlocked,
+      coolingDown,
+    });
 
     return {
       connection: active === null
@@ -165,7 +193,13 @@ export class ReportDriveStatusUseCase {
         .map((connection) => ({ generationId: connection.id, state: connection.status, retiredAtMs: connection.retiredAtMs })),
       quota,
       reclamation,
-      requiredActions: requiredActions(active, connections, counts),
+      requiredAction: requiredActionFor(drainState),
+      recovery: recoveryFenceFor({
+        active,
+        providerState,
+        providerOwnsActiveGeneration,
+        drainState,
+      }),
       queue: {
         queuedVideos: queue.queuedVideos,
         retryableVideos: queue.retryableVideos,
@@ -174,27 +208,23 @@ export class ReportDriveStatusUseCase {
           : Math.max(0, nowMs - queue.oldestQueuedVideoAtMs),
         unhealthyDateFolders,
       },
-      drainState: deriveArchiveDrainState({
-        providerBlock,
-        hasActiveTransfer: active !== null
-          && activity?.generationId === active.id
-          && activity.artifactKind === 'motion_video',
-        queuedVideos: queue.queuedVideos,
-        branchBlocked: queue.branchBlocked,
-        coolingDown,
-      }),
+      drainState,
     };
   }
 }
 
 export function deriveArchiveDrainState(input: {
+  reauthorizationRequired: boolean;
+  clockBlocked: boolean;
   providerBlock: Extract<ArchiveDrainState,
-    'quota-blocked' | 'capacity-blocked' | 'policy-blocked' | 'reauthorization-required'> | null;
+    'quota-blocked' | 'capacity-blocked' | 'policy-blocked'> | null;
   hasActiveTransfer: boolean;
   queuedVideos: number;
   branchBlocked: boolean;
   coolingDown: boolean;
 }): ArchiveDrainState {
+  if (input.reauthorizationRequired) return 'reauthorization-required';
+  if (input.clockBlocked) return 'clock-blocked';
   if (input.providerBlock !== null) return input.providerBlock;
   if (input.hasActiveTransfer) return 'active';
   if (input.queuedVideos > 0 && input.branchBlocked) return 'branch-blocked';
@@ -203,8 +233,7 @@ export function deriveArchiveDrainState(input: {
 }
 
 function providerBlockFor(state: ArchiveProviderState): Extract<ArchiveDrainState,
-  'quota-blocked' | 'capacity-blocked' | 'policy-blocked' | 'reauthorization-required'> | null {
-  if (state.blockReason === 'reauthorization_required') return 'reauthorization-required';
+  'quota-blocked' | 'capacity-blocked' | 'policy-blocked'> | null {
   if (state.blockReason === 'policy_blocked') return 'policy-blocked';
   if (state.blockReason === 'account_creation_limit') return 'capacity-blocked';
   if (state.blockReason === 'quota_exhausted') return 'quota-blocked';
@@ -268,14 +297,35 @@ function folderLinks(folders: NonNullable<DriveStatusConnection['folders']>) {
   };
 }
 
-function requiredActions(
-  active: DriveStatusConnection | null,
-  connections: readonly DriveStatusConnection[],
-  counts: ArchiveStatusCounts,
-): readonly ('reauthorize' | 'check-clock' | 'manual-cleanup')[] {
-  const actions: ('reauthorize' | 'check-clock' | 'manual-cleanup')[] = [];
-  if (active?.status === 'reauth_required' || active?.errorCode === 'authorization_required') actions.push('reauthorize');
-  if (connections.some((connection) => connection.errorCode === 'clock_unhealthy')) actions.push('check-clock');
-  if (counts.attempts.missing > 0 || counts.attempts.detached > 0) actions.push('manual-cleanup');
-  return actions;
+function requiredActionFor(state: ArchiveDrainState): ArchiveRequiredAction {
+  switch (state) {
+    case 'branch-blocked': return 'restore-date-folder';
+    case 'quota-blocked': return 'free-drive-space';
+    case 'capacity-blocked': return 'fix-capacity-then-retry';
+    case 'policy-blocked': return 'fix-policy-then-retry';
+    case 'clock-blocked': return 'fix-system-clock';
+    case 'reauthorization-required': return 'reauthorize';
+    default: return null;
+  }
+}
+
+function recoveryFenceFor(input: {
+  active: DriveStatusConnection | null;
+  providerState: ArchiveProviderState;
+  providerOwnsActiveGeneration: boolean;
+  drainState: ArchiveDrainState;
+}): DriveArchiveRecoveryFence | null {
+  if (!input.active || !input.providerOwnsActiveGeneration) return null;
+  if (input.drainState !== 'branch-blocked'
+    && input.drainState !== 'quota-blocked'
+    && input.drainState !== 'capacity-blocked'
+    && input.drainState !== 'policy-blocked'
+    && input.drainState !== 'reauthorization-required') return null;
+  return {
+    generationId: input.active.id,
+    providerRevision: input.providerState.revision,
+    retryable: input.drainState === 'branch-blocked'
+      || input.drainState === 'capacity-blocked'
+      || input.drainState === 'policy-blocked',
+  };
 }

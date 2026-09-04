@@ -20,7 +20,8 @@ const report: DriveStatusReport = {
   generations: [],
   quota: null,
   reclamation: null,
-  requiredActions: [],
+  requiredAction: 'restore-date-folder',
+  recovery: { generationId: 'generation-sensitive', providerRevision: 7, retryable: true },
   queue: {
     queuedVideos: 12,
     retryableVideos: 3,
@@ -36,6 +37,8 @@ describe('Drive status and alert catalog parity', () => {
 
     expect(rendered).toContain('Queued videos: 12');
     expect(rendered).toContain('Unhealthy date folders: 2');
+    expect(rendered).toContain(catalogFor('en').gdrive.actions['restore-date-folder']);
+    expect(rendered).not.toContain('generation-sensitive');
     expect(rendered).not.toContain('folder-id');
     expect(rendered).not.toContain('/home/pi/motion');
   });

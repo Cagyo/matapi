@@ -4,7 +4,11 @@ import type { SensorSeverity, SensorType } from '../sensors/domain/sensor';
 import type { ImportSummary } from '../sensors/application/import-sensors.use-case';
 import type { DepUpdate } from '../system/domain/ports/system-deps.port';
 import type { User } from '../telegram/domain/user.entity';
-import type { ArchiveDrainState } from '../archive/application/use-cases/report-drive-status.use-case';
+import type {
+  ArchiveDrainState,
+  ArchiveRequiredAction,
+} from '../archive/application/use-cases/report-drive-status.use-case';
+import type { RetryDriveArchiveResult } from '../archive/application/use-cases/retry-drive-archive.use-case';
 import type { LocaleCatalog } from './catalog';
 import { deepFreeze } from './freeze';
 
@@ -69,7 +73,25 @@ const DRIVE_DRAIN_LABELS: Record<ArchiveDrainState, string> = {
   'quota-blocked': 'квоту вичерпано',
   'capacity-blocked': 'ліміт місткості',
   'policy-blocked': 'політику заблоковано',
+  'clock-blocked': 'системний годинник заблоковано',
   'reauthorization-required': 'потрібна повторна авторизація',
+};
+
+const DRIVE_REQUIRED_ACTIONS: Record<NonNullable<ArchiveRequiredAction>, string> = {
+  'restore-date-folder': 'Відновіть потрібну папку дати, потім повторіть.',
+  'free-drive-space': 'Звільніть місце у Drive; відновлення буде перевірено автоматично.',
+  'fix-capacity-then-retry': 'Усуньте обмеження місткості Drive, потім повторіть.',
+  'fix-policy-then-retry': 'Усуньте блокування політики Drive, потім повторіть.',
+  'fix-system-clock': 'Виправте системний годинник перед відновленням архівації.',
+  reauthorize: 'Повторно підключіть Google Drive через /gdrive connect.',
+};
+
+const DRIVE_RETRY_RESULTS: Record<RetryDriveArchiveResult, string> = {
+  scheduled: '✅ Відновлення архіву Drive заплановано.',
+  stale: '↻ Стан Drive змінився. Оновіть статус і спробуйте ще раз.',
+  'automatic-quota-probe': 'ℹ️ Відновлення місця Drive буде перевірено автоматично.',
+  reauthorize: 'ℹ️ Повторно підключіть Google Drive через /gdrive connect.',
+  'nothing-blocked': 'ℹ️ Зараз нічого не заблоковано.',
 };
 
 function fmtDate(date: Date | null | undefined, withSeconds = false): string {
@@ -190,7 +212,7 @@ export interface GdriveStatusView {
   generations: readonly { generationId: string; state: string; retiredAtMs: number | null }[];
   quota: { limitBytes: number | null; usageBytes: number; usageInDriveBytes: number; usageInDriveTrashBytes: number } | null;
   reclamation: { windowStartedMs: number | null; reclaimedBytes: number } | null;
-  requiredActions: readonly ('reauthorize' | 'check-clock' | 'manual-cleanup')[];
+  requiredAction: ArchiveRequiredAction;
   queue: { queuedVideos: number; retryableVideos: number; oldestQueuedVideoAgeMs: number | null; unhealthyDateFolders: number };
   drainState: ArchiveDrainState;
 }
@@ -1477,12 +1499,15 @@ const ukCatalog = {
   },
 
   gdrive: {
-    usage: 'Використання: /gdrive connect|status|disconnect',
+    usage: 'Використання: /gdrive connect|status|retry|disconnect',
     header: '☁️ Стан Google Drive',
+    drainStates: DRIVE_DRAIN_LABELS,
+    actions: DRIVE_REQUIRED_ACTIONS,
+    retryResults: DRIVE_RETRY_RESULTS,
+    retryButton: '↻ Повторити відновлення архіву',
     body: (v: GdriveStatusView): string => {
       const lines = [
         `Підключення: ${v.connection?.state ?? 'не підключено'}`,
-        v.account ? `Ідентифікатор дозволу: ${v.account.permissionId}` : 'Обліковий запис недоступний',
         `📦 Використано: ${gb(v.quota?.usageBytes ?? null)} / ${gb(v.quota?.limitBytes ?? null)} (${percent(v.quota?.usageBytes ?? null, v.quota?.limitBytes ?? null)})`,
         `📤 Останнє завантаження: ${fmtDate(v.last.uploadAtMs === null ? null : new Date(v.last.uploadAtMs))}`,
         `💾 Остання резервна копія: ${fmtDate(v.last.backupAtMs === null ? null : new Date(v.last.backupAtMs))}`,
@@ -1496,9 +1521,7 @@ const ukCatalog = {
         `📋 Артефактів: ${Object.values(v.artifacts).reduce((sum, count) => sum + count, 0)}; спроб: ${Object.values(v.attempts).reduce((sum, count) => sum + count, 0)}`,
         `⚠️ Відсутні / відокремлені: ${v.attempts.missing ?? 0} / ${v.attempts.detached ?? 0}`,
       ];
-      if (v.connection?.errorCode) lines.push(`⚠️ Стан архіву: ${v.connection.errorCode}`);
-      if (v.folders) lines.push(`Приватні папки:\nКорінь: ${v.folders.root}\nВідео: ${v.folders.motion}\nКопії: ${v.folders.backups}`);
-      if (v.requiredActions.length > 0) lines.push('Потрібна дія адміністратора.');
+      if (v.requiredAction) lines.push(`Потрібна дія: ${DRIVE_REQUIRED_ACTIONS[v.requiredAction]}`);
       return lines.join('\n');
     },
     notInstalled: '❌ Інтеграція Google Drive недоступна.',

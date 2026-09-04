@@ -10,8 +10,41 @@ import type {
   CameraSourceFailureKind,
   CameraSourceRecoveryAction,
 } from '../telegram/interfaces/camera-source-error.presenter';
-import type { ArchiveDrainState } from '../archive/application/use-cases/report-drive-status.use-case';
+import type {
+  ArchiveDrainState,
+  ArchiveRequiredAction,
+} from '../archive/application/use-cases/report-drive-status.use-case';
+import type { RetryDriveArchiveResult } from '../archive/application/use-cases/retry-drive-archive.use-case';
 import { deepFreeze } from './freeze';
+
+const DRIVE_DRAIN_LABELS: Record<ArchiveDrainState, string> = {
+  active: 'active transfer',
+  idle: 'idle',
+  'cooling-down': 'provider cooldown',
+  'branch-blocked': 'date-folder branch blocked',
+  'quota-blocked': 'Drive space blocked',
+  'capacity-blocked': 'Drive capacity blocked',
+  'policy-blocked': 'Drive policy blocked',
+  'clock-blocked': 'system clock blocked',
+  'reauthorization-required': 'reauthorization required',
+};
+
+const DRIVE_REQUIRED_ACTIONS: Record<NonNullable<ArchiveRequiredAction>, string> = {
+  'restore-date-folder': 'Restore the affected date folder, then retry.',
+  'free-drive-space': 'Free Drive space; recovery will probe automatically.',
+  'fix-capacity-then-retry': 'Resolve the Drive capacity limit, then retry.',
+  'fix-policy-then-retry': 'Resolve the Drive policy block, then retry.',
+  'fix-system-clock': 'Fix the system clock before archive work resumes.',
+  reauthorize: 'Reconnect Google Drive with /gdrive connect.',
+};
+
+const DRIVE_RETRY_RESULTS: Record<RetryDriveArchiveResult, string> = {
+  scheduled: '✅ Drive archive recovery has been scheduled.',
+  stale: '↻ Drive status changed. Refresh status and try again.',
+  'automatic-quota-probe': 'ℹ️ Drive space recovery will be probed automatically.',
+  reauthorize: 'ℹ️ Reconnect Google Drive with /gdrive connect.',
+  'nothing-blocked': 'ℹ️ Nothing is currently blocked.',
+};
 
 const presentation = {
   date: {
@@ -174,7 +207,7 @@ export interface GdriveStatusView {
   generations: readonly { generationId: string; state: string; retiredAtMs: number | null }[];
   quota: { limitBytes: number | null; usageBytes: number; usageInDriveBytes: number; usageInDriveTrashBytes: number } | null;
   reclamation: { windowStartedMs: number | null; reclaimedBytes: number } | null;
-  requiredActions: readonly ('reauthorize' | 'check-clock' | 'manual-cleanup')[];
+  requiredAction: ArchiveRequiredAction;
   queue: { queuedVideos: number; retryableVideos: number; oldestQueuedVideoAgeMs: number | null; unhealthyDateFolders: number };
   drainState: ArchiveDrainState;
 }
@@ -1531,12 +1564,15 @@ const enCatalog = {
   },
 
   gdrive: {
-    usage: 'Usage: /gdrive connect|status|disconnect',
+    usage: 'Usage: /gdrive connect|status|retry|disconnect',
     header: '☁️ Google Drive Status',
+    drainStates: DRIVE_DRAIN_LABELS,
+    actions: DRIVE_REQUIRED_ACTIONS,
+    retryResults: DRIVE_RETRY_RESULTS,
+    retryButton: '↻ Retry archive recovery',
     body: (v: GdriveStatusView): string => {
       const lines = [
         `Connection: ${v.connection?.state ?? 'not connected'}`,
-        v.account ? `Account permission: ${v.account.permissionId}` : 'Account: unavailable',
         `📦 Used: ${gb(v.quota?.usageBytes ?? null)} / ${gb(v.quota?.limitBytes ?? null)} (${percent(v.quota?.usageBytes ?? null, v.quota?.limitBytes ?? null)})`,
         `Drive / Trash: ${gb(v.quota?.usageInDriveBytes ?? null)} / ${gb(v.quota?.usageInDriveTrashBytes ?? null)}`,
         `📤 Last upload: ${fmtDate(v.last.uploadAtMs === null ? null : new Date(v.last.uploadAtMs))}`,
@@ -1544,7 +1580,7 @@ const enCatalog = {
         `🔄 Last reconcile / cleanup: ${fmtDate(v.last.reconcileAtMs === null ? null : new Date(v.last.reconcileAtMs))} / ${fmtDate(v.last.cleanupAtMs === null ? null : new Date(v.last.cleanupAtMs))}`,
         `🔎 Last Motion traversal: ${fmtDate(v.last.motionTraversalAtMs == null ? null : new Date(v.last.motionTraversalAtMs))}`,
         `📝 Last artifact registration: ${fmtDate(v.last.artifactRegistrationAtMs == null ? null : new Date(v.last.artifactRegistrationAtMs))}`,
-        `Drain state: ${v.drainState ?? 'idle'}`,
+        `Drain state: ${DRIVE_DRAIN_LABELS[v.drainState]}`,
         `Queued videos: ${v.queue?.queuedVideos ?? 0}`,
         `Retryable videos: ${v.queue?.retryableVideos ?? 0}`,
         `Oldest queued video age: ${formatAgeMs(v.queue?.oldestQueuedVideoAgeMs ?? null)}`,
@@ -1552,11 +1588,9 @@ const enCatalog = {
         `📋 Artifacts: ${Object.values(v.artifacts).reduce((sum, count) => sum + count, 0)}; attempts: ${Object.values(v.attempts).reduce((sum, count) => sum + count, 0)}`,
         `⚠️ Missing / detached: ${v.attempts.missing ?? 0} / ${v.attempts.detached ?? 0}`,
       ];
-      if (v.connection?.errorCode) lines.push(`⚠️ Archive status: ${v.connection.errorCode}`);
       if (v.reclamation) lines.push(`🧹 Reclaimed: ${gb(v.reclamation.reclaimedBytes)} (window: ${fmtDate(v.reclamation.windowStartedMs === null ? null : new Date(v.reclamation.windowStartedMs))})`);
       if (v.generations.length > 0) lines.push(`ℹ️ Retired or disconnected generations: ${v.generations.length}`);
-      if (v.folders) lines.push(`Private folders:\nRoot: ${v.folders.root}\nMotion: ${v.folders.motion}\nBackups: ${v.folders.backups}`);
-      if (v.requiredActions.length > 0) lines.push(`Required actions: ${v.requiredActions.map((action) => ({ reauthorize: 'reauthorize', 'check-clock': 'check system clock', 'manual-cleanup': 'review archive cleanup' })[action]).join(', ')}`);
+      if (v.requiredAction) lines.push(`Required action: ${DRIVE_REQUIRED_ACTIONS[v.requiredAction]}`);
       return lines.join('\n');
     },
     notInstalled: '❌ Google Drive integration is unavailable.',

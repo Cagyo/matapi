@@ -192,32 +192,38 @@ describe('en.gdrive', () => {
     connection: { generationId: 'g1', state: 'active', errorCode: null },
     account: { permissionId: 'perm-1', email: null, displayName: null },
     folders: null,
-    last: { refreshAtMs: null, uploadAtMs: new Date('2026-04-08T15:30:00').getTime(), backupAtMs: null, reconcileAtMs: null, cleanupAtMs: null },
+    last: {
+      refreshAtMs: null, uploadAtMs: new Date('2026-04-08T15:30:00').getTime(),
+      backupAtMs: null, reconcileAtMs: null, cleanupAtMs: null,
+      motionTraversalAtMs: null, artifactRegistrationAtMs: null,
+    },
     artifacts: { pending: 3 },
     attempts: { pending: 3, missing: 0, detached: 0 },
     generations: [],
     quota: { usageBytes: 8.2 * 1024 ** 3, limitBytes: 15 * 1024 ** 3, usageInDriveBytes: 8 * 1024 ** 3, usageInDriveTrashBytes: .2 * 1024 ** 3 },
     reclamation: null,
-    requiredActions: [],
+    requiredAction: null,
+    queue: { queuedVideos: 0, retryableVideos: 0, oldestQueuedVideoAgeMs: null, unhealthyDateFolders: 0 },
+    drainState: 'idle' as const,
   };
 
   it('renders a healthy status body', () => {
     const body = en.gdrive.body(base);
     expect(body).toContain('📦 Used: 8.2 GB / 15.0 GB (55%)');
     expect(body).toContain('Connection: active');
-    expect(body).toContain('Account permission: perm-1');
+    expect(body).not.toContain('perm-1');
     expect(body).toContain('📋 Artifacts: 3; attempts: 3');
     expect(body).not.toContain('🚨');
   });
 
-  it('renders private folder links and required actions only in the admin status view', () => {
+  it('renders one localized required action without private folder links', () => {
     const body = en.gdrive.body({
       ...base,
       folders: { root: 'https://drive.google.com/root', motion: 'https://drive.google.com/motion', backups: 'https://drive.google.com/backups' },
-      requiredActions: ['reauthorize', 'manual-cleanup'],
+      requiredAction: 'reauthorize',
     });
-    expect(body).toContain('Private folders:');
-    expect(body).toContain('reauthorize');
+    expect(body).toContain(en.gdrive.actions.reauthorize);
+    expect(body).not.toContain('drive.google.com');
   });
 });
 
