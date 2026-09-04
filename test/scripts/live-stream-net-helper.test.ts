@@ -89,6 +89,12 @@ describe('live-stream net helper security behavior', () => {
     expect(scenario('v1-policy-rejected')).toEqual({ ok: false, reason: 'policy' });
   });
 
+  it('rejects missing and duplicate v2 keys through the installed policy loader', () => {
+    expect(scenario('v2-load-missing-duplicate-keys')).toEqual({
+      missing: 'policy', duplicate: 'policy',
+    });
+  });
+
   it('never rounds an nft timeout beyond lease expiry', () => {
     expect(scenario('subsecond-timeout')).toEqual({ subsecondAllowed: false, oneSecond: true });
   });

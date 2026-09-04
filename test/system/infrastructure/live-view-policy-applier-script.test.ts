@@ -23,6 +23,7 @@ from types import SimpleNamespace
 spec = importlib.util.spec_from_file_location('live_view_policy_applier', ${JSON.stringify(applier)})
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
+real_rtsp_assets_state = m.rtsp_assets_state
 
 REQUEST_ID = 'AbCdEfGhIjKlMnOp'
 SECOND_ID = 'PqRsTuVwXyZaBcDe'
@@ -105,7 +106,7 @@ def configure(root, initial=None, assets=True):
     m.validate_parent_chain = lambda _path: None
     m.validate_fixed_parents = lambda: None
     m.validate_root_bundle = lambda: None
-    m.rtsp_assets_present = lambda: assets
+    m.rtsp_assets_state = lambda: 'valid' if assets else 'absent'
     m.activate_policy = lambda _policy: None
     return root
 
@@ -211,6 +212,7 @@ with tempfile.TemporaryDirectory() as root:
     assert calls == [claim_fd, request_fd], calls
     m.fsync_directory = original_sync
     claim = os.path.join(m.CLAIM_DIRECTORY, REQUEST_ID + '.json')
+    worker_inode = os.stat(claim).st_ino
     normalizations = []
     original_chown = m.os.fchown
     m.os.fchown = lambda fd, uid, gid: (
@@ -222,7 +224,12 @@ with tempfile.TemporaryDirectory() as root:
     )
     assert claim_data == bytes_for(settings_request())
     assert replay is False
+    assert normalizations == []
+    request = m.parse_request(claim_data, REQUEST_ID + '.json')
+    m.seal_claim(claim_fd, REQUEST_ID + '.json', request)
     assert normalizations == [(m.ROOT_UID, m.ROOT_GID)]
+    assert os.stat(claim).st_ino != worker_inode
+    assert Path(claim).read_bytes() == bytes_for(request)
     m.os.fchown = original_chown
     os.chmod(claim, 0o640)
     try:
@@ -295,6 +302,41 @@ with tempfile.TemporaryDirectory() as root:
     assert os.path.exists(request_path)
     assert not os.path.exists(os.path.join(m.RESULT_DIRECTORY, REQUEST_ID + '.json'))
     assert not os.path.exists(m.POLICY_PATH)
+
+with tempfile.TemporaryDirectory() as root:
+    configure(root)
+    os.chmod(root, 0o700)
+    try:
+        worker_uid, worker_gid = m.worker_ids()
+        m.validate_layout(worker_uid, worker_gid)
+        raise AssertionError('install root mode other than 0711 accepted')
+    except RuntimeError:
+        pass
+`);
+  });
+
+  it("quarantines a non-regular claim so a later valid request can progress", async () => {
+    await execute(String.raw`
+with tempfile.TemporaryDirectory() as root:
+    configure(root, settings(generation=3, enabled=False), assets=False)
+    unsafe_name = REQUEST_ID + '.json'
+    os.mkdir(os.path.join(m.REQUEST_DIRECTORY, unsafe_name), 0o600)
+    publish(settings_request(request_id=SECOND_ID))
+
+    assert m.process_one() is True
+    assert not os.path.exists(os.path.join(m.CLAIM_DIRECTORY, unsafe_name))
+    quarantined = [
+        name for name in os.listdir(m.CLAIM_DIRECTORY)
+        if name.startswith('.unsafe-')
+    ]
+    assert len(quarantined) == 1, quarantined
+    assert os.path.isdir(os.path.join(m.CLAIM_DIRECTORY, quarantined[0]))
+    assert not os.path.exists(os.path.join(m.RESULT_DIRECTORY, REQUEST_ID + '.json'))
+
+    assert m.process_one() is True
+    assert result(SECOND_ID)['outcome'] == 'succeeded'
+    assert result(SECOND_ID)['resultingGeneration'] == 4
+    assert json.loads(Path(m.SETTINGS_PATH).read_text())['generation'] == 4
 `);
   });
 
@@ -392,6 +434,59 @@ with tempfile.TemporaryDirectory() as root:
 `);
   });
 
+  it("distinguishes wholly absent RTSP assets from unsafe or partial installs", async () => {
+    await execute(String.raw`
+old_policy = {
+    'version': 2, 'settingsGeneration': 3, 'rtspEnabled': True,
+    'workerUid': 501, 'streamUid': 997,
+    'allowedCidrs': ['192.168.1.0/24'],
+    'udpPortFirst': 24000, 'udpPortLast': 24001,
+}
+
+for unsafe_kind in ('wrong-mode', 'symlink', 'missing-active-unit'):
+    with tempfile.TemporaryDirectory() as root:
+        configure(root, settings(3, True, ['192.168.1.0/24']), assets=False)
+        runtime = os.path.join(root, 'runtime-assets')
+        os.mkdir(runtime)
+        m.NET_HELPER_PATH = os.path.join(runtime, 'live-stream-net-helper')
+        m.STREAM_NET_UNIT_PATH = os.path.join(runtime, 'homeworker-stream-net.service')
+        m.rtsp_assets_state = real_rtsp_assets_state
+        if unsafe_kind == 'wrong-mode':
+            write_file(m.NET_HELPER_PATH, b'helper\n', 0o700)
+            write_file(m.STREAM_NET_UNIT_PATH, b'[Service]\n', 0o644)
+        elif unsafe_kind == 'symlink':
+            target = os.path.join(runtime, 'helper-target')
+            write_file(target, b'helper\n', 0o755)
+            os.symlink(target, m.NET_HELPER_PATH)
+            write_file(m.STREAM_NET_UNIT_PATH, b'[Service]\n', 0o644)
+        else:
+            write_file(m.NET_HELPER_PATH, b'helper\n', 0o755)
+        write_file(m.POLICY_PATH, bytes_for(old_policy), 0o600)
+        before_policy = Path(m.POLICY_PATH).read_bytes()
+        publish(settings_request(enabled=False, cidrs=['192.168.1.0/24']))
+
+        assert m.process_one() is True
+        assert result(REQUEST_ID)['failureCode'] == 'policy-apply-failed', unsafe_kind
+        assert json.loads(Path(m.SETTINGS_PATH).read_text()) == settings(
+            3, True, ['192.168.1.0/24']
+        ), unsafe_kind
+        assert Path(m.POLICY_PATH).read_bytes() == before_policy, unsafe_kind
+
+with tempfile.TemporaryDirectory() as root:
+    configure(root, settings(3, False), assets=False)
+    runtime = os.path.join(root, 'runtime-assets')
+    os.mkdir(runtime)
+    m.NET_HELPER_PATH = os.path.join(runtime, 'live-stream-net-helper')
+    m.STREAM_NET_UNIT_PATH = os.path.join(runtime, 'homeworker-stream-net.service')
+    m.rtsp_assets_state = real_rtsp_assets_state
+    publish(settings_request())
+    assert m.process_one() is True
+    assert result(REQUEST_ID)['outcome'] == 'succeeded'
+    assert json.loads(Path(m.SETTINGS_PATH).read_text())['generation'] == 4
+    assert not os.path.exists(m.POLICY_PATH)
+`);
+  });
+
   it("runs only fixed systemctl checks with a sanitized process boundary", async () => {
     await execute(String.raw`
 policy = {
@@ -442,6 +537,16 @@ with tempfile.TemporaryDirectory() as root:
     assert m.policy_runtime_values() == (
         os.getuid(), os.getuid() + 1, 24010, 24011
     )
+    write_file(
+        environment,
+        b'RTSP_UDP_PORT_FIRST=' + (b'9' * 5000) + b'\nRTSP_UDP_PORT_LAST=24011\n',
+        0o600,
+    )
+    try:
+        m.policy_runtime_values()
+        raise AssertionError('unbounded numeric runtime value accepted')
+    except m.ApplyFailure as error:
+        assert error.code == 'policy-apply-failed'
 `);
   });
 
@@ -509,6 +614,95 @@ assert real_claim_replay_state(worker_metadata, 501, 502) is False
 `);
   });
 
+  it("does not make replay durable before the initial generation CAS succeeds", async () => {
+    await execute(String.raw`
+class Crash(BaseException):
+    pass
+
+with tempfile.TemporaryDirectory() as root:
+    configure(root, settings(3, False), assets=False)
+    tracked_root_inodes = set()
+    real_fchown = m.os.fchown
+    m.os.fchown = lambda fd, uid, gid: (
+        tracked_root_inodes.add(os.fstat(fd).st_ino),
+        real_fchown(fd, uid, gid),
+    )[1]
+    m.claim_replay_state = lambda metadata, _uid, _gid: (
+        metadata.st_ino in tracked_root_inodes
+    )
+    publish(settings_request(
+        request_id=SECOND_ID,
+        expected=3,
+        enabled=True,
+        cidrs=['192.168.1.0/24'],
+        rtsp=False,
+    ))
+    real_read_settings = m.read_settings
+    m.read_settings = lambda _gid: (_ for _ in ()).throw(Crash())
+    try:
+        m.process_one()
+        raise AssertionError('pre-CAS crash was swallowed')
+    except Crash:
+        pass
+    claim_path = os.path.join(m.CLAIM_DIRECTORY, SECOND_ID + '.json')
+    assert os.stat(claim_path).st_ino not in tracked_root_inodes
+
+    write_file(
+        m.SETTINGS_PATH,
+        bytes_for(settings(4, True, ['192.168.1.0/24'])),
+        0o640,
+    )
+    m.read_settings = real_read_settings
+    assert m.process_one() is True
+    assert result(SECOND_ID)['failureCode'] == 'stale-generation'
+    assert result(SECOND_ID)['resultingRtspEnabled'] is None
+    assert not os.path.exists(m.POLICY_PATH)
+`);
+  });
+
+  it("seals an accepted request into a new inode before privileged side effects", async () => {
+    await execute(String.raw`
+class Crash(BaseException):
+    pass
+
+with tempfile.TemporaryDirectory() as root:
+    configure(root, settings(3, False), assets=False)
+    request_path = publish(settings_request(rtsp=True))
+    retained_worker_fd = os.open(request_path, os.O_RDWR)
+    tracked_root_inodes = set()
+    real_fchown = m.os.fchown
+    m.os.fchown = lambda fd, uid, gid: (
+        tracked_root_inodes.add(os.fstat(fd).st_ino),
+        real_fchown(fd, uid, gid),
+    )[1]
+    m.claim_replay_state = lambda metadata, _uid, _gid: (
+        metadata.st_ino in tracked_root_inodes
+    )
+    real_read_marker = m.read_attention_marker
+    m.read_attention_marker = lambda _gid: (_ for _ in ()).throw(Crash())
+    try:
+        m.process_one()
+        raise AssertionError('post-CAS crash was swallowed')
+    except Crash:
+        pass
+    claim_path = os.path.join(m.CLAIM_DIRECTORY, REQUEST_ID + '.json')
+    assert os.stat(claim_path).st_ino != os.fstat(retained_worker_fd).st_ino
+
+    changed = bytes_for(settings_request(rtsp=False))
+    os.lseek(retained_worker_fd, 0, os.SEEK_SET)
+    os.ftruncate(retained_worker_fd, 0)
+    os.write(retained_worker_fd, changed)
+    os.fsync(retained_worker_fd)
+    os.close(retained_worker_fd)
+    m.read_attention_marker = real_read_marker
+
+    assert m.process_one() is True
+    assert result(REQUEST_ID)['outcome'] == 'succeeded'
+    assert result(REQUEST_ID)['resultingRtspEnabled'] is True
+    assert json.loads(Path(m.SETTINGS_PATH).read_text())['generation'] == 4
+`);
+  });
+
   it("replays a claim after a crash between policy activation and settings commit", async () => {
     await execute(String.raw`
 class Crash(BaseException):
@@ -517,18 +711,25 @@ class Crash(BaseException):
 with tempfile.TemporaryDirectory() as root:
     configure(root, settings(3, False))
     publish(settings_request())
-    m.activate_policy = lambda _policy: (_ for _ in ()).throw(Crash())
+    activations = []
+    m.activate_policy = lambda policy: activations.append(
+        (policy['settingsGeneration'], policy['rtspEnabled'])
+    )
+    real_write_settings = m.write_settings_atomic
+    m.write_settings_atomic = lambda _value, _gid: (_ for _ in ()).throw(Crash())
     try:
         m.process_one()
         raise AssertionError('injected crash was swallowed')
     except Crash:
         pass
+    assert activations == [(4, True)]
     assert json.loads(Path(m.SETTINGS_PATH).read_text())['generation'] == 3
     assert json.loads(Path(m.POLICY_PATH).read_text())['settingsGeneration'] == 4
     assert os.path.exists(os.path.join(m.CLAIM_DIRECTORY, REQUEST_ID + '.json'))
     assert not os.path.exists(os.path.join(m.RESULT_DIRECTORY, REQUEST_ID + '.json'))
-    m.activate_policy = lambda _policy: None
+    m.write_settings_atomic = real_write_settings
     assert m.process_one() is True
+    assert activations == [(4, True), (4, True)]
     assert json.loads(Path(m.SETTINGS_PATH).read_text())['generation'] == 4
     assert result(REQUEST_ID)['resultingGeneration'] == 4
 `);
@@ -588,6 +789,124 @@ with tempfile.TemporaryDirectory() as root:
 `);
   });
 
+  it("rejects terminal success that does not correlate to the exact request and committed state", async () => {
+    await execute(String.raw`
+cases = [
+    (
+        'mutation-wrong-generation',
+        settings(4, True, ['192.168.1.0/24']),
+        settings_request(expected=3, rtsp=True),
+        {
+            'version': 1, 'kind': 'settings-mutation', 'requestId': REQUEST_ID,
+            'outcome': 'succeeded', 'resultingGeneration': 5,
+            'resultingRtspEnabled': True, 'failureCode': None,
+        },
+    ),
+    (
+        'mutation-wrong-rtsp',
+        settings(4, True, ['192.168.1.0/24']),
+        settings_request(expected=3, rtsp=True),
+        {
+            'version': 1, 'kind': 'settings-mutation', 'requestId': REQUEST_ID,
+            'outcome': 'succeeded', 'resultingGeneration': 4,
+            'resultingRtspEnabled': False, 'failureCode': None,
+        },
+    ),
+    (
+        'reconcile-wrong-generation',
+        settings(4, True, ['192.168.1.0/24']),
+        reconcile_request(expected=4, rtsp=False),
+        {
+            'version': 1, 'kind': 'rtsp-state-reconcile', 'requestId': SECOND_ID,
+            'outcome': 'succeeded', 'resultingGeneration': 5,
+            'resultingRtspEnabled': False, 'failureCode': None,
+        },
+    ),
+    (
+        'reconcile-wrong-rtsp',
+        settings(4, True, ['192.168.1.0/24']),
+        reconcile_request(expected=4, rtsp=False),
+        {
+            'version': 1, 'kind': 'rtsp-state-reconcile', 'requestId': SECOND_ID,
+            'outcome': 'succeeded', 'resultingGeneration': 4,
+            'resultingRtspEnabled': True, 'failureCode': None,
+        },
+    ),
+    (
+        'different-candidate',
+        settings(4, True, ['192.168.1.0/24']),
+        settings_request(
+            expected=3,
+            enabled=False,
+            cidrs=['192.168.1.0/24'],
+            rtsp=True,
+        ),
+        {
+            'version': 1, 'kind': 'settings-mutation', 'requestId': REQUEST_ID,
+            'outcome': 'succeeded', 'resultingGeneration': 4,
+            'resultingRtspEnabled': True, 'failureCode': None,
+        },
+    ),
+]
+
+for label, current, request, terminal in cases:
+    with tempfile.TemporaryDirectory() as root:
+        configure(root, current)
+        m.claim_replay_state = lambda _metadata, _uid, _gid: True
+        publish(request)
+        terminal_path = os.path.join(
+            m.RESULT_DIRECTORY, request['requestId'] + '.json'
+        )
+        write_file(terminal_path, bytes_for(terminal), 0o640)
+        terminal_before = Path(terminal_path).read_bytes()
+        settings_before = Path(m.SETTINGS_PATH).read_bytes()
+        try:
+            m.process_one()
+            raise AssertionError(label + ' terminal accepted')
+        except RuntimeError:
+            pass
+        claim_path = os.path.join(
+            m.CLAIM_DIRECTORY, request['requestId'] + '.json'
+        )
+        assert os.path.exists(claim_path), label
+        assert Path(terminal_path).read_bytes() == terminal_before, label
+        assert Path(m.SETTINGS_PATH).read_bytes() == settings_before, label
+`);
+  });
+
+  it("accepts a failed terminal only with sealed root-owned request evidence", async () => {
+    await execute(String.raw`
+failed = {
+    'version': 1, 'kind': 'settings-mutation', 'requestId': REQUEST_ID,
+    'outcome': 'failed', 'resultingGeneration': None,
+    'resultingRtspEnabled': None, 'failureCode': 'policy-apply-failed',
+}
+
+with tempfile.TemporaryDirectory() as root:
+    configure(root, settings(3, False))
+    publish(settings_request())
+    result_path = os.path.join(m.RESULT_DIRECTORY, REQUEST_ID + '.json')
+    write_file(result_path, bytes_for(failed), 0o640)
+    try:
+        m.process_one()
+        raise AssertionError('ambiguous fresh failed result accepted')
+    except RuntimeError:
+        pass
+    assert os.path.exists(os.path.join(m.CLAIM_DIRECTORY, REQUEST_ID + '.json'))
+    assert Path(result_path).read_bytes() == bytes_for(failed)
+
+with tempfile.TemporaryDirectory() as root:
+    configure(root, settings(3, False))
+    m.claim_replay_state = lambda _metadata, _uid, _gid: True
+    publish(settings_request())
+    result_path = os.path.join(m.RESULT_DIRECTORY, REQUEST_ID + '.json')
+    write_file(result_path, bytes_for(failed), 0o640)
+    assert m.process_one() is True
+    assert not os.path.exists(os.path.join(m.CLAIM_DIRECTORY, REQUEST_ID + '.json'))
+    assert Path(result_path).read_bytes() == bytes_for(failed)
+`);
+  });
+
   it("removes only an acknowledged root-owned terminal result and retains invalid acknowledgements", async () => {
     await execute(String.raw`
 terminal = {
@@ -632,6 +951,35 @@ with tempfile.TemporaryDirectory() as root:
     assert m.process_one() is False
     assert os.path.exists(result_path)
     assert os.path.exists(ack_path)
+
+class AckCleanupCrash(BaseException):
+    pass
+
+with tempfile.TemporaryDirectory() as root:
+    configure(root)
+    result_path = os.path.join(m.RESULT_DIRECTORY, REQUEST_ID + '.json')
+    ack_path = os.path.join(m.ACK_DIRECTORY, REQUEST_ID + '.ack')
+    write_file(result_path, bytes_for(terminal), 0o640)
+    write_file(ack_path, b'', 0o600)
+    real_remove = m.remove_entry
+    m.remove_entry = lambda fd, name: (
+        (_ for _ in ()).throw(AckCleanupCrash())
+        if name.endswith('.json')
+        else real_remove(fd, name)
+    )
+    try:
+        m.process_one()
+        raise AssertionError('ack cleanup crash was swallowed')
+    except AckCleanupCrash:
+        pass
+    assert not os.path.exists(ack_path)
+    assert os.path.exists(result_path)
+
+    m.remove_entry = real_remove
+    write_file(ack_path, b'', 0o600)
+    assert m.process_one() is False
+    assert not os.path.exists(ack_path)
+    assert not os.path.exists(result_path)
 `);
   });
 

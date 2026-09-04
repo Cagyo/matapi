@@ -372,6 +372,34 @@ def run(helper, inspector, name):
             except helper.Reject as error:
                 return {"ok": False, "reason": error.reason}
             raise AssertionError("version one policy accepted")
+        if name == "v2-load-missing-duplicate-keys":
+            install_summary(inspector, root, summary_document(inspector))
+            target = Path(root) / "live-stream-policy.json"
+            failures = {}
+
+            missing = document(inspector)
+            del missing["settingsGeneration"]
+            install_policy(root, missing)
+            try:
+                helper.load_verified_policy(str(target), inspector)
+                raise AssertionError("missing v2 policy key accepted")
+            except helper.Reject as error:
+                failures["missing"] = error.reason
+
+            encoded = json.dumps(
+                document(inspector), separators=(",", ":"), sort_keys=True
+            )
+            target.write_text(
+                encoded.replace('"version":2', '"version":2,"version":2', 1)
+                + "\n",
+                encoding="utf-8",
+            )
+            try:
+                helper.load_verified_policy(str(target), inspector)
+                raise AssertionError("duplicate v2 policy key accepted")
+            except helper.Reject as error:
+                failures["duplicate"] = error.reason
+            return failures
         if name == "subsecond-timeout":
             leases = {"aa" * 16: {"sessionId": request()["sessionId"], "addresses": [bound("192.168.1.20")], "rtspControlPorts": [554], "transport": "tcp", "udpMediaPorts": None, "expiresAtUnixMs": now + 999}}
             at_999 = helper.render_nft(STREAM_UID, STREAM_GID, leases, now)

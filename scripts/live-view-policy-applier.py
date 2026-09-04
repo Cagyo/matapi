@@ -61,6 +61,9 @@ MAX_SAFE_INTEGER = 9_007_199_254_740_991
 MAX_ALLOWED_CIDRS = 16
 MAX_UDP_PORTS = 64
 COMMAND_TIMEOUT_SECONDS = 15
+RTSP_ASSETS_ABSENT = "absent"
+RTSP_ASSETS_VALID = "valid"
+RTSP_ASSETS_UNSAFE = "unsafe"
 REQUEST_ID = re.compile(r"^[A-Za-z0-9_-]{16}$")
 REQUEST_ENTRY = re.compile(r"^([A-Za-z0-9_-]{16})\.json$")
 ACK_ENTRY = re.compile(r"^([A-Za-z0-9_-]{16})\.ack$")
@@ -691,17 +694,6 @@ def open_claim(claim_fd, name, worker_uid, worker_gid):
     try:
         value = os.fstat(descriptor)
         replay = validate_claim_metadata(value, worker_uid, worker_gid)
-        if not replay:
-            os.fchown(descriptor, ROOT_UID, ROOT_GID)
-            os.fchmod(descriptor, 0o600)
-            os.fsync(descriptor)
-            value = os.fstat(descriptor)
-            if (
-                value.st_uid != ROOT_UID
-                or value.st_gid != ROOT_GID
-                or stat.S_IMODE(value.st_mode) != 0o600
-            ):
-                raise InvalidRequest("claim normalization")
         return read_descriptor(descriptor, value, MAX_BYTES), replay
     finally:
         os.close(descriptor)
@@ -734,6 +726,18 @@ def remove_entry(directory_descriptor, name):
     except FileNotFoundError:
         return
     fsync_directory(directory_descriptor)
+
+
+def quarantine_claim(claim_fd, name):
+    """Move unsafe claim metadata out of the lexical work queue without deletion."""
+    quarantine = ".unsafe-" + uuid.uuid4().hex
+    os.rename(
+        name,
+        quarantine,
+        src_dir_fd=claim_fd,
+        dst_dir_fd=claim_fd,
+    )
+    fsync_directory(claim_fd)
 
 
 def write_atomic(directory_descriptor, name, payload, uid, gid, mode):
@@ -781,6 +785,18 @@ def write_atomic(directory_descriptor, name, payload, uid, gid, mode):
         except OSError:
             pass
         raise
+
+
+def seal_claim(claim_fd, name, request):
+    """Replace an accepted worker inode with immutable canonical replay evidence."""
+    write_atomic(
+        claim_fd,
+        name,
+        canonical_json(request),
+        ROOT_UID,
+        ROOT_GID,
+        0o600,
+    )
 
 
 def read_settings(worker_gid):
@@ -910,9 +926,16 @@ def policy_runtime_values():
 
     def port(key, default):
         text = values.get(key, default)
-        if not isinstance(text, str) or re.fullmatch(r"[0-9]+", text) is None:
+        if (
+            not isinstance(text, str)
+            or not 1 <= len(text) <= 5
+            or re.fullmatch(r"[0-9]+", text) is None
+        ):
             raise ApplyFailure("policy-apply-failed")
-        value = int(text)
+        try:
+            value = int(text)
+        except ValueError as error:
+            raise ApplyFailure("policy-apply-failed") from error
         if not is_integer(value, 1024, 65535):
             raise ApplyFailure("policy-apply-failed")
         return value
@@ -1028,10 +1051,33 @@ def install_policy(policy):
     activate_policy(policy)
 
 
-def rtsp_assets_present():
-    return root_owned_file(NET_HELPER_PATH, 0o755) and root_owned_file(
-        STREAM_NET_UNIT_PATH, 0o644
+def rtsp_assets_state():
+    def state(path, mode):
+        try:
+            value = os.stat(path, follow_symlinks=False)
+        except FileNotFoundError:
+            return RTSP_ASSETS_ABSENT
+        except OSError:
+            return RTSP_ASSETS_UNSAFE
+        if (
+            stat.S_ISREG(value.st_mode)
+            and value.st_nlink == 1
+            and value.st_uid == ROOT_UID
+            and value.st_gid == ROOT_GID
+            and stat.S_IMODE(value.st_mode) == mode
+        ):
+            return RTSP_ASSETS_VALID
+        return RTSP_ASSETS_UNSAFE
+
+    states = (
+        state(NET_HELPER_PATH, 0o755),
+        state(STREAM_NET_UNIT_PATH, 0o644),
     )
+    if all(value == RTSP_ASSETS_ABSENT for value in states):
+        return RTSP_ASSETS_ABSENT
+    if all(value == RTSP_ASSETS_VALID for value in states):
+        return RTSP_ASSETS_VALID
+    return RTSP_ASSETS_UNSAFE
 
 
 def write_terminal_result(value, worker_gid):
@@ -1109,21 +1155,54 @@ def candidate_document(request):
     }
 
 
-def apply_settings_mutation(request, worker_gid, replay):
+def terminal_result_authoritative(value, request, worker_gid, replay):
+    if value["outcome"] == "failed":
+        # A failed result cannot carry the candidate tuple. Only a canonical
+        # root-sealed claim proves which request this terminal belongs to.
+        return replay
+    if request["kind"] == "settings-mutation":
+        try:
+            candidate = candidate_document(request)
+            current = read_settings(worker_gid)
+        except (ApplyFailure, InvalidRequest):
+            return False
+        return (
+            value["resultingGeneration"] == request["expectedGeneration"] + 1
+            and value["resultingRtspEnabled"] == request["rtspEnabled"]
+            and current == candidate
+        )
+    return (
+        value["resultingGeneration"] == request["expectedGeneration"]
+        and value["resultingRtspEnabled"] == request["rtspEnabled"]
+    )
+
+
+def prepare_request(request, worker_gid, replay):
     current = read_settings(worker_gid)
     expected = request["expectedGeneration"]
+    if request["kind"] == "rtsp-state-reconcile":
+        if current["generation"] != expected:
+            raise ApplyFailure("stale-generation")
+        return current, None, False
+
+    candidate = candidate_document(request)
     if current["generation"] == expected:
-        candidate = candidate_document(request)
-        committed_replay = False
-    elif replay:
-        candidate = candidate_document(request)
-        committed_replay = current == candidate
-    else:
-        committed_replay = False
-    if not committed_replay and current["generation"] != expected:
-        raise ApplyFailure("stale-generation")
+        return current, candidate, False
+    if replay and current == candidate:
+        return current, candidate, True
+    raise ApplyFailure("stale-generation")
+
+
+def apply_settings_mutation(request, worker_gid, candidate, committed_replay):
+    if not committed_replay:
+        current = read_settings(worker_gid)
+        if current["generation"] != request["expectedGeneration"]:
+            raise ApplyFailure("stale-generation")
+    assets = rtsp_assets_state()
+    if assets == RTSP_ASSETS_UNSAFE:
+        raise ApplyFailure("policy-apply-failed")
     if committed_replay:
-        if rtsp_assets_present():
+        if assets == RTSP_ASSETS_VALID:
             install_policy(policy_for(candidate, request["rtspEnabled"]))
         # The settings commit point has passed. Marker cleanup is independent
         # and can be retried without changing the terminal success.
@@ -1134,7 +1213,7 @@ def apply_settings_mutation(request, worker_gid, replay):
         return candidate["generation"], request["rtspEnabled"]
 
     marker_present = read_attention_marker(worker_gid)
-    if rtsp_assets_present():
+    if assets == RTSP_ASSETS_VALID:
         install_policy(policy_for(candidate, request["rtspEnabled"]))
     write_settings_atomic(candidate, worker_gid)
     if marker_present:
@@ -1147,12 +1226,14 @@ def apply_settings_mutation(request, worker_gid, replay):
     return candidate["generation"], request["rtspEnabled"]
 
 
-def apply_rtsp_reconcile(request, worker_gid):
-    current = read_settings(worker_gid)
+def apply_rtsp_reconcile(request, current):
     if current["generation"] != request["expectedGeneration"]:
         raise ApplyFailure("stale-generation")
-    if not rtsp_assets_present():
+    assets = rtsp_assets_state()
+    if assets == RTSP_ASSETS_ABSENT:
         raise ApplyFailure("rtsp-assets-absent")
+    if assets != RTSP_ASSETS_VALID:
+        raise ApplyFailure("policy-apply-failed")
     install_policy(policy_for(current, request["rtspEnabled"]))
     return current["generation"], request["rtspEnabled"]
 
@@ -1186,6 +1267,10 @@ def process_one():
             claim_data, replay = open_claim(
                 claim_fd, name, worker_uid, worker_gid
             )
+        except InvalidRequest:
+            quarantine_claim(claim_fd, name)
+            return True
+        try:
             request = parse_request(claim_data, name)
         except InvalidRequest as error:
             if error.identity is not None:
@@ -1196,6 +1281,11 @@ def process_one():
             remove_entry(claim_fd, name)
             return True
 
+        if replay and claim_data != canonical_json(request):
+            # Root ownership is replay authority only for the exact canonical
+            # evidence written after the initial generation CAS.
+            raise RuntimeError("unsafe replay claim")
+
         try:
             existing = open_terminal_result(
                 result_fd,
@@ -1203,35 +1293,32 @@ def process_one():
                 request["kind"],
                 worker_gid,
             )
-            del existing
+            if not terminal_result_authoritative(
+                existing, request, worker_gid, replay
+            ):
+                raise RuntimeError("ambiguous terminal result")
             remove_entry(claim_fd, name)
             return True
         except FileNotFoundError:
             pass
-        except InvalidRequest:
-            terminal = result_payload(
-                request, "failed", "request-invalid"
-            )
-            write_terminal_result(terminal, worker_gid)
-            remove_entry(claim_fd, name)
-            return True
-
-        if bundle_failure:
-            terminal = result_payload(
-                request, "failed", "helper-version-mismatch"
-            )
-            write_terminal_result(terminal, worker_gid)
-            remove_entry(claim_fd, name)
-            return True
+        except InvalidRequest as error:
+            raise RuntimeError("unsafe terminal result") from error
 
         try:
+            current, candidate, committed_replay = prepare_request(
+                request, worker_gid, replay
+            )
+            if not replay:
+                seal_claim(claim_fd, name, request)
+            if bundle_failure:
+                raise ApplyFailure("helper-version-mismatch")
             if request["kind"] == "settings-mutation":
                 generation, rtsp_enabled = apply_settings_mutation(
-                    request, worker_gid, replay
+                    request, worker_gid, candidate, committed_replay
                 )
             elif request["kind"] == "rtsp-state-reconcile":
                 generation, rtsp_enabled = apply_rtsp_reconcile(
-                    request, worker_gid
+                    request, current
                 )
             else:
                 raise ApplyFailure("request-invalid")
@@ -1263,8 +1350,11 @@ def bootstrap_rtsp():
         validate_fixed_parents()
         validate_layout(worker_uid, worker_gid)
         validate_root_bundle()
-        if not rtsp_assets_present():
+        assets = rtsp_assets_state()
+        if assets == RTSP_ASSETS_ABSENT:
             raise ApplyFailure("rtsp-assets-absent")
+        if assets != RTSP_ASSETS_VALID:
+            raise ApplyFailure("policy-apply-failed")
         current = read_settings(worker_gid)
         install_policy(policy_for(current, False))
         return True
