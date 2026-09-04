@@ -19,6 +19,7 @@ export interface PrepareLiveViewSettingsJobInput {
 export interface LiveViewSettingsJobRepositoryPort {
   findById(id: string): Promise<LiveViewSettingsJob | null>;
   findActive(): Promise<LiveViewSettingsJob | null>;
+  findLatestTerminal(): Promise<LiveViewSettingsJob | null>;
   markPublished(id: string, now: Date): Promise<LiveViewSettingsJob>;
   markCommitted(id: string, now: Date): Promise<LiveViewSettingsJob>;
   markRestartRequired(

@@ -67,6 +67,47 @@ describe('InMemoryLiveViewSettingsJobRepository', () => {
     },
   );
 
+  it('returns only the latest terminal job by updated then created time', async () => {
+    const jobs = new InMemoryLiveViewSettingsJobRepository();
+    jobs.claimPrepared(prepared);
+    await jobs.markPublished(prepared.id, prepared.now);
+    await jobs.markCommitted(prepared.id, prepared.now);
+    await jobs.terminalizeSuccess(
+      prepared.id,
+      new Date('2030-01-01T00:04:00.000Z'),
+    );
+
+    jobs.claimPrepared({
+      ...prepared,
+      id: 'BcDeFgHiJkLmNoPq',
+      now: new Date('2030-01-01T00:01:00.000Z'),
+    });
+    await jobs.terminalizeFailure(
+      'BcDeFgHiJkLmNoPq',
+      'interrupted',
+      new Date('2030-01-01T00:03:00.000Z'),
+    );
+    await expect(jobs.findLatestTerminal()).resolves.toMatchObject({
+      id: prepared.id,
+      status: 'succeeded',
+    });
+
+    jobs.claimPrepared({
+      ...prepared,
+      id: 'CdEfGhIjKlMnOpQr',
+      now: new Date('2030-01-01T00:02:00.000Z'),
+    });
+    await jobs.terminalizeFailure(
+      'CdEfGhIjKlMnOpQr',
+      'interrupted',
+      new Date('2030-01-01T00:04:00.000Z'),
+    );
+    await expect(jobs.findLatestTerminal()).resolves.toMatchObject({
+      id: 'CdEfGhIjKlMnOpQr',
+      status: 'failed',
+    });
+  });
+
   it('rejects an invalid compare-and-set without changing the job', async () => {
     const jobs = new InMemoryLiveViewSettingsJobRepository();
     jobs.claimPrepared(prepared);

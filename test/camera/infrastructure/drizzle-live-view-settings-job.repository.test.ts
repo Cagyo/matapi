@@ -77,6 +77,38 @@ describe('DrizzleLiveViewSettingsJobRepository', () => {
     },
   );
 
+  it('returns only the latest terminal job by updated then created time', async () => {
+    seedPrepared();
+    await jobs.markPublished('AbCdEfGhIjKlMnOp', now);
+    await jobs.markCommitted('AbCdEfGhIjKlMnOp', now);
+    await jobs.terminalizeSuccess(
+      'AbCdEfGhIjKlMnOp',
+      new Date('2030-01-01T00:04:00.000Z'),
+    );
+
+    seedPrepared('BcDeFgHiJkLmNoPq', new Date('2030-01-01T00:01:00.000Z'));
+    await jobs.terminalizeFailure(
+      'BcDeFgHiJkLmNoPq',
+      'interrupted',
+      new Date('2030-01-01T00:03:00.000Z'),
+    );
+    await expect(jobs.findLatestTerminal()).resolves.toMatchObject({
+      id: 'AbCdEfGhIjKlMnOp',
+      status: 'succeeded',
+    });
+
+    seedPrepared('CdEfGhIjKlMnOpQr', new Date('2030-01-01T00:02:00.000Z'));
+    await jobs.terminalizeFailure(
+      'CdEfGhIjKlMnOpQr',
+      'interrupted',
+      new Date('2030-01-01T00:04:00.000Z'),
+    );
+    await expect(jobs.findLatestTerminal()).resolves.toMatchObject({
+      id: 'CdEfGhIjKlMnOpQr',
+      status: 'failed',
+    });
+  });
+
   it('does not update a job when a transition loses its compare-and-set', async () => {
     seedPrepared();
 
@@ -109,9 +141,9 @@ describe('DrizzleLiveViewSettingsJobRepository', () => {
     await expect(jobs.findById(id)).rejects.toBeInstanceOf(LiveViewSettingsStateError);
   });
 
-  function seedPrepared(): void {
+  function seedPrepared(id = 'AbCdEfGhIjKlMnOp', createdAt = now): void {
     db.insert(liveViewSettingsJobs).values({
-      id: 'AbCdEfGhIjKlMnOp',
+      id,
       status: 'prepared',
       activeSlot: 1,
       expectedGeneration: 3,
@@ -120,8 +152,8 @@ describe('DrizzleLiveViewSettingsJobRepository', () => {
       requestedInChatId: 1001,
       workflowReceiptId: 'QrStUvWxYz012345',
       failureCode: null,
-      createdAt: now,
-      updatedAt: now,
+      createdAt,
+      updatedAt: createdAt,
     }).run();
   }
 });

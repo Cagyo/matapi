@@ -55,6 +55,18 @@ export class InMemoryLiveViewSettingsJobRepository implements LiveViewSettingsJo
     return stored ? cloneJob(stored.job) : null;
   }
 
+  async findLatestTerminal(): Promise<LiveViewSettingsJob | null> {
+    const [stored] = [...this.jobs.values()]
+      .filter(({ job }) => job.status === 'succeeded' || job.status === 'failed')
+      .sort(
+        (left, right) =>
+          right.updatedAt.getTime() - left.updatedAt.getTime() ||
+          right.createdAt.getTime() - left.createdAt.getTime() ||
+          right.job.id.localeCompare(left.job.id),
+      );
+    return stored ? cloneJob(stored.job) : null;
+  }
+
   async markPublished(id: string, now: Date): Promise<LiveViewSettingsJob> {
     return this.transition(id, ['prepared'], 'published', null, now);
   }
@@ -91,7 +103,7 @@ export class InMemoryLiveViewSettingsJobRepository implements LiveViewSettingsJo
     now: Date,
   ): LiveViewSettingsJob {
     const stored = this.jobs.get(id);
-    if (!stored || stored.job.activeSlot !== 1 || !allowed.includes(stored.job.status)) {
+    if (stored?.job.activeSlot !== 1 || !allowed.includes(stored.job.status)) {
       throw new RangeError(`Live view settings job '${id}' state changed`);
     }
     const job: LiveViewSettingsJob = {

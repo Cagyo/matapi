@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../database/database.module';
 import { liveViewSettingsJobs } from '../../database/schema';
 import {
@@ -26,6 +26,19 @@ export class DrizzleLiveViewSettingsJobRepository implements LiveViewSettingsJob
   async findActive(): Promise<LiveViewSettingsJob | null> {
     const row = this.db.select().from(liveViewSettingsJobs)
       .where(eq(liveViewSettingsJobs.activeSlot, 1)).get();
+    return row ? toJob(row) : null;
+  }
+
+  async findLatestTerminal(): Promise<LiveViewSettingsJob | null> {
+    const row = this.db.select().from(liveViewSettingsJobs)
+      .where(inArray(liveViewSettingsJobs.status, ['succeeded', 'failed']))
+      .orderBy(
+        desc(liveViewSettingsJobs.updatedAt),
+        desc(liveViewSettingsJobs.createdAt),
+        desc(liveViewSettingsJobs.id),
+      )
+      .limit(1)
+      .get();
     return row ? toJob(row) : null;
   }
 

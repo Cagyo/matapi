@@ -24,8 +24,9 @@ export class LiveViewSettingsRecoveryService implements OnApplicationBootstrap {
 
   async run(): Promise<ReconcileLiveViewSettingsJobResult | null> {
     const active = await this.jobs.findActive();
-    if (active === null) return null;
-    return this.reconcile.execute(active.id);
+    const recoverable = active ?? (await this.jobs.findLatestTerminal());
+    if (recoverable === null) return null;
+    return this.reconcile.execute(recoverable.id);
   }
 
   async onApplicationBootstrap(): Promise<void> {
