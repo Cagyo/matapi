@@ -26,11 +26,13 @@ function address(
 }
 
 describe("OsPrivateSubnetDetectorAdapter", () => {
-  it("keeps eligible private networks only, canonicalizes them, and preserves bounded labels with their total", async () => {
+  it("keeps usable private networks only, canonicalizes them, and preserves bounded labels with their total", async () => {
     const interfaces: Interfaces = {
       lo: [address("127.0.0.1", "255.0.0.0", { internal: true })],
       malformed0: [address("192.168.50.1", "255.0.255.0", { cidr: null })],
-      wlan0: [address("172.16.3.4", "255.255.0.0", { cidr: null })],
+      down0: [address("172.16.3.4", "255.255.0.0")],
+      virtual0: [address("172.17.3.4", "255.255.0.0")],
+      failure0: [address("172.18.3.4", "255.255.0.0")],
       wan0: [address("8.8.8.8", "255.255.255.0")],
       eth0: [address("192.168.1.42", "255.255.255.0")],
       br0: [address("192.168.1.1", "255.255.255.0")],
@@ -41,12 +43,16 @@ describe("OsPrivateSubnetDetectorAdapter", () => {
 
     const suggestions = await new OsPrivateSubnetDetectorAdapter(
       () => interfaces,
+      (label) => {
+        if (label === "failure0") throw new Error("sysfs unavailable");
+        return label === "virtual0" ? "unknown" : label === "down0" ? "down" : "up";
+      },
     ).detect();
 
     expect(suggestions).toEqual([
       {
-        cidr: "172.16.0.0/16",
-        interfaceLabels: ["wlan0"],
+        cidr: "172.17.3.0/24",
+        interfaceLabels: ["virtual0"],
         interfaceLabelCount: 1,
       },
       {
@@ -62,6 +68,20 @@ describe("OsPrivateSubnetDetectorAdapter", () => {
     ]);
   });
 
+  it("rejects unsafe interface labels before they can reach the state reader", async () => {
+    const labelsRead: string[] = [];
+    const suggestions = await new OsPrivateSubnetDetectorAdapter(
+      () => ({ "../escape": [address("192.168.1.42", "255.255.255.0")] }),
+      (label) => {
+        labelsRead.push(label);
+        return "up";
+      },
+    ).detect();
+
+    expect(suggestions).toEqual([]);
+    expect(labelsRead).toEqual([]);
+  });
+
   it("keeps a stable first 32 canonical suggestions when virtual interfaces exceed the bound", async () => {
     const interfaces: Interfaces = Object.fromEntries(
       Array.from({ length: 40 }, (_, index) => [
@@ -72,6 +92,7 @@ describe("OsPrivateSubnetDetectorAdapter", () => {
 
     const suggestions = await new OsPrivateSubnetDetectorAdapter(
       () => interfaces,
+      () => "unknown",
     ).detect();
 
     expect(suggestions).toHaveLength(32);

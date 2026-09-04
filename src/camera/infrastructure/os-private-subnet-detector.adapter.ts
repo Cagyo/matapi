@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { networkInterfaces, type NetworkInterfaceInfo } from "node:os";
 
 import * as ipaddr from "ipaddr.js";
@@ -13,6 +14,7 @@ const MAX_INTERFACE_LABELS = 3;
 
 type DetectedSubnet = Omit<PrivateSubnetSuggestion, "selector">;
 type NetworkInterfaces = ReturnType<typeof networkInterfaces>;
+type InterfaceStateReader = (interfaceLabel: string) => string;
 
 export class OsPrivateSubnetDetectorAdapter
   implements PrivateSubnetDetectorPort
@@ -20,6 +22,8 @@ export class OsPrivateSubnetDetectorAdapter
   constructor(
     private readonly readNetworkInterfaces: () => NetworkInterfaces =
       networkInterfaces,
+    private readonly readInterfaceState: InterfaceStateReader =
+      readLinuxInterfaceState,
   ) {}
 
   async detect(): Promise<readonly DetectedSubnet[]> {
@@ -28,7 +32,9 @@ export class OsPrivateSubnetDetectorAdapter
     for (const [label, entries] of Object.entries(
       this.readNetworkInterfaces(),
     )) {
-      if (!entries) continue;
+      if (!entries || !isUsableInterface(label, this.readInterfaceState)) {
+        continue;
+      }
       for (const entry of entries) {
         const cidr = privateCidr(entry);
         if (!cidr) continue;
@@ -49,11 +55,11 @@ export class OsPrivateSubnetDetectorAdapter
 function privateCidr(entry: NetworkInterfaceInfo): string | null {
   if (entry.internal) return null;
 
-  const prefix =
-    (entry.cidr === null
-      ? null
-      : prefixFromCidr(entry.cidr, entry.family)) ??
-    prefixFromNetmask(entry.netmask, entry.family);
+  // Node reports `cidr: null` when its netmask metadata is unusable. There is
+  // no independent prefix source in this API, so a suggestion must fail closed.
+  if (entry.cidr === null) return null;
+
+  const prefix = prefixFromCidr(entry.cidr, entry.family);
   if (prefix === null) return null;
 
   try {
@@ -92,37 +98,28 @@ function prefixFromCidr(
   }
 }
 
-function prefixFromNetmask(
-  netmask: string,
-  family: NetworkInterfaceInfo["family"],
-): number | null {
+function isUsableInterface(
+  label: string,
+  readState: InterfaceStateReader,
+): boolean {
+  if (!isSafeInterfaceLabel(label)) return false;
   try {
-    const address = ipaddr.parse(netmask);
-    if (
-      (family === "IPv4" && address.kind() !== "ipv4") ||
-      (family === "IPv6" && address.kind() !== "ipv6")
-    ) {
-      return null;
-    }
-
-    let prefix = 0;
-    let sawZero = false;
-    for (const octet of address.toByteArray()) {
-      for (let bit = 7; bit >= 0; bit -= 1) {
-        const isSet = (octet & (1 << bit)) !== 0;
-        if (!isSet) {
-          sawZero = true;
-        } else if (sawZero) {
-          return null;
-        } else {
-          prefix += 1;
-        }
-      }
-    }
-    return prefix;
+    const state = readState(label).trim();
+    return state === "up" || state === "unknown";
   } catch {
-    return null;
+    return false;
   }
+}
+
+function isSafeInterfaceLabel(label: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,14}$/.test(label);
+}
+
+function readLinuxInterfaceState(interfaceLabel: string): string {
+  return readFileSync(
+    `/sys/class/net/${interfaceLabel}/operstate`,
+    "utf8",
+  ).trim();
 }
 
 function compareSuggestions(left: DetectedSubnet, right: DetectedSubnet): number {
