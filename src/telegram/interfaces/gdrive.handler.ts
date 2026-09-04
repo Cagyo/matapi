@@ -420,17 +420,21 @@ export class GdriveHandler implements TelegramHandler {
     });
     if (!receipt) return;
     const catalog = ctx.localeState?.catalog ?? en;
-    let retryReceipt: string | null = null;
     try {
       const result = await this.status.execute();
       const body = catalog.gdrive.body(result);
-      const replyMarkup = result.recovery?.retryable
-        ? this.storeRetryReceipt(ctx, result.recovery)
-        : undefined;
-      retryReceipt = replyMarkup?.receipt ?? null;
-      await this.complete(ctx, receipt, () => ctx.reply(`${catalog.gdrive.header}\n\n${body}`, replyMarkup?.options));
+      await this.complete(ctx, receipt, async () => {
+        const replyMarkup = result.recovery?.retryable
+          ? this.storeRetryReceipt(ctx, result.recovery)
+          : undefined;
+        try {
+          await ctx.reply(`${catalog.gdrive.header}\n\n${body}`, replyMarkup?.options);
+        } catch (error) {
+          if (replyMarkup) this.retries.delete(replyMarkup.receipt);
+          throw error;
+        }
+      });
     } catch (err) {
-      if (retryReceipt) this.retries.delete(retryReceipt);
       await this.handleError(ctx, receipt, err);
     }
   }

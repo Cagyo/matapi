@@ -291,6 +291,27 @@ describe('GdriveHandler archive retry', () => {
     expect(retryCallbackData(fixture.ctx)).toBeUndefined();
   });
 
+  it('does not offer or schedule a retry for a reauthorized connection report', async () => {
+    const fixture = setupRetryHandler();
+    fixture.status.execute.mockResolvedValue(driveStatusReport({
+      connection: {
+        generationId: 'generation-sensitive', state: 'reauth_required',
+        errorCode: 'authorization_required',
+      },
+      drainState: 'reauthorization-required',
+      requiredAction: 'reauthorize',
+      recovery: { generationId: 'generation-sensitive', providerRevision: 47, retryable: false },
+    }));
+
+    await fixture.handler.handleStatus(fixture.ctx as never);
+    expect(retryCallbackData(fixture.ctx)).toBeUndefined();
+
+    await invokeGdriveCommand(fixture, 'retry');
+
+    expect(lastReplyText(fixture.ctx)).toBe(fixture.catalog.gdrive.retryResults.reauthorize);
+    expect(fixture.retry.execute).not.toHaveBeenCalled();
+  });
+
   it('does not render a retry button for a report fence that is not schedulable', async () => {
     const fixture = setupRetryHandler();
     fixture.status.execute.mockResolvedValue(driveStatusReport({
@@ -395,6 +416,59 @@ describe('GdriveHandler archive retry', () => {
 
     expect(fixture.retry.execute).not.toHaveBeenCalled();
     expect(fixture.ctx.reply).not.toHaveBeenCalled();
+  });
+
+  it('cleans an attempted receipt when navigation catches status-delivery failure', async () => {
+    const navigation = {
+      complete: vi.fn(async (_ctx, _launch, presentation) => {
+        await presentation.deliver().catch(() => undefined);
+      }),
+    };
+    const fixture = setupRetryHandler({ navigation });
+    fixture.status.execute.mockResolvedValue(driveStatusReport({
+      drainState: 'branch-blocked', requiredAction: 'restore-date-folder',
+      recovery: { generationId: 'generation-sensitive', providerRevision: 83, retryable: true },
+    }));
+    fixture.ctx.reply.mockRejectedValueOnce(new Error('delivery unavailable'));
+
+    await fixture.handler.handleStatus(fixture.ctx as never);
+    const failedReceipt = retryCallbackDataFromOptions(fixture.ctx.reply.mock.calls[0]?.[1]);
+    fixture.ctx.reply.mockClear();
+    await invokeRetryCallback(fixture, failedReceipt);
+
+    expect(fixture.retry.execute).not.toHaveBeenCalled();
+    expect(fixture.ctx.reply).not.toHaveBeenCalled();
+  });
+
+  it('does not replace a delivered receipt when navigation skips status delivery', async () => {
+    let deliver = true;
+    const navigation = {
+      complete: vi.fn(async (_ctx, _launch, presentation) => {
+        if (deliver) await presentation.deliver();
+      }),
+    };
+    const fixture = setupRetryHandler({ navigation });
+    fixture.status.execute
+      .mockResolvedValueOnce(driveStatusReport({
+        drainState: 'branch-blocked', requiredAction: 'restore-date-folder',
+        recovery: { generationId: 'generation-sensitive', providerRevision: 89, retryable: true },
+      }))
+      .mockResolvedValueOnce(driveStatusReport({
+        drainState: 'branch-blocked', requiredAction: 'restore-date-folder',
+        recovery: { generationId: 'generation-sensitive', providerRevision: 97, retryable: true },
+      }));
+    fixture.retry.execute.mockResolvedValue('scheduled');
+
+    await fixture.handler.handleStatus(fixture.ctx as never);
+    const deliveredReceipt = retryCallbackData(fixture.ctx);
+    deliver = false;
+    await fixture.handler.handleStatus(fixture.ctx as never);
+    fixture.ctx.reply.mockClear();
+    await invokeRetryCallback(fixture, deliveredReceipt);
+
+    expect(fixture.retry.execute).toHaveBeenCalledWith({
+      generationId: 'generation-sensitive', observedProviderRevision: 89,
+    });
   });
 });
 
@@ -883,7 +957,9 @@ function driveSetupReceipt(workflow: 'drive-setup' | 'drive-status' = 'drive-set
   };
 }
 
-function setupRetryHandler() {
+function setupRetryHandler(options: {
+  navigation?: { complete(ctx: object, launch: object, presentation: { deliver(): Promise<void> }): Promise<void> };
+} = {}) {
   const status = { execute: vi.fn() };
   const retry = { execute: vi.fn() };
   const callbacks: { pattern: RegExp; fn: (ctx: object) => Promise<void> }[] = [];
@@ -898,7 +974,7 @@ function setupRetryHandler() {
     status as never,
     {} as never,
     workflows as never,
-    undefined,
+    options.navigation as never,
     { read: vi.fn() },
     { execute: vi.fn() } as never,
     { execute: vi.fn() } as never,

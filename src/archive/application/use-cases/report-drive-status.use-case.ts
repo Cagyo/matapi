@@ -326,6 +326,8 @@ function recoveryFenceFor(input: {
   return {
     generationId: input.active.id,
     providerRevision: input.providerState.revision,
-    retryable: eligibility === 'branch-revalidation' || eligibility === 'provider-probe',
+    retryable: (input.drainState === 'branch-blocked' && eligibility === 'branch-revalidation')
+      || ((input.drainState === 'capacity-blocked' || input.drainState === 'policy-blocked')
+        && eligibility === 'provider-probe'),
   };
 }

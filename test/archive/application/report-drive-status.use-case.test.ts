@@ -324,6 +324,26 @@ describe('ReportDriveStatusUseCase', () => {
     });
   });
 
+  it('keeps a clear same-generation provider row outside manual recovery during connection reauthorization', async () => {
+    const connections = activeConnections();
+    connections.listStatusConnections = async () => [{
+      ...(await activeConnections().listStatusConnections())[0],
+      status: 'reauth_required' as const,
+      errorCode: 'authorization_required',
+    }];
+
+    const report = await statusUseCase({
+      connections,
+      provider: providerState({ revision: 47, operationClass: null }),
+    }).execute();
+
+    expect(report).toMatchObject({
+      drainState: 'reauthorization-required',
+      requiredAction: 'reauthorize',
+      recovery: { generationId: 'generation-1', providerRevision: 47, retryable: false },
+    });
+  });
+
   it.each([
     ['expired global row', 1, null, 'idle'],
     ['retired generation activity', 0, { generationId: 'generation-retired', artifactKind: 'motion_video', startedAtMs: 9_000 }, 'idle'],
