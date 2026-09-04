@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { FeatureDisableLifecycleRegistry } from '../../../src/features/application/feature-disable-lifecycle-registry.service';
 import { ReconcileFeatureInstallUseCase } from '../../../src/features/application/reconcile-feature-install.use-case';
 import { VerifyFeatureReadinessUseCase } from '../../../src/features/application/verify-feature-readiness.use-case';
 import { FeatureRestartDispatchError } from '../../../src/features/domain/errors/feature-restart-dispatch.error';
@@ -132,6 +133,10 @@ function create(scenario: Scenario) {
     afterEnable: vi.fn(async (_name: ManageableFeatureName) => {
       if (scenario.failAfterEnable) throw new Error('start gate unavailable');
     }),
+    runTransition: vi.fn(async (
+      _name: ManageableFeatureName,
+      operation: () => Promise<unknown>,
+    ) => operation()),
   };
   let dispatches = 0;
   const restart = {
@@ -571,6 +576,65 @@ describe('ReconcileFeatureInstallUseCase', () => {
 
     expect(order).toEqual(['result-remove', 'policy:true']);
     expect(test.lifecycle.afterEnable).toHaveBeenCalledOnce();
+  });
+
+  it('holds the registered RTSP transition wrapper across terminal install state and after-enable', async () => {
+    const scenario: Scenario = {
+      name: 'RTSP terminal transition',
+      feature: 'rtsp',
+      identities: [],
+      expected: summary(),
+    };
+    const test = create(scenario);
+    await arrange(test, scenario);
+    const registry = new FeatureDisableLifecycleRegistry();
+    let transitionActive = false;
+    let transitionCalls = 0;
+    const afterEnable = vi.fn(async () => {
+      expect(transitionActive).toBe(true);
+    });
+    registry.register('rtsp', {
+      beforeDisable: vi.fn(),
+      afterEnable,
+      runTransition: async (operation) => {
+        expect(transitionActive).toBe(false);
+        transitionActive = true;
+        transitionCalls += 1;
+        try {
+          return await operation();
+        } finally {
+          transitionActive = false;
+        }
+      },
+    });
+    const terminalizeSuccess = test.jobs.terminalizeSuccess.bind(test.jobs);
+    test.jobs.terminalizeSuccess = async (input) => {
+      expect(transitionActive).toBe(true);
+      return terminalizeSuccess(input);
+    };
+    const useCase = new ReconcileFeatureInstallUseCase(
+      test.jobs,
+      test.results,
+      new VerifyFeatureReadinessUseCase(test.features, test.readiness),
+      registry,
+      test.restart,
+      test.features,
+      test.outcomes,
+      { now: () => now },
+      test.identity,
+    );
+
+    await useCase.execute(id);
+    test.identity.value = second;
+    await useCase.execute(id);
+
+    expect(transitionCalls).toBe(2);
+    expect(afterEnable).toHaveBeenCalledOnce();
+    expect(await test.features.findByName('rtsp')).toMatchObject({
+      installed: true,
+      enabled: true,
+      attentionReason: null,
+    });
   });
 
   it('coalesces concurrent reconciliations of the same job', async () => {

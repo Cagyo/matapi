@@ -29,7 +29,12 @@ import {
 } from "../domain/ports/live-view-settings-store.port";
 
 const DEFAULT_RESULT_POLL_INTERVAL_MS = 250;
-const DEFAULT_MAX_RESULT_POLLS = 241;
+const POLICY_APPLIER_TIMEOUT_MS = 60_000;
+const ACTIVATION_AND_SCHEDULING_MARGIN_MS = 5_000;
+const DEFAULT_MAX_RESULT_POLLS =
+  (POLICY_APPLIER_TIMEOUT_MS - ACTIVATION_AND_SCHEDULING_MARGIN_MS) /
+    DEFAULT_RESULT_POLL_INTERVAL_MS +
+  1;
 
 export const RECONCILE_RTSP_POLICY_OPTIONS = Symbol(
   "RECONCILE_RTSP_POLICY_OPTIONS",
@@ -40,6 +45,14 @@ export interface ReconcileRtspPolicyOptions {
   readonly maxResultPolls?: number;
   readonly resultPollIntervalMs?: number;
   readonly sleep?: (milliseconds: number) => Promise<void>;
+}
+
+/** The published policy request needs restart/boot recovery before another write. */
+export class LiveViewPolicyRestartPendingError extends LiveViewPolicyApplyError {
+  constructor() {
+    super();
+    this.name = "LiveViewPolicyRestartPendingError";
+  }
 }
 
 /** Reconciles the root-owned RTSP policy to one exact committed-settings tuple. */
@@ -88,31 +101,37 @@ export class ReconcileRtspPolicyUseCase {
     });
 
     await this.requests.publish(request);
-    await this.controller.start();
-    const result = await this.pollResult(request.requestId);
-    const terminal = createLiveViewPolicyResultV1(result);
+    let terminal: LiveViewPolicyResultV1;
+    try {
+      await this.controller.start();
+      const result = await this.pollResult(request.requestId);
+      terminal = createLiveViewPolicyResultV1(result);
 
-    if (
-      terminal.kind !== request.kind ||
-      terminal.requestId !== request.requestId
-    ) {
-      throw new LiveViewPolicyApplyError();
+      if (
+        terminal.kind !== request.kind ||
+        terminal.requestId !== request.requestId
+      ) {
+        throw new LiveViewPolicyApplyError();
+      }
+
+      if (
+        terminal.outcome === "succeeded" &&
+        (terminal.resultingGeneration !== committed.generation ||
+          terminal.resultingRtspEnabled !== request.rtspEnabled)
+      ) {
+        throw new LiveViewPolicyApplyError();
+      }
+
+      await this.acknowledgements.publish(request.requestId);
+    } catch {
+      throw new LiveViewPolicyRestartPendingError();
     }
 
+    await this.controller.start().catch(() => undefined);
     if (terminal.outcome === "failed") {
       if (terminal.failureCode === null) throw new LiveViewPolicyApplyError();
-      await this.acknowledgements.publish(request.requestId);
       throw mapFailure(terminal.failureCode);
     }
-
-    if (
-      terminal.resultingGeneration !== committed.generation ||
-      terminal.resultingRtspEnabled !== request.rtspEnabled
-    ) {
-      throw new LiveViewPolicyApplyError();
-    }
-
-    await this.acknowledgements.publish(request.requestId);
   }
 
   private async pollResult(requestId: string): Promise<LiveViewPolicyResultV1> {

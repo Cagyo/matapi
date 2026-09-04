@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+import { FeatureCameraRuntimeLifecycleService } from "../../../src/camera/application/feature-camera-runtime-lifecycle.service";
+import { LiveViewPolicyCoordinatorService } from "../../../src/camera/application/live-view-policy-coordinator.service";
 import { ReconcileRtspPolicyUseCase } from "../../../src/camera/application/reconcile-rtsp-policy.use-case";
 import { LiveViewPolicyApplyError } from "../../../src/camera/domain/errors/live-view-policy-apply.error";
+import { LiveViewSettingsBusyError } from "../../../src/camera/domain/errors/live-view-settings-busy.error";
 import type {
   LiveViewPolicyFailureCode,
   LiveViewPolicyResultV1,
@@ -50,6 +53,7 @@ function failed(
 
 function setup(
   resultSteps: readonly (LiveViewPolicyResultV1 | null)[] = [succeeded()],
+  options: { readonly useDefaultPollConfiguration?: boolean } = {},
 ) {
   const order: string[] = [];
   let resultRead = 0;
@@ -90,18 +94,21 @@ function setup(
   const sleep = vi.fn(async () => {
     order.push("poll:yield");
   });
+  const useCaseOptions = options.useDefaultPollConfiguration
+    ? { requestId: () => requestId, sleep }
+    : {
+        requestId: () => requestId,
+        maxResultPolls: 3,
+        resultPollIntervalMs: 25,
+        sleep,
+      };
   const useCase = new ReconcileRtspPolicyUseCase(
     settings,
     requests,
     controller,
     results,
     acknowledgements,
-    {
-      requestId: () => requestId,
-      maxResultPolls: 3,
-      resultPollIntervalMs: 25,
-      sleep,
-    },
+    useCaseOptions,
   );
   return {
     order,
@@ -138,9 +145,11 @@ describe("ReconcileRtspPolicyUseCase", () => {
       "poll:yield",
       "result:read",
       "ack:publish",
+      "controller:start",
     ]);
     expect(test.sleep).toHaveBeenCalledWith(25);
     expect(test.acknowledgements.publish).toHaveBeenCalledWith(requestId);
+    expect(test.controller.start).toHaveBeenCalledTimes(2);
   });
 
   it("stops after the configured result bound and leaves an absent result unacknowledged", async () => {
@@ -154,6 +163,72 @@ describe("ReconcileRtspPolicyUseCase", () => {
     expect(test.sleep).toHaveBeenCalledTimes(2);
     expect(test.acknowledgements.publish).not.toHaveBeenCalled();
   });
+
+  it("reserves five seconds of the fixed unit timeout for activation and scheduling", async () => {
+    const test = setup([null], { useDefaultPollConfiguration: true });
+
+    await expect(
+      test.useCase.execute({ rtspEnabled: true }),
+    ).rejects.toBeInstanceOf(LiveViewPolicyApplyError);
+
+    expect(test.results.read).toHaveBeenCalledTimes(221);
+    expect(test.sleep).toHaveBeenCalledTimes(220);
+    expect(test.sleep).toHaveBeenCalledWith(250);
+  });
+
+  it("does not fail a valid reconciliation when the post-ack cleanup trigger fails", async () => {
+    const test = setup();
+    test.controller.start
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("cleanup trigger failed"));
+
+    await expect(
+      test.useCase.execute({ rtspEnabled: true }),
+    ).resolves.toBeUndefined();
+
+    expect(test.acknowledgements.publish).toHaveBeenCalledWith(requestId);
+    expect(test.controller.start).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    "controller failure",
+    "result read failure",
+    "invalid result",
+    "timeout",
+  ] as const)(
+    "latches %s after publication and blocks compensation or another request",
+    async (scenario) => {
+      const test =
+        scenario === "invalid result"
+          ? setup([succeeded({ resultingGeneration: 5 })])
+          : setup([null]);
+      if (scenario === "controller failure") {
+        test.controller.start.mockRejectedValueOnce(
+          new Error("controller failed"),
+        );
+      }
+      if (scenario === "result read failure") {
+        test.results.read.mockRejectedValueOnce(
+          new Error("result read failed"),
+        );
+      }
+      const composed = composeRtspTransition(test);
+
+      await expect(
+        runUncertainRtspTransition(composed.camera),
+      ).rejects.toBeInstanceOf(LiveViewPolicyApplyError);
+
+      expect(composed.coordinator.isRestartPending()).toBe(true);
+      expect(test.requests.publish).toHaveBeenCalledTimes(1);
+      expect(test.acknowledgements.publish).not.toHaveBeenCalled();
+      await expect(
+        runRtspTransition(composed.camera, () =>
+          composed.camera.rtsp.afterEnable(),
+        ),
+      ).rejects.toBeInstanceOf(LiveViewSettingsBusyError);
+      expect(test.requests.publish).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it.each([
     ["wrong kind", succeeded({ kind: "settings-mutation" })],
@@ -195,6 +270,51 @@ describe("ReconcileRtspPolicyUseCase", () => {
         test.useCase.execute({ rtspEnabled: true }),
       ).rejects.toBeInstanceOf(LiveViewPolicyApplyError);
       expect(test.acknowledgements.publish).toHaveBeenCalledWith(requestId);
+      expect(test.controller.start).toHaveBeenCalledTimes(2);
     },
   );
 });
+
+type ReconcileHarness = ReturnType<typeof setup>;
+
+function composeRtspTransition(test: ReconcileHarness) {
+  const coordinator = new LiveViewPolicyCoordinatorService();
+  const gate = { close: vi.fn(), open: vi.fn().mockResolvedValue(undefined) };
+  const camera = new FeatureCameraRuntimeLifecycleService(
+    { stop: vi.fn(), start: vi.fn() } as never,
+    { stop: vi.fn() } as never,
+    gate as never,
+    {
+      stopCamera: vi.fn().mockResolvedValue(undefined),
+      stopSourceKind: vi.fn().mockResolvedValue(undefined),
+    },
+    { findActive: vi.fn().mockResolvedValue(null) },
+    coordinator,
+    test.useCase,
+  );
+  return { coordinator, camera, gate };
+}
+
+async function runUncertainRtspTransition(
+  camera: FeatureCameraRuntimeLifecycleService,
+): Promise<void> {
+  await runRtspTransition(camera, async () => {
+    try {
+      await camera.rtsp.afterEnable();
+    } catch (error) {
+      await expect(camera.rtsp.beforeDisable()).rejects.toBeInstanceOf(
+        LiveViewSettingsBusyError,
+      );
+      throw error;
+    }
+  });
+}
+
+function runRtspTransition<T>(
+  camera: FeatureCameraRuntimeLifecycleService,
+  operation: () => Promise<T>,
+): Promise<T> {
+  if (!camera.rtsp.runTransition)
+    throw new Error("RTSP transition wrapper is missing");
+  return camera.rtsp.runTransition(operation);
+}

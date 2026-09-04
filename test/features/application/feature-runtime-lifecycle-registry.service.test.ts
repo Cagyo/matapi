@@ -22,4 +22,42 @@ describe('FeatureDisableLifecycleRegistry', () => {
 
     expect(() => registry.register('rtsp', { beforeDisable: vi.fn(), afterEnable: vi.fn() })).toThrow(RangeError);
   });
+
+  it('delegates a registered transition wrapper and passes through every other feature', async () => {
+    const registry = new FeatureDisableLifecycleRegistry();
+    const trace: string[] = [];
+    registry.register('rtsp', {
+      beforeDisable: vi.fn(),
+      afterEnable: vi.fn(),
+      runTransition: async (operation) => {
+        trace.push('wrapper:enter');
+        try {
+          return await operation();
+        } finally {
+          trace.push('wrapper:leave');
+        }
+      },
+    });
+    registry.register('digital', { beforeDisable: vi.fn(), afterEnable: vi.fn() });
+
+    await expect(registry.runTransition('rtsp', async () => {
+      trace.push('rtsp:operation');
+      return 'rtsp-result';
+    })).resolves.toBe('rtsp-result');
+    await expect(registry.runTransition('digital', async () => {
+      trace.push('digital:operation');
+      return 'digital-result';
+    })).resolves.toBe('digital-result');
+    await registry.runTransition('motion', async () => {
+      trace.push('missing:operation');
+    });
+
+    expect(trace).toEqual([
+      'wrapper:enter',
+      'rtsp:operation',
+      'wrapper:leave',
+      'digital:operation',
+      'missing:operation',
+    ]);
+  });
 });

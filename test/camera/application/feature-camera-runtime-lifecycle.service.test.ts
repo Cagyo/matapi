@@ -19,7 +19,7 @@ describe('FeatureCameraRuntimeLifecycleService', () => {
     const order: string[] = [];
     const { lifecycle, settingsJobs, gate, sessions, reconcileRtspPolicy } = createLifecycle(order);
 
-    await lifecycle.rtsp.beforeDisable();
+    await runRtspTransition(lifecycle, () => lifecycle.rtsp.beforeDisable());
 
     expect(order).toEqual([
       'settings-job-check',
@@ -38,7 +38,7 @@ describe('FeatureCameraRuntimeLifecycleService', () => {
     const order: string[] = [];
     const { lifecycle, reconcileRtspPolicy, gate } = createLifecycle(order);
 
-    await lifecycle.rtsp.afterEnable();
+    await runRtspTransition(lifecycle, () => lifecycle.rtsp.afterEnable());
 
     expect(order).toEqual(['settings-job-check', 'policy:true', 'rtsp-gate-open']);
     expect(reconcileRtspPolicy.execute).toHaveBeenCalledWith({ rtspEnabled: true });
@@ -55,9 +55,9 @@ describe('FeatureCameraRuntimeLifecycleService', () => {
         return { id: 'settings-job' } as never;
       });
 
-      await expect(lifecycle.rtsp[transition]()).rejects.toBeInstanceOf(
-        LiveViewSettingsBusyError,
-      );
+      await expect(
+        runRtspTransition(lifecycle, () => lifecycle.rtsp[transition]()),
+      ).rejects.toBeInstanceOf(LiveViewSettingsBusyError);
 
       expect(order).toEqual(['settings-job-check']);
       expect(gate.close).not.toHaveBeenCalled();
@@ -66,6 +66,23 @@ describe('FeatureCameraRuntimeLifecycleService', () => {
       expect(reconcileRtspPolicy.execute).not.toHaveBeenCalled();
     },
   );
+
+  it('holds one coordinator lease around the complete registered RTSP operation', async () => {
+    const { lifecycle, coordinator } = createLifecycle();
+    const interleavingSettingsMutation = vi.fn(async () => undefined);
+    let interleavingError: unknown;
+
+    await runRtspTransition(lifecycle, async () => {
+      try {
+        await coordinator.run('settings', interleavingSettingsMutation);
+      } catch (error) {
+        interleavingError = error;
+      }
+    });
+
+    expect(interleavingError).toBeInstanceOf(LiveViewSettingsBusyError);
+    expect(interleavingSettingsMutation).not.toHaveBeenCalled();
+  });
 });
 
 function createLifecycle(order: string[] = []) {
@@ -108,7 +125,16 @@ function createLifecycle(order: string[] = []) {
     coordinator,
     reconcileRtspPolicy as never,
   );
-  return { lifecycle, watcher, motion, gate, sessions, settingsJobs, reconcileRtspPolicy };
+  return {
+    lifecycle,
+    watcher,
+    motion,
+    gate,
+    sessions,
+    settingsJobs,
+    coordinator,
+    reconcileRtspPolicy,
+  };
 }
 
 function sessionControl(order: string[]): LiveSourceSessionControlPort {
@@ -118,4 +144,12 @@ function sessionControl(order: string[]): LiveSourceSessionControlPort {
       order.push('rtsp-quiesce');
     }),
   };
+}
+
+function runRtspTransition<T>(
+  lifecycle: FeatureCameraRuntimeLifecycleService,
+  operation: () => Promise<T>,
+): Promise<T> {
+  if (!lifecycle.rtsp.runTransition) throw new Error('RTSP transition wrapper is missing');
+  return lifecycle.rtsp.runTransition(operation);
 }

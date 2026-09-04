@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
+import { FeatureCameraRuntimeLifecycleService } from '../../../src/camera/application/feature-camera-runtime-lifecycle.service';
+import { LiveViewPolicyCoordinatorService } from '../../../src/camera/application/live-view-policy-coordinator.service';
+import { LiveViewSettingsBusyError } from '../../../src/camera/domain/errors/live-view-settings-busy.error';
 import { EnableFeatureUseCase } from '../../../src/features/application/enable-feature.use-case';
+import { FeatureDisableLifecycleRegistry } from '../../../src/features/application/feature-disable-lifecycle-registry.service';
 import { VerifyFeatureReadinessUseCase } from '../../../src/features/application/verify-feature-readiness.use-case';
 import { FeatureInstallBusyError } from '../../../src/features/domain/errors/feature-install-busy.error';
 import { FeatureInconsistentError } from '../../../src/features/domain/errors/feature-inconsistent.error';
@@ -24,9 +28,16 @@ function setup(name: ManageableFeatureName = 'digital') {
   };
   const readiness = new InMemoryFeatureReadinessAdapter();
   const verify = new VerifyFeatureReadinessUseCase(features, readiness);
-  const lifecycle: Pick<FeatureRuntimeLifecycleRegistryPort, 'beforeDisable' | 'afterEnable'> = {
+  const lifecycle: Pick<
+    FeatureRuntimeLifecycleRegistryPort,
+    'runTransition' | 'beforeDisable' | 'afterEnable'
+  > = {
     beforeDisable: vi.fn().mockResolvedValue(undefined),
     afterEnable: vi.fn().mockResolvedValue(undefined),
+    runTransition: <T>(
+      _name: ManageableFeatureName,
+      operation: () => Promise<T>,
+    ): Promise<T> => operation(),
   };
   const restart: FeatureRestartPort = { dispatch: vi.fn().mockResolvedValue(undefined) };
   return {
@@ -82,6 +93,51 @@ describe('EnableFeatureUseCase', () => {
       'rtsp-gate-open',
       'restart',
     ]);
+  });
+
+  it('rejects an active settings job before any RTSP enable mutation or compensation', async () => {
+    const test = setup('rtsp');
+    const coordinator = new LiveViewPolicyCoordinatorService();
+    const registry = new FeatureDisableLifecycleRegistry();
+    const gate = { close: vi.fn(), open: vi.fn().mockResolvedValue(undefined) };
+    const sessions = {
+      stopCamera: vi.fn().mockResolvedValue(undefined),
+      stopSourceKind: vi.fn().mockResolvedValue(undefined),
+    };
+    const settingsJobs = {
+      findActive: vi.fn().mockResolvedValue({ id: 'active-settings-job' }),
+    };
+    const reconcileRtspPolicy = { execute: vi.fn().mockResolvedValue(undefined) };
+    const camera = new FeatureCameraRuntimeLifecycleService(
+      { stop: vi.fn(), start: vi.fn() } as never,
+      { stop: vi.fn() } as never,
+      gate as never,
+      sessions,
+      settingsJobs,
+      coordinator,
+      reconcileRtspPolicy as never,
+    );
+    registry.register('rtsp', camera.rtsp);
+    const useCase = new EnableFeatureUseCase(
+      test.features,
+      test.jobs,
+      test.verify,
+      registry,
+      test.restart,
+    );
+
+    await expect(useCase.execute({ name: 'rtsp', expected })).rejects.toBeInstanceOf(
+      LiveViewSettingsBusyError,
+    );
+
+    expect(await test.features.findByName('rtsp')).toMatchObject({
+      enabled: false,
+      attentionReason: null,
+    });
+    expect(reconcileRtspPolicy.execute).not.toHaveBeenCalled();
+    expect(gate.close).not.toHaveBeenCalled();
+    expect(gate.open).not.toHaveBeenCalled();
+    expect(test.restart.dispatch).not.toHaveBeenCalled();
   });
 
   it('blocks only an active install of the same feature', async () => {

@@ -6,11 +6,16 @@ export const FEATURE_RUNTIME_LIFECYCLE = Symbol('FEATURE_RUNTIME_LIFECYCLE');
 export interface FeatureRuntimeLifecyclePort {
   beforeDisable(): Promise<void>;
   afterEnable(): Promise<void>;
+  runTransition?<T>(operation: () => Promise<T>): Promise<T>;
 }
 
 /** Feature-keyed runtime lifecycle registration for composition roots. */
 export interface FeatureRuntimeLifecycleRegistryPort {
   register(name: ManageableFeatureName, lifecycle: FeatureRuntimeLifecyclePort): void;
+  runTransition<T>(
+    name: ManageableFeatureName,
+    operation: () => Promise<T>,
+  ): Promise<T>;
   beforeDisable(name: ManageableFeatureName): Promise<void>;
   afterEnable(name: ManageableFeatureName): Promise<void>;
 }

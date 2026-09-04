@@ -55,12 +55,19 @@ export class BeginFeatureInstallUseCase {
     @Inject(FEATURE_INSTALL_CONTROLLER)
     private readonly controller: FeatureInstallControllerPort,
     @Inject(FEATURE_RUNTIME_LIFECYCLE)
-    private readonly lifecycle: Pick<FeatureRuntimeLifecycleRegistryPort, 'beforeDisable' | 'afterEnable'>,
+    private readonly lifecycle: Pick<
+      FeatureRuntimeLifecycleRegistryPort,
+      'runTransition' | 'beforeDisable' | 'afterEnable'
+    >,
     @Inject(FEATURE_CLOCK) private readonly clock: FeatureClockPort,
     private readonly recovery: FeatureInstallRecoveryService,
   ) {}
 
   async execute(input: BeginFeatureInstallInput): Promise<BeginFeatureInstallResult> {
+    return this.lifecycle.runTransition(input.feature, () => this.begin(input));
+  }
+
+  private async begin(input: BeginFeatureInstallInput): Promise<BeginFeatureInstallResult> {
     // `createQueued` is the state fence: it refuses when the feature no longer
     // matches the snapshot the confirmed button was rendered against.
     const job = await this.jobs.createQueued({ ...input, now: this.clock.now() });

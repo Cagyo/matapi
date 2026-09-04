@@ -5,8 +5,14 @@ import {
   type LiveViewSettingsJobRepositoryPort,
 } from '../domain/ports/live-view-settings-job-repository.port';
 import { MotionWatcherService } from './motion-watcher.service';
-import { LiveViewPolicyCoordinatorService } from './live-view-policy-coordinator.service';
-import { ReconcileRtspPolicyUseCase } from './reconcile-rtsp-policy.use-case';
+import {
+  LiveViewPolicyCoordinatorService,
+  type LiveViewPolicyMutationLease,
+} from './live-view-policy-coordinator.service';
+import {
+  LiveViewPolicyRestartPendingError,
+  ReconcileRtspPolicyUseCase,
+} from './reconcile-rtsp-policy.use-case';
 import { RtspSourceStartGate } from './rtsp-source-start-gate.service';
 import { MOTION_CONTROL, type MotionControlPort } from '../domain/ports/motion-control.port';
 import {
@@ -20,6 +26,7 @@ import type { FeatureRuntimeLifecyclePort } from '../../features/domain/ports/fe
 export class FeatureCameraRuntimeLifecycleService {
   readonly motion: FeatureRuntimeLifecyclePort;
   readonly rtsp: FeatureRuntimeLifecyclePort;
+  private activeRtspLease: LiveViewPolicyMutationLease | null = null;
 
   constructor(
     private readonly watcher: MotionWatcherService,
@@ -40,21 +47,45 @@ export class FeatureCameraRuntimeLifecycleService {
       afterEnable: () => this.watcher.start(),
     };
     this.rtsp = {
-      beforeDisable: () => this.coordinator.run('rtsp-state', async () => {
+      runTransition: (operation) => this.coordinator.run('rtsp-state', async (lease) => {
         await this.requireNoActiveSettingsJob();
+        this.activeRtspLease = lease;
+        try {
+          return await operation();
+        } finally {
+          this.activeRtspLease = null;
+        }
+      }),
+      beforeDisable: async () => {
+        this.requireNoRestartPending();
         this.gate.close();
         await this.sessions.stopSourceKind('rtsp');
-        await this.reconcileRtspPolicy.execute({ rtspEnabled: false });
-      }),
-      afterEnable: () => this.coordinator.run('rtsp-state', async () => {
-        await this.requireNoActiveSettingsJob();
-        await this.reconcileRtspPolicy.execute({ rtspEnabled: true });
+        await this.reconcilePolicy(false);
+      },
+      afterEnable: async () => {
+        this.requireNoRestartPending();
+        await this.reconcilePolicy(true);
         await this.gate.open();
-      }),
+      },
     };
   }
 
   private async requireNoActiveSettingsJob(): Promise<void> {
     if (await this.settingsJobs.findActive()) throw new LiveViewSettingsBusyError();
+  }
+
+  private requireNoRestartPending(): void {
+    if (this.coordinator.isRestartPending()) throw new LiveViewSettingsBusyError();
+  }
+
+  private async reconcilePolicy(rtspEnabled: boolean): Promise<void> {
+    try {
+      await this.reconcileRtspPolicy.execute({ rtspEnabled });
+    } catch (error) {
+      if (error instanceof LiveViewPolicyRestartPendingError) {
+        this.activeRtspLease?.markRestartPending();
+      }
+      throw error;
+    }
   }
 }
