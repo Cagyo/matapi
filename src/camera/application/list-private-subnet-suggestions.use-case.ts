@@ -38,6 +38,7 @@ export class ListPrivateSubnetSuggestionsUseCase {
         selector: String(index),
         cidr: suggestion.cidr,
         interfaceLabels: [...suggestion.interfaceLabels],
+        interfaceLabelCount: suggestion.interfaceLabelCount,
       })),
     };
   }

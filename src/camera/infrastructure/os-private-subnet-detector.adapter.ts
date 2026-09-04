@@ -40,24 +40,20 @@ export class OsPrivateSubnetDetectorAdapter
     }
 
     return [...labelsByCidr]
-      .map(([cidr, labels]) => ({
-        cidr,
-        interfaceLabels: [...labels]
-          .sort((left, right) => left.localeCompare(right))
-          .slice(0, MAX_INTERFACE_LABELS),
-      }))
+      .map(([cidr, labels]) => suggestionFor(cidr, labels))
       .sort(compareSuggestions)
       .slice(0, MAX_SUGGESTIONS);
   }
 }
 
 function privateCidr(entry: NetworkInterfaceInfo): string | null {
-  if (entry.internal || entry.cidr === null) return null;
+  if (entry.internal) return null;
 
-  const prefix = prefixFromCidr(entry.cidr, entry.family) ?? prefixFromNetmask(
-    entry.netmask,
-    entry.family,
-  );
+  const prefix =
+    (entry.cidr === null
+      ? null
+      : prefixFromCidr(entry.cidr, entry.family)) ??
+    prefixFromNetmask(entry.netmask, entry.family);
   if (prefix === null) return null;
 
   try {
@@ -65,6 +61,17 @@ function privateCidr(entry: NetworkInterfaceInfo): string | null {
   } catch {
     return null;
   }
+}
+
+function suggestionFor(cidr: string, labels: ReadonlySet<string>): DetectedSubnet {
+  const sortedLabels = [...labels].sort((left, right) =>
+    left.localeCompare(right),
+  );
+  return {
+    cidr,
+    interfaceLabels: sortedLabels.slice(0, MAX_INTERFACE_LABELS),
+    interfaceLabelCount: sortedLabels.length,
+  };
 }
 
 function prefixFromCidr(

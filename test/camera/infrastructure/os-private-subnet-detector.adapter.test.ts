@@ -26,13 +26,16 @@ function address(
 }
 
 describe("OsPrivateSubnetDetectorAdapter", () => {
-  it("keeps active private networks only, canonicalizes them, and joins sorted interface labels", async () => {
+  it("keeps eligible private networks only, canonicalizes them, and preserves bounded labels with their total", async () => {
     const interfaces: Interfaces = {
       lo: [address("127.0.0.1", "255.0.0.0", { internal: true })],
-      dormant0: [address("192.168.50.1", "255.255.255.0", { cidr: null })],
+      malformed0: [address("192.168.50.1", "255.0.255.0", { cidr: null })],
+      wlan0: [address("172.16.3.4", "255.255.0.0", { cidr: null })],
       wan0: [address("8.8.8.8", "255.255.255.0")],
       eth0: [address("192.168.1.42", "255.255.255.0")],
       br0: [address("192.168.1.1", "255.255.255.0")],
+      lan0: [address("192.168.1.2", "255.255.255.0")],
+      wlan1: [address("192.168.1.3", "255.255.255.0")],
       ula0: [address("fd12:3456::1", "ffff:ffff:ffff:ffff::")],
     };
 
@@ -41,8 +44,21 @@ describe("OsPrivateSubnetDetectorAdapter", () => {
     ).detect();
 
     expect(suggestions).toEqual([
-      { cidr: "192.168.1.0/24", interfaceLabels: ["br0", "eth0"] },
-      { cidr: "fd12:3456::/64", interfaceLabels: ["ula0"] },
+      {
+        cidr: "172.16.0.0/16",
+        interfaceLabels: ["wlan0"],
+        interfaceLabelCount: 1,
+      },
+      {
+        cidr: "192.168.1.0/24",
+        interfaceLabels: ["br0", "eth0", "lan0"],
+        interfaceLabelCount: 4,
+      },
+      {
+        cidr: "fd12:3456::/64",
+        interfaceLabels: ["ula0"],
+        interfaceLabelCount: 1,
+      },
     ]);
   });
 

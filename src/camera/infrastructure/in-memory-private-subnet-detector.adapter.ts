@@ -14,6 +14,7 @@ export class InMemoryPrivateSubnetDetectorAdapter
     return this.suggestions.map((suggestion) => ({
       cidr: suggestion.cidr,
       interfaceLabels: [...suggestion.interfaceLabels],
+      interfaceLabelCount: suggestion.interfaceLabelCount,
     }));
   }
 }
