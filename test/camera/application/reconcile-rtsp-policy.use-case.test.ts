@@ -252,7 +252,9 @@ describe("ReconcileRtspPolicyUseCase", () => {
       const test =
         scenario === "invalid result"
           ? setup([succeeded({ resultingGeneration: 5 })])
-          : setup([null]);
+          : scenario === "acknowledgement failure"
+            ? setup()
+            : setup([null]);
       if (scenario === "controller failure") {
         test.controller.start.mockRejectedValueOnce(
           new Error("controller failed"),
@@ -276,7 +278,11 @@ describe("ReconcileRtspPolicyUseCase", () => {
 
       expect(composed.coordinator.isRestartPending()).toBe(true);
       expect(test.requests.publish).toHaveBeenCalledTimes(1);
-      expect(test.acknowledgements.publish).not.toHaveBeenCalled();
+      if (scenario === "acknowledgement failure") {
+        expect(test.acknowledgements.publish).toHaveBeenCalledOnce();
+      } else {
+        expect(test.acknowledgements.publish).not.toHaveBeenCalled();
+      }
       await expect(
         runRtspTransition(composed.camera, () =>
           composed.camera.rtsp.afterEnable(),
