@@ -58,6 +58,19 @@ interface ViewerGrant {
   tokenHash: string;
 }
 
+/**
+ * The single raw viewer mutation allowed to outlive its caller's timeout.
+ * Keeping one marker, rather than a collection of promises, makes the drain
+ * projection constant-size while still retaining enough identity to undo a
+ * late successful addition.
+ */
+interface ViewerAdditionDrain {
+  active: ActiveSession;
+  tokenHash: string;
+  added: boolean;
+  revocationInFlight: boolean;
+}
+
 interface RuntimeMessageReference extends LiveStreamMessageReference {
   grantId: string;
 }
@@ -126,6 +139,7 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
   private expiryTimer?: ReturnType<typeof setTimeout>;
   private leaseMutationTail: Promise<void> = Promise.resolve();
   private leaseMutationsPending = 0;
+  private viewerAdditionDrain?: ViewerAdditionDrain;
   private shuttingDown = false;
   private shutdownPromise?: Promise<void>;
   private readonly stopWaiters = new Set<SessionStopWaiter>();
@@ -202,6 +216,11 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
       try {
         this.assertCanStart(source.kind);
         if (this.leaseMutationsPending > 0) {
+          deferred.reject(new LiveStreamUnavailableError());
+          return;
+        }
+
+        if (this.viewerAdditionDrain) {
           deferred.reject(new LiveStreamUnavailableError());
           return;
         }
@@ -312,6 +331,15 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
           }
         }
 
+        const viewerAddition = this.viewerAdditionDrain;
+        if (
+          viewerAddition?.added &&
+          !viewerAddition.revocationInFlight &&
+          this.scopeOwns(scope, activeWork(viewerAddition.active))
+        ) {
+          await this.revokeLateViewerAddition(viewerAddition);
+        }
+
         if (this.active && this.scopeOwns(scope, activeWork(this.active))) {
           await this.stopActive();
         }
@@ -385,6 +413,11 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
         if (!(await this.retryBlockedCleanup())) {
           throw new LiveStreamUnavailableError();
         }
+      }
+
+      const viewerAddition = this.viewerAdditionDrain;
+      if (viewerAddition?.added && !viewerAddition.revocationInFlight) {
+        await this.revokeLateViewerAddition(viewerAddition);
       }
 
       if (this.active && !this.cleanupBlocked) {
@@ -723,16 +756,32 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
     const token = createViewerToken(randomBytes(32));
     const tokenHash = createHash('sha256').update(token).digest('hex');
     await this.requireSourceReady(active.sourceKind);
-    await this.withOperationTimeout(
-      Promise.resolve().then(() => {
-        this.assertCanStart(active.sourceKind);
-        return this.gateway.addViewer({
-          tokenHash,
-          telegramId,
-          expiresMonotonicMs: active.session.expiresMonotonicMs,
-        });
-      }),
-    );
+    const drain: ViewerAdditionDrain = {
+      active,
+      tokenHash,
+      added: false,
+      revocationInFlight: false,
+    };
+    const addition = Promise.resolve().then(() => {
+      this.assertCanStart(active.sourceKind);
+      return this.gateway.addViewer({
+        tokenHash,
+        telegramId,
+        expiresMonotonicMs: active.session.expiresMonotonicMs,
+      });
+    });
+    this.viewerAdditionDrain = drain;
+    try {
+      await this.withOperationTimeout(addition);
+      if (this.viewerAdditionDrain === drain) this.viewerAdditionDrain = undefined;
+    } catch (error) {
+      if (error instanceof OperationTimeoutError) {
+        this.trackLateViewerAddition(drain, addition);
+      } else if (this.viewerAdditionDrain === drain) {
+        this.viewerAdditionDrain = undefined;
+      }
+      throw error;
+    }
     try {
       this.assertCanStart(active.sourceKind);
     } catch {
@@ -761,6 +810,83 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  private trackLateViewerAddition(
+    drain: ViewerAdditionDrain,
+    addition: Promise<void>,
+  ): void {
+    void addition.then(
+      () => {
+        void this.enqueue(() => this.revokeLateViewerAddition(drain)).catch(() => {
+          // The drain marker remains fail closed when compensation cannot finish.
+        });
+      },
+      () => {
+        void this.enqueue(async () => {
+          if (this.viewerAdditionDrain === drain) this.viewerAdditionDrain = undefined;
+        }).catch(() => {
+          // The queue guard resolves drain waiters after discarding this marker.
+        });
+      },
+    );
+  }
+
+  private async revokeLateViewerAddition(drain: ViewerAdditionDrain): Promise<void> {
+    if (this.viewerAdditionDrain !== drain) return;
+    drain.added = true;
+    if (drain.revocationInFlight) return;
+
+    drain.revocationInFlight = true;
+    const revocation = Promise.resolve().then(() => this.gateway.revokeViewer(drain.tokenHash));
+    try {
+      await this.withOperationTimeout(revocation);
+      if (this.viewerAdditionDrain === drain) this.viewerAdditionDrain = undefined;
+    } catch (error) {
+      if (error instanceof OperationTimeoutError) {
+        void revocation.then(
+          () => {
+            void this.enqueue(async () => {
+              if (this.viewerAdditionDrain === drain) this.viewerAdditionDrain = undefined;
+            }).catch(() => {
+              // A successful late revocation remains represented until queued.
+            });
+          },
+          () => {
+            void this.enqueue(async () => {
+              if (this.viewerAdditionDrain === drain) drain.revocationInFlight = false;
+            }).catch(() => {
+              // The marker remains fail closed after failed compensation.
+            });
+          },
+        );
+      } else {
+        drain.revocationInFlight = false;
+      }
+
+      try {
+        await this.stopAfterLateViewerAddition(drain);
+      } catch {
+        // The drain marker and any cleanup blocker keep subsequent starts fenced.
+      }
+    }
+  }
+
+  private async stopAfterLateViewerAddition(drain: ViewerAdditionDrain): Promise<void> {
+    if (this.viewerAdditionDrain !== drain) return;
+
+    if (this.active === drain.active) {
+      await this.stopActive();
+      return;
+    }
+
+    if (this.cleanupBlocked?.active === drain.active) {
+      if (!this.cleanupBlocked.teardownInFlight) await this.retryBlockedCleanup();
+      return;
+    }
+
+    await this.stopGateway(drain.active);
+    this.completeViewerAdditionAfterTeardown(drain.active);
+  }
+
   private async requireSourceReady(kind: LiveStreamSource['kind']): Promise<void> {
     if (this.availability) await this.availability.requireReady(kind === 'rtsp' ? 'rtsp' : 'motion');
     this.liveViewStartGate.assertCanStart();
@@ -783,9 +909,11 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
 
   private async stopActive(beforeStop?: () => void): Promise<string | null> {
     if (!this.active) return null;
-    const cameraName = this.active.session.cameraName;
-    await this.stopGateway(this.active, beforeStop);
-    await this.deleteMessageReferences(this.active.messageReferences);
+    const stopped = this.active;
+    const cameraName = stopped.session.cameraName;
+    await this.stopGateway(stopped, beforeStop);
+    this.completeViewerAdditionAfterTeardown(stopped);
+    await this.deleteMessageReferences(stopped.messageReferences);
     this.active = undefined;
     this.clearExpiryTimer();
     await this.clearLease();
@@ -815,6 +943,7 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
     }
 
     this.cleanupBlocked = undefined;
+    this.completeViewerAdditionAfterTeardown(active);
     if (this.active === active) {
       await this.deleteMessageReferences(active.messageReferences);
       this.active = undefined;
@@ -897,6 +1026,7 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
     if (this.cleanupBlocked?.active !== active) return;
     const pending = this.cleanupBlocked.pending;
     this.cleanupBlocked = undefined;
+    this.completeViewerAdditionAfterTeardown(active);
     if (this.active === active) {
       await this.deleteMessageReferences(active.messageReferences);
       this.active = undefined;
@@ -909,6 +1039,15 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     if (pending) this.beginReplacement(pending);
+  }
+
+  private completeViewerAdditionAfterTeardown(active: ActiveSession): void {
+    if (
+      this.viewerAdditionDrain?.active === active &&
+      this.viewerAdditionDrain.added
+    ) {
+      this.viewerAdditionDrain = undefined;
+    }
   }
 
   private async failBlockedTeardown(active: ActiveSession): Promise<void> {
@@ -1186,6 +1325,7 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
       // before the slot is set — but listed so the enumeration stays uniform
       // rather than resting on that invariant holding forever.
       this.pendingStartCleanup?.replacement?.source,
+      this.viewerAdditionDrain && activeWork(this.viewerAdditionDrain.active),
     ];
   }
 

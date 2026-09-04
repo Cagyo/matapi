@@ -237,6 +237,101 @@ describe('LiveStreamSessionService', () => {
     expect(gateway.activeViewerCount()).toBe(1);
   });
 
+  it('waits for an addition beyond its timeout and revokes its late viewer before quiescing', async () => {
+    vi.useFakeTimers();
+    const gate = openedLiveViewGate();
+    const gateway = new FakeGateway();
+    const service = createService({
+      gateway,
+      liveViewStartGate: gate,
+      operationTimeoutMs: 100,
+    });
+    await service.open(source('front_door'), 1);
+    gateway.deferNextAddViewer = true;
+
+    const joining = service.open(source('front_door'), 2);
+    const joiningRejected = expect(joining).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    await joiningRejected;
+    gate.close();
+
+    let quiesced = false;
+    const quiescing = service.quiesce().then(() => {
+      quiesced = true;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(quiesced).toBe(false);
+    expect(gateway.activeViewerCount()).toBe(0);
+
+    gateway.resolveAddViewer();
+    await vi.advanceTimersByTimeAsync(0);
+
+    await expect(quiescing).resolves.toBeUndefined();
+    expect(gateway.activeViewerCount()).toBe(0);
+  });
+
+  it('rejects another viewer mutation while a timed-out addition remains unsettled', async () => {
+    vi.useFakeTimers();
+    const gateway = new FakeGateway();
+    const service = createService({ gateway, operationTimeoutMs: 100 });
+    await service.open(source('front_door'), 1);
+    gateway.deferNextAddViewer = true;
+
+    const joining = service.open(source('front_door'), 2);
+    const joiningRejected = expect(joining).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    await joiningRejected;
+
+    await expect(service.open(source('front_door'), 3)).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    expect(gateway.addViewerCalls).toBe(2);
+
+    gateway.resolveAddViewer();
+    await vi.advanceTimersByTimeAsync(0);
+    await service.stop(1);
+  });
+
+  it('accepts a full teardown after late viewer success when revocation fails', async () => {
+    vi.useFakeTimers();
+    const gate = openedLiveViewGate();
+    const gateway = new FakeGateway();
+    const service = createService({
+      gateway,
+      liveViewStartGate: gate,
+      operationTimeoutMs: 100,
+    });
+    await service.open(source('front_door'), 1);
+    gateway.deferNextAddViewer = true;
+
+    const joining = service.open(source('front_door'), 2);
+    const joiningRejected = expect(joining).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    await joiningRejected;
+    gateway.revokeError = new Error('revoke failed');
+    gateway.resolveAddViewer();
+    await vi.advanceTimersByTimeAsync(0);
+    gate.close();
+
+    let quiesced = false;
+    const quiescing = service.quiesce().then(() => {
+      quiesced = true;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(quiesced).toBe(true);
+    await quiescing;
+    expect(gateway.activeProcess).toBeNull();
+    expect(gateway.activeViewerCount()).toBe(0);
+  });
+
   it('quiesces an active session and clears its recovery lease', async () => {
     const gate = openedLiveViewGate();
     const gateway = new FakeGateway();
