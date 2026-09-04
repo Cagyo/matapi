@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { AppDatabase } from '../../../src/database/database.module';
 import { liveViewSettingsJobs, users } from '../../../src/database/schema';
 import { DrizzleLiveViewSettingsJobRepository } from '../../../src/camera/infrastructure/drizzle-live-view-settings-job.repository';
+import { LiveViewSettingsStateError } from '../../../src/camera/domain/errors/live-view-settings-state.error';
 
 describe('DrizzleLiveViewSettingsJobRepository', () => {
   const now = new Date('2030-01-01T00:00:00.000Z');
@@ -84,6 +85,28 @@ describe('DrizzleLiveViewSettingsJobRepository', () => {
     expect(db.select().from(liveViewSettingsJobs)
       .where(eq(liveViewSettingsJobs.id, 'AbCdEfGhIjKlMnOp')).get())
       .toMatchObject({ status: 'prepared', activeSlot: 1 });
+  });
+
+  it.each([
+    ['malformed request ID', 'short', 3],
+    ['fractional generation', 'AbCdEfGhIjKlMnOp', 3.5],
+    ['unsafe generation', 'AbCdEfGhIjKlMnOp', 9_007_199_254_740_992n],
+  ] as const)('fails closed when a persisted row has a %s', async (_name, id, generation) => {
+    sqlite.pragma('ignore_check_constraints = ON');
+    sqlite.prepare(`INSERT INTO live_view_settings_jobs
+      (id, status, active_slot, expected_generation, candidate_settings,
+       requested_by_user_id, requested_in_chat_id, workflow_receipt_id,
+       failure_code, created_at, updated_at)
+      VALUES (?, 'prepared', 1, ?, ?, 1001, 1001, 'QrStUvWxYz012345', NULL, ?, ?)`)
+      .run(
+        id,
+        generation,
+        '{"enabled":true,"allowedCameraCidrs":["192.168.1.0/24"]}',
+        now.getTime() / 1_000,
+        now.getTime() / 1_000,
+      );
+
+    await expect(jobs.findById(id)).rejects.toBeInstanceOf(LiveViewSettingsStateError);
   });
 
   function seedPrepared(): void {

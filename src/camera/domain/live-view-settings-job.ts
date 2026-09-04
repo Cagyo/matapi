@@ -55,6 +55,10 @@ const FAILURE_CODES: readonly LiveViewSettingsJobFailureCode[] = [
   "restart-activation-timeout",
   "dependency-unready",
 ];
+const RESTART_REQUIRED_FAILURE_CODES: readonly LiveViewSettingsJobFailureCode[] = [
+  "restart-dispatch-failed",
+  "restart-activation-timeout",
+];
 
 const TRANSITIONS: Readonly<
   Record<LiveViewSettingsJobStatus, readonly LiveViewSettingsJobStatus[]>
@@ -126,6 +130,14 @@ export function createLiveViewSettingsJob(value: unknown): LiveViewSettingsJob {
     if (!isFailureCode(value.failureCode))
       throw new LiveViewSettingsStateError();
     failureCode = value.failureCode;
+  } else if (value.status === "restart-required") {
+    if (
+      !isFailureCode(value.failureCode) ||
+      !RESTART_REQUIRED_FAILURE_CODES.includes(value.failureCode)
+    ) {
+      throw new LiveViewSettingsStateError();
+    }
+    failureCode = value.failureCode;
   } else {
     if (value.failureCode !== null) throw new LiveViewSettingsStateError();
     failureCode = null;
@@ -163,6 +175,9 @@ export function transitionLiveViewSettingsJob(
     status,
     expectedGeneration: current.expectedGeneration,
     candidateSettings: current.candidateSettings,
-    failureCode: status === "failed" ? failureCode : null,
+    failureCode:
+      status === "failed" || status === "restart-required"
+        ? failureCode
+        : null,
   });
 }

@@ -10,7 +10,13 @@ import type { LiveViewSettingsDocument } from '../../../src/camera/domain/live-v
 import type { LiveViewSettingsStorePort } from '../../../src/camera/domain/ports/live-view-settings-store.port';
 import { InMemoryLiveViewSettingsJobRepository } from '../../../src/camera/infrastructure/in-memory-live-view-settings-job.repository';
 import type { AppDatabase } from '../../../src/database/database.module';
-import { homeActionReceipts, liveViewSettingsJobs, users } from '../../../src/database/schema';
+import {
+  featureInstallJobs,
+  features,
+  homeActionReceipts,
+  liveViewSettingsJobs,
+  users,
+} from '../../../src/database/schema';
 import type { Feature } from '../../../src/features/domain/feature.entity';
 import { InMemoryFeatureInstallJobRepository } from '../../../src/features/infrastructure/in-memory-feature-install-job.repository';
 import { InMemoryFeatureRepository } from '../../../src/features/infrastructure/in-memory-feature.repository';
@@ -216,7 +222,155 @@ describe('ClaimLiveViewSettingsMutationUseCase', () => {
       userId: 1001, chatId: 1001, id: workflowReceipt.id, now,
     })).resolves.toMatchObject({ status: 'pending' });
   });
+
+  it.each([
+    ['demotion', async (test: DrizzleTestContext) => {
+      test.db.update(users).set({ role: 'user' }).where(eq(users.telegramId, 1001)).run();
+      return 3;
+    }, LiveViewSettingsStateError],
+    ['expiry', async (test: DrizzleTestContext) => {
+      await test.actions.beginWorkflowReturn({ ...test.receipt, expiresAt: now });
+      return 3;
+    }, LiveViewSettingsStateError],
+    ['workflow mismatch', async (test: DrizzleTestContext) => {
+      await test.actions.beginWorkflowReturn({
+        ...test.receipt,
+        payload: {
+          workflow: 'logs', phase: 'cancellable', originSource: 'natural-parent',
+          origin: { kind: 'home', checking: false }, deliveryStage: 'pending',
+        },
+      });
+      return 3;
+    }, LiveViewSettingsStateError],
+    ['RTSP contention', async (test: DrizzleTestContext) => {
+      test.db.insert(features).values({ name: 'rtsp', installed: false, enabled: false }).run();
+      test.db.insert(featureInstallJobs).values({
+        id: 'RtSpInStAlL01234',
+        featureName: 'rtsp',
+        status: 'queued',
+        activeSlot: 1,
+        operation: 'install',
+        requestedByUserId: 1001,
+        requestedInChatId: 1001,
+        workflowReceiptId: 'FtRtSpRcPt012345',
+        previousInstalled: false,
+        previousEnabled: false,
+        restartScope: null,
+        restartDispatchIdentity: null,
+        failureCode: null,
+        createdAt: now,
+        updatedAt: now,
+      }).run();
+      return 3;
+    }, LiveViewSettingsBusyError],
+    ['stale generation', async () => 4, LiveViewSettingsStateError],
+  ] as const)(
+    'keeps both Drizzle tables unchanged on %s refusal',
+    async (_name, arrange, errorType) => {
+      const test = await createDrizzleTestContext();
+      try {
+        const settingsGeneration = await arrange(test);
+        const before = snapshotClaimTables(test.db);
+        const claim = new ClaimLiveViewSettingsMutationUseCase(
+          test.actions,
+          settingsAt(settingsGeneration),
+          clock,
+        );
+
+        await expect(claim.execute({
+          userId: 1001, chatId: 1001, receiptId: test.receipt.id,
+          jobId: 'AbCdEfGhIjKlMnOp', expectedGeneration: 3, candidate,
+        })).rejects.toBeInstanceOf(errorType);
+
+        expect(snapshotClaimTables(test.db)).toEqual(before);
+      } finally {
+        test.sqlite.close();
+      }
+    },
+  );
+
+  it('rolls back the Drizzle receipt transition when prepared-job insertion fails', async () => {
+    const test = await createDrizzleTestContext();
+    try {
+      const before = snapshotClaimTables(test.db);
+      test.sqlite.exec(`CREATE TRIGGER fail_live_view_settings_job_insert
+        BEFORE INSERT ON live_view_settings_jobs
+        BEGIN SELECT RAISE(ABORT, 'injected settings job insert failure'); END`);
+      const claim = new ClaimLiveViewSettingsMutationUseCase(test.actions, settingsAt(3), clock);
+
+      await expect(claim.execute({
+        userId: 1001, chatId: 1001, receiptId: test.receipt.id,
+        jobId: 'AbCdEfGhIjKlMnOp', expectedGeneration: 3, candidate,
+      })).rejects.toThrow(/injected settings job insert failure/);
+
+      expect(snapshotClaimTables(test.db)).toEqual(before);
+    } finally {
+      test.sqlite.close();
+    }
+  });
+
+  it('does not claim a job from a receipt replaced during an awaited in-memory lookup', async () => {
+    let markLookupStarted: (() => void) | undefined;
+    let releaseLookup: (() => void) | undefined;
+    const lookupStarted = new Promise<void>((resolve) => { markLookupStarted = resolve; });
+    const lookupBlocked = new Promise<void>((resolve) => { releaseLookup = resolve; });
+    const jobs = new InMemoryLiveViewSettingsJobRepository();
+    const actions = new InMemoryHomeActionRepository(
+      usersFor(1001),
+      {
+        findActive: async () => {
+          markLookupStarted?.();
+          await lookupBlocked;
+          return null;
+        },
+      },
+      jobs,
+    );
+    const original = receipt(1001, 'QrStUvWxYz012345', 'AbCdEfGhIjKlMnOp');
+    const replacement = receipt(1001, 'ZaYbXcWdVeUfTgSh', 'BcDeFgHiJkLmNoPq');
+    await actions.beginWorkflowReturn(original);
+    const claim = new ClaimLiveViewSettingsMutationUseCase(actions, settingsAt(3), clock);
+    const outcome = expect(claim.execute({
+      userId: 1001, chatId: 1001, receiptId: original.id,
+      jobId: 'AbCdEfGhIjKlMnOp', expectedGeneration: 3, candidate,
+    })).rejects.toBeInstanceOf(LiveViewSettingsStateError);
+
+    await lookupStarted;
+    await actions.beginWorkflowReturn(replacement);
+    releaseLookup?.();
+
+    await outcome;
+    await expect(jobs.findActive()).resolves.toBeNull();
+    await expect(actions.findWorkflowReturn({ userId: 1001, chatId: 1001, now }))
+      .resolves.toEqual(replacement);
+  });
 });
+
+interface DrizzleTestContext {
+  sqlite: Database.Database;
+  db: AppDatabase;
+  actions: DrizzleHomeActionRepository;
+  receipt: WorkflowReturnReceipt;
+}
+
+async function createDrizzleTestContext(): Promise<DrizzleTestContext> {
+  const sqlite = new Database(':memory:');
+  sqlite.pragma('foreign_keys = ON');
+  const db: AppDatabase = drizzle(sqlite);
+  migrate(db, { migrationsFolder: 'migrations' });
+  db.insert(users).values({ telegramId: 1001, name: 'Admin', role: 'admin' }).run();
+  const actions = new DrizzleHomeActionRepository(db);
+  const workflowReceipt = receipt(1001, 'QrStUvWxYz012345', 'AbCdEfGhIjKlMnOp');
+  await actions.beginWorkflowReturn(workflowReceipt);
+  return { sqlite, db, actions, receipt: workflowReceipt };
+}
+
+function snapshotClaimTables(db: AppDatabase) {
+  return {
+    receipts: db.select().from(homeActionReceipts).all(),
+    jobs: db.select().from(liveViewSettingsJobs).all(),
+  };
+}
 
 interface TestContext {
   users: InMemoryUserRepository;

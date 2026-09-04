@@ -64,12 +64,33 @@ describe('live-view-settings-job migration', () => {
     expect(() => insertJob('AbCdEfGhIjKlMnOp', 'prepared', 1, null, 3, 9999)).toThrow(/FOREIGN KEY/);
   });
 
+  it.each([
+    'AbCdEfGhIjKlMnO',
+    'AbCdEfGhIjKlMnOpQ',
+    'AbCdEfGhIjKlMnO!',
+  ])('rejects malformed request ID %s', (id) => {
+    expect(() => insertJob(id, 'prepared', 1, null)).toThrow(/CHECK/);
+  });
+
+  it.each([
+    ['fractional', 3.5],
+    ['above the JavaScript safe-integer ceiling', 9_007_199_254_740_992n],
+  ] as const)('rejects an expected generation that is %s', (_name, generation) => {
+    expect(() => insertJob(
+      'AbCdEfGhIjKlMnOp',
+      'prepared',
+      1,
+      null,
+      generation,
+    )).toThrow(/CHECK/);
+  });
+
   function insertJob(
     id: string,
     status: string,
     activeSlot: number | null,
     failureCode: string | null,
-    expectedGeneration = 3,
+    expectedGeneration: number | bigint = 3,
     requestedByUserId = 1001,
   ): void {
     sqlite.prepare(`INSERT INTO live_view_settings_jobs

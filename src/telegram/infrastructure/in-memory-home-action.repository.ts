@@ -33,6 +33,19 @@ function clone(receipt: HomeActionReceipt): HomeActionReceipt {
   return { ...receipt, expiresAt: new Date(receipt.expiresAt), payload } as HomeActionReceipt;
 }
 
+function isSameReceiptVersion(
+  expected: WorkflowReturnReceipt,
+  current: WorkflowReturnReceipt,
+): boolean {
+  return expected.id === current.id
+    && expected.userId === current.userId
+    && expected.chatId === current.chatId
+    && expected.sessionToken === current.sessionToken
+    && expected.status === current.status
+    && expected.expiresAt.getTime() === current.expiresAt.getTime()
+    && JSON.stringify(expected.payload) === JSON.stringify(current.payload);
+}
+
 function decode(receipt: unknown): HomeActionReceipt | null {
   return isHomeActionReceipt(receipt) ? clone(receipt) : null;
 }
@@ -290,12 +303,24 @@ export class InMemoryHomeActionRepository implements HomeActionRepositoryPort {
         throw new Error('InMemoryHomeActionRepository requires live view settings jobs for settings claims');
       }
 
+      // The feature lookup yields. Revalidate the exact current receipt and role
+      // before the synchronous job/receipt commit so an overlapping replacement
+      // cannot be claimed from stale state.
+      const currentReceipt = this.getCurrent(`${input.userId}:${input.chatId}:workflow-return`);
+      if (currentReceipt?.kind !== 'workflow-return'
+        || !isSameReceiptVersion(receipt, currentReceipt)) {
+        return { kind: 'superseded' } as const;
+      }
+      if (this.users?.readRoleForHomeAction(input.userId) !== 'admin') {
+        return { kind: 'unauthorized' } as const;
+      }
+
       const candidate = createLiveViewSettingsCandidate(input.candidate);
       const running: WorkflowReturnReceipt = {
-        ...receipt,
+        ...currentReceipt,
         status: 'executing',
         expiresAt: new Date(input.now.getTime() + 24 * 60 * 60 * 1_000),
-        payload: { ...receipt.payload, phase: 'running' },
+        payload: { ...currentReceipt.payload, phase: 'running' },
       };
       if (!isHomeActionReceipt(running)) {
         throw new RangeError('Invalid live view settings mutation receipt');

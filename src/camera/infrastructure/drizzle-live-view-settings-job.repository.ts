@@ -2,12 +2,12 @@ import { Inject, Injectable } from '@nestjs/common';
 import { and, eq, inArray } from 'drizzle-orm';
 import { AppDatabase, DB } from '../../database/database.module';
 import { liveViewSettingsJobs } from '../../database/schema';
-import type {
-  LiveViewSettingsJob,
-  LiveViewSettingsJobFailureCode,
-  LiveViewSettingsJobStatus,
+import {
+  createLiveViewSettingsJob,
+  type LiveViewSettingsJob,
+  type LiveViewSettingsJobFailureCode,
+  type LiveViewSettingsJobStatus,
 } from '../domain/live-view-settings-job';
-import { createLiveViewSettingsCandidate } from '../domain/live-view-settings';
 import type { LiveViewSettingsJobRepositoryPort } from '../domain/ports/live-view-settings-job-repository.port';
 
 type JobRow = typeof liveViewSettingsJobs.$inferSelect;
@@ -94,12 +94,11 @@ function stateChanged(id: string): RangeError {
 }
 
 function toJob(row: JobRow): LiveViewSettingsJob {
-  return {
+  return createLiveViewSettingsJob({
     id: row.id,
-    status: row.status as LiveViewSettingsJobStatus,
-    activeSlot: row.activeSlot === 1 ? 1 : null,
+    status: row.status,
     expectedGeneration: row.expectedGeneration,
-    candidateSettings: createLiveViewSettingsCandidate(row.candidateSettings),
-    failureCode: row.failureCode as LiveViewSettingsJobFailureCode | null,
-  };
+    candidateSettings: row.candidateSettings,
+    failureCode: row.failureCode,
+  });
 }

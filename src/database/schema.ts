@@ -643,8 +643,9 @@ export const liveViewSettingsJobs = sqliteTable(
   (table) => [
     uniqueIndex('idx_live_view_settings_jobs_active_slot').on(table.activeSlot),
     index('idx_live_view_settings_jobs_receipt').on(table.workflowReceiptId),
+    check('live_view_settings_jobs_id_check', sql`length(${table.id}) = 16 and ${table.id} not glob '*[^A-Za-z0-9_-]*'`),
     check('live_view_settings_jobs_status_check', sql`${table.status} in ('prepared', 'published', 'committed', 'restart-required', 'succeeded', 'failed')`),
-    check('live_view_settings_jobs_generation_check', sql`${table.expectedGeneration} >= 0`),
+    check('live_view_settings_jobs_generation_check', sql`typeof(${table.expectedGeneration}) = 'integer' and ${table.expectedGeneration} between 0 and 9007199254740991`),
     check('live_view_settings_jobs_active_slot_check', sql`(
       (${table.status} in ('prepared', 'published', 'committed', 'restart-required') and ${table.activeSlot} is 1)
       or (${table.status} in ('succeeded', 'failed') and ${table.activeSlot} is null)

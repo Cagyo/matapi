@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "72f8df25-aeee-49b7-a0c1-85424aad6d6d",
+  "id": "8b7785a5-f2c5-4584-9aa4-9f7e8aee6a96",
   "prevId": "d8ab3808-7caa-4f8a-b9a4-dd2a9bbd104a",
   "tables": {
     "archive_artifacts": {
@@ -2162,13 +2162,17 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {
+        "live_view_settings_jobs_id_check": {
+          "name": "live_view_settings_jobs_id_check",
+          "value": "length(\"live_view_settings_jobs\".\"id\") = 16 and \"live_view_settings_jobs\".\"id\" not glob '*[^A-Za-z0-9_-]*'"
+        },
         "live_view_settings_jobs_status_check": {
           "name": "live_view_settings_jobs_status_check",
           "value": "\"live_view_settings_jobs\".\"status\" in ('prepared', 'published', 'committed', 'restart-required', 'succeeded', 'failed')"
         },
         "live_view_settings_jobs_generation_check": {
           "name": "live_view_settings_jobs_generation_check",
-          "value": "\"live_view_settings_jobs\".\"expected_generation\" >= 0"
+          "value": "typeof(\"live_view_settings_jobs\".\"expected_generation\") = 'integer' and \"live_view_settings_jobs\".\"expected_generation\" between 0 and 9007199254740991"
         },
         "live_view_settings_jobs_active_slot_check": {
           "name": "live_view_settings_jobs_active_slot_check",

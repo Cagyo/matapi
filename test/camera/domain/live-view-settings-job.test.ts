@@ -66,6 +66,31 @@ describe("LiveViewSettingsJob transitions", () => {
     });
   });
 
+  it("requires a bounded restart code while restart remains active", () => {
+    expect(
+      createLiveViewSettingsJob({
+        id: prepared.id,
+        status: "restart-required",
+        expectedGeneration: prepared.expectedGeneration,
+        candidateSettings: prepared.candidateSettings,
+        failureCode: "restart-activation-timeout",
+      }),
+    ).toMatchObject({
+      status: "restart-required",
+      failureCode: "restart-activation-timeout",
+      activeSlot: 1,
+    });
+    expect(() =>
+      createLiveViewSettingsJob({
+        id: prepared.id,
+        status: "restart-required",
+        expectedGeneration: prepared.expectedGeneration,
+        candidateSettings: prepared.candidateSettings,
+        failureCode: "request-publish-failed",
+      }),
+    ).toThrow(LiveViewSettingsStateError);
+  });
+
   it("rejects attempts to create a second active job from an active one", () => {
     expect(() => transitionLiveViewSettingsJob(prepared, "prepared")).toThrow(
       LiveViewSettingsBusyError,
