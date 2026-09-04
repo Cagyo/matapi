@@ -1,14 +1,14 @@
-import { execFile } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { promisify } from 'node:util';
-import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { execFile } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { promisify } from "node:util";
+import { resolve } from "node:path";
+import { describe, expect, it } from "vitest";
 
 const run = promisify(execFile);
-const helper = resolve(__dirname, '../../../scripts/feature-installer.py');
+const helper = resolve(__dirname, "../../../scripts/feature-installer.py");
 
-describe('feature installer boundary', () => {
-  it('fails closed when the deployed helper manifest or version is stale', async () => {
+describe("feature installer boundary", () => {
+  it("fails closed when the deployed helper manifest or version is stale", async () => {
     const program = String.raw`
 import importlib.util, os, tempfile
 spec = importlib.util.spec_from_file_location('helper', ${JSON.stringify(helper)})
@@ -21,13 +21,15 @@ with tempfile.TemporaryDirectory() as root:
   try: m.validate_root_bundle(); raise AssertionError('stale version accepted')
   except RuntimeError as error: assert str(error) == 'helper-version-mismatch'
 `;
-    await expect(run('python3', ['-c', program])).resolves.toMatchObject({ stderr: '' });
+    await expect(run("python3", ["-c", program])).resolves.toMatchObject({
+      stderr: "",
+    });
   });
 
-  it('refuses a root bundle that omits the RTSP policy inspector', async () => {
+  it("refuses a root bundle that omits the RTSP policy inspector", async () => {
     const expectedVersion = readFileSync(
-      resolve(__dirname, '../../../config/feature-installer.version'),
-      'utf8',
+      resolve(__dirname, "../../../config/feature-installer.version"),
+      "utf8",
     ).trim();
     const program = String.raw`
 import importlib.util, os, tempfile
@@ -68,10 +70,62 @@ with tempfile.TemporaryDirectory() as root:
   try: m.validate_root_bundle(); raise AssertionError('bundle without the policy inspector accepted')
   except RuntimeError as error: assert str(error) == 'helper-version-mismatch'
 `;
-    await expect(run('python3', ['-c', program])).resolves.toMatchObject({ stderr: '' });
+    await expect(run("python3", ["-c", program])).resolves.toMatchObject({
+      stderr: "",
+    });
   });
 
-  it('executes strict parsers, claim durability ordering, and terminal-marker recovery', async () => {
+  it("requires both active policy units to be exact copies of their manifested bundle units", async () => {
+    const expectedVersion = readFileSync(
+      resolve(__dirname, "../../../config/feature-installer.version"),
+      "utf8",
+    ).trim();
+    const program = String.raw`
+import hashlib, importlib.util, os, tempfile
+spec = importlib.util.spec_from_file_location('helper', ${JSON.stringify(helper)})
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+assert m.INSTALLER_VERSION == ${JSON.stringify(expectedVersion)}
+with tempfile.TemporaryDirectory() as root:
+  bundle = root + '/bundle'; active = root + '/active'; os.mkdir(bundle); os.mkdir(active)
+  files = {
+    bundle + '/feature-installer': 0o755,
+    bundle + '/live-stream-net-helper': 0o755,
+    bundle + '/live-view-policy-applier': 0o755,
+    bundle + '/homeworker-stream-net.service': 0o644,
+    bundle + '/homeworker-live-view-policy-apply.service': 0o644,
+  }
+  for index, (path, mode) in enumerate(files.items()):
+    open(path, 'wb').write(('asset-' + str(index)).encode()); os.chmod(path, mode)
+  stream_active = active + '/homeworker-stream-net.service'
+  applier_active = active + '/homeworker-live-view-policy-apply.service'
+  open(stream_active, 'wb').write(open(bundle + '/homeworker-stream-net.service', 'rb').read()); os.chmod(stream_active, 0o644)
+  open(applier_active, 'wb').write(open(bundle + '/homeworker-live-view-policy-apply.service', 'rb').read()); os.chmod(applier_active, 0o644)
+  m.ROOT_BUNDLE_FILES = files
+  m.STREAM_NET_BUNDLED_UNIT_PATH = bundle + '/homeworker-stream-net.service'
+  m.STREAM_NET_ACTIVE_UNIT_PATH = stream_active
+  m.LIVE_VIEW_BUNDLED_UNIT_PATH = bundle + '/homeworker-live-view-policy-apply.service'
+  m.LIVE_VIEW_ACTIVE_UNIT_PATH = applier_active
+  m.VERSION_PATH = root + '/version'; m.MANIFEST_PATH = root + '/manifest'
+  open(m.VERSION_PATH, 'w').write(m.INSTALLER_VERSION + '\n'); os.chmod(m.VERSION_PATH, 0o644)
+  lines = ['version ' + m.INSTALLER_VERSION]
+  lines += [hashlib.sha256(open(path, 'rb').read()).hexdigest() + ' ' + format(mode, '04o') + ' ' + path for path, mode in files.items()]
+  open(m.MANIFEST_PATH, 'w').write('\n'.join(lines) + '\n'); os.chmod(m.MANIFEST_PATH, 0o644)
+  m.root_owned_file = lambda path, mode: os.path.isfile(path) and (os.stat(path).st_mode & 0o777) == mode
+  m.validate_root_bundle()
+  open(stream_active, 'wb').write(b'drift'); os.chmod(stream_active, 0o644)
+  try: m.validate_root_bundle(); raise AssertionError('drifted stream unit accepted')
+  except RuntimeError as error: assert str(error) == 'helper-version-mismatch'
+  open(stream_active, 'wb').write(open(bundle + '/homeworker-stream-net.service', 'rb').read())
+  open(applier_active, 'wb').write(b'drift'); os.chmod(applier_active, 0o644)
+  try: m.validate_root_bundle(); raise AssertionError('drifted live-view unit accepted')
+  except RuntimeError as error: assert str(error) == 'helper-version-mismatch'
+`;
+    await expect(run("python3", ["-c", program])).resolves.toMatchObject({
+      stderr: "",
+    });
+  });
+
+  it("executes strict parsers, claim durability ordering, and terminal-marker recovery", async () => {
     const program = String.raw`
 import importlib.util, json, os, tempfile
 spec = importlib.util.spec_from_file_location('helper', ${JSON.stringify(helper)})
@@ -101,10 +155,12 @@ assert not any('pigpio' in c or '/pigs' in c for c in digital_argv), digital_arg
 assert any('gpiodetect' in c for c in digital_argv), digital_argv
 assert any('gpiomon' in c for c in digital_argv), digital_argv
 `;
-    await expect(run('python3', ['-c', program])).resolves.toMatchObject({ stderr: '' });
+    await expect(run("python3", ["-c", program])).resolves.toMatchObject({
+      stderr: "",
+    });
   });
 
-  it('preserves the reserved routine exit codes and collapses every other status', async () => {
+  it("preserves the reserved routine exit codes and collapses every other status", async () => {
     const program = String.raw`
 import importlib.util, json, os, tempfile
 spec = importlib.util.spec_from_file_location('helper', ${JSON.stringify(helper)})
@@ -195,25 +251,30 @@ assert terminal_result('ok', False) == failed_with('privileged-verification-fail
 assert terminal_result('route-unavailable', False) == failed_with('dependency-install-failed')
 assert terminal_result('interrupted', False) == failed_with('interrupted')
 `;
-    await expect(run('python3', ['-c', program])).resolves.toMatchObject({ stderr: '' });
+    await expect(run("python3", ["-c", program])).resolves.toMatchObject({
+      stderr: "",
+    });
   });
 
-  it('loads privileged routines with a sudo wrapper that preserves literal argv', async () => {
-    const { stdout } = await run('bash', ['-c', `
+  it("loads privileged routines with a sudo wrapper that preserves literal argv", async () => {
+    const { stdout } = await run("bash", [
+      "-c",
+      `
       temp_dir="$(mktemp -d)"
       export temp_dir
       trap 'rm -rf "$temp_dir"' EXIT
-      printf '#!/bin/sh\\nprintf "%%s " "$@" > "${'${temp_dir}'}/argv"\\n' > "$temp_dir/sudo"
+      printf '#!/bin/sh\\nprintf "%%s " "$@" > "${"${temp_dir}"}/argv"\\n' > "$temp_dir/sudo"
       chmod 700 "$temp_dir/sudo"
       HOME_WORKER_PRIVILEGED=1
-      eval "$(sed '/^case "\\$FEATURE" in/,$d' ${JSON.stringify(resolve(__dirname, '../../../scripts/install-feature.sh'))} | sed "s|/usr/bin/sudo|$temp_dir/sudo|g")"
+      eval "$(sed '/^case "\\$FEATURE" in/,$d' ${JSON.stringify(resolve(__dirname, "../../../scripts/install-feature.sh"))} | sed "s|/usr/bin/sudo|$temp_dir/sudo|g")"
       sudo -H -u homeworker /bin/true
       cat "$temp_dir/argv"
-    `]);
-    expect(stdout).toBe('-H -u homeworker /bin/true ');
+    `,
+    ]);
+    expect(stdout).toBe("-H -u homeworker /bin/true ");
   });
 
-  it('executes the claim-to-terminal path with patched fixed layout seams and kills timed-out routine groups', async () => {
+  it("executes the claim-to-terminal path with patched fixed layout seams and kills timed-out routine groups", async () => {
     const program = String.raw`
 import importlib.util, json, os, stat, tempfile
 from types import SimpleNamespace
@@ -266,6 +327,8 @@ with tempfile.TemporaryDirectory() as root:
   m.os.killpg = lambda pid, sig: killed.append((pid, sig))
   assert m.run_routine('digital') == 'interrupted'; assert seen['argv'] == [m.ROUTINES_PATH, 'digital'] and seen['kw']['shell'] is False and seen['kw']['start_new_session'] is True and killed == [(91, m.signal.SIGKILL)]
 `;
-    await expect(run('python3', ['-c', program])).resolves.toMatchObject({ stderr: '' });
+    await expect(run("python3", ["-c", program])).resolves.toMatchObject({
+      stderr: "",
+    });
   });
 });

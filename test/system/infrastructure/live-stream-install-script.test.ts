@@ -83,7 +83,7 @@ describe('experimental live-stream installation', () => {
     expect(featureScript).toContain('"$cloudflared_bin" --config "$config" tunnel diag');
     expect(featureScript).toContain('run_as_worker env -i');
     expect(featureScript).toContain('DNS resolution and outbound port 7844');
-    expect(installScript).toContain("includes('rtsp')");
+    expect(installScript).toContain("new Set(['digital','uart','zigbee','motion','rtsp'])");
   });
 
   it('configures the signed Cloudflare apt source before updating and installing', () => {
@@ -164,49 +164,45 @@ describe('experimental live-stream installation', () => {
     expect(featureScript).toContain('trap - EXIT');
   });
 
-  it('proves an eligible local network before any repository or package mutation', () => {
-    // The routine-body slice below cannot see this: the Cloudflare keyring, the
-    // apt source, `apt-get update`, and cloudflared all live in the case body,
-    // ahead of install_rtsp_runtime. Discovery has to gate them too.
+  it('keeps the test seam isolated and bootstraps policy after runtime deployment', () => {
     const rtspCase = featureScript.slice(
       featureScript.indexOf('\n  rtsp)'),
       featureScript.indexOf('\n  digital)'),
     );
     expect(rtspCase).not.toBe('');
-    const gate = rtspCase.indexOf('require_eligible_local_network');
-    expect(gate).toBeGreaterThan(-1);
-    for (const mutation of [
-      'CLOUDFLARE_KEYRING_DIR=',
-      'curl -fsSL -o "$CLOUDFLARE_KEY_TMP"',
-      'apt_get update',
-      'apt_get install -y cloudflared',
-      'install_rtsp_runtime',
-    ]) {
-      expect(rtspCase.indexOf(mutation), mutation).toBeGreaterThan(gate);
-    }
-    // The gate runs under the same test seam as the runtime install, so the
-    // legacy cloudflared harness still exercises repository behaviour alone,
-    // and stale staged files are reaped before anything new is staged.
-    expect(rtspCase).toMatch(
-      /if ! rtsp_runtime_install_skipped; then\n\s*reap_stale_rtsp_staging\n\s*require_eligible_local_network/,
-    );
+
+    // The legacy harness continues to exercise Cloudflare repository and
+    // diagnostic behaviour alone. Only Vitest can activate this skip seam.
     expect(featureScript).toMatch(/HOME_WORKER_RTSP_SKIP_RUNTIME_INSTALL[^\n]*VITEST/);
-    // The gate itself asks the fixed inspector and refuses an empty projection.
-    const guard = featureScript.slice(
-      featureScript.indexOf('require_eligible_local_network() {'),
-      featureScript.indexOf('install_rtsp_runtime() {'),
+    expect(rtspCase).toMatch(
+      /if rtsp_runtime_install_skipped; then\n\s*:[^\n]*\n\s*else\n\s*install_rtsp_runtime\n\s*fi/,
     );
-    expect(guard).toContain('"$SCRIPT_DIR/live-stream-policy-inspector"');
-    expect(guard).toContain('inspector_path, "discover"');
-    // "Nothing eligible" leaves through its own reserved exit status, so the
-    // shell never has to parse this message to tell it from a failed discovery.
-    expect(guard).toContain('no eligible local network');
-    expect(guard).toContain('NO_LOCAL_NETWORK_STATUS = 20');
-    // The gate reuses the inspector's own strict parser and version constant
-    // rather than carrying a second, weaker copy of the discovery rules.
-    expect(guard).toContain('inspector.strict_json_loads');
-    expect(guard).toContain('inspector.POLICY_VERSION');
-    expect(guard).not.toContain('json.loads(');
+    expect(rtspCase.indexOf('apt_get install -y cloudflared')).toBeLessThan(
+      rtspCase.indexOf('if rtsp_runtime_install_skipped'),
+    );
+
+    // The v2 authority has no shell-owned discovery, reaper, or policy write.
+    expect(featureScript).not.toContain('require_eligible_local_network');
+    expect(featureScript).not.toContain('reap_stale_rtsp_staging');
+
+    const runtime = featureScript.slice(
+      featureScript.indexOf('install_rtsp_runtime() {'),
+      featureScript.indexOf('\ncase "$FEATURE" in'),
+    );
+    const orderedSteps = [
+      'apt_get install -y ffmpeg nftables polkitd pkexec',
+      'homeworker-ffmpeg-stream@.service',
+      'homeworker-stream-net.service',
+      'sudo systemctl daemon-reload',
+      'sudo systemctl enable homeworker-stream-net.service',
+      '/usr/lib/home-worker/live-view-policy-applier --bootstrap-rtsp',
+    ];
+    let prior = -1;
+    for (const step of orderedSteps) {
+      const current = runtime.indexOf(step);
+      expect(current, step).toBeGreaterThan(prior);
+      prior = current;
+    }
   });
 
   it('keeps apt operations bounded by the shared lock timeout', () => {

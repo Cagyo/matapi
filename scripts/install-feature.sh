@@ -33,27 +33,13 @@ else
   run_as_worker() { sudo -H -u "$USER" "$@"; }
 fi
 
-# Exit statuses 20-23 are reserved process-wide for the routines this script
-# runs, and the root helper honours them for the rtsp routine alone: one
-# operator-visible cause each, with every other nonzero status collapsing to an
-# ordinary dependency failure. A routine for another feature must never exit in
-# this range -- it would be told a cause that has nothing to do with it. Raw
-# discovery, package, and policy diagnostics stay on this stderr, which belongs
-# to the root journal alone.
+# Exit statuses 20-23 remain the closed contract with the root feature
+# installer. Policy selection and legacy parsing no longer happen in this
+# shell: the fixed live-view applier owns every durable policy write.
 RTSP_EXIT_NO_LOCAL_NETWORK=20
 RTSP_EXIT_POLICY_GENERATION=21
 RTSP_EXIT_DEPENDENCY=22
 RTSP_EXIT_PRIVILEGED=23
-# Armed only once the durable tuple is installed; see the trap below.
-RTSP_TUPLE_COMMITTED=0
-
-# The RTSP durable tuple, spelled once. Staging, the commit, and the stale-file
-# reaper all address exactly these three paths, and the private worker
-# environment has no second location.
-RTSP_POLICY_DIR="/etc/home-worker"
-RTSP_POLICY_FILE="$RTSP_POLICY_DIR/live-stream-policy.json"
-RTSP_SUMMARY_FILE="$RTSP_POLICY_DIR/live-stream-policy.summary.json"
-RTSP_ENV_FILE="$INSTALL_DIR/.env"
 
 apt_get() {
   sudo apt-get -o "DPkg::Lock::Timeout=${APT_LOCK_TIMEOUT_SECONDS}" "$@"
@@ -61,115 +47,25 @@ apt_get() {
 
 install_root_asset_if_distinct() {
   local source="$1" target="$2" mode="$3"
-  # Privileged routines run from the already-validated root bundle. Reinstalling
-  # a bundle executable over itself fails on some systems and is unnecessary.
+  # The privileged routine normally executes from the already-validated root
+  # bundle, so an executable whose fixed source and target match needs no copy.
   [ "$source" = "$target" ] && return 0
   sudo install -m "$mode" -o root -g root "$source" "$target"
-}
-
-discard_staged_rtsp_policy() {
-  # Staged files are the only mutation the pre-package phase performs, so a
-  # failed staging attempt leaves the previously installed tuple untouched.
-  local target
-  for target in "$@"; do
-    sudo rm -f "$target.staged"
-  done
 }
 
 rtsp_runtime_install_skipped() {
   [ "${HOME_WORKER_RTSP_SKIP_RUNTIME_INSTALL:-0}" = "1" ] && [ "${VITEST:-}" = "true" ]
 }
 
-require_eligible_local_network() {
-  # Runs before the Cloudflare keyring, the apt source, `apt-get update`, and
-  # every package: a host with no eligible local network must fail closed
-  # before any repository or package mutation, never after one.
-  #
-  # This gate answers one narrow question -- is anything eligible at all -- and
-  # deliberately does not re-validate entries. The staging program re-runs
-  # discovery and validates every field authoritatively before it writes a
-  # single durable byte, so this must never become a second policy parser.
-  local status=0
-  sudo python3 - "$SCRIPT_DIR/live-stream-policy-inspector" <<'PY' || status=$?
-import importlib.machinery, importlib.util, subprocess, sys
-inspector_path = sys.argv[1]
-MAX_BYTES = 64 * 1024
-NO_LOCAL_NETWORK_STATUS = 20
-
-
-def no_eligible_local_network():
-    # A reserved status, so the shell can tell "nothing eligible" apart from
-    # every other refusal without parsing this message.
-    sys.stderr.write("no eligible local network\n")
-    raise SystemExit(NO_LOCAL_NETWORK_STATUS)
-
-
-loader = importlib.machinery.SourceFileLoader("live_stream_policy_inspector", inspector_path)
-inspector = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
-loader.exec_module(inspector)
-try:
-    completed = subprocess.run(
-        [inspector_path, "discover"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL, timeout=30, check=False)
-except (OSError, subprocess.SubprocessError):
-    raise SystemExit("local network discovery failed")
-if completed.returncode != 0 or len(completed.stdout) > MAX_BYTES:
-    raise SystemExit("local network discovery failed")
-try:
-    payload = inspector.strict_json_loads(completed.stdout.decode("utf-8"))
-except (UnicodeDecodeError, ValueError):
-    raise SystemExit("local network discovery failed")
-if not isinstance(payload, dict) or payload.get("version") != inspector.POLICY_VERSION:
-    raise SystemExit("local network discovery failed")
-if not isinstance(payload.get("networks"), list):
-    raise SystemExit("local network discovery failed")
-if not payload["networks"]:
-    no_eligible_local_network()
-PY
-  if [ "$status" -eq 0 ]; then
-    return 0
-  fi
-  if [ "$status" -eq "$RTSP_EXIT_NO_LOCAL_NETWORK" ]; then
-    echo "ERROR: no eligible local network for the RTSP runtime" >&2
-    return "$RTSP_EXIT_NO_LOCAL_NETWORK"
-  fi
-  # Discovery that failed is not discovery that found nothing: an operator told
-  # "no local network" would go looking for the wrong problem.
-  echo "ERROR: local network discovery for the RTSP runtime failed" >&2
-  return "$RTSP_EXIT_POLICY_GENERATION"
-}
-
-reap_stale_rtsp_staging() {
-  # A crash during staging leaves staged files behind, one of which holds a
-  # credential key that was never committed. Reap them at branch entry so no
-  # secret-shaped artifact outlives the install that produced it.
-  discard_staged_rtsp_policy "$RTSP_POLICY_FILE" "$RTSP_SUMMARY_FILE" "$RTSP_ENV_FILE"
-}
-
-rtsp_privileged_failure_after_commit() {
-  local status=$?
-  if [ "$status" -ne 0 ] && [ "${RTSP_TUPLE_COMMITTED:-0}" = "1" ]; then
-    exit "$RTSP_EXIT_PRIVILEGED"
-  fi
-}
-
 install_rtsp_runtime() {
   local stream_user="homeworker-stream"
   local stream_group="homeworker-stream"
-  local env_file="$RTSP_ENV_FILE"
-  local policy_dir="$RTSP_POLICY_DIR"
-  local policy_file="$RTSP_POLICY_FILE"
-  local summary_file="$RTSP_SUMMARY_FILE"
-  local inspector="$SCRIPT_DIR/live-stream-policy-inspector"
-  local root_uid=0 root_gid=0
 
   if ! [[ "$USER" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
     echo "ERROR: unsafe worker account name" >&2
     return 1
   fi
 
-  # The staged policy binds both runtime UIDs, so the accounts exist before
-  # staging.  Account creation installs no package and is reconciliation safe.
   if ! getent group "$stream_group" >/dev/null; then
     sudo groupadd --system "$stream_group"
   fi
@@ -181,450 +77,34 @@ install_rtsp_runtime() {
   sudo usermod -L "$stream_user"
   sudo usermod -aG "$stream_group" "$USER"
 
-  if ! sudo test -f "$env_file"; then
-    echo "ERROR: $env_file is required before RTSP runtime installation" >&2
-    return 1
-  fi
-
-  sudo install -d -m 0755 -o root -g root "$policy_dir" /etc/home-worker/ca /usr/lib/home-worker /etc/polkit-1/rules.d /etc/tmpfiles.d
-
-  # Stage the whole durable tuple before any RTSP package mutation: discovery,
-  # the private policy, the public summary, and the private environment are all
-  # written to same-directory staged files and flushed, so a failure here can
-  # only leave staged files behind.  Credential keys are generated only when
-  # absent/blank; existing non-empty keys are never printed or replaced and
-  # malformed non-empty values fail closed.
-  local env_identity stage_status=0
-  env_identity="$(sudo python3 - "$inspector" "$env_file" "$policy_file" "$summary_file" "$root_uid" "$root_gid" "$(id -u "$USER")" "$(id -u "$stream_user")" <<'PY'
-import importlib.machinery, importlib.util, json, os, re, secrets, stat, subprocess, sys
-
-(inspector_path, env_path, policy_path, summary_path,
- root_uid_text, root_gid_text, worker_uid_text, stream_uid_text) = sys.argv[1:]
-DIGITS = re.compile(r"\d+")
-HEX_KEY = re.compile(r"[0-9a-fA-F]{64}")
-O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
-O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
-MAX_BYTES = 64 * 1024
-DISCOVERY_TIMEOUT_SECONDS = 30
-NO_LOCAL_NETWORK_STATUS = 20
-
-
-def no_eligible_local_network():
-    # The one staging refusal with its own reserved status: every other failure
-    # below is a policy-generation failure, and both are pre-mutation.
-    sys.stderr.write("no eligible local network\n")
-    raise SystemExit(NO_LOCAL_NETWORK_STATUS)
-
-
-if not all(DIGITS.fullmatch(text) for text in (root_uid_text, root_gid_text, worker_uid_text, stream_uid_text)):
-    raise SystemExit("unsafe runtime identity")
-root_uid, root_gid = int(root_uid_text), int(root_gid_text)
-worker_uid, stream_uid = int(worker_uid_text), int(stream_uid_text)
-if worker_uid == stream_uid:
-    raise SystemExit("unsafe runtime uid policy")
-
-# Root code loading root code from its fixed bundle path: the digest and every
-# canonical rule stay defined exactly once, in the inspector both verifiers use.
-loader = importlib.machinery.SourceFileLoader("live_stream_policy_inspector", inspector_path)
-inspector = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
-loader.exec_module(inspector)
-
-
-def discovered_networks():
-    try:
-        completed = subprocess.run(
-            [inspector_path, "discover"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, timeout=DISCOVERY_TIMEOUT_SECONDS, check=False)
-    except (OSError, subprocess.SubprocessError):
-        raise SystemExit("local network discovery failed")
-    if completed.returncode != 0 or len(completed.stdout) > MAX_BYTES:
-        raise SystemExit("local network discovery failed")
-    try:
-        payload = inspector.strict_json_loads(completed.stdout.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
-        raise SystemExit("local network discovery failed")
-    if not isinstance(payload, dict) or set(payload) != {"version", "networks"}:
-        raise SystemExit("local network discovery failed")
-    if payload["version"] != inspector.POLICY_VERSION or not isinstance(payload["networks"], list):
-        raise SystemExit("local network discovery failed")
-    networks = []
-    for entry in payload["networks"]:
-        if not isinstance(entry, dict) or set(entry) != {"family", "cidr", "interface"}:
-            raise SystemExit("local network discovery failed")
-        network = inspector.parse_network(entry["cidr"])
-        if network is None or entry["family"] != network.version or not inspector.valid_interface(entry["interface"]):
-            raise SystemExit("local network discovery failed")
-        networks.append(inspector.EligibleNetwork(
-            family=network.version, cidr=str(network), interface=entry["interface"]))
-    order = [inspector.network_key(entry) for entry in networks]
-    if order != sorted(order) or len(set(order)) != len(order):
-        raise SystemExit("local network discovery failed")
-    # `discover` reports "nothing eligible" as a successful empty projection.
-    # Refusing to stage it here is what keeps an unbound policy off the device.
-    if not networks:
-        no_eligible_local_network()
-    return networks
-
-
-networks = discovered_networks()
-try:
-    env_fd = os.open(env_path, os.O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
-except OSError:
-    raise SystemExit("unsafe env file")
-env_stat = os.fstat(env_fd)
-if (not stat.S_ISREG(env_stat.st_mode) or env_stat.st_nlink != 1
-        or env_stat.st_uid != worker_uid or stat.S_IMODE(env_stat.st_mode) != 0o600):
-    os.close(env_fd)
-    raise SystemExit("unsafe env file")
-try:
-    with os.fdopen(env_fd, "rb") as stream:
-        env_raw = stream.read(MAX_BYTES + 1)
-except OSError:
-    raise SystemExit("unsafe env file")
-if len(env_raw) > MAX_BYTES:
-    raise SystemExit("unsafe env file")
-try:
-    lines = env_raw.decode("utf-8").splitlines()
-except UnicodeDecodeError:
-    # Never re-raise: the decoder embeds the offending bytes in its message.
-    raise SystemExit("unsafe env file")
-positions = {}
-for index, line in enumerate(lines):
-    if not line or line.startswith("#") or "=" not in line:
-        continue
-    key = line.split("=", 1)[0]
-    if key in positions:
-        raise SystemExit("duplicate policy setting")
-    positions[key] = index
-
-
-def setting(key, default=""):
-    # A present-but-blank setting means "unset": the installer supplies its own
-    # default and regenerates a blank credential key, rather than hard-blocking
-    # an install until somebody hand-edits the private environment.
-    if key not in positions:
-        return default
-    value = lines[positions[key]].split("=", 1)[1].strip().strip('"').strip("'")
-    return value if value else default
-
-
-def assign(key, value):
-    if key in positions:
-        lines[positions[key]] = key + "=" + value
-    else:
-        positions[key] = len(lines)
-        lines.append(key + "=" + value)
-
-
-def udp_port(key, default):
-    text = setting(key, default)
-    if not DIGITS.fullmatch(text):
-        raise SystemExit("unsafe RTSP UDP range")
-    return int(text)
-
-
-udp_first = udp_port("RTSP_UDP_PORT_FIRST", "24000")
-udp_last = udp_port("RTSP_UDP_PORT_LAST", "24001")
-if not inspector.valid_udp_port(udp_first) or not inspector.valid_udp_port(udp_last):
-    # Policy version 2 refuses privileged ports outright. Name the bound so an
-    # operator who pinned a low port knows exactly what to change.
-    raise SystemExit(
-        "RTSP_UDP_PORT_FIRST/RTSP_UDP_PORT_LAST must be within 1024..65535")
-if udp_first > udp_last or udp_last - udp_first + 1 > 64:
-    raise SystemExit("unsafe RTSP UDP range")
-credential_key = setting("RTSP_CREDENTIALS_KEY")
-if credential_key and not HEX_KEY.fullmatch(credential_key):
-    raise SystemExit("malformed RTSP credential key")
-if not credential_key:
-    assign("RTSP_CREDENTIALS_KEY", secrets.token_hex(32))
-
-digest = inspector.policy_digest(
-    inspector.POLICY_VERSION, worker_uid, stream_uid, networks, udp_first, udp_last)
-cidrs = []
-for entry in networks:
-    if entry.cidr not in cidrs:
-        cidrs.append(entry.cidr)
-assign("RTSP_ALLOWED_CIDRS", ",".join(cidrs))
-assign("RTSP_POLICY_DIGEST", digest)
-document = {
-    "version": inspector.POLICY_VERSION,
-    "workerUid": worker_uid,
-    "streamUid": stream_uid,
-    "networks": inspector.projection(networks),
-    "udpPortFirst": udp_first,
-    "udpPortLast": udp_last,
-    "digest": digest,
-}
-policy_body = (json.dumps(document, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
-env_body = ("\n".join(lines) + "\n").encode("utf-8")
-
-
-def fsync_directory(path):
-    fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY | O_CLOEXEC)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
-def stage(path, body, uid, gid, mode):
-    # Deterministic name, but created exclusively: `.env.staged` sits in a
-    # worker-writable directory, so root must never adopt a file it did not
-    # create.  A racing creation between the unlink and the open fails closed.
-    staged = path + ".staged"
-    try:
-        try:
-            os.unlink(staged)
-        except FileNotFoundError:
-            pass
-        fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_CLOEXEC | O_NOFOLLOW, mode)
-        try:
-            os.fchmod(fd, mode)
-            os.fchown(fd, uid, gid)
-            os.write(fd, body)
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        fsync_directory(staged)
-        # Re-read what actually landed: this catches a short write and refuses a
-        # staged path that turned into a link between the two opens.
-        check = os.open(staged, os.O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
-        try:
-            if os.read(check, MAX_BYTES + 1) != body:
-                raise SystemExit("staged policy did not persist")
-        finally:
-            os.close(check)
-    except OSError:
-        # A worker that plants a directory (or anything else) under the staged
-        # name gets the short refusal, never a traceback on the root stderr.
-        # NOTE: this program is fed through $( ... ), where a stray apostrophe
-        # would break the command substitution -- keep this heredoc free of them.
-        raise SystemExit("staged policy could not be written")
-
-
-stage(policy_path, policy_body, root_uid, root_gid, 0o600)
-stage(summary_path, policy_body, root_uid, root_gid, 0o644)
-stage(env_path, env_body, worker_uid, env_stat.st_gid, 0o600)
-# The only output: the identity of the environment file these settings were
-# read from, so the commit refuses to overwrite a file replaced since staging.
-sys.stdout.write("{}:{}\n".format(env_stat.st_dev, env_stat.st_ino))
-PY
-  )" || stage_status=$?
-  if [ "$stage_status" -ne 0 ]; then
-    discard_staged_rtsp_policy "$policy_file" "$summary_file" "$env_file"
-    if [ "$stage_status" -eq "$RTSP_EXIT_NO_LOCAL_NETWORK" ]; then
-      return "$RTSP_EXIT_NO_LOCAL_NETWORK"
-    fi
-    return "$RTSP_EXIT_POLICY_GENERATION"
-  fi
-
-  # Debian 13 removed the legacy policykit-1 package name. Install the
-  # concrete daemon and client packages used by the systemd authorization flow.
+  # The root-only applier runs last. Until it has published and activated a
+  # generation-bound deny-all policy, no installed RTSP feature is reported as
+  # ready by the root helper.
   if ! apt_get install -y ffmpeg nftables polkitd pkexec; then
-    discard_staged_rtsp_policy "$policy_file" "$summary_file" "$env_file"
     return "$RTSP_EXIT_DEPENDENCY"
   fi
 
-  # Revalidate the staged tuple and commit it in the fixed order: private
-  # policy, public summary, environment.  The three renames cannot be globally
-  # atomic; a crash between them leaves a mixed tuple that both privileged and
-  # application readiness reject until an idempotent reinstall reconciles it.
-  if ! sudo python3 - "$inspector" "$policy_file" "$summary_file" "$env_file" /etc/systemd/system/homeworker-stream-net.service "$root_uid" "$root_gid" "$(id -u "$USER")" "$env_identity" <<'PY'
-import importlib.machinery, importlib.util, os, re, stat, subprocess, sys
+  sudo install -d -m 0755 -o root -g root /etc/home-worker /etc/home-worker/ca \
+    /usr/lib/home-worker /etc/polkit-1/rules.d /etc/tmpfiles.d
+  install_root_asset_if_distinct \
+    "$SCRIPT_DIR/live-stream-ffmpeg-runner" \
+    /usr/lib/home-worker/live-stream-ffmpeg-runner \
+    0755
+  sudo install -m 0644 -o root -g root \
+    "$ROOT_BUNDLE_DIR/systemd/homeworker-ffmpeg-stream@.service" \
+    /etc/systemd/system/homeworker-ffmpeg-stream@.service
+  sudo install -m 0644 -o root -g root \
+    "$ROOT_BUNDLE_DIR/systemd/homeworker-stream-net.service" \
+    /etc/systemd/system/homeworker-stream-net.service
 
-(inspector_path, policy_path, summary_path, env_path, unit_path,
- root_uid_text, root_gid_text, worker_uid_text, env_identity_text) = sys.argv[1:]
-DIGITS = re.compile(r"\d+")
-IDENTITY = re.compile(r"(\d+):(\d+)")
-HEX_KEY = re.compile(r"[0-9a-fA-F]{64}")
-O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
-O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
-MAX_BYTES = 64 * 1024
-PRIVILEGED_FAILURE_STATUS = 23
-if not all(DIGITS.fullmatch(text) for text in (root_uid_text, root_gid_text, worker_uid_text)):
-    raise SystemExit("unsafe runtime identity")
-root_uid, root_gid, worker_uid = int(root_uid_text), int(root_gid_text), int(worker_uid_text)
-identity = IDENTITY.fullmatch(env_identity_text.strip())
-if identity is None:
-    raise SystemExit("unsafe runtime identity")
-env_device, env_inode = int(identity.group(1)), int(identity.group(2))
-
-loader = importlib.machinery.SourceFileLoader("live_stream_policy_inspector", inspector_path)
-inspector = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
-loader.exec_module(inspector)
-
-
-def read_private(path, uid, gid, mode):
-    try:
-        fd = os.open(path, os.O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
-    except OSError:
-        raise SystemExit("unsafe staged policy")
-    try:
-        info = os.fstat(fd)
-        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != uid
-                or (gid is not None and info.st_gid != gid)
-                or stat.S_IMODE(info.st_mode) != mode):
-            raise SystemExit("unsafe staged policy")
-        body = os.read(fd, MAX_BYTES + 1)
-    except OSError:
-        raise SystemExit("unsafe staged policy")
-    finally:
-        os.close(fd)
-    if len(body) > MAX_BYTES:
-        raise SystemExit("unsafe staged policy")
-    return body
-
-
-policy_body = read_private(policy_path + ".staged", root_uid, root_gid, 0o600)
-summary_body = read_private(summary_path + ".staged", root_uid, root_gid, 0o644)
-env_body = read_private(env_path + ".staged", worker_uid, None, 0o600)
-if policy_body != summary_body:
-    raise SystemExit("staged policy disagreement")
-try:
-    document = inspector.strict_json_loads(policy_body.decode("utf-8"))
-except (UnicodeDecodeError, ValueError):
-    raise SystemExit("staged policy is not canonical")
-# The whole document contract -- accepted keys, per-entry rules, canonical
-# order, and the digest over them -- belongs to the one shared parser, so this
-# revalidation cannot drift from the summary validator or the runtime helper.
-try:
-    (_version, staged_worker_uid, _stream_uid, networks,
-     _udp_first, _udp_last, digest) = inspector.parse_policy_document(document)
-except inspector.PolicyDocumentInvalid:
-    raise SystemExit("staged policy is not canonical")
-# The one check the shared parser deliberately cannot make: this policy must
-# name the worker account this install is actually running for.
-if staged_worker_uid != worker_uid:
-    raise SystemExit("staged policy is not canonical")
-
-try:
-    env_text = env_body.decode("utf-8")
-except UnicodeDecodeError:
-    # Never re-raise: the decoder embeds the offending bytes in its message.
-    raise SystemExit("staged environment is not readable")
-values = {}
-for raw in env_text.splitlines():
-    if not raw or raw.startswith("#") or "=" not in raw:
-        continue
-    key, value = raw.split("=", 1)
-    if key in values:
-        raise SystemExit("duplicate policy setting")
-    values[key] = value.strip().strip('"').strip("'")
-cidrs = []
-for entry in networks:
-    if entry.cidr not in cidrs:
-        cidrs.append(entry.cidr)
-if values.get("RTSP_ALLOWED_CIDRS") != ",".join(cidrs) or values.get("RTSP_POLICY_DIGEST") != digest:
-    raise SystemExit("staged environment disagreement")
-if not HEX_KEY.fullmatch(values.get("RTSP_CREDENTIALS_KEY", "")):
-    raise SystemExit("staged environment disagreement")
-try:
-    env_fd = os.open(env_path, os.O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
-except OSError:
-    raise SystemExit("unsafe env file")
-try:
-    info = os.fstat(env_fd)
-    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != worker_uid
-            or stat.S_IMODE(info.st_mode) != 0o600):
-        raise SystemExit("unsafe env file")
-    # The staged settings were derived from one specific file. If anything
-    # replaced it since, committing would silently discard those edits.
-    if info.st_dev != env_device or info.st_ino != env_inode:
-        raise SystemExit("env file changed during update")
-finally:
-    os.close(env_fd)
-
-
-def commit(path):
-    # read_private already validated this staged file, and os.replace re-resolves
-    # the name in a directory the worker can write. That window is benign: the
-    # worker already owns the environment file this commit installs, protected
-    # hardlinks block a cross-owner link, and everything renamed here was checked
-    # for canonical shape, digest, CIDRs, and a hex credential key above.
-    try:
-        os.replace(path + ".staged", path)
-        fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY | O_CLOEXEC)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-    except OSError:
-        raise SystemExit("policy commit failed")
-
-
-def stop_stream_helper():
-    """No helper may be live across the mixed tuple the three renames create.
-
-    A running helper holds the stream UID it read at start, and the trailing
-    catch-all it rendered is keyed to that UID. If the account behind it
-    changed, ffmpeg traffic matches neither the accepts nor that reject and
-    falls through the chain policy. Stopping first means every helper that runs
-    again must pass the policy/summary digest cross-check, which a mixed tuple
-    fails; the unit ExecStopPost drops the table meanwhile, and
-    homeworker-ffmpeg-stream@ requires this unit, so no stream outlives it. The
-    shell restarts it once the tuple is whole. A fresh install has no unit yet.
-    """
-    if not os.path.exists(unit_path):
-        return
-    try:
-        completed = subprocess.run(
-            ["/bin/systemctl", "stop", "homeworker-stream-net.service"],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            timeout=60, check=False)
-    except (OSError, subprocess.SubprocessError):
-        raise SystemExit("stream helper could not be stopped")
-    if completed.returncode != 0:
-        # Abort before any rename, so the previous tuple survives whole.
-        raise SystemExit("stream helper could not be stopped")
-
-
-try:
-    # From the stop attempt onward the helper may be down and the three renames
-    # may have landed in part. The shell never reaches the restart, so no
-    # failure in this region is an ordinary retry: it needs the reserved
-    # privileged status and a reconciling reinstall.
-    stop_stream_helper()
-    commit(policy_path)
-    commit(summary_path)
-    commit(env_path)
-except BaseException:
-    # One fixed token, never the raised message. Both policy_path and env_path
-    # are in scope here, so passing a SystemExit string through would let one
-    # future f-string leak a path into a log; the status carries the meaning.
-    sys.stderr.write("policy commit failed\n")
-    raise SystemExit(PRIVILEGED_FAILURE_STATUS) from None
-PY
-  then
-    # A commit failure before the first rename leaves the previous tuple whole;
-    # one after a rename leaves a mixed tuple that readiness rejects. Either
-    # way the stale staged files -- including a freshly generated credential
-    # key -- are removed, and the reconciling reinstall stages the tuple again.
-    #
-    # Every refusal here is deliberately reported as a privileged failure, the
-    # staged-tuple revalidation that runs before the stop included. It is
-    # broader than "after the first rename" on purpose: this branch runs after
-    # the package step, so recovery must keep it gated instead of treating it
-    # as reconciliation-safe. Do not narrow it to a policy-generation failure.
-    discard_staged_rtsp_policy "$policy_file" "$summary_file" "$env_file"
-    return "$RTSP_EXIT_PRIVILEGED"
-  fi
-
-  # Past this point the tuple is installed and the stream helper is stopped, so
-  # every remaining failure needs privileged reconciliation rather than a plain
-  # retry. Arm it as a trap, not per command, so a later addition to the
-  # activation tail cannot quietly escape the classification.
-  RTSP_TUPLE_COMMITTED=1
-  trap rtsp_privileged_failure_after_commit EXIT
-
-  install_root_asset_if_distinct "$SCRIPT_DIR/live-stream-net-helper" /usr/lib/home-worker/live-stream-net-helper 0755
-  install_root_asset_if_distinct "$SCRIPT_DIR/live-stream-ffmpeg-runner" /usr/lib/home-worker/live-stream-ffmpeg-runner 0755
-  sudo install -m 0644 -o root -g root "$ROOT_BUNDLE_DIR/systemd/homeworker-ffmpeg-stream@.service" /etc/systemd/system/homeworker-ffmpeg-stream@.service
-  sudo install -m 0644 -o root -g root "$ROOT_BUNDLE_DIR/systemd/homeworker-stream-net.service" /etc/systemd/system/homeworker-stream-net.service
   local polkit_tmp
   polkit_tmp="$(mktemp)"
-  sed "s/@HOME_WORKER_USER@/$USER/g" "$ROOT_BUNDLE_DIR/systemd/homeworker-stream-systemd.rules" > "$polkit_tmp"
-  sudo install -m 0644 -o root -g root "$polkit_tmp" /etc/polkit-1/rules.d/49-homeworker-stream-systemd.rules
+  sed "s/@HOME_WORKER_USER@/$USER/g" \
+    "$ROOT_BUNDLE_DIR/systemd/homeworker-stream-systemd.rules" > "$polkit_tmp"
+  sudo install -m 0644 -o root -g root "$polkit_tmp" \
+    /etc/polkit-1/rules.d/49-homeworker-stream-systemd.rules
   rm -f "$polkit_tmp"
+
   local tmpfiles_tmp
   tmpfiles_tmp="$(mktemp)"
   cat > "$tmpfiles_tmp" <<EOF
@@ -633,13 +113,16 @@ d /run/home-worker/live-stream-config 2730 root $stream_group - -
 d /run/home-worker/live-stream-output 3770 root $stream_group - -
 d /run/home-worker/live-source-probe 0700 $USER $USER - -
 EOF
-  sudo install -m 0644 -o root -g root "$tmpfiles_tmp" /etc/tmpfiles.d/homeworker-stream.conf
+  sudo install -m 0644 -o root -g root "$tmpfiles_tmp" \
+    /etc/tmpfiles.d/homeworker-stream.conf
   rm -f "$tmpfiles_tmp"
   sudo systemd-tmpfiles --create /etc/tmpfiles.d/homeworker-stream.conf
   sudo systemctl daemon-reload
   sudo systemctl enable homeworker-stream-net.service
-  sudo systemctl restart homeworker-stream-net.service
-  sudo systemctl is-active --quiet homeworker-stream-net.service
+
+  if ! /usr/lib/home-worker/live-view-policy-applier --bootstrap-rtsp; then
+    return "$RTSP_EXIT_PRIVILEGED"
+  fi
 }
 
 case "$FEATURE" in
@@ -755,14 +238,6 @@ EOF
         exit "$RTSP_EXIT_DEPENDENCY"
         ;;
     esac
-
-    # Discovery gates every mutation in this branch, not just the runtime
-    # packages: without an eligible local network the install must fail before
-    # the Cloudflare keyring, the apt source, and cloudflared itself.
-    if ! rtsp_runtime_install_skipped; then
-      reap_stale_rtsp_staging
-      require_eligible_local_network
-    fi
 
     if ! command -v cloudflared >/dev/null 2>&1; then
       CLOUDFLARE_KEYRING_DIR="${CLOUDFLARE_KEYRING_DIR:-/usr/share/keyrings}"

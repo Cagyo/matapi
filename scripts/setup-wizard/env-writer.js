@@ -14,6 +14,14 @@ function replaceOrAppendEnvLine(envContent, key, value) {
   return `${envContent.trimEnd()}\n${line}\n`;
 }
 
+function removeEnvLine(envContent, key) {
+  const prefix = `${key}=`;
+  return envContent
+    .split('\n')
+    .filter((line) => !line.startsWith(prefix))
+    .join('\n');
+}
+
 /**
  * Writes .env and features.json atomically.
  * Handles edge cases: missing .env.example (Fix 3a), disk full ENOSPC (Fix 3b),
@@ -40,10 +48,15 @@ function writeConfig(
   }
 
   // Fix 3d: Normalize line endings (CRLF -> LF)
-  const normalizedExample = rawExample.replace(/\r\n/g, '\n');
+  const normalizedExample = removeEnvLine(
+    rawExample.replace(/\r\n/g, '\n'),
+    'LIVE_STREAM_ENABLED'
+  );
 
   const cleanedToken = cleanToken(token);
   const selectedFeatures = Array.isArray(enabledFeatures) ? enabledFeatures : [];
+  const deferredFeatures = selectedFeatures.includes('rtsp') ? ['rtsp'] : [];
+  const persistedFeatures = selectedFeatures.filter((feature) => feature !== 'rtsp');
   const envWithBotToken = replaceOrAppendEnvLine(
     normalizedExample,
     'TELEGRAM_BOT_TOKEN',
@@ -54,16 +67,11 @@ function writeConfig(
     'CLAIM_ADMIN_TOKEN',
     claimAdminToken
   );
-  const envContent = replaceOrAppendEnvLine(
-    envWithClaimToken,
-    'LIVE_STREAM_ENABLED',
-    selectedFeatures.includes('rtsp') ? 'true' : 'false'
-  );
+  const envContent = envWithClaimToken;
 
   const featuresData = JSON.stringify(
     {
-      enabled: selectedFeatures,
-      liveStream: selectedFeatures.includes('rtsp'),
+      enabled: persistedFeatures,
       timestamp: new Date().toISOString(),
     },
     null,
@@ -100,7 +108,7 @@ function writeConfig(
     throw new Error(`Failed to write configuration files: ${err.message}`);
   }
 
-  return { claimAdminToken };
+  return { claimAdminToken, deferredFeatures };
 }
 
 module.exports = {

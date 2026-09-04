@@ -10,6 +10,7 @@ import grp
 import hashlib
 import importlib.machinery
 import importlib.util
+import ipaddress
 import json
 import os
 import pwd
@@ -29,13 +30,20 @@ LOCK_PATH = '/run/lock/homeworker-feature-install.lock'
 ROUTINES_PATH = '/usr/lib/home-worker/install-feature-routines'
 VERSION_PATH = '/usr/lib/home-worker/feature-installer.version'
 MANIFEST_PATH = '/usr/lib/home-worker/feature-installer.manifest'
-INSTALLER_VERSION = '6'
+INSTALLER_VERSION = '7'
 WORKER_NAME = 'homeworker'
 STREAM_NAME = 'homeworker-stream'
 STREAM_GROUP = 'homeworker-stream'
 POLICY_INSPECTOR_PATH = '/usr/lib/home-worker/live-stream-policy-inspector'
+LIVE_VIEW_APPLIER_PATH = '/usr/lib/home-worker/live-view-policy-applier'
+STREAM_NET_BUNDLED_UNIT_PATH = '/usr/lib/home-worker/systemd/homeworker-stream-net.service'
+STREAM_NET_ACTIVE_UNIT_PATH = '/etc/systemd/system/homeworker-stream-net.service'
+LIVE_VIEW_BUNDLED_UNIT_PATH = '/usr/lib/home-worker/systemd/homeworker-live-view-policy-apply.service'
+LIVE_VIEW_ACTIVE_UNIT_PATH = '/etc/systemd/system/homeworker-live-view-policy-apply.service'
 POLICY_OWNER_UID = 0
 POLICY_OWNER_GID = 0
+ROOT_UID = 0
+ROOT_GID = 0
 LIVE_STREAM_POLICY_PATH = '/etc/home-worker/live-stream-policy.json'
 # The summary path is spelled here, in the inspector's SUMMARY_PATH, and in the
 # routine that writes it. Production agrees by construction and the test harness
@@ -43,8 +51,12 @@ LIVE_STREAM_POLICY_PATH = '/etc/home-worker/live-stream-policy.json'
 # together when any one of them moves.
 LIVE_STREAM_SUMMARY_PATH = '/etc/home-worker/live-stream-policy.summary.json'
 WORKER_ENV_PATH = '/opt/home-worker/.env'
+LIVE_VIEW_SETTINGS_PATH = INSTALL_ROOT + '/live-view-settings.json'
+LIVE_VIEW_ATTENTION_PATH = INSTALL_ROOT + '/live-view-settings-migration-attention.json'
 MAX_BYTES = 4096
 MAX_POLICY_BYTES = 64 * 1024
+MAX_ENV_BYTES = 64 * 1024
+MAX_ALLOWED_CIDRS = 16
 TIMEOUT_SECONDS = 30 * 60
 CHECK_TIMEOUT_SECONDS = 15
 JOB_ID = re.compile(r'^[A-Za-z0-9_-]{16}$')
@@ -78,6 +90,12 @@ RESULT_FAILURE_CODES = ROUTINE_FAILURE_CODES | frozenset(
     ('request-invalid', 'helper-version-mismatch', 'interrupted'))
 O_CLOEXEC = getattr(os, 'O_CLOEXEC', 0)
 O_NOFOLLOW = getattr(os, 'O_NOFOLLOW', 0)
+PRIVATE_NETWORKS = (
+    ipaddress.ip_network('10.0.0.0/8'),
+    ipaddress.ip_network('172.16.0.0/12'),
+    ipaddress.ip_network('192.168.0.0/16'),
+    ipaddress.ip_network('fc00::/7'),
+)
 
 
 class InvalidRequest(ValueError):
@@ -90,18 +108,281 @@ ROOT_BUNDLE_FILES = {
     '/usr/lib/home-worker/live-stream-net-helper': 0o755,
     '/usr/lib/home-worker/live-stream-ffmpeg-runner': 0o755,
     '/usr/lib/home-worker/live-stream-policy-inspector': 0o755,
+    '/usr/lib/home-worker/live-view-policy-applier': 0o755,
     '/usr/lib/home-worker/systemd/homeworker-feature-install.service': 0o644,
     '/usr/lib/home-worker/systemd/homeworker-feature-supervisor-restart.service': 0o644,
     '/usr/lib/home-worker/systemd/homeworker-feature-host-reboot.service': 0o644,
     '/usr/lib/home-worker/systemd/homeworker-ffmpeg-stream@.service': 0o644,
     '/usr/lib/home-worker/systemd/homeworker-stream-net.service': 0o644,
     '/usr/lib/home-worker/systemd/homeworker-stream-systemd.rules': 0o644,
+    '/usr/lib/home-worker/systemd/homeworker-live-view-policy-apply.service': 0o644,
 }
 
 
 def worker_ids():
     entry = pwd.getpwnam(WORKER_NAME)
     return entry.pw_uid, entry.pw_gid
+
+
+def _safe_integer(value):
+    return (isinstance(value, int) and not isinstance(value, bool)
+            and 0 <= value <= 9_007_199_254_740_991)
+
+
+def _private_network(value):
+    if not isinstance(value, str) or not value.strip() or '/' not in value.strip():
+        raise ValueError('invalid CIDR')
+    network = ipaddress.ip_network(value.strip(), strict=False)
+    if not any(network.version == allowed.version and network.subnet_of(allowed)
+               for allowed in PRIVATE_NETWORKS):
+        raise ValueError('invalid CIDR')
+    return network
+
+
+def _canonical_cidr_values(values):
+    if not isinstance(values, list) or len(values) > MAX_ALLOWED_CIDRS:
+        raise ValueError('invalid CIDRs')
+    networks = {_private_network(value) for value in values}
+    if len(networks) > MAX_ALLOWED_CIDRS:
+        raise ValueError('invalid CIDRs')
+    return [str(network) for network in sorted(
+        networks, key=lambda item: (item.version, item.prefixlen, str(item)))]
+
+
+def legacy_live_view_settings(legacy):
+    """Map the two compatibility keys without exposing either value."""
+    safe = {
+        'version': 1,
+        'generation': 0,
+        'enabled': False,
+        'allowedCameraCidrs': [],
+    }
+    try:
+        if not isinstance(legacy, dict):
+            raise ValueError('invalid legacy settings')
+        raw_enabled = legacy.get('LIVE_STREAM_ENABLED')
+        if raw_enabled is None:
+            enabled = False
+        elif raw_enabled == 'true':
+            enabled = True
+        elif raw_enabled == 'false':
+            enabled = False
+        else:
+            raise ValueError('invalid legacy boolean')
+
+        raw_cidrs = legacy.get('RTSP_ALLOWED_CIDRS')
+        if raw_cidrs is None or raw_cidrs == '':
+            cidrs = []
+        elif not isinstance(raw_cidrs, str):
+            raise ValueError('invalid legacy CIDRs')
+        else:
+            entries = [item.strip() for item in raw_cidrs.split(',')]
+            if any(not item for item in entries):
+                raise ValueError('invalid legacy CIDRs')
+            cidrs = _canonical_cidr_values(entries)
+        return {
+            'settings': {**safe, 'enabled': enabled, 'allowedCameraCidrs': cidrs},
+            'attention': None,
+        }
+    except (TypeError, ValueError):
+        return {'settings': safe, 'attention': 'legacy-values-invalid'}
+
+
+def _read_regular(path, uid, gid, mode, maximum, missing_ok=False):
+    try:
+        descriptor = os.open(
+            path, os.O_RDONLY | os.O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW)
+    except FileNotFoundError:
+        if missing_ok:
+            return None
+        raise RuntimeError('settings-state-unsafe')
+    except OSError as error:
+        raise RuntimeError('settings-state-unsafe') from error
+    try:
+        value = os.fstat(descriptor)
+        if (not stat.S_ISREG(value.st_mode) or value.st_nlink != 1
+                or value.st_uid != uid or value.st_gid != gid
+                or stat.S_IMODE(value.st_mode) != mode
+                or not 1 <= value.st_size <= maximum):
+            raise RuntimeError('settings-state-unsafe')
+        raw = os.read(descriptor, maximum + 1)
+        if len(raw) != value.st_size or len(raw) > maximum:
+            raise RuntimeError('settings-state-unsafe')
+        return raw
+    finally:
+        os.close(descriptor)
+
+
+def _read_legacy_environment(worker_uid, worker_gid):
+    try:
+        raw = _read_regular(
+            WORKER_ENV_PATH, worker_uid, worker_gid, 0o600,
+            MAX_ENV_BYTES, missing_ok=True)
+    except RuntimeError:
+        return None
+    if raw is None:
+        return {}
+    try:
+        lines = raw.decode('utf-8', 'strict').splitlines()
+    except UnicodeDecodeError:
+        return None
+    selected = {}
+    for line in lines:
+        if not line or line.lstrip().startswith('#') or '=' not in line:
+            continue
+        key, value = line.split('=', 1)
+        key = key.strip()
+        if key not in ('LIVE_STREAM_ENABLED', 'RTSP_ALLOWED_CIDRS'):
+            continue
+        if key in selected:
+            return None
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+            value = value[1:-1]
+        selected[key] = value
+    return selected
+
+
+def _typed_settings(raw):
+    try:
+        value = json.loads(raw.decode('utf-8', 'strict'), object_pairs_hook=no_duplicates)
+        if (not isinstance(value, dict)
+                or set(value) != {'version', 'generation', 'enabled', 'allowedCameraCidrs'}
+                or value.get('version') != 1 or isinstance(value.get('version'), bool)
+                or not _safe_integer(value.get('generation'))
+                or not isinstance(value.get('enabled'), bool)):
+            raise ValueError('invalid settings')
+        canonical = _canonical_cidr_values(value.get('allowedCameraCidrs'))
+        if canonical != value['allowedCameraCidrs']:
+            raise ValueError('invalid settings')
+        return value
+    except (InvalidRequest, RecursionError, TypeError, UnicodeDecodeError,
+            ValueError, json.JSONDecodeError) as error:
+        raise RuntimeError('settings-state-unsafe') from error
+
+
+def _existing_typed_settings(worker_gid):
+    raw = _read_regular(
+        LIVE_VIEW_SETTINGS_PATH, ROOT_UID, worker_gid, 0o640,
+        MAX_BYTES, missing_ok=True)
+    return None if raw is None else _typed_settings(raw)
+
+
+def _atomic_path_write(path, payload, uid, gid, mode):
+    parent = os.path.dirname(path)
+    directory = os.open(
+        parent, os.O_RDONLY | os.O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+    temporary = os.path.join(parent, '.%s.%s.tmp' % (
+        os.path.basename(path), uuid.uuid4().hex))
+    descriptor = None
+    try:
+        current = os.fstat(directory)
+        if (not stat.S_ISDIR(current.st_mode) or current.st_uid != ROOT_UID
+                or current.st_gid != ROOT_GID
+                or stat.S_IMODE(current.st_mode) & 0o022):
+            raise RuntimeError('settings-state-unsafe')
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+            mode,
+        )
+        os.fchown(descriptor, uid, gid)
+        os.fchmod(descriptor, mode)
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError('short write')
+            view = view[written:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        os.replace(temporary, path)
+        os.fsync(directory)
+    except BaseException:
+        if descriptor is not None:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+    finally:
+        os.close(directory)
+
+
+def _settings_payload(value):
+    return (json.dumps(value, separators=(',', ':'), sort_keys=True) + '\n').encode('utf-8')
+
+
+def _remove_attention_marker(worker_gid):
+    raw = _read_regular(
+        LIVE_VIEW_ATTENTION_PATH, ROOT_UID, worker_gid, 0o640,
+        MAX_BYTES, missing_ok=True)
+    if raw is None:
+        return
+    try:
+        value = json.loads(raw.decode('utf-8', 'strict'), object_pairs_hook=no_duplicates)
+    except (InvalidRequest, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError('settings-state-unsafe') from error
+    if value != {'version': 1, 'code': 'legacy-values-invalid'}:
+        raise RuntimeError('settings-state-unsafe')
+    directory = os.open(
+        os.path.dirname(LIVE_VIEW_ATTENTION_PATH),
+        os.O_RDONLY | os.O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW,
+    )
+    try:
+        os.unlink(LIVE_VIEW_ATTENTION_PATH)
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def run_live_view_bootstrap():
+    try:
+        completed = subprocess.run(
+            [LIVE_VIEW_APPLIER_PATH, '--bootstrap-rtsp'],
+            cwd='/', env=SAFE_ENV, shell=False, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            check=False, timeout=CHECK_TIMEOUT_SECONDS)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RuntimeError('policy-bootstrap-failed') from error
+    if completed.returncode != 0:
+        raise RuntimeError('policy-bootstrap-failed')
+
+
+def migrate_live_view_settings(reset=False):
+    """Create generation zero once, or deliberately reset through deny-all."""
+    _worker_uid, worker_gid = worker_ids()
+    if not reset:
+        existing = _existing_typed_settings(worker_gid)
+        if existing is not None:
+            return {'status': 'preserved', 'settings': existing, 'attention': None}
+
+    safe = {
+        'version': 1,
+        'generation': 0,
+        'enabled': False,
+        'allowedCameraCidrs': [],
+    }
+    if reset:
+        _atomic_path_write(
+            LIVE_VIEW_SETTINGS_PATH, _settings_payload(safe),
+            ROOT_UID, worker_gid, 0o640)
+        run_live_view_bootstrap()
+        _remove_attention_marker(worker_gid)
+        return {'status': 'reset', 'settings': safe, 'attention': None}
+
+    legacy = _read_legacy_environment(_worker_uid, worker_gid)
+    migrated = legacy_live_view_settings(legacy if legacy is not None else object())
+    if migrated['attention'] is not None:
+        marker = b'{"version":1,"code":"legacy-values-invalid"}\n'
+        _atomic_path_write(
+            LIVE_VIEW_ATTENTION_PATH, marker, ROOT_UID, worker_gid, 0o640)
+    _atomic_path_write(
+        LIVE_VIEW_SETTINGS_PATH, _settings_payload(migrated['settings']),
+        ROOT_UID, worker_gid, 0o640)
+    return {'status': 'created', **migrated}
 
 
 def root_owned_file(path, mode):
@@ -159,6 +440,16 @@ def validate_root_bundle():
         seen.add(path)
     if seen != set(ROOT_BUNDLE_FILES):
         raise RuntimeError('helper-version-mismatch')
+    for bundled, active in (
+            (STREAM_NET_BUNDLED_UNIT_PATH, STREAM_NET_ACTIVE_UNIT_PATH),
+            (LIVE_VIEW_BUNDLED_UNIT_PATH, LIVE_VIEW_ACTIVE_UNIT_PATH)):
+        if not root_owned_file(active, 0o644):
+            raise RuntimeError('helper-version-mismatch')
+        try:
+            if file_digest(active) != file_digest(bundled):
+                raise RuntimeError('helper-version-mismatch')
+        except OSError as error:
+            raise RuntimeError('helper-version-mismatch') from error
 
 
 def fsync_directory(fd):
@@ -418,7 +709,9 @@ def verify_feature(feature):
         'uart': (('/usr/bin/test', '-e', '/dev/serial0'),),
         'zigbee': (('/usr/bin/which', 'mosquitto'), ('/bin/systemctl', 'is-active', '--quiet', 'mosquitto.service')),
         'motion': (('/usr/bin/which', 'motion'), ('/usr/bin/which', 'ffmpeg'), ('/usr/bin/test', '-f', '/etc/motion/motion.conf'), ('/usr/bin/test', '-d', '/home/pi/motion/videos'), ('/bin/systemctl', 'is-active', '--quiet', 'motion.service')),
-        'rtsp': (('/usr/bin/which', 'ffmpeg'), ('/usr/bin/which', 'cloudflared'), ('/usr/bin/test', '-f', LIVE_STREAM_POLICY_PATH), ('/usr/bin/test', '-f', LIVE_STREAM_SUMMARY_PATH), ('/usr/bin/test', '-f', '/etc/systemd/system/homeworker-stream-net.service'), ('/bin/systemctl', 'is-active', '--quiet', 'homeworker-stream-net.service')),
+        'rtsp': (('/usr/bin/which', 'ffmpeg'), ('/usr/bin/which', 'cloudflared'),
+                 ('/usr/bin/test', '-f', STREAM_NET_ACTIVE_UNIT_PATH),
+                 ('/bin/systemctl', 'is-active', '--quiet', 'homeworker-stream-net.service')),
     }[feature]
     try:
         commands_ok = all(subprocess.run(command, cwd='/', env=SAFE_ENV, shell=False,
@@ -433,7 +726,7 @@ def verify_feature(feature):
             return (owned_regular('/etc/motion/motion.conf', 0, 0, 0o644)
                     and owned_directory('/home/pi/motion/videos', motion_uid, motion_gid, 0o775))
         if feature == 'rtsp':
-            return (owned_regular('/etc/systemd/system/homeworker-stream-net.service', 0, 0, 0o644)
+            return (owned_regular(STREAM_NET_ACTIVE_UNIT_PATH, 0, 0, 0o644)
                     and rtsp_policy_installed())
         return True
     except (OSError, subprocess.TimeoutExpired):
@@ -466,128 +759,43 @@ def read_owned_regular(path, uid, gid, mode, limit):
     return None if len(raw) > limit else raw
 
 
-def load_policy_inspector():
-    """Load the verified root bundle inspector so the digest is defined once."""
-    loader = importlib.machinery.SourceFileLoader('live_stream_policy_inspector', POLICY_INSPECTOR_PATH)
-    module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+def load_live_view_applier():
+    """Load the manifest-validated v2 policy authority from the root bundle."""
+    loader = importlib.machinery.SourceFileLoader(
+        'live_view_policy_applier', LIVE_VIEW_APPLIER_PATH)
+    module = importlib.util.module_from_spec(
+        importlib.util.spec_from_loader(loader.name, loader))
     loader.exec_module(module)
     return module
 
 
-def environment_settings(raw):
-    """Parse the private worker environment, rejecting any duplicated key."""
-    values = {}
-    for line in raw.decode('utf-8').splitlines():
-        if not line or line.startswith('#') or '=' not in line:
-            continue
-        key, value = line.split('=', 1)
-        if key in values:
-            return None
-        values[key] = value.strip().strip('"').strip("'")
-    return values
-
-
 def journal_rtsp_rejection(reason):
-    """One closed token per refusal, so a misconfiguration is not mistaken for tampering."""
+    """Log one closed token, never policy, settings, or environment values."""
     try:
-        syslog.openlog('home-worker-feature-installer', syslog.LOG_PID, syslog.LOG_DAEMON)
+        syslog.openlog(
+            'home-worker-feature-installer', syslog.LOG_PID, syslog.LOG_DAEMON)
         syslog.syslog(syslog.LOG_ERR, 'rtsp-policy-rejected: ' + reason)
     except Exception:
         return
 
 
-def artifact_reason(path, uid, gid, mode, prefix):
-    """Diagnostic only: name the clause that made read_owned_regular refuse.
-
-    The verdict is already decided by read_owned_regular; drift here can only
-    mislabel a log line, never change whether the policy is accepted.
-    """
-    try:
-        value = os.stat(path, follow_symlinks=False)
-    except FileNotFoundError:
-        return prefix + '-missing'
-    except OSError:
-        return prefix + '-unreadable'
-    if not stat.S_ISREG(value.st_mode):
-        return prefix + '-not-regular'
-    if value.st_nlink != 1:
-        return prefix + '-linked'
-    if value.st_uid != uid or (gid is not None and value.st_gid != gid):
-        return prefix + '-owner'
-    if stat.S_IMODE(value.st_mode) != mode:
-        return prefix + '-mode'
-    return prefix + '-size'
-
-
 def rtsp_policy_rejection():
-    """Return a closed reason token, or None when one canonical policy is installed.
-
-    The three durable renames cannot be globally atomic, so a crash between them
-    leaves a mixed tuple. Every refusal below is fail closed until an idempotent
-    reinstall reconciles the private policy, the public summary, and the private
-    worker environment.
-    """
+    """Verify the deny-all bootstrap tuple through the single v2 authority."""
     try:
-        inspector = load_policy_inspector()
-    except (OSError, SyntaxError, ValueError):
-        return 'inspector-unavailable'
-    policy_raw = read_owned_regular(
-        LIVE_STREAM_POLICY_PATH, POLICY_OWNER_UID, POLICY_OWNER_GID, 0o600, MAX_POLICY_BYTES)
-    if policy_raw is None:
-        return artifact_reason(LIVE_STREAM_POLICY_PATH, POLICY_OWNER_UID, POLICY_OWNER_GID, 0o600, 'policy')
-    summary_raw = read_owned_regular(
-        LIVE_STREAM_SUMMARY_PATH, POLICY_OWNER_UID, POLICY_OWNER_GID, 0o644, MAX_POLICY_BYTES)
-    if summary_raw is None:
-        return artifact_reason(LIVE_STREAM_SUMMARY_PATH, POLICY_OWNER_UID, POLICY_OWNER_GID, 0o644, 'summary')
-    # load_summary re-opens the fixed public summary itself and rejects a wrong
-    # version, a non-canonical order, a UDP port outside 1024..65535, a
-    # duplicated key, or a digest that does not match its own fields.
-    try:
-        digest, networks = inspector.load_summary()
-    except Exception:
-        return 'summary-invalid'
-    try:
-        document = inspector.strict_json_loads(policy_raw.decode('utf-8'))
-        public = inspector.strict_json_loads(summary_raw.decode('utf-8'))
-    except (UnicodeDecodeError, ValueError):
-        return 'policy-invalid'
-    if document != public:
-        return 'policy-summary-disagreement'
-    try:
-        worker_uid = pwd.getpwnam(WORKER_NAME).pw_uid
-    except KeyError:
-        return 'worker-account-missing'
-    if document['workerUid'] != worker_uid:
-        return 'worker-uid-mismatch'
-    try:
-        stream_uid = pwd.getpwnam(STREAM_NAME).pw_uid
-    except KeyError:
-        return 'stream-account-missing'
-    if document['streamUid'] != stream_uid:
-        return 'stream-uid-mismatch'
-    try:
-        grp.getgrnam(STREAM_GROUP)
-    except KeyError:
-        return 'stream-group-missing'
-    environment_raw = read_owned_regular(WORKER_ENV_PATH, worker_uid, None, 0o600, MAX_POLICY_BYTES)
-    if environment_raw is None:
-        return artifact_reason(WORKER_ENV_PATH, worker_uid, None, 0o600, 'environment')
-    settings = environment_settings(environment_raw)
-    if settings is None:
-        return 'environment-invalid'
-    if settings.get('RTSP_POLICY_DIGEST') != digest:
-        return 'digest-mismatch'
-    cidrs = []
-    for entry in networks:
-        if entry.cidr not in cidrs:
-            cidrs.append(entry.cidr)
-    if settings.get('RTSP_ALLOWED_CIDRS') != ','.join(cidrs):
-        return 'environment-disagreement'
+        applier = load_live_view_applier()
+        _worker_uid, worker_gid = worker_ids()
+        settings = applier.read_settings(worker_gid)
+        installed = applier.read_installed_policy()
+        expected = applier.policy_for(settings, False)
+    except (KeyError, OSError, RuntimeError, SyntaxError, ValueError):
+        return 'policy-state-invalid'
+    if installed != expected:
+        return 'policy-tuple-mismatch'
     return None
 
 
 def rtsp_policy_installed():
-    """Fail closed, but never silently: the operator needs to know which clause refused."""
+    """Fail closed and publish only a bounded rejection token to root's log."""
     try:
         reason = rtsp_policy_rejection()
     except Exception:
@@ -690,6 +898,15 @@ def main():
             return 0
         except RuntimeError:
             return 3
+    if len(sys.argv) == 2 and sys.argv[1] in (
+            '--migrate-live-view-settings', '--reset-live-view-settings'):
+        try:
+            validate_root_bundle()
+            migrate_live_view_settings(
+                reset=sys.argv[1] == '--reset-live-view-settings')
+            return 0
+        except (OSError, RuntimeError, ValueError):
+            return 5
     if len(sys.argv) == 3 and sys.argv[1] == '--verify-feature' and sys.argv[2] in FEATURES:
         try:
             validate_root_bundle()

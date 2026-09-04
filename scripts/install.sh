@@ -7,6 +7,7 @@ NODE_VERSION="${HOME_WORKER_NODE_VERSION:-22}"
 USER="${HOME_WORKER_USER:-homeworker}"
 APT_LOCK_TIMEOUT_SECONDS=300
 RTSP_GROUP_REFRESH_REQUIRED=0
+RESET_LIVE_VIEW_SETTINGS=0
 
 export DEBIAN_FRONTEND=noninteractive
 export APT_LISTCHANGES_FRONTEND=none
@@ -17,6 +18,12 @@ apt_get() {
 }
 
 main() {
+  if [ "$#" -eq 1 ] && [ "$1" = "--reset-live-view-settings" ]; then
+    RESET_LIVE_VIEW_SETTINGS=1
+  elif [ "$#" -ne 0 ]; then
+    echo "ERROR: unsupported installer argument" >&2
+    exit 2
+  fi
   check_raspberry_pi
   setup_hardware_resources
   create_user
@@ -642,7 +649,7 @@ install_selected_features() {
 
   local failed="" successful=""
   local features
-  features=$(node -e "try { const f = require(process.argv[1]); const selected = f.enabled || []; const rtspSelected = selected.includes('rtsp'); const allowed = new Set(['digital','uart','zigbee','motion','rtsp']); [...new Set(selected)].filter(n => allowed.has(n) && (n !== 'rtsp' || rtspSelected)).forEach(n => console.log(n)); } catch {}" "$features_file")
+  features=$(node -e "try { const f = require(process.argv[1]); const selected = f.enabled || []; const allowed = new Set(['digital','uart','zigbee','motion','rtsp']); [...new Set(selected)].filter(n => allowed.has(n)).forEach(n => console.log(n)); } catch {}" "$features_file")
 
   # Wizard selection is only an input. Do not publish any successful state
   # until the fixed root routine and both verifications have completed.
@@ -686,7 +693,6 @@ verify_feature_visible_to_application() {
     if (!stat.isFile() || (stat.mode & 0o777) !== 0o600) process.exit(1);
     const env = fs.readFileSync(file, "utf8");
     if (!env.includes("TELEGRAM_BOT_TOKEN=")) process.exit(1);
-    if (feature === "rtsp" && !env.includes("LIVE_STREAM_ENABLED=true")) process.exit(1);
   ' "$INSTALL_DIR/.env" "$feature"
 }
 
@@ -697,7 +703,7 @@ write_verified_feature_config() {
     const path = require("path");
     const [target, csv] = process.argv.slice(1);
     const enabled = csv ? csv.split(",") : [];
-    const payload = JSON.stringify({ enabled, liveStream: enabled.includes("rtsp"), timestamp: new Date().toISOString() }, null, 2) + "\n";
+    const payload = JSON.stringify({ enabled, timestamp: new Date().toISOString() }, null, 2) + "\n";
     const directory = path.dirname(target);
     const temporary = path.join(directory, `.features.${process.pid}.${Date.now()}.tmp`);
     let file;
@@ -733,6 +739,28 @@ require_route_inspection_prerequisite() {
   fi
 }
 
+provision_live_view_policy_prerequisites() {
+  local stream_user="homeworker-stream"
+  local stream_group="homeworker-stream"
+
+  # The settings applier must be able to publish and activate a deny-all tuple
+  # before RTSP itself is enabled. nftables and the locked stream identity are
+  # enforcement prerequisites, not feature enablement or runtime bootstrap.
+  apt_get install -y nftables
+  if ! getent group "$stream_group" >/dev/null; then
+    sudo groupadd --system "$stream_group"
+  fi
+  if ! id "$stream_user" >/dev/null 2>&1; then
+    sudo useradd --system --no-create-home --home-dir /nonexistent \
+      --shell /usr/sbin/nologin --gid "$stream_group" "$stream_user"
+  fi
+  sudo usermod --home /nonexistent --shell /usr/sbin/nologin \
+    --gid "$stream_group" "$stream_user"
+  sudo usermod -L "$stream_user"
+  sudo usermod -aG "$stream_group" "$USER"
+  sudo install -d -m 0755 -o root -g root /etc/home-worker
+}
+
 install_feature_management_artifacts() {
   local bundle="/usr/lib/home-worker"
   local source_version="$INSTALL_DIR/config/feature-installer.version"
@@ -744,6 +772,7 @@ install_feature_management_artifacts() {
   fi
 
   require_route_inspection_prerequisite
+  provision_live_view_policy_prerequisites
 
   echo "Installing root-owned feature-management boundary..."
   sudo install -d -m 0755 -o root -g root "$bundle" "$bundle/systemd"
@@ -752,9 +781,11 @@ install_feature_management_artifacts() {
   install_root_bundle_file "$INSTALL_DIR/scripts/live-stream-net-helper" "$bundle/live-stream-net-helper" 0755
   install_root_bundle_file "$INSTALL_DIR/scripts/live-stream-ffmpeg-runner" "$bundle/live-stream-ffmpeg-runner" 0755
   install_root_bundle_file "$INSTALL_DIR/scripts/live-stream-policy-inspector" "$bundle/live-stream-policy-inspector" 0755
+  install_root_bundle_file "$INSTALL_DIR/scripts/live-view-policy-applier.py" "$bundle/live-view-policy-applier" 0755
   for unit in homeworker-feature-install.service homeworker-feature-supervisor-restart.service homeworker-feature-host-reboot.service homeworker-ffmpeg-stream@.service homeworker-stream-net.service homeworker-stream-systemd.rules; do
     install_root_bundle_file "$INSTALL_DIR/systemd/$unit" "$bundle/systemd/$unit" 0644
   done
+  install_root_bundle_file "$INSTALL_DIR/systemd/homeworker-live-view-policy-apply.service" "$bundle/systemd/homeworker-live-view-policy-apply.service" 0644
   install_root_bundle_file "$source_version" "$bundle/feature-installer.version" 0644
 
   local manifest_tmp
@@ -762,9 +793,10 @@ install_feature_management_artifacts() {
   {
     printf 'version %s\n' "$version"
     for path in "$bundle/feature-installer" "$bundle/install-feature-routines" "$bundle/live-stream-net-helper" "$bundle/live-stream-ffmpeg-runner" \
-      "$bundle/live-stream-policy-inspector" \
+      "$bundle/live-stream-policy-inspector" "$bundle/live-view-policy-applier" \
       "$bundle/systemd/homeworker-feature-install.service" "$bundle/systemd/homeworker-feature-supervisor-restart.service" "$bundle/systemd/homeworker-feature-host-reboot.service" \
-      "$bundle/systemd/homeworker-ffmpeg-stream@.service" "$bundle/systemd/homeworker-stream-net.service" "$bundle/systemd/homeworker-stream-systemd.rules"; do
+      "$bundle/systemd/homeworker-ffmpeg-stream@.service" "$bundle/systemd/homeworker-stream-net.service" "$bundle/systemd/homeworker-stream-systemd.rules" \
+      "$bundle/systemd/homeworker-live-view-policy-apply.service"; do
       mode=$(printf '%04o' "0$(stat -c '%a' "$path")")
       digest=$(sha256sum "$path" | awk '{print $1}')
       printf '%s %s %s\n' "$digest" "$mode" "$path"
@@ -776,12 +808,23 @@ install_feature_management_artifacts() {
   sudo install -d -m 0711 -o root -g root /var/lib/home-worker
   sudo install -d -m 0770 -o root -g "$USER" /var/lib/home-worker/feature-install-requests /var/lib/home-worker/feature-install-results
   sudo install -d -m 0700 -o root -g root /var/lib/home-worker/feature-install-claims
-  install_feature_management_sudoers
-  for unit in homeworker-feature-install.service homeworker-feature-supervisor-restart.service homeworker-feature-host-reboot.service homeworker-ffmpeg-stream@.service homeworker-stream-net.service; do
+  sudo install -d -m 0770 -o root -g "$USER" /var/lib/home-worker/live-view-settings-requests
+  sudo install -d -m 0700 -o root -g root /var/lib/home-worker/live-view-settings-claims
+  sudo install -d -m 0750 -o root -g "$USER" /var/lib/home-worker/live-view-settings-results
+  sudo install -d -m 0770 -o root -g "$USER" /var/lib/home-worker/live-view-settings-acks
+  for unit in homeworker-feature-install.service homeworker-feature-supervisor-restart.service homeworker-feature-host-reboot.service homeworker-ffmpeg-stream@.service; do
     sudo install -m 0644 -o root -g root "$bundle/systemd/$unit" "/etc/systemd/system/$unit"
   done
+  install_root_bundle_file "$bundle/systemd/homeworker-stream-net.service" "/etc/systemd/system/homeworker-stream-net.service" 0644
+  install_root_bundle_file "$bundle/systemd/homeworker-live-view-policy-apply.service" "/etc/systemd/system/homeworker-live-view-policy-apply.service" 0644
   sudo systemctl daemon-reload
   /usr/lib/home-worker/feature-installer --validate-installation || { echo "ERROR: root feature helper validation failed" >&2; exit 1; }
+  if [ "$RESET_LIVE_VIEW_SETTINGS" = "1" ]; then
+    sudo /usr/lib/home-worker/feature-installer --reset-live-view-settings || { echo "ERROR: live view settings reset failed" >&2; exit 1; }
+  else
+    sudo /usr/lib/home-worker/feature-installer --migrate-live-view-settings || { echo "ERROR: live view settings migration failed" >&2; exit 1; }
+  fi
+  install_feature_management_sudoers
 }
 
 install_root_bundle_file() {
@@ -795,7 +838,7 @@ install_feature_management_sudoers() {
   local temporary
   temporary="$(mktemp)"
   cat > "$temporary" <<EOF
-$USER ALL=(root) NOPASSWD: /bin/systemctl start --no-block homeworker-feature-install.service, /bin/systemctl start --no-block homeworker-feature-supervisor-restart.service, /bin/systemctl start --no-block homeworker-feature-host-reboot.service
+$USER ALL=(root) NOPASSWD: /bin/systemctl start --no-block homeworker-feature-install.service, /bin/systemctl start --no-block homeworker-feature-supervisor-restart.service, /bin/systemctl start --no-block homeworker-feature-host-reboot.service, /bin/systemctl start --no-block homeworker-live-view-policy-apply.service
 EOF
   if ! sudo visudo -c -f "$temporary" >/dev/null; then
     rm -f "$temporary"

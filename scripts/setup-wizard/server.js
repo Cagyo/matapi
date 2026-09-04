@@ -153,11 +153,15 @@ function createSetupServer({
           ? body.features
           : (body.features ? [body.features] : []);
         const features = [...new Set(requestedFeatures.filter((feature) => MANAGEABLE_FEATURES.has(feature)))];
-        const { claimAdminToken } = writeConfig(installDir, result.cleanedToken, features);
+        const { claimAdminToken, deferredFeatures } = writeConfig(installDir, result.cleanedToken, features);
 
         res.once('finish', onComplete);
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(renderDone(body.botUsername || result.username || '', claimAdminToken));
+        res.end(renderDone(
+          body.botUsername || result.username || '',
+          claimAdminToken,
+          deferredFeatures
+        ));
       } catch {
         res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(renderErrorPage('Configuration Error', 'Failed to save configuration.'));
