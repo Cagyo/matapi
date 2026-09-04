@@ -6,28 +6,43 @@ import {
 
 describe('ReportDriveStatusUseCase', () => {
   it.each([
-    ['reauthorization_required', 'reauthorization-required'],
-    ['clock_blocked', 'clock-blocked'],
-    ['policy_blocked', 'policy-blocked'],
-    ['capacity_blocked', 'capacity-blocked'],
-    ['quota_blocked', 'quota-blocked'],
-    ['active', 'active'],
-    ['branch_blocked', 'branch-blocked'],
-    ['cooling_down', 'cooling-down'],
-    ['idle', 'idle'],
-  ] as const)('applies drain-state precedence for %s', (scenario, expected) => {
-    const input = {
-      reauthorizationRequired: scenario === 'reauthorization_required',
-      clockBlocked: scenario === 'clock_blocked',
-      providerBlock: scenario === 'policy_blocked' ? 'policy-blocked' as const
-          : scenario === 'capacity_blocked' ? 'capacity-blocked' as const
-            : scenario === 'quota_blocked' ? 'quota-blocked' as const : null,
-      hasActiveTransfer: scenario === 'active',
-      queuedVideos: scenario === 'idle' ? 0 : 1,
-      branchBlocked: scenario === 'branch_blocked',
-      coolingDown: scenario === 'cooling_down',
-    };
-
+    ['reauthorization_required', 'reauthorization-required', {
+      reauthorizationRequired: true, clockBlocked: true, providerBlock: 'policy-blocked' as const,
+      hasActiveTransfer: true, queuedVideos: 1, branchBlocked: true, coolingDown: true,
+    }],
+    ['clock_blocked', 'clock-blocked', {
+      reauthorizationRequired: false, clockBlocked: true, providerBlock: 'policy-blocked' as const,
+      hasActiveTransfer: true, queuedVideos: 1, branchBlocked: true, coolingDown: true,
+    }],
+    ['policy_blocked', 'policy-blocked', {
+      reauthorizationRequired: false, clockBlocked: false, providerBlock: 'policy-blocked' as const,
+      hasActiveTransfer: true, queuedVideos: 1, branchBlocked: true, coolingDown: true,
+    }],
+    ['capacity_blocked', 'capacity-blocked', {
+      reauthorizationRequired: false, clockBlocked: false, providerBlock: 'capacity-blocked' as const,
+      hasActiveTransfer: true, queuedVideos: 1, branchBlocked: true, coolingDown: true,
+    }],
+    ['quota_blocked', 'quota-blocked', {
+      reauthorizationRequired: false, clockBlocked: false, providerBlock: 'quota-blocked' as const,
+      hasActiveTransfer: true, queuedVideos: 1, branchBlocked: true, coolingDown: true,
+    }],
+    ['active', 'active', {
+      reauthorizationRequired: false, clockBlocked: false, providerBlock: null,
+      hasActiveTransfer: true, queuedVideos: 1, branchBlocked: true, coolingDown: true,
+    }],
+    ['branch_blocked', 'branch-blocked', {
+      reauthorizationRequired: false, clockBlocked: false, providerBlock: null,
+      hasActiveTransfer: false, queuedVideos: 1, branchBlocked: true, coolingDown: true,
+    }],
+    ['cooling_down', 'cooling-down', {
+      reauthorizationRequired: false, clockBlocked: false, providerBlock: null,
+      hasActiveTransfer: false, queuedVideos: 1, branchBlocked: false, coolingDown: true,
+    }],
+    ['idle', 'idle', {
+      reauthorizationRequired: false, clockBlocked: false, providerBlock: null,
+      hasActiveTransfer: false, queuedVideos: 0, branchBlocked: false, coolingDown: false,
+    }],
+  ] as const)('applies drain-state precedence for %s', (_scenario, expected, input) => {
     expect(deriveArchiveDrainState(input)).toBe(expected);
   });
 
@@ -110,11 +125,53 @@ describe('ReportDriveStatusUseCase', () => {
 
     const report = await statusUseCase({
       artifacts,
-      provider: providerState({ revision: 23 }),
+      provider: providerState({ revision: 23, operationClass: null }),
     }).execute();
 
     expect(report.recovery).toEqual({
       generationId: 'generation-1', providerRevision: 23, retryable: true,
+    });
+  });
+
+  it('withholds a manual fence while a provider cooldown owns a branch block', async () => {
+    const artifacts = aggregateArtifacts();
+    artifacts.readQueueStatus = async () => ({
+      queuedVideos: 1, retryableVideos: 1, oldestQueuedVideoAtMs: 9_000,
+      branchBlocked: true,
+    });
+
+    const report = await statusUseCase({
+      artifacts,
+      provider: providerState({
+        revision: 29,
+        failureClass: 'rate-limit',
+        failureStreak: 1,
+        cooldownUntilMs: 20_000,
+      }),
+    }).execute();
+
+    expect(report).toMatchObject({
+      drainState: 'branch-blocked',
+      recovery: { generationId: 'generation-1', providerRevision: 29, retryable: false },
+    });
+  });
+
+  it.each([
+    ['account_creation_limit', 'capacity'],
+    ['policy_blocked', 'policy'],
+  ] as const)('withholds a manual fence for an already claimed %s probe', async (blockReason, failureClass) => {
+    const report = await statusUseCase({
+      provider: providerState({
+        revision: 41,
+        blockReason,
+        failureClass,
+        failureStreak: 1,
+        cooldownUntilMs: 20_000,
+      }),
+    }).execute();
+
+    expect(report).toMatchObject({
+      recovery: { generationId: 'generation-1', providerRevision: 41, retryable: false },
     });
   });
 
@@ -374,12 +431,19 @@ function activeStatusConnections(id: string) {
 function providerState(overrides: {
   revision?: number;
   blockReason?: 'quota_exhausted' | 'account_creation_limit' | 'policy_blocked' | 'reauthorization_required' | null;
+  failureClass?: 'transport' | 'rate-limit' | 'quota' | 'capacity' | 'authorization' | 'policy' | null;
+  failureStreak?: number;
+  cooldownUntilMs?: number | null;
+  operationClass?: 'account' | 'folder' | 'upload' | 'reconcile' | 'delete' | null;
 } = {}) {
   return {
     load: async () => ({
       revision: overrides.revision ?? 1,
-      generationId: 'generation-1', operationClass: 'upload' as const,
-      failureClass: null, failureStreak: 0, cooldownUntilMs: null,
+      generationId: 'generation-1',
+      operationClass: overrides.operationClass === undefined ? 'upload' : overrides.operationClass,
+      failureClass: overrides.failureClass ?? null,
+      failureStreak: overrides.failureStreak ?? 0,
+      cooldownUntilMs: overrides.cooldownUntilMs ?? null,
       blockReason: overrides.blockReason ?? null, updatedAtMs: 9_000,
     }),
   };

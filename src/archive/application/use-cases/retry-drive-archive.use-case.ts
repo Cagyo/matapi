@@ -23,6 +23,26 @@ export interface RetryDriveArchiveInput {
   observedProviderRevision: number;
 }
 
+/** The only retry actions that are durable against the current provider gate state. */
+export type DriveArchiveRetryEligibility =
+  | 'branch-revalidation'
+  | 'provider-probe'
+  | 'automatic-quota-probe'
+  | 'reauthorize'
+  | 'nothing-blocked';
+
+/**
+ * Classifies a fresh provider snapshot before presenting or scheduling a retry.
+ * A provider probe is claimable only while its cooldown fence is clear.
+ */
+export function classifyDriveArchiveRetry(state: ArchiveProviderState): DriveArchiveRetryEligibility {
+  if (state.blockReason === 'quota_exhausted') return 'automatic-quota-probe';
+  if (state.blockReason === 'reauthorization_required') return 'reauthorize';
+  if ((state.blockReason === 'account_creation_limit' || state.blockReason === 'policy_blocked')
+    && state.cooldownUntilMs === null) return 'provider-probe';
+  return isClear(state) ? 'branch-revalidation' : 'nothing-blocked';
+}
+
 /** Schedules bounded recovery work without accepting a remote object or folder ID. */
 @Injectable()
 export class RetryDriveArchiveUseCase {
@@ -43,14 +63,18 @@ export class RetryDriveArchiveUseCase {
     if (current.generationId !== input.generationId
       || current.revision !== input.observedProviderRevision) return 'stale';
 
-    if (current.blockReason === 'quota_exhausted') return 'automatic-quota-probe';
-    if (current.blockReason === 'reauthorization_required') return 'reauthorize';
-    if (current.blockReason === 'account_creation_limit'
-      || current.blockReason === 'policy_blocked') {
+    const eligibility = classifyDriveArchiveRetry(current);
+    if (eligibility === 'automatic-quota-probe') return eligibility;
+    if (eligibility === 'reauthorize') return eligibility;
+    if (eligibility === 'provider-probe') {
+      const blockReason = current.blockReason;
+      if (blockReason !== 'account_creation_limit' && blockReason !== 'policy_blocked') {
+        return 'nothing-blocked';
+      }
       const scheduled = await this.providerState.requestProbe({
         generationId: input.generationId,
         expectedRevision: input.observedProviderRevision,
-        allowedBlockReasons: [current.blockReason],
+        allowedBlockReasons: [blockReason],
         nowMs: this.clock.now().getTime(),
       });
       if (!scheduled) return 'stale';
@@ -58,7 +82,7 @@ export class RetryDriveArchiveUseCase {
       return 'scheduled';
     }
 
-    if (!isClear(current)) return 'nothing-blocked';
+    if (eligibility !== 'branch-revalidation') return 'nothing-blocked';
     const requested = await this.reservations.requestNextBlockedRevalidation({
       generationId: input.generationId,
       nowMs: this.clock.now().getTime(),

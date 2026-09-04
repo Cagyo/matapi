@@ -420,8 +420,8 @@ export const commands: CommandDescriptor[] = [
   },
   {
     command: 'gdrive',
-    description: 'Подключить, проверить или отключить Google Drive',
-    usage: '/gdrive connect|status|disconnect — управление Google Drive',
+    description: 'Подключить, проверить, повторить или отключить Google Drive',
+    usage: '/gdrive connect|status|retry|disconnect — управление Google Drive',
     scope: 'admin',
   },
   {

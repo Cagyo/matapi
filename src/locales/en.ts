@@ -421,8 +421,8 @@ export const commands: CommandDescriptor[] = [
   },
   {
     command: 'gdrive',
-    description: 'Connect, inspect, or disconnect Google Drive',
-    usage: '/gdrive connect|status|disconnect — manage Google Drive',
+    description: 'Connect, inspect, retry, or disconnect Google Drive',
+    usage: '/gdrive connect|status|retry|disconnect — manage Google Drive',
     scope: 'admin',
   },
   {

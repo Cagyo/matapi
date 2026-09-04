@@ -113,6 +113,29 @@ describe('RetryDriveArchiveUseCase', () => {
     expect(fixture.wake.snapshot()).toBe(0);
   });
 
+  it.each([
+    ['account_creation_limit', 'capacity'],
+    ['policy_blocked', 'policy'],
+  ] as const)('does not re-request an already claimed %s provider probe', async (reason, failureClass) => {
+    const fixture = await createFixture();
+    const blocked = await seedBlocked(fixture, reason, failureClass);
+
+    await expect(fixture.useCase.execute({
+      generationId: 'generation-1',
+      observedProviderRevision: blocked.revision,
+    })).resolves.toBe('scheduled');
+    const claimed = await fixture.providerState.load();
+
+    await expect(fixture.useCase.execute({
+      generationId: 'generation-1',
+      observedProviderRevision: claimed.revision,
+    })).resolves.toBe('nothing-blocked');
+
+    await expect(fixture.providerState.load()).resolves.toEqual(claimed);
+    expect(fixture.reservations.requestNextBlockedRevalidation).not.toHaveBeenCalled();
+    expect(fixture.wake.snapshot()).toBe(1);
+  });
+
   it('does not wake when persisting the branch request fails', async () => {
     const fixture = await createFixture();
     const clear = await fixture.providerState.load();

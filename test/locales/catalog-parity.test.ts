@@ -61,4 +61,10 @@ describe('Drive status and alert catalog parity', () => {
       }
     }
   });
+
+  it('advertises the retry action in every localized admin help descriptor', () => {
+    for (const catalog of [catalogs.en, catalogs.ru, catalogs.uk]) {
+      expect(catalog.help.admin).toContain('/gdrive connect|status|retry|disconnect');
+    }
+  });
 });

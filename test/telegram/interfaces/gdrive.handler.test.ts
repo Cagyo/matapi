@@ -75,7 +75,7 @@ describe('GdriveHandler archive retry', () => {
     fixture.status.execute.mockResolvedValue(report);
     fixture.retry.execute.mockResolvedValue('scheduled');
 
-    await fixture.handler.handleRetry(fixture.ctx as never);
+    await invokeGdriveCommand(fixture, 'retry');
 
     expect(fixture.retry.execute).toHaveBeenCalledWith({
       generationId: 'generation-sensitive', observedProviderRevision: 13,
@@ -83,6 +83,33 @@ describe('GdriveHandler archive retry', () => {
     expect(lastReplyText(fixture.ctx)).toBe(fixture.catalog.gdrive.retryResults.scheduled);
     expect(JSON.stringify(fixture.ctx.reply.mock.calls))
       .not.toMatch(/generation-sensitive|folder-sensitive|drive\.google\.com/u);
+  });
+
+  it.each([
+    ['a generation-like extra argument', 'retry generation-sensitive'],
+    ['an unexpected argument', 'retry now'],
+  ])('keeps %s out of the registered retry command path', async (_name, match) => {
+    const fixture = setupRetryHandler();
+
+    await invokeGdriveCommand(fixture, match);
+
+    expect(fixture.status.execute).not.toHaveBeenCalled();
+    expect(fixture.retry.execute).not.toHaveBeenCalled();
+    expect(lastReplyText(fixture.ctx)).toBe(fixture.catalog.gdrive.usage);
+  });
+
+  it.each([
+    ['a non-admin private chat', { localeState: { user: { role: 'member' } } }],
+    ['a group chat', { chat: { id: 7, type: 'group' } }],
+  ] as const)('does not run the registered retry command for %s', async (_name, identity) => {
+    const fixture = setupRetryHandler();
+    Object.assign(fixture.ctx, identity);
+
+    await invokeGdriveCommand(fixture, 'retry');
+
+    expect(fixture.status.execute).not.toHaveBeenCalled();
+    expect(fixture.retry.execute).not.toHaveBeenCalled();
+    expect(fixture.ctx.reply).not.toHaveBeenCalled();
   });
 
   it('uses only a sixteen-character opaque receipt in a status retry callback', async () => {
@@ -140,6 +167,42 @@ describe('GdriveHandler archive retry', () => {
     await invokeRetryCallback(fixture, receipt);
 
     expect(fixture.retry.execute).toHaveBeenCalledTimes(1);
+    expect(lastReplyText(fixture.ctx)).toBe(fixture.catalog.gdrive.retryResults.scheduled);
+  });
+
+  it('delivers a command retry result once when delivery fails after scheduling', async () => {
+    const fixture = setupRetryHandler();
+    fixture.status.execute.mockResolvedValue(driveStatusReport({
+      drainState: 'policy-blocked', requiredAction: 'fix-policy-then-retry',
+      recovery: { generationId: 'generation-sensitive', providerRevision: 53, retryable: true },
+    }));
+    fixture.retry.execute.mockResolvedValue('scheduled');
+    fixture.ctx.reply.mockRejectedValueOnce(new Error('delivery unavailable'));
+
+    await expect(invokeGdriveCommand(fixture, 'retry')).rejects.toThrow('delivery unavailable');
+
+    expect(fixture.retry.execute).toHaveBeenCalledOnce();
+    expect(fixture.ctx.reply).toHaveBeenCalledOnce();
+    expect(lastReplyText(fixture.ctx)).toBe(fixture.catalog.gdrive.retryResults.scheduled);
+  });
+
+  it('delivers a callback retry result once when delivery fails after scheduling', async () => {
+    const fixture = setupRetryHandler();
+    fixture.status.execute.mockResolvedValue(driveStatusReport({
+      drainState: 'policy-blocked', requiredAction: 'fix-policy-then-retry',
+      recovery: { generationId: 'generation-sensitive', providerRevision: 59, retryable: true },
+    }));
+    fixture.retry.execute.mockResolvedValue('scheduled');
+
+    await fixture.handler.handleStatus(fixture.ctx as never);
+    const receipt = retryCallbackData(fixture.ctx);
+    fixture.ctx.reply.mockClear();
+    fixture.ctx.reply.mockRejectedValueOnce(new Error('delivery unavailable'));
+
+    await expect(invokeRetryCallback(fixture, receipt)).rejects.toThrow('delivery unavailable');
+
+    expect(fixture.retry.execute).toHaveBeenCalledOnce();
+    expect(fixture.ctx.reply).toHaveBeenCalledOnce();
     expect(lastReplyText(fixture.ctx)).toBe(fixture.catalog.gdrive.retryResults.scheduled);
   });
 
@@ -226,6 +289,112 @@ describe('GdriveHandler archive retry', () => {
 
     expect(lastReplyText(fixture.ctx)).toContain(fixture.catalog.gdrive.actions.reauthorize);
     expect(retryCallbackData(fixture.ctx)).toBeUndefined();
+  });
+
+  it('does not render a retry button for a report fence that is not schedulable', async () => {
+    const fixture = setupRetryHandler();
+    fixture.status.execute.mockResolvedValue(driveStatusReport({
+      drainState: 'policy-blocked', requiredAction: 'fix-policy-then-retry',
+      recovery: { generationId: 'generation-sensitive', providerRevision: 61, retryable: false },
+    }));
+
+    await fixture.handler.handleStatus(fixture.ctx as never);
+
+    expect(retryCallbackData(fixture.ctx)).toBeUndefined();
+  });
+
+  it('returns localized stale for an expired receipt without retrying', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(100_000));
+      const fixture = setupRetryHandler();
+      fixture.status.execute.mockResolvedValue(driveStatusReport({
+        drainState: 'branch-blocked', requiredAction: 'restore-date-folder',
+        recovery: { generationId: 'generation-sensitive', providerRevision: 67, retryable: true },
+      }));
+
+      await fixture.handler.handleStatus(fixture.ctx as never);
+      const receipt = retryCallbackData(fixture.ctx);
+      fixture.ctx.reply.mockClear();
+      vi.setSystemTime(new Date(400_001));
+      await invokeRetryCallback(fixture, receipt);
+
+      expect(fixture.retry.execute).not.toHaveBeenCalled();
+      expect(fixture.ctx.reply).toHaveBeenCalledOnce();
+      expect(lastReplyText(fixture.ctx)).toBe(fixture.catalog.gdrive.retryResults.stale);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('replaces a prior receipt for the same admin and chat', async () => {
+    const fixture = setupRetryHandler();
+    fixture.status.execute
+      .mockResolvedValueOnce(driveStatusReport({
+        drainState: 'branch-blocked', requiredAction: 'restore-date-folder',
+        recovery: { generationId: 'generation-sensitive', providerRevision: 71, retryable: true },
+      }))
+      .mockResolvedValueOnce(driveStatusReport({
+        drainState: 'branch-blocked', requiredAction: 'restore-date-folder',
+        recovery: { generationId: 'generation-sensitive', providerRevision: 72, retryable: true },
+      }));
+    fixture.retry.execute.mockResolvedValue('scheduled');
+
+    await fixture.handler.handleStatus(fixture.ctx as never);
+    const older = retryCallbackData(fixture.ctx);
+    await fixture.handler.handleStatus(fixture.ctx as never);
+    const newer = retryCallbackData(fixture.ctx);
+    fixture.ctx.reply.mockClear();
+
+    await invokeRetryCallback(fixture, older);
+    expect(fixture.retry.execute).not.toHaveBeenCalled();
+    await invokeRetryCallback(fixture, newer);
+
+    expect(fixture.retry.execute).toHaveBeenCalledOnce();
+    expect(fixture.retry.execute).toHaveBeenCalledWith({
+      generationId: 'generation-sensitive', observedProviderRevision: 72,
+    });
+  });
+
+  it('bounds retry receipts by evicting the oldest receipt globally', async () => {
+    const fixture = setupRetryHandler();
+    fixture.status.execute.mockResolvedValue(driveStatusReport({
+      drainState: 'branch-blocked', requiredAction: 'restore-date-folder',
+      recovery: { generationId: 'generation-sensitive', providerRevision: 73, retryable: true },
+    }));
+    fixture.retry.execute.mockResolvedValue('scheduled');
+    const contexts = Array.from({ length: 65 }, (_value, index) => retryContext(
+      fixture.catalog,
+      index + 100,
+    ));
+
+    for (const context of contexts) await fixture.handler.handleStatus(context as never);
+    const oldest = retryCallbackData(contexts[0]);
+    const newestContext = contexts[64];
+    const newest = retryCallbackData(newestContext);
+
+    await invokeRetryCallback(fixture, oldest, contexts[0]);
+    expect(fixture.retry.execute).not.toHaveBeenCalled();
+    await invokeRetryCallback(fixture, newest, newestContext);
+
+    expect(fixture.retry.execute).toHaveBeenCalledOnce();
+  });
+
+  it('cleans a retry receipt when status delivery fails', async () => {
+    const fixture = setupRetryHandler();
+    fixture.status.execute.mockResolvedValue(driveStatusReport({
+      drainState: 'branch-blocked', requiredAction: 'restore-date-folder',
+      recovery: { generationId: 'generation-sensitive', providerRevision: 79, retryable: true },
+    }));
+    fixture.ctx.reply.mockRejectedValueOnce(new Error('delivery unavailable'));
+
+    await fixture.handler.handleStatus(fixture.ctx as never);
+    const failedReceipt = retryCallbackDataFromOptions(fixture.ctx.reply.mock.calls[0]?.[1]);
+    fixture.ctx.reply.mockClear();
+    await invokeRetryCallback(fixture, failedReceipt);
+
+    expect(fixture.retry.execute).not.toHaveBeenCalled();
+    expect(fixture.ctx.reply).not.toHaveBeenCalled();
   });
 });
 
@@ -718,13 +887,9 @@ function setupRetryHandler() {
   const status = { execute: vi.fn() };
   const retry = { execute: vi.fn() };
   const callbacks: { pattern: RegExp; fn: (ctx: object) => Promise<void> }[] = [];
+  const commands: { command: string; fn: (ctx: object) => Promise<void> }[] = [];
   const catalog = catalogFor('en');
-  const ctx = {
-    from: { id: 7 }, chat: { id: 7, type: 'private' },
-    localeState: { locale: 'en', catalog, user: { telegramId: 7, role: 'admin' } },
-    reply: vi.fn(async () => ({ message_id: 1 })),
-    answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
-  };
+  const ctx = retryContext(catalog, 7);
   const workflows = {
     begin: vi.fn().mockResolvedValue(driveSetupReceipt('drive-status')),
     loadCurrent: vi.fn().mockResolvedValue(driveSetupReceipt('drive-status')),
@@ -746,12 +911,23 @@ function setupRetryHandler() {
     handleRetry(ctx: object): Promise<void>;
   };
   handler.register({
-    command: vi.fn(), on: vi.fn(),
+    command: vi.fn((command: string, _guard: unknown, fn: (ctx: object) => Promise<void>) => {
+      commands.push({ command, fn });
+    }), on: vi.fn(),
     callbackQuery: vi.fn((pattern: RegExp, fn: (callback: object) => Promise<void>) => {
       callbacks.push({ pattern, fn });
     }),
   } as never);
-  return { handler, ctx, status, retry, callbacks, catalog };
+  return { handler, ctx, status, retry, callbacks, commands, catalog };
+}
+
+function retryContext(catalog: ReturnType<typeof catalogFor>, id: number) {
+  return {
+    from: { id }, chat: { id, type: 'private' },
+    localeState: { locale: 'en', catalog, user: { telegramId: id, role: 'admin' } },
+    reply: vi.fn(async () => ({ message_id: 1 })),
+    answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+  };
 }
 
 function driveStatusReport(overrides: Partial<DriveStatusReport> = {}): DriveStatusReport {
@@ -779,10 +955,14 @@ function lastReplyText(ctx: { reply: ReturnType<typeof vi.fn> }): string | undef
 }
 
 function retryCallbackData(ctx: { reply: ReturnType<typeof vi.fn> }): string | undefined {
-  const options = ctx.reply.mock.calls.at(-1)?.[1] as {
+  return retryCallbackDataFromOptions(ctx.reply.mock.calls.at(-1)?.[1]);
+}
+
+function retryCallbackDataFromOptions(options: unknown): string | undefined {
+  const replyOptions = options as {
     reply_markup?: { inline_keyboard?: { callback_data?: string }[][] };
   } | undefined;
-  return options?.reply_markup?.inline_keyboard?.flat()
+  return replyOptions?.reply_markup?.inline_keyboard?.flat()
     .find((button) => typeof button.callback_data === 'string')?.callback_data;
 }
 
@@ -795,6 +975,17 @@ async function invokeRetryCallback(
   if (!callback) throw new Error('retry callback was not registered');
   Object.assign(ctx, { callbackQuery: { data } });
   await callback.fn(ctx);
+}
+
+async function invokeGdriveCommand(
+  fixture: ReturnType<typeof setupRetryHandler>,
+  match: string,
+  ctx = fixture.ctx,
+): Promise<void> {
+  const command = fixture.commands.find((registered) => registered.command === 'gdrive');
+  if (!command) throw new Error('gdrive command was not registered');
+  Object.assign(ctx, { match });
+  await command.fn(ctx);
 }
 
 function setupDriveHandler(options: {

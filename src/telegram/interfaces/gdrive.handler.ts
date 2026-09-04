@@ -45,6 +45,8 @@ import {
 } from './drive-setup-state.registry';
 
 const GOOGLE_CLOUD_CONSOLE_URL = 'https://console.cloud.google.com/apis/credentials';
+const RETRY_RECEIPT_TTL_MS = 5 * 60_000;
+const MAX_RETRY_RECEIPTS = 64;
 
 /**
  * `/gdrive status` — private-admin only. Reports the sanitized archive state.
@@ -437,13 +439,15 @@ export class GdriveHandler implements TelegramHandler {
   async handleRetry(ctx: TelegramContext): Promise<void> {
     if (!this.currentAdmin(ctx)) return;
     const catalog = ctx.localeState?.catalog ?? en;
+    let outcome: RetryDriveArchiveResult;
     try {
       const report = await this.status.execute();
-      await ctx.reply(catalog.gdrive.retryResults[await this.retryFromReport(report)]);
+      outcome = await this.retryFromReport(report);
     } catch {
       this.logger.error('/gdrive retry failed');
-      await ctx.reply(catalog.gdrive.retryResults.stale);
+      outcome = 'stale';
     }
+    await ctx.reply(catalog.gdrive.retryResults[outcome]);
   }
 
   private async handleRetryCallback(ctx: TelegramContext): Promise<void> {
@@ -452,18 +456,26 @@ export class GdriveHandler implements TelegramHandler {
     if (!current || !receiptId) return;
     const requested = this.retries.get(receiptId);
     if (requested?.userId !== current.userId || requested?.chatId !== current.chatId) return;
-    this.retries.delete(receiptId);
     const catalog = ctx.localeState?.catalog ?? en;
+    const nowMs = Date.now();
+    if (requested.expiresAtMs <= nowMs) {
+      this.retries.delete(receiptId);
+      await ctx.reply(catalog.gdrive.retryResults.stale);
+      return;
+    }
+    this.pruneRetryReceipts(nowMs, receiptId);
+    this.retries.delete(receiptId);
+    let outcome: RetryDriveArchiveResult;
     try {
-      const result = await this.retry.execute({
+      outcome = await this.retry.execute({
         generationId: requested.generationId,
         observedProviderRevision: requested.providerRevision,
       });
-      await ctx.reply(catalog.gdrive.retryResults[result]);
     } catch {
       this.logger.error('/gdrive retry callback failed');
-      await ctx.reply(catalog.gdrive.retryResults.stale);
+      outcome = 'stale';
     }
+    await ctx.reply(catalog.gdrive.retryResults[outcome]);
   }
 
   private async retryFromReport(report: Awaited<ReturnType<ReportDriveStatusUseCase['execute']>>): Promise<RetryDriveArchiveResult> {
@@ -484,12 +496,17 @@ export class GdriveHandler implements TelegramHandler {
   ): { receipt: string; options: { reply_markup: InlineKeyboard } } | undefined {
     const current = this.currentAdmin(ctx);
     if (!current || !recovery.retryable) return undefined;
+    const nowMs = Date.now();
+    this.pruneRetryReceipts(nowMs);
+    this.removeRetryReceiptsFor(current);
+    this.enforceRetryReceiptCap();
     const receipt = randomReceipt();
     this.retries.set(receipt, {
       userId: current.userId,
       chatId: current.chatId,
       generationId: recovery.generationId,
       providerRevision: recovery.providerRevision,
+      expiresAtMs: nowMs + RETRY_RECEIPT_TTL_MS,
     });
     return {
       receipt,
@@ -497,6 +514,26 @@ export class GdriveHandler implements TelegramHandler {
         reply_markup: new InlineKeyboard().text((ctx.localeState?.catalog ?? en).gdrive.retryButton, `gdr:${receipt}`),
       },
     };
+  }
+
+  private pruneRetryReceipts(nowMs: number, retainedReceipt?: string): void {
+    for (const [receipt, stored] of this.retries) {
+      if (receipt !== retainedReceipt && stored.expiresAtMs <= nowMs) this.retries.delete(receipt);
+    }
+  }
+
+  private removeRetryReceiptsFor(current: { userId: number; chatId: number }): void {
+    for (const [receipt, stored] of this.retries) {
+      if (stored.userId === current.userId && stored.chatId === current.chatId) this.retries.delete(receipt);
+    }
+  }
+
+  private enforceRetryReceiptCap(): void {
+    while (this.retries.size >= MAX_RETRY_RECEIPTS) {
+      const oldest = this.retries.keys().next().value;
+      if (!oldest) return;
+      this.retries.delete(oldest);
+    }
   }
 
   private async handleError(
@@ -534,6 +571,7 @@ interface ArchiveRetryReceipt {
   chatId: number;
   generationId: string;
   providerRevision: number;
+  expiresAtMs: number;
 }
 
 type DriveCallbackAction = 'a' | 'c' | 'd' | 'x';

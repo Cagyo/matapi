@@ -21,6 +21,7 @@ import {
   type ArchiveProviderState,
   type ArchiveProviderStateRepositoryPort,
 } from '../ports/archive-provider-state-repository.port';
+import { classifyDriveArchiveRetry } from './retry-drive-archive.use-case';
 
 export type ArchiveDrainState =
   | 'active'
@@ -321,11 +322,10 @@ function recoveryFenceFor(input: {
     && input.drainState !== 'capacity-blocked'
     && input.drainState !== 'policy-blocked'
     && input.drainState !== 'reauthorization-required') return null;
+  const eligibility = classifyDriveArchiveRetry(input.providerState);
   return {
     generationId: input.active.id,
     providerRevision: input.providerState.revision,
-    retryable: input.drainState === 'branch-blocked'
-      || input.drainState === 'capacity-blocked'
-      || input.drainState === 'policy-blocked',
+    retryable: eligibility === 'branch-revalidation' || eligibility === 'provider-probe',
   };
 }
