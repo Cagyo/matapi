@@ -29,4 +29,21 @@ describe("SystemdLiveViewPolicyControllerAdapter", () => {
       expect.any(Function),
     );
   });
+
+  it("rejects when the fixed execFile callback reports failure", async () => {
+    const failure = new Error("systemctl failed");
+    const execFile = vi.fn(
+      (
+        _file: string,
+        _args: readonly string[],
+        _options: unknown,
+        callback: (error: Error | null) => void,
+      ) => callback(failure),
+    );
+
+    await expect(
+      new SystemdLiveViewPolicyControllerAdapter(execFile).start(),
+    ).rejects.toBe(failure);
+    expect(execFile).toHaveBeenCalledTimes(1);
+  });
 });

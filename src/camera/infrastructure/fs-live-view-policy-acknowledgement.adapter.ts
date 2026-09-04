@@ -1,6 +1,10 @@
+import { randomUUID } from "node:crypto";
+
 import type { LiveViewPolicyAcknowledgementPort } from "../domain/ports/live-view-policy-acknowledgement.port";
 import {
   assertRequestId,
+  DEFAULT_LIVE_VIEW_POLICY_SPOOL_FILESYSTEM,
+  type LiveViewPolicySpoolFilesystem,
   publishNoReplace,
   type SafeSpoolDirectoryOptions,
 } from "./fs-live-view-policy-request.adapter";
@@ -17,12 +21,15 @@ export interface FsLiveViewPolicyAcknowledgementOptions {
   readonly expectedDirectoryGid?: number;
   readonly expectedFileUid?: number;
   readonly expectedFileGid?: number;
+  readonly filesystem?: LiveViewPolicySpoolFilesystem;
+  readonly temporaryId?: () => string;
 }
 
 export class FsLiveViewPolicyAcknowledgementAdapter implements LiveViewPolicyAcknowledgementPort {
   readonly #directory: SafeSpoolDirectoryOptions;
   readonly #expectedFileUid: number;
   readonly #expectedFileGid: number;
+  readonly #temporaryId: () => string;
 
   constructor(options: FsLiveViewPolicyAcknowledgementOptions = {}) {
     this.#directory = {
@@ -30,9 +37,12 @@ export class FsLiveViewPolicyAcknowledgementAdapter implements LiveViewPolicyAck
       expectedUid: options.expectedDirectoryUid ?? ROOT_UID,
       expectedGid: options.expectedDirectoryGid ?? process.getgid?.() ?? -1,
       expectedMode: ACKNOWLEDGEMENT_DIRECTORY_MODE,
+      filesystem:
+        options.filesystem ?? DEFAULT_LIVE_VIEW_POLICY_SPOOL_FILESYSTEM,
     };
     this.#expectedFileUid = options.expectedFileUid ?? process.getuid?.() ?? -1;
     this.#expectedFileGid = options.expectedFileGid ?? process.getgid?.() ?? -1;
+    this.#temporaryId = options.temporaryId ?? randomUUID;
   }
 
   async publish(requestId: string): Promise<"published" | "already-published"> {
@@ -55,6 +65,7 @@ export class FsLiveViewPolicyAcknowledgementAdapter implements LiveViewPolicyAck
       isSame: (existing) => existing === "",
       conflictMessage:
         "Live view policy acknowledgement conflicts with an existing spool entry",
+      temporaryId: this.#temporaryId,
     });
   }
 }

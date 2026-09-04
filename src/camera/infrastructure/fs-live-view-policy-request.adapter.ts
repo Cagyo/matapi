@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { constants, type Stats } from "node:fs";
-import { link, open, unlink, type FileHandle } from "node:fs/promises";
+import { link, open, readdir, unlink } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
@@ -17,7 +17,42 @@ const REQUEST_DIRECTORY_MODE = 0o770;
 const REQUEST_FILE_MODE = 0o600;
 const ROOT_UID = 0;
 const REQUEST_ID = /^[A-Za-z0-9_-]{16}$/u;
+const TEMPORARY_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 const O_CLOEXEC = closeOnExecFlagFor(process.platform);
+
+export interface LiveViewPolicySpoolFileHandle {
+  stat(): Promise<Stats>;
+  read(
+    buffer: Buffer,
+    offset: number,
+    length: number,
+    position: number,
+  ): Promise<{ readonly bytesRead: number }>;
+  writeFile(data: string, encoding: BufferEncoding): Promise<void>;
+  chmod(mode: number): Promise<void>;
+  sync(): Promise<void>;
+  close(): Promise<void>;
+}
+
+export interface LiveViewPolicySpoolFilesystem {
+  open(
+    path: string,
+    flags: number,
+    mode?: number,
+  ): Promise<LiveViewPolicySpoolFileHandle>;
+  link(source: string, target: string): Promise<void>;
+  unlink(path: string): Promise<void>;
+  readdir(path: string): Promise<string[]>;
+}
+
+export const DEFAULT_LIVE_VIEW_POLICY_SPOOL_FILESYSTEM: LiveViewPolicySpoolFilesystem =
+  {
+    open: async (path, flags, mode) => open(path, flags, mode),
+    link,
+    unlink,
+    readdir,
+  };
 
 export interface FsLiveViewPolicyRequestOptions {
   readonly directory?: string;
@@ -26,6 +61,8 @@ export interface FsLiveViewPolicyRequestOptions {
   readonly expectedFileUid?: number;
   readonly expectedFileGid?: number;
   readonly maximumBytes?: number;
+  readonly filesystem?: LiveViewPolicySpoolFilesystem;
+  readonly temporaryId?: () => string;
 }
 
 export interface SafeSpoolDirectoryOptions {
@@ -33,6 +70,7 @@ export interface SafeSpoolDirectoryOptions {
   readonly expectedUid: number;
   readonly expectedGid: number;
   readonly expectedMode: number;
+  readonly filesystem: LiveViewPolicySpoolFilesystem;
 }
 
 export interface SafeSpoolEntryOptions<T> {
@@ -43,6 +81,7 @@ export interface SafeSpoolEntryOptions<T> {
   readonly minimumBytes: number;
   readonly maximumBytes: number;
   readonly parse: (raw: string) => T;
+  readonly filesystem: LiveViewPolicySpoolFilesystem;
 }
 
 interface PublishNoReplaceOptions<T> {
@@ -57,6 +96,7 @@ interface PublishNoReplaceOptions<T> {
   readonly parseExisting: (raw: string) => T;
   readonly isSame: (existing: T) => boolean;
   readonly conflictMessage: string;
+  readonly temporaryId: () => string;
 }
 
 export class FsLiveViewPolicyRequestAdapter implements LiveViewPolicyRequestPort {
@@ -64,6 +104,7 @@ export class FsLiveViewPolicyRequestAdapter implements LiveViewPolicyRequestPort
   readonly #expectedFileUid: number;
   readonly #expectedFileGid: number;
   readonly #maximumBytes: number;
+  readonly #temporaryId: () => string;
 
   constructor(options: FsLiveViewPolicyRequestOptions = {}) {
     this.#directory = {
@@ -71,10 +112,13 @@ export class FsLiveViewPolicyRequestAdapter implements LiveViewPolicyRequestPort
       expectedUid: options.expectedDirectoryUid ?? ROOT_UID,
       expectedGid: options.expectedDirectoryGid ?? process.getgid?.() ?? -1,
       expectedMode: REQUEST_DIRECTORY_MODE,
+      filesystem:
+        options.filesystem ?? DEFAULT_LIVE_VIEW_POLICY_SPOOL_FILESYSTEM,
     };
     this.#expectedFileUid = options.expectedFileUid ?? process.getuid?.() ?? -1;
     this.#expectedFileGid = options.expectedFileGid ?? process.getgid?.() ?? -1;
     this.#maximumBytes = options.maximumBytes ?? DEFAULT_MAXIMUM_BYTES;
+    this.#temporaryId = options.temporaryId ?? randomUUID;
   }
 
   async publish(
@@ -95,6 +139,7 @@ export class FsLiveViewPolicyRequestAdapter implements LiveViewPolicyRequestPort
       isSame: (existing) => serializeRequest(existing) === body,
       conflictMessage:
         "Live view policy request conflicts with an existing spool entry",
+      temporaryId: this.#temporaryId,
     });
   }
 }
@@ -108,7 +153,7 @@ export function assertRequestId(requestId: string): void {
 export async function validateSafeSpoolDirectory(
   options: SafeSpoolDirectoryOptions,
 ): Promise<void> {
-  const handle = await open(
+  const handle = await options.filesystem.open(
     options.directory,
     constants.O_RDONLY |
       constants.O_DIRECTORY |
@@ -134,7 +179,7 @@ export async function validateSafeSpoolDirectory(
 export async function readSafeSpoolEntry<T>(
   options: SafeSpoolEntryOptions<T>,
 ): Promise<T> {
-  const handle = await open(
+  const handle = await options.filesystem.open(
     options.path,
     constants.O_RDONLY |
       O_CLOEXEC |
@@ -162,14 +207,18 @@ export async function publishNoReplace<T>(
   }
 
   const target = join(options.directory.directory, options.targetName);
+  const temporaryId = options.temporaryId();
+  if (!TEMPORARY_ID.test(temporaryId)) {
+    throw new RangeError("Live view policy temporary ID is invalid");
+  }
   const temporary = join(
     options.directory.directory,
-    `.${options.targetName}.${randomUUID()}.tmp`,
+    `.${options.targetName}.${temporaryId}.tmp`,
   );
-  let handle: FileHandle | undefined;
+  let handle: LiveViewPolicySpoolFileHandle | undefined;
   let temporaryExists = false;
   try {
-    handle = await open(
+    handle = await options.directory.filesystem.open(
       temporary,
       constants.O_WRONLY |
         constants.O_CREAT |
@@ -199,33 +248,26 @@ export async function publishNoReplace<T>(
     handle = undefined;
 
     try {
-      await link(temporary, target);
+      await options.directory.filesystem.link(temporary, target);
     } catch (error: unknown) {
       if (!hasCode(error, "EEXIST")) throw error;
-      await unlink(temporary);
+      await unlinkGeneratedTemporary(options.directory.filesystem, temporary);
       temporaryExists = false;
       await syncSafeSpoolDirectory(options.directory);
-      const existing = await readSafeSpoolEntry({
-        path: target,
-        expectedUid: options.expectedFileUid,
-        expectedGid: options.expectedFileGid,
-        expectedMode: options.expectedFileMode,
-        minimumBytes: options.minimumBytes,
-        maximumBytes: options.maximumBytes,
-        parse: options.parseExisting,
-      });
+      const existing = await readExistingOrRecoverInterrupted(options, target);
       if (options.isSame(existing)) return "already-published";
       throw new RangeError(options.conflictMessage);
     }
 
-    await unlink(temporary);
+    await unlinkGeneratedTemporary(options.directory.filesystem, temporary);
     temporaryExists = false;
     await syncSafeSpoolDirectory(options.directory);
     return "published";
   } finally {
     await handle?.close().catch(() => undefined);
     if (temporaryExists) {
-      const removed = await unlink(temporary)
+      const removed = await options.directory.filesystem
+        .unlink(temporary)
         .then(() => true)
         .catch(() => false);
       if (removed) {
@@ -273,10 +315,11 @@ function assertSafeSpoolEntryMetadata(
     | "minimumBytes"
     | "maximumBytes"
   >,
+  allowedLinkCounts: readonly number[] = [1],
 ): void {
   if (
     !metadata.isFile() ||
-    metadata.nlink !== 1 ||
+    !allowedLinkCounts.includes(metadata.nlink) ||
     metadata.uid !== options.expectedUid ||
     metadata.gid !== options.expectedGid ||
     (metadata.mode & 0o7777) !== options.expectedMode ||
@@ -289,7 +332,7 @@ function assertSafeSpoolEntryMetadata(
 }
 
 async function readCapturedBytes(
-  handle: Pick<FileHandle, "read">,
+  handle: Pick<LiveViewPolicySpoolFileHandle, "read">,
   capturedSize: number,
 ): Promise<Uint8Array> {
   const bytes = Buffer.allocUnsafe(capturedSize + 1);
@@ -313,7 +356,7 @@ async function readCapturedBytes(
 async function syncSafeSpoolDirectory(
   options: SafeSpoolDirectoryOptions,
 ): Promise<void> {
-  const handle = await open(
+  const handle = await options.filesystem.open(
     options.directory,
     constants.O_RDONLY |
       constants.O_DIRECTORY |
@@ -334,6 +377,137 @@ async function syncSafeSpoolDirectory(
     await handle.sync();
   } finally {
     await handle.close();
+  }
+}
+
+async function readExistingOrRecoverInterrupted<T>(
+  options: PublishNoReplaceOptions<T>,
+  target: string,
+): Promise<T> {
+  const targetEntry = await readSpoolEntryWithMetadata(
+    {
+      path: target,
+      expectedUid: options.expectedFileUid,
+      expectedGid: options.expectedFileGid,
+      expectedMode: options.expectedFileMode,
+      minimumBytes: options.minimumBytes,
+      maximumBytes: options.maximumBytes,
+      parse: options.parseExisting,
+      filesystem: options.directory.filesystem,
+    },
+    [1, 2],
+    options.directory.filesystem,
+  );
+  if (targetEntry.metadata.nlink === 1) return targetEntry.value;
+  if (!options.isSame(targetEntry.value)) {
+    throw new RangeError(options.conflictMessage);
+  }
+
+  const prefix = `.${options.targetName}.`;
+  const candidateNames = (
+    await options.directory.filesystem.readdir(options.directory.directory)
+  ).filter((name) => isGeneratedTemporaryName(name, prefix));
+  let matchingTemporary: string | undefined;
+  for (const candidateName of candidateNames) {
+    const candidate = join(options.directory.directory, candidateName);
+    let candidateEntry: Awaited<
+      ReturnType<typeof readSpoolEntryWithMetadata<T>>
+    >;
+    try {
+      candidateEntry = await readSpoolEntryWithMetadata(
+        {
+          path: candidate,
+          expectedUid: options.expectedFileUid,
+          expectedGid: options.expectedFileGid,
+          expectedMode: options.expectedFileMode,
+          minimumBytes: options.minimumBytes,
+          maximumBytes: options.maximumBytes,
+          parse: options.parseExisting,
+          filesystem: options.directory.filesystem,
+        },
+        [1, 2],
+        options.directory.filesystem,
+      );
+    } catch (error: unknown) {
+      if (hasCode(error, "ENOENT")) continue;
+      throw error;
+    }
+    if (
+      candidateEntry.metadata.dev === targetEntry.metadata.dev &&
+      candidateEntry.metadata.ino === targetEntry.metadata.ino &&
+      candidateEntry.metadata.nlink === 2 &&
+      options.isSame(candidateEntry.value)
+    ) {
+      if (matchingTemporary !== undefined) {
+        throw new RangeError(
+          "Live view policy interrupted publication is unsafe",
+        );
+      }
+      matchingTemporary = candidate;
+    }
+  }
+
+  if (matchingTemporary !== undefined) {
+    await unlinkGeneratedTemporary(
+      options.directory.filesystem,
+      matchingTemporary,
+    );
+    await syncSafeSpoolDirectory(options.directory);
+  }
+
+  const recovered = await readSafeSpoolEntry({
+    path: target,
+    expectedUid: options.expectedFileUid,
+    expectedGid: options.expectedFileGid,
+    expectedMode: options.expectedFileMode,
+    minimumBytes: options.minimumBytes,
+    maximumBytes: options.maximumBytes,
+    parse: options.parseExisting,
+    filesystem: options.directory.filesystem,
+  });
+  if (!options.isSame(recovered)) {
+    throw new RangeError(options.conflictMessage);
+  }
+  return recovered;
+}
+
+async function readSpoolEntryWithMetadata<T>(
+  options: SafeSpoolEntryOptions<T>,
+  allowedLinkCounts: readonly number[],
+  filesystem: LiveViewPolicySpoolFilesystem,
+): Promise<{ readonly value: T; readonly metadata: Stats }> {
+  const handle = await filesystem.open(
+    options.path,
+    constants.O_RDONLY |
+      O_CLOEXEC |
+      constants.O_NONBLOCK |
+      constants.O_NOFOLLOW,
+  );
+  try {
+    const metadata = await handle.stat();
+    assertSafeSpoolEntryMetadata(metadata, options, allowedLinkCounts);
+    const bytes = await readCapturedBytes(handle, metadata.size);
+    const raw = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return { value: options.parse(raw), metadata };
+  } finally {
+    await handle.close();
+  }
+}
+
+function isGeneratedTemporaryName(name: string, prefix: string): boolean {
+  if (!name.startsWith(prefix) || !name.endsWith(".tmp")) return false;
+  const temporaryId = name.slice(prefix.length, -".tmp".length);
+  return TEMPORARY_ID.test(temporaryId);
+}
+
+async function unlinkGeneratedTemporary(
+  filesystem: LiveViewPolicySpoolFilesystem,
+  path: string,
+): Promise<void> {
+  try {
+    await filesystem.unlink(path);
+  } catch (error: unknown) {
+    if (!hasCode(error, "ENOENT")) throw error;
   }
 }
 

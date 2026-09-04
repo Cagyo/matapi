@@ -9,7 +9,9 @@ import type { LiveViewPolicyResultPort } from "../domain/ports/live-view-policy-
 import { assertNoDuplicateJsonKeys } from "./fs-live-view-settings.adapter";
 import {
   assertRequestId,
+  DEFAULT_LIVE_VIEW_POLICY_SPOOL_FILESYSTEM,
   hasCode,
+  type LiveViewPolicySpoolFilesystem,
   readSafeSpoolEntry,
   type SafeSpoolDirectoryOptions,
   validateSafeSpoolDirectory,
@@ -29,6 +31,7 @@ export interface FsLiveViewPolicyResultOptions {
   readonly expectedFileUid?: number;
   readonly expectedFileGid?: number;
   readonly maximumBytes?: number;
+  readonly filesystem?: LiveViewPolicySpoolFilesystem;
 }
 
 export class FsLiveViewPolicyResultAdapter implements LiveViewPolicyResultPort {
@@ -43,6 +46,8 @@ export class FsLiveViewPolicyResultAdapter implements LiveViewPolicyResultPort {
       expectedUid: options.expectedDirectoryUid ?? ROOT_UID,
       expectedGid: options.expectedDirectoryGid ?? process.getgid?.() ?? -1,
       expectedMode: RESULT_DIRECTORY_MODE,
+      filesystem:
+        options.filesystem ?? DEFAULT_LIVE_VIEW_POLICY_SPOOL_FILESYSTEM,
     };
     this.#expectedFileUid = options.expectedFileUid ?? ROOT_UID;
     this.#expectedFileGid = options.expectedFileGid ?? process.getgid?.() ?? -1;
@@ -66,6 +71,7 @@ export class FsLiveViewPolicyResultAdapter implements LiveViewPolicyResultPort {
         minimumBytes: 1,
         maximumBytes: this.#maximumBytes,
         parse: parseResult,
+        filesystem: this.#directory.filesystem,
       });
       if (result.requestId !== requestId) throw new LiveViewPolicyApplyError();
       return result;
