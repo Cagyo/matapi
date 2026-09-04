@@ -100,9 +100,9 @@ export class ReconcileRtspPolicyUseCase {
       rtspEnabled: input.rtspEnabled,
     });
 
-    await this.requests.publish(request);
     let terminal: LiveViewPolicyResultV1;
     try {
+      await this.requests.publish(request);
       await this.controller.start();
       const result = await this.pollResult(request.requestId);
       terminal = createLiveViewPolicyResultV1(result);

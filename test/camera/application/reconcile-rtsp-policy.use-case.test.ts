@@ -6,6 +6,7 @@ import { LiveViewPolicyApplyError } from "../../../src/camera/domain/errors/live
 import { LiveViewSettingsBusyError } from "../../../src/camera/domain/errors/live-view-settings-busy.error";
 import type {
   LiveViewPolicyFailureCode,
+  LiveViewPolicyRequestV1,
   LiveViewPolicyResultV1,
 } from "../../../src/camera/domain/live-view-policy";
 import type { LiveViewPolicyAcknowledgementPort } from "../../../src/camera/domain/ports/live-view-policy-acknowledgement.port";
@@ -190,11 +191,61 @@ describe("ReconcileRtspPolicyUseCase", () => {
     expect(test.controller.start).toHaveBeenCalledTimes(2);
   });
 
+  it("latches a request that became visible before publication rejected", async () => {
+    const test = setup([succeeded({ resultingRtspEnabled: false })]);
+    const visibleRequests: LiveViewPolicyRequestV1[] = [];
+    test.requests.publish.mockImplementation(async (request) => {
+      visibleRequests.push(request);
+      if (visibleRequests.length === 1) {
+        throw new Error("temporary unlink failed after target link");
+      }
+      return "published";
+    });
+    const composed = composeRtspTransition(test);
+    let applyError: unknown;
+    let compensationError: unknown;
+
+    await runRtspTransition(composed.camera, async () => {
+      try {
+        await composed.camera.rtsp.afterEnable();
+      } catch (error) {
+        applyError = error;
+        try {
+          await composed.camera.rtsp.beforeDisable();
+        } catch (compensationFailure) {
+          compensationError = compensationFailure;
+        }
+      }
+    });
+
+    expect(applyError).toBeInstanceOf(LiveViewPolicyApplyError);
+    expect(compensationError).toBeInstanceOf(LiveViewSettingsBusyError);
+    expect(composed.coordinator.isRestartPending()).toBe(true);
+    expect(visibleRequests).toEqual([
+      {
+        version: 1,
+        kind: "rtsp-state-reconcile",
+        requestId,
+        expectedGeneration: 4,
+        rtspEnabled: true,
+      },
+    ]);
+    expect(test.requests.publish).toHaveBeenCalledTimes(1);
+    expect(test.acknowledgements.publish).not.toHaveBeenCalled();
+    await expect(
+      runRtspTransition(composed.camera, () =>
+        composed.camera.rtsp.afterEnable(),
+      ),
+    ).rejects.toBeInstanceOf(LiveViewSettingsBusyError);
+    expect(test.requests.publish).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     "controller failure",
     "result read failure",
     "invalid result",
     "timeout",
+    "acknowledgement failure",
   ] as const)(
     "latches %s after publication and blocks compensation or another request",
     async (scenario) => {
@@ -210,6 +261,11 @@ describe("ReconcileRtspPolicyUseCase", () => {
       if (scenario === "result read failure") {
         test.results.read.mockRejectedValueOnce(
           new Error("result read failed"),
+        );
+      }
+      if (scenario === "acknowledgement failure") {
+        test.acknowledgements.publish.mockRejectedValueOnce(
+          new Error("acknowledgement publish failed"),
         );
       }
       const composed = composeRtspTransition(test);
@@ -229,6 +285,46 @@ describe("ReconcileRtspPolicyUseCase", () => {
       expect(test.requests.publish).toHaveBeenCalledTimes(1);
     },
   );
+
+  it("allows a valid closed helper failure to run opposite compensation under the same lease", async () => {
+    const test = setup([
+      failed("policy-apply-failed"),
+      succeeded({ resultingRtspEnabled: false }),
+    ]);
+    const composed = composeRtspTransition(test);
+
+    await expect(
+      runRtspTransition(composed.camera, async () => {
+        try {
+          await composed.camera.rtsp.afterEnable();
+        } catch (error) {
+          await composed.camera.rtsp.beforeDisable();
+          throw error;
+        }
+      }),
+    ).rejects.toBeInstanceOf(LiveViewPolicyApplyError);
+
+    expect(composed.coordinator.isRestartPending()).toBe(false);
+    expect(test.requests.publish).toHaveBeenCalledTimes(2);
+    expect(test.requests.publish).toHaveBeenNthCalledWith(1, {
+      version: 1,
+      kind: "rtsp-state-reconcile",
+      requestId,
+      expectedGeneration: 4,
+      rtspEnabled: true,
+    });
+    expect(test.requests.publish).toHaveBeenNthCalledWith(2, {
+      version: 1,
+      kind: "rtsp-state-reconcile",
+      requestId,
+      expectedGeneration: 4,
+      rtspEnabled: false,
+    });
+    expect(test.acknowledgements.publish).toHaveBeenCalledTimes(2);
+    expect(test.controller.start).toHaveBeenCalledTimes(4);
+    expect(composed.gate.close).toHaveBeenCalledOnce();
+    expect(composed.gate.open).not.toHaveBeenCalled();
+  });
 
   it.each([
     ["wrong kind", succeeded({ kind: "settings-mutation" })],
