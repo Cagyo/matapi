@@ -558,6 +558,62 @@ describe("live view policy spool adapters", () => {
     });
   });
 
+  it("recovers a linked target without deleting malformed temps left by earlier crashes", async () => {
+    const { requestsDirectory } = await fixture();
+    const requestTarget = join(requestsDirectory, `${REQUEST_ID}.json`);
+    const zeroByteTemporaryName = `.${REQUEST_ID}.json.00000000-0000-4000-8000-000000000000.tmp`;
+    const partialTemporaryName = `.${REQUEST_ID}.json.99999999-9999-4999-8999-999999999999.tmp`;
+    const requestOrphanName = `.${REQUEST_ID}.json.${TEMPORARY_ID}.tmp`;
+    const zeroByteTemporary = join(requestsDirectory, zeroByteTemporaryName);
+    const partialTemporary = join(requestsDirectory, partialTemporaryName);
+    const requestOrphan = join(requestsDirectory, requestOrphanName);
+    const partialBody = canonicalRequestBody.slice(0, 47);
+    const recoveryOrder = [
+      zeroByteTemporaryName,
+      partialTemporaryName,
+      requestOrphanName,
+    ];
+    const requests = new FsLiveViewPolicyRequestAdapter({
+      directory: requestsDirectory,
+      expectedDirectoryUid: uid,
+      expectedDirectoryGid: gid,
+      expectedFileUid: uid,
+      expectedFileGid: gid,
+      filesystem: {
+        open,
+        link,
+        unlink,
+        readdir: async (path: string) => {
+          const names = await readdir(path);
+          return [...names].sort(
+            (left, right) =>
+              recoveryOrder.indexOf(left) - recoveryOrder.indexOf(right),
+          );
+        },
+      },
+    });
+
+    await writeFile(zeroByteTemporary, "", { mode: 0o600 });
+    await chmod(zeroByteTemporary, 0o600);
+    await writeFile(partialTemporary, partialBody, { mode: 0o600 });
+    await chmod(partialTemporary, 0o600);
+    await writeFile(requestOrphan, canonicalRequestBody, { mode: 0o600 });
+    await chmod(requestOrphan, 0o600);
+    await link(requestOrphan, requestTarget);
+    expect((await lstat(requestTarget)).nlink).toBe(2);
+
+    await expect(requests.publish(request)).resolves.toBe("already-published");
+
+    expect((await lstat(requestTarget)).nlink).toBe(1);
+    await expect(lstat(requestOrphan)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    expect((await lstat(zeroByteTemporary)).nlink).toBe(1);
+    expect(await readFile(zeroByteTemporary, "utf8")).toBe("");
+    expect((await lstat(partialTemporary)).nlink).toBe(1);
+    expect(await readFile(partialTemporary, "utf8")).toBe(partialBody);
+  });
+
   it("lets a canonical concurrent retry finish an in-flight linked publication", async () => {
     const { requestsDirectory } = await fixture();
     let linkCalls = 0;

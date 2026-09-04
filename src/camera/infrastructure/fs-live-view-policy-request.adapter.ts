@@ -428,9 +428,8 @@ async function readExistingOrRecoverInterrupted<T>(
         [1, 2],
         options.directory.filesystem,
       );
-    } catch (error: unknown) {
-      if (hasCode(error, "ENOENT")) continue;
-      throw error;
+    } catch {
+      continue;
     }
     if (
       candidateEntry.metadata.dev === targetEntry.metadata.dev &&
