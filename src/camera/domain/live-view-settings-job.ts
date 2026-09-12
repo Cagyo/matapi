@@ -25,6 +25,9 @@ export type LiveViewSettingsJobFailureCode =
 
 export interface LiveViewSettingsJob {
   readonly id: string;
+  readonly requestedByUserId: number;
+  readonly requestedInChatId: number;
+  readonly workflowReceiptId: string;
   readonly status: LiveViewSettingsJobStatus;
   readonly activeSlot: 1 | null;
   readonly expectedGeneration: number;
@@ -112,6 +115,9 @@ export function createLiveViewSettingsJob(value: unknown): LiveViewSettingsJob {
     !isRecord(value) ||
     !hasExactKeys(value, [
       "id",
+      "requestedByUserId",
+      "requestedInChatId",
+      "workflowReceiptId",
       "status",
       "expectedGeneration",
       "candidateSettings",
@@ -119,6 +125,9 @@ export function createLiveViewSettingsJob(value: unknown): LiveViewSettingsJob {
     ]) ||
     typeof value.id !== "string" ||
     !REQUEST_ID.test(value.id) ||
+    typeof value.requestedByUserId !== "number" || !Number.isSafeInteger(value.requestedByUserId) ||
+    typeof value.requestedInChatId !== "number" || !Number.isSafeInteger(value.requestedInChatId) ||
+    typeof value.workflowReceiptId !== "string" || !REQUEST_ID.test(value.workflowReceiptId) ||
     !isStatus(value.status) ||
     !isSafeGeneration(value.expectedGeneration)
   ) {
@@ -145,6 +154,9 @@ export function createLiveViewSettingsJob(value: unknown): LiveViewSettingsJob {
 
   return {
     id: value.id,
+    requestedByUserId: value.requestedByUserId,
+    requestedInChatId: value.requestedInChatId,
+    workflowReceiptId: value.workflowReceiptId,
     status: value.status,
     activeSlot: activeSlotFor(value.status),
     expectedGeneration: value.expectedGeneration,
@@ -172,6 +184,9 @@ export function transitionLiveViewSettingsJob(
 
   return createLiveViewSettingsJob({
     id: current.id,
+    requestedByUserId: current.requestedByUserId,
+    requestedInChatId: current.requestedInChatId,
+    workflowReceiptId: current.workflowReceiptId,
     status,
     expectedGeneration: current.expectedGeneration,
     candidateSettings: current.candidateSettings,

@@ -29,6 +29,9 @@ describe('InMemoryLiveViewSettingsJobRepository', () => {
       status: 'restart-required',
       activeSlot: 1,
       failureCode: 'restart-dispatch-failed',
+      requestedByUserId: 1001,
+      requestedInChatId: 1001,
+      workflowReceiptId: 'QrStUvWxYz012345',
     });
 
     expect(() => jobs.claimPrepared({ ...prepared, id: 'BcDeFgHiJkLmNoPq' }))

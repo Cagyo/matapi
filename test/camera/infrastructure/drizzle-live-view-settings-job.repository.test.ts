@@ -25,6 +25,11 @@ describe('DrizzleLiveViewSettingsJobRepository', () => {
 
   afterEach(() => sqlite.close());
 
+  it('returns persisted delivery identity for exact workflow recovery', async () => {
+    seedPrepared();
+    expect(await jobs.findActive()).toMatchObject({ requestedByUserId: 1001, requestedInChatId: 1001, workflowReceiptId: 'QrStUvWxYz012345' });
+  });
+
   it('follows committed to succeeded and releases the active slot', async () => {
     seedPrepared();
 

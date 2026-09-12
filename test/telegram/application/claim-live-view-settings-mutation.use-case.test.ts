@@ -113,10 +113,11 @@ describe('ClaimLiveViewSettingsMutationUseCase', () => {
       await actions.beginWorkflowReturn(receipt(2002, 'ZaYbXcWdVeUfTgSh', 'BcDeFgHiJkLmNoPq'));
       const claim = new ClaimLiveViewSettingsMutationUseCase(actions, settingsAt(3), clock);
 
-      await claim.execute({
+      const claimed = await claim.execute({
         userId: 1001, chatId: 1001, receiptId: 'QrStUvWxYz012345',
         jobId: 'AbCdEfGhIjKlMnOp', expectedGeneration: 3, candidate,
       });
+      expect(claimed).toMatchObject({ requestedByUserId: 1001, requestedInChatId: 1001, workflowReceiptId: 'QrStUvWxYz012345' });
       await expect(claim.execute({
         userId: 2002, chatId: 2002, receiptId: 'ZaYbXcWdVeUfTgSh',
         jobId: 'BcDeFgHiJkLmNoPq', expectedGeneration: 3, candidate,

@@ -465,6 +465,9 @@ function toLiveViewSettingsJob(
 ): LiveViewSettingsJob {
   return {
     id: row.id,
+    requestedByUserId: row.requestedByUserId,
+    requestedInChatId: row.requestedInChatId,
+    workflowReceiptId: row.workflowReceiptId,
     status: 'prepared',
     activeSlot: 1,
     expectedGeneration: row.expectedGeneration,

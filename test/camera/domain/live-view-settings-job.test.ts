@@ -8,7 +8,10 @@ import {
   transitionLiveViewSettingsJob,
 } from "../../../src/camera/domain/live-view-settings-job";
 
+const delivery = { requestedByUserId: 1, requestedInChatId: 1, workflowReceiptId: 'abcdefghijklmnop' };
+
 const prepared = createLiveViewSettingsJob({
+  ...delivery,
   id: "AbCdEfGhIjKlMnOp",
   status: "prepared",
   expectedGeneration: 4,
@@ -17,6 +20,9 @@ const prepared = createLiveViewSettingsJob({
 });
 
 describe("LiveViewSettingsJob transitions", () => {
+  it('preserves the exact delivery identity through transitions', () => {
+    expect(transitionLiveViewSettingsJob(prepared, 'published')).toMatchObject(delivery);
+  });
   it("permits the durable active progression", () => {
     expect(canTransitionLiveViewSettingsJob("prepared", "published")).toBe(
       true,
@@ -70,6 +76,7 @@ describe("LiveViewSettingsJob transitions", () => {
     expect(
       createLiveViewSettingsJob({
         id: prepared.id,
+        ...delivery,
         status: "restart-required",
         expectedGeneration: prepared.expectedGeneration,
         candidateSettings: prepared.candidateSettings,
@@ -83,6 +90,7 @@ describe("LiveViewSettingsJob transitions", () => {
     expect(() =>
       createLiveViewSettingsJob({
         id: prepared.id,
+        ...delivery,
         status: "restart-required",
         expectedGeneration: prepared.expectedGeneration,
         candidateSettings: prepared.candidateSettings,

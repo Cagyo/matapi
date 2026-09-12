@@ -119,6 +119,7 @@ function setup(overrides: {
   exportConfig?: { handleCommand: ReturnType<typeof vi.fn> };
   systemUpdate?: { handleCommand: ReturnType<typeof vi.fn> };
   workflowNavigation?: { complete: ReturnType<typeof vi.fn> };
+  liveViewSettings?: { handleCommand: ReturnType<typeof vi.fn> };
 } = {}) {
   const guard = { registered: vi.fn() } as unknown as RoleMiddleware;
   const open = {
@@ -179,6 +180,8 @@ function setup(overrides: {
     { now: () => new Date('2030-01-01T00:00:00.000Z') },
     overrides.workflows ?? workflowEntry,
     overrides.workflowNavigation as never,
+    undefined,
+    overrides.liveViewSettings as never,
   );
   const commands: Record<string, (...args: any[]) => Promise<void>> = {};
   const callbacks: { regex: RegExp; fn: (...args: any[]) => Promise<void> }[] = [];
@@ -568,7 +571,8 @@ describe('HomeHandler', () => {
   });
 
   it('starts Live view setup once with its captured Admin tools origin', async () => {
-    const { callbacks, validate, navigation, workflowEntry } = setup();
+    const liveViewSettings = { handleCommand: vi.fn().mockResolvedValue(undefined) };
+    const { callbacks, validate, navigation, workflowEntry } = setup({ liveViewSettings });
     const ctx = context(encodeHomeCallback(identity.token, 1, { kind: 'live-view-settings' }));
     (validate.execute as ReturnType<typeof vi.fn>).mockResolvedValue({
       kind: 'accepted', active: identity, view: { kind: 'admin-tools' },
@@ -582,6 +586,7 @@ describe('HomeHandler', () => {
     expect(workflowEntry.begin).toHaveBeenCalledWith(ctx, 'live-view-settings', {
       source: 'captured', view: { kind: 'admin-tools' }, sessionToken: identity.token,
     });
+    expect(liveViewSettings.handleCommand).toHaveBeenCalledWith(ctx, { receipt: workflowReceipt });
   });
 
   it.each([

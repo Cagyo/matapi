@@ -29,6 +29,9 @@ export class InMemoryLiveViewSettingsJobRepository implements LiveViewSettingsJo
     }
     const job = createLiveViewSettingsJob({
       id: input.id,
+      requestedByUserId: input.requestedByUserId,
+      requestedInChatId: input.requestedInChatId,
+      workflowReceiptId: input.workflowReceiptId,
       status: 'prepared',
       expectedGeneration: input.expectedGeneration,
       candidateSettings: input.candidateSettings,

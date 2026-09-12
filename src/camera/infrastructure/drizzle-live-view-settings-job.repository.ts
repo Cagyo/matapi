@@ -109,6 +109,9 @@ function stateChanged(id: string): RangeError {
 function toJob(row: JobRow): LiveViewSettingsJob {
   return createLiveViewSettingsJob({
     id: row.id,
+    requestedByUserId: row.requestedByUserId,
+    requestedInChatId: row.requestedInChatId,
+    workflowReceiptId: row.workflowReceiptId,
     status: row.status,
     expectedGeneration: row.expectedGeneration,
     candidateSettings: row.candidateSettings,

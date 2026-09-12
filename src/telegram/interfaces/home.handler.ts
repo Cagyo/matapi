@@ -36,6 +36,7 @@ import { TelegramHandler } from './telegram-handler';
 import { WorkflowEntryCoordinator, type WorkflowLaunch } from './workflow-entry.coordinator';
 import { WorkflowNavigationHandler } from './workflow-navigation.handler';
 import { FeatureHandler } from './feature.handler';
+import { LiveViewSettingsHandler } from './live-view-settings.handler';
 
 type HomeEffectOutcome =
   | Extract<HomeNavigationResult, { kind: 'render' | 'restart' | 'recovery' }>
@@ -76,6 +77,7 @@ export class HomeHandler implements TelegramHandler {
     @Optional() @Inject(WorkflowNavigationHandler)
     private readonly workflowNavigation?: WorkflowNavigationHandler,
     @Optional() private readonly feature?: FeatureHandler,
+    @Optional() private readonly liveViewSettings?: LiveViewSettingsHandler,
   ) {}
 
   register(composer: Composer<TelegramContext>): void {
@@ -401,9 +403,10 @@ export class HomeHandler implements TelegramHandler {
         return launch ? this.feature.handleList(ctx, launch) : this.recover(ctx, 'unavailable');
       }
       case 'live-view-settings': {
+        if (!this.liveViewSettings) return this.recover(ctx, 'unavailable');
         const launch = await this.beginWorkflow(ctx, 'live-view-settings', active, { kind: 'admin-tools' });
         if (!launch) return this.recover(ctx, 'unavailable');
-        return;
+        return this.liveViewSettings.handleCommand(ctx, launch);
       }
       default: return this.recover(ctx, 'unavailable');
     }
