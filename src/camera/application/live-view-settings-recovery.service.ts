@@ -67,7 +67,9 @@ export class LiveViewSettingsRecoveryService implements OnApplicationBootstrap {
     }
     const epoch = this.gate?.close();
     const rtspFeature = (await this.features?.listAll())?.find(feature => feature.name === 'rtsp');
-    await this.reconcileRtspPolicy?.execute({ rtspEnabled: Boolean(rtspFeature?.installed && rtspFeature.enabled) });
+    if (rtspFeature?.installed === true) {
+      await this.reconcileRtspPolicy?.execute({ rtspEnabled: rtspFeature.enabled });
+    }
     if (reopenLiveView) this.gate?.openIfCurrent(epoch!);
     if (recoverable) {
       const terminal = await this.jobs.findById(recoverable.id);

@@ -192,6 +192,18 @@ describe('admin live view settings acceptance', () => {
     expect(s.rtsp.isOpen()).toBe(false);
   });
 
+  it('opens Motion-only boot readiness without publishing policy when RTSP is uninstalled', async () => {
+    const s = setup();
+    s.settings.setCommitted({ version: 1, generation: 3, ...enabled });
+    await s.settings.simulateDevelopmentRestart();
+    s.features.listAll = async () => [{ name: 'rtsp', installed: false, enabled: false, config: null, attentionReason: null }];
+    const publish = vi.spyOn(s.policy, 'publish');
+    await s.recovery.onApplicationBootstrap();
+    await s.readiness.wait();
+    expect(() => s.gate.assertCanStart()).not.toThrow();
+    expect(publish).not.toHaveBeenCalled();
+  });
+
   it.each([false, true])('reconciles persisted RTSP state before opening boot gates (helper failure: %s)', async fail => {
     const s = setup(false);
     s.settings.setCommitted({ version: 1, generation: 3, enabled: true, allowedCameraCidrs: ['10.0.0.0/8'] });
