@@ -45,8 +45,9 @@ describe('OpenLiveStreamUseCase', () => {
         'Object, live_view_start_gate_service_1.LiveViewStartGate,',
       );
       expect(compiledUseCase).toContain(
-        'rtsp_source_start_gate_service_1.RtspSourceStartGate, Object])',
+        'rtsp_source_start_gate_service_1.RtspSourceStartGate, Object,',
       );
+      expect(compiledUseCase).toContain('live_view_readiness_barrier_service_1.LiveViewReadinessBarrierService])');
     } finally {
       rmSync(outputDir, { force: true, recursive: true });
     }

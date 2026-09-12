@@ -78,7 +78,7 @@ function build(options: Options = {}) {
   const adapter = new InstalledRtspPolicyStatusAdapter({
     inspector: new RtspPolicyInspectorGateway({ execFile }),
     files: { readSealed },
-    env: options.env ?? { RTSP_ALLOWED_CIDRS: '192.168.1.0/24', RTSP_POLICY_DIGEST: String(document.digest) },
+    env: options.env ?? { RTSP_POLICY_DIGEST: String(document.digest) },
   });
   return { adapter, readSealed, execFile };
 }
@@ -131,13 +131,13 @@ describe('installed RTSP policy status', () => {
     const { adapter } = build({
       document,
       stdout: verdict({ digest, networks }),
-      env: { RTSP_ALLOWED_CIDRS: '192.168.1.0/24,fd00::/64', RTSP_POLICY_DIGEST: digest },
+      env: { RTSP_POLICY_DIGEST: digest },
     });
 
     await expect(adapter.inspect()).resolves.toEqual({ state: 'ready', digest, networks });
   });
 
-  it('canonicalizes the worker-visible CIDR list instead of comparing raw text', async () => {
+  it('verifies the public network projection without a settings CIDR environment value', async () => {
     const document = summaryDocument({
       networks: [
         { family: 4 as const, cidr: '192.168.1.0/24', interface: 'eth0' },
@@ -148,7 +148,6 @@ describe('installed RTSP policy status', () => {
       document,
       stdout: verdict({ digest: document.digest, networks: document.networks }),
       env: {
-        RTSP_ALLOWED_CIDRS: ' 192.168.1.0/24 , FD00:0000:0000:0000::/64 ',
         RTSP_POLICY_DIGEST: document.digest,
       },
     });
@@ -156,7 +155,7 @@ describe('installed RTSP policy status', () => {
     await expect(adapter.inspect()).resolves.toMatchObject({ state: 'ready' });
   });
 
-  it('accepts one environment entry for a CIDR reached through two interfaces', async () => {
+  it('accepts a verified CIDR reached through two interfaces', async () => {
     const networks = [
       { family: 4 as const, cidr: '192.168.1.0/24', interface: 'eth0' },
       { family: 4 as const, cidr: '192.168.1.0/24', interface: 'wlan0' },
@@ -165,7 +164,7 @@ describe('installed RTSP policy status', () => {
     const { adapter } = build({
       document,
       stdout: verdict({ digest: document.digest, networks }),
-      env: { RTSP_ALLOWED_CIDRS: '192.168.1.0/24', RTSP_POLICY_DIGEST: document.digest },
+      env: { RTSP_POLICY_DIGEST: document.digest },
     });
 
     await expect(adapter.inspect()).resolves.toMatchObject({ state: 'ready' });
@@ -222,7 +221,7 @@ describe('installed RTSP policy status', () => {
 
     const { adapter, execFile } = build({
       document,
-      env: { RTSP_ALLOWED_CIDRS: '192.168.1.0/24', RTSP_POLICY_DIGEST: stored.digest },
+      env: { RTSP_POLICY_DIGEST: stored.digest },
     });
 
     await expect(adapter.inspect()).resolves.toEqual({ state: 'unavailable', digest: null, networks: [] });
@@ -249,7 +248,7 @@ describe('installed RTSP policy status', () => {
     const adapter = new InstalledRtspPolicyStatusAdapter({
       inspector: new RtspPolicyInspectorGateway({ execFile }),
       files: { readSealed },
-      env: { RTSP_ALLOWED_CIDRS: '192.168.1.0/24', RTSP_POLICY_DIGEST: summaryDocument().digest },
+      env: { RTSP_POLICY_DIGEST: summaryDocument().digest },
     });
 
     await expect(adapter.inspect()).resolves.toEqual({ state: 'unavailable', digest: null, networks: [] });
@@ -257,10 +256,6 @@ describe('installed RTSP policy status', () => {
   });
 
   it.each([
-    ['a stale CIDR list', { RTSP_ALLOWED_CIDRS: '10.0.0.0/8' }],
-    ['an absent CIDR list', { RTSP_ALLOWED_CIDRS: undefined }],
-    ['a malformed CIDR list', { RTSP_ALLOWED_CIDRS: '192.168.001.0/24' }],
-    ['an extra CIDR', { RTSP_ALLOWED_CIDRS: '192.168.1.0/24,10.0.0.0/8' }],
     ['a stale digest', { RTSP_POLICY_DIGEST: 'f'.repeat(64) }],
     ['an absent digest', { RTSP_POLICY_DIGEST: undefined }],
     ['a shifted UDP range', { RTSP_UDP_PORT_FIRST: '24010', RTSP_UDP_PORT_LAST: '24011' }],
@@ -268,7 +263,6 @@ describe('installed RTSP policy status', () => {
   ])('refuses the projection when the process environment disagrees through %s', async (_label, overrides) => {
     const { adapter, execFile } = build({
       env: {
-        RTSP_ALLOWED_CIDRS: '192.168.1.0/24',
         RTSP_POLICY_DIGEST: summaryDocument().digest,
         ...overrides,
       },
@@ -280,7 +274,7 @@ describe('installed RTSP policy status', () => {
 
   it('accepts an environment that leaves the default UDP range implicit', async () => {
     const { adapter } = build({
-      env: { RTSP_ALLOWED_CIDRS: '192.168.1.0/24', RTSP_POLICY_DIGEST: summaryDocument().digest, RTSP_UDP_PORT_FIRST: '' },
+      env: { RTSP_POLICY_DIGEST: summaryDocument().digest, RTSP_UDP_PORT_FIRST: '' },
     });
 
     await expect(adapter.inspect()).resolves.toMatchObject({ state: 'ready' });
@@ -333,7 +327,7 @@ describe('installed RTSP policy status', () => {
     const adapter = new InstalledRtspPolicyStatusAdapter({
       inspector: new RtspPolicyInspectorGateway({ execFile }),
       files: { readSealed: vi.fn(async () => sealed(body)) },
-      env: { RTSP_ALLOWED_CIDRS: '192.168.1.0/24', RTSP_POLICY_DIGEST: summaryDocument().digest },
+      env: { RTSP_POLICY_DIGEST: summaryDocument().digest },
     });
 
     await adapter.requireCurrent();

@@ -11,6 +11,7 @@ import {
 import { LiveStreamSourceResolverService } from './live-stream-source-resolver.service';
 import { LiveViewStartGate } from './live-view-start-gate.service';
 import { RtspSourceStartGate } from './rtsp-source-start-gate.service';
+import { LiveViewReadinessBarrierService } from './live-view-readiness-barrier.service';
 import type { LiveStreamSource } from '../domain/live-stream.entity';
 import { FEATURE_AVAILABILITY, type FeatureAvailabilityPort } from '../../features/domain/ports/feature-availability.port';
 
@@ -35,9 +36,11 @@ export class OpenLiveStreamUseCase {
     private readonly liveViewStartGate: LiveViewStartGate,
     private readonly sourceStartGate: RtspSourceStartGate,
     @Inject(FEATURE_AVAILABILITY) private readonly availability?: FeatureAvailabilityPort,
+    @Inject(LiveViewReadinessBarrierService) private readonly readiness?: LiveViewReadinessBarrierService,
   ) {}
 
   async execute(input: OpenLiveStreamInput): Promise<OpenLiveStreamResult> {
+    await this.readiness?.wait();
     this.liveViewStartGate.assertCanStart();
     const source = await this.source.resolve(input.cameraName);
     await this.ensureAvailable(source);
@@ -45,6 +48,7 @@ export class OpenLiveStreamUseCase {
   }
 
   async executeById(input: OpenLiveStreamByIdInput): Promise<OpenLiveStreamResult> {
+    await this.readiness?.wait();
     this.liveViewStartGate.assertCanStart();
     const source = await this.source.resolveById(input.cameraId);
     await this.ensureAvailable(source);

@@ -3,6 +3,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CameraModule } from '../camera/camera.module';
 import { CameraSourceAuthorizationRegistry } from '../camera/application/camera-source-authorization-registry.service';
+import { LIVE_VIEW_SETTINGS_STORE } from '../camera/domain/ports/live-view-settings-store.port';
+import { LIVE_VIEW_SETTINGS_JOB_REPOSITORY } from '../camera/domain/ports/live-view-settings-job-repository.port';
+import { InMemoryLiveViewSettingsJobRepository } from '../camera/infrastructure/in-memory-live-view-settings-job.repository';
+import { CLOCK } from '../events/domain/ports/clock.port';
+import { ClaimLiveViewSettingsMutationUseCase } from './application/claim-live-view-settings-mutation.use-case';
+import { LiveViewSettingsDraftRegistry } from './interfaces/live-view-settings-draft.registry';
+import { LiveViewSettingsHandler } from './interfaces/live-view-settings.handler';
 import { ConfigModule } from '../config/config.module';
 import { EventModule } from '../events/event.module';
 import { FeatureModule } from '../features/feature.module';
@@ -217,8 +224,8 @@ const mode = resolveBotMode();
       provide: HOME_ACTION_REPOSITORY,
       ...(mode === 'mock'
         ? {
-          useFactory: (users: InMemoryUserRepository) => new InMemoryHomeActionRepository(users),
-          inject: [USER_REPOSITORY],
+          useFactory: (users: InMemoryUserRepository, jobs: InMemoryLiveViewSettingsJobRepository) => new InMemoryHomeActionRepository(users, undefined, jobs),
+          inject: [USER_REPOSITORY, LIVE_VIEW_SETTINGS_JOB_REPOSITORY],
         }
         : { useClass: DrizzleHomeActionRepository }),
     },
@@ -293,6 +300,13 @@ const mode = resolveBotMode();
     HomeNavigationUseCase,
     BeginWorkflowReturnUseCase,
     ClaimFeatureMutationUseCase,
+    {
+      provide: ClaimLiveViewSettingsMutationUseCase,
+      useFactory: (...args: ConstructorParameters<typeof ClaimLiveViewSettingsMutationUseCase>) => new ClaimLiveViewSettingsMutationUseCase(...args),
+      inject: [HOME_ACTION_REPOSITORY, LIVE_VIEW_SETTINGS_STORE, CLOCK],
+    },
+    LiveViewSettingsDraftRegistry,
+    LiveViewSettingsHandler,
     UpdateWorkflowReturnUseCase,
     ClaimWorkflowReturnUseCase,
     CompleteWorkflowReturnUseCase,

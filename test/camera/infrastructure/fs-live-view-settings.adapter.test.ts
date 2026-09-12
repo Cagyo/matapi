@@ -399,7 +399,7 @@ async function openWithReportedMode(
             return (target.mode & ~0o7777) | reportedMode;
           }
           const value = Reflect.get(target, property, target) as unknown;
-          return typeof value === "function" ? value.bind(target) : value;
+          return typeof value === "function" ? value.bind(target) as unknown : value;
         },
       });
     },

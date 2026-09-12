@@ -77,7 +77,7 @@ export class HomeHandler implements TelegramHandler {
     @Optional() @Inject(WorkflowNavigationHandler)
     private readonly workflowNavigation?: WorkflowNavigationHandler,
     @Optional() private readonly feature?: FeatureHandler,
-    @Optional() private readonly liveViewSettings?: LiveViewSettingsHandler,
+    @Optional() @Inject(LiveViewSettingsHandler) private readonly liveViewSettings?: LiveViewSettingsHandler,
   ) {}
 
   register(composer: Composer<TelegramContext>): void {

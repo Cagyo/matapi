@@ -136,6 +136,8 @@ export async function readBounded(
 }
 
 const JSON_PROPERTY =
+  // JSON strings cannot contain unescaped control characters.
+  // eslint-disable-next-line no-control-regex
   /"(?:\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4})|[^"\\\u0000-\u001f])*"\s*:/gu;
 
 export function assertNoDuplicateJsonKeys(raw: string): void {

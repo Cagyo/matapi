@@ -58,6 +58,7 @@ import {
   type LiveViewPolicyMutationLease,
 } from "./live-view-policy-coordinator.service";
 import { LiveViewStartGate } from "./live-view-start-gate.service";
+import { LiveViewSettingsOutcomeRegistryService } from './live-view-settings-outcome-registry.service';
 
 const DEFAULT_RESULT_POLL_INTERVAL_MS = 250;
 const POLICY_APPLIER_TIMEOUT_MS = 60_000;
@@ -127,6 +128,7 @@ export class ReconcileLiveViewSettingsJobUseCase {
     options: ReconcileLiveViewSettingsJobOptions = {},
     @Optional()
     private readonly restartActivation?: LiveViewRestartActivationService,
+    @Optional() private readonly outcomes?: LiveViewSettingsOutcomeRegistryService,
   ) {
     this.maxResultPolls = positiveInteger(
       options.maxResultPolls ?? DEFAULT_MAX_RESULT_POLLS,
@@ -185,6 +187,11 @@ export class ReconcileLiveViewSettingsJobUseCase {
         "request-publish-failed",
       );
       return { kind: "failed", failureCode: failed.failureCode! };
+    }
+
+    if (policyState.rtspEnabled && job.candidateSettings.enabled && job.candidateSettings.allowedCameraCidrs.length === 0) {
+      await this.terminalizeFailure(job, 'request-invalid');
+      return { kind: 'failed', failureCode: 'request-invalid' };
     }
 
     const request = createLiveViewPolicyRequestV1({
@@ -437,6 +444,7 @@ export class ReconcileLiveViewSettingsJobUseCase {
     lease: LiveViewPolicyMutationLease,
     gateEpoch: number,
   ): Promise<ReconcileLiveViewSettingsJobResult> {
+    await this.outcomes?.notifyPreRestart(job);
     try {
       await this.restarter.restart(() =>
         this.settings.simulateDevelopmentRestart(),
