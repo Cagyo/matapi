@@ -301,7 +301,7 @@ function isInstallationId(value: string | undefined): value is string {
     {
       provide: LiveViewSettingsRecoveryService,
       useFactory: (...args: ConstructorParameters<typeof LiveViewSettingsRecoveryService>) => new LiveViewSettingsRecoveryService(...args),
-      inject: [LIVE_VIEW_SETTINGS_JOB_REPOSITORY, ReconcileLiveViewSettingsJobUseCase, LIVE_VIEW_SETTINGS_STORE, LiveViewStartGate, RtspSourceStartGate, LiveViewReadinessBarrierService, LiveViewSettingsOutcomeRegistryService],
+      inject: [LIVE_VIEW_SETTINGS_JOB_REPOSITORY, ReconcileLiveViewSettingsJobUseCase, LIVE_VIEW_SETTINGS_STORE, LiveViewStartGate, RtspSourceStartGate, LiveViewReadinessBarrierService, LiveViewSettingsOutcomeRegistryService, FEATURE_QUERY, ReconcileRtspPolicyUseCase],
     },
     mode === 'stub' ? InMemoryMediaRepository : DrizzleMediaRepository,
     {

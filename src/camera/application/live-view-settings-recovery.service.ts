@@ -17,6 +17,8 @@ import { LiveViewReadinessBarrierService } from './live-view-readiness-barrier.s
 import { LiveViewStartGate } from './live-view-start-gate.service';
 import { RtspSourceStartGate } from './rtsp-source-start-gate.service';
 import { LiveViewSettingsOutcomeRegistryService } from './live-view-settings-outcome-registry.service';
+import { FEATURE_QUERY, type FeatureQueryPort } from '../../features/domain/ports/feature-query.port';
+import { ReconcileRtspPolicyUseCase } from './reconcile-rtsp-policy.use-case';
 
 /** Resumes the one globally active settings mutation during application boot. */
 @Injectable()
@@ -31,6 +33,8 @@ export class LiveViewSettingsRecoveryService implements OnApplicationBootstrap {
     private readonly rtsp?: RtspSourceStartGate,
     private readonly readiness?: LiveViewReadinessBarrierService,
     private readonly outcomes?: LiveViewSettingsOutcomeRegistryService,
+    @Inject(FEATURE_QUERY) private readonly features?: FeatureQueryPort,
+    private readonly reconcileRtspPolicy?: ReconcileRtspPolicyUseCase,
   ) {}
 
   run(): Promise<ReconcileLiveViewSettingsJobResult | null> {
@@ -42,7 +46,7 @@ export class LiveViewSettingsRecoveryService implements OnApplicationBootstrap {
   }
 
   private async recover(): Promise<ReconcileLiveViewSettingsJobResult | null> {
-    const epoch = this.gate?.close();
+    this.gate?.close();
     this.rtsp?.close();
     const committed = await this.settings?.readCommitted();
     const active = await this.jobs.findActive();
@@ -52,9 +56,19 @@ export class LiveViewSettingsRecoveryService implements OnApplicationBootstrap {
       this.readiness?.markFailedClosed();
       return result;
     }
-    if (!recoverable && committed?.enabled && committed.generation === this.settings?.bootLoadedGeneration()) {
-      this.gate?.openIfCurrent(epoch!);
+    let reopenLiveView = !recoverable && committed?.enabled && committed.generation === this.settings?.bootLoadedGeneration();
+    if (recoverable && this.gate) {
+      try {
+        this.gate.assertCanStart();
+        reopenLiveView = true;
+      } catch {
+        reopenLiveView = false;
+      }
     }
+    const epoch = this.gate?.close();
+    const rtspFeature = (await this.features?.listAll())?.find(feature => feature.name === 'rtsp');
+    await this.reconcileRtspPolicy?.execute({ rtspEnabled: Boolean(rtspFeature?.installed && rtspFeature.enabled) });
+    if (reopenLiveView) this.gate?.openIfCurrent(epoch!);
     if (recoverable) {
       const terminal = await this.jobs.findById(recoverable.id);
       if (terminal?.status === 'succeeded' || terminal?.status === 'failed') {

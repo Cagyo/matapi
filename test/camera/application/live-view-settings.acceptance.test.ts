@@ -23,6 +23,8 @@ import type { WorkflowReturnReceipt } from '../../../src/telegram/domain/workflo
 import type { LiveViewSettingsCandidate } from '../../../src/camera/domain/live-view-settings';
 import type { LiveViewSettingsJob } from '../../../src/camera/domain/live-view-settings-job';
 import type { ProcessRestarterPort } from '../../../src/system/domain/ports/process-restarter.port';
+import type { FeatureQueryPort } from '../../../src/features/domain/ports/feature-query.port';
+import type { LiveViewPolicyRequestV1 } from '../../../src/camera/domain/live-view-policy';
 
 const now = new Date('2030-01-01T00:00:00Z');
 const jobId = 'AbCdEfGhIjKlMnOp';
@@ -45,10 +47,12 @@ function setup(rtspEnabled = false) {
   const restarter: ProcessRestarterPort = { restart: async (activate) => { await activate?.(); } };
   const coordinator = new LiveViewPolicyCoordinatorService();
   const activation = new LiveViewRestartActivationService(jobs, settings, gate, restarter, { now: () => now });
+  const features: FeatureQueryPort = { listAll: async () => [{ name: 'rtsp', installed: true, enabled: rtspEnabled, config: null, attentionReason: null }] };
   const reconcile = new ReconcileLiveViewSettingsJobUseCase(jobs, settings,
-    { listAll: async () => [{ name: 'rtsp', installed: true, enabled: rtspEnabled, config: null, attentionReason: null }] }, gate, sessions, coordinator, policy, policy, policy, policy,
+    features, gate, sessions, coordinator, policy, policy, policy, policy,
     restarter, { isAvailable: async () => true }, { now: () => now }, poll, activation, outcomes);
-  const recovery = new LiveViewSettingsRecoveryService(jobs, reconcile, settings, gate, rtsp, readiness, outcomes);
+  const reconcileRtspPolicy = new ReconcileRtspPolicyUseCase(settings, policy, policy, policy, policy, poll);
+  const recovery = new LiveViewSettingsRecoveryService(jobs, reconcile, settings, gate, rtsp, readiness, outcomes, features, reconcileRtspPolicy);
   const users = new InMemoryUserRepository([1, 2].map(telegramId => ({ telegramId, name: 'Admin', role: 'admin', locale: 'en',
     muted: false, nonCriticalPausedUntil: null, notificationPauseRevision: 0, quietStart: null, quietEnd: null, createdAt: now })));
   const actions = new InMemoryHomeActionRepository(users, undefined, jobs);
@@ -64,7 +68,7 @@ function setup(rtspEnabled = false) {
     return claim.execute({ userId, chatId: userId, receiptId: id, jobId: selectedJobId, expectedGeneration: 0, candidate });
   }
   return { settings, jobs, policy, gate, rtsp, readiness, outcomes, gateway, lease, sessions, restarter, activation,
-    reconcile, recovery, prepare, apply: new ApplyLiveViewSettingsUseCase(reconcile) };
+    reconcile, recovery, features, prepare, apply: new ApplyLiveViewSettingsUseCase(reconcile) };
 }
 
 afterEach(() => vi.useRealTimers());
@@ -172,7 +176,8 @@ describe('admin live view settings acceptance', () => {
     const reconcile = new ReconcileLiveViewSettingsJobUseCase(s.jobs, s.settings, { listAll: async () => [] },
       reboot.gate, reboot.sessions, new LiveViewPolicyCoordinatorService(), s.policy, s.policy, s.policy, s.policy,
       s.restarter, { isAvailable: async () => true }, { now: () => now }, poll);
-    const recovery = new LiveViewSettingsRecoveryService(s.jobs, reconcile, s.settings, reboot.gate, reboot.rtsp, reboot.readiness);
+    const recovery = new LiveViewSettingsRecoveryService(s.jobs, reconcile, s.settings, reboot.gate, reboot.rtsp, reboot.readiness,
+      reboot.outcomes, s.features, new ReconcileRtspPolicyUseCase(s.settings, s.policy, s.policy, s.policy, s.policy, poll));
     await recovery.run();
     expect(await s.jobs.findById(jobId)).toMatchObject({ status: 'succeeded', activeSlot: null });
     expect(() => reboot.gate.assertCanStart()).not.toThrow();
@@ -185,6 +190,38 @@ describe('admin live view settings acceptance', () => {
     await s.readiness.wait();
     expect(() => s.gate.assertCanStart()).toThrow();
     expect(s.rtsp.isOpen()).toBe(false);
+  });
+
+  it.each([false, true])('reconciles persisted RTSP state before opening boot gates (helper failure: %s)', async fail => {
+    const s = setup(false);
+    s.settings.setCommitted({ version: 1, generation: 3, enabled: true, allowedCameraCidrs: ['10.0.0.0/8'] });
+    await new ReconcileRtspPolicyUseCase(s.settings, s.policy, s.policy, s.policy, s.policy, poll).execute({ rtspEnabled: true });
+    await s.settings.simulateDevelopmentRestart();
+    const requests: LiveViewPolicyRequestV1[] = [];
+    let release!: () => void;
+    const waiting = new Promise<void>(resolve => { release = resolve; });
+    const reconcileRtspPolicy = new ReconcileRtspPolicyUseCase(s.settings,
+      { publish: async request => { requests.push(request); return s.policy.publish(request); } },
+      { start: async () => { await waiting; if (fail) throw new Error('helper unavailable'); await s.policy.start(); } },
+      s.policy, s.policy, poll);
+    const recovery = new LiveViewSettingsRecoveryService(s.jobs, s.reconcile, s.settings, s.gate, s.rtsp, s.readiness,
+      s.outcomes, s.features, reconcileRtspPolicy);
+    let ready = false;
+    void s.readiness.wait().then(() => { ready = true; });
+    const boot = recovery.onApplicationBootstrap();
+    await vi.waitFor(() => expect(requests).toHaveLength(1));
+    expect(requests[0]).toMatchObject({ kind: 'rtsp-state-reconcile', expectedGeneration: 3, rtspEnabled: false });
+    expect(() => s.gate.assertCanStart()).toThrow();
+    expect(s.rtsp.isOpen()).toBe(false);
+    expect(ready).toBe(false);
+    release();
+    await boot;
+    await s.readiness.wait();
+    expect(s.rtsp.isOpen()).toBe(!fail);
+    if (fail) expect(() => s.gate.assertCanStart()).toThrow();
+    else expect(() => s.gate.assertCanStart()).not.toThrow();
+    expect((await s.settings.readCommitted()).generation).toBe(3);
+    expect(s.policy.snapshot().resultWriteCount).toBe(fail ? 1 : 2);
   });
 
   it('releases boot waiters with both gates closed while a restart is still required', async () => {
