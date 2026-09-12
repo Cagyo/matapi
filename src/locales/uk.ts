@@ -652,6 +652,7 @@ const ukCatalog = {
       system: '🖥 Система',
       invite: '👤 Створити запрошення',
       features: '🔧 Можливості',
+      liveViewSetup: '📺 Налаштування live view',
     },
     adminSensorSetup: {
       title: '⚙️ Налаштування датчиків',

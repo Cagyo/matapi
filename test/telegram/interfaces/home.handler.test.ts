@@ -567,6 +567,23 @@ describe('HomeHandler', () => {
     expect(settings.handleCommand).toHaveBeenCalledWith(ctx, { receipt: workflowReceipt });
   });
 
+  it('starts Live view setup once with its captured Admin tools origin', async () => {
+    const { callbacks, validate, navigation, workflowEntry } = setup();
+    const ctx = context(encodeHomeCallback(identity.token, 1, { kind: 'live-view-settings' }));
+    (validate.execute as ReturnType<typeof vi.fn>).mockResolvedValue({
+      kind: 'accepted', active: identity, view: { kind: 'admin-tools' },
+    });
+    (navigation.route as ReturnType<typeof vi.fn>).mockReturnValue({
+      kind: 'external', destination: 'live-view-settings',
+    });
+
+    await callbacks[0].fn(ctx);
+
+    expect(workflowEntry.begin).toHaveBeenCalledWith(ctx, 'live-view-settings', {
+      source: 'captured', view: { kind: 'admin-tools' }, sessionToken: identity.token,
+    });
+  });
+
   it.each([
     ['config-import', 'sensor-import', 'importConfig', 'handleCommand'],
     ['config-export', 'sensor-export', 'exportConfig', 'handleCommand'],

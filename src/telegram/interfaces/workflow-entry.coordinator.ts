@@ -14,6 +14,7 @@ import type { Role } from '../domain/role';
 import type {
   ExternalWorkflow,
   FeatureWorkflowOperation,
+  LiveViewSettingsWorkflowOperation,
   WorkflowDeliveryStage,
   WorkflowReturnReceipt,
 } from '../domain/workflow-return';
@@ -55,7 +56,7 @@ export class WorkflowEntryCoordinator {
     ctx: TelegramContext,
     workflow: ExternalWorkflow,
     origin: WorkflowOrigin,
-    operation?: FeatureWorkflowOperation,
+    operation?: FeatureWorkflowOperation | LiveViewSettingsWorkflowOperation,
   ): Promise<WorkflowReturnReceipt | null> {
     const identity = currentWorkflowIdentity(ctx);
     if (!identity) return null;

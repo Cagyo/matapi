@@ -16,6 +16,7 @@ const WORKFLOWS: readonly ExternalWorkflow[] = [
   'sensor-modify', 'sensor-remove', 'sensor-import', 'sensor-export',
   'drive-status', 'drive-setup', 'storage-cleanup', 'health',
   'system-update', 'system-restart', 'invite', 'camera',
+  'live-view-settings',
 ];
 const PHASES: readonly WorkflowReturnPhase[] = ['cancellable', 'running'];
 const STATUSES: readonly WorkflowReturnReceipt['status'][] = ['pending', 'executing', 'returned', 'completed'];
@@ -41,7 +42,13 @@ function receipt(overrides: Partial<WorkflowReturnReceipt> = {}): WorkflowReturn
 
 describe('Workflow return receipt validation', () => {
   it.each(WORKFLOWS)('accepts the %s workflow', (workflow) => {
-    expect(isHomeActionReceipt(receipt({ payload: { ...receipt().payload, workflow } }))).toBe(true);
+    expect(isHomeActionReceipt(receipt({
+      payload: {
+        ...receipt().payload,
+        workflow,
+        ...(workflow === 'live-view-settings' ? { deliveryStage: 'pending' as const } : {}),
+      } as WorkflowReturnReceipt['payload'],
+    }))).toBe(true);
   });
 
   it.each(PHASES)('accepts the %s phase', (phase) => {

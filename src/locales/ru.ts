@@ -652,6 +652,7 @@ const ruCatalog = {
       system: '🖥 Система',
       invite: '👤 Создать приглашение',
       features: '🔧 Функции',
+      liveViewSetup: '📺 Настройка live view',
     },
     adminSensorSetup: {
       title: '⚙️ Настройка датчиков',

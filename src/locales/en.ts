@@ -642,6 +642,7 @@ const enCatalog = {
       system: '🖥 System',
       invite: '👤 Create invite',
       features: '🔧 Features',
+      liveViewSetup: '📺 Live view setup',
     },
     adminSensorSetup: {
       title: '⚙️ Sensor setup',

@@ -400,6 +400,11 @@ export class HomeHandler implements TelegramHandler {
         const launch = await this.beginWorkflow(ctx, 'feature', active, { kind: 'admin-tools' });
         return launch ? this.feature.handleList(ctx, launch) : this.recover(ctx, 'unavailable');
       }
+      case 'live-view-settings': {
+        const launch = await this.beginWorkflow(ctx, 'live-view-settings', active, { kind: 'admin-tools' });
+        if (!launch) return this.recover(ctx, 'unavailable');
+        return;
+      }
       default: return this.recover(ctx, 'unavailable');
     }
   }
