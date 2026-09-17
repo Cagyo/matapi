@@ -302,6 +302,14 @@ only when creating the new authority. Invalid legacy input produces safe disable
 settings plus a bounded migration-attention marker; subsequent installs preserve
 the committed authority. Runtime code and the setup wizard do not use those keys.
 
+The root applier provisions the public physical-network summary during migration
+and before reset or settings-save enforcement activation. Ordinary operations
+preserve a valid summary; an explicit RTSP reinstall refreshes it for the current
+network. The app validates its digest against the fixed inspector, without a
+process-environment digest. An exact canonical previous private policy is
+replaced with the typed policy under the same root lock before activation;
+malformed or unsafe policy files fail closed.
+
 The wizard records RTSP as deferred and directs administrators to Home → Health
 → Live view settings to save camera CIDRs before installing RTSP in Telegram.
 Motion-only live view can be enabled with an empty CIDR list. The installed

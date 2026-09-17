@@ -184,6 +184,17 @@ describe('LiveViewSettingsHandler', () => {
     await vi.waitFor(() => expect(s.reply.mock.calls.some(call => String(call[0]).includes('Saved — restarting'))).toBe(true));
   });
 
+  it('leaves Applying unchanged while the published job remains pending', async () => {
+    const s = await setup();
+    s.apply.execute.mockResolvedValue({ kind: 'pending' });
+    await s.handler.handleCommand(s.ctx, { receipt });
+    await s.callback({ kind: 'enable' });
+    await s.callback({ kind: 'save' });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(s.screen()).toContain('Applying live view settings');
+    expect(s.reply.mock.calls.some(call => String(call[0]).includes('Saved — restarting'))).toBe(false);
+  });
+
   it('discards a stale generation and reloads current settings', async () => {
     const s = await setup();
     await s.handler.handleCommand(s.ctx, { receipt });

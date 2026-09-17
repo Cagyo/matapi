@@ -38,7 +38,7 @@ export class EnableFeatureUseCase {
     @Inject(FEATURE_RUNTIME_LIFECYCLE)
     private readonly lifecycle: Pick<
       FeatureRuntimeLifecycleRegistryPort,
-      'runTransition' | 'beforeDisable' | 'afterEnable'
+      'runTransition' | 'beforeEnable' | 'beforeDisable' | 'afterEnable'
     >,
     @Inject(FEATURE_RESTART) private readonly restart: FeatureRestartPort,
   ) {}
@@ -58,6 +58,7 @@ export class EnableFeatureUseCase {
     const active = await this.jobs.findActive();
     if (active?.feature === name) throw new FeatureInstallBusyError(name);
     await this.requireExpectedState(name, input.expected);
+    await this.lifecycle.beforeEnable?.(name);
     await this.verify.execute({ name, source: 'mutation' });
 
     const feature = await this.features.compareAndSetEnabled({

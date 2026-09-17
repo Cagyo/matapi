@@ -32,7 +32,7 @@ const DEFAULT_RESULT_POLL_INTERVAL_MS = 250;
 const POLICY_APPLIER_TIMEOUT_MS = 60_000;
 const ACTIVATION_AND_SCHEDULING_MARGIN_MS = 5_000;
 const DEFAULT_MAX_RESULT_POLLS =
-  (POLICY_APPLIER_TIMEOUT_MS - ACTIVATION_AND_SCHEDULING_MARGIN_MS) /
+  (POLICY_APPLIER_TIMEOUT_MS + ACTIVATION_AND_SCHEDULING_MARGIN_MS) /
     DEFAULT_RESULT_POLL_INTERVAL_MS +
   1;
 
@@ -103,8 +103,12 @@ export class ReconcileRtspPolicyUseCase {
     let terminal: LiveViewPolicyResultV1;
     try {
       await this.requests.publish(request);
-      await this.controller.start();
-      const result = await this.pollResult(request.requestId);
+      let result: LiveViewPolicyResultV1 | null = null;
+      for (let activation = 0; activation < 2 && result === null; activation += 1) {
+        await this.controller.start();
+        result = await this.pollResult(request.requestId);
+      }
+      if (result === null) throw new LiveViewPolicyApplyError();
       terminal = createLiveViewPolicyResultV1(result);
 
       if (
@@ -134,7 +138,7 @@ export class ReconcileRtspPolicyUseCase {
     }
   }
 
-  private async pollResult(requestId: string): Promise<LiveViewPolicyResultV1> {
+  private async pollResult(requestId: string): Promise<LiveViewPolicyResultV1 | null> {
     for (let attempt = 0; attempt < this.maxResultPolls; attempt += 1) {
       const result = await this.results.read(requestId);
       if (result !== null) return result;
@@ -142,7 +146,7 @@ export class ReconcileRtspPolicyUseCase {
         await this.sleep(this.resultPollIntervalMs);
       }
     }
-    throw new LiveViewPolicyApplyError();
+    return null;
   }
 }
 

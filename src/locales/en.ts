@@ -743,6 +743,8 @@ const enCatalog = {
     listButton: (name: string, state: string) => `${name} — ${state}`,
     listBack: '« Features',
     reinstallAction: '🔁 Reinstall on current network',
+    liveViewSetupRequired: 'Complete Live view setup first',
+    openLiveViewSetup: 'Open Live view setup',
     reinstallNotice: 'Cameras, sources and saved credentials are kept. Live streams stop until the reinstall finishes.',
     downtime: { worker: 'Worker restarts briefly.', supervisor: 'Service restarts briefly.', host: 'Pi reboot is required.' },
     detail: ({ name, description, state, dependencies, controls, monitoring, downtime, attention }: { name: string; description: string; state: string; dependencies: string; controls: string; monitoring: string; downtime: string; attention: string | null }) => [name, description, `State: ${state}`, `Dependencies: ${dependencies}`, `Controls: ${controls}`, `Monitoring: ${monitoring}`, downtime, attention ? `Attention: ${attention}` : ''].filter(Boolean).join('\n'),

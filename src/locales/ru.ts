@@ -753,6 +753,8 @@ const ruCatalog = {
     listButton: (name: string, state: string) => `${name} — ${state}`,
     listBack: '« Функции',
     reinstallAction: '🔁 Переустановить в текущей сети',
+    liveViewSetupRequired: 'Сначала завершите настройку трансляции',
+    openLiveViewSetup: 'Открыть настройку трансляции',
     reinstallNotice: 'Камеры, источники и сохранённые учётные данные сохраняются. Трансляции остановятся до конца переустановки.',
     downtime: { worker: 'Worker кратко перезапустится.', supervisor: 'Служба кратко перезапустится.', host: 'Требуется перезагрузка Pi.' },
     detail: ({ name, description, state, dependencies, controls, monitoring, downtime, attention }: { name: string; description: string; state: string; dependencies: string; controls: string; monitoring: string; downtime: string; attention: string | null }) => [name, description, `Состояние: ${state}`, `Зависимости: ${dependencies}`, `Управляет: ${controls}`, `Мониторинг: ${monitoring}`, downtime, attention ? `Внимание: ${attention}` : ''].filter(Boolean).join('\n'),

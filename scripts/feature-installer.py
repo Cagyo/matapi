@@ -1081,7 +1081,13 @@ def main():
             if sys.argv[1] == '--reset-live-view-settings':
                 run_live_view_reset()
             else:
-                migrate_live_view_settings()
+                applier = load_live_view_applier()
+                lock = applier.lock_applier()
+                try:
+                    migrate_live_view_settings()
+                    applier.provision_summary()
+                finally:
+                    os.close(lock)
             return 0
         except (OSError, RuntimeError, ValueError):
             return 5

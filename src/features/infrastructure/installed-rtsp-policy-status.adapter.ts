@@ -50,16 +50,10 @@ interface PolicyDocument {
 /**
  * The installed RTSP policy as one projection every consumer shares.
  *
- * Three artifacts describe the policy — the private file root reads, the public
- * summary, and the environment this process was started with — and a reinstall
- * renames them one at a time. Readiness, install recovery, and Camera each
- * reading their own subset is how they end up disagreeing about a half-renamed
- * tuple, so all of them ask here and the three are cross-checked in one place:
- * the summary is opened through a single descriptor, its digest is recomputed
- * from every field rather than trusted, that digest and the advanced UDP range
- * must equal what this process was started with, and only then does the fixed
- * root inspector get asked whether the installed networks are still the live
- * ones. Any disagreement fails closed.
+ * The root-owned physical summary is read through one descriptor and its digest
+ * recomputed from every field. The fixed inspector confirms that projection and
+ * the live networks; the advanced UDP range must still match this process.
+ * The private settings/RTSP tuple is verified by policy apply and recovery.
  */
 export class InstalledRtspPolicyStatusAdapter implements RtspPolicyStatusPort {
   private readonly logger = new Logger(InstalledRtspPolicyStatusAdapter.name);
@@ -125,7 +119,6 @@ export class InstalledRtspPolicyStatusAdapter implements RtspPolicyStatusPort {
   }
 
   private assertEnvironmentAgrees(installed: PolicyDocument): void {
-    if (this.env.RTSP_POLICY_DIGEST !== installed.digest) throw new Error('policy digest drifted');
     if (
       this.udpPort('RTSP_UDP_PORT_FIRST', DEFAULT_UDP_PORT_FIRST) !== installed.udpPortFirst ||
       this.udpPort('RTSP_UDP_PORT_LAST', DEFAULT_UDP_PORT_LAST) !== installed.udpPortLast

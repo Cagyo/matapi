@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { catalogFor } from '../../../src/locales';
 import { FeatureHandler } from '../../../src/telegram/interfaces/feature.handler';
 import { FeatureAlreadyEnabledError } from '../../../src/features/domain/errors/feature-already-enabled.error';
+import { LiveViewSetupRequiredError } from '../../../src/features/domain/errors/live-view-setup-required.error';
 
 const receipt = {
   id: 'abcdefghijklmnop', userId: 7, chatId: 7, kind: 'workflow-return' as const,
@@ -30,17 +31,40 @@ function setup() {
   const workflows = { begin: vi.fn().mockResolvedValue(receipt), loadCurrent: vi.fn().mockResolvedValue(receipt), completeHeadless: vi.fn() };
   const navigation = { complete: vi.fn().mockResolvedValue(undefined) };
   const outcomes = { register: vi.fn() };
+  const liveViewSettings = { handleCommand: vi.fn().mockResolvedValue(undefined) };
   const handler = new FeatureHandler(
     list as never, detail as never, install as never, enable as never, disable as never, verify as never,
     claim as never, workflows as never,
     navigation as never, {} as never, outcomes as never, { findByTelegramId: vi.fn() } as never, {} as never,
     { adminOnly: vi.fn(), registered: vi.fn() } as never,
+    liveViewSettings as never,
   );
   const ctx = { from: { id: 7 }, chat: { id: 7, type: 'private' }, localeState: { locale: 'en', catalog: catalogFor('en'), user: { telegramId: 7, role: 'admin' } }, reply: vi.fn().mockResolvedValue({}), answerCallbackQuery: vi.fn().mockResolvedValue(undefined) };
-  return { ctx, handler, list, detail, install, enable, disable, verify, claim, workflows, navigation, outcomes };
+  return { ctx, handler, list, detail, install, enable, disable, verify, claim, workflows, navigation, outcomes, liveViewSettings };
 }
 
 describe('FeatureHandler', () => {
+  it.each([
+    ['en', 'install', 'Complete Live view setup first', 'Open Live view setup'],
+    ['ru', 'enable', 'Сначала завершите настройку трансляции', 'Открыть настройку трансляции'],
+    ['uk', 'install', 'Спочатку завершіть налаштування трансляції', 'Відкрити налаштування трансляції'],
+  ] as const)('offers localized setup for %s RTSP %s without reporting a failed install', async (locale, action, message, label) => {
+    const s = setup();
+    s.ctx.localeState.catalog = catalogFor(locale);
+    s.claim.execute.mockResolvedValue({ kind: 'claimed', receipt, operation: { kind: 'feature-mutation', feature: 'rtsp', action, expectedInstalled: action === 'enable', expectedEnabled: false, expectedAttentionReason: null } });
+    s[action].execute.mockRejectedValue(new LiveViewSetupRequiredError());
+    await (s.handler as any).confirm(s.ctx, receipt.id, false);
+    expect(s.ctx.reply).toHaveBeenCalledWith(message, expect.objectContaining({ reply_markup: expect.anything() }));
+    expect(labels(s.ctx)).toContain(label);
+    expect(callbacks(s.ctx)).toContain('ft:s:abcdefghijklmnop');
+    expect(s.navigation.complete).not.toHaveBeenCalled();
+    await (s.handler as any).handleCallback({ ...s.ctx, callbackQuery: { data: 'ft:s:abcdefghijklmnop' } });
+    expect(s.liveViewSettings.handleCommand).toHaveBeenCalledOnce();
+    s.workflows.loadCurrent.mockResolvedValue(null);
+    await (s.handler as any).handleCallback({ ...s.ctx, callbackQuery: { data: 'ft:s:abcdefghijklmnop' } });
+    expect(s.liveViewSettings.handleCommand).toHaveBeenCalledOnce();
+  });
+
   it('renders exactly five full-width opaque feature list controls', async () => {
     const { handler, ctx } = setup();
     await handler.handleList(ctx as never, { receipt });

@@ -125,13 +125,14 @@ describe('admin live view settings acceptance', () => {
     await s.sessions.onModuleDestroy();
   });
 
-  it('rolls back helper start failure without publishing a new settings generation', async () => {
+  it('retains a published claim on uncertain helper start without freeing its slot', async () => {
     const s = setup();
     await s.prepare();
     s.policy.start = async () => { throw new Error('helper unavailable'); };
-    await expect(s.apply.execute(jobId)).rejects.toThrow();
+    await s.apply.execute(jobId);
     expect(await s.settings.readCommitted()).toMatchObject({ generation: 0, enabled: false });
-    expect(await s.jobs.findById(jobId)).toMatchObject({ status: 'failed', failureCode: 'unit-start-failed' });
+    expect(await s.jobs.findById(jobId)).toMatchObject({ status: 'published', activeSlot: 1 });
+    expect(() => s.gate.assertCanStart()).toThrow();
   });
 
   it.each(['prepared', 'published'] as const)('recovers a %s crash once and delivers the terminal job to a late listener once', async phase => {
@@ -181,6 +182,20 @@ describe('admin live view settings acceptance', () => {
     await recovery.run();
     expect(await s.jobs.findById(jobId)).toMatchObject({ status: 'succeeded', activeSlot: null });
     expect(() => reboot.gate.assertCanStart()).not.toThrow();
+  });
+
+  it('marks a hung restart dispatch restart-required and respects that state on late completion', async () => {
+    vi.useFakeTimers();
+    const s = setup();
+    await s.prepare();
+    let release!: () => void;
+    s.restarter.restart = () => new Promise<void>(resolve => { release = resolve; });
+    const applying = s.apply.execute(jobId);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(await s.jobs.findById(jobId)).toMatchObject({ status: 'restart-required', failureCode: 'restart-activation-timeout', activeSlot: 1 });
+    expect(() => s.gate.assertCanStart()).toThrow();
+    release();
+    await expect(applying).resolves.toEqual({ kind: 'restart-required' });
   });
 
   it('completes failed boot with both gates closed', async () => {

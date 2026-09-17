@@ -252,6 +252,7 @@ export class LiveViewSettingsHandler implements TelegramHandler {
   private async runApply(ctx: TelegramContext, receipt: WorkflowReturnReceipt, job: LiveViewSettingsJob): Promise<void> {
     try {
       const result = await this.apply.execute(job.id);
+      if (result.kind === 'pending') return;
       const terminal = await this.jobs.findById(job.id);
       if (terminal?.status === 'succeeded' || terminal?.status === 'failed') { await this.notify(terminal); return; }
       const catalog = this.catalog(ctx);

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { FeatureCameraRuntimeLifecycleService } from '../../../src/camera/application/feature-camera-runtime-lifecycle.service';
 import { LiveViewPolicyCoordinatorService } from '../../../src/camera/application/live-view-policy-coordinator.service';
 import { LiveViewSettingsBusyError } from '../../../src/camera/domain/errors/live-view-settings-busy.error';
+import { InMemoryLiveViewSettingsAdapter } from '../../../src/camera/infrastructure/in-memory-live-view-settings.adapter';
 import { EnableFeatureUseCase } from '../../../src/features/application/enable-feature.use-case';
 import { FeatureDisableLifecycleRegistry } from '../../../src/features/application/feature-disable-lifecycle-registry.service';
 import { VerifyFeatureReadinessUseCase } from '../../../src/features/application/verify-feature-readiness.use-case';
@@ -52,6 +53,16 @@ function setup(name: ManageableFeatureName = 'digital') {
 }
 
 describe('EnableFeatureUseCase', () => {
+  it('checks the activation prerequisite before verification or state mutation', async () => {
+    const test = setup('rtsp');
+    const beforeEnable = vi.fn().mockRejectedValue(new Error('setup required'));
+    Object.assign(test.lifecycle, { beforeEnable });
+    const verify = vi.spyOn(test.verify, 'execute');
+    await expect(test.useCase.execute({ name: 'rtsp', expected })).rejects.toThrow('setup required');
+    expect(verify).not.toHaveBeenCalled();
+    expect((await test.features.findByName('rtsp'))?.enabled).toBe(false);
+    expect(test.lifecycle.afterEnable).not.toHaveBeenCalled();
+  });
   it('enables only after readiness and then reloads runtime before worker restart', async () => {
     const { useCase, verify, lifecycle, restart } = setup();
     const order: string[] = [];
@@ -116,6 +127,7 @@ describe('EnableFeatureUseCase', () => {
       settingsJobs,
       coordinator,
       reconcileRtspPolicy as never,
+      new InMemoryLiveViewSettingsAdapter(),
     );
     registry.register('rtsp', camera.rtsp);
     const useCase = new EnableFeatureUseCase(

@@ -753,6 +753,8 @@ const ukCatalog = {
     listButton: (name: string, state: string) => `${name} — ${state}`,
     listBack: '« Можливості',
     reinstallAction: '🔁 Перевстановити в поточній мережі',
+    liveViewSetupRequired: 'Спочатку завершіть налаштування трансляції',
+    openLiveViewSetup: 'Відкрити налаштування трансляції',
     reinstallNotice: 'Камери, джерела та збережені облікові дані зберігаються. Трансляції зупиняться до завершення перевстановлення.',
     downtime: { worker: 'Worker коротко перезапуститься.', supervisor: 'Служба коротко перезапуститься.', host: 'Потрібне перезавантаження Pi.' },
     detail: ({ name, description, state, dependencies, controls, monitoring, downtime, attention }: { name: string; description: string; state: string; dependencies: string; controls: string; monitoring: string; downtime: string; attention: string | null }) => [name, description, `Стан: ${state}`, `Залежності: ${dependencies}`, `Керує: ${controls}`, `Моніторинг: ${monitoring}`, downtime, attention ? `Увага: ${attention}` : ''].filter(Boolean).join('\n'),

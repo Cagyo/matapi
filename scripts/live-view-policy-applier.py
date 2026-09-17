@@ -8,6 +8,8 @@ cannot select a path or command and never receives privileged command output.
 
 import fcntl
 import hashlib
+import importlib.machinery
+import importlib.util
 import ipaddress
 import json
 import os
@@ -28,10 +30,12 @@ RESULT_DIRECTORY = INSTALL_ROOT + "/live-view-settings-results"
 ACK_DIRECTORY = INSTALL_ROOT + "/live-view-settings-acks"
 POLICY_DIRECTORY = "/etc/home-worker"
 POLICY_PATH = POLICY_DIRECTORY + "/live-stream-policy.json"
+SUMMARY_PATH = POLICY_DIRECTORY + "/live-stream-policy.summary.json"
 LOCK_PATH = "/run/lock/homeworker-live-view-policy.lock"
 
 APPLIER_PATH = "/usr/lib/home-worker/live-view-policy-applier"
 NET_HELPER_PATH = "/usr/lib/home-worker/live-stream-net-helper"
+POLICY_INSPECTOR_PATH = "/usr/lib/home-worker/live-stream-policy-inspector"
 BUNDLED_UNIT_PATH = (
     "/usr/lib/home-worker/systemd/homeworker-live-view-policy-apply.service"
 )
@@ -449,6 +453,7 @@ def validate_root_bundle():
     required = {
         APPLIER_PATH: 0o755,
         NET_HELPER_PATH: 0o755,
+        POLICY_INSPECTOR_PATH: 0o755,
         BUNDLED_UNIT_PATH: 0o644,
     }
     if (
@@ -1051,7 +1056,41 @@ def write_policy_atomic(policy):
         os.close(descriptor)
 
 
-def read_installed_policy():
+def load_policy_inspector():
+    loader = importlib.machinery.SourceFileLoader("live_stream_policy_inspector", POLICY_INSPECTOR_PATH)
+    module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+    loader.exec_module(module)
+    return module
+
+
+def provision_summary(refresh=False):
+    """Publish the physical projection before any private policy activation."""
+    inspector = load_policy_inspector()
+    descriptor = directory_fd(POLICY_DIRECTORY, ROOT_UID, ROOT_GID, 0o755)
+    try:
+        try:
+            existing = open_entry(descriptor, os.path.basename(SUMMARY_PATH), ROOT_UID, ROOT_GID, 0o644, inspector.MAX_OUTPUT_BYTES)
+            if not refresh:
+                inspector.parse_policy_document(inspector.strict_json_loads(existing.decode("utf-8")))
+                return
+        except FileNotFoundError:
+            pass
+        worker, stream, first, last = policy_runtime_values()
+        networks = inspector.current_networks()
+        summary = inspector.policy_payload(inspector.POLICY_VERSION, worker, stream, networks, first, last)
+        summary["digest"] = inspector.policy_digest(inspector.POLICY_VERSION, worker, stream, networks, first, last)
+        inspector.parse_policy_document(summary)
+        payload = canonical_json(summary)
+        if len(payload) > inspector.MAX_OUTPUT_BYTES:
+            raise InvalidRequest("summary too large")
+        write_atomic(descriptor, os.path.basename(SUMMARY_PATH), payload, ROOT_UID, ROOT_GID, 0o644)
+    except (OSError, ValueError, RuntimeError, inspector.PolicyDocumentInvalid, inspector.Unavailable) as error:
+        raise ApplyFailure("policy-apply-failed") from error
+    finally:
+        os.close(descriptor)
+
+
+def read_installed_policy(allow_legacy=False):
     descriptor = directory_fd(
         POLICY_DIRECTORY, ROOT_UID, ROOT_GID, 0o755
     )
@@ -1064,7 +1103,22 @@ def read_installed_policy():
             0o600,
             MAX_BYTES,
         )
-        return parse_policy(data)
+        try:
+            return parse_policy(data)
+        except InvalidRequest:
+            if not allow_legacy:
+                raise
+            previous = strict_json(data)
+            inspector = load_policy_inspector()
+            try:
+                _version, worker, stream, networks, first, last, digest = inspector.parse_policy_document(previous)
+            except inspector.PolicyDocumentInvalid as error:
+                raise InvalidRequest("legacy policy") from error
+            canonical = inspector.policy_payload(inspector.POLICY_VERSION, worker, stream, networks, first, last)
+            canonical["digest"] = digest
+            if data != canonical_json(canonical):
+                raise InvalidRequest("noncanonical legacy policy")
+            return None
     finally:
         os.close(descriptor)
 
@@ -1099,12 +1153,13 @@ def activate_policy(policy):
         raise ApplyFailure("service-unhealthy")
 
 
-def install_policy(policy):
+def install_policy(policy, refresh_summary=False):
     try:
         try:
-            installed = read_installed_policy()
+            installed = read_installed_policy(allow_legacy=True)
         except FileNotFoundError:
             installed = None
+        provision_summary(refresh=refresh_summary)
         if installed != policy:
             write_policy_atomic(policy)
     except ApplyFailure:
@@ -1419,7 +1474,7 @@ def bootstrap_rtsp():
         if assets != RTSP_ASSETS_VALID:
             raise ApplyFailure("policy-apply-failed")
         current = read_settings(worker_gid)
-        install_policy(policy_for(current, False))
+        install_policy(policy_for(current, False), refresh_summary=True)
         return True
     finally:
         os.close(lock)

@@ -4,7 +4,7 @@ import { LiveViewPolicyApplyError } from "../domain/errors/live-view-policy-appl
 import { ReconcileLiveViewSettingsJobUseCase } from "./reconcile-live-view-settings-job.use-case";
 
 export interface ApplyLiveViewSettingsResult {
-  readonly kind: "restart-dispatched" | "restart-required";
+  readonly kind: "restart-dispatched" | "restart-required" | "pending";
 }
 
 /** Starts or resumes the durable settings job claimed by the interface layer. */
@@ -17,6 +17,8 @@ export class ApplyLiveViewSettingsUseCase {
   async execute(jobId: string): Promise<ApplyLiveViewSettingsResult> {
     const outcome = await this.reconcile.execute(jobId);
     switch (outcome.kind) {
+      case "pending":
+        return outcome;
       case "resumed":
         return { kind: "restart-dispatched" };
       case "succeeded":

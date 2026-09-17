@@ -52,7 +52,7 @@ export class LiveViewSettingsRecoveryService implements OnApplicationBootstrap {
     const active = await this.jobs.findActive();
     const recoverable = active ?? (await this.jobs.findLatestTerminal());
     const result = recoverable ? await this.reconcile.execute(recoverable.id) : null;
-    if (result?.kind === 'resumed' || result?.kind === 'restart-required') {
+    if (result?.kind === 'pending' || result?.kind === 'resumed' || result?.kind === 'restart-required') {
       this.readiness?.markFailedClosed();
       return result;
     }

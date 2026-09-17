@@ -356,7 +356,7 @@ describe("ApplyLiveViewSettingsUseCase", () => {
     expect(() => test.gate.assertCanStart()).not.toThrow();
   });
 
-  it("terminalizes a fixed-unit start refusal and only restores a proven-ready old gate", async () => {
+  it("keeps an uncertain unit start active even when the old dependency is ready", async () => {
     const start = vi.fn(async () => {
       throw new Error("systemd unavailable");
     });
@@ -365,20 +365,19 @@ describe("ApplyLiveViewSettingsUseCase", () => {
       controller: { start },
     });
 
-    await expect(test.apply.execute(JOB_ID)).rejects.toBeInstanceOf(
-      LiveViewPolicyApplyError,
-    );
+    await expect(test.apply.execute(JOB_ID)).resolves.toEqual({ kind: 'pending' });
 
     expect(await jobOf(test.jobs)).toMatchObject({
-      status: "failed",
-      failureCode: "unit-start-failed",
+      status: "published",
+      activeSlot: 1,
+      failureCode: null,
     });
     expect(test.result.read).not.toHaveBeenCalled();
-    expect(test.capability.isAvailable).toHaveBeenCalledWith("motion-mjpeg");
-    expect(() => test.gate.assertCanStart()).not.toThrow();
+    expect(test.capability.isAvailable).not.toHaveBeenCalled();
+    expect(() => test.gate.assertCanStart()).toThrow();
   });
 
-  it("does not reopen the gate when old dependency readiness cannot be proven", async () => {
+  it("reports an uncertain published request as pending and keeps its gate closed", async () => {
     const test = setup({
       settings: new InMemoryLiveViewSettingsAdapter(CURRENT),
       controller: {
@@ -389,9 +388,7 @@ describe("ApplyLiveViewSettingsUseCase", () => {
       capability: { isAvailable: vi.fn(async () => false) },
     });
 
-    await expect(test.apply.execute(JOB_ID)).rejects.toBeInstanceOf(
-      LiveViewPolicyApplyError,
-    );
+    await expect(test.apply.execute(JOB_ID)).resolves.toEqual({ kind: 'pending' });
 
     expect(() => test.gate.assertCanStart()).toThrow();
   });

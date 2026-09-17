@@ -16,7 +16,7 @@ const unit = resolve(
 );
 
 const prelude = String.raw`
-import importlib.util, json, os, stat, tempfile
+import importlib.util, importlib.machinery, json, os, stat, tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,6 +24,10 @@ spec = importlib.util.spec_from_file_location('live_view_policy_applier', ${JSON
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 real_rtsp_assets_state = m.rtsp_assets_state
+loader = importlib.machinery.SourceFileLoader('inspector', ${JSON.stringify(resolve('scripts/live-stream-policy-inspector'))})
+inspector = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(inspector)
+inspector.current_networks = lambda: [inspector.EligibleNetwork(4, '192.168.1.0/24', 'eth0')]
 
 REQUEST_ID = 'AbCdEfGhIjKlMnOp'
 SECOND_ID = 'PqRsTuVwXyZaBcDe'
@@ -85,6 +89,8 @@ def configure(root, initial=None, assets=True):
     m.ACK_DIRECTORY = os.path.join(root, 'acks')
     m.POLICY_DIRECTORY = os.path.join(root, 'policy')
     m.POLICY_PATH = os.path.join(m.POLICY_DIRECTORY, 'live-stream-policy.json')
+    m.SUMMARY_PATH = os.path.join(m.POLICY_DIRECTORY, 'live-stream-policy.summary.json')
+    m.load_policy_inspector = lambda: inspector
     m.LOCK_PATH = os.path.join(root, 'live-view-policy.lock')
     for path, mode in (
         (m.REQUEST_DIRECTORY, 0o770),
@@ -129,6 +135,151 @@ async function execute(body: string): Promise<void> {
 }
 
 describe("live view root policy applier", () => {
+  it('provisions the physical summary during ordinary migration under the shared root lock', async () => {
+    await execute(String.raw`
+spec = importlib.util.spec_from_file_location('installer', ${JSON.stringify(resolve('scripts/feature-installer.py'))})
+installer = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(installer)
+for fresh in (True, False):
+    with tempfile.TemporaryDirectory() as root:
+        configure(root)
+        installer.ROOT_UID, installer.ROOT_GID = os.getuid(), os.getgid()
+        installer.INSTALL_ROOT = root
+        installer.LIVE_VIEW_SETTINGS_PATH = m.SETTINGS_PATH
+        installer.LIVE_VIEW_ATTENTION_PATH = m.ATTENTION_PATH
+        installer.WORKER_ENV_PATH = os.path.join(root, 'worker.env')
+        installer.worker_ids = m.worker_ids
+        installer.validate_root_bundle = lambda: None
+        installer.load_live_view_applier = lambda: m
+        write_file(installer.WORKER_ENV_PATH, b'', 0o600)
+        if fresh:
+            os.unlink(m.SETTINGS_PATH)
+        real_provision = m.provision_summary
+        def provision():
+            try:
+                second_lock = m.lock_applier()
+            except BlockingIOError:
+                pass
+            else:
+                os.close(second_lock)
+                raise AssertionError('summary published outside the policy lock')
+            return real_provision()
+        m.provision_summary = provision
+        installer.sys.argv = ['feature-installer', '--migrate-live-view-settings']
+        assert installer.main() == 0
+        inspector.parse_policy_document(json.loads(Path(m.SUMMARY_PATH).read_bytes()))
+        assert json.loads(Path(m.SETTINGS_PATH).read_bytes()) == settings(0 if fresh else 3)
+        assert not os.path.exists(m.POLICY_PATH)
+        m.provision_summary = real_provision
+`);
+  });
+
+  it('provisions once before reset or settings-save activation and preserves a valid stale-network summary', async () => {
+    await execute(String.raw`
+for operation in ('reset', 'save'):
+    with tempfile.TemporaryDirectory() as root:
+        configure(root)
+        activations = []
+        def activate(policy):
+            summary = json.loads(Path(m.SUMMARY_PATH).read_bytes())
+            inspector.parse_policy_document(summary)
+            assert summary['networks'][0]['cidr'] == '192.168.1.0/24'
+            activations.append(policy)
+        m.activate_policy = activate
+        if operation == 'reset':
+            assert m.reset_live_view_settings() is True
+        else:
+            publish(settings_request(rtsp=False))
+            assert m.run_spool_once() is True
+            assert result(REQUEST_ID)['outcome'] == 'succeeded'
+        before = Path(m.SUMMARY_PATH).read_bytes()
+        inspector.current_networks = lambda: [inspector.EligibleNetwork(4, '10.0.0.0/24', 'eth0')]
+        assert m.reset_live_view_settings() is True
+        assert Path(m.SUMMARY_PATH).read_bytes() == before
+        assert len(activations) == 2
+        inspector.current_networks = lambda: [inspector.EligibleNetwork(4, '192.168.1.0/24', 'eth0')]
+`);
+  });
+
+  it('provisions the canonical physical summary before fresh Motion-only bootstrap activates enforcement', async () => {
+    await execute(String.raw`
+with tempfile.TemporaryDirectory() as root:
+    configure(root, settings(3, True))
+    before = Path(m.SETTINGS_PATH).read_bytes()
+    activations = []
+    def activate(policy):
+        summary = json.loads(Path(m.SUMMARY_PATH).read_bytes())
+        inspector.parse_policy_document(summary)
+        assert summary['networks'] == [{'family': 4, 'cidr': '192.168.1.0/24', 'interface': 'eth0'}]
+        assert 'settingsGeneration' not in summary and 'rtspEnabled' not in summary
+        assert stat.S_IMODE(os.stat(m.SUMMARY_PATH).st_mode) == 0o644
+        assert os.stat(m.SUMMARY_PATH).st_nlink == 1
+        assert policy['allowedCidrs'] == [] and policy['rtspEnabled'] is False
+        activations.append(policy)
+    m.activate_policy = activate
+    assert m.bootstrap_rtsp() is True
+    assert len(activations) == 1
+    assert Path(m.SETTINGS_PATH).read_bytes() == before
+`);
+  });
+
+  it('refuses unsafe or malformed summary state before settings or enforcement changes', async () => {
+    await execute(String.raw`
+for unsafe in ('mode', 'hardlink', 'symlink', 'malformed'):
+    with tempfile.TemporaryDirectory() as root:
+        configure(root)
+        m.provision_summary()
+        before = Path(m.SETTINGS_PATH).read_bytes()
+        if unsafe == 'mode':
+            os.chmod(m.SUMMARY_PATH, 0o666)
+        elif unsafe == 'hardlink':
+            os.link(m.SUMMARY_PATH, os.path.join(root, 'linked-summary'))
+        elif unsafe == 'symlink':
+            target = os.path.join(root, 'summary-target')
+            os.rename(m.SUMMARY_PATH, target)
+            os.symlink(target, m.SUMMARY_PATH)
+        else:
+            write_file(m.SUMMARY_PATH, b'{}', 0o644)
+        def forbidden_activation(_policy):
+            raise AssertionError('activated with unsafe summary')
+        m.activate_policy = forbidden_activation
+        try:
+            m.reset_live_view_settings()
+            raise AssertionError('unsafe summary accepted')
+        except m.ApplyFailure:
+            pass
+        assert Path(m.SETTINGS_PATH).read_bytes() == before
+        assert not os.path.exists(m.POLICY_PATH)
+`);
+  });
+
+  it('replaces only the exact canonical previous policy shape while malformed legacy state stays unchanged', async () => {
+    await execute(String.raw`
+networks = inspector.current_networks()
+legacy = inspector.policy_payload(2, 501, 997, networks, 24000, 24001)
+legacy['digest'] = inspector.policy_digest(2, 501, 997, networks, 24000, 24001)
+for malformed, previous in (
+    (False, legacy),
+    (True, {**legacy, 'digest': '0' * 64}),
+    (True, {**legacy, 'settingsGeneration': 3}),
+    (True, {**legacy, 'networks': [{**legacy['networks'][0], 'family': 4.0}]}),
+):
+    with tempfile.TemporaryDirectory() as root:
+        configure(root)
+        write_file(m.POLICY_PATH, bytes_for(previous), 0o600)
+        original = Path(m.POLICY_PATH).read_bytes()
+        try:
+            m.bootstrap_rtsp()
+            assert not malformed, 'malformed legacy policy accepted'
+        except m.ApplyFailure:
+            assert malformed, 'canonical previous policy rejected'
+        if malformed:
+            assert Path(m.POLICY_PATH).read_bytes() == original
+        else:
+            assert json.loads(Path(m.POLICY_PATH).read_bytes()) == m.policy_for(settings(), False)
+`);
+  });
+
   it("runs through the fixed root-only hardened oneshot unit", () => {
     expect(readFileSync(unit, "utf8")).toBe(`[Unit]
 Description=Home Worker live view policy applier
@@ -1112,11 +1263,13 @@ with tempfile.TemporaryDirectory() as root:
     m.MANIFEST_PATH = os.path.join(root, 'manifest')
     m.APPLIER_PATH = os.path.join(root, 'applier')
     m.NET_HELPER_PATH = os.path.join(root, 'net-helper')
+    m.POLICY_INSPECTOR_PATH = os.path.join(root, 'inspector')
     m.BUNDLED_UNIT_PATH = os.path.join(root, 'bundled.service')
     m.ACTIVE_UNIT_PATH = os.path.join(root, 'active.service')
     assets = {
         m.APPLIER_PATH: (b'applier\n', 0o755),
         m.NET_HELPER_PATH: (b'net helper\n', 0o755),
+        m.POLICY_INSPECTOR_PATH: (b'inspector\n', 0o755),
         m.BUNDLED_UNIT_PATH: (b'[Service]\nExecStart=/fixed\n', 0o644),
     }
     for path, (body, mode) in assets.items():

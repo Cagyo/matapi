@@ -3,8 +3,21 @@ import { FeatureCameraRuntimeLifecycleService } from '../../../src/camera/applic
 import { LiveViewPolicyCoordinatorService } from '../../../src/camera/application/live-view-policy-coordinator.service';
 import { LiveViewSettingsBusyError } from '../../../src/camera/domain/errors/live-view-settings-busy.error';
 import type { LiveSourceSessionControlPort } from '../../../src/camera/domain/ports/live-source-session-control.port';
+import { InMemoryLiveViewSettingsAdapter } from '../../../src/camera/infrastructure/in-memory-live-view-settings.adapter';
 
 describe('FeatureCameraRuntimeLifecycleService', () => {
+  it('permits RTSP activation once a CIDR is committed even while Live view is off', async () => {
+    const settings = new InMemoryLiveViewSettingsAdapter({ version: 1, generation: 2, enabled: false, allowedCameraCidrs: ['192.168.1.0/24'] });
+    const { lifecycle } = createLifecycle([], settings);
+    await expect(Promise.resolve(lifecycle.rtsp.beforeEnable?.())).resolves.toBeUndefined();
+  });
+  it('requires committed CIDRs before RTSP activation but still permits disable', async () => {
+    const { lifecycle, reconcileRtspPolicy } = createLifecycle();
+    await expect(Promise.resolve(lifecycle.rtsp.beforeEnable?.())).rejects.toMatchObject({ code: 'LIVE_VIEW_SETUP_REQUIRED' });
+    expect(reconcileRtspPolicy.execute).not.toHaveBeenCalled();
+    await runRtspTransition(lifecycle, () => lifecycle.rtsp.beforeDisable());
+    expect(reconcileRtspPolicy.execute).toHaveBeenCalledWith({ rtspEnabled: false });
+  });
   it('stops watcher work before stopping Motion', async () => {
     const { lifecycle, watcher, motion } = createLifecycle();
 
@@ -85,7 +98,7 @@ describe('FeatureCameraRuntimeLifecycleService', () => {
   });
 });
 
-function createLifecycle(order: string[] = []) {
+function createLifecycle(order: string[] = [], settings = new InMemoryLiveViewSettingsAdapter()) {
   const watcher = {
     stop: vi.fn().mockResolvedValue(undefined),
     start: vi.fn().mockResolvedValue(undefined),
@@ -124,6 +137,7 @@ function createLifecycle(order: string[] = []) {
     settingsJobs,
     coordinator,
     reconcileRtspPolicy as never,
+    settings,
   );
   return {
     lifecycle,

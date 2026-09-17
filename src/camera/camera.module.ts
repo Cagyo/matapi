@@ -616,7 +616,7 @@ function isInstallationId(value: string | undefined): value is string {
     {
       provide: FeatureCameraRuntimeLifecycleService,
       useFactory: (...args: ConstructorParameters<typeof FeatureCameraRuntimeLifecycleService>) => new FeatureCameraRuntimeLifecycleService(...args),
-      inject: [MotionWatcherService, MOTION_CONTROL, RtspSourceStartGate, LIVE_SOURCE_SESSION_CONTROL, LIVE_VIEW_SETTINGS_JOB_REPOSITORY, LiveViewPolicyCoordinatorService, ReconcileRtspPolicyUseCase],
+      inject: [MotionWatcherService, MOTION_CONTROL, RtspSourceStartGate, LIVE_SOURCE_SESSION_CONTROL, LIVE_VIEW_SETTINGS_JOB_REPOSITORY, LiveViewPolicyCoordinatorService, ReconcileRtspPolicyUseCase, LIVE_VIEW_SETTINGS_STORE],
     },
     {
       provide: 'FEATURE_CAMERA_RUNTIME_LIFECYCLE_REGISTRATION',

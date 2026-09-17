@@ -17,6 +17,7 @@ import { FeatureAlreadyDisabledError } from '../../features/domain/errors/featur
 import { FeatureRestartDispatchError } from '../../features/domain/errors/feature-restart-dispatch.error';
 import { FeatureStateChangedError } from '../../features/domain/errors/feature-state-changed.error';
 import { FeatureVerificationError } from '../../features/domain/errors/feature-verification.error';
+import { LiveViewSetupRequiredError } from '../../features/domain/errors/live-view-setup-required.error';
 import { UnknownFeatureError } from '../../features/domain/errors/unknown-feature.error';
 import {
   FEATURE_INSTALL_OUTCOME_REGISTRY,
@@ -34,8 +35,9 @@ import { TelegramHandler } from './telegram-handler';
 import { TelegramContext } from './telegram-context';
 import { currentWorkflowIdentity, type WorkflowLaunch, WorkflowEntryCoordinator } from './workflow-entry.coordinator';
 import { WorkflowNavigationHandler } from './workflow-navigation.handler';
+import { LiveViewSettingsHandler } from './live-view-settings.handler';
 
-const FEATURE_CALLBACK = /^ft:(l|d|c|v|r):([A-Za-z0-9_-]{16})(?::([duzmr]))?$/;
+const FEATURE_CALLBACK = /^ft:(l|d|c|v|r|s):([A-Za-z0-9_-]{16})(?::([duzmr]))?$/;
 const FEATURE_CODES: Record<string, ManageableFeatureName> = {
   d: 'digital', u: 'uart', z: 'zigbee', m: 'motion', r: 'rtsp',
 };
@@ -63,6 +65,7 @@ export class FeatureHandler implements TelegramHandler, FeatureInstallOutcomePor
     @Inject(USER_REPOSITORY) private readonly users: UserRepositoryPort,
     @Inject(DIRECT_MESSENGER) private readonly dm: DirectMessengerPort,
     private readonly guard: RoleMiddleware,
+    @Inject(LiveViewSettingsHandler) private readonly liveViewSettings: LiveViewSettingsHandler,
   ) {}
 
   register(composer: Composer<TelegramContext>): void {
@@ -180,6 +183,10 @@ export class FeatureHandler implements TelegramHandler, FeatureInstallOutcomePor
     const parsed = parseCallback(ctx.callbackQuery?.data ?? '');
     const identity = currentWorkflowIdentity(ctx);
     if (!parsed || identity?.role !== 'admin') return this.stale(ctx);
+    if (parsed.kind === 's') {
+      const current = await this.workflows.loadCurrent(ctx, parsed.receiptId, 'feature');
+      return current ? this.liveViewSettings.handleCommand(ctx) : this.stale(ctx);
+    }
     if (parsed.kind === 'd') {
       const current = await this.workflows.loadCurrent(ctx, parsed.receiptId, 'feature');
       if (!current || !parsed.feature) return this.stale(ctx);
@@ -302,6 +309,14 @@ export class FeatureHandler implements TelegramHandler, FeatureInstallOutcomePor
         failureNotice: catalog.recovery.unavailable,
       });
     } catch (error) {
+      if (error instanceof LiveViewSetupRequiredError) {
+        await ctx.reply(catalog.liveViewSetupRequired, {
+          reply_markup: new InlineKeyboard()
+            .text(catalog.openLiveViewSetup, callback('s', receipt.id)).row()
+            .text(catalog.listBack, callback('l', receipt.id)),
+        });
+        return;
+      }
       if (error instanceof FeatureStateChangedError) {
         await this.openDetail(ctx, receipt, operation.feature);
         return;
@@ -348,7 +363,7 @@ export class FeatureHandler implements TelegramHandler, FeatureInstallOutcomePor
   }
 }
 
-type FeatureCallbackKind = 'l' | 'd' | 'c' | 'v' | 'r';
+type FeatureCallbackKind = 'l' | 'd' | 'c' | 'v' | 'r' | 's';
 
 /** Kinds that name the feature themselves instead of inheriting it from the receipt. */
 const FEATURE_SCOPED_KINDS = new Set<FeatureCallbackKind>(['d', 'r']);

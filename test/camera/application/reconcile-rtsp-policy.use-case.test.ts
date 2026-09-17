@@ -124,6 +124,16 @@ function setup(
 }
 
 describe("ReconcileRtspPolicyUseCase", () => {
+  it('retriggers the controller when an interrupted older claim was processed before its own request', async () => {
+    const test = setup([null]);
+    let activations = 0;
+    test.controller.start.mockImplementation(async () => { activations += 1; });
+    test.results.read.mockImplementation(async () => activations >= 2 ? succeeded() : null);
+    await expect(test.useCase.execute({ rtspEnabled: true })).resolves.toBeUndefined();
+    expect(test.acknowledgements.publish).toHaveBeenCalledWith(requestId);
+    expect(activations).toBe(3);
+  });
+
   it("publishes the strict request, yields while polling, validates the tuple, and acknowledges", async () => {
     const test = setup([null, succeeded()]);
 
@@ -160,20 +170,20 @@ describe("ReconcileRtspPolicyUseCase", () => {
       test.useCase.execute({ rtspEnabled: true }),
     ).rejects.toBeInstanceOf(LiveViewPolicyApplyError);
 
-    expect(test.results.read).toHaveBeenCalledTimes(3);
-    expect(test.sleep).toHaveBeenCalledTimes(2);
+    expect(test.results.read).toHaveBeenCalledTimes(6);
+    expect(test.sleep).toHaveBeenCalledTimes(4);
     expect(test.acknowledgements.publish).not.toHaveBeenCalled();
   });
 
-  it("reserves five seconds of the fixed unit timeout for activation and scheduling", async () => {
+  it("waits beyond the fixed unit timeout before each bounded retrigger", async () => {
     const test = setup([null], { useDefaultPollConfiguration: true });
 
     await expect(
       test.useCase.execute({ rtspEnabled: true }),
     ).rejects.toBeInstanceOf(LiveViewPolicyApplyError);
 
-    expect(test.results.read).toHaveBeenCalledTimes(221);
-    expect(test.sleep).toHaveBeenCalledTimes(220);
+    expect(test.results.read).toHaveBeenCalledTimes(522);
+    expect(test.sleep).toHaveBeenCalledTimes(520);
     expect(test.sleep).toHaveBeenCalledWith(250);
   });
 
@@ -393,6 +403,7 @@ function composeRtspTransition(test: ReconcileHarness) {
     { findActive: vi.fn().mockResolvedValue(null) },
     coordinator,
     test.useCase,
+    test.settings,
   );
   return { coordinator, camera, gate };
 }

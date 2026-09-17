@@ -20,6 +20,8 @@ import {
   type LiveSourceSessionControlPort,
 } from '../domain/ports/live-source-session-control.port';
 import type { FeatureRuntimeLifecyclePort } from '../../features/domain/ports/feature-runtime-lifecycle.port';
+import { LiveViewSetupRequiredError } from '../../features/domain/errors/live-view-setup-required.error';
+import { LIVE_VIEW_SETTINGS_STORE, type LiveViewSettingsStorePort } from '../domain/ports/live-view-settings-store.port';
 
 /** Runtime transitions that must complete around camera feature state changes. */
 @Injectable()
@@ -38,6 +40,7 @@ export class FeatureCameraRuntimeLifecycleService {
     private readonly settingsJobs: Pick<LiveViewSettingsJobRepositoryPort, 'findActive'>,
     private readonly coordinator: LiveViewPolicyCoordinatorService,
     private readonly reconcileRtspPolicy: ReconcileRtspPolicyUseCase,
+    @Inject(LIVE_VIEW_SETTINGS_STORE) private readonly settings: LiveViewSettingsStorePort,
   ) {
     this.motion = {
       beforeDisable: async () => {
@@ -47,6 +50,10 @@ export class FeatureCameraRuntimeLifecycleService {
       afterEnable: () => this.watcher.start(),
     };
     this.rtsp = {
+      beforeEnable: async () => {
+        const committed = await this.settings.readCommitted();
+        if (committed.allowedCameraCidrs.length === 0) throw new LiveViewSetupRequiredError();
+      },
       runTransition: (operation) => this.coordinator.run('rtsp-state', async (lease) => {
         await this.requireNoActiveSettingsJob();
         this.activeRtspLease = lease;

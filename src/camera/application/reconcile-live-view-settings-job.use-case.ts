@@ -64,7 +64,7 @@ const DEFAULT_RESULT_POLL_INTERVAL_MS = 250;
 const POLICY_APPLIER_TIMEOUT_MS = 60_000;
 const ACTIVATION_AND_SCHEDULING_MARGIN_MS = 5_000;
 const DEFAULT_MAX_RESULT_POLLS =
-  (POLICY_APPLIER_TIMEOUT_MS - ACTIVATION_AND_SCHEDULING_MARGIN_MS) /
+  (POLICY_APPLIER_TIMEOUT_MS + ACTIVATION_AND_SCHEDULING_MARGIN_MS) /
     DEFAULT_RESULT_POLL_INTERVAL_MS +
   1;
 
@@ -80,6 +80,7 @@ export interface ReconcileLiveViewSettingsJobOptions {
 
 export type ReconcileLiveViewSettingsJobResult =
   | { readonly kind: "resumed" }
+  | { readonly kind: "pending" }
   | { readonly kind: "restart-required" }
   | { readonly kind: "succeeded" }
   | {
@@ -203,9 +204,8 @@ export class ReconcileLiveViewSettingsJobUseCase {
       settings: job.candidateSettings,
     });
 
-    let publication: "published" | "already-published";
     try {
-      publication = await this.requests.publish(request);
+      await this.requests.publish(request);
     } catch {
       // Publication uses a durable link. A thrown cleanup step can be
       // indistinguishable from a successful publication, so retain the job.
@@ -220,7 +220,6 @@ export class ReconcileLiveViewSettingsJobUseCase {
         policyState,
         lease,
         gateEpoch,
-        publication === "published",
       );
     });
   }
@@ -242,7 +241,7 @@ export class ReconcileLiveViewSettingsJobUseCase {
   ): Promise<ReconcileLiveViewSettingsJobResult> {
     return this.retainPublishedOnUncertainty(lease, async () => {
       const policyState = await this.readPolicyState();
-      return this.runPublished(job, policyState, lease, gateEpoch, false);
+      return this.runPublished(job, policyState, lease, gateEpoch);
     });
   }
 
@@ -251,12 +250,11 @@ export class ReconcileLiveViewSettingsJobUseCase {
     policyState: PolicyState,
     lease: LiveViewPolicyMutationLease,
     gateEpoch: number,
-    freshlyPublished: boolean,
   ): Promise<ReconcileLiveViewSettingsJobResult> {
     try {
       await this.controller.start();
     } catch {
-      return this.handleUnitStartFailure(job, policyState, lease, gateEpoch);
+      return this.handleUnitStartFailure(job, lease, gateEpoch);
     }
 
     const terminal = await this.pollResult(job.id);
@@ -275,10 +273,8 @@ export class ReconcileLiveViewSettingsJobUseCase {
       if (committed.generation !== job.expectedGeneration) {
         throw new LiveViewPolicyApplyError();
       }
-      if (!freshlyPublished) return { kind: "resumed" };
-
-      const failed = await this.terminalizeFailure(job, "interrupted");
-      return { kind: "failed", failureCode: failed.failureCode! };
+      lease.markRestartPending();
+      return { kind: "pending" };
     }
 
     const verified = verifyTerminalResult(terminal, job, policyState);
@@ -312,7 +308,6 @@ export class ReconcileLiveViewSettingsJobUseCase {
 
   private async handleUnitStartFailure(
     job: LiveViewSettingsJob,
-    policyState: PolicyState,
     lease: LiveViewPolicyMutationLease,
     gateEpoch: number,
   ): Promise<ReconcileLiveViewSettingsJobResult> {
@@ -326,14 +321,8 @@ export class ReconcileLiveViewSettingsJobUseCase {
       return this.dispatchRestart(committedJob, lease, gateEpoch);
     }
 
-    const failed = await this.terminalizeFailure(job, "unit-start-failed");
-    await this.restoreOldGateIfSafe(
-      failed,
-      policyState,
-      gateEpoch,
-      "unit-start-failed",
-    );
-    return { kind: "failed", failureCode: "unit-start-failed" };
+    lease.markRestartPending();
+    return { kind: "pending" };
   }
 
   private async resumeCommitted(
@@ -445,14 +434,16 @@ export class ReconcileLiveViewSettingsJobUseCase {
     gateEpoch: number,
   ): Promise<ReconcileLiveViewSettingsJobResult> {
     await this.outcomes?.notifyPreRestart(job);
+    this.restartActivation?.arm(job.id, job.expectedGeneration);
     try {
       await this.restarter.restart(() =>
         this.settings.simulateDevelopmentRestart(),
       );
-      if (this.settings.bootLoadedGeneration() !== job.expectedGeneration) {
-        return this.resumeCommitted(job, lease, gateEpoch);
+      const current = await this.jobs.findById(job.id);
+      if (current?.status === 'restart-required') return { kind: 'restart-required' };
+      if (current && this.settings.bootLoadedGeneration() !== job.expectedGeneration) {
+        return this.resumeCommitted(current, lease, gateEpoch);
       }
-      this.restartActivation?.arm(job.id, job.expectedGeneration);
       return { kind: "resumed" };
     } catch {
       try {

@@ -25,6 +25,8 @@ describe('feature locale catalog parity', () => {
       expect(Object.keys(confirmation).sort(), locale).toEqual([...FEATURE_ACTIONS].sort());
       expect(catalog.feature.reinstallAction.length, locale).toBeGreaterThan(0);
       expect(catalog.feature.reinstallNotice.length, locale).toBeGreaterThan(0);
+      expect(catalog.feature.liveViewSetupRequired.length, locale).toBeGreaterThan(0);
+      expect(catalog.feature.openLiveViewSetup.length, locale).toBeGreaterThan(0);
       expect(catalog.feature.progress.reinstalling('X'), locale).toContain('X');
       expect(catalog.feature.errors.reinstallUnavailable('X'), locale).toContain('X');
     }

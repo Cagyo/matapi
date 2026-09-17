@@ -78,7 +78,7 @@ function build(options: Options = {}) {
   const adapter = new InstalledRtspPolicyStatusAdapter({
     inspector: new RtspPolicyInspectorGateway({ execFile }),
     files: { readSealed },
-    env: options.env ?? { RTSP_POLICY_DIGEST: String(document.digest) },
+    env: options.env ?? {},
   });
   return { adapter, readSealed, execFile };
 }
@@ -256,8 +256,6 @@ describe('installed RTSP policy status', () => {
   });
 
   it.each([
-    ['a stale digest', { RTSP_POLICY_DIGEST: 'f'.repeat(64) }],
-    ['an absent digest', { RTSP_POLICY_DIGEST: undefined }],
     ['a shifted UDP range', { RTSP_UDP_PORT_FIRST: '24010', RTSP_UDP_PORT_LAST: '24011' }],
     ['a malformed UDP range', { RTSP_UDP_PORT_FIRST: '24000x' }],
   ])('refuses the projection when the process environment disagrees through %s', async (_label, overrides) => {

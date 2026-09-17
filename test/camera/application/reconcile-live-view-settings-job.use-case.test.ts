@@ -4,6 +4,7 @@ import { LiveViewPolicyCoordinatorService } from "../../../src/camera/applicatio
 import {
   ReconcileLiveViewSettingsJobUseCase,
   type ReconcileLiveViewSettingsJobResult,
+  type ReconcileLiveViewSettingsJobOptions,
 } from "../../../src/camera/application/reconcile-live-view-settings-job.use-case";
 import { LiveViewStartGate } from "../../../src/camera/application/live-view-start-gate.service";
 import { LiveViewPolicyApplyError } from "../../../src/camera/domain/errors/live-view-policy-apply.error";
@@ -90,6 +91,7 @@ function makeReconcile(input: {
   readonly features?: FeatureQueryPort;
   readonly gate?: LiveViewStartGate;
   readonly quiesce?: () => Promise<void>;
+  readonly pollOptions?: ReconcileLiveViewSettingsJobOptions;
 }) {
   const gate = input.gate ?? new LiveViewStartGate();
   const quiesce = vi.fn(input.quiesce ?? (async () => undefined));
@@ -110,7 +112,7 @@ function makeReconcile(input: {
     restarter,
     input.capability ?? READY,
     { now: () => new Date(NOW) },
-    {
+    input.pollOptions ?? {
       maxResultPolls: 1,
       resultPollIntervalMs: 1,
       sleep: async () => undefined,
@@ -182,6 +184,24 @@ function observedRecoveryPath(input: {
 }
 
 describe("ReconcileLiveViewSettingsJobUseCase", () => {
+  it('still observes a helper result at the full 60-second unit bound', async () => {
+    const jobs = new InMemoryLiveViewSettingsJobRepository();
+    createPreparedJob(jobs);
+    const settings = new InMemoryLiveViewSettingsAdapter(CURRENT);
+    const policy = new InMemoryLiveViewPolicyAdapter(settings);
+    let elapsed = 0;
+    const test = makeReconcile({
+      jobs, settings, requests: policy, results: policy, acknowledgements: policy,
+      controller: { start: async () => undefined },
+      pollOptions: { sleep: async milliseconds => {
+        elapsed += milliseconds;
+        if (elapsed === 60_000) await policy.start();
+      } },
+    });
+    await expect(test.reconcile.execute(JOB_ID)).resolves.toEqual({ kind: 'resumed' });
+    expect(await jobs.findById(JOB_ID)).toMatchObject({ status: 'committed', activeSlot: 1 });
+    expect(elapsed).toBe(60_000);
+  });
   it.each([
     ["prepared", "resume-quiesce-and-publish"],
     ["published", "retrigger-and-read-result"],
@@ -225,37 +245,33 @@ describe("ReconcileLiveViewSettingsJobUseCase", () => {
     }
   });
 
-  it("terminalizes a prepared job as interrupted after a bounded terminal unit produces no request, result, or generation", async () => {
+  it.each([false, true])("retains a published job for a late helper after uncertainty (start failure: %s)", async startFails => {
     const jobs = new InMemoryLiveViewSettingsJobRepository();
     createPreparedJob(jobs);
     const settings = new InMemoryLiveViewSettingsAdapter(CURRENT);
-    const requests: LiveViewPolicyRequestPort = {
-      publish: vi.fn(async () => "published"),
-    };
-    const results: LiveViewPolicyResultPort = {
-      read: vi.fn(async () => null),
-    };
+    const policy = new InMemoryLiveViewPolicyAdapter(settings);
     const test = makeReconcile({
       jobs,
       settings,
-      requests,
-      controller: { start: vi.fn(async () => undefined) },
-      results,
-      acknowledgements: { publish: vi.fn(async () => "published") },
+      requests: policy,
+      controller: { start: async () => { if (startFails) throw new Error('dispatch uncertain'); } },
+      results: policy,
+      acknowledgements: policy,
     });
 
     await expect(test.reconcile.execute(JOB_ID)).resolves.toEqual({
-      kind: "failed",
-      failureCode: "interrupted",
+      kind: "pending",
     });
 
     expect(await jobs.findById(JOB_ID)).toMatchObject({
-      status: "failed",
-      failureCode: "interrupted",
-      activeSlot: null,
+      status: "published",
+      activeSlot: 1,
     });
     expect(await settings.readCommitted()).toEqual(CURRENT);
     expect(() => test.gate.assertCanStart()).toThrow();
+    await policy.start();
+    expect(await settings.readCommitted()).toEqual(TARGET);
+    expect(await jobs.findActive()).toMatchObject({ id: JOB_ID, status: 'published' });
   });
 
   it("keeps a published job active when a replayable claim has no result yet", async () => {
@@ -273,7 +289,7 @@ describe("ReconcileLiveViewSettingsJobUseCase", () => {
     });
 
     await expect(test.reconcile.execute(JOB_ID)).resolves.toEqual({
-      kind: "resumed",
+      kind: "pending",
     });
 
     expect(await jobs.findById(JOB_ID)).toMatchObject({
