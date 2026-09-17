@@ -434,7 +434,7 @@ export class ReconcileLiveViewSettingsJobUseCase {
     gateEpoch: number,
   ): Promise<ReconcileLiveViewSettingsJobResult> {
     await this.outcomes?.notifyPreRestart(job);
-    this.restartActivation?.arm(job.id, job.expectedGeneration);
+    const restartGateEpoch = this.restartActivation?.arm(job.id, job.expectedGeneration) ?? gateEpoch;
     try {
       await this.restarter.restart(() =>
         this.settings.simulateDevelopmentRestart(),
@@ -442,7 +442,7 @@ export class ReconcileLiveViewSettingsJobUseCase {
       const current = await this.jobs.findById(job.id);
       if (current?.status === 'restart-required') return { kind: 'restart-required' };
       if (current && this.settings.bootLoadedGeneration() !== job.expectedGeneration) {
-        return this.resumeCommitted(current, lease, gateEpoch);
+        return this.resumeCommitted(current, lease, restartGateEpoch);
       }
       return { kind: "resumed" };
     } catch {

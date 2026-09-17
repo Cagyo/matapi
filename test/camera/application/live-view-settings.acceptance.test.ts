@@ -74,7 +74,7 @@ function setup(rtspEnabled = false) {
 afterEach(() => vi.useRealTimers());
 
 describe('admin live view settings acceptance', () => {
-  it('enables Motion without CIDRs, commits one generation, and reports before restarting', async () => {
+  it('opens the Motion gate after a successful in-memory restart without CIDRs', async () => {
     const s = setup();
     const delivered: string[] = [];
     s.outcomes.register({ notify: async () => undefined, notifyPreRestart: async job => { delivered.push(job.status); } });
@@ -82,6 +82,7 @@ describe('admin live view settings acceptance', () => {
     await s.apply.execute(jobId);
     expect(await s.settings.readCommitted()).toEqual({ version: 1, generation: 1, ...enabled });
     expect(await s.jobs.findById(jobId)).toMatchObject({ status: 'succeeded', activeSlot: null });
+    expect(() => s.gate.assertCanStart()).not.toThrow();
     expect(s.policy.snapshot().settingsCommitCount).toBe(1);
     expect(delivered).toEqual(['committed']);
   });

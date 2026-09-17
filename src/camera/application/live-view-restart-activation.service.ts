@@ -37,9 +37,9 @@ export class LiveViewRestartActivationService {
     private readonly clock: CameraClockPort,
   ) {}
 
-  arm(jobId: string, oldGeneration: number): void {
+  arm(jobId: string, oldGeneration: number): number {
     this.cancelOnBoot(jobId);
-    this.gate.close();
+    const gateEpoch = this.gate.close();
     const deadline = setTimeout(() => {
       this.deadlines.delete(jobId);
       if (this.settings.bootLoadedGeneration() !== oldGeneration) return;
@@ -52,6 +52,7 @@ export class LiveViewRestartActivationService {
         .catch(() => undefined);
     }, RESTART_ACTIVATION_DEADLINE_MS);
     this.deadlines.set(jobId, deadline);
+    return gateEpoch;
   }
 
   async retry(_jobId: string): Promise<void> {
