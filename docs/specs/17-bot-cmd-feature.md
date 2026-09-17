@@ -63,6 +63,18 @@ Mutations use the existing workflow-return receipt, current-role rechecks, expec
 
 ## First-install consistency
 
+RTSP enable/disable shares Camera's policy mutation lease and refuses transitions
+while a settings job or restart is active. Disable closes the RTSP start gate,
+stops RTSP sessions, and applies deny-all; enable applies the committed CIDRs
+before opening the gate. Both use the exact `(settingsGeneration, rtspEnabled)`
+policy tuple and retain the same settings generation. Package installation
+remains separate from these fixed policy applications.
+
+The setup wizard defers selected RTSP installation until camera CIDRs have been
+saved in Telegram. Live-view capability reports dependency readiness independently
+of the settings enable switch. The settings source and recovery protocol are
+defined by [Admin Live View Settings Design](../superpowers/specs/2026-08-13-admin-live-view-settings-design.md).
+
 The installer rewrites `features.json.enabled` to contain only features whose installation and verification succeeded. The worker seeder must not mark a selected-but-failed feature installed or enabled.
 
 ## Detailed design

@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
+import { FeatureCameraRuntimeLifecycleService } from '../../../src/camera/application/feature-camera-runtime-lifecycle.service';
+import { LiveViewPolicyCoordinatorService } from '../../../src/camera/application/live-view-policy-coordinator.service';
+import { LiveViewSettingsBusyError } from '../../../src/camera/domain/errors/live-view-settings-busy.error';
+import { InMemoryLiveViewSettingsAdapter } from '../../../src/camera/infrastructure/in-memory-live-view-settings.adapter';
 import { BeginFeatureInstallUseCase } from '../../../src/features/application/begin-feature-install.use-case';
+import { FeatureDisableLifecycleRegistry } from '../../../src/features/application/feature-disable-lifecycle-registry.service';
 import { FeatureInstallStartError } from '../../../src/features/domain/errors/feature-install-start.error';
 import { FeatureStateChangedError } from '../../../src/features/domain/errors/feature-state-changed.error';
 import type { Feature } from '../../../src/features/domain/feature.entity';
@@ -25,8 +30,17 @@ const reinstall = {
   expected: { installed: true, enabled: true },
 };
 
+const freshRtsp = {
+  ...input,
+  feature: 'rtsp' as const,
+};
+
 const INSTALLED_RTSP: Feature = {
   name: 'rtsp', installed: true, enabled: true, config: null, attentionReason: null,
+};
+
+const UNINSTALLED_RTSP: Feature = {
+  name: 'rtsp', installed: false, enabled: false, config: null, attentionReason: null,
 };
 
 function create(seed: readonly Feature[] = []) {
@@ -44,6 +58,7 @@ function create(seed: readonly Feature[] = []) {
   const lifecycle = {
     beforeDisable: vi.fn(async () => { trace.push('before-disable'); }),
     afterEnable: vi.fn(async () => { trace.push('after-enable'); }),
+    runTransition: vi.fn(async (_name, operation: () => Promise<unknown>) => operation()),
   };
   const recovery = { wake: vi.fn() } as unknown as FeatureInstallRecoveryService;
   return {
@@ -55,6 +70,14 @@ function create(seed: readonly Feature[] = []) {
 }
 
 describe('BeginFeatureInstallUseCase', () => {
+  it('checks the RTSP setup prerequisite before creating or publishing an install job', async () => {
+    const test = create([UNINSTALLED_RTSP]);
+    Object.assign(test.lifecycle, { beforeEnable: vi.fn().mockRejectedValue(new Error('setup required')) });
+    await expect(test.useCase.execute(freshRtsp)).rejects.toThrow('setup required');
+    expect(await test.jobs.findActive()).toBeNull();
+    expect(test.request.publish).not.toHaveBeenCalled();
+    expect(test.controller.start).not.toHaveBeenCalled();
+  });
   it('persists the queued job before publishing, then starts and marks it running', async () => {
     const test = create();
     test.request.publish.mockImplementation(async () => {
@@ -76,6 +99,41 @@ describe('BeginFeatureInstallUseCase', () => {
     expect(test.lifecycle.beforeDisable).not.toHaveBeenCalled();
     expect(test.lifecycle.afterEnable).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ['fresh install', freshRtsp, UNINSTALLED_RTSP],
+    ['reinstall', reinstall, INSTALLED_RTSP],
+  ] as const)(
+    'rejects an active settings job before an RTSP %s creates or publishes install state',
+    async (_name, installInput, feature) => {
+      const test = create([feature]);
+      const composed = composeRtspLifecycleWithActiveSettings();
+      const useCase = new BeginFeatureInstallUseCase(
+        test.jobs,
+        test.request,
+        test.controller,
+        composed.registry,
+        { now: () => now },
+        test.recovery,
+      );
+
+      await expect(useCase.execute(installInput)).rejects.toBeInstanceOf(
+        LiveViewSettingsBusyError,
+      );
+
+      expect(await test.jobs.findById(installInput.id)).toBeNull();
+      expect(await test.features.findByName('rtsp')).toMatchObject({
+        installed: feature.installed,
+        enabled: feature.enabled,
+        attentionReason: null,
+      });
+      expect(test.request.publish).not.toHaveBeenCalled();
+      expect(test.controller.start).not.toHaveBeenCalled();
+      expect(composed.reconcileRtspPolicy.execute).not.toHaveBeenCalled();
+      expect(composed.gate.close).not.toHaveBeenCalled();
+      expect(composed.gate.open).not.toHaveBeenCalled();
+    },
+  );
 
   it('terminalizes a rejected start only after cancelling the exact unclaimed request', async () => {
     const test = create();
@@ -183,3 +241,26 @@ describe('BeginFeatureInstallUseCase', () => {
     });
   });
 });
+
+function composeRtspLifecycleWithActiveSettings() {
+  const registry = new FeatureDisableLifecycleRegistry();
+  const coordinator = new LiveViewPolicyCoordinatorService();
+  const gate = { close: vi.fn(), open: vi.fn().mockResolvedValue(undefined) };
+  const sessions = {
+    stopCamera: vi.fn().mockResolvedValue(undefined),
+    stopSourceKind: vi.fn().mockResolvedValue(undefined),
+  };
+  const reconcileRtspPolicy = { execute: vi.fn().mockResolvedValue(undefined) };
+  const camera = new FeatureCameraRuntimeLifecycleService(
+    { stop: vi.fn(), start: vi.fn() } as never,
+    { stop: vi.fn() } as never,
+    gate as never,
+    sessions,
+    { findActive: vi.fn().mockResolvedValue({ id: 'active-settings-job' }) },
+    coordinator,
+    reconcileRtspPolicy as never,
+    new InMemoryLiveViewSettingsAdapter(),
+  );
+  registry.register('rtsp', camera.rtsp);
+  return { registry, coordinator, gate, sessions, reconcileRtspPolicy };
+}

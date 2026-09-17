@@ -252,9 +252,12 @@ function renderStep2(token, botUsername, catalog = [], pairingSecret = '', local
   return renderLayout('Select Features', content);
 }
 
-function renderDone(botUsername, claimAdminToken) {
+function renderDone(botUsername, claimAdminToken, deferredFeatures = []) {
   const safeUser = escapeHtml(botUsername || 'your_bot');
   const safeClaimToken = escapeHtml(claimAdminToken);
+  const liveViewGuidance = Array.isArray(deferredFeatures) && deferredFeatures.includes('rtsp')
+    ? '<br>3. Finish Live view setup in Telegram before enabling RTSP.'
+    : '';
   const content = `
     <h1>Setup Complete!</h1>
     <p class="subtitle">Configuration saved successfully.</p>
@@ -262,7 +265,7 @@ function renderDone(botUsername, claimAdminToken) {
       <b>Next Steps:</b>
       <p style="margin-top: 0.5rem; font-size: 0.875rem;">
         1. Terminal is installing feature dependencies... this may take a few minutes.<br>
-        2. Once the terminal shows "Installation complete", send <code>/claim_admin ${safeClaimToken}</code> to <b>@${safeUser}</b> in Telegram.
+        2. Once the terminal shows "Installation complete", send <code>/claim_admin ${safeClaimToken}</code> to <b>@${safeUser}</b> in Telegram.${liveViewGuidance}
       </p>
     </div>
     <p style="color: var(--text-muted); font-size: 0.825rem; text-align: center;">

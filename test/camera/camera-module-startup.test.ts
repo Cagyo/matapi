@@ -6,6 +6,9 @@ import { join } from 'node:path';
 import { COMPLETED_MOTION_VIDEO } from '../../src/camera/domain/ports/completed-motion-video.port';
 import { FsCompletedMotionVideoAdapter } from '../../src/camera/infrastructure/fs-completed-motion-video.adapter';
 import { CameraModule } from '../../src/camera/camera.module';
+import { LIVE_VIEW_SETTINGS_STORE } from '../../src/camera/domain/ports/live-view-settings-store.port';
+import { LIVE_VIEW_SETTINGS_JOB_REPOSITORY } from '../../src/camera/domain/ports/live-view-settings-job-repository.port';
+import { LiveViewSettingsRecoveryService } from '../../src/camera/application/live-view-settings-recovery.service';
 
 describe('CameraModule archive composition', () => {
   const previousDatabasePath = process.env.DATABASE_PATH;
@@ -25,9 +28,13 @@ describe('CameraModule archive composition', () => {
     tempDirectories.push(directory);
     process.env.DATABASE_PATH = join(directory, 'worker.sqlite');
     process.env.CAMERA_MODE = 'stub';
-    const app = await NestFactory.createApplicationContext(CameraModule, { logger: false });
+    const app = await NestFactory.createApplicationContext(CameraModule, { logger: false, abortOnError: false });
     try {
       expect(app.get(COMPLETED_MOTION_VIDEO)).toBeInstanceOf(FsCompletedMotionVideoAdapter);
+      expect(app.get(LIVE_VIEW_SETTINGS_STORE).constructor.name).toBe('InMemoryLiveViewSettingsAdapter');
+      expect(app.get(LIVE_VIEW_SETTINGS_JOB_REPOSITORY).constructor.name).toBe('InMemoryLiveViewSettingsJobRepository');
+      const recovery = app.get(LiveViewSettingsRecoveryService);
+      expect(recovery.run()).toBe(recovery.run());
     } finally {
       await app.close();
     }

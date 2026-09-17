@@ -21,7 +21,10 @@ export class DisableFeatureUseCase {
     @Inject(FEATURE_INSTALL_JOB_REPOSITORY)
     private readonly jobs: Pick<FeatureInstallJobRepositoryPort, 'findActive'>,
     @Inject(FEATURE_RUNTIME_LIFECYCLE)
-    private readonly lifecycle: Pick<FeatureRuntimeLifecycleRegistryPort, 'beforeDisable' | 'afterEnable'>,
+    private readonly lifecycle: Pick<
+      FeatureRuntimeLifecycleRegistryPort,
+      'runTransition' | 'beforeDisable' | 'afterEnable'
+    >,
     @Inject(FEATURE_RESTART) private readonly restart: FeatureRestartPort,
   ) {}
 
@@ -30,6 +33,13 @@ export class DisableFeatureUseCase {
   async execute(input: ToggleFeatureInput | string): Promise<ToggleFeatureResult> {
     if (typeof input === 'string') return this.execute(await this.legacyInput(input));
     const name = this.validate(input);
+    return this.lifecycle.runTransition(name, () => this.disable(input, name));
+  }
+
+  private async disable(
+    input: ToggleFeatureInput,
+    name: ManageableFeatureName,
+  ): Promise<ToggleFeatureResult> {
     const active = await this.jobs.findActive();
     if (active?.feature === name) throw new FeatureInstallBusyError(name);
     await this.requireExpectedState(name, input.expected);

@@ -36,7 +36,10 @@ export class EnableFeatureUseCase {
     private readonly jobs: Pick<FeatureInstallJobRepositoryPort, 'findActive'>,
     private readonly verify: VerifyFeatureReadinessUseCase,
     @Inject(FEATURE_RUNTIME_LIFECYCLE)
-    private readonly lifecycle: Pick<FeatureRuntimeLifecycleRegistryPort, 'beforeDisable' | 'afterEnable'>,
+    private readonly lifecycle: Pick<
+      FeatureRuntimeLifecycleRegistryPort,
+      'runTransition' | 'beforeEnable' | 'beforeDisable' | 'afterEnable'
+    >,
     @Inject(FEATURE_RESTART) private readonly restart: FeatureRestartPort,
   ) {}
 
@@ -45,9 +48,17 @@ export class EnableFeatureUseCase {
   async execute(input: ToggleFeatureInput | string): Promise<ToggleFeatureResult> {
     if (typeof input === 'string') return this.execute(await this.legacyInput(input));
     const name = this.validate(input);
+    return this.lifecycle.runTransition(name, () => this.enable(input, name));
+  }
+
+  private async enable(
+    input: ToggleFeatureInput,
+    name: ManageableFeatureName,
+  ): Promise<ToggleFeatureResult> {
     const active = await this.jobs.findActive();
     if (active?.feature === name) throw new FeatureInstallBusyError(name);
     await this.requireExpectedState(name, input.expected);
+    await this.lifecycle.beforeEnable?.(name);
     await this.verify.execute({ name, source: 'mutation' });
 
     const feature = await this.features.compareAndSetEnabled({

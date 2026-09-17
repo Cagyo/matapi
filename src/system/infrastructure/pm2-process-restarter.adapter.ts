@@ -1,6 +1,10 @@
-import { Injectable, Logger, Optional } from '@nestjs/common';
-import { type ChildProcess, spawn, type SpawnOptions } from 'node:child_process';
-import { ProcessRestarterPort } from '../domain/ports/process-restarter.port';
+import { Injectable, Logger, Optional } from "@nestjs/common";
+import {
+  type ChildProcess,
+  spawn,
+  type SpawnOptions,
+} from "node:child_process";
+import { ProcessRestarterPort } from "../domain/ports/process-restarter.port";
 
 type ProcessSpawner = (
   command: string,
@@ -9,8 +13,8 @@ type ProcessSpawner = (
 ) => ChildProcess;
 
 /**
- * Triggers a `pm2 restart worker` and detaches. The current process is
- * expected to be torn down by PM2 shortly after this resolves.
+ * Triggers a fixed `pm2 restart <app>` command and acknowledges only its
+ * successful exit. The current process is expected to be torn down by PM2.
  *
  * The PM2 app name is overridable with `PM2_APP_NAME` (defaults to
  * `worker` per `ecosystem.config.js`).
@@ -24,28 +28,45 @@ export class Pm2ProcessRestarter implements ProcessRestarterPort {
   ) {}
 
   async restart(): Promise<void> {
-    const appName = process.env.PM2_APP_NAME ?? 'worker';
+    const appName = process.env.PM2_APP_NAME ?? "worker";
     this.logger.warn(`Triggering pm2 restart ${appName}`);
-    const child = this.spawnProcess('pm2', ['restart', appName], {
+    const child = this.spawnProcess("pm2", ["restart", appName], {
       detached: true,
-      stdio: 'ignore',
+      shell: false,
+      stdio: "ignore",
     });
     await new Promise<void>((resolve, reject) => {
       let settled = false;
+      const settle = (operation: () => void) => {
+        if (settled) return;
+        settled = true;
+        child.removeListener("error", onError);
+        child.removeListener("close", onClose);
+        operation();
+      };
       const onError = (error: Error) => {
-        if (settled) return;
-        settled = true;
-        child.removeListener('spawn', onSpawn);
-        reject(error);
+        settle(() => reject(error));
       };
-      const onSpawn = () => {
-        if (settled) return;
-        settled = true;
-        child.unref();
-        resolve();
+      const onClose = (code: number | null, signal: NodeJS.Signals | null) => {
+        if (signal !== null) {
+          settle(() =>
+            reject(new Error(`pm2 restart terminated by ${signal}`)),
+          );
+          return;
+        }
+        if (code !== 0) {
+          settle(() =>
+            reject(new Error(`pm2 restart exited with code ${String(code)}`)),
+          );
+          return;
+        }
+        settle(() => {
+          child.unref();
+          resolve();
+        });
       };
-      child.once('error', onError);
-      child.once('spawn', onSpawn);
+      child.once("error", onError);
+      child.once("close", onClose);
     });
   }
 }

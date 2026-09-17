@@ -317,6 +317,7 @@ function renderAdminTools(catalog: LocaleCatalog, identity: PendingHomeIdentity)
       [button(catalog.home.adminTools.sensorSetup, identity, { kind: 'admin-sensor-setup' }), button(catalog.home.adminTools.storage, identity, { kind: 'admin-storage' })],
       [button(catalog.home.adminTools.system, identity, { kind: 'admin-system' }), button(catalog.home.adminTools.invite, identity, { kind: 'invite' })],
       [button(catalog.home.adminTools.features, identity, { kind: 'features' })],
+      [button(catalog.home.adminTools.liveViewSetup, identity, { kind: 'live-view-settings' })],
       ...navigationRows(catalog, identity, 'more'),
     ],
   };

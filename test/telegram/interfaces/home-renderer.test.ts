@@ -323,6 +323,7 @@ describe('renderHomeMessage', () => {
       [{ kind: 'admin-sensor-setup' }, { kind: 'admin-storage' }],
       [{ kind: 'admin-system' }, { kind: 'invite' }],
       [{ kind: 'features' }],
+      [{ kind: 'live-view-settings' }],
       [{ kind: 'back' }, { kind: 'home' }],
     ]);
   });

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { LiveViewStartGate } from '../../../src/camera/application/live-view-start-gate.service';
 import { OpenLiveStreamUseCase } from '../../../src/camera/application/open-live-stream.use-case';
 import { RtspSourceStartGate } from '../../../src/camera/application/rtsp-source-start-gate.service';
 import { FeatureLiveStreamCapabilityAdapter } from '../../../src/camera/infrastructure/feature-live-stream-capability.adapter';
@@ -6,6 +7,8 @@ import { FeatureLiveStreamCapabilityAdapter } from '../../../src/camera/infrastr
 describe('live-stream capability', () => {
   it('refuses a resolved live request when the Quick Tunnel capability is unavailable', async () => {
     let sourceResolutions = 0;
+    const liveViewStartGate = new LiveViewStartGate();
+    liveViewStartGate.openIfCurrent(0);
     const useCase = new OpenLiveStreamUseCase(
       {
         resolve: async () => {
@@ -20,6 +23,7 @@ describe('live-stream capability', () => {
       } as never,
       { open: async () => { throw new Error('gateway must not start'); } } as never,
       { isAvailable: async () => false },
+      liveViewStartGate,
       new RtspSourceStartGate(),
     );
 

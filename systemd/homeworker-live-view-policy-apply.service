@@ -1,0 +1,19 @@
+[Unit]
+Description=Home Worker live view policy applier
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/home-worker/live-view-policy-applier
+TimeoutStartSec=60
+User=root
+Group=root
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictRealtime=yes
+StandardOutput=journal
+StandardError=journal

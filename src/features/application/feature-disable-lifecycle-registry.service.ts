@@ -23,6 +23,20 @@ export class FeatureDisableLifecycleRegistry
     await this.lifecycles.get(name)?.beforeDisable();
   }
 
+  async beforeEnable(name: ManageableFeatureName): Promise<void> {
+    await this.lifecycles.get(name)?.beforeEnable?.();
+  }
+
+  async runTransition<T>(
+    name: ManageableFeatureName,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const lifecycle = this.lifecycles.get(name);
+    return lifecycle?.runTransition
+      ? lifecycle.runTransition(operation)
+      : operation();
+  }
+
   async afterEnable(name: ManageableFeatureName): Promise<void> {
     await this.lifecycles.get(name)?.afterEnable();
   }

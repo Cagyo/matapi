@@ -1,10 +1,11 @@
-export const PROCESS_RESTARTER = Symbol('PROCESS_RESTARTER');
+export const PROCESS_RESTARTER = Symbol("PROCESS_RESTARTER");
 
 /**
  * Triggers a process-supervisor restart (PM2 in production). Implementations
- * must not return before the supervisor has been instructed to restart; the
- * worker process will be torn down shortly after.
+ * must not resolve until the fixed supervisor command exits successfully.
+ * Development implementations may invoke the supplied process-local activation
+ * seam instead of starting a supervisor.
  */
 export interface ProcessRestarterPort {
-  restart(): Promise<void>;
+  restart(simulateDevelopmentRestart?: () => Promise<void>): Promise<void>;
 }

@@ -128,6 +128,19 @@ describe('WorkflowEntryCoordinator', () => {
     }));
   });
 
+  it('uses Admin tools as the natural parent for a direct Live view setup alias', async () => {
+    const { coordinator, execute } = setup();
+
+    await coordinator.begin(context(), 'live-view-settings', { source: 'natural-parent' });
+
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({
+      workflow: 'live-view-settings',
+      origin: { kind: 'admin-tools' },
+      originSource: 'natural-parent',
+      sessionToken: null,
+    }));
+  });
+
   it('checks a local callback receipt without consuming or advancing it', async () => {
     const actions = {
       findWorkflowReturn: vi.fn().mockResolvedValue(receipt),

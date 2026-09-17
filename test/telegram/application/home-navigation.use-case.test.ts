@@ -132,6 +132,14 @@ describe('HomeNavigationUseCase', () => {
       .resolves.toEqual({ kind: 'recovery', reason: 'superseded' });
   });
 
+  it('starts Live view setup only from Admin tools for an administrator', async () => {
+    const useCase = new HomeNavigationUseCase({} as never, { now: () => now }, { generate: () => '1234567890abcdef' });
+    await expect(useCase.execute({ active, role: 'admin', view: { kind: 'admin-tools' }, action: { kind: 'live-view-settings' } }))
+      .resolves.toEqual({ kind: 'external', destination: 'live-view-settings' });
+    await expect(useCase.execute({ active, role: 'user', view: { kind: 'admin-tools' }, action: { kind: 'live-view-settings' } }))
+      .resolves.toEqual({ kind: 'recovery', reason: 'superseded' });
+  });
+
   it('refreshes the already validated legacy view without changing its destination', async () => {
     const useCase = new HomeNavigationUseCase(
       {} as never,

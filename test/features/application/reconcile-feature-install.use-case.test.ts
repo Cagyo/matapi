@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { FeatureDisableLifecycleRegistry } from '../../../src/features/application/feature-disable-lifecycle-registry.service';
 import { ReconcileFeatureInstallUseCase } from '../../../src/features/application/reconcile-feature-install.use-case';
 import { VerifyFeatureReadinessUseCase } from '../../../src/features/application/verify-feature-readiness.use-case';
 import { FeatureRestartDispatchError } from '../../../src/features/domain/errors/feature-restart-dispatch.error';
@@ -41,10 +42,12 @@ const RUNTIME_INVALID: FeatureReadinessResult = {
 type ResultState = Awaited<ReturnType<FeatureInstallResultPort['readState']>>;
 type ReadinessStep = FeatureReadinessResult | 'throws';
 
-const succeeded: FeatureInstallResultV1 = {
-  version: 1, jobId: id, feature: 'digital', outcome: 'succeeded',
-  failureCode: null, privilegedReady: true, restartScope: 'worker',
-};
+function succeeded(feature: ManageableFeatureName = 'digital'): FeatureInstallResultV1 {
+  return {
+    version: 1, jobId: id, feature, outcome: 'succeeded',
+    failureCode: null, privilegedReady: true, restartScope: 'worker',
+  };
+}
 
 function failed(failureCode: FeatureInstallFailureCode): FeatureInstallResultV1 {
   return { version: 1, jobId: id, feature: 'digital', outcome: 'failed', failureCode, privilegedReady: false, restartScope: null };
@@ -93,6 +96,7 @@ interface Summary {
 
 interface Scenario {
   name: string;
+  feature?: ManageableFeatureName;
   /** Feature state before the job; `true` starts installed and enabled. */
   installed?: boolean;
   /** Overrides the enabled half of that state when they must differ. */
@@ -110,24 +114,29 @@ interface Scenario {
 }
 
 function create(scenario: Scenario) {
+  const feature = scenario.feature ?? 'digital';
   const installed = scenario.installed ?? false;
   const features = new InMemoryFeatureRepository([
-    { name: 'digital', installed, enabled: enabledOf(scenario), config: null, attentionReason: null },
+    { name: feature, installed, enabled: enabledOf(scenario), config: null, attentionReason: null },
   ]);
   const jobs = new InMemoryFeatureInstallJobRepository(features);
   const readiness = new ScriptedReadiness(scenario.readiness ?? [READY]);
   const identity = new StubProcessIdentity();
-  const state: ResultState = scenario.state ?? { kind: 'terminal', result: succeeded };
+  const state: ResultState = scenario.state ?? { kind: 'terminal', result: succeeded(feature) };
   const results = {
     readState: vi.fn(async (): Promise<ResultState> => state),
     removeTerminal: vi.fn(async () => undefined),
   };
   const lifecycle = {
     register: vi.fn(),
-    beforeDisable: vi.fn(async () => undefined),
-    afterEnable: vi.fn(async () => {
+    beforeDisable: vi.fn(async (_name: ManageableFeatureName) => undefined),
+    afterEnable: vi.fn(async (_name: ManageableFeatureName) => {
       if (scenario.failAfterEnable) throw new Error('start gate unavailable');
     }),
+    runTransition: vi.fn(async (
+      _name: ManageableFeatureName,
+      operation: () => Promise<unknown>,
+    ) => operation()),
   };
   let dispatches = 0;
   const restart = {
@@ -147,7 +156,18 @@ function create(scenario: Scenario) {
     jobs, results, new VerifyFeatureReadinessUseCase(features, readiness),
     lifecycle, restart, features, outcomes, { now: () => now }, identity,
   );
-  return { features, jobs, readiness, identity, results, lifecycle, restart, outcomes, useCase };
+  return {
+    featureName: feature,
+    features,
+    jobs,
+    readiness,
+    identity,
+    results,
+    lifecycle,
+    restart,
+    outcomes,
+    useCase,
+  };
 }
 
 type Harness = ReturnType<typeof create>;
@@ -159,7 +179,7 @@ function enabledOf(scenario: Scenario): boolean {
 async function arrange(test: Harness, scenario: Scenario): Promise<void> {
   const installed = scenario.installed ?? false;
   await test.jobs.createQueued({
-    id, feature: 'digital', operation: scenario.operation ?? 'install',
+    id, feature: scenario.feature ?? 'digital', operation: scenario.operation ?? 'install',
     requestedByUserId: 1, requestedInChatId: 2,
     workflowReceiptId: 'ponmlkjihgfedcba',
     expected: { installed, enabled: enabledOf(scenario) }, now,
@@ -174,7 +194,7 @@ async function arrange(test: Harness, scenario: Scenario): Promise<void> {
 
 async function summarize(test: Harness, restartErrors: number): Promise<Summary> {
   const job = await test.jobs.findById(id);
-  const feature = await test.features.findByName('digital');
+  const feature = await test.features.findByName(test.featureName);
   if (!job || !feature) throw new Error('Install job or feature is missing');
   return {
     status: job.status,
@@ -526,6 +546,95 @@ describe('ReconcileFeatureInstallUseCase', () => {
 
     expect(order).toEqual(['pre-restart', 'restart', 'remove', 'gate', 'notify']);
     expect(await test.features.findByName('digital')).toMatchObject({ installed: true, enabled: true, attentionReason: null });
+  });
+
+  it('runs the RTSP true-policy lifecycle once after committing install success', async () => {
+    const scenario: Scenario = {
+      name: 'RTSP install success',
+      feature: 'rtsp',
+      identities: [],
+      expected: summary(),
+    };
+    const test = create(scenario);
+    await arrange(test, scenario);
+    const order: string[] = [];
+    test.results.removeTerminal.mockImplementation(async () => {
+      order.push('result-remove');
+    });
+    test.lifecycle.afterEnable.mockImplementation(async (name) => {
+      expect(name).toBe('rtsp');
+      expect(await test.features.findByName('rtsp')).toMatchObject({
+        installed: true,
+        enabled: true,
+      });
+      order.push('policy:true');
+    });
+
+    await test.useCase.execute(id);
+    test.identity.value = second;
+    await test.useCase.execute(id);
+
+    expect(order).toEqual(['result-remove', 'policy:true']);
+    expect(test.lifecycle.afterEnable).toHaveBeenCalledOnce();
+  });
+
+  it('holds the registered RTSP transition wrapper across terminal install state and after-enable', async () => {
+    const scenario: Scenario = {
+      name: 'RTSP terminal transition',
+      feature: 'rtsp',
+      identities: [],
+      expected: summary(),
+    };
+    const test = create(scenario);
+    await arrange(test, scenario);
+    const registry = new FeatureDisableLifecycleRegistry();
+    let transitionActive = false;
+    let transitionCalls = 0;
+    const afterEnable = vi.fn(async () => {
+      expect(transitionActive).toBe(true);
+    });
+    registry.register('rtsp', {
+      beforeDisable: vi.fn(),
+      afterEnable,
+      runTransition: async (operation) => {
+        expect(transitionActive).toBe(false);
+        transitionActive = true;
+        transitionCalls += 1;
+        try {
+          return await operation();
+        } finally {
+          transitionActive = false;
+        }
+      },
+    });
+    const terminalizeSuccess = test.jobs.terminalizeSuccess.bind(test.jobs);
+    test.jobs.terminalizeSuccess = async (input) => {
+      expect(transitionActive).toBe(true);
+      return terminalizeSuccess(input);
+    };
+    const useCase = new ReconcileFeatureInstallUseCase(
+      test.jobs,
+      test.results,
+      new VerifyFeatureReadinessUseCase(test.features, test.readiness),
+      registry,
+      test.restart,
+      test.features,
+      test.outcomes,
+      { now: () => now },
+      test.identity,
+    );
+
+    await useCase.execute(id);
+    test.identity.value = second;
+    await useCase.execute(id);
+
+    expect(transitionCalls).toBe(2);
+    expect(afterEnable).toHaveBeenCalledOnce();
+    expect(await test.features.findByName('rtsp')).toMatchObject({
+      installed: true,
+      enabled: true,
+      attentionReason: null,
+    });
   });
 
   it('coalesces concurrent reconciliations of the same job', async () => {

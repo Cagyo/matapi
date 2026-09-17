@@ -169,6 +169,13 @@
       "when": 1788004523682,
       "tag": "0023_drive_sync_pressure_constraints",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "6",
+      "when": 1789633595729,
+      "tag": "0024_live_view_settings_jobs",
+      "breakpoints": true
     }
   ]
 }

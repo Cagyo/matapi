@@ -212,6 +212,18 @@ Events today: 12
 
 ## Contextual camera workflow navigation
 
+Live view is configured by administrators at Home → Health → Live view settings.
+The screen shows the committed settings, loaded generation, dependency readiness,
+and any migration/repair or restart-required state. Motion-only enablement needs
+no network entry; enabled RTSP requires at least one private camera CIDR. Network
+entries can be selected from OS suggestions or entered manually, with explicit
+normalization confirmation, a review screen, and receipt-bound Save. Disabling
+retains the configured CIDRs. Saving closes the shared start gate and quiesces
+both Motion and RTSP sessions, including late starts, before applying policy.
+The resulting restart and recovered terminal reply remain tied to that durable
+job even if the administrator returns Home. See the
+[revised design authority](../superpowers/specs/2026-08-13-admin-live-view-settings-design.md).
+
 Every interactive camera reply, including dashboard, browse, media, live, and
 source-management output, carries receipt-bound navigation controls. The only
 workflow-return callback grammar is compact and secret-free `wr:<id>:[oh]`;

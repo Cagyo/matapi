@@ -5,6 +5,20 @@ import type { CameraSourceFailureKind } from '../../src/telegram/interfaces/came
 import { en } from '../../src/locales/en';
 
 describe('catalogFor', () => {
+  it('provides translated live-view settings states, controls and bounded failures with formatter parity', () => {
+    for (const locale of ['en', 'ru', 'uk'] as const) {
+      const text = catalogFor(locale).liveViewSettings;
+      expect(text).toEqual(expect.objectContaining({ applying: expect.any(String), savedRestarting: expect.any(String), savedRestartRequired: expect.any(String), moreNetworks: expect.any(String), busy: expect.any(String), legacyAttention: expect.any(String), confirmNormalized: expect.any(String) }));
+      expect(Object.keys(text)).toEqual(Object.keys(catalogFor('en').liveViewSettings));
+      expect(Object.keys(text.failures)).toHaveLength(14);
+      expect(text.normalization('192.168.1.42/24', '192.168.1.0/24')).toContain('192.168.1.42/24');
+      expect(text.normalization('192.168.1.42/24', '192.168.1.0/24')).toContain('192.168.1.0/24');
+      expect(text.generations(5, 4)).toContain('5');
+      expect(text.generations(5, 4)).toContain('4');
+    }
+    expect(catalogFor('ru').liveViewSettings.applying).not.toBe(catalogFor('en').liveViewSettings.applying);
+    expect(catalogFor('uk').liveViewSettings.applying).not.toBe(catalogFor('en').liveViewSettings.applying);
+  });
   it('returns English for English and invalid locale values', () => {
     expect(catalogFor('en')).toBe(en);
     expect(catalogFor('invalid')).toBe(en);

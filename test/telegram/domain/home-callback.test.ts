@@ -43,6 +43,7 @@ describe('Home callback codec', () => {
       { kind: 'help' },
       { kind: 'admin-tools' },
       { kind: 'features' },
+      { kind: 'live-view-settings' },
       { kind: 'admin-sensor-setup' },
       { kind: 'admin-storage' },
       { kind: 'admin-system' },
@@ -98,6 +99,13 @@ describe('Home callback codec', () => {
         action,
       });
     }
+  });
+
+  it('round trips the Admin tools live view setup action', () => {
+    const action = { kind: 'live-view-settings' } as const;
+
+    expect(encodeHomeCallback(token, 1, action)).toBe(`h:${token}:1:lv`);
+    expect(parseHomeCallback(`h:${token}:1:lv`)).toEqual({ token, revision: 1, action });
   });
 
   it('uses separate wire codes for every receipt action', () => {

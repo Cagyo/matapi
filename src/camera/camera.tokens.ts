@@ -5,9 +5,9 @@ export const CAMERA_MODE = Symbol('CAMERA_MODE');
 export type CameraMode = 'real' | 'stub';
 
 export const LIVE_STREAM_OPTIONS = Symbol('LIVE_STREAM_OPTIONS');
+export const LIVE_SOURCE_PROBE_OPTIONS = Symbol('LIVE_SOURCE_PROBE_OPTIONS');
 
 export interface LiveStreamOptions {
-  enabled: boolean;
   durationMs: number;
   startTimeoutMs: number;
   maxViewers: number;
@@ -15,7 +15,6 @@ export interface LiveStreamOptions {
 }
 
 const DEFAULTS: LiveStreamOptions = {
-  enabled: false,
   durationMs: 300_000,
   startTimeoutMs: 30_000,
   maxViewers: 2,
@@ -26,7 +25,6 @@ export function liveStreamOptionsFromEnv(
   env: Record<string, string | undefined>,
 ): LiveStreamOptions {
   return {
-    enabled: env.LIVE_STREAM_ENABLED === 'true',
     durationMs: boundedInteger(env.LIVE_STREAM_DURATION_MS, 1_000, 300_000, DEFAULTS.durationMs),
     startTimeoutMs: boundedInteger(
       env.LIVE_STREAM_START_TIMEOUT_MS,

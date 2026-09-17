@@ -5,7 +5,12 @@ import {
   HOME_TOKEN_GENERATOR,
   type HomeTokenGeneratorPort,
 } from '../domain/ports/home-token-generator.port';
-import type { ExternalWorkflow, FeatureWorkflowOperation, WorkflowReturnReceipt } from '../domain/workflow-return';
+import type {
+  ExternalWorkflow,
+  FeatureWorkflowOperation,
+  LiveViewSettingsWorkflowOperation,
+  WorkflowReturnReceipt,
+} from '../domain/workflow-return';
 import type { WorkflowReturnPayload } from '../domain/home-action-receipt';
 import {
   HOME_ACTION_REPOSITORY,
@@ -21,8 +26,8 @@ export interface BeginWorkflowReturnInput {
   origin: HomeView;
   originSource: 'captured' | 'natural-parent';
   sessionToken: string | null;
-  /** Feature mutations are receipt-bound; a feature list deliberately omits it. */
-  operation?: FeatureWorkflowOperation;
+  /** Mutations are receipt-bound; a workflow landing screen deliberately omits them. */
+  operation?: FeatureWorkflowOperation | LiveViewSettingsWorkflowOperation;
 }
 
 export interface BeginWorkflowReturnResult {
@@ -39,12 +44,16 @@ export class BeginWorkflowReturnUseCase {
   ) {}
 
   async execute(input: BeginWorkflowReturnInput): Promise<BeginWorkflowReturnResult> {
-    if (input.operation && input.workflow !== 'feature') {
+    if (input.operation?.kind === 'feature-mutation' && input.workflow !== 'feature') {
       throw new RangeError('Feature operations require the feature workflow');
+    }
+    if (input.operation?.kind === 'live-view-settings-mutation'
+      && input.workflow !== 'live-view-settings') {
+      throw new RangeError('Live view settings operations require the live-view-settings workflow');
     }
     const now = this.clock.now();
     const payload: WorkflowReturnPayload = input.workflow === 'feature'
-      ? input.operation
+      ? input.operation?.kind === 'feature-mutation'
         ? {
           workflow: 'feature', phase: 'cancellable', originSource: input.originSource,
           origin: input.origin, operation: input.operation, deliveryStage: 'pending',
@@ -53,6 +62,16 @@ export class BeginWorkflowReturnUseCase {
           workflow: 'feature', phase: 'cancellable', originSource: input.originSource,
           origin: input.origin, deliveryStage: 'pending',
         }
+      : input.workflow === 'live-view-settings'
+        ? input.operation?.kind === 'live-view-settings-mutation'
+          ? {
+            workflow: 'live-view-settings', phase: 'cancellable', originSource: input.originSource,
+            origin: input.origin, operation: input.operation, deliveryStage: 'pending',
+          }
+          : {
+            workflow: 'live-view-settings', phase: 'cancellable', originSource: input.originSource,
+            origin: input.origin, deliveryStage: 'pending',
+          }
       : {
         workflow: input.workflow, phase: 'cancellable', originSource: input.originSource,
         origin: input.origin, deliveryStage: 'pending',

@@ -43,6 +43,7 @@
     "drizzle-orm": "^0.38.3",
     "google-auth-library": "^10.9.1",
     "grammy": "^1.34.0",
+    "ipaddr.js": "^2.2.0",
     "mqtt": "^5",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",

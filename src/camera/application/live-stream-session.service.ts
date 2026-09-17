@@ -30,6 +30,7 @@ import {
   MONOTONIC_CLOCK,
   type MonotonicClockPort,
 } from '../domain/ports/monotonic-clock.port';
+import { LiveViewStartGate } from './live-view-start-gate.service';
 import { RtspSourceStartGate } from './rtsp-source-start-gate.service';
 import { FEATURE_AVAILABILITY, type FeatureAvailabilityPort } from '../../features/domain/ports/feature-availability.port';
 
@@ -55,6 +56,19 @@ interface ActiveSession {
 interface ViewerGrant {
   grantId: string;
   tokenHash: string;
+}
+
+/**
+ * The single raw viewer mutation allowed to outlive its caller's timeout.
+ * Keeping one marker, rather than a collection of promises, makes the drain
+ * projection constant-size while still retaining enough identity to undo a
+ * late successful addition.
+ */
+interface ViewerAdditionDrain {
+  active: ActiveSession;
+  tokenHash: string;
+  added: boolean;
+  revocationInFlight: boolean;
 }
 
 interface RuntimeMessageReference extends LiveStreamMessageReference {
@@ -92,6 +106,7 @@ interface CleanupBlocker {
 
 /** Which slice of session work a stop caller is waiting to see drained. */
 type SessionStopScope =
+  | { type: 'all' }
   | { type: 'kind'; kind: LiveStreamSource['kind'] }
   | { type: 'camera'; cameraId: string };
 
@@ -124,6 +139,7 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
   private expiryTimer?: ReturnType<typeof setTimeout>;
   private leaseMutationTail: Promise<void> = Promise.resolve();
   private leaseMutationsPending = 0;
+  private viewerAdditionDrain?: ViewerAdditionDrain;
   private shuttingDown = false;
   private shutdownPromise?: Promise<void>;
   private readonly stopWaiters = new Set<SessionStopWaiter>();
@@ -138,6 +154,8 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
     private readonly durationMs = 300_000,
     private readonly operationTimeoutMs = 30_000,
     private readonly maxViewers = 2,
+    // Direct construction without boot reconciliation remains fail closed.
+    private readonly liveViewStartGate = new LiveViewStartGate(),
     // Direct unit construction has no feature lifecycle; composition always
     // injects the fail-closed gate.
     private readonly sourceStartGate = new RtspSourceStartGate(undefined, true),
@@ -189,15 +207,20 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
   open(source: LiveStreamSource, telegramId: number): Promise<OpenLiveStreamResult> {
     if (this.shuttingDown) return Promise.reject(new LiveStreamUnavailableError());
     try {
-      this.sourceStartGate.assertCanStart(source.kind);
+      this.assertCanStart(source.kind);
     } catch {
       return Promise.reject(new LiveStreamUnavailableError());
     }
     const deferred = createDeferred<OpenLiveStreamResult>();
     const queued = this.enqueue(async () => {
       try {
-        this.sourceStartGate.assertCanStart(source.kind);
+        this.assertCanStart(source.kind);
         if (this.leaseMutationsPending > 0) {
+          deferred.reject(new LiveStreamUnavailableError());
+          return;
+        }
+
+        if (this.viewerAdditionDrain) {
           deferred.reject(new LiveStreamUnavailableError());
           return;
         }
@@ -220,7 +243,7 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
         }
 
         if (this.active) {
-          await this.stopActive(() => this.sourceStartGate.assertCanStart(source.kind));
+          await this.stopActive(() => this.assertCanStart(source.kind));
         }
 
         if (this.pending) {
@@ -308,6 +331,15 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
           }
         }
 
+        const viewerAddition = this.viewerAdditionDrain;
+        if (
+          viewerAddition?.added &&
+          !viewerAddition.revocationInFlight &&
+          this.scopeOwns(scope, activeWork(viewerAddition.active))
+        ) {
+          await this.revokeLateViewerAddition(viewerAddition);
+        }
+
         if (this.active && this.scopeOwns(scope, activeWork(this.active))) {
           await this.stopActive();
         }
@@ -339,6 +371,70 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
     }).catch(() => {
       throw new LiveStreamUnavailableError();
     });
+  }
+
+  /**
+   * Cancels every prospective start and resolves only after all live work,
+   * late cleanup, blocked teardown, and lease mutations have drained.
+   */
+  async quiesce(): Promise<void> {
+    const scope: SessionStopScope = { type: 'all' };
+    const waiter: SessionStopWaiter = {
+      scope,
+      resolve: () => undefined,
+    };
+    const stopped = new Promise<void>((resolve) => {
+      waiter.resolve = resolve;
+    });
+
+    const draining = this.enqueue(async () => {
+      const blockedPending = this.cleanupBlocked?.pending;
+      if (blockedPending) {
+        blockedPending.cancelled = true;
+        this.rejectPending(blockedPending);
+        this.rejectReplacement(blockedPending);
+      }
+
+      const pending = this.pending;
+      if (pending) {
+        pending.cancelled = true;
+        this.rejectPending(pending);
+        this.rejectReplacement(pending);
+      }
+
+      const lateStart = this.pendingStartCleanup;
+      if (lateStart) {
+        lateStart.cancelled = true;
+        this.rejectPending(lateStart);
+        this.rejectReplacement(lateStart);
+      }
+
+      if (this.cleanupBlocked && !this.cleanupBlocked.teardownInFlight) {
+        if (!(await this.retryBlockedCleanup())) {
+          throw new LiveStreamUnavailableError();
+        }
+      }
+
+      const viewerAddition = this.viewerAdditionDrain;
+      if (viewerAddition?.added && !viewerAddition.revocationInFlight) {
+        await this.revokeLateViewerAddition(viewerAddition);
+      }
+
+      if (this.active && !this.cleanupBlocked) {
+        await this.stopActive();
+      }
+
+      if (this.hasScopedWork(scope)) this.stopWaiters.add(waiter);
+      else waiter.resolve();
+    }).then(() => stopped);
+
+    try {
+      await this.withOperationTimeout(draining);
+    } catch {
+      throw new LiveStreamUnavailableError();
+    } finally {
+      this.stopWaiters.delete(waiter);
+    }
   }
 
   /** Ordered process-shutdown entry point; module teardown reuses it defensively. */
@@ -464,7 +560,7 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
     this.pending = pending;
     try {
       if (this.availability) await this.availability.requireReady(source.kind === 'rtsp' ? 'rtsp' : 'motion');
-      this.sourceStartGate.assertCanStart(source.kind);
+      this.assertCanStart(source.kind);
     } catch {
       if (this.pending === pending) {
         this.pending = undefined;
@@ -485,9 +581,10 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    const start = Promise.resolve().then(() =>
-      this.gateway.start({ session: pending.provisionalSession, source }),
-    );
+    const start = Promise.resolve().then(() => {
+      this.assertCanStart(source.kind);
+      return this.gateway.start({ session: pending.provisionalSession, source });
+    });
 
     void this.withOperationTimeout(start).then(
       (started) => {
@@ -556,6 +653,13 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
       viewerGrants: new Map(),
       messageReferences: [],
     };
+
+    try {
+      this.assertCanStart(pending.source.kind);
+    } catch {
+      this.abortStartedPending(pending, active);
+      return;
+    }
 
     if (pending.cancelled || !isQuickTunnelHostname(started.publicHostname)) {
       this.abortStartedPending(pending, active);
@@ -652,15 +756,48 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
     const token = createViewerToken(randomBytes(32));
     const tokenHash = createHash('sha256').update(token).digest('hex');
     await this.requireSourceReady(active.sourceKind);
-    await this.withOperationTimeout(
-      Promise.resolve().then(() =>
-        this.gateway.addViewer({
-          tokenHash,
-          telegramId,
-          expiresMonotonicMs: active.session.expiresMonotonicMs,
-        }),
-      ),
-    );
+    const drain: ViewerAdditionDrain = {
+      active,
+      tokenHash,
+      added: false,
+      revocationInFlight: false,
+    };
+    const addition = Promise.resolve().then(() => {
+      this.assertCanStart(active.sourceKind);
+      return this.gateway.addViewer({
+        tokenHash,
+        telegramId,
+        expiresMonotonicMs: active.session.expiresMonotonicMs,
+      });
+    });
+    this.viewerAdditionDrain = drain;
+    try {
+      await this.withOperationTimeout(addition);
+      if (this.viewerAdditionDrain === drain) this.viewerAdditionDrain = undefined;
+    } catch (error) {
+      if (error instanceof OperationTimeoutError) {
+        this.trackLateViewerAddition(drain, addition);
+      } else if (this.viewerAdditionDrain === drain) {
+        this.viewerAdditionDrain = undefined;
+      }
+      throw error;
+    }
+    try {
+      this.assertCanStart(active.sourceKind);
+    } catch {
+      try {
+        await this.withOperationTimeout(
+          Promise.resolve().then(() => this.gateway.revokeViewer(tokenHash)),
+        );
+      } catch {
+        try {
+          await this.stopActive();
+        } catch {
+          // The cleanup blocker retains uncertain teardown until reconciliation.
+        }
+      }
+      throw new LiveStreamUnavailableError();
+    }
     active.viewerGrants.set(telegramId, { grantId, tokenHash });
     return {
       watchUrl: `https://${active.publicHostname}/watch/${token}`,
@@ -673,8 +810,91 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  private trackLateViewerAddition(
+    drain: ViewerAdditionDrain,
+    addition: Promise<void>,
+  ): void {
+    void addition.then(
+      () => {
+        void this.enqueue(() => this.revokeLateViewerAddition(drain)).catch(() => {
+          // The drain marker remains fail closed when compensation cannot finish.
+        });
+      },
+      () => {
+        void this.enqueue(async () => {
+          if (this.viewerAdditionDrain === drain) this.viewerAdditionDrain = undefined;
+        }).catch(() => {
+          // The queue guard resolves drain waiters after discarding this marker.
+        });
+      },
+    );
+  }
+
+  private async revokeLateViewerAddition(drain: ViewerAdditionDrain): Promise<void> {
+    if (this.viewerAdditionDrain !== drain) return;
+    drain.added = true;
+    if (drain.revocationInFlight) return;
+
+    drain.revocationInFlight = true;
+    const revocation = Promise.resolve().then(() => this.gateway.revokeViewer(drain.tokenHash));
+    try {
+      await this.withOperationTimeout(revocation);
+      if (this.viewerAdditionDrain === drain) this.viewerAdditionDrain = undefined;
+    } catch (error) {
+      if (error instanceof OperationTimeoutError) {
+        void revocation.then(
+          () => {
+            void this.enqueue(async () => {
+              if (this.viewerAdditionDrain === drain) this.viewerAdditionDrain = undefined;
+            }).catch(() => {
+              // A successful late revocation remains represented until queued.
+            });
+          },
+          () => {
+            void this.enqueue(async () => {
+              if (this.viewerAdditionDrain === drain) drain.revocationInFlight = false;
+            }).catch(() => {
+              // The marker remains fail closed after failed compensation.
+            });
+          },
+        );
+      } else {
+        drain.revocationInFlight = false;
+      }
+
+      try {
+        await this.stopAfterLateViewerAddition(drain);
+      } catch {
+        // The drain marker and any cleanup blocker keep subsequent starts fenced.
+      }
+    }
+  }
+
+  private async stopAfterLateViewerAddition(drain: ViewerAdditionDrain): Promise<void> {
+    if (this.viewerAdditionDrain !== drain) return;
+
+    if (this.active === drain.active) {
+      await this.stopActive();
+      return;
+    }
+
+    if (this.cleanupBlocked?.active === drain.active) {
+      if (!this.cleanupBlocked.teardownInFlight) await this.retryBlockedCleanup();
+      return;
+    }
+
+    await this.stopGateway(drain.active);
+    this.completeViewerAdditionAfterTeardown(drain.active);
+  }
+
   private async requireSourceReady(kind: LiveStreamSource['kind']): Promise<void> {
     if (this.availability) await this.availability.requireReady(kind === 'rtsp' ? 'rtsp' : 'motion');
+    this.liveViewStartGate.assertCanStart();
+    this.sourceStartGate.assertCanStart(kind);
+  }
+
+  private assertCanStart(kind: LiveStreamSource['kind']): void {
+    this.liveViewStartGate.assertCanStart();
     this.sourceStartGate.assertCanStart(kind);
   }
 
@@ -689,9 +909,11 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
 
   private async stopActive(beforeStop?: () => void): Promise<string | null> {
     if (!this.active) return null;
-    const cameraName = this.active.session.cameraName;
-    await this.stopGateway(this.active, beforeStop);
-    await this.deleteMessageReferences(this.active.messageReferences);
+    const stopped = this.active;
+    const cameraName = stopped.session.cameraName;
+    await this.stopGateway(stopped, beforeStop);
+    this.completeViewerAdditionAfterTeardown(stopped);
+    await this.deleteMessageReferences(stopped.messageReferences);
     this.active = undefined;
     this.clearExpiryTimer();
     await this.clearLease();
@@ -721,6 +943,7 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
     }
 
     this.cleanupBlocked = undefined;
+    this.completeViewerAdditionAfterTeardown(active);
     if (this.active === active) {
       await this.deleteMessageReferences(active.messageReferences);
       this.active = undefined;
@@ -803,6 +1026,7 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
     if (this.cleanupBlocked?.active !== active) return;
     const pending = this.cleanupBlocked.pending;
     this.cleanupBlocked = undefined;
+    this.completeViewerAdditionAfterTeardown(active);
     if (this.active === active) {
       await this.deleteMessageReferences(active.messageReferences);
       this.active = undefined;
@@ -815,6 +1039,15 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     if (pending) this.beginReplacement(pending);
+  }
+
+  private completeViewerAdditionAfterTeardown(active: ActiveSession): void {
+    if (
+      this.viewerAdditionDrain?.active === active &&
+      this.viewerAdditionDrain.added
+    ) {
+      this.viewerAdditionDrain = undefined;
+    }
   }
 
   private async failBlockedTeardown(active: ActiveSession): Promise<void> {
@@ -941,9 +1174,11 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
     const settled = mutation.then(
       () => {
         this.leaseMutationsPending -= 1;
+        this.resolveStopWaiters();
       },
       () => {
         this.leaseMutationsPending -= 1;
+        this.resolveStopWaiters();
       },
     );
     this.leaseMutationTail = settled;
@@ -1068,6 +1303,7 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
   }
 
   private hasScopedWork(scope: SessionStopScope): boolean {
+    if (scope.type === 'all' && this.leaseMutationsPending > 0) return true;
     return this.occupiedSlots().some((work) => work && this.scopeOwns(scope, work));
   }
 
@@ -1089,10 +1325,12 @@ export class LiveStreamSessionService implements OnModuleInit, OnModuleDestroy {
       // before the slot is set — but listed so the enumeration stays uniform
       // rather than resting on that invariant holding forever.
       this.pendingStartCleanup?.replacement?.source,
+      this.viewerAdditionDrain && activeWork(this.viewerAdditionDrain.active),
     ];
   }
 
   private scopeOwns(scope: SessionStopScope, work: ScopedWork): boolean {
+    if (scope.type === 'all') return true;
     return scope.type === 'kind'
       ? work.kind === scope.kind
       : work.cameraId === scope.cameraId;

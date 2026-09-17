@@ -8,6 +8,35 @@
 
 Motion daemon captures video on movement detection. Worker receives events via HTTP hooks, logs them, and provides snapshot/video access via bot commands.
 
+## Live-view settings and boot readiness
+
+The typed authority is `/var/lib/home-worker/live-view-settings.json`: version,
+generation, enabled, and canonical private camera CIDRs. The filesystem adapter
+validates ownership, mode, link count, bounded content, and exact schema; an
+unsafe file leaves live view closed. Runtime probe CIDRs are loaded from this
+document at boot. Advanced timeout, UDP, and runtime-directory environment
+options remain separate.
+
+One durable SQLite job owns the global active slot through prepared, published,
+committed, and restart-required phases until terminal success/failure. The fixed
+root helper publishes the private version-2 policy tuple
+`(settingsGeneration, rtspEnabled)` and the settings generation through its
+request/result/acknowledgement protocol. The worker acknowledges only after the
+matching database transition, then retriggers root-owned cleanup. The public
+physical-network inspector summary remains distinct from this private tuple.
+
+`LiveViewSettingsRecoveryService` runs once, captures boot settings before
+reconciliation, and alone completes `LiveViewReadinessBarrierService`.
+`OpenLiveStreamUseCase` awaits that barrier before any source or gate check.
+Failed/uncertain recovery releases waiters with global and RTSP gates closed;
+successful recovery restores eligible gates and delivers the exact terminal job
+once through the late-bound Telegram listener. Stub mode shares one in-memory
+settings store, job repository, and policy adapter; production uses filesystem,
+Drizzle, OS subnet detection, and the fixed systemd helper adapters.
+
+See [Admin Live View Settings Design](../superpowers/specs/2026-08-13-admin-live-view-settings-design.md)
+for the commit protocol, restart deadline, and on-device acceptance procedure.
+
 ## Motion Daemon Setup
 
 Systemd service, independent of worker:

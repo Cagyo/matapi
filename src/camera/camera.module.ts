@@ -57,6 +57,7 @@ import { LiveSourceCredentialRotationCoordinator } from './application/live-sour
 import { LiveStreamSourceResolverService } from './application/live-stream-source-resolver.service';
 import { MotionWatcherService } from './application/motion-watcher.service';
 import { OpenLiveStreamUseCase } from './application/open-live-stream.use-case';
+import { LiveViewStartGate } from './application/live-view-start-gate.service';
 import { RtspSourceStartGate } from './application/rtsp-source-start-gate.service';
 import { RecordMotionEndUseCase } from './application/record-motion-end.use-case';
 import { RecordMotionStartUseCase } from './application/record-motion-start.use-case';
@@ -68,6 +69,7 @@ import { TriggerCleanUseCase } from './application/trigger-clean.use-case';
 import {
   CAMERA_MODE,
   LIVE_STREAM_OPTIONS,
+  LIVE_SOURCE_PROBE_OPTIONS,
   liveStreamOptionsFromEnv,
   type LiveStreamOptions,
 } from './camera.tokens';
@@ -140,6 +142,7 @@ import { liveSourceCredentialFromEnvironment } from './infrastructure/aes-gcm-li
 import {
   FfmpegLiveSourceProbeAdapter,
   liveSourceProbeOptionsFromEnvironment,
+  type FfmpegLiveSourceProbeOptions,
 } from './infrastructure/ffmpeg-live-source-probe.adapter';
 import { UnavailableStreamEgressAdapter } from './infrastructure/unavailable-stream-egress.adapter';
 import { UnavailableStreamSandboxAdapter } from './infrastructure/unavailable-stream-sandbox.adapter';
@@ -175,6 +178,36 @@ import { StubRetentionPruneAdapter } from './infrastructure/stub-retention-prune
 import { StubSnapshotAdapter } from './infrastructure/stub-snapshot.adapter';
 import { SystemMonotonicClockAdapter } from './infrastructure/system-monotonic-clock.adapter';
 import { MotionHooksController } from './interfaces/motion-hooks.controller';
+import { LIVE_VIEW_SETTINGS_STORE, type LiveViewSettingsStorePort } from './domain/ports/live-view-settings-store.port';
+import { LIVE_VIEW_SETTINGS_JOB_REPOSITORY } from './domain/ports/live-view-settings-job-repository.port';
+import { LIVE_VIEW_POLICY_REQUEST } from './domain/ports/live-view-policy-request.port';
+import { LIVE_VIEW_POLICY_RESULT } from './domain/ports/live-view-policy-result.port';
+import { LIVE_VIEW_POLICY_ACKNOWLEDGEMENT } from './domain/ports/live-view-policy-acknowledgement.port';
+import { LIVE_VIEW_POLICY_CONTROLLER } from './domain/ports/live-view-policy-controller.port';
+import { LIVE_VIEW_MIGRATION_ATTENTION } from './domain/ports/live-view-migration-attention.port';
+import { PRIVATE_SUBNET_DETECTOR } from './domain/ports/private-subnet-detector.port';
+import { FsLiveViewSettingsAdapter } from './infrastructure/fs-live-view-settings.adapter';
+import { InMemoryLiveViewSettingsAdapter } from './infrastructure/in-memory-live-view-settings.adapter';
+import { DrizzleLiveViewSettingsJobRepository } from './infrastructure/drizzle-live-view-settings-job.repository';
+import { InMemoryLiveViewSettingsJobRepository } from './infrastructure/in-memory-live-view-settings-job.repository';
+import { InMemoryLiveViewPolicyAdapter } from './infrastructure/in-memory-live-view-policy.adapter';
+import { FsLiveViewPolicyRequestAdapter } from './infrastructure/fs-live-view-policy-request.adapter';
+import { FsLiveViewPolicyResultAdapter } from './infrastructure/fs-live-view-policy-result.adapter';
+import { FsLiveViewPolicyAcknowledgementAdapter } from './infrastructure/fs-live-view-policy-acknowledgement.adapter';
+import { SystemdLiveViewPolicyControllerAdapter } from './infrastructure/systemd-live-view-policy-controller.adapter';
+import { FsLiveViewMigrationAttentionAdapter } from './infrastructure/fs-live-view-migration-attention.adapter';
+import { OsPrivateSubnetDetectorAdapter } from './infrastructure/os-private-subnet-detector.adapter';
+import { GetLiveViewSettingsUseCase } from './application/get-live-view-settings.use-case';
+import { ListPrivateSubnetSuggestionsUseCase } from './application/list-private-subnet-suggestions.use-case';
+import { ApplyLiveViewSettingsUseCase } from './application/apply-live-view-settings.use-case';
+import { ReconcileLiveViewSettingsJobUseCase, RECONCILE_LIVE_VIEW_SETTINGS_JOB_OPTIONS } from './application/reconcile-live-view-settings-job.use-case';
+import { LiveViewRestartActivationService } from './application/live-view-restart-activation.service';
+import { LiveViewSettingsRecoveryService } from './application/live-view-settings-recovery.service';
+import { LiveViewReadinessBarrierService } from './application/live-view-readiness-barrier.service';
+import { LiveViewSettingsOutcomeRegistryService } from './application/live-view-settings-outcome-registry.service';
+import { LiveViewPolicyCoordinatorService } from './application/live-view-policy-coordinator.service';
+import { ReconcileRtspPolicyUseCase } from './application/reconcile-rtsp-policy.use-case';
+import { PROCESS_RESTARTER } from '../system/domain/ports/process-restarter.port';
 
 export type CameraMode = 'real' | 'stub';
 
@@ -231,6 +264,57 @@ function isInstallationId(value: string | undefined): value is string {
   providers: [
     { provide: CAMERA_MODE, useValue: mode },
     { provide: LIVE_STREAM_OPTIONS, useValue: liveStreamOptions },
+    {
+      provide: LIVE_VIEW_SETTINGS_STORE,
+      useFactory: async (): Promise<LiveViewSettingsStorePort> => {
+        const settings = mode === 'stub' ? new InMemoryLiveViewSettingsAdapter() : new FsLiveViewSettingsAdapter();
+        await settings.readCommitted().catch(() => undefined);
+        return settings;
+      },
+    },
+    { provide: LIVE_VIEW_SETTINGS_JOB_REPOSITORY, useClass: mode === 'stub' ? InMemoryLiveViewSettingsJobRepository : DrizzleLiveViewSettingsJobRepository },
+    {
+      provide: LIVE_SOURCE_PROBE_OPTIONS,
+      useFactory: async (settings: LiveViewSettingsStorePort) => {
+        const committed = await settings.readCommitted().catch(() => null);
+        return liveSourceProbeOptionsFromEnvironment(process.env, committed?.allowedCameraCidrs ?? []);
+      },
+      inject: [LIVE_VIEW_SETTINGS_STORE],
+    },
+    ...(mode === 'stub' ? [{
+      provide: InMemoryLiveViewPolicyAdapter,
+      useFactory: (settings: InMemoryLiveViewSettingsAdapter) => new InMemoryLiveViewPolicyAdapter(settings),
+      inject: [LIVE_VIEW_SETTINGS_STORE],
+    }] : []),
+    { provide: LIVE_VIEW_POLICY_REQUEST, ...(mode === 'stub' ? { useExisting: InMemoryLiveViewPolicyAdapter } : { useFactory: () => new FsLiveViewPolicyRequestAdapter() }) },
+    { provide: LIVE_VIEW_POLICY_RESULT, ...(mode === 'stub' ? { useExisting: InMemoryLiveViewPolicyAdapter } : { useFactory: () => new FsLiveViewPolicyResultAdapter() }) },
+    { provide: LIVE_VIEW_POLICY_ACKNOWLEDGEMENT, ...(mode === 'stub' ? { useExisting: InMemoryLiveViewPolicyAdapter } : { useFactory: () => new FsLiveViewPolicyAcknowledgementAdapter() }) },
+    { provide: LIVE_VIEW_POLICY_CONTROLLER, ...(mode === 'stub' ? { useExisting: InMemoryLiveViewPolicyAdapter } : { useFactory: () => new SystemdLiveViewPolicyControllerAdapter() }) },
+    { provide: LIVE_VIEW_MIGRATION_ATTENTION, useFactory: () => mode === 'stub' ? { read: async () => null } : new FsLiveViewMigrationAttentionAdapter() },
+    { provide: PRIVATE_SUBNET_DETECTOR, useFactory: () => mode === 'stub' ? { detect: async () => [] } : new OsPrivateSubnetDetectorAdapter() },
+    GetLiveViewSettingsUseCase,
+    ListPrivateSubnetSuggestionsUseCase,
+    LiveViewPolicyCoordinatorService,
+    LiveViewReadinessBarrierService,
+    LiveViewSettingsOutcomeRegistryService,
+    ReconcileRtspPolicyUseCase,
+    { provide: RECONCILE_LIVE_VIEW_SETTINGS_JOB_OPTIONS, useValue: {} },
+    {
+      provide: LiveViewRestartActivationService,
+      useFactory: (...args: ConstructorParameters<typeof LiveViewRestartActivationService>) => new LiveViewRestartActivationService(...args),
+      inject: [LIVE_VIEW_SETTINGS_JOB_REPOSITORY, LIVE_VIEW_SETTINGS_STORE, LiveViewStartGate, PROCESS_RESTARTER, CAMERA_CLOCK],
+    },
+    {
+      provide: ReconcileLiveViewSettingsJobUseCase,
+      useFactory: (...args: ConstructorParameters<typeof ReconcileLiveViewSettingsJobUseCase>) => new ReconcileLiveViewSettingsJobUseCase(...args),
+      inject: [LIVE_VIEW_SETTINGS_JOB_REPOSITORY, LIVE_VIEW_SETTINGS_STORE, FEATURE_QUERY, LiveViewStartGate, LiveStreamSessionService, LiveViewPolicyCoordinatorService, LIVE_VIEW_POLICY_REQUEST, LIVE_VIEW_POLICY_CONTROLLER, LIVE_VIEW_POLICY_RESULT, LIVE_VIEW_POLICY_ACKNOWLEDGEMENT, PROCESS_RESTARTER, LIVE_STREAM_CAPABILITY, CAMERA_CLOCK, RECONCILE_LIVE_VIEW_SETTINGS_JOB_OPTIONS, LiveViewRestartActivationService, LiveViewSettingsOutcomeRegistryService],
+    },
+    { provide: ApplyLiveViewSettingsUseCase, useFactory: (reconcile: ReconcileLiveViewSettingsJobUseCase) => new ApplyLiveViewSettingsUseCase(reconcile), inject: [ReconcileLiveViewSettingsJobUseCase] },
+    {
+      provide: LiveViewSettingsRecoveryService,
+      useFactory: (...args: ConstructorParameters<typeof LiveViewSettingsRecoveryService>) => new LiveViewSettingsRecoveryService(...args),
+      inject: [LIVE_VIEW_SETTINGS_JOB_REPOSITORY, ReconcileLiveViewSettingsJobUseCase, LIVE_VIEW_SETTINGS_STORE, LiveViewStartGate, RtspSourceStartGate, LiveViewReadinessBarrierService, LiveViewSettingsOutcomeRegistryService, FEATURE_QUERY, ReconcileRtspPolicyUseCase],
+    },
     mode === 'stub' ? InMemoryMediaRepository : DrizzleMediaRepository,
     {
       provide: MEDIA_REPOSITORY,
@@ -357,17 +441,14 @@ function isInstallationId(value: string | undefined): value is string {
       provide: LIVE_STREAM_CAPABILITY,
       ...(mode === 'stub'
         ? {
-            useFactory: (options: LiveStreamOptions): LiveStreamCapabilityPort =>
-              new AvailableLiveStreamCapabilityAdapter(options.enabled),
-            inject: [LIVE_STREAM_OPTIONS],
+            useFactory: (): LiveStreamCapabilityPort => new AvailableLiveStreamCapabilityAdapter(true),
           }
         : {
             useFactory: (
               features: FeatureQueryPort,
-              options: LiveStreamOptions,
             ): LiveStreamCapabilityPort =>
-              new FeatureLiveStreamCapabilityAdapter(features, options.enabled),
-            inject: [FEATURE_QUERY, LIVE_STREAM_OPTIONS],
+              new FeatureLiveStreamCapabilityAdapter(features, true),
+            inject: [FEATURE_QUERY],
           }),
     },
     {
@@ -471,8 +552,7 @@ function isInstallationId(value: string | undefined): value is string {
     },
     {
       provide: STREAM_SANDBOX,
-      useFactory: (): StreamSandboxPort => {
-        const probe = liveSourceProbeOptionsFromEnvironment(process.env);
+      useFactory: (probe: FfmpegLiveSourceProbeOptions | null): StreamSandboxPort => {
         return mode === 'stub' || !probe
           ? new UnavailableStreamSandboxAdapter()
           : new SystemdFfmpegStreamAdapter({
@@ -484,11 +564,11 @@ function isInstallationId(value: string | undefined): value is string {
             caFile: probe.caFile,
           });
       },
+      inject: [LIVE_SOURCE_PROBE_OPTIONS],
     },
     {
       provide: RTSP_RUNTIME_COORDINATOR,
-      useFactory: (egress: StreamEgressPort, sandbox: StreamSandboxPort): RtspRuntimeCoordinatorPort => {
-        const options = liveSourceProbeOptionsFromEnvironment(process.env);
+      useFactory: (egress: StreamEgressPort, sandbox: StreamSandboxPort, options: FfmpegLiveSourceProbeOptions | null): RtspRuntimeCoordinatorPort => {
         return options
           ? new FfmpegLiveSourceProbeAdapter(
               egress,
@@ -497,7 +577,7 @@ function isInstallationId(value: string | undefined): value is string {
             )
           : new UnavailableRtspRuntimeCoordinatorAdapter();
       },
-      inject: [STREAM_EGRESS, STREAM_SANDBOX],
+      inject: [STREAM_EGRESS, STREAM_SANDBOX, LIVE_SOURCE_PROBE_OPTIONS],
     },
     { provide: LIVE_SOURCE_PROBE, useExisting: RTSP_RUNTIME_COORDINATOR },
     {
@@ -512,10 +592,11 @@ function isInstallationId(value: string | undefined): value is string {
       useFactory: (
         sources: LiveSourceRepositoryPort,
         coordinator: RtspRuntimeCoordinatorPort,
-      ): RtspStreamRuntimePort => mode === 'real' && liveSourceProbeOptionsFromEnvironment(process.env)
+        options: FfmpegLiveSourceProbeOptions | null,
+      ): RtspStreamRuntimePort => mode === 'real' && options
         ? new RestrictedRtspStreamRuntimeAdapter(sources, coordinator)
         : new UnavailableRtspStreamRuntimeAdapter(),
-      inject: [LIVE_SOURCE_REPOSITORY, RTSP_RUNTIME_COORDINATOR],
+      inject: [LIVE_SOURCE_REPOSITORY, RTSP_RUNTIME_COORDINATOR, LIVE_SOURCE_PROBE_OPTIONS],
     },
     LiveStreamMessageCleanupService,
     {
@@ -523,6 +604,7 @@ function isInstallationId(value: string | undefined): value is string {
       useExisting: LiveStreamMessageCleanupService,
     },
     LiveStreamSourceResolverService,
+    LiveViewStartGate,
     RtspSourceStartGate,
     {
       provide: LiveStreamSessionService,
@@ -533,6 +615,7 @@ function isInstallationId(value: string | undefined): value is string {
         alerts: AdminAlertService,
         messageCleanup: LiveStreamMessageCleanupPort,
         options: LiveStreamOptions,
+        liveViewStartGate: LiveViewStartGate,
         sourceStartGate: RtspSourceStartGate,
         availability: FeatureAvailabilityPort,
       ) => new LiveStreamSessionService(
@@ -544,6 +627,7 @@ function isInstallationId(value: string | undefined): value is string {
         options.durationMs,
         options.startTimeoutMs,
         options.maxViewers,
+        liveViewStartGate,
         sourceStartGate,
         availability,
       ),
@@ -554,11 +638,16 @@ function isInstallationId(value: string | undefined): value is string {
         ADMIN_ALERT,
         LIVE_STREAM_MESSAGE_CLEANUP,
         LIVE_STREAM_OPTIONS,
+        LiveViewStartGate,
         RtspSourceStartGate,
         FEATURE_AVAILABILITY,
       ],
     },
-    FeatureCameraRuntimeLifecycleService,
+    {
+      provide: FeatureCameraRuntimeLifecycleService,
+      useFactory: (...args: ConstructorParameters<typeof FeatureCameraRuntimeLifecycleService>) => new FeatureCameraRuntimeLifecycleService(...args),
+      inject: [MotionWatcherService, MOTION_CONTROL, RtspSourceStartGate, LIVE_SOURCE_SESSION_CONTROL, LIVE_VIEW_SETTINGS_JOB_REPOSITORY, LiveViewPolicyCoordinatorService, ReconcileRtspPolicyUseCase, LIVE_VIEW_SETTINGS_STORE],
+    },
     {
       provide: 'FEATURE_CAMERA_RUNTIME_LIFECYCLE_REGISTRATION',
       useFactory: (
@@ -587,7 +676,11 @@ function isInstallationId(value: string | undefined): value is string {
     LiveSourceCredentialRotationCoordinator,
     ListLiveSourcesUseCase,
     GetRtspSourceOverviewUseCase,
-    OpenLiveStreamUseCase,
+    {
+      provide: OpenLiveStreamUseCase,
+      useFactory: (...args: ConstructorParameters<typeof OpenLiveStreamUseCase>) => new OpenLiveStreamUseCase(...args),
+      inject: [LiveStreamSourceResolverService, LiveStreamSessionService, LIVE_STREAM_CAPABILITY, LiveViewStartGate, RtspSourceStartGate, FEATURE_AVAILABILITY, LiveViewReadinessBarrierService],
+    },
     StopLiveStreamUseCase,
     GetSnapshotUseCase,
     BrowseMotionEventsUseCase,
@@ -623,6 +716,14 @@ function isInstallationId(value: string | undefined): value is string {
     TriggerCleanUseCase,
   ],
   exports: [
+    LIVE_VIEW_SETTINGS_STORE,
+    LIVE_VIEW_SETTINGS_JOB_REPOSITORY,
+    LIVE_STREAM_CAPABILITY,
+    GetLiveViewSettingsUseCase,
+    ListPrivateSubnetSuggestionsUseCase,
+    ApplyLiveViewSettingsUseCase,
+    LiveViewRestartActivationService,
+    LiveViewSettingsOutcomeRegistryService,
     MEDIA_REPOSITORY,
     LIVE_SOURCE_REPOSITORY,
     CreateRtspCameraUseCase,
@@ -651,6 +752,7 @@ function isInstallationId(value: string | undefined): value is string {
     StopLiveStreamUseCase,
     LiveStreamSessionService,
     LiveStreamMessageCleanupService,
+    LiveViewStartGate,
     RtspSourceStartGate,
   ],
 })

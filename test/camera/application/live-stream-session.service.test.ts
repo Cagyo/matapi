@@ -10,6 +10,7 @@ import {
   type LiveStreamLease,
   type LiveStreamSource,
 } from '../../../src/camera/domain/live-stream.entity';
+import { LiveViewStartGate } from '../../../src/camera/application/live-view-start-gate.service';
 import { RtspSourceStartGate } from '../../../src/camera/application/rtsp-source-start-gate.service';
 import type { FeatureAvailabilityPort } from '../../../src/features/domain/ports/feature-availability.port';
 
@@ -166,6 +167,307 @@ describe('LiveStreamSessionService', () => {
     await expect(service.open(source('motion'), 2)).resolves.toMatchObject({
       cameraName: 'motion',
     });
+  });
+
+  it.each([
+    ['Motion', source('motion')],
+    ['RTSP', rtspSource('rtsp')],
+  ])('rejects a direct %s open while the global start gate is closed', async (_kind, candidate) => {
+    const gate = openedLiveViewGate();
+    const gateway = new FakeGateway();
+    const service = createService({ gateway, liveViewStartGate: gate });
+    gate.close();
+
+    await expect(service.open(candidate, 1)).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    expect(gateway.startCalls).toHaveLength(0);
+    expect(gateway.addViewerCalls).toBe(0);
+  });
+
+  it('rejects a join to an active session after the global gate closes', async () => {
+    const gate = openedLiveViewGate();
+    const gateway = new FakeGateway();
+    const service = createService({ gateway, liveViewStartGate: gate });
+    await service.open(source('front_door'), 1);
+    gate.close();
+
+    await expect(service.open(source('front_door'), 2)).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    expect(gateway.startCalls).toHaveLength(1);
+    expect(gateway.addViewerCalls).toBe(1);
+  });
+
+  it('rejects a replacement whose old-session teardown crosses a global gate closure', async () => {
+    const gate = openedLiveViewGate();
+    const gateway = new FakeGateway();
+    const service = createService({ gateway, liveViewStartGate: gate });
+    await service.open(source('front_door'), 1);
+    gateway.deferStop = true;
+
+    const replacement = service.open(source('garden'), 2);
+    const replacementRejected = expect(replacement).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    await vi.waitFor(() => expect(gateway.stopCalls).toBe(1));
+    gate.close();
+    gateway.resolveStop();
+
+    await replacementRejected;
+    expect(gateway.startCalls).toHaveLength(1);
+  });
+
+  it('revokes and rejects a viewer addition that completes after the global gate closes', async () => {
+    const gate = openedLiveViewGate();
+    const gateway = new FakeGateway();
+    const service = createService({ gateway, liveViewStartGate: gate });
+    await service.open(source('front_door'), 1);
+    gateway.deferNextAddViewer = true;
+
+    const joining = service.open(source('front_door'), 2);
+    const joiningRejected = expect(joining).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    await vi.waitFor(() => expect(gateway.addViewerCalls).toBe(2));
+    gate.close();
+    gateway.resolveAddViewer();
+
+    await joiningRejected;
+    expect(gateway.activeViewerCount()).toBe(1);
+  });
+
+  it('waits for an addition beyond its timeout and revokes its late viewer before quiescing', async () => {
+    vi.useFakeTimers();
+    const gate = openedLiveViewGate();
+    const gateway = new FakeGateway();
+    const service = createService({
+      gateway,
+      liveViewStartGate: gate,
+      operationTimeoutMs: 100,
+    });
+    await service.open(source('front_door'), 1);
+    gateway.deferNextAddViewer = true;
+
+    const joining = service.open(source('front_door'), 2);
+    const joiningRejected = expect(joining).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    await joiningRejected;
+    gate.close();
+
+    let quiesced = false;
+    const quiescing = service.quiesce().then(() => {
+      quiesced = true;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(quiesced).toBe(false);
+    expect(gateway.activeViewerCount()).toBe(0);
+
+    gateway.resolveAddViewer();
+    await vi.advanceTimersByTimeAsync(0);
+
+    await expect(quiescing).resolves.toBeUndefined();
+    expect(gateway.activeViewerCount()).toBe(0);
+  });
+
+  it('rejects another viewer mutation while a timed-out addition remains unsettled', async () => {
+    vi.useFakeTimers();
+    const gateway = new FakeGateway();
+    const service = createService({ gateway, operationTimeoutMs: 100 });
+    await service.open(source('front_door'), 1);
+    gateway.deferNextAddViewer = true;
+
+    const joining = service.open(source('front_door'), 2);
+    const joiningRejected = expect(joining).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    await joiningRejected;
+
+    await expect(service.open(source('front_door'), 3)).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    expect(gateway.addViewerCalls).toBe(2);
+
+    gateway.resolveAddViewer();
+    await vi.advanceTimersByTimeAsync(0);
+    await service.stop(1);
+  });
+
+  it('accepts a full teardown after late viewer success when revocation fails', async () => {
+    vi.useFakeTimers();
+    const gate = openedLiveViewGate();
+    const gateway = new FakeGateway();
+    const service = createService({
+      gateway,
+      liveViewStartGate: gate,
+      operationTimeoutMs: 100,
+    });
+    await service.open(source('front_door'), 1);
+    gateway.deferNextAddViewer = true;
+
+    const joining = service.open(source('front_door'), 2);
+    const joiningRejected = expect(joining).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    await joiningRejected;
+    gateway.revokeError = new Error('revoke failed');
+    gateway.resolveAddViewer();
+    await vi.advanceTimersByTimeAsync(0);
+    gate.close();
+
+    let quiesced = false;
+    const quiescing = service.quiesce().then(() => {
+      quiesced = true;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(quiesced).toBe(true);
+    await quiescing;
+    expect(gateway.activeProcess).toBeNull();
+    expect(gateway.activeViewerCount()).toBe(0);
+  });
+
+  it('quiesces an active session and clears its recovery lease', async () => {
+    const gate = openedLiveViewGate();
+    const gateway = new FakeGateway();
+    const lease = new FakeLease();
+    const service = createService({ gateway, lease, liveViewStartGate: gate });
+    await service.open(source('front_door'), 1);
+    gate.close();
+
+    await expect(service.quiesce()).resolves.toBeUndefined();
+
+    expect(gateway.activeProcess).toBeNull();
+    expect(gateway.activeViewerCount()).toBe(0);
+    expect(lease.current()).toBeNull();
+  });
+
+  it('cancels pending and replacement opens before waiting for their cleanup', async () => {
+    const gate = openedLiveViewGate();
+    const gateway = new DeferredGateway();
+    const service = createService({ gateway, liveViewStartGate: gate });
+    const pending = service.open(source('front_door'), 1);
+    await vi.waitFor(() => expect(gateway.startCalls).toHaveLength(1));
+    const replacement = service.open(source('garden'), 2);
+    gate.close();
+
+    const quiescing = service.quiesce();
+    await expect(Promise.allSettled([pending, replacement])).resolves.toEqual([
+      expect.objectContaining({ status: 'rejected' }),
+      expect.objectContaining({ status: 'rejected' }),
+    ]);
+    gateway.resolveStart();
+
+    await expect(quiescing).resolves.toBeUndefined();
+    expect(gateway.startCalls).toHaveLength(1);
+    expect(gateway.activeProcess).toBeNull();
+  });
+
+  it('waits for late-start gateway cleanup and its lease mutation before resolving quiescence', async () => {
+    vi.useFakeTimers();
+    const gate = openedLiveViewGate();
+    const gateway = new DeferredGateway();
+    const lease = new FakeLease();
+    const service = createService({
+      gateway,
+      lease,
+      liveViewStartGate: gate,
+      operationTimeoutMs: 100,
+    });
+    const opening = service.open(source('front_door'), 1);
+    const openingRejected = expect(opening).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    await openingRejected;
+
+    gate.close();
+    gateway.deferStop = true;
+    lease.deferNextClear = true;
+    let quiesced = false;
+    const quiescing = service.quiesce().finally(() => {
+      quiesced = true;
+    });
+    gateway.resolveStart();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(gateway.activeProcess).not.toBeNull();
+    expect(quiesced).toBe(false);
+
+    gateway.resolveStop();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(gateway.activeProcess).toBeNull();
+    expect(lease.clearCalls).toBe(0);
+    expect(quiesced).toBe(false);
+
+    lease.resolveClear();
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(quiescing).resolves.toBeUndefined();
+    expect(lease.clearCalls).toBe(1);
+  });
+
+  it('waits for a previously timed-out lease mutation after every session slot is empty', async () => {
+    vi.useFakeTimers();
+    const gate = openedLiveViewGate();
+    const lease = new FakeLease();
+    const service = createService({
+      lease,
+      liveViewStartGate: gate,
+      operationTimeoutMs: 100,
+    });
+    await service.open(source('front_door'), 1);
+    lease.deferNextClear = true;
+    const stopping = service.stop(1);
+    const stoppingRejected = expect(stopping).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    await stoppingRejected;
+    gate.close();
+
+    let quiesced = false;
+    const quiescing = service.quiesce().finally(() => {
+      quiesced = true;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(quiesced).toBe(false);
+    expect(lease.clearCalls).toBe(0);
+
+    lease.resolveClear();
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(quiescing).resolves.toBeUndefined();
+    expect(lease.clearCalls).toBe(1);
+  });
+
+  it('bounds quiescence when a timed-out gateway start never returns for cleanup', async () => {
+    vi.useFakeTimers();
+    const gate = openedLiveViewGate();
+    const gateway = new DeferredGateway();
+    const service = createService({
+      gateway,
+      liveViewStartGate: gate,
+      operationTimeoutMs: 100,
+    });
+    const opening = service.open(source('front_door'), 1);
+    const openingRejected = expect(opening).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    await openingRejected;
+    gate.close();
+
+    const quiescing = service.quiesce();
+    const quiescingRejected = expect(quiescing).rejects.toMatchObject({
+      code: 'LIVE_STREAM_UNAVAILABLE',
+    });
+    await vi.advanceTimersByTimeAsync(100);
+
+    await quiescingRejected;
+    expect(gateway.stopCalls).toBe(0);
   });
 
   it('stops only the targeted camera and leaves other cameras running', async () => {
@@ -1522,6 +1824,7 @@ function createService(input: {
   durationMs?: number;
   operationTimeoutMs?: number;
   sourceStartGate?: RtspSourceStartGate;
+  liveViewStartGate?: LiveViewStartGate;
   availability?: FeatureAvailabilityPort;
 } = {}): LiveStreamSessionService {
   return new LiveStreamSessionService(
@@ -1533,9 +1836,16 @@ function createService(input: {
     input.durationMs ?? 300_000,
     input.operationTimeoutMs ?? 30_000,
     2,
+    input.liveViewStartGate ?? openedLiveViewGate(),
     input.sourceStartGate,
     input.availability,
   );
+}
+
+function openedLiveViewGate(): LiveViewStartGate {
+  const gate = new LiveViewStartGate();
+  gate.openIfCurrent(0);
+  return gate;
 }
 
 class FakeMonotonicClock implements MonotonicClockPort {
@@ -1560,6 +1870,8 @@ class FakeGateway implements LiveStreamGatewayPort {
     processIdentity: string;
   }[] = [];
   stopCalls = 0;
+  addViewerCalls = 0;
+  activeProcess: { cameraId: string } | null = null;
   recoveryResult: 'stopped' | 'not-owned' = 'stopped';
   stopError?: Error;
   addViewerError?: Error;
@@ -1569,9 +1881,12 @@ class FakeGateway implements LiveStreamGatewayPort {
   hangRevoke = false;
   hangStop = false;
   deferStop = false;
+  deferNextAddViewer = false;
   throwStartSynchronously = false;
   private readonly stopResolvers: (() => void)[] = [];
   private readonly stopRejectors: ((error: Error) => void)[] = [];
+  private readonly addViewerResolvers: (() => void)[] = [];
+  private readonly viewers = new Set<string>();
   private failureHandler?: () => void;
 
   onFailure(handler: () => void): void {
@@ -1589,6 +1904,7 @@ class FakeGateway implements LiveStreamGatewayPort {
   }> {
     this.startCalls.push({ source: input.source });
     if (this.throwStartSynchronously) throw new Error('start failed synchronously');
+    this.activeProcess = { cameraId: input.source.cameraId };
     return Promise.resolve({
       publicHostname: 'clear-moon.trycloudflare.com',
       pid: createLiveStreamProcessId(123),
@@ -1596,15 +1912,22 @@ class FakeGateway implements LiveStreamGatewayPort {
     });
   }
 
-  async addViewer(): Promise<void> {
+  async addViewer(input: { tokenHash: string }): Promise<void> {
+    this.addViewerCalls += 1;
     if (this.addViewerError) throw this.addViewerError;
     if (this.hangAddViewer) await new Promise<never>(() => undefined);
+    if (this.deferNextAddViewer) {
+      this.deferNextAddViewer = false;
+      await new Promise<void>((resolve) => this.addViewerResolvers.push(resolve));
+    }
+    this.viewers.add(input.tokenHash);
   }
 
   async revokeViewer(tokenHash: string): Promise<void> {
     if (this.revokeError) throw this.revokeError;
     if (this.hangRevoke) await new Promise<never>(() => undefined);
     this.revoked.push(tokenHash);
+    this.viewers.delete(tokenHash);
   }
 
   async stop(): Promise<void> {
@@ -1617,6 +1940,16 @@ class FakeGateway implements LiveStreamGatewayPort {
         this.stopRejectors.push(reject);
       });
     }
+    this.activeProcess = null;
+    this.viewers.clear();
+  }
+
+  resolveAddViewer(): void {
+    this.addViewerResolvers.shift()?.();
+  }
+
+  activeViewerCount(): number {
+    return this.viewers.size;
   }
 
   resolveStop(): void {
@@ -1653,6 +1986,7 @@ class DeferredGateway extends FakeGateway {
     await new Promise<void>((resolve) => {
       this.resolvers.push(resolve);
     });
+    this.activeProcess = { cameraId: input.source.cameraId };
     return {
       publicHostname: 'clear-moon.trycloudflare.com',
       pid: createLiveStreamProcessId(123),

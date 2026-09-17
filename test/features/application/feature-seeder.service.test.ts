@@ -1,15 +1,37 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { FeatureSeederService } from '../../../src/features/application/feature-seeder.service';
-import { FEATURE_CATALOG } from '../../../src/features/domain/feature-catalog';
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { createRequire } from "node:module";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { FeatureSeederService } from "../../../src/features/application/feature-seeder.service";
+import { FEATURE_CATALOG } from "../../../src/features/domain/feature-catalog";
+import { FsFeatureSeedConfigAdapter } from "../../../src/features/infrastructure/fs-feature-seed-config.adapter";
 
-function loggerErrorSpy(seeder: FeatureSeederService): ReturnType<typeof vi.spyOn> {
-  const logger = (seeder as unknown as {
-    logger: { error: (message: string) => void };
-  }).logger;
-  return vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+const require = createRequire(import.meta.url);
+const { writeConfig } = require(
+  resolve("scripts/setup-wizard/env-writer.js"),
+) as {
+  writeConfig: (
+    installDir: string,
+    token: string,
+    enabledFeatures: readonly string[],
+    claimAdminToken: string,
+  ) => { deferredFeatures: readonly string[] };
+};
+const roots: string[] = [];
+
+function loggerErrorSpy(
+  seeder: FeatureSeederService,
+): ReturnType<typeof vi.spyOn> {
+  const logger = (
+    seeder as unknown as {
+      logger: { error: (message: string) => void };
+    }
+  ).logger;
+  return vi.spyOn(logger, "error").mockImplementation(() => undefined);
 }
 
-describe('FeatureSeederService', () => {
+describe("FeatureSeederService", () => {
   let seeder: FeatureSeederService;
   let config: { loadEnabled: ReturnType<typeof vi.fn> };
   let query: { listAll: ReturnType<typeof vi.fn> };
@@ -22,64 +44,125 @@ describe('FeatureSeederService', () => {
     seeder = new FeatureSeederService(config, query, repository);
   });
 
-  it('does not touch a complete catalogue', async () => {
-    query.listAll.mockResolvedValue(FEATURE_CATALOG.map(({ name }) => ({ name })));
+  afterEach(() => {
+    roots
+      .splice(0)
+      .forEach((root) => rmSync(root, { recursive: true, force: true }));
+  });
+
+  it("does not touch a complete catalogue", async () => {
+    query.listAll.mockResolvedValue(
+      FEATURE_CATALOG.map(({ name }) => ({ name })),
+    );
     await seeder.onModuleInit();
     expect(repository.insertMissing).not.toHaveBeenCalled();
   });
 
-  it.each([null, []])('never seeds success from a missing or malformed config result', async (enabled) => {
+  it.each([null, []])(
+    "never seeds success from a missing or malformed config result",
+    async (enabled) => {
+      query.listAll.mockResolvedValue([]);
+      config.loadEnabled.mockResolvedValue(enabled);
+      await seeder.onModuleInit();
+      expect(repository.insertMissing).toHaveBeenCalledWith(
+        FEATURE_CATALOG.map(({ name }) => ({
+          name,
+          installed: false,
+          enabled: false,
+        })),
+      );
+    },
+  );
+
+  it("marks only the final verified enabled list installed and enabled on an empty database", async () => {
     query.listAll.mockResolvedValue([]);
-    config.loadEnabled.mockResolvedValue(enabled);
+    config.loadEnabled.mockResolvedValue(["digital", "motion"]);
     await seeder.onModuleInit();
-    expect(repository.insertMissing).toHaveBeenCalledWith(FEATURE_CATALOG.map(({ name }) => ({
-      name, installed: false, enabled: false,
-    })));
+    expect(repository.insertMissing).toHaveBeenCalledWith(
+      FEATURE_CATALOG.map(({ name }) => ({
+        name,
+        installed: name === "digital" || name === "motion",
+        enabled: name === "digital" || name === "motion",
+      })),
+    );
   });
 
-  it('marks only the final verified enabled list installed and enabled on an empty database', async () => {
+  it("seeds the real wizard output while keeping selected RTSP deferred", async () => {
+    const root = mkdtempSync(join(tmpdir(), "feature-seeder-writer-"));
+    roots.push(root);
+    writeFileSync(
+      join(root, ".env.example"),
+      "TELEGRAM_BOT_TOKEN=\nCLAIM_ADMIN_TOKEN=\n",
+    );
+    const result = writeConfig(
+      root,
+      "123456:telegram-token",
+      ["digital", "motion", "rtsp"],
+      "fixed-claim-token",
+    );
+    const realConfig = new FsFeatureSeedConfigAdapter(
+      join(root, "features.json"),
+    );
     query.listAll.mockResolvedValue([]);
-    config.loadEnabled.mockResolvedValue(['digital', 'motion']);
+    seeder = new FeatureSeederService(realConfig, query, repository);
+
     await seeder.onModuleInit();
-    expect(repository.insertMissing).toHaveBeenCalledWith(FEATURE_CATALOG.map(({ name }) => ({
-      name, installed: name === 'digital' || name === 'motion', enabled: name === 'digital' || name === 'motion',
-    })));
+
+    expect(result.deferredFeatures).toEqual(["rtsp"]);
+    expect(repository.insertMissing).toHaveBeenCalledWith(
+      FEATURE_CATALOG.map(({ name }) => ({
+        name,
+        installed: name === "digital" || name === "motion",
+        enabled: name === "digital" || name === "motion",
+      })),
+    );
   });
 
-  it('adds only missing catalogue rows without consulting first-install config on upgrades', async () => {
-    query.listAll.mockResolvedValue([{ name: 'motion' }, { name: 'uart' }]);
+  it("adds only missing catalogue rows without consulting first-install config on upgrades", async () => {
+    query.listAll.mockResolvedValue([{ name: "motion" }, { name: "uart" }]);
     await seeder.onModuleInit();
     expect(config.loadEnabled).not.toHaveBeenCalled();
-    expect(repository.insertMissing).toHaveBeenCalledWith(expect.arrayContaining([
-      { name: 'digital', installed: false, enabled: false },
-      { name: 'zigbee', installed: false, enabled: false },
-      { name: 'rtsp', installed: false, enabled: false },
-    ]));
+    expect(repository.insertMissing).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        { name: "digital", installed: false, enabled: false },
+        { name: "zigbee", installed: false, enabled: false },
+        { name: "rtsp", installed: false, enabled: false },
+      ]),
+    );
   });
 
-  it('names the failure code without leaking the database path when seeding fails', async () => {
-    query.listAll.mockRejectedValue(Object.assign(
-      new Error('unable to open database file /opt/home-worker/data/worker.db'),
-      { code: 'SQLITE_CANTOPEN' },
-    ));
+  it("names the failure code without leaking the database path when seeding fails", async () => {
+    query.listAll.mockRejectedValue(
+      Object.assign(
+        new Error(
+          "unable to open database file /opt/home-worker/data/worker.db",
+        ),
+        { code: "SQLITE_CANTOPEN" },
+      ),
+    );
     const error = loggerErrorSpy(seeder);
 
     await expect(seeder.onModuleInit()).resolves.toBeUndefined();
 
-    expect(error).toHaveBeenCalledWith('Feature seeding failed: SQLITE_CANTOPEN');
-    expect(error.mock.calls.flat().join(' ')).not.toContain('/opt/home-worker');
+    expect(error).toHaveBeenCalledWith(
+      "Feature seeding failed: SQLITE_CANTOPEN",
+    );
+    expect(error.mock.calls.flat().join(" ")).not.toContain("/opt/home-worker");
   });
 
-  it('falls back to a fixed code when the seeding failure code could carry a path', async () => {
-    query.listAll.mockRejectedValue(Object.assign(
-      new Error('seed failed'),
-      { code: 'SQLITE_CANTOPEN: /opt/home-worker/data/worker.db' },
-    ));
+  it("falls back to a fixed code when the seeding failure code could carry a path", async () => {
+    query.listAll.mockRejectedValue(
+      Object.assign(new Error("seed failed"), {
+        code: "SQLITE_CANTOPEN: /opt/home-worker/data/worker.db",
+      }),
+    );
     const error = loggerErrorSpy(seeder);
 
     await seeder.onModuleInit();
 
-    expect(error).toHaveBeenCalledWith('Feature seeding failed: FEATURE_OPERATION_FAILED');
-    expect(error.mock.calls.flat().join(' ')).not.toContain('/opt/home-worker');
+    expect(error).toHaveBeenCalledWith(
+      "Feature seeding failed: FEATURE_OPERATION_FAILED",
+    );
+    expect(error.mock.calls.flat().join(" ")).not.toContain("/opt/home-worker");
   });
 });

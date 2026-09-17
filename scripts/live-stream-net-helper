@@ -31,6 +31,18 @@ HEX64_RE = __import__("re").compile(r"^[0-9a-f]{64}$", __import__("re").I)
 LEASE_RE = __import__("re").compile(r"^[0-9a-f]{32}$")
 MAX_LEASE_MS = 300_000
 MAX_UDP_PORTS = 64
+MAX_ALLOWED_CIDRS = 16
+MAX_SAFE_INTEGER = 9_007_199_254_740_991
+POLICY_KEYS = {
+    "version", "settingsGeneration", "rtspEnabled", "workerUid", "streamUid",
+    "allowedCidrs", "udpPortFirst", "udpPortLast",
+}
+PRIVATE_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("fc00::/7"),
+)
 POLICY_INSPECTOR_PATH = "/usr/lib/home-worker/live-stream-policy-inspector"
 IP_BINARY = "/usr/sbin/ip"
 IP_ENVIRONMENT = {"LANG": "C", "LC_ALL": "C", "PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}
@@ -38,7 +50,10 @@ IP_ENVIRONMENT = {"LANG": "C", "LC_ALL": "C", "PATH": "/usr/sbin:/usr/bin:/sbin:
 # route get is a local netlink round trip; one second is already generous.
 ROUTE_TIMEOUT_SECONDS = 1
 MAX_ROUTE_BYTES = 64 * 1024
-INSPECTOR_SYMBOLS = ("PolicyDocumentInvalid", "parse_policy_document", "load_summary")
+INSPECTOR_SYMBOLS = (
+    "PolicyDocumentInvalid", "parse_policy_document", "strict_json_loads",
+    "open_summary", "load_summary",
+)
 
 
 class Reject(Exception):
@@ -98,24 +113,108 @@ def load_policy_inspector():
     return module
 
 
-class Policy:
-    """The installed policy version 2: private networks bound to physical links."""
+def valid_uid(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
-    def __init__(self, raw, inspector):
-        # The document contract -- accepted keys, per-entry rules, canonical
-        # order, and the digest covering them -- belongs to the inspector both
-        # verifiers already share. A second copy here is what would let the
-        # startup cross-check quietly stop covering a field.
-        try:
-            (_version, self.worker_uid, self.stream_uid, entries,
-             self.udp_first, self.udp_last, self.digest) = inspector.parse_policy_document(raw)
-        except inspector.PolicyDocumentInvalid:
+
+def valid_policy_port(value):
+    return (
+        isinstance(value, int) and not isinstance(value, bool)
+        and 1024 <= value <= 65535
+    )
+
+
+def private_network(text):
+    if not isinstance(text, str) or "/" not in text:
+        return None
+    try:
+        network = ipaddress.ip_network(text, strict=True)
+    except ValueError:
+        return None
+    if str(network) != text:
+        return None
+    if (network.prefixlen == 0 or network.is_loopback or network.is_link_local
+            or network.is_multicast or network.is_unspecified or network.is_global):
+        return None
+    if not any(
+        network.version == allowed.version and network.subnet_of(allowed)
+        for allowed in PRIVATE_NETWORKS
+    ):
+        return None
+    return network
+
+
+class Policy:
+    """The exact settings-correlated policy version 2.
+
+    The durable policy carries only administrator-approved CIDRs.  The public
+    inspector summary remains the independent projection of physical links;
+    an address must satisfy both sets before a route can receive a lease.
+    """
+
+    def __init__(self, raw, inspector, physical_networks=None):
+        if not isinstance(raw, dict) or set(raw) != POLICY_KEYS:
             raise Reject("policy")
+        if raw.get("version") != 2 or isinstance(raw.get("version"), bool):
+            raise Reject("policy")
+        generation = raw.get("settingsGeneration")
+        if (not isinstance(generation, int) or isinstance(generation, bool)
+                or not 0 <= generation <= MAX_SAFE_INTEGER):
+            raise Reject("policy")
+        if not isinstance(raw.get("rtspEnabled"), bool):
+            raise Reject("policy")
+        if (not valid_uid(raw.get("workerUid")) or not valid_uid(raw.get("streamUid"))
+                or raw["workerUid"] == raw["streamUid"]):
+            raise Reject("policy")
+        first = raw.get("udpPortFirst")
+        last = raw.get("udpPortLast")
+        if (not valid_policy_port(first) or not valid_policy_port(last)
+                or first > last or last - first + 1 > MAX_UDP_PORTS):
+            raise Reject("policy")
+        cidrs = raw.get("allowedCidrs")
+        if (not isinstance(cidrs, list) or len(cidrs) > MAX_ALLOWED_CIDRS
+                or not all(isinstance(entry, str) for entry in cidrs)):
+            raise Reject("policy")
+        networks = []
+        for entry in cidrs:
+            network = private_network(entry)
+            if network is None:
+                raise Reject("policy")
+            networks.append(network)
+        canonical = sorted(
+            set(networks),
+            key=lambda value: (value.version, value.prefixlen, str(value)),
+        )
+        if cidrs != [str(network) for network in canonical]:
+            raise Reject("policy")
+        if not raw["rtspEnabled"] and canonical:
+            raise Reject("policy")
+
+        if physical_networks is None:
+            try:
+                physical_networks = inspector.current_networks()
+            except Exception:
+                raise Reject("policy")
+        physical = []
+        try:
+            for entry in physical_networks:
+                network = ipaddress.ip_network(entry.cidr, strict=True)
+                physical.append((network, entry.interface))
+        except (AttributeError, TypeError, ValueError):
+            raise Reject("policy")
+
+        self.settings_generation = generation
+        self.rtsp_enabled = raw["rtspEnabled"]
+        self.worker_uid = raw["workerUid"]
+        self.stream_uid = raw["streamUid"]
+        self.udp_first = first
+        self.udp_last = last
+        self.allowed_networks = tuple(canonical)
+        self.physical_networks = tuple(physical)
         # A runtime bound the installer also enforces, but the durable policy is
         # hand-editable, so the process that renders the ruleset re-checks it.
         if self.udp_last - self.udp_first + 1 > MAX_UDP_PORTS:
             raise Reject("policy")
-        self.networks = [(ipaddress.ip_network(entry.cidr), entry.interface) for entry in entries]
 
     def address(self, text):
         if not isinstance(text, str):
@@ -135,8 +234,13 @@ class Policy:
         return self._interfaces(ipaddress.ip_address(text))
 
     def _interfaces(self, address):
+        if not any(
+            address.version == network.version and address in network
+            for network in self.allowed_networks
+        ):
+            return frozenset()
         return frozenset(
-            interface for network, interface in self.networks
+            interface for network, interface in self.physical_networks
             if address.version == network.version and address in network
         )
 
@@ -503,26 +607,27 @@ def valid_session(value):
 
 
 def load_verified_policy(path, inspector):
-    """Load the private policy and require the public summary to describe it.
+    """Load the private tuple and bind it to the verified physical summary.
 
-    The two artifacts are renamed one after the other, so a crash can leave a new
-    private policy beside an old public summary. When the change implied no route
-    change -- a recreated stream account, an edited UDP range -- nothing else in
-    the system notices, because application readiness only ever compares the
-    environment with the summary. This is that cross-check. `load_summary`
-    re-derives the summary digest from the summary's own fields, so digest
-    equality proves every security-relevant field of the two agrees.
+    The settings-correlated policy deliberately contains no interface names.
+    Those remain owned by the root inspector's public summary.  Identity and
+    UDP bounds must agree across both artifacts, and grants are admitted only
+    when an address is inside both an allowed CIDR and one summarized physical
+    network.
     """
     try:
         raw = strict_json_loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError, Reject):
         raise Reject("policy")
-    policy = Policy(raw, inspector)
     try:
-        digest, _networks = inspector.load_summary()
+        summary = inspector.strict_json_loads(inspector.open_summary())
+        (_version, worker_uid, stream_uid, networks, udp_first, udp_last,
+         _digest) = inspector.parse_policy_document(summary)
     except Exception:
         raise Reject("summary")
-    if digest != policy.digest:
+    policy = Policy(raw, inspector, networks)
+    if (worker_uid != policy.worker_uid or stream_uid != policy.stream_uid
+            or udp_first != policy.udp_first or udp_last != policy.udp_last):
         raise Reject("summary")
     return policy
 

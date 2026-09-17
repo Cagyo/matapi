@@ -73,6 +73,28 @@ describe('live-stream net helper security behavior', () => {
     expect(scenario('version-one-policy')).toEqual({ ok: false, reason: 'policy' });
   });
 
+  it('accepts an empty version-2 allowlist as deny-all', () => {
+    expect(scenario('v2-empty-deny-all-policy')).toEqual({ ok: false, reason: 'address' });
+  });
+
+  it('retains the exact settings and RTSP correlation tuple', () => {
+    expect(scenario('v2-tuple-policy')).toEqual({ settingsGeneration: 4, rtspEnabled: true });
+  });
+
+  it('rejects a disabled tuple that still carries grant CIDRs', () => {
+    expect(scenario('v2-disabled-nonempty-policy')).toEqual({ ok: false, reason: 'policy' });
+  });
+
+  it('rejects the previous policy version even when every other field is valid', () => {
+    expect(scenario('v1-policy-rejected')).toEqual({ ok: false, reason: 'policy' });
+  });
+
+  it('rejects missing and duplicate v2 keys through the installed policy loader', () => {
+    expect(scenario('v2-load-missing-duplicate-keys')).toEqual({
+      missing: 'policy', duplicate: 'policy',
+    });
+  });
+
   it('never rounds an nft timeout beyond lease expiry', () => {
     expect(scenario('subsecond-timeout')).toEqual({ subsecondAllowed: false, oneSecond: true });
   });
@@ -218,9 +240,9 @@ describe('live-stream net helper runtime identity', () => {
 
 describe('live-stream net helper policy and summary agreement', () => {
   it('accepts a private policy that matches the public summary', () => {
-    const result = scenario('summary-match') as { digest: string; streamUid: number };
+    const result = scenario('summary-match') as { settingsGeneration: number; streamUid: number };
     expect(result.streamUid).toBe(997);
-    expect(result.digest).toMatch(/^[0-9a-f]{64}$/u);
+    expect(result.settingsGeneration).toBe(4);
   });
 
   it('refuses a summary that disagrees on an identity change implying no route change', () => {

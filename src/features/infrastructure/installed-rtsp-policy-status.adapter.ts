@@ -50,16 +50,10 @@ interface PolicyDocument {
 /**
  * The installed RTSP policy as one projection every consumer shares.
  *
- * Three artifacts describe the policy — the private file root reads, the public
- * summary, and the environment this process was started with — and a reinstall
- * renames them one at a time. Readiness, install recovery, and Camera each
- * reading their own subset is how they end up disagreeing about a half-renamed
- * tuple, so all of them ask here and the three are cross-checked in one place:
- * the summary is opened through a single descriptor, its digest is recomputed
- * from every field rather than trusted, that digest and the CIDR/UDP projection
- * must equal what this process was started with, and only then does the fixed
- * root inspector get asked whether the installed networks are still the live
- * ones. Any disagreement fails closed.
+ * The root-owned physical summary is read through one descriptor and its digest
+ * recomputed from every field. The fixed inspector confirms that projection and
+ * the live networks; the advanced UDP range must still match this process.
+ * The private settings/RTSP tuple is verified by policy apply and recovery.
  */
 export class InstalledRtspPolicyStatusAdapter implements RtspPolicyStatusPort {
   private readonly logger = new Logger(InstalledRtspPolicyStatusAdapter.name);
@@ -125,21 +119,6 @@ export class InstalledRtspPolicyStatusAdapter implements RtspPolicyStatusPort {
   }
 
   private assertEnvironmentAgrees(installed: PolicyDocument): void {
-    const raw = this.env.RTSP_ALLOWED_CIDRS;
-    if (!raw) throw new Error('allowed CIDRs unset');
-    const declared = raw.split(',').map((entry) => {
-      const network = canonicalNetwork(entry.trim());
-      if (network === null) throw new Error('allowed CIDRs malformed');
-      return network.cidr;
-    });
-    const expected: string[] = [];
-    for (const network of installed.networks) {
-      if (!expected.includes(network.cidr)) expected.push(network.cidr);
-    }
-    if (declared.length !== expected.length || declared.some((cidr, index) => cidr !== expected[index])) {
-      throw new Error('allowed CIDRs drifted');
-    }
-    if (this.env.RTSP_POLICY_DIGEST !== installed.digest) throw new Error('policy digest drifted');
     if (
       this.udpPort('RTSP_UDP_PORT_FIRST', DEFAULT_UDP_PORT_FIRST) !== installed.udpPortFirst ||
       this.udpPort('RTSP_UDP_PORT_LAST', DEFAULT_UDP_PORT_LAST) !== installed.udpPortLast
@@ -195,7 +174,7 @@ function parseNetworks(raw: unknown): readonly InstalledRtspNetwork[] {
     if (typeof name !== 'string' || !INTERFACE.test(name) || name === 'lo') throw new Error('summary networks');
     const network = typeof record.cidr === 'string' ? canonicalNetwork(record.cidr) : null;
     // The digest covers the CIDR text itself, so an installed entry must already
-    // be canonical; only the hand-editable environment is normalized on read.
+    // be canonical. Settings CIDRs belong to the separate private policy tuple.
     if (network === null || record.family !== network.family || network.cidr !== record.cidr) {
       throw new Error('summary networks');
     }

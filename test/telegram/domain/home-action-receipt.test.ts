@@ -6,6 +6,7 @@ import {
 import type {
   ExternalWorkflow,
   FeatureWorkflowOperation,
+  LiveViewSettingsWorkflowOperation,
   WorkflowReturnPhase,
   WorkflowReturnReceipt,
 } from '../../../src/telegram/domain/workflow-return';
@@ -15,6 +16,7 @@ const WORKFLOWS: readonly ExternalWorkflow[] = [
   'sensor-modify', 'sensor-remove', 'sensor-import', 'sensor-export',
   'drive-status', 'drive-setup', 'storage-cleanup', 'health',
   'system-update', 'system-restart', 'invite', 'camera',
+  'live-view-settings',
 ];
 const PHASES: readonly WorkflowReturnPhase[] = ['cancellable', 'running'];
 const STATUSES: readonly WorkflowReturnReceipt['status'][] = ['pending', 'executing', 'returned', 'completed'];
@@ -40,7 +42,13 @@ function receipt(overrides: Partial<WorkflowReturnReceipt> = {}): WorkflowReturn
 
 describe('Workflow return receipt validation', () => {
   it.each(WORKFLOWS)('accepts the %s workflow', (workflow) => {
-    expect(isHomeActionReceipt(receipt({ payload: { ...receipt().payload, workflow } }))).toBe(true);
+    expect(isHomeActionReceipt(receipt({
+      payload: {
+        ...receipt().payload,
+        workflow,
+        ...(workflow === 'live-view-settings' ? { deliveryStage: 'pending' as const } : {}),
+      } as WorkflowReturnReceipt['payload'],
+    }))).toBe(true);
   });
 
   it.each(PHASES)('accepts the %s phase', (phase) => {
@@ -201,6 +209,32 @@ describe('Workflow return receipt validation', () => {
     expect(isHomeActionReceipt(receipt({
       payload: { ...receipt().payload, operation },
     } as Partial<WorkflowReturnReceipt>))).toBe(false);
+  });
+
+  it('accepts only the exact live-view-settings mutation operation', () => {
+    const operation: LiveViewSettingsWorkflowOperation = {
+      kind: 'live-view-settings-mutation',
+      jobId: 'AbCdEfGhIjKlMnOp',
+      expectedGeneration: 3,
+    };
+    const settings = receipt({
+      payload: {
+        ...receipt().payload,
+        workflow: 'live-view-settings',
+        operation,
+        deliveryStage: 'pending',
+      },
+    });
+
+    expect(isHomeActionReceipt(settings)).toBe(true);
+    expect(isHomeActionReceipt({
+      ...settings,
+      payload: { ...settings.payload, operation: { ...operation, candidate: {} } },
+    })).toBe(false);
+    expect(isHomeActionReceipt({
+      ...settings,
+      payload: { ...settings.payload, operation: { ...operation, expectedGeneration: -1 } },
+    })).toBe(false);
   });
 
   it('keeps the workflow return receipt assignable to the shared receipt union', () => {

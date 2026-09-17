@@ -3,16 +3,24 @@ import { ArchiveSchedulerHooksService } from '../../src/archive/application/arch
 import { ARCHIVE_REGISTRATION_LOOKUP } from '../../src/archive/application/ports/archive-registration-lookup.port';
 import { ARCHIVE_RUNTIME_SIGNAL } from '../../src/archive/application/ports/archive-runtime-signal.port';
 import { CleanupCoordinatorService } from '../../src/camera/application/cleanup-coordinator.service';
+import { LiveStreamSessionService } from '../../src/camera/application/live-stream-session.service';
+import { LiveViewStartGate } from '../../src/camera/application/live-view-start-gate.service';
+import { RtspSourceStartGate } from '../../src/camera/application/rtsp-source-start-gate.service';
 import { CompletedMotionVideoRecoveryScheduler } from '../../src/camera/application/completed-motion-video-recovery.scheduler';
 import { CameraSourceAuthorizationRegistry } from '../../src/camera/application/camera-source-authorization-registry.service';
 import { RecordMotionEndUseCase } from '../../src/camera/application/record-motion-end.use-case';
 import { RegisterCompletedMotionVideosUseCase } from '../../src/camera/application/register-completed-motion-videos.use-case';
 import { CameraModule } from '../../src/camera/camera.module';
 import { CameraNameTakenError } from '../../src/camera/domain/errors/camera-name-taken.error';
+import { ADMIN_ALERT } from '../../src/camera/domain/ports/admin-alert.port';
 import { CAMERA_SOURCE_AUTHORIZATION } from '../../src/camera/domain/ports/camera-source-authorization.port';
+import { LIVE_STREAM_GATEWAY } from '../../src/camera/domain/ports/live-stream-gateway.port';
+import { LIVE_STREAM_LEASE } from '../../src/camera/domain/ports/live-stream-lease.port';
+import { LIVE_STREAM_MESSAGE_CLEANUP } from '../../src/camera/domain/ports/live-stream-message-cleanup.port';
 import { LIVE_SOURCE_REPOSITORY } from '../../src/camera/domain/ports/live-source-repository.port';
 import { MEDIA_REPOSITORY } from '../../src/camera/domain/ports/media-repository.port';
 import { MEDIA_WRITER } from '../../src/camera/domain/ports/media-writer.port';
+import { MONOTONIC_CLOCK } from '../../src/camera/domain/ports/monotonic-clock.port';
 import { RTSP_SOURCE_CONFIGURATION } from '../../src/camera/domain/ports/rtsp-source-configuration.port';
 import { AesGcmLiveSourceCredentialAdapter } from '../../src/camera/infrastructure/aes-gcm-live-source-credential.adapter';
 import { InMemoryLiveSourceRepository } from '../../src/camera/infrastructure/in-memory-live-source.repository';
@@ -20,6 +28,7 @@ import { InMemoryMediaRepository } from '../../src/camera/infrastructure/in-memo
 import { DB } from '../../src/database/database.module';
 import { FEATURE_AVAILABILITY } from '../../src/features/domain/ports/feature-availability.port';
 import {
+  LIVE_STREAM_OPTIONS,
   liveStreamOptionsFromEnv,
   type LiveStreamOptions,
 } from '../../src/camera/camera.tokens';
@@ -33,7 +42,6 @@ import { join } from 'node:path';
 describe('CameraModule live-stream composition', () => {
   it('uses the safe live-stream defaults', () => {
     expect(liveStreamOptionsFromEnv({})).toEqual<LiveStreamOptions>({
-      enabled: false,
       durationMs: 300_000,
       startTimeoutMs: 30_000,
       maxViewers: 2,
@@ -43,13 +51,11 @@ describe('CameraModule live-stream composition', () => {
 
   it('falls back or caps unsafe numeric configuration', () => {
     expect(liveStreamOptionsFromEnv({
-      LIVE_STREAM_ENABLED: 'true',
       LIVE_STREAM_DURATION_MS: '999999999999',
       LIVE_STREAM_START_TIMEOUT_MS: '-1',
       LIVE_STREAM_MAX_VIEWERS: '999',
       LIVE_STREAM_RUNTIME_DIR: '',
     })).toEqual<LiveStreamOptions>({
-      enabled: true,
       durationMs: 300_000,
       startTimeoutMs: 30_000,
       maxViewers: 2,
@@ -89,6 +95,34 @@ describe('CameraModule live-stream composition', () => {
     expect(liveStreamOptionsFromEnv({
       LIVE_STREAM_RUNTIME_DIR: runtimeDirectory,
     }).runtimeDirectory).toBe(runtimeDirectory);
+  });
+
+  it('wires the same global and RTSP gates into the live-session provider', () => {
+    interface FactoryProvider {
+      provide?: unknown;
+      inject?: unknown[];
+    }
+    const providers = Reflect.getMetadata('providers', CameraModule) as unknown[];
+    const sessionProvider = providers.find(
+      (candidate): candidate is FactoryProvider => typeof candidate === 'object'
+        && candidate !== null
+        && 'provide' in candidate
+        && candidate.provide === LiveStreamSessionService,
+    );
+
+    expect(providers).toContain(LiveViewStartGate);
+    expect(sessionProvider?.inject).toEqual([
+      LIVE_STREAM_GATEWAY,
+      LIVE_STREAM_LEASE,
+      MONOTONIC_CLOCK,
+      ADMIN_ALERT,
+      LIVE_STREAM_MESSAGE_CLEANUP,
+      LIVE_STREAM_OPTIONS,
+      LiveViewStartGate,
+      RtspSourceStartGate,
+      FEATURE_AVAILABILITY,
+    ]);
+    expect(Reflect.getMetadata('exports', CameraModule) as unknown[]).toContain(LiveViewStartGate);
   });
 });
 

@@ -2,6 +2,7 @@ import { sql } from 'drizzle-orm';
 import { check, sqliteTable, text, integer, index, primaryKey, type AnySQLiteColumn, uniqueIndex } from 'drizzle-orm/sqlite-core';
 import { DEFAULT_LOCALE } from '../telegram/domain/locale';
 import type { LiveSourceSettings } from '../camera/domain/live-source.entity';
+import type { LiveViewSettingsCandidate } from '../camera/domain/live-view-settings';
 
 // ─── Sensors ───
 export const sensors = sqliteTable('sensors', {
@@ -643,6 +644,52 @@ export const featureInstallJobs = sqliteTable(
       or (${table.status} in ('succeeded', 'failed') and ${table.activeSlot} is null)
     )`),
     check('feature_install_jobs_restart_scope_check', sql`${table.restartScope} is null or ${table.restartScope} in ('worker', 'supervisor', 'host')`),
+  ],
+);
+
+// ─── Live View Settings Jobs ───
+// The nullable unique slot is the durable global serialization authority for
+// root-applied live-view settings mutations.
+export const liveViewSettingsJobs = sqliteTable(
+  'live_view_settings_jobs',
+  {
+    id: text('id').primaryKey(),
+    status: text('status').notNull(),
+    activeSlot: integer('active_slot'),
+    expectedGeneration: integer('expected_generation').notNull(),
+    candidateSettings: text('candidate_settings', { mode: 'json' })
+      .$type<LiveViewSettingsCandidate>()
+      .notNull(),
+    requestedByUserId: integer('requested_by_user_id')
+      .notNull()
+      .references(() => users.telegramId),
+    requestedInChatId: integer('requested_in_chat_id').notNull(),
+    workflowReceiptId: text('workflow_receipt_id').notNull(),
+    failureCode: text('failure_code'),
+    createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+  },
+  (table) => [
+    uniqueIndex('idx_live_view_settings_jobs_active_slot').on(table.activeSlot),
+    index('idx_live_view_settings_jobs_receipt').on(table.workflowReceiptId),
+    check('live_view_settings_jobs_id_check', sql`length(${table.id}) = 16 and ${table.id} not glob '*[^A-Za-z0-9_-]*'`),
+    check('live_view_settings_jobs_status_check', sql`${table.status} in ('prepared', 'published', 'committed', 'restart-required', 'succeeded', 'failed')`),
+    check('live_view_settings_jobs_generation_check', sql`typeof(${table.expectedGeneration}) = 'integer' and ${table.expectedGeneration} between 0 and 9007199254740991`),
+    check('live_view_settings_jobs_active_slot_check', sql`(
+      (${table.status} in ('prepared', 'published', 'committed', 'restart-required') and ${table.activeSlot} is 1)
+      or (${table.status} in ('succeeded', 'failed') and ${table.activeSlot} is null)
+    )`),
+    check('live_view_settings_jobs_failure_code_check', sql`${table.failureCode} is null or ${table.failureCode} in (
+      'request-invalid', 'stale-generation', 'settings-state-unsafe', 'policy-apply-failed',
+      'service-unhealthy', 'rtsp-assets-absent', 'interrupted', 'helper-version-mismatch',
+      'live-work-not-quiescent', 'request-publish-failed', 'unit-start-failed',
+      'restart-dispatch-failed', 'restart-activation-timeout', 'dependency-unready'
+    )`),
+    check('live_view_settings_jobs_failure_state_check', sql`(
+      (${table.status} in ('prepared', 'published', 'committed', 'succeeded') and ${table.failureCode} is null)
+      or (${table.status} = 'restart-required' and ${table.failureCode} in ('restart-dispatch-failed', 'restart-activation-timeout'))
+      or (${table.status} = 'failed' and ${table.failureCode} is not null)
+    )`),
   ],
 );
 

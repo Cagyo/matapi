@@ -261,10 +261,8 @@ describe('motion install scripts', () => {
     }
   });
 
-  it('dispatches the experimental live-stream installer only for an explicit rtsp selection', () => {
+  it('dispatches enabled feature selections through the fixed installer and verifier', () => {
     const script = readFileSync(resolve('scripts/install.sh'), 'utf8');
-    expect(script).toContain("selected.includes('rtsp')");
-    expect(script).toContain("n !== 'rtsp' || rtspSelected");
     expect(script).toContain('HOME_WORKER_PRIVILEGED=1 /usr/lib/home-worker/install-feature-routines');
     expect(script).toContain('/usr/lib/home-worker/feature-installer --verify-feature "$feature"');
   });

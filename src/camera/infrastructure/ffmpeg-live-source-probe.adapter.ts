@@ -115,10 +115,11 @@ export interface FfmpegLiveSourceProbeOptions {
 
 export function liveSourceProbeOptionsFromEnvironment(
   env: Record<string, string | undefined>,
+  allowedCameraCidrs: readonly string[] = [],
 ): FfmpegLiveSourceProbeOptions | null {
-  if (!env.RTSP_ALLOWED_CIDRS) return null;
+  if (allowedCameraCidrs.length === 0) return null;
   return {
-    allowedCidrs: env.RTSP_ALLOWED_CIDRS,
+    allowedCidrs: allowedCameraCidrs.join(','),
     runtimeDirectory:
       env.RTSP_PROBE_RUNTIME_DIR ?? '/run/home-worker/live-source-probe',
     timeoutMs: strictInteger(env.RTSP_PROBE_TIMEOUT_MS, 30_000),

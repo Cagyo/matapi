@@ -4,13 +4,20 @@ export const FEATURE_RUNTIME_LIFECYCLE = Symbol('FEATURE_RUNTIME_LIFECYCLE');
 
 /** Stops and reloads the runtime work owned by one manageable feature. */
 export interface FeatureRuntimeLifecyclePort {
+  beforeEnable?(): Promise<void>;
   beforeDisable(): Promise<void>;
   afterEnable(): Promise<void>;
+  runTransition?<T>(operation: () => Promise<T>): Promise<T>;
 }
 
 /** Feature-keyed runtime lifecycle registration for composition roots. */
 export interface FeatureRuntimeLifecycleRegistryPort {
+  beforeEnable?(name: ManageableFeatureName): Promise<void>;
   register(name: ManageableFeatureName, lifecycle: FeatureRuntimeLifecyclePort): void;
+  runTransition<T>(
+    name: ManageableFeatureName,
+    operation: () => Promise<T>,
+  ): Promise<T>;
   beforeDisable(name: ManageableFeatureName): Promise<void>;
   afterEnable(name: ManageableFeatureName): Promise<void>;
 }

@@ -136,6 +136,20 @@ reused; no schema migration is generated.
 
 ## Role Model
 
+### Admin live-view settings workflow
+
+Home → Health → Live view settings opens the receipt-bound `live-view-settings`
+workflow. `LiveViewSettingsHandler` registers after locale resolution and uses
+application entry points for status, subnet suggestions, atomic Save, and
+restart retry. Its `lvs:` callbacks contain only an opaque receipt and bounded
+action selectors. Every continuation rechecks the current administrator role;
+draft expiry and navigation cancel only the exact receipt's cancellable state.
+Save atomically claims the receipt and the single durable settings job before
+detaching apply. Recovery delivers its persisted terminal identity through the
+existing exact-receipt completion path, with the listener registered only after
+Telegram delivery is ready. English, Russian, and Ukrainian share these states.
+See [Admin Live View Settings Design](../superpowers/specs/2026-08-13-admin-live-view-settings-design.md).
+
 | Role | Capabilities |
 |------|-------------|
 | Admin | All commands, config, user management, updates |

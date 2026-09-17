@@ -82,17 +82,21 @@ export class ReconcileFeatureInstallUseCase {
   execute(id: string): Promise<FeatureInstallJob | null> {
     const existing = this.inFlight.get(id);
     if (existing) return existing;
-    const operation = this.reconcile(id).finally(() => this.inFlight.delete(id));
+    const operation = this.runTransition(id).finally(() => this.inFlight.delete(id));
     this.inFlight.set(id, operation);
     return operation;
   }
 
-  private async reconcile(id: string): Promise<FeatureInstallJob | null> {
+  private async runTransition(id: string): Promise<FeatureInstallJob | null> {
     const job = await this.jobs.findById(id);
     if (!job) return null;
     if (job.status === 'succeeded' || job.status === 'failed') {
       return job;
     }
+    return this.lifecycle.runTransition(job.feature, () => this.reconcile(job));
+  }
+
+  private async reconcile(job: FeatureInstallJob): Promise<FeatureInstallJob | null> {
     // The privileged work is already durable and its phase is persisted, so the
     // helper is never consulted — nor started — for an awaiting-restart job.
     if (job.status === 'awaiting-restart') return this.reconcileAwaitingRestart(job);

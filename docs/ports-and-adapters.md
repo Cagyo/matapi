@@ -48,8 +48,8 @@ the UID inventory, and the environment never do.
 them to the installed projection. The digest — SHA-256 over compact sorted-key
 JSON of schema version, worker UID, stream UID, the interface/CIDR pairs, and
 the UDP range, ordered by family, network bytes, prefix length, then interface
-name — proves only that the three durable artifacts still agree with each
-other. It never proves the policy still matches the network, so a digest that
+name — binds the public physical-network summary to the inspector's verdict.
+It never proves the policy still matches the network, so a digest that
 still compares equal is not evidence of freshness on its own.
 
 | Port | Adapters | Status | Source |
@@ -63,7 +63,7 @@ still compares equal is not evidence of freshness on its own.
 | `FeatureInstallControllerPort` (`FEATURE_INSTALL_CONTROLLER`) | `SystemdFeatureInstallControllerAdapter` | ✅ canonical fixed-unit trigger. It starts the root-owned installer asynchronously and exposes no arbitrary command interface. | [feature-install-controller.port.ts](../src/features/domain/ports/feature-install-controller.port.ts) |
 | `FeatureClockPort` (`FEATURE_CLOCK`) | `SystemFeatureClockAdapter` | ✅ canonical local clock seam for queueing, reconciliation, and recovery; keeps the feature context independent from the events/system clock ports. | [feature-clock.port.ts](../src/features/domain/ports/feature-clock.port.ts) |
 | `FeatureReadinessPort` (`FEATURE_READINESS`) | `FeatureReadinessRouter` over the fixed Digital, UART, Zigbee, Motion, and RTSP adapters; `InMemoryFeatureReadinessAdapter` (tests/dev) | ✅ canonical — each production probe uses fixed executable/argument arrays, a sanitized PATH, a five-second timeout, and a 64 KiB command-output limit. A refusal carries one reason: `runtime-group-incomplete` (the only one another restart can fix), `policy-stale`, or `runtime-invalid`. `RtspReadinessAdapter` takes its last check from the shared `RTSP_POLICY_STATUS` instance instead of reading the policy artifacts itself. | [feature-readiness.port.ts](../src/features/domain/ports/feature-readiness.port.ts) |
-| `RtspPolicyStatusPort` (`RTSP_POLICY_STATUS`) | `InstalledRtspPolicyStatusAdapter` over `RtspPolicyInspectorGateway` | ✅ canonical single verified projection of the installed RTSP policy, exported by `FeatureModule` so no consumer opens the policy artifacts itself. It reads the public summary through one no-follow single-link root-owned exact-mode descriptor, recomputes the digest field by field, requires the digest, CIDR list, and UDP range this process was started with to agree with it, and only then asks the inspector whether the installed networks are still the live ones. `inspect` degrades to `unavailable`, `requireCurrent` throws, and `assertDigest` is the synchronous fence over the last digest actually proven current. **Load-bearing for Camera:** `inspect` runs `assertEnvironmentAgrees(installed)` *before* it returns either `ready` or `stale`, and fails closed to `unavailable` on any drift, so a `ready` status's `digest` and `networks` provably describe the same `RTSP_ALLOWED_CIDRS` string the probe parses. That is what bounds the status/enforcement divergence in Camera (below) to two arithmetic rules over one policy vocabulary rather than two unrelated sources. (A `stale` status deliberately returns the inspector's freshly *discovered* networks instead — that difference is the drift being reported — and Camera marks `currentPolicyDigest` null for it, so nothing is ever reported verified against them.) | [rtsp-policy-status.port.ts](../src/features/domain/ports/rtsp-policy-status.port.ts) |
+| `RtspPolicyStatusPort` (`RTSP_POLICY_STATUS`) | `InstalledRtspPolicyStatusAdapter` over `RtspPolicyInspectorGateway` | ✅ shared physical-network projection. Validates the sealed root-owned public summary, recomputes its digest, checks the advanced UDP range, then asks the fixed inspector to verify the digest and current interfaces. `inspect` degrades to unavailable, `requireCurrent` throws, and `assertDigest` fences the last verified digest. Camera probe CIDRs now come from typed committed settings; the exact private settings-generation/RTSP-state tuple is verified by policy apply and recovery separately. | [rtsp-policy-status.port.ts](../src/features/domain/ports/rtsp-policy-status.port.ts) |
 | `FeatureProcessIdentityPort` (`FEATURE_PROCESS_IDENTITY`) | `LinuxFeatureProcessIdentityAdapter` | ✅ canonical `<linux-boot-id>:<proc-self-start-ticks>` identity, read from bounded fixed `/proc` paths with `/proc/self/stat` parsed from its final `)`. Both halves are required — start ticks repeat across boots, and the boot id survives every restart within one boot. It is what makes an `awaiting-restart` install verifiable only by a genuinely fresh process. | [feature-process-identity.port.ts](../src/features/domain/ports/feature-process-identity.port.ts) |
 | `FeatureReadinessBarrierPort` (`FEATURE_READINESS_BARRIER`) | `FeatureReadinessBootService` | ✅ canonical boot gate. It performs one shared installed-and-enabled verification pass before availability is published. Internal to the feature context. | [feature-readiness-barrier.port.ts](../src/features/domain/ports/feature-readiness-barrier.port.ts) |
 | `FeatureAvailabilityPort` (`FEATURE_AVAILABILITY`) | `FeatureAvailabilityService` | ✅ canonical — published boot-gated state projection. `inspect` and `requireReady` await the shared initial verification pass and derive status from one feature row plus its active install job. | [feature-availability.port.ts](../src/features/domain/ports/feature-availability.port.ts) |
@@ -251,6 +251,27 @@ it). A third candidate is decided by that sentence, not by those two precedents.
 
 ### Camera context
 
+Admin live-view settings follow the [revised design](superpowers/specs/2026-08-13-admin-live-view-settings-design.md).
+Recovery alone completes the shared boot barrier. Telegram receives application
+entry points and published ports; Camera never imports Telegram.
+
+| Port | Adapters | Purpose |
+|---|---|---|
+| `LiveViewSettingsStorePort` (`LIVE_VIEW_SETTINGS_STORE`) | `FsLiveViewSettingsAdapter`, `InMemoryLiveViewSettingsAdapter` | Typed committed settings and captured boot generation; filesystem reads fail closed. |
+| `LiveViewSettingsJobRepositoryPort` (`LIVE_VIEW_SETTINGS_JOB_REPOSITORY`) | `DrizzleLiveViewSettingsJobRepository`, `InMemoryLiveViewSettingsJobRepository` | Durable single active slot, exact generation and receipt identity, phase CAS, terminal recovery. |
+| `LiveViewPolicyRequestPort` (`LIVE_VIEW_POLICY_REQUEST`) | `FsLiveViewPolicyRequestAdapter`, shared `InMemoryLiveViewPolicyAdapter` | Atomic publication of one fixed request. |
+| `LiveViewPolicyResultPort` (`LIVE_VIEW_POLICY_RESULT`) | `FsLiveViewPolicyResultAdapter`, shared `InMemoryLiveViewPolicyAdapter` | Validated root-owned result for the exact request. |
+| `LiveViewPolicyAcknowledgementPort` (`LIVE_VIEW_POLICY_ACKNOWLEDGEMENT`) | `FsLiveViewPolicyAcknowledgementAdapter`, shared `InMemoryLiveViewPolicyAdapter` | Zero-byte acknowledgement after the database transition. |
+| `LiveViewPolicyControllerPort` (`LIVE_VIEW_POLICY_CONTROLLER`) | `SystemdLiveViewPolicyControllerAdapter`, shared `InMemoryLiveViewPolicyAdapter` | Fixed unit start for apply and root-owned cleanup. |
+| `LiveViewMigrationAttentionPort` (`LIVE_VIEW_MIGRATION_ATTENTION`) | `FsLiveViewMigrationAttentionAdapter`, null-returning stub | Bounded migration-attention projection. |
+| `PrivateSubnetDetectorPort` (`PRIVATE_SUBNET_DETECTOR`) | `OsPrivateSubnetDetectorAdapter`, empty in-memory stub | Bounded private subnet suggestions; no implicit selection. |
+
+`LiveViewSettingsOutcomeRegistryService` holds only the recovered terminal job
+until the single Telegram listener is ready, and forwards `notifyPreRestart`
+before restart dispatch. Terminal delivery uses the existing exact-receipt CAS.
+The application-only acceptance suite constructs the real use cases with
+in-memory adapters, including crash recovery and late-start quiescence.
+
 Every RTSP camera-source mutation runs through `RtspSourceMutationService`, so
 the ordering that makes it safe is written once. An **install** — create,
 attach, replace — captures the policy digest, the `RtspSourceStartGate` epoch
@@ -356,6 +377,10 @@ follow-up.
 | `MonotonicClockPort` (`MONOTONIC_CLOCK`) | `SystemMonotonicClockAdapter`, `InMemoryMonotonicClockAdapter` (stub/dev), fixed test clocks | ✅ camera live-session expiry independent of wall-clock changes | [monotonic-clock.port.ts](../src/camera/domain/ports/monotonic-clock.port.ts) |
 
 ### System context
+
+`ProcessRestarterPort` (`PROCESS_RESTARTER`) is implemented by
+`Pm2ProcessRestarter` and `StubProcessRestarter`. Production waits for the fixed
+supervisor command; the stub invokes the supplied development activation seam.
 
 | Port | Adapters | Status | Source |
 |---|---|---|---|

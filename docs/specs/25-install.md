@@ -293,6 +293,33 @@ Install script should set up this hook automatically.
 
 ## Phase 1 — Setup Web Wizard
 
+### Live-view settings installation
+
+The installer creates typed generation-0 disabled settings at
+`/var/lib/home-worker/live-view-settings.json` before worker boot. Its one-release
+migration parser consumes legacy `LIVE_STREAM_ENABLED` and `RTSP_ALLOWED_CIDRS`
+only when creating the new authority. Invalid legacy input produces safe disabled
+settings plus a bounded migration-attention marker; subsequent installs preserve
+the committed authority. Runtime code and the setup wizard do not use those keys.
+
+The root applier provisions the public physical-network summary during migration
+and before reset or settings-save enforcement activation. Ordinary operations
+preserve a valid summary; an explicit RTSP reinstall refreshes it for the current
+network. The app validates its digest against the fixed inspector, without a
+process-environment digest. An exact canonical previous private policy is
+replaced with the typed policy under the same root lock before activation;
+malformed or unsafe policy files fail closed.
+
+The wizard records RTSP as deferred and directs administrators to Home → Health
+→ Live view settings to save camera CIDRs before installing RTSP in Telegram.
+Motion-only live view can be enabled with an empty CIDR list. The installed
+root-owned policy applier accepts only the fixed request schema through the
+fixed systemd unit; Telegram never supplies commands, paths, units, or argv.
+Root owns results and cleanup, while the worker publishes only requests and
+zero-byte acknowledgements after durable database transitions. See
+[Admin Live View Settings Design](../superpowers/specs/2026-08-13-admin-live-view-settings-design.md)
+for ownership/mode checks, migration rules, and Raspberry Pi acceptance.
+
 Standalone lightweight HTTP server (not NestJS):
 
 1. Install script runs unattended (no prompts)

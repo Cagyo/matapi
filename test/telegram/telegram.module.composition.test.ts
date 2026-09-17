@@ -96,6 +96,11 @@ async function resolveHomeSummaryFromApplication(mode: 'mock' | 'real') {
   const { WorkflowEntryCoordinator } = await import('../../src/telegram/interfaces/workflow-entry.coordinator');
   const { WorkflowNavigationHandler } = await import('../../src/telegram/interfaces/workflow-navigation.handler');
   const { WorkflowNavigationPresenter } = await import('../../src/telegram/interfaces/workflow-navigation.presenter');
+  const { LiveViewSettingsHandler } = await import('../../src/telegram/interfaces/live-view-settings.handler');
+  const { GetLiveViewSettingsUseCase } = await import('../../src/camera/application/get-live-view-settings.use-case');
+  const { ApplyLiveViewSettingsUseCase } = await import('../../src/camera/application/apply-live-view-settings.use-case');
+  const { LIVE_VIEW_SETTINGS_JOB_REPOSITORY } = await import('../../src/camera/domain/ports/live-view-settings-job-repository.port');
+  const { GrammyBotGateway } = await import('../../src/telegram/infrastructure/grammy-bot.gateway');
   let app: Awaited<ReturnType<typeof NestFactory.createApplicationContext>> | undefined;
   try {
     app = await NestFactory.createApplicationContext(AppModule, {
@@ -112,6 +117,11 @@ async function resolveHomeSummaryFromApplication(mode: 'mock' | 'real') {
       workflowCoordinator: app.get(WorkflowEntryCoordinator),
       workflowNavigation: app.get(WorkflowNavigationHandler),
       workflowPresenter: app.get(WorkflowNavigationPresenter),
+      liveViewSettings: app.get(LiveViewSettingsHandler),
+      settingsStatus: app.get(GetLiveViewSettingsUseCase),
+      applySettings: app.get(ApplyLiveViewSettingsUseCase),
+      settingsJobs: app.get(LIVE_VIEW_SETTINGS_JOB_REPOSITORY),
+      gateway: app.get(GrammyBotGateway),
     };
   } finally {
     await app?.close();
@@ -246,6 +256,7 @@ describe('TelegramModule bot-mode composition', () => {
       workflowCoordinator,
       workflowNavigation,
       workflowPresenter,
+      liveViewSettings, settingsStatus, applySettings, settingsJobs, gateway,
     } = await resolveHomeSummaryFromApplication(mode);
     expect((summary as unknown as { notificationTargets: unknown }).notificationTargets === targets).toBe(true);
     expect((homeHandler as unknown as { workflows?: unknown }).workflows).toBe(workflowCoordinator);
@@ -257,6 +268,12 @@ describe('TelegramModule bot-mode composition', () => {
     expect(readApplicationLogs).toBeDefined();
     expect(applicationLogDocumentPresenter).toBeDefined();
     expect(logsHandler).toBeDefined();
+    const handlerDependencies = liveViewSettings as unknown as Record<string, unknown>;
+    expect(handlerDependencies.status).toBe(settingsStatus);
+    expect(handlerDependencies.apply).toBe(applySettings);
+    expect(handlerDependencies.jobs).toBe(settingsJobs);
+    expect((homeHandler as unknown as Record<string, unknown>).liveViewSettings === liveViewSettings).toBe(true);
+    expect((gateway as unknown as Record<string, unknown>).liveViewSettings === liveViewSettings).toBe(true);
   });
 
   /*

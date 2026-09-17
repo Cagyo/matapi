@@ -13,6 +13,8 @@ import { Bot, GrammyError, HttpError } from 'grammy';
 import { AdminAlertService } from '../../camera/application/admin-alert.service';
 import { ArchiveAdminAlertService } from '../../archive/application/archive-admin-alert.service';
 import { LiveStreamMessageCleanupService } from '../../camera/application/live-stream-message-cleanup.service';
+import { LiveViewSettingsOutcomeRegistryService } from '../../camera/application/live-view-settings-outcome-registry.service';
+import { LiveViewSettingsHandler } from '../interfaces/live-view-settings.handler';
 import { EventNotifierService } from '../../events/application/event-notifier.service';
 import { EventProcessorService } from '../../events/application/event-processor.service';
 import { RecipientDirectoryService } from '../../events/application/recipient-directory.service';
@@ -194,6 +196,8 @@ export class GrammyBotGateway
     private readonly botCommandsMenu: BotCommandsMenuService,
     private readonly localeMiddleware: LocaleMiddleware,
     @Optional() private readonly token: string | undefined = process.env.TELEGRAM_BOT_TOKEN,
+    @Optional() @Inject(LiveViewSettingsHandler) private readonly liveViewSettings?: LiveViewSettingsHandler,
+    @Optional() @Inject(LiveViewSettingsOutcomeRegistryService) private readonly liveViewOutcomes?: LiveViewSettingsOutcomeRegistryService,
   ) {}
 
   /** Last update received from Telegram, or `null` if none yet (spec 08, 22). */
@@ -287,6 +291,7 @@ export class GrammyBotGateway
     this.botCommandsMenu.setBot(bot);
     this.telegramLiveStreamMessageCleanup.setBot(bot);
     this.telegramCameraSourceMessage.setBot(bot);
+    if (this.liveViewSettings) this.liveViewOutcomes?.register(this.liveViewSettings);
 
     // Started before `run(bot)`, not merely before the other follow-ups: the
     // hazard is the update pump. A `running` row from the dead process sits in
@@ -360,6 +365,7 @@ export class GrammyBotGateway
       // Receipt-bound workflow returns must win before every broad workflow
       // callback handler can inspect the update.
       this.workflowNavigation,
+      ...(this.liveViewSettings ? [this.liveViewSettings] : []),
       this.claim,
       this.mute,
       this.unmute,

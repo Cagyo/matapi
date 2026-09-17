@@ -29,6 +29,7 @@ NETWORKS = [
     {"family": 4, "cidr": "192.168.1.0/24", "interface": "eth0"},
     {"family": 6, "cidr": "fd00::/64", "interface": "eth0"},
 ]
+ALLOWED_CIDRS = ["192.168.1.0/24", "fd00::/64"]
 
 
 def load(name, path):
@@ -107,7 +108,30 @@ class FakeRoutes:
 
 
 def document(inspector, **overrides):
-    """The canonical policy version 2 document, digested by the inspector."""
+    """The canonical settings-correlated policy version 2 document."""
+    version = overrides.get("version", 2)
+    generation = overrides.get("settingsGeneration", 4)
+    rtsp_enabled = overrides.get("rtspEnabled", True)
+    worker_uid = overrides.get("workerUid", WORKER_UID)
+    stream_uid = overrides.get("streamUid", STREAM_UID)
+    first = overrides.get("udpPortFirst", 24000)
+    last = overrides.get("udpPortLast", 24001)
+    value = {
+        "version": version,
+        "settingsGeneration": generation,
+        "rtspEnabled": rtsp_enabled,
+        "workerUid": worker_uid,
+        "streamUid": stream_uid,
+        "allowedCidrs": overrides.get("allowedCidrs", ALLOWED_CIDRS),
+        "udpPortFirst": first,
+        "udpPortLast": last,
+    }
+    value.update(overrides.get("corrupt", {}))
+    return value
+
+
+def summary_document(inspector, **overrides):
+    """The installed physical-network summary retained for interface binding."""
     networks = overrides.get("networks", NETWORKS)
     entries = [inspector.EligibleNetwork(**entry) for entry in networks]
     version = overrides.get("version", inspector.POLICY_VERSION)
@@ -115,21 +139,23 @@ def document(inspector, **overrides):
     stream_uid = overrides.get("streamUid", STREAM_UID)
     first = overrides.get("udpPortFirst", 24000)
     last = overrides.get("udpPortLast", 24001)
-    value = {
+    return {
         "version": version,
         "workerUid": worker_uid,
         "streamUid": stream_uid,
         "networks": inspector.projection(entries),
         "udpPortFirst": first,
         "udpPortLast": last,
-        "digest": inspector.policy_digest(version, worker_uid, stream_uid, entries, first, last),
+        "digest": inspector.policy_digest(
+            version, worker_uid, stream_uid, entries, first, last
+        ),
     }
-    value.update(overrides.get("corrupt", {}))
-    return value
 
 
 def policy(helper, inspector, **overrides):
-    return helper.Policy(document(inspector, **overrides), inspector)
+    physical = overrides.pop("physicalNetworks", NETWORKS)
+    entries = [inspector.EligibleNetwork(**entry) for entry in physical]
+    return helper.Policy(document(inspector, **overrides), inspector, entries)
 
 
 def install_summary(inspector, root, value):
@@ -309,10 +335,71 @@ def run(helper, inspector, name):
             raise AssertionError("same uid policy accepted")
         if name == "version-one-policy":
             try:
-                helper.Policy({"version": 1, "workerUid": WORKER_UID, "streamUid": STREAM_UID, "allowedCidrs": ["192.168.0.0/16"], "udpPortFirst": 24000, "udpPortLast": 24001}, inspector)
+                helper.Policy(
+                    document(inspector, version=1),
+                    inspector,
+                    [inspector.EligibleNetwork(**entry) for entry in NETWORKS],
+                )
             except helper.Reject as error:
                 return {"ok": False, "reason": error.reason}
             raise AssertionError("version one policy accepted")
+        if name == "v2-empty-deny-all-policy":
+            deny_all = policy(helper, inspector, allowedCidrs=[])
+            denied = helper.Engine(
+                deny_all, store, nft, routes, STREAM_GID,
+                now_ms=lambda: now, lease_id=lambda: "11" * 16,
+            )
+            return rejected(helper, denied, request())
+        if name == "v2-tuple-policy":
+            current = policy(helper, inspector, settingsGeneration=4, rtspEnabled=True)
+            return {
+                "settingsGeneration": current.settings_generation,
+                "rtspEnabled": current.rtsp_enabled,
+            }
+        if name == "v2-disabled-nonempty-policy":
+            try:
+                policy(helper, inspector, rtspEnabled=False)
+            except helper.Reject as error:
+                return {"ok": False, "reason": error.reason}
+            raise AssertionError("disabled policy retained grants")
+        if name == "v1-policy-rejected":
+            try:
+                helper.Policy(
+                    document(inspector, version=1),
+                    inspector,
+                    [inspector.EligibleNetwork(**entry) for entry in NETWORKS],
+                )
+            except helper.Reject as error:
+                return {"ok": False, "reason": error.reason}
+            raise AssertionError("version one policy accepted")
+        if name == "v2-load-missing-duplicate-keys":
+            install_summary(inspector, root, summary_document(inspector))
+            target = Path(root) / "live-stream-policy.json"
+            failures = {}
+
+            missing = document(inspector)
+            del missing["settingsGeneration"]
+            install_policy(root, missing)
+            try:
+                helper.load_verified_policy(str(target), inspector)
+                raise AssertionError("missing v2 policy key accepted")
+            except helper.Reject as error:
+                failures["missing"] = error.reason
+
+            encoded = json.dumps(
+                document(inspector), separators=(",", ":"), sort_keys=True
+            )
+            target.write_text(
+                encoded.replace('"version":2', '"version":2,"version":2', 1)
+                + "\n",
+                encoding="utf-8",
+            )
+            try:
+                helper.load_verified_policy(str(target), inspector)
+                raise AssertionError("duplicate v2 policy key accepted")
+            except helper.Reject as error:
+                failures["duplicate"] = error.reason
+            return failures
         if name == "subsecond-timeout":
             leases = {"aa" * 16: {"sessionId": request()["sessionId"], "addresses": [bound("192.168.1.20")], "rtspControlPorts": [554], "transport": "tcp", "udpMediaPorts": None, "expiresAtUnixMs": now + 999}}
             at_999 = helper.render_nft(STREAM_UID, STREAM_GID, leases, now)
@@ -333,7 +420,7 @@ def run(helper, inspector, name):
             return {"first": "l_{}_0_4_tcp".format(first_id) in text, "second": "l_{}_0_4_tcp".format(second_id) in text}
         if name == "policy-narrowing":
             store.save({"version": 1, "leases": {"66" * 16: {"sessionId": request()["sessionId"], "addresses": [bound("192.168.1.20")], "rtspControlPorts": [554], "transport": "tcp", "udpMediaPorts": None, "expiresAtUnixMs": now + 30_000}}, "usedNonces": {"ab" * 32: now + 30_000}})
-            narrowed = policy(helper, inspector, networks=[{"family": 4, "cidr": "10.0.0.0/8", "interface": "eth0"}])
+            narrowed = policy(helper, inspector, allowedCidrs=["10.0.0.0/8"])
             recovered_nft = FakeNft(); recovered = helper.Engine(narrowed, store, recovered_nft, FakeRoutes(), STREAM_GID, now_ms=lambda: now)
             return {"leases": len(recovered.state["leases"]), "staleRule": "192.168.1.20" in recovered_nft.scripts[-1]}
         if name == "interface-narrowing":
@@ -369,7 +456,7 @@ def run(helper, inspector, name):
             return {"leases": len(recovered.state["leases"]), "staleRule": "192.168.1.20" in recovered_nft.scripts[-1], "replayReason": replay["reason"]}
         if name == "loopback-policy":
             try:
-                policy(helper, inspector, networks=[{"family": 4, "cidr": "127.0.0.0/8", "interface": "eth0"}])
+                policy(helper, inspector, allowedCidrs=["127.0.0.0/8"])
             except helper.Reject as error:
                 return {"ok": False, "reason": error.reason}
             raise AssertionError("loopback policy accepted")
@@ -409,10 +496,15 @@ def run(helper, inspector, name):
                 "v6Element": "fd00::20 . 554 timeout 30s" in text,
             }
         if name == "multi-interface-render":
-            multi = policy(helper, inspector, networks=[
-                {"family": 4, "cidr": "10.0.0.0/8", "interface": "wlan0"},
-                {"family": 4, "cidr": "192.168.1.0/24", "interface": "eth0"},
-            ])
+            multi = policy(
+                helper,
+                inspector,
+                allowedCidrs=["10.0.0.0/8", "192.168.1.0/24"],
+                physicalNetworks=[
+                    {"family": 4, "cidr": "10.0.0.0/8", "interface": "wlan0"},
+                    {"family": 4, "cidr": "192.168.1.0/24", "interface": "eth0"},
+                ],
+            )
             multi_routes = FakeRoutes({"192.168.1.20": "eth0", "10.0.0.5": "wlan0"})
             multi_nft = FakeNft()
             multi_engine = helper.Engine(multi, store, multi_nft, multi_routes, STREAM_GID, now_ms=lambda: now, lease_id=lambda: "11" * 16)
@@ -453,14 +545,19 @@ def run(helper, inspector, name):
             real.handle(request(addresses=["fd00::20"]))
             return {"argv": recorder.calls[-1]["argv"], "oifname": 'oifname "eth0" ip6 daddr . tcp dport' in real_nft.scripts[-1]}
         if name == "summary-match":
-            value = document(inspector)
-            install_summary(inspector, root, value)
-            loaded = helper.load_verified_policy(install_policy(root, value), inspector)
-            return {"digest": loaded.digest, "streamUid": loaded.stream_uid}
+            install_summary(inspector, root, summary_document(inspector))
+            loaded = helper.load_verified_policy(install_policy(root, document(inspector)), inspector)
+            return {
+                "settingsGeneration": loaded.settings_generation,
+                "streamUid": loaded.stream_uid,
+            }
         if name == "summary-uid-mismatch":
             # A recreated `homeworker-stream` account changes the private policy
             # without changing any route, so nothing but this cross-check sees it.
-            install_summary(inspector, root, document(inspector, streamUid=STREAM_UID + 1))
+            install_summary(
+                inspector, root,
+                summary_document(inspector, streamUid=STREAM_UID + 1),
+            )
             path = install_policy(root, document(inspector))
             try:
                 helper.load_verified_policy(path, inspector)
@@ -470,7 +567,10 @@ def run(helper, inspector, name):
                 return {"ok": False, "reason": error.reason, "subprocessCalls": len(recorder.calls)}
             raise AssertionError("mismatched summary accepted")
         if name == "summary-udp-mismatch":
-            install_summary(inspector, root, document(inspector, udpPortLast=24005))
+            install_summary(
+                inspector, root,
+                summary_document(inspector, udpPortLast=24005),
+            )
             path = install_policy(root, document(inspector))
             try:
                 helper.load_verified_policy(path, inspector)
@@ -486,9 +586,10 @@ def run(helper, inspector, name):
                 return {"ok": False, "reason": error.reason}
             raise AssertionError("missing summary accepted")
         if name == "corrupt-digest-policy":
-            value = document(inspector)
-            install_summary(inspector, root, value)
-            path = install_policy(root, document(inspector, corrupt={"digest": "0" * 64}))
+            install_summary(inspector, root, summary_document(inspector))
+            path = install_policy(
+                root, document(inspector, corrupt={"digest": "0" * 64})
+            )
             try:
                 helper.load_verified_policy(path, inspector)
             except helper.Reject as error:

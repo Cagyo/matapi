@@ -1,4 +1,6 @@
 import type { ClaimedExternalAction, HomeActionReceipt, UndoReceiptKind } from '../../domain/home-action-receipt';
+import type { LiveViewSettingsCandidate } from '../../../camera/domain/live-view-settings';
+import type { LiveViewSettingsJob } from '../../../camera/domain/live-view-settings-job';
 import type { FeatureWorkflowOperation, WorkflowDeliveryStage, WorkflowReturnPhase, WorkflowReturnReceipt } from '../../domain/workflow-return';
 
 export const HOME_ACTION_REPOSITORY = Symbol('HOME_ACTION_REPOSITORY');
@@ -11,6 +13,20 @@ export type WorkflowClaimResult =
 export type FeatureMutationClaimResult =
   | { kind: 'claimed'; receipt: WorkflowReturnReceipt; operation: FeatureWorkflowOperation }
   | { kind: 'expired' | 'superseded' | 'terminal' | 'unauthorized' | 'mismatched' };
+
+export type LiveViewSettingsMutationClaimResult =
+  | { kind: 'claimed'; job: LiveViewSettingsJob }
+  | { kind: 'expired' | 'superseded' | 'terminal' | 'unauthorized' | 'mismatched' | 'busy' };
+
+export interface LiveViewSettingsMutationClaimInput {
+  userId: number;
+  chatId: number;
+  receiptId: string;
+  jobId: string;
+  expectedGeneration: number;
+  candidate: LiveViewSettingsCandidate;
+  now: Date;
+}
 
 export interface HomeActionRepositoryPort {
   create(receipt: HomeActionReceipt): Promise<void>;
@@ -31,5 +47,8 @@ export interface HomeActionRepositoryPort {
   claimWorkflowReturn(input: { userId: number; chatId: number; id: string; now: Date }): Promise<WorkflowClaimResult>;
   claimWorkflowReturnExact(input: { userId: number; chatId: number; id: string; now: Date }): Promise<WorkflowClaimResult>;
   claimFeatureMutation(input: { userId: number; chatId: number; id: string; now: Date }): Promise<FeatureMutationClaimResult>;
+  claimLiveViewSettingsMutation(
+    input: LiveViewSettingsMutationClaimInput,
+  ): Promise<LiveViewSettingsMutationClaimResult>;
   finishWorkflowReturn(input: { userId: number; chatId: number; id: string; outcome: 'returned' | 'completed'; now: Date }): Promise<'finished' | 'superseded' | 'terminal'>;
 }
